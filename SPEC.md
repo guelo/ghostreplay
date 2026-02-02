@@ -1544,3 +1544,57 @@ When user has no completed games:
 - **No pagination:** Simple limit-based loading (cursor pagination deferred)
 - **No search:** Full-text search in PGN deferred
 - **No mini-board preview:** Showing final position thumbnail deferred
+
+---
+
+## 12. Testing Strategy
+
+### 12.1 Tooling
+
+| Layer | Tooling | Scope |
+| --- | --- | --- |
+| Unit (Frontend) | Vitest | Pure functions, state reducers, utilities |
+| Unit (Backend) | pytest | SRS math, graph helpers, DB query builders |
+| Integration (Frontend) | React Testing Library | UI flows, board events, ghost state transitions |
+| Integration (Backend) | pytest + httpx | API endpoints, DB interactions, SRS updates |
+| E2E | Playwright | Full user journeys in the browser |
+
+### 12.2 Coverage Priorities (MVP)
+
+**SRS & Ghost Logic**
+- Priority score calculation (pass streak + time since last review)
+- Due selection weighting (deterministic with fixed seed)
+- Ghost activation/deactivation on path deviations
+- Re-hooking on transpositions (normalized FEN hashing)
+
+**Blunder Detection**
+- First mistake only per session
+- Threshold handling (>=150cp blunder, >=50cp replay failure)
+- Pre-move position reference (P_before) for stored blunders
+
+**Graph Traversal**
+- Recursive query cycle detection
+- Depth bounds and stopping conditions
+- Correct next-move selection for ghost path
+
+**Frontend Interaction**
+- Pause + feedback modal on replay failure
+- Resume flow after correction
+- UI state when ghost hands off to engine mode
+
+### 12.3 Key Test Cases
+
+| Area | Test Case | Expectation |
+| --- | --- | --- |
+| SRS | pass_streak increments on correct replay | priority decreases |
+| SRS | replay failure resets pass_streak | priority increases |
+| Ghost | user deviates off path | ghost deactivates |
+| Ghost | user transposes back to known node | ghost reactivates |
+| Blunder | blunder stored against pre-move FEN | decision point preserved |
+| Analysis | first blunder only | later mistakes ignored |
+
+### 12.4 Test Data & Determinism
+
+- Use fixed PGNs with known engine evals for replay scenarios.
+- Seed any probabilistic SRS selection to make tests deterministic.
+- Pin Stockfish evaluation settings for unit/integration tests that rely on eval deltas.
