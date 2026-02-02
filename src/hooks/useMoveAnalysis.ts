@@ -17,10 +17,24 @@ type AnalyzeMoveOptions = {
   movetime?: number
 }
 
+type AnalysisResult = {
+  id: string
+  move: string
+  bestMove: string
+  bestEval: number | null
+  playedEval: number | null
+  currentPositionEval: number | null
+  delta: number | null
+  blunder: boolean
+}
+
 export const useMoveAnalysis = () => {
   const workerRef = useRef<Worker | null>(null)
   const [status, setStatus] = useState<AnalysisStatus>('booting')
   const [error, setError] = useState<string | null>(null)
+  const [lastAnalysis, setLastAnalysis] = useState<AnalysisResult | null>(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [analyzingMove, setAnalyzingMove] = useState<string | null>(null)
 
   useEffect(() => {
     const worker = new Worker(
@@ -36,7 +50,23 @@ export const useMoveAnalysis = () => {
         case 'ready':
           setStatus('ready')
           break
+        case 'analysis-started':
+          setIsAnalyzing(true)
+          setAnalyzingMove(message.move)
+          break
         case 'analysis':
+          setIsAnalyzing(false)
+          setAnalyzingMove(null)
+          setLastAnalysis({
+            id: message.id,
+            move: message.move,
+            bestMove: message.bestMove,
+            bestEval: message.bestEval,
+            playedEval: message.playedEval,
+            currentPositionEval: message.playedEval,
+            delta: message.delta,
+            blunder: message.blunder,
+          })
           if (message.blunder && message.delta !== null) {
             console.log(
               `[Analyst] Blunder detected: Δ${message.delta}cp (best ${message.bestMove}).`,
@@ -46,6 +76,8 @@ export const useMoveAnalysis = () => {
         case 'error':
           setStatus('error')
           setError(message.error)
+          setIsAnalyzing(false)
+          setAnalyzingMove(null)
           break
         case 'log':
           console.log(`[Analyst] ${message.message}`)
@@ -95,6 +127,9 @@ export const useMoveAnalysis = () => {
   return {
     status,
     error,
+    lastAnalysis,
+    isAnalyzing,
+    analyzingMove,
     analyzeMove,
   }
 }

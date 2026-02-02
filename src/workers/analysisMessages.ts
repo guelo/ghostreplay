@@ -12,9 +12,11 @@ export type AnalysisWorkerRequest =
 
 export type AnalysisWorkerResponse =
   | { type: 'ready' }
+  | { type: 'analysis-started'; id: string; move: string }
   | {
       type: 'analysis'
       id: string
+      move: string
       bestMove: string
       bestEval: number | null
       playedEval: number | null

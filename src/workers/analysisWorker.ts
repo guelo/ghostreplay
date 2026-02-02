@@ -197,6 +197,12 @@ const drainQueue = () => {
 }
 
 const analyzeMove = async (request: AnalyzeMoveMessage) => {
+  ctx.postMessage({
+    type: 'analysis-started',
+    id: request.id,
+    move: request.move,
+  } satisfies AnalysisWorkerResponse)
+
   const sideToMove = getSideToMove(request.fen)
 
   if (!sideToMove) {
@@ -236,6 +242,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   ctx.postMessage({
     type: 'analysis',
     id: request.id,
+    move: request.move,
     bestMove,
     bestEval,
     playedEval,

@@ -25,7 +25,6 @@ const ChessGame = () => {
   const [fen, setFen] = useState(chess.fen())
   const [boardOrientation, setBoardOrientation] =
     useState<BoardOrientation>('white')
-  const [autoRotate, setAutoRotate] = useState(true)
   const {
     status: engineStatus,
     error: engineError,
@@ -34,7 +33,7 @@ const ChessGame = () => {
     evaluatePosition,
     resetEngine,
   } = useStockfishEngine()
-  const { analyzeMove } = useMoveAnalysis()
+  const { analyzeMove, lastAnalysis, status: analysisStatus, isAnalyzing, analyzingMove } = useMoveAnalysis()
   const [engineMessage, setEngineMessage] = useState<string | null>(null)
 
   const statusText = (() => {
@@ -86,6 +85,45 @@ const ChessGame = () => {
     return 'Stockfish is ready.'
   })()
 
+  const analysisStatusText = (() => {
+    if (analysisStatus === 'booting') {
+      return 'Analyst is warming up…'
+    }
+
+    if (analysisStatus === 'error') {
+      return 'Analyst is unavailable.'
+    }
+
+    if (isAnalyzing && analyzingMove) {
+      return `Analyzing ${analyzingMove}…`
+    }
+
+    if (!lastAnalysis) {
+      return 'Analyst is ready.'
+    }
+
+    const evalText =
+      lastAnalysis.currentPositionEval !== null
+        ? ` Eval: ${lastAnalysis.currentPositionEval > 0 ? '+' : ''}${(lastAnalysis.currentPositionEval / 100).toFixed(2)}`
+        : ''
+
+    if (lastAnalysis.blunder && lastAnalysis.delta !== null) {
+      return `⚠️ ${lastAnalysis.move}: Blunder! Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+    }
+
+    if (lastAnalysis.delta !== null) {
+      if (lastAnalysis.delta === 0) {
+        return `✓ ${lastAnalysis.move}: Best move!${evalText}`
+      }
+      if (lastAnalysis.delta < 50) {
+        return `✓ ${lastAnalysis.move}: Good move. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+      }
+      return `${lastAnalysis.move}: Inaccuracy. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+    }
+
+    return 'Analyst is ready.'
+  })()
+
   const applyEngineMove = useCallback(async () => {
     try {
       const result = await evaluatePosition(chess.fen())
@@ -106,12 +144,6 @@ const ChessGame = () => {
 
       setFen(chess.fen())
       setEngineMessage(null)
-
-      if (autoRotate) {
-        setBoardOrientation((current) =>
-          current === 'white' ? 'black' : 'white',
-        )
-      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -119,7 +151,7 @@ const ChessGame = () => {
           : 'Unable to apply Stockfish move.'
       setEngineMessage(message)
     }
-  }, [autoRotate, chess, evaluatePosition])
+  }, [chess, evaluatePosition])
 
   const handleDrop = ({
     sourceSquare,
@@ -145,10 +177,6 @@ const ChessGame = () => {
     const uciMove = `${move.from}${move.to}${move.promotion ?? ''}`
     analyzeMove(fenBeforeMove, uciMove)
 
-    if (autoRotate) {
-      setBoardOrientation((current) => (current === 'white' ? 'black' : 'white'))
-    }
-
     if (!chess.isGameOver()) {
       void applyEngineMove()
     }
@@ -166,10 +194,6 @@ const ChessGame = () => {
 
   const flipBoard = () => {
     setBoardOrientation((current) => (current === 'white' ? 'black' : 'white'))
-  }
-
-  const toggleAutoRotate = () => {
-    setAutoRotate((value) => !value)
   }
 
   return (
@@ -197,14 +221,6 @@ const ChessGame = () => {
             <button className="chess-button" type="button" onClick={flipBoard}>
               Flip board
             </button>
-            <button
-              className="chess-button"
-              type="button"
-              aria-pressed={autoRotate}
-              onClick={toggleAutoRotate}
-            >
-              {autoRotate ? 'Auto-rotate on' : 'Auto-rotate off'}
-            </button>
           </div>
         </div>
 
@@ -218,7 +234,7 @@ const ChessGame = () => {
               allowDragging:
                 engineStatus === 'ready' && chess.turn() === 'w' && !isThinking,
               boardStyle: {
-                borderRadius: '1.25rem',
+                borderRadius: '0',
                 boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
               },
             }}
@@ -233,6 +249,12 @@ const ChessGame = () => {
                 Candidate line: {engineInfo.pv.slice(0, 4).join(' ')}
               </p>
             )}
+          </div>
+          <div className="engine-status">
+            <p className="chess-meta">
+              Analyst status:{' '}
+              <span className="chess-meta-strong">{analysisStatusText}</span>
+            </p>
           </div>
         </div>
       </div>
