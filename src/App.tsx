@@ -1,3 +1,4 @@
+import ChessGame from './components/ChessGame'
 import './App.css'
 
 const featureHighlights = [
@@ -47,6 +48,8 @@ function App() {
           </article>
         ))}
       </section>
+
+      <ChessGame />
 
       <section className="status-card" aria-live="polite">
         <span>Status</span>

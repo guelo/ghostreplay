@@ -21,10 +21,21 @@ npm run preview     # preview the production build locally
 
 The default dev command prints the local URL in the terminal. Open it in a browser and you should see the Ghost Replay placeholder copy along with the feature highlight cards.
 
+## Verifying the chess game
+
+The client now bundles [`react-chessboard`](https://www.npmjs.com/package/react-chessboard) and [`chess.js`](https://www.npmjs.com/package/chess.js) so you can rehearse both sides of the board locally.
+
+1. Run `npm run dev` and open the printed URL.
+2. Scroll to the ChessGame card and make a few legal moves; the turn indicator should update after every drop.
+3. Try an illegal move (for example, move a knight like a bishop). The piece should snap back immediately.
+4. Click **Flip board** to play from the opposite side or toggle **Auto-rotate** to have the view swap each move.
+5. Use **Reset game** after a full play-through to return to the initial position.
+
 ## Project structure
 
 - `src/main.tsx` mounts React and wires up the global styles
-- `src/App.tsx` renders the placeholder hero, feature cards, and status message
+- `src/App.tsx` renders the hero, feature cards, chessboard, and status message
+- `src/components/ChessGame.tsx` powers the local chess sandbox with react-chessboard + chess.js
 - `src/App.css` + `src/index.css` define the temporary theme and layout
 - `public/` holds assets that should be copied verbatim into the build output
 - `vite.config.ts`, `tsconfig.*.json`, and `eslint.config.js` configure the tooling
