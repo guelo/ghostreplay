@@ -1,11 +1,23 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.health import router as health_router
+from app.db import engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+    yield
+    engine.dispose()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Ghost Replay API", version="0.1.0")
+    app = FastAPI(title="Ghost Replay API", version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,
