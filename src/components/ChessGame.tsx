@@ -3,6 +3,7 @@ import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
 import { useStockfishEngine } from '../hooks/useStockfishEngine'
+import { useMoveAnalysis } from '../hooks/useMoveAnalysis'
 
 type BoardOrientation = 'white' | 'black'
 
@@ -33,6 +34,7 @@ const ChessGame = () => {
     evaluatePosition,
     resetEngine,
   } = useStockfishEngine()
+  const { analyzeMove } = useMoveAnalysis()
   const [engineMessage, setEngineMessage] = useState<string | null>(null)
 
   const statusText = (() => {
@@ -127,6 +129,7 @@ const ChessGame = () => {
       return false
     }
 
+    const fenBeforeMove = chess.fen()
     const move = chess.move({
       from: sourceSquare,
       to: targetSquare,
@@ -138,6 +141,9 @@ const ChessGame = () => {
     }
 
     setFen(chess.fen())
+
+    const uciMove = `${move.from}${move.to}${move.promotion ?? ''}`
+    analyzeMove(fenBeforeMove, uciMove)
 
     if (autoRotate) {
       setBoardOrientation((current) => (current === 'white' ? 'black' : 'white'))
