@@ -1,5 +1,7 @@
 # Agent Instructions
 
+The overall project and architecure is described in SPEC.md
+
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
 ## Quick Reference
