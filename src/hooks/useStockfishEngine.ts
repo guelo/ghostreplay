@@ -28,21 +28,25 @@ const createRequestId = () => {
   return Math.random().toString(36).slice(2)
 }
 
+const sharedArrayBufferAvailable = typeof SharedArrayBuffer !== 'undefined'
+const sharedArrayBufferError =
+  'SharedArrayBuffer is unavailable. Ensure COOP/COEP headers are active and reload the page.'
+
 export const useStockfishEngine = () => {
   const workerRef = useRef<Worker | null>(null)
   const pendingEvaluations = useRef<Map<string, PendingEntry>>(new Map())
   const activeRequestId = useRef<string | null>(null)
-  const [status, setStatus] = useState<EngineStatus>('booting')
-  const [error, setError] = useState<string | null>(null)
+  const [status, setStatus] = useState<EngineStatus>(
+    sharedArrayBufferAvailable ? 'booting' : 'error',
+  )
+  const [error, setError] = useState<string | null>(
+    sharedArrayBufferAvailable ? null : sharedArrayBufferError,
+  )
   const [info, setInfo] = useState<EngineInfo | null>(null)
   const [isThinking, setIsThinking] = useState(false)
 
   useEffect(() => {
-    if (typeof SharedArrayBuffer === 'undefined') {
-      setStatus('error')
-      setError(
-        'SharedArrayBuffer is unavailable. Ensure COOP/COEP headers are active and reload the page.',
-      )
+    if (!sharedArrayBufferAvailable) {
       return
     }
 
@@ -51,6 +55,7 @@ export const useStockfishEngine = () => {
       { type: 'module' },
     )
     workerRef.current = worker
+    const pendingMap = pendingEvaluations.current
 
     const handleMessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data
@@ -72,11 +77,11 @@ export const useStockfishEngine = () => {
           }
           break
         case 'bestmove': {
-          const entry = pendingEvaluations.current.get(message.id)
+          const entry = pendingMap.get(message.id)
 
           if (entry) {
             entry.resolve({ move: message.move, raw: message.raw })
-            pendingEvaluations.current.delete(message.id)
+            pendingMap.delete(message.id)
           }
 
           if (message.id === activeRequestId.current) {
@@ -92,10 +97,10 @@ export const useStockfishEngine = () => {
           setIsThinking(false)
           activeRequestId.current = null
 
-          pendingEvaluations.current.forEach((entry) => {
+          pendingMap.forEach((entry) => {
             entry.reject(new Error(message.error))
           })
-          pendingEvaluations.current.clear()
+          pendingMap.clear()
           break
         }
         case 'log':
@@ -119,10 +124,10 @@ export const useStockfishEngine = () => {
     return () => {
       worker.removeEventListener('message', handleMessage)
       worker.removeEventListener('error', handleError)
-      pendingEvaluations.current.forEach((entry) => {
+      pendingMap.forEach((entry) => {
         entry.reject(new Error('Stockfish worker disposed'))
       })
-      pendingEvaluations.current.clear()
+      pendingMap.clear()
       worker.terminate()
       workerRef.current = null
     }

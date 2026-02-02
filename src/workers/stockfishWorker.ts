@@ -162,7 +162,8 @@ function handleEngineLine(line: string) {
 
   if (line.startsWith('bestmove')) {
     if (runningSearch) {
-      const [_, move] = line.split(' ')
+      const parts = line.split(' ')
+      const move = parts[1] ?? ''
       ctx.postMessage({
         type: 'bestmove',
         id: runningSearch.id,
