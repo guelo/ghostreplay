@@ -12,6 +12,13 @@ export DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5432/ghost
 uvicorn app.main:app --reload --port 8000
 ```
 
+## Database migrations (Alembic)
+
+```bash
+cd backend
+alembic -c alembic.ini upgrade head
+```
+
 ## Endpoints
 
 - `GET /` -> basic service info
