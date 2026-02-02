@@ -1,0 +1,122 @@
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  min-height: 100vh;
+  padding: clamp(2rem, 6vw, 4.5rem);
+  display: flex;
+  flex-direction: column;
+  gap: clamp(2rem, 4vw, 3.5rem);
+  max-width: 1024px;
+  margin: 0 auto;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2.5rem, 6vw, 3.5rem);
+  color: #f8fafc;
+}
+
+.hero p {
+  margin: 0;
+  color: #cbd5f5;
+  max-width: 60ch;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+}
+
+.cta {
+  background: linear-gradient(135deg, #38bdf8, #818cf8);
+  border: none;
+  padding: 0.85rem 1.5rem;
+  border-radius: 999px;
+  color: #020617;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 200ms ease, box-shadow 200ms ease;
+  box-shadow: 0 10px 25px rgba(129, 140, 248, 0.2);
+}
+
+.cta:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 12px 30px rgba(129, 140, 248, 0.3);
+}
+
+.cta.secondary {
+  background: transparent;
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.6);
+  box-shadow: none;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.feature-card {
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid rgba(51, 65, 85, 0.8);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.4);
+}
+
+.feature-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.15rem;
+  color: #f8fafc;
+}
+
+.feature-card p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.95rem;
+}
+
+.status-card {
+  background: rgba(15, 118, 110, 0.12);
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  color: #5eead4;
+}
+
+.status-card span {
+  font-size: 0.85rem;
+  color: #99f6e4;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.status-card code {
+  font-family: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.85rem;
+  background: rgba(15, 23, 42, 0.8);
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.4rem;
+  color: #f0fdf4;
+}
