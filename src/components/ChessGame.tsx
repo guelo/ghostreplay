@@ -427,12 +427,13 @@ const ChessGame = () => {
               <span className="chess-meta-strong">{analysisStatusText}</span>
             </p>
           </div>
-          <MoveList
-            moves={moveHistory}
-            currentIndex={viewIndex}
-            onNavigate={handleNavigate}
-          />
         </div>
+
+        <MoveList
+          moves={moveHistory}
+          currentIndex={viewIndex}
+          onNavigate={handleNavigate}
+        />
       </div>
 
     </section>

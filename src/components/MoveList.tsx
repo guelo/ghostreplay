@@ -22,8 +22,7 @@ const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
 
   const handlePrev = useCallback(() => {
     if (!canGoBack) return
-    const newIndex = effectiveIndex - 1
-    onNavigate(newIndex < 0 ? null : newIndex)
+    onNavigate(effectiveIndex - 1) // -1 is valid (starting position)
   }, [canGoBack, effectiveIndex, onNavigate])
 
   const handleNext = useCallback(() => {
@@ -95,11 +94,9 @@ const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
     <div className="move-list-container">
       <div className="move-list-header">
         <span className="move-list-title">Moves</span>
-        {!isAtLatest && (
-          <span className="move-list-viewing">
-            Viewing position {effectiveIndex + 1}/{moves.length}
-          </span>
-        )}
+        <span className={`move-list-viewing ${isAtLatest ? 'hidden' : ''}`}>
+          Viewing position {effectiveIndex + 1}/{moves.length}
+        </span>
       </div>
 
       <div className="move-list-nav">
