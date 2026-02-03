@@ -3,83 +3,12 @@ Simple test for POST /api/game/start endpoint.
 
 Run with: pytest test_game_api.py -v
 """
-import os
 import uuid
-from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
 
-# Ensure JWT secret is set before app import
-os.environ.setdefault("JWT_SECRET", "test-secret-32-bytes-minimum-length")
-
-# Import models FIRST to register them with Base.metadata
-from app.models import Base, GameSession, Position, Blunder
-from app.main import app
-from app.db import get_db
-from app.security import create_access_token
-
-# Use in-memory SQLite for testing with StaticPool to share connection
-SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
-engine = create_engine(
-    SQLALCHEMY_TEST_DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,  # Share the same connection across all threads
-)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-def create_test_tables():
-    """Create tables with SQLite-compatible schema."""
-    with engine.connect() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS game_sessions (
-                id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                started_at TIMESTAMP NOT NULL,
-                ended_at TIMESTAMP,
-                status VARCHAR(20) NOT NULL,
-                result VARCHAR(20),
-                engine_elo INTEGER NOT NULL,
-                blunder_recorded BOOLEAN NOT NULL DEFAULT 0,
-                player_color VARCHAR(5) NOT NULL DEFAULT 'white',
-                pgn TEXT
-            )
-        """))
-        conn.commit()
+from app.models import GameSession
 
 
-def override_get_db():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def reset_db():
-    """Reset database before each test and configure app override."""
-    app.dependency_overrides[get_db] = override_get_db
-
-    with engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS game_sessions"))
-        conn.commit()
-    create_test_tables()
-    yield
-
-
-client = TestClient(app)
-
-
-def auth_headers(user_id: int = 123, username: str = "ghost_test", is_anonymous: bool = True) -> dict:
-    token = create_access_token(user_id=user_id, username=username, is_anonymous=is_anonymous)
-    return {"Authorization": f"Bearer {token}"}
-
-
-def test_start_game_success():
+def test_start_game_success(client, auth_headers):
     """Test successful game creation with standard ELO."""
     response = client.post(
         "/api/game/start",
@@ -106,7 +35,7 @@ def test_start_game_success():
         assert False, "session_id is not a valid UUID"
 
 
-def test_start_game_defaults_player_color_white():
+def test_start_game_defaults_player_color_white(client, auth_headers, db_session):
     """Test that player_color defaults to white when omitted."""
     response = client.post(
         "/api/game/start",
@@ -122,16 +51,12 @@ def test_start_game_defaults_player_color_white():
     assert data["player_color"] == "white"
 
     # Verify database persistence
-    db = TestingSessionLocal()
-    try:
-        session = db.query(GameSession).filter(GameSession.id == session_uuid).first()
-        assert session is not None
-        assert session.player_color == "white"
-    finally:
-        db.close()
+    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).first()
+    assert session is not None
+    assert session.player_color == "white"
 
 
-def test_start_game_with_player_color_black():
+def test_start_game_with_player_color_black(client, auth_headers, db_session):
     """Test that player_color is persisted when provided."""
     response = client.post(
         "/api/game/start",
@@ -147,16 +72,12 @@ def test_start_game_with_player_color_black():
     assert data["player_color"] == "black"
 
     # Verify database persistence
-    db = TestingSessionLocal()
-    try:
-        session = db.query(GameSession).filter(GameSession.id == session_uuid).first()
-        assert session is not None
-        assert session.player_color == "black"
-    finally:
-        db.close()
+    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).first()
+    assert session is not None
+    assert session.player_color == "black"
 
 
-def test_start_game_low_elo():
+def test_start_game_low_elo(client, auth_headers):
     """Test that low ELO values are accepted (no validation)."""
     response = client.post(
         "/api/game/start",
@@ -169,7 +90,7 @@ def test_start_game_low_elo():
     assert data["engine_elo"] == 400
 
 
-def test_start_game_high_elo():
+def test_start_game_high_elo(client, auth_headers):
     """Test that high ELO values are accepted (no validation)."""
     response = client.post(
         "/api/game/start",
@@ -182,7 +103,7 @@ def test_start_game_high_elo():
     assert data["engine_elo"] == 3000
 
 
-def test_start_game_missing_auth():
+def test_start_game_missing_auth(client):
     """Test that missing Authorization header is rejected."""
     response = client.post(
         "/api/game/start",
@@ -192,7 +113,7 @@ def test_start_game_missing_auth():
     assert response.status_code == 401  # Missing auth token
 
 
-def test_start_game_invalid_user_id():
+def test_start_game_invalid_user_id(client):
     """Test that invalid bearer token is rejected."""
     response = client.post(
         "/api/game/start",
@@ -203,7 +124,7 @@ def test_start_game_invalid_user_id():
     assert response.status_code == 401  # Invalid token
 
 
-def test_start_game_missing_elo():
+def test_start_game_missing_elo(client, auth_headers):
     """Test that missing engine_elo is rejected."""
     response = client.post(
         "/api/game/start",
@@ -214,7 +135,7 @@ def test_start_game_missing_elo():
     assert response.status_code == 422  # Validation error
 
 
-def test_end_game_success():
+def test_end_game_success(client, auth_headers):
     """Test successfully ending a game with checkmate_win."""
     # Start a game first
     start_response = client.post(
@@ -243,7 +164,7 @@ def test_end_game_success():
     assert "ended_at" in data
 
 
-def test_end_game_with_pgn():
+def test_end_game_with_pgn(client, auth_headers):
     """Test ending a game with PGN."""
     # Start a game
     start_response = client.post(
@@ -269,7 +190,7 @@ def test_end_game_with_pgn():
     assert end_response.json()["result"] == "draw"
 
 
-def test_end_game_all_result_types():
+def test_end_game_all_result_types(client, auth_headers):
     """Test all valid result types."""
     results = ["checkmate_win", "checkmate_loss", "resign", "draw", "abandon"]
 
@@ -297,7 +218,7 @@ def test_end_game_all_result_types():
         assert end_response.json()["result"] == result
 
 
-def test_end_game_not_found():
+def test_end_game_not_found(client, auth_headers):
     """Test ending a non-existent game."""
     fake_uuid = "00000000-0000-0000-0000-000000000000"
     response = client.post(
@@ -314,7 +235,7 @@ def test_end_game_not_found():
     assert "not found" in response.json()["detail"].lower()
 
 
-def test_end_game_wrong_user():
+def test_end_game_wrong_user(client, auth_headers):
     """Test that users cannot end other users' games."""
     # User 123 starts a game
     start_response = client.post(
@@ -339,7 +260,7 @@ def test_end_game_wrong_user():
     assert "not authorized" in end_response.json()["detail"].lower()
 
 
-def test_end_game_already_ended():
+def test_end_game_already_ended(client, auth_headers):
     """Test that ending an already-ended game fails."""
     # Start a game
     start_response = client.post(
@@ -375,7 +296,7 @@ def test_end_game_already_ended():
     assert "already ended" in second_end_response.json()["detail"].lower()
 
 
-def test_end_game_invalid_result():
+def test_end_game_invalid_result(client, auth_headers):
     """Test that invalid result values are rejected."""
     start_response = client.post(
         "/api/game/start",
@@ -397,7 +318,7 @@ def test_end_game_invalid_result():
     assert response.status_code == 422  # Validation error
 
 
-def test_end_game_missing_auth():
+def test_end_game_missing_auth(client, auth_headers):
     """Test that missing Authorization header is rejected."""
     start_response = client.post(
         "/api/game/start",
@@ -418,7 +339,7 @@ def test_end_game_missing_auth():
     assert response.status_code == 401  # Missing auth token
 
 
-def test_end_game_missing_pgn():
+def test_end_game_missing_pgn(client, auth_headers):
     """Test that missing PGN is rejected."""
     start_response = client.post(
         "/api/game/start",

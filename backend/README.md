@@ -19,6 +19,15 @@ cd backend
 alembic -c alembic.ini upgrade head
 ```
 
+## Testing
+
+```bash
+cd backend
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest
+```
+
 ## Endpoints
 
 - `GET /` -> basic service info
