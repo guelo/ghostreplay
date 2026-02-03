@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api.health import router as health_router
+from app.api.game import router as game_router
 from app.db import engine
 
 
@@ -27,6 +28,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health_router)
+    app.include_router(game_router)
 
     @app.get("/")
     def root() -> dict:

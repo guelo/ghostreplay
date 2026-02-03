@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Index
+import uuid
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Index
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -42,3 +44,22 @@ class Blunder(Base):
     pass_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_reviewed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class GameSession(Base):
+    __tablename__ = "game_sessions"
+    __table_args__ = (
+        Index("idx_game_sessions_user", "user_id"),
+        Index("idx_game_sessions_status", "status"),
+        Index("idx_game_sessions_user_started", "user_id", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    ended_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    result: Mapped[str | None] = mapped_column(String(20))
+    engine_elo: Mapped[int] = mapped_column(Integer, nullable=False)
+    blunder_recorded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    pgn: Mapped[str | None] = mapped_column(Text)

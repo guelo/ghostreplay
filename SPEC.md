@@ -887,7 +887,7 @@ Creates a new game session. The session tracks which game the blunders belong to
 **Request:**
 ```json
 {
-  "engine_elo": "integer (800-2500)"
+  "engine_elo": "integer"
 }
 ```
 
