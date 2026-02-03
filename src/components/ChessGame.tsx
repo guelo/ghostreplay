@@ -335,7 +335,7 @@ const ChessGame = () => {
         </div>
 
         <div className="chessboard-wrapper">
-          {!isGameActive && (
+          {!isGameActive && !gameResult && (
             <div className="chessboard-overlay">
               <button
                 className="chess-button primary overlay-button"
