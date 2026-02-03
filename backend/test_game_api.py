@@ -122,6 +122,231 @@ def test_start_game_missing_elo():
     assert response.status_code == 422  # Validation error
 
 
+def test_end_game_success():
+    """Test successfully ending a game with checkmate_win."""
+    # Start a game first
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    # End the game
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "checkmate_win",
+            "pgn": "1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#"
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    assert end_response.status_code == 200
+    data = end_response.json()
+
+    assert data["session_id"] == session_id
+    assert data["result"] == "checkmate_win"
+    assert "ended_at" in data
+
+
+def test_end_game_with_pgn():
+    """Test ending a game with PGN."""
+    # Start a game
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    # End with PGN
+    pgn = "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6"
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "draw",
+            "pgn": pgn
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    assert end_response.status_code == 200
+    assert end_response.json()["result"] == "draw"
+
+
+def test_end_game_all_result_types():
+    """Test all valid result types."""
+    results = ["checkmate_win", "checkmate_loss", "resign", "draw", "abandon"]
+
+    for result in results:
+        # Start a new game for each result type
+        start_response = client.post(
+            "/api/game/start",
+            json={"engine_elo": 1500},
+            headers={"X-User-Id": "123"}
+        )
+        session_id = start_response.json()["session_id"]
+
+        # End with specific result
+        end_response = client.post(
+            "/api/game/end",
+            json={
+                "session_id": session_id,
+                "result": result,
+                "pgn": "1. e4 e5"
+            },
+            headers={"X-User-Id": "123"}
+        )
+
+        assert end_response.status_code == 200
+        assert end_response.json()["result"] == result
+
+
+def test_end_game_not_found():
+    """Test ending a non-existent game."""
+    fake_uuid = "00000000-0000-0000-0000-000000000000"
+    response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": fake_uuid,
+            "result": "resign",
+            "pgn": "1. e4 e5"
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_end_game_wrong_user():
+    """Test that users cannot end other users' games."""
+    # User 123 starts a game
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    # User 456 tries to end it
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "resign",
+            "pgn": "1. e4 e5"
+        },
+        headers={"X-User-Id": "456"}
+    )
+
+    assert end_response.status_code == 403
+    assert "not authorized" in end_response.json()["detail"].lower()
+
+
+def test_end_game_already_ended():
+    """Test that ending an already-ended game fails."""
+    # Start a game
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    # End it once
+    client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "checkmate_win",
+            "pgn": "1. e4 e5"
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    # Try to end it again
+    second_end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "resign",
+            "pgn": "1. e4 e5"
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    assert second_end_response.status_code == 400
+    assert "already ended" in second_end_response.json()["detail"].lower()
+
+
+def test_end_game_invalid_result():
+    """Test that invalid result values are rejected."""
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "invalid_result",
+            "pgn": "1. e4 e5"
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    assert response.status_code == 422  # Validation error
+
+
+def test_end_game_missing_auth():
+    """Test that missing X-User-Id header is rejected."""
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "resign",
+            "pgn": "1. e4 e5"
+        }
+    )
+
+    assert response.status_code == 422  # Missing required header
+
+
+def test_end_game_missing_pgn():
+    """Test that missing PGN is rejected."""
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers={"X-User-Id": "123"}
+    )
+    session_id = start_response.json()["session_id"]
+
+    response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "resign"
+        },
+        headers={"X-User-Id": "123"}
+    )
+
+    assert response.status_code == 422  # Validation error
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
