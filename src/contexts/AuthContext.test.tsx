@@ -1,0 +1,274 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, waitFor, act, cleanup } from '@testing-library/react'
+import { renderHook } from '@testing-library/react'
+import { AuthProvider, useAuth } from './AuthContext'
+
+const mockAuthResponse = {
+  token: 'mock-jwt-token',
+  user_id: 123,
+  username: 'ghost_abc12345',
+}
+
+// Persistent mock storage that survives test lifecycle
+let mockLocalStorage: Record<string, string> = {}
+
+const localStorageMock = {
+  getItem: (key: string) => mockLocalStorage[key] ?? null,
+  setItem: (key: string, value: string) => {
+    mockLocalStorage[key] = value
+  },
+  removeItem: (key: string) => {
+    delete mockLocalStorage[key]
+  },
+  clear: () => {
+    mockLocalStorage = {}
+  },
+  length: 0,
+  key: () => null,
+}
+
+Object.defineProperty(window, 'localStorage', {
+  value: localStorageMock,
+  writable: true,
+})
+
+describe('AuthContext', () => {
+  let mockFetch: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    mockLocalStorage = {}
+    mockFetch = vi.fn()
+    global.fetch = mockFetch
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+  })
+
+  describe('auto-registration', () => {
+    it('registers new anonymous user when no credentials exist', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      expect(screen.getByTestId('loading')).toHaveTextContent('true')
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/auth/register'),
+        expect.objectContaining({
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+
+      expect(screen.getByTestId('user-id')).toHaveTextContent('123')
+      expect(screen.getByTestId('is-anonymous')).toHaveTextContent('true')
+      expect(mockLocalStorage['ghost_replay_credentials']).toBeDefined()
+      expect(mockLocalStorage['ghost_replay_token']).toBe('mock-jwt-token')
+    })
+  })
+
+  describe('auto-login', () => {
+    it('logs in with stored credentials on mount', async () => {
+      mockLocalStorage['ghost_replay_credentials'] = JSON.stringify({
+        username: 'ghost_existing',
+        password: 'existing-password-12345678',
+      })
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/auth/login'),
+        expect.objectContaining({ method: 'POST' })
+      )
+
+      expect(screen.getByTestId('user-id')).toHaveTextContent('123')
+    })
+
+    it('re-registers when stored credentials are invalid', async () => {
+      mockLocalStorage['ghost_replay_credentials'] = JSON.stringify({
+        username: 'ghost_invalid',
+        password: 'invalid-password-12345678',
+      })
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          json: () => Promise.resolve({ detail: 'Invalid credentials' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockAuthResponse),
+        })
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('/api/auth/login'),
+        expect.any(Object)
+      )
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('/api/auth/register'),
+        expect.any(Object)
+      )
+    })
+  })
+
+  describe('login', () => {
+    it('updates state and stores credentials on successful login', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      const { result } = renderHook(() => useAuth(), {
+        wrapper: AuthProvider,
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+
+      const loginResponse = {
+        token: 'new-token',
+        user_id: 456,
+        username: 'claimed_user',
+      }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(loginResponse),
+      })
+
+      await act(async () => {
+        await result.current.login('claimed_user', 'my-secure-password')
+      })
+
+      expect(result.current.user?.id).toBe(456)
+      expect(result.current.user?.isAnonymous).toBe(false)
+      expect(result.current.token).toBe('new-token')
+    })
+
+    it('throws on failed login', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      const { result } = renderHook(() => useAuth(), {
+        wrapper: AuthProvider,
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+
+      mockFetch.mockResolvedValue({
+        ok: false,
+        json: () => Promise.resolve({ detail: 'Invalid credentials' }),
+      })
+
+      await expect(
+        act(async () => {
+          await result.current.login('bad_user', 'bad-password-12345')
+        })
+      ).rejects.toThrow('Invalid credentials')
+    })
+  })
+
+  describe('logout', () => {
+    it('clears credentials and registers new anonymous user', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      const { result } = renderHook(() => useAuth(), {
+        wrapper: AuthProvider,
+      })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+
+      const newAnonResponse = {
+        token: 'new-anon-token',
+        user_id: 789,
+        username: 'ghost_newanon',
+      }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(newAnonResponse),
+      })
+
+      act(() => {
+        result.current.logout()
+      })
+
+      await waitFor(() => {
+        expect(result.current.user?.id).toBe(789)
+      })
+
+      expect(result.current.user?.isAnonymous).toBe(true)
+      expect(result.current.token).toBe('new-anon-token')
+    })
+  })
+
+  describe('useAuth hook', () => {
+    it('throws when used outside AuthProvider', () => {
+      expect(() => {
+        renderHook(() => useAuth())
+      }).toThrow('useAuth must be used within an AuthProvider')
+    })
+  })
+})
+
+function TestConsumer() {
+  const { user, token, isLoading, error } = useAuth()
+
+  return (
+    <div>
+      <span data-testid="loading">{String(isLoading)}</span>
+      <span data-testid="user-id">{user?.id ?? 'null'}</span>
+      <span data-testid="username">{user?.username ?? 'null'}</span>
+      <span data-testid="is-anonymous">{String(user?.isAnonymous ?? 'null')}</span>
+      <span data-testid="token">{token ?? 'null'}</span>
+      <span data-testid="error">{error ?? 'null'}</span>
+    </div>
+  )
+}

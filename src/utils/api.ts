@@ -5,18 +5,14 @@
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 /**
- * Get or create a user ID for API requests.
- * For MVP, we use a simple numeric ID stored in localStorage.
- * In production, this would integrate with the auth endpoints.
+ * Get headers for authenticated API requests, including JWT token if available.
  */
-const getUserId = (): string => {
-  let userId = localStorage.getItem('ghost_replay_user_id')
-  if (!userId) {
-    // Generate a simple numeric user ID for MVP
-    userId = String(Math.floor(Math.random() * 1000000) + 1)
-    localStorage.setItem('ghost_replay_user_id', userId)
+const getAuthHeaders = (): Record<string, string> => {
+  const token = localStorage.getItem('ghost_replay_token')
+  return {
+    'Content-Type': 'application/json',
+    ...(token && { Authorization: `Bearer ${token}` }),
   }
-  return userId
 }
 
 interface StartGameRequest {
@@ -48,10 +44,7 @@ export const startGame = async (
 ): Promise<StartGameResponse> => {
   const response = await fetch(`${API_BASE_URL}/api/game/start`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-User-Id': getUserId(),
-    },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ engine_elo: engineElo } satisfies StartGameRequest),
   })
 
@@ -72,10 +65,7 @@ export const endGame = async (
 ): Promise<EndGameResponse> => {
   const response = await fetch(`${API_BASE_URL}/api/game/end`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-User-Id': getUserId(),
-    },
+    headers: getAuthHeaders(),
     body: JSON.stringify({ session_id: sessionId, result, pgn } satisfies EndGameRequest),
   })
 
