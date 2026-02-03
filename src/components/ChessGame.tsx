@@ -5,8 +5,14 @@ import type { PieceDropHandlerArgs } from 'react-chessboard'
 import { useStockfishEngine } from '../hooks/useStockfishEngine'
 import { useMoveAnalysis } from '../hooks/useMoveAnalysis'
 import { startGame, endGame } from '../utils/api'
+import MoveList from './MoveList'
 
 type BoardOrientation = 'white' | 'black'
+
+type MoveRecord = {
+  san: string
+  fen: string // Position after this move
+}
 
 const formatScore = (score?: { type: 'cp' | 'mate'; value: number }) => {
   if (!score) {
@@ -26,11 +32,15 @@ type GameResult = {
   message: string
 }
 
+const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+
 const ChessGame = () => {
   const chess = useMemo(() => new Chess(), [])
   const [fen, setFen] = useState(chess.fen())
   const [boardOrientation, setBoardOrientation] =
     useState<BoardOrientation>('white')
+  const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([])
+  const [viewIndex, setViewIndex] = useState<number | null>(null) // null = viewing live position
   const {
     status: engineStatus,
     error: engineError,
@@ -44,6 +54,24 @@ const ChessGame = () => {
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [isGameActive, setIsGameActive] = useState(false)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
+
+  // Get the FEN to display on the board (accounts for viewing past positions)
+  const displayedFen = useMemo(() => {
+    if (viewIndex === null) {
+      return fen // Live position
+    }
+    if (viewIndex === -1) {
+      return STARTING_FEN // Starting position
+    }
+    return moveHistory[viewIndex]?.fen ?? fen
+  }, [viewIndex, fen, moveHistory])
+
+  // Whether the user can make moves (must be viewing live position)
+  const isViewingLive = viewIndex === null
+
+  const handleNavigate = useCallback((index: number | null) => {
+    setViewIndex(index)
+  }, [])
 
   const handleGameEnd = useCallback(async () => {
     if (!sessionId || !isGameActive) return
@@ -186,7 +214,10 @@ const ChessGame = () => {
         throw new Error(`Engine returned illegal move: ${result.move}`)
       }
 
-      setFen(chess.fen())
+      const newFen = chess.fen()
+      setFen(newFen)
+      setMoveHistory((prev) => [...prev, { san: appliedMove.san, fen: newFen }])
+      setViewIndex(null) // Ensure we're viewing the live position
       setEngineMessage(null)
 
       // Check if the engine's move ended the game
@@ -221,7 +252,10 @@ const ChessGame = () => {
       return false
     }
 
-    setFen(chess.fen())
+    const newFen = chess.fen()
+    setFen(newFen)
+    setMoveHistory((prev) => [...prev, { san: move.san, fen: newFen }])
+    setViewIndex(null) // Ensure we're viewing the live position
 
     const uciMove = `${move.from}${move.to}${move.promotion ?? ''}`
     analyzeMove(fenBeforeMove, uciMove)
@@ -253,6 +287,8 @@ const ChessGame = () => {
       setBoardOrientation('white')
       setEngineMessage(null)
       setGameResult(null)
+      setMoveHistory([])
+      setViewIndex(null)
       resetEngine()
     } catch (error) {
       const message =
@@ -285,6 +321,8 @@ const ChessGame = () => {
     setSessionId(null)
     setIsGameActive(false)
     setGameResult(null)
+    setMoveHistory([])
+    setViewIndex(null)
     resetEngine()
   }
 
@@ -348,12 +386,12 @@ const ChessGame = () => {
           )}
           <Chessboard
             options={{
-              position: fen,
+              position: displayedFen,
               onPieceDrop: handleDrop,
               boardOrientation,
               animationDurationInMs: 200,
               allowDragging:
-                isGameActive && engineStatus === 'ready' && chess.turn() === 'w' && !isThinking,
+                isGameActive && engineStatus === 'ready' && chess.turn() === 'w' && !isThinking && isViewingLive,
               boardStyle: {
                 borderRadius: '0',
                 boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
@@ -389,6 +427,11 @@ const ChessGame = () => {
               <span className="chess-meta-strong">{analysisStatusText}</span>
             </p>
           </div>
+          <MoveList
+            moves={moveHistory}
+            currentIndex={viewIndex}
+            onNavigate={handleNavigate}
+          />
         </div>
       </div>
 
