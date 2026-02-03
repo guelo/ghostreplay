@@ -38,6 +38,23 @@ interface EndGameResponse {
   blunders_reviewed: number
 }
 
+interface BlunderRequest {
+  session_id: string
+  pgn: string
+  fen: string
+  user_move: string
+  best_move: string
+  eval_before: number
+  eval_after: number
+}
+
+interface BlunderResponse {
+  blunder_id: number | null
+  position_id: number
+  positions_created: number
+  is_new: boolean
+}
+
 /**
  * Start a new game session
  */
@@ -77,6 +94,39 @@ export const endGame = async (
 
   if (!response.ok) {
     throw new Error(`Failed to end game: ${response.statusText}`)
+  }
+
+  return response.json()
+}
+
+/**
+ * Record a blunder from a game session
+ */
+export const recordBlunder = async (
+  sessionId: string,
+  pgn: string,
+  fen: string,
+  userMove: string,
+  bestMove: string,
+  evalBefore: number,
+  evalAfter: number,
+): Promise<BlunderResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/blunder`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      session_id: sessionId,
+      pgn,
+      fen,
+      user_move: userMove,
+      best_move: bestMove,
+      eval_before: evalBefore,
+      eval_after: evalAfter,
+    } satisfies BlunderRequest),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to record blunder: ${response.statusText}`)
   }
 
   return response.json()

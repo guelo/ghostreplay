@@ -1,50 +1,51 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Chess } from 'chess.js'
-import { Chessboard } from 'react-chessboard'
-import type { PieceDropHandlerArgs } from 'react-chessboard'
-import { useStockfishEngine } from '../hooks/useStockfishEngine'
-import { useMoveAnalysis } from '../hooks/useMoveAnalysis'
-import { startGame, endGame } from '../utils/api'
-import MoveList from './MoveList'
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Chess } from "chess.js";
+import { Chessboard } from "react-chessboard";
+import type { PieceDropHandlerArgs } from "react-chessboard";
+import { useStockfishEngine } from "../hooks/useStockfishEngine";
+import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
+import { startGame, endGame, recordBlunder } from "../utils/api";
+import { shouldRecordBlunder } from "../utils/blunder";
+import MoveList from "./MoveList";
 
-type BoardOrientation = 'white' | 'black'
+type BoardOrientation = "white" | "black";
 
 type MoveRecord = {
-  san: string
-  fen: string // Position after this move
-}
+  san: string;
+  fen: string; // Position after this move
+};
 
-const formatScore = (score?: { type: 'cp' | 'mate'; value: number }) => {
+const formatScore = (score?: { type: "cp" | "mate"; value: number }) => {
   if (!score) {
-    return null
+    return null;
   }
 
-  if (score.type === 'mate') {
-    return `M${score.value}`
+  if (score.type === "mate") {
+    return `M${score.value}`;
   }
 
-  const value = score.value / 100
-  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}`
-}
+  const value = score.value / 100;
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
+};
 
 type GameResult = {
-  type: 'checkmate_win' | 'checkmate_loss' | 'draw' | 'resign'
-  message: string
-}
+  type: "checkmate_win" | "checkmate_loss" | "draw" | "resign";
+  message: string;
+};
 
-const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 const ChessGame = () => {
-  const chess = useMemo(() => new Chess(), [])
-  const [fen, setFen] = useState(chess.fen())
+  const chess = useMemo(() => new Chess(), []);
+  const [fen, setFen] = useState(chess.fen());
   const [boardOrientation, setBoardOrientation] =
-    useState<BoardOrientation>('white')
-  const [playerColor, setPlayerColor] = useState<BoardOrientation>('white')
+    useState<BoardOrientation>("white");
+  const [playerColor, setPlayerColor] = useState<BoardOrientation>("white");
   const [playerColorChoice, setPlayerColorChoice] = useState<
-    BoardOrientation | 'random'
-  >('white')
-  const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([])
-  const [viewIndex, setViewIndex] = useState<number | null>(null) // null = viewing live position
+    BoardOrientation | "random"
+  >("white");
+  const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
+  const [viewIndex, setViewIndex] = useState<number | null>(null); // null = viewing live position
   const {
     status: engineStatus,
     error: engineError,
@@ -52,222 +53,236 @@ const ChessGame = () => {
     isThinking,
     evaluatePosition,
     resetEngine,
-  } = useStockfishEngine()
+  } = useStockfishEngine();
   const {
     analyzeMove,
     lastAnalysis,
     status: analysisStatus,
     isAnalyzing,
     analyzingMove,
-  } = useMoveAnalysis()
-  const [engineMessage, setEngineMessage] = useState<string | null>(null)
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [isGameActive, setIsGameActive] = useState(false)
-  const [gameResult, setGameResult] = useState<GameResult | null>(null)
-  const [isStartingGame, setIsStartingGame] = useState(false)
-  const [startError, setStartError] = useState<string | null>(null)
-  const [showStartOverlay, setShowStartOverlay] = useState(false)
+  } = useMoveAnalysis();
+  const [engineMessage, setEngineMessage] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isGameActive, setIsGameActive] = useState(false);
+  const [gameResult, setGameResult] = useState<GameResult | null>(null);
+  const [isStartingGame, setIsStartingGame] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [showStartOverlay, setShowStartOverlay] = useState(false);
+
+  // Blunder tracking: only record the first blunder per session
+  const blunderRecordedRef = useRef(false);
+  // Store context for the pending move analysis (FEN before move, PGN after move)
+  const pendingAnalysisContextRef = useRef<{
+    fen: string;
+    pgn: string;
+    moveSan: string;
+    moveUci: string;
+  } | null>(null);
 
   // Get the FEN to display on the board (accounts for viewing past positions)
   const displayedFen = useMemo(() => {
     if (viewIndex === null) {
-      return fen // Live position
+      return fen; // Live position
     }
     if (viewIndex === -1) {
-      return STARTING_FEN // Starting position
+      return STARTING_FEN; // Starting position
     }
-    return moveHistory[viewIndex]?.fen ?? fen
-  }, [viewIndex, fen, moveHistory])
+    return moveHistory[viewIndex]?.fen ?? fen;
+  }, [viewIndex, fen, moveHistory]);
 
   // Whether the user can make moves (must be viewing live position)
-  const isViewingLive = viewIndex === null
+  const isViewingLive = viewIndex === null;
 
   const handleNavigate = useCallback((index: number | null) => {
-    setViewIndex(index)
-  }, [])
+    setViewIndex(index);
+  }, []);
 
   const handleGameEnd = useCallback(async () => {
-    if (!sessionId || !isGameActive) return
+    if (!sessionId || !isGameActive) return;
 
-    let result: GameResult | null = null
+    let result: GameResult | null = null;
 
     if (chess.isCheckmate()) {
-      const loser = chess.turn() === 'w' ? 'white' : 'black'
-      const playerWon = playerColor !== loser
+      const loser = chess.turn() === "w" ? "white" : "black";
+      const playerWon = playerColor !== loser;
       result = playerWon
-        ? { type: 'checkmate_win', message: 'Checkmate! You won!' }
-        : { type: 'checkmate_loss', message: 'Checkmate! You lost.' }
+        ? { type: "checkmate_win", message: "Checkmate! You won!" }
+        : { type: "checkmate_loss", message: "Checkmate! You lost." };
     } else if (chess.isStalemate()) {
-      result = { type: 'draw', message: 'Stalemate! The game is a draw.' }
+      result = { type: "draw", message: "Stalemate! The game is a draw." };
     } else if (chess.isThreefoldRepetition()) {
-      result = { type: 'draw', message: 'Draw by threefold repetition.' }
+      result = { type: "draw", message: "Draw by threefold repetition." };
     } else if (chess.isInsufficientMaterial()) {
-      result = { type: 'draw', message: 'Draw by insufficient material.' }
+      result = { type: "draw", message: "Draw by insufficient material." };
     } else if (chess.isDraw()) {
-      result = { type: 'draw', message: 'The game is a draw.' }
+      result = { type: "draw", message: "The game is a draw." };
     }
 
     if (result) {
       try {
-        await endGame(sessionId, result.type, chess.pgn())
-        setIsGameActive(false)
-        setGameResult(result)
+        await endGame(sessionId, result.type, chess.pgn());
+        setIsGameActive(false);
+        setGameResult(result);
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to end game.'
-        setEngineMessage(message)
+        const message =
+          error instanceof Error ? error.message : "Failed to end game.";
+        setEngineMessage(message);
       }
     }
-  }, [chess, isGameActive, playerColor, sessionId])
+  }, [chess, isGameActive, playerColor, sessionId]);
 
-  const isPlayersTurn = chess.turn() === (playerColor === 'white' ? 'w' : 'b')
-  const moveCount = moveHistory.length
+  const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
+  const moveCount = moveHistory.length;
 
   const statusText = (() => {
     if (chess.isCheckmate()) {
-      const winningColor = chess.turn() === 'w' ? 'Black' : 'White'
-      return `${winningColor} wins by checkmate`
+      const winningColor = chess.turn() === "w" ? "Black" : "White";
+      return `${winningColor} wins by checkmate`;
     }
 
     if (chess.isDraw()) {
-      return 'Drawn position'
+      return "Drawn position";
     }
 
     if (chess.isGameOver()) {
-      return 'Game over'
+      return "Game over";
     }
 
-    const active = chess.turn() === 'w' ? 'White' : 'Black'
-    const suffix = chess.inCheck() ? ' (check)' : ''
-    return `${active} to move${suffix}`
-  })()
+    const active = chess.turn() === "w" ? "White" : "Black";
+    const suffix = chess.inCheck() ? " (check)" : "";
+    return `${active} to move${suffix}`;
+  })();
 
   const engineStatusText = (() => {
     if (engineError) {
-      return engineError
+      return engineError;
     }
 
     if (engineMessage) {
-      return engineMessage
+      return engineMessage;
     }
 
-    if (engineStatus === 'booting') {
-      return 'Stockfish is warming up…'
+    if (engineStatus === "booting") {
+      return "Stockfish is warming up…";
     }
 
-    if (engineStatus === 'error') {
-      return 'Stockfish is unavailable.'
+    if (engineStatus === "error") {
+      return "Stockfish is unavailable.";
     }
 
     if (isThinking) {
-      const formattedScore = formatScore(engineInfo?.score)
+      const formattedScore = formatScore(engineInfo?.score);
       const parts = [
-        'Stockfish is thinking…',
+        "Stockfish is thinking…",
         engineInfo?.depth ? `depth ${engineInfo.depth}` : null,
         formattedScore ? `eval ${formattedScore}` : null,
-      ].filter(Boolean)
-      return parts.join(' · ')
+      ].filter(Boolean);
+      return parts.join(" · ");
     }
 
-    return 'Stockfish is ready.'
-  })()
+    return "Stockfish is ready.";
+  })();
 
   const analysisStatusText = (() => {
-    if (analysisStatus === 'booting') {
-      return 'Analyst is warming up…'
+    if (analysisStatus === "booting") {
+      return "Analyst is warming up…";
     }
 
-    if (analysisStatus === 'error') {
-      return 'Analyst is unavailable.'
+    if (analysisStatus === "error") {
+      return "Analyst is unavailable.";
     }
 
     if (isAnalyzing && analyzingMove) {
-      return `Analyzing ${analyzingMove}…`
+      return `Analyzing ${analyzingMove}…`;
     }
 
     if (!lastAnalysis) {
-      return 'Analyst is ready.'
+      return "Analyst is ready.";
     }
 
     const evalText =
       lastAnalysis.currentPositionEval !== null
-        ? ` Eval: ${lastAnalysis.currentPositionEval > 0 ? '+' : ''}${(lastAnalysis.currentPositionEval / 100).toFixed(2)}`
-        : ''
+        ? ` Eval: ${lastAnalysis.currentPositionEval > 0 ? "+" : ""}${(lastAnalysis.currentPositionEval / 100).toFixed(2)}`
+        : "";
 
     if (lastAnalysis.blunder && lastAnalysis.delta !== null) {
-      return `⚠️ ${lastAnalysis.move}: Blunder! Lost ${Math.max(lastAnalysis.delta, 0)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+      return `⚠️ ${lastAnalysis.move}: Blunder! Lost ${Math.max(lastAnalysis.delta, 0)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
     }
 
     if (lastAnalysis.delta !== null) {
       if (lastAnalysis.delta === 0) {
-        return `✓ ${lastAnalysis.move}: Best move!${evalText}`
+        return `✓ ${lastAnalysis.move}: Best move!${evalText}`;
       }
       if (lastAnalysis.delta < 0) {
-        return `✓ ${lastAnalysis.move}: Great move! Gained ${Math.abs(lastAnalysis.delta)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+        return `✓ ${lastAnalysis.move}: Great move! Gained ${Math.abs(lastAnalysis.delta)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
       }
       if (lastAnalysis.delta < 50) {
-        return `✓ ${lastAnalysis.move}: Good move. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+        return `✓ ${lastAnalysis.move}: Good move. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
       }
-      return `${lastAnalysis.move}: Inaccuracy. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+      return `${lastAnalysis.move}: Inaccuracy. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
     }
 
-    return 'Analyst is ready.'
-  })()
+    return "Analyst is ready.";
+  })();
 
   const applyEngineMove = useCallback(async () => {
     try {
-      const result = await evaluatePosition(chess.fen())
+      const result = await evaluatePosition(chess.fen());
 
-      if (result.move === '(none)') {
-        setEngineMessage('Stockfish has no legal moves.')
-        return
+      if (result.move === "(none)") {
+        setEngineMessage("Stockfish has no legal moves.");
+        return;
       }
 
-      const from = result.move.slice(0, 2)
-      const to = result.move.slice(2, 4)
-      const promotion = result.move.slice(4) || undefined
-      const appliedMove = chess.move({ from, to, promotion })
+      const from = result.move.slice(0, 2);
+      const to = result.move.slice(2, 4);
+      const promotion = result.move.slice(4) || undefined;
+      const appliedMove = chess.move({ from, to, promotion });
 
       if (!appliedMove) {
-        throw new Error(`Engine returned illegal move: ${result.move}`)
+        throw new Error(`Engine returned illegal move: ${result.move}`);
       }
 
-      const newFen = chess.fen()
-      setFen(newFen)
-      setMoveHistory((prev) => [...prev, { san: appliedMove.san, fen: newFen }])
-      setViewIndex(null) // Ensure we're viewing the live position
-      setEngineMessage(null)
+      const newFen = chess.fen();
+      setFen(newFen);
+      setMoveHistory((prev) => [
+        ...prev,
+        { san: appliedMove.san, fen: newFen },
+      ]);
+      setViewIndex(null); // Ensure we're viewing the live position
+      setEngineMessage(null);
 
       // Check if the engine's move ended the game
       if (chess.isGameOver()) {
-        await handleGameEnd()
+        await handleGameEnd();
       }
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : 'Unable to apply Stockfish move.'
-      setEngineMessage(message)
+          : "Unable to apply Stockfish move.";
+      setEngineMessage(message);
     }
-  }, [chess, evaluatePosition, handleGameEnd])
+  }, [chess, evaluatePosition, handleGameEnd]);
 
   useEffect(() => {
     if (!isGameActive) {
-      return
+      return;
     }
 
-    if (playerColor !== 'black') {
-      return
+    if (playerColor !== "black") {
+      return;
     }
 
-    if (moveCount > 0 || chess.turn() !== 'w') {
-      return
+    if (moveCount > 0 || chess.turn() !== "w") {
+      return;
     }
 
-    if (engineStatus !== 'ready' || isThinking || !isViewingLive) {
-      return
+    if (engineStatus !== "ready" || isThinking || !isViewingLive) {
+      return;
     }
 
-    void applyEngineMove()
+    void applyEngineMove();
   }, [
     applyEngineMove,
     chess,
@@ -277,172 +292,213 @@ const ChessGame = () => {
     isViewingLive,
     moveCount,
     playerColor,
-  ])
+  ]);
 
-  const handleDrop = ({
-    sourceSquare,
-    targetSquare,
-  }: PieceDropHandlerArgs) => {
+  // Blunder detection: POST /api/blunder on first blunder this session
+  useEffect(() => {
+    const blunderData = shouldRecordBlunder({
+      analysis: lastAnalysis,
+      context: pendingAnalysisContextRef.current,
+      sessionId,
+      isGameActive,
+      alreadyRecorded: blunderRecordedRef.current,
+    });
+
+    if (!blunderData) {
+      return;
+    }
+
+    // Mark as recorded before the async call to prevent duplicates
+    blunderRecordedRef.current = true;
+
+    const postBlunder = async () => {
+      try {
+        await recordBlunder(
+          blunderData.sessionId,
+          blunderData.pgn,
+          blunderData.fen,
+          blunderData.userMove,
+          blunderData.bestMove,
+          blunderData.evalBefore,
+          blunderData.evalAfter,
+        );
+        console.log("[Blunder] Recorded blunder to backend");
+      } catch (error) {
+        console.error("[Blunder] Failed to record blunder:", error);
+        // Don't reset blunderRecordedRef - backend may have received it
+      }
+    };
+
+    void postBlunder();
+  }, [lastAnalysis, sessionId, isGameActive]);
+
+  const handleDrop = ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
     if (!targetSquare) {
-      return false
+      return false;
     }
 
     if (!isPlayersTurn || !isViewingLive) {
-      return false
+      return false;
     }
 
-    const fenBeforeMove = chess.fen()
+    const fenBeforeMove = chess.fen();
     const move = chess.move({
       from: sourceSquare,
       to: targetSquare,
-      promotion: 'q',
-    })
+      promotion: "q",
+    });
 
     if (!move) {
-      return false
+      return false;
     }
 
-    const newFen = chess.fen()
-    setFen(newFen)
-    setMoveHistory((prev) => [...prev, { san: move.san, fen: newFen }])
-    setViewIndex(null) // Ensure we're viewing the live position
+    const newFen = chess.fen();
+    setFen(newFen);
+    setMoveHistory((prev) => [...prev, { san: move.san, fen: newFen }]);
+    setViewIndex(null); // Ensure we're viewing the live position
 
-    const uciMove = `${move.from}${move.to}${move.promotion ?? ''}`
-    analyzeMove(fenBeforeMove, uciMove, playerColor)
+    const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
+    // Store context for blunder detection before engine moves
+    pendingAnalysisContextRef.current = {
+      fen: fenBeforeMove,
+      pgn: chess.pgn(),
+      moveSan: move.san,
+      moveUci: uciMove,
+    };
+    analyzeMove(fenBeforeMove, uciMove, playerColor);
 
     if (chess.isGameOver()) {
-      void handleGameEnd()
+      void handleGameEnd();
     } else {
-      void applyEngineMove()
+      void applyEngineMove();
     }
 
-    return true
-  }
+    return true;
+  };
 
   const handleNewGame = async () => {
     try {
-      setIsStartingGame(true)
-      setStartError(null)
+      setIsStartingGame(true);
+      setStartError(null);
       // End current session if active
       if (sessionId && isGameActive) {
-        await endGame(sessionId, 'abandon', chess.pgn())
+        await endGame(sessionId, "abandon", chess.pgn());
       }
 
       // Start new game session
       const resolvedPlayerColor =
-        playerColorChoice === 'random'
+        playerColorChoice === "random"
           ? Math.random() < 0.5
-            ? 'white'
-            : 'black'
-          : playerColorChoice
-      setPlayerColor(resolvedPlayerColor)
-      setBoardOrientation(resolvedPlayerColor)
+            ? "white"
+            : "black"
+          : playerColorChoice;
+      setPlayerColor(resolvedPlayerColor);
+      setBoardOrientation(resolvedPlayerColor);
 
-      const response = await startGame(1500, resolvedPlayerColor)
-      setSessionId(response.session_id)
-      setIsGameActive(true)
-      setIsStartingGame(false)
-      setShowStartOverlay(false)
+      const response = await startGame(1500, resolvedPlayerColor);
+      setSessionId(response.session_id);
+      setIsGameActive(true);
+      setIsStartingGame(false);
+      setShowStartOverlay(false);
 
       // Reset the board
-      chess.reset()
-      setFen(chess.fen())
-      setEngineMessage(null)
-      setGameResult(null)
-      setMoveHistory([])
-      setViewIndex(null)
-      resetEngine()
+      chess.reset();
+      setFen(chess.fen());
+      setEngineMessage(null);
+      setGameResult(null);
+      setMoveHistory([]);
+      setViewIndex(null);
+      resetEngine();
+      blunderRecordedRef.current = false;
+      pendingAnalysisContextRef.current = null;
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Failed to start new game.'
-      setEngineMessage(message)
-      setStartError(message)
-      setIsStartingGame(false)
+        error instanceof Error ? error.message : "Failed to start new game.";
+      setEngineMessage(message);
+      setStartError(message);
+      setIsStartingGame(false);
     }
-  }
+  };
 
   const handleResign = async () => {
     if (!sessionId || !isGameActive) {
-      return
+      return;
     }
 
     try {
-      await endGame(sessionId, 'resign', chess.pgn())
-      setIsGameActive(false)
-      setGameResult({ type: 'resign', message: 'You resigned.' })
+      await endGame(sessionId, "resign", chess.pgn());
+      setIsGameActive(false);
+      setGameResult({ type: "resign", message: "You resigned." });
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : 'Failed to resign game.'
-      setEngineMessage(message)
+        error instanceof Error ? error.message : "Failed to resign game.";
+      setEngineMessage(message);
     }
-  }
+  };
 
   const handleReset = () => {
-    chess.reset()
-    setFen(chess.fen())
-    setBoardOrientation(playerColor)
-    setEngineMessage(null)
-    setSessionId(null)
-    setIsGameActive(false)
-    setGameResult(null)
-    setMoveHistory([])
-    setViewIndex(null)
-    resetEngine()
-    setShowStartOverlay(false)
-  }
+    chess.reset();
+    setFen(chess.fen());
+    setBoardOrientation(playerColor);
+    setEngineMessage(null);
+    setSessionId(null);
+    setIsGameActive(false);
+    setGameResult(null);
+    setMoveHistory([]);
+    setViewIndex(null);
+    resetEngine();
+    setShowStartOverlay(false);
+    blunderRecordedRef.current = false;
+    pendingAnalysisContextRef.current = null;
+  };
 
   const flipBoard = () => {
-    setBoardOrientation((current) => (current === 'white' ? 'black' : 'white'))
-  }
+    setBoardOrientation((current) => (current === "white" ? "black" : "white"));
+  };
 
   const handleSelectPlayerColor = (color: BoardOrientation) => {
-    setPlayerColorChoice(color)
-    setPlayerColor(color)
+    setPlayerColorChoice(color);
+    setPlayerColor(color);
     if (!isGameActive) {
-      setBoardOrientation(color)
+      setBoardOrientation(color);
     }
-  }
+  };
 
   const handleRandomColor = () => {
-    setPlayerColorChoice('random')
-  }
+    setPlayerColorChoice("random");
+  };
 
   const handleShowStartOverlay = () => {
-    setShowStartOverlay(true)
-  }
+    setShowStartOverlay(true);
+  };
 
   return (
     <section className="chess-section">
       <header className="chess-header">
-        <p className="eyebrow">Self-play sandbox</p>
-        <h2>ChessGame</h2>
-        <p>
-          Practice both sides of the board locally. Moves are validated with
-          chess.js so illegal drops snap back instantly.
-        </p>
+        <p className="eyebrow">SRS Chess</p>
       </header>
 
       <div className="chess-layout">
         <div className="chess-panel" aria-live="polite">
           <p className="chess-status">{statusText}</p>
           <p className="chess-meta">
-            Orientation: {boardOrientation === 'white' ? 'White' : 'Black'} on
+            Orientation: {boardOrientation === "white" ? "White" : "Black"} on
             bottom
           </p>
           <p className="chess-meta">
-            Playing as:{' '}
+            Playing as:{" "}
             <span className="chess-meta-strong">
-              {playerColorChoice === 'random' && !isGameActive
-                ? 'Random'
-                : playerColor === 'white'
-                  ? 'White'
-                  : 'Black'}
+              {playerColorChoice === "random" && !isGameActive
+                ? "Random"
+                : playerColor === "white"
+                  ? "White"
+                  : "Black"}
             </span>
           </p>
           <p className="chess-meta">
-            Session:{' '}
-            <span className={isGameActive ? 'chess-meta-strong' : ''}>
-              {isGameActive ? 'Active' : 'None (click New game to start)'}
+            Session:{" "}
+            <span className={isGameActive ? "chess-meta-strong" : ""}>
+              {isGameActive ? "Active" : "None (click New game to start)"}
             </span>
           </p>
           <div className="chess-controls">
@@ -457,7 +513,11 @@ const ChessGame = () => {
             <button className="chess-button" type="button" onClick={flipBoard}>
               Flip board
             </button>
-            <button className="chess-button" type="button" onClick={handleReset}>
+            <button
+              className="chess-button"
+              type="button"
+              onClick={handleReset}
+            >
               Reset
             </button>
           </div>
@@ -470,28 +530,28 @@ const ChessGame = () => {
                 <p className="chess-start-title">Choose your side</p>
                 <div className="chess-start-options">
                   <button
-                    className={`chess-button toggle ${playerColorChoice === 'white' ? 'active' : ''}`}
+                    className={`chess-button toggle ${playerColorChoice === "white" ? "active" : ""}`}
                     type="button"
-                    onClick={() => handleSelectPlayerColor('white')}
-                    aria-pressed={playerColorChoice === 'white'}
+                    onClick={() => handleSelectPlayerColor("white")}
+                    aria-pressed={playerColorChoice === "white"}
                     disabled={isStartingGame}
                   >
                     Play White
                   </button>
                   <button
-                    className={`chess-button toggle ${playerColorChoice === 'random' ? 'active' : ''}`}
+                    className={`chess-button toggle ${playerColorChoice === "random" ? "active" : ""}`}
                     type="button"
                     onClick={handleRandomColor}
-                    aria-pressed={playerColorChoice === 'random'}
+                    aria-pressed={playerColorChoice === "random"}
                     disabled={isStartingGame}
                   >
                     Play Random
                   </button>
                   <button
-                    className={`chess-button toggle ${playerColorChoice === 'black' ? 'active' : ''}`}
+                    className={`chess-button toggle ${playerColorChoice === "black" ? "active" : ""}`}
                     type="button"
-                    onClick={() => handleSelectPlayerColor('black')}
-                    aria-pressed={playerColorChoice === 'black'}
+                    onClick={() => handleSelectPlayerColor("black")}
+                    aria-pressed={playerColorChoice === "black"}
                     disabled={isStartingGame}
                   >
                     Play Black
@@ -506,7 +566,7 @@ const ChessGame = () => {
                   onClick={handleNewGame}
                   disabled={isStartingGame}
                 >
-                  {isStartingGame ? 'Starting…' : 'Play'}
+                  {isStartingGame ? "Starting…" : "Play"}
                 </button>
               </div>
             </div>
@@ -519,20 +579,20 @@ const ChessGame = () => {
               animationDurationInMs: 200,
               allowDragging:
                 isGameActive &&
-                engineStatus === 'ready' &&
+                engineStatus === "ready" &&
                 isPlayersTurn &&
                 !isThinking &&
                 isViewingLive,
               boardStyle: {
-                borderRadius: '0',
-                boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
+                borderRadius: "0",
+                boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
               },
             }}
           />
           {!isGameActive && (
             <div className="game-end-banner">
               <p className="game-end-banner-message">
-                {gameResult ? gameResult.message : 'Ready for a new game?'}
+                {gameResult ? gameResult.message : "Ready for a new game?"}
               </p>
               <button
                 className="chess-button primary"
@@ -545,18 +605,18 @@ const ChessGame = () => {
           )}
           <div className="engine-status">
             <p className="chess-meta">
-              Engine status:{' '}
+              Engine status:{" "}
               <span className="chess-meta-strong">{engineStatusText}</span>
             </p>
             {engineInfo?.pv && isThinking && (
               <p className="chess-meta">
-                Candidate line: {engineInfo.pv.slice(0, 4).join(' ')}
+                Candidate line: {engineInfo.pv.slice(0, 4).join(" ")}
               </p>
             )}
           </div>
           <div className="engine-status">
             <p className="chess-meta">
-              Analyst status:{' '}
+              Analyst status:{" "}
               <span className="chess-meta-strong">{analysisStatusText}</span>
             </p>
           </div>
@@ -568,9 +628,8 @@ const ChessGame = () => {
           onNavigate={handleNavigate}
         />
       </div>
-
     </section>
-  )
-}
+  );
+};
 
-export default ChessGame
+export default ChessGame;
