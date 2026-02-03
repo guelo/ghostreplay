@@ -96,3 +96,20 @@ class GameSession(Base):
     blunder_recorded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     player_color: Mapped[str] = mapped_column(String(5), nullable=False, server_default="white")
     pgn: Mapped[str | None] = mapped_column(Text)
+
+
+class Move(Base):
+    __tablename__ = "moves"
+
+    from_position_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("positions.id"),
+        primary_key=True,
+        nullable=False,
+    )
+    move_san: Mapped[str] = mapped_column(String(10), primary_key=True, nullable=False)
+    to_position_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("positions.id"),
+        nullable=False,
+    )

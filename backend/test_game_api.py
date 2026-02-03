@@ -6,7 +6,7 @@ Run with: pytest test_game_api.py -v
 import os
 import uuid
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -28,8 +28,24 @@ engine = create_engine(
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Create tables - models must be imported before this line
-Base.metadata.create_all(bind=engine)
+def create_test_tables():
+    """Create tables with SQLite-compatible schema."""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS game_sessions (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                started_at TIMESTAMP NOT NULL,
+                ended_at TIMESTAMP,
+                status VARCHAR(20) NOT NULL,
+                result VARCHAR(20),
+                engine_elo INTEGER NOT NULL,
+                blunder_recorded BOOLEAN NOT NULL DEFAULT 0,
+                player_color VARCHAR(5) NOT NULL DEFAULT 'white',
+                pgn TEXT
+            )
+        """))
+        conn.commit()
 
 
 def override_get_db():
@@ -40,7 +56,21 @@ def override_get_db():
         db.close()
 
 
-app.dependency_overrides[get_db] = override_get_db
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def reset_db():
+    """Reset database before each test and configure app override."""
+    app.dependency_overrides[get_db] = override_get_db
+
+    with engine.connect() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS game_sessions"))
+        conn.commit()
+    create_test_tables()
+    yield
+
+
 client = TestClient(app)
 
 
