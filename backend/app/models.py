@@ -1,7 +1,18 @@
 from __future__ import annotations
 
 import uuid
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Index
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -66,6 +77,7 @@ class Blunder(Base):
 class GameSession(Base):
     __tablename__ = "game_sessions"
     __table_args__ = (
+        CheckConstraint("player_color in ('white','black')", name="ck_game_sessions_player_color"),
         Index("idx_game_sessions_user", "user_id"),
         Index("idx_game_sessions_status", "status"),
         Index("idx_game_sessions_user_started", "user_id", "started_at"),
@@ -79,4 +91,5 @@ class GameSession(Base):
     result: Mapped[str | None] = mapped_column(String(20))
     engine_elo: Mapped[int] = mapped_column(Integer, nullable=False)
     blunder_recorded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False, server_default="white")
     pgn: Mapped[str | None] = mapped_column(Text)
