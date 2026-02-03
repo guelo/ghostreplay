@@ -27,3 +27,6 @@ dist-ssr
 __pycache__/
 *.py[cod]
 .venv/
+
+# Models
+maia2/maia2_models/
