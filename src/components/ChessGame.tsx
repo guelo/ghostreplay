@@ -261,10 +261,6 @@ const ChessGame = () => {
     }
   }
 
-  const handleCloseModal = () => {
-    setGameResult(null)
-  }
-
   const handleResign = async () => {
     if (!sessionId || !isGameActive) {
       return
@@ -364,6 +360,18 @@ const ChessGame = () => {
               },
             }}
           />
+          {gameResult && (
+            <div className="game-end-banner">
+              <p className="game-end-banner-message">{gameResult.message}</p>
+              <button
+                className="chess-button primary"
+                type="button"
+                onClick={handleNewGame}
+              >
+                New Game
+              </button>
+            </div>
+          )}
           <div className="engine-status">
             <p className="chess-meta">
               Engine status:{' '}
@@ -384,30 +392,6 @@ const ChessGame = () => {
         </div>
       </div>
 
-      {gameResult && (
-        <div className="game-end-modal-overlay" onClick={handleCloseModal}>
-          <div className="game-end-modal" onClick={(e) => e.stopPropagation()}>
-            <h3 className="game-end-title">Game Over</h3>
-            <p className="game-end-message">{gameResult.message}</p>
-            <div className="game-end-actions">
-              <button
-                className="chess-button primary"
-                type="button"
-                onClick={handleNewGame}
-              >
-                New Game
-              </button>
-              <button
-                className="chess-button"
-                type="button"
-                onClick={handleCloseModal}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </section>
   )
 }
