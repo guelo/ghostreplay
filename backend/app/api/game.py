@@ -22,8 +22,18 @@ class GameResult(str, Enum):
     ABANDON = "abandon"
 
 
+class PlayerColor(str, Enum):
+    """Player color selection."""
+    WHITE = "white"
+    BLACK = "black"
+
+
 class GameStartRequest(BaseModel):
     engine_elo: int = Field(..., description="Engine ELO rating")
+    player_color: PlayerColor = Field(
+        PlayerColor.WHITE,
+        description="Player color (white|black)",
+    )
 
 
 class GameStartResponse(BaseModel):
@@ -61,6 +71,7 @@ def start_game(
         status="active",
         engine_elo=request.engine_elo,
         blunder_recorded=False,
+        player_color=request.player_color.value,
     )
 
     db.add(session)

@@ -74,6 +74,46 @@ def test_start_game_success():
         assert False, "session_id is not a valid UUID"
 
 
+def test_start_game_defaults_player_color_white():
+    """Test that player_color defaults to white when omitted."""
+    response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers=auth_headers()
+    )
+
+    assert response.status_code == 201
+    session_uuid = uuid.UUID(response.json()["session_id"])
+
+    db = TestingSessionLocal()
+    try:
+        session = db.query(GameSession).filter(GameSession.id == session_uuid).first()
+        assert session is not None
+        assert session.player_color == "white"
+    finally:
+        db.close()
+
+
+def test_start_game_with_player_color_black():
+    """Test that player_color is persisted when provided."""
+    response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "black"},
+        headers=auth_headers()
+    )
+
+    assert response.status_code == 201
+    session_uuid = uuid.UUID(response.json()["session_id"])
+
+    db = TestingSessionLocal()
+    try:
+        session = db.query(GameSession).filter(GameSession.id == session_uuid).first()
+        assert session is not None
+        assert session.player_color == "black"
+    finally:
+        db.close()
+
+
 def test_start_game_low_elo():
     """Test that low ELO values are accepted (no validation)."""
     response = client.post(
