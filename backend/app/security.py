@@ -100,7 +100,18 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         path = request.url.path
+        if request.method == "OPTIONS":
+            return await call_next(request)
         if path == "/" or path.startswith(self.exempt_prefixes):
+            return await call_next(request)
+
+        # TODO: remove this dev-only escape hatch once auth endpoints are live.
+        if os.environ.get("AUTH_BYPASS", "").lower() == "true":
+            request.state.user = TokenPayload(
+                user_id=int(request.headers.get("X-User-Id", "1")),
+                username=request.headers.get("X-Username", "dev"),
+                is_anonymous=request.headers.get("X-Is-Anonymous", "true").lower() == "true",
+            )
             return await call_next(request)
 
         header = request.headers.get("Authorization")

@@ -22,14 +22,14 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Ghost Replay API", version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
+        AuthMiddleware,
+        exempt_prefixes=("/api/auth", "/health", "/docs", "/openapi.json", "/redoc"),
+    )
+    app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
-    )
-    app.add_middleware(
-        AuthMiddleware,
-        exempt_prefixes=("/api/auth", "/health", "/docs", "/openapi.json", "/redoc"),
     )
 
     app.include_router(health_router)
