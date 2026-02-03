@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.api.health import router as health_router
 from app.api.game import router as game_router
 from app.db import engine
+from app.security import AuthMiddleware
 
 
 @asynccontextmanager
@@ -25,6 +26,10 @@ def create_app() -> FastAPI:
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
+    )
+    app.add_middleware(
+        AuthMiddleware,
+        exempt_prefixes=("/api/auth", "/health", "/docs", "/openapi.json", "/redoc"),
     )
 
     app.include_router(health_router)

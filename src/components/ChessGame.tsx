@@ -21,6 +21,11 @@ const formatScore = (score?: { type: 'cp' | 'mate'; value: number }) => {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}`
 }
 
+type GameResult = {
+  type: 'checkmate_win' | 'checkmate_loss' | 'draw' | 'resign'
+  message: string
+}
+
 const ChessGame = () => {
   const chess = useMemo(() => new Chess(), [])
   const [fen, setFen] = useState(chess.fen())
@@ -38,6 +43,42 @@ const ChessGame = () => {
   const [engineMessage, setEngineMessage] = useState<string | null>(null)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [isGameActive, setIsGameActive] = useState(false)
+  const [gameResult, setGameResult] = useState<GameResult | null>(null)
+
+  const handleGameEnd = useCallback(async () => {
+    if (!sessionId || !isGameActive) return
+
+    let result: GameResult | null = null
+
+    if (chess.isCheckmate()) {
+      // If it's white's turn, white is in checkmate, so black (engine) wins
+      // User plays white, so if white is checkmated, user loses
+      if (chess.turn() === 'w') {
+        result = { type: 'checkmate_loss', message: 'Checkmate! You lost.' }
+      } else {
+        result = { type: 'checkmate_win', message: 'Checkmate! You won!' }
+      }
+    } else if (chess.isStalemate()) {
+      result = { type: 'draw', message: 'Stalemate! The game is a draw.' }
+    } else if (chess.isThreefoldRepetition()) {
+      result = { type: 'draw', message: 'Draw by threefold repetition.' }
+    } else if (chess.isInsufficientMaterial()) {
+      result = { type: 'draw', message: 'Draw by insufficient material.' }
+    } else if (chess.isDraw()) {
+      result = { type: 'draw', message: 'The game is a draw.' }
+    }
+
+    if (result) {
+      try {
+        await endGame(sessionId, result.type, chess.pgn())
+        setIsGameActive(false)
+        setGameResult(result)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to end game.'
+        setEngineMessage(message)
+      }
+    }
+  }, [chess, sessionId, isGameActive])
 
   const statusText = (() => {
     if (chess.isCheckmate()) {
@@ -147,6 +188,11 @@ const ChessGame = () => {
 
       setFen(chess.fen())
       setEngineMessage(null)
+
+      // Check if the engine's move ended the game
+      if (chess.isGameOver()) {
+        await handleGameEnd()
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -154,7 +200,7 @@ const ChessGame = () => {
           : 'Unable to apply Stockfish move.'
       setEngineMessage(message)
     }
-  }, [chess, evaluatePosition])
+  }, [chess, evaluatePosition, handleGameEnd])
 
   const handleDrop = ({
     sourceSquare,
@@ -180,7 +226,9 @@ const ChessGame = () => {
     const uciMove = `${move.from}${move.to}${move.promotion ?? ''}`
     analyzeMove(fenBeforeMove, uciMove)
 
-    if (!chess.isGameOver()) {
+    if (chess.isGameOver()) {
+      void handleGameEnd()
+    } else {
       void applyEngineMove()
     }
 
@@ -204,12 +252,17 @@ const ChessGame = () => {
       setFen(chess.fen())
       setBoardOrientation('white')
       setEngineMessage(null)
+      setGameResult(null)
       resetEngine()
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to start new game.'
       setEngineMessage(message)
     }
+  }
+
+  const handleCloseModal = () => {
+    setGameResult(null)
   }
 
   const handleResign = async () => {
@@ -220,7 +273,7 @@ const ChessGame = () => {
     try {
       await endGame(sessionId, 'resign', chess.pgn())
       setIsGameActive(false)
-      setEngineMessage('You resigned.')
+      setGameResult({ type: 'resign', message: 'You resigned.' })
     } catch (error) {
       const message =
         error instanceof Error ? error.message : 'Failed to resign game.'
@@ -235,6 +288,7 @@ const ChessGame = () => {
     setEngineMessage(null)
     setSessionId(null)
     setIsGameActive(false)
+    setGameResult(null)
     resetEngine()
   }
 
@@ -329,6 +383,31 @@ const ChessGame = () => {
           </div>
         </div>
       </div>
+
+      {gameResult && (
+        <div className="game-end-modal-overlay" onClick={handleCloseModal}>
+          <div className="game-end-modal" onClick={(e) => e.stopPropagation()}>
+            <h3 className="game-end-title">Game Over</h3>
+            <p className="game-end-message">{gameResult.message}</p>
+            <div className="game-end-actions">
+              <button
+                className="chess-button primary"
+                type="button"
+                onClick={handleNewGame}
+              >
+                New Game
+              </button>
+              <button
+                className="chess-button"
+                type="button"
+                onClick={handleCloseModal}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

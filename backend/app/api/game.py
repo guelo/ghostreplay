@@ -2,12 +2,13 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import GameSession
+from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/game", tags=["game"])
 
@@ -19,15 +20,6 @@ class GameResult(str, Enum):
     RESIGN = "resign"
     DRAW = "draw"
     ABANDON = "abandon"
-
-
-# TODO: Replace with proper JWT auth once auth system is implemented
-def get_current_user_id(x_user_id: str = Header(...)) -> int:
-    """Temporary auth placeholder. Extract user_id from X-User-Id header."""
-    try:
-        return int(x_user_id)
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid user ID")
 
 
 class GameStartRequest(BaseModel):
@@ -55,7 +47,7 @@ class GameEndResponse(BaseModel):
 def start_game(
     request: GameStartRequest,
     db: Session = Depends(get_db),
-    user_id: int = Depends(get_current_user_id),
+    user: TokenPayload = Depends(get_current_user),
 ) -> GameStartResponse:
     """
     Create a new game session with the specified engine ELO.
@@ -64,7 +56,7 @@ def start_game(
     """
     session = GameSession(
         id=uuid.uuid4(),
-        user_id=user_id,
+        user_id=user.user_id,
         started_at=datetime.now(timezone.utc),
         status="active",
         engine_elo=request.engine_elo,
@@ -85,7 +77,7 @@ def start_game(
 def end_game(
     request: GameEndRequest,
     db: Session = Depends(get_db),
-    user_id: int = Depends(get_current_user_id),
+    user: TokenPayload = Depends(get_current_user),
 ) -> GameEndResponse:
     """
     End a game session by setting its status to 'ended', recording the result,
@@ -100,7 +92,7 @@ def end_game(
         raise HTTPException(status_code=404, detail="Game session not found")
 
     # Verify ownership
-    if session.user_id != user_id:
+    if session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized to end this game")
 
     # Verify session is active

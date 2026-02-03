@@ -1,6 +1,7 @@
 # Agent Instructions
 
 The overall project and architecure is described in SPEC.md
+When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 

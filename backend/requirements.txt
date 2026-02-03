@@ -4,3 +4,4 @@ sqlalchemy
 alembic
 uvicorn[standard]
 bcrypt
+PyJWT

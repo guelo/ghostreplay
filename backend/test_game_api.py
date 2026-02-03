@@ -3,16 +3,21 @@ Simple test for POST /api/game/start endpoint.
 
 Run with: pytest test_game_api.py -v
 """
+import os
 import uuid
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+# Ensure JWT secret is set before app import
+os.environ.setdefault("JWT_SECRET", "test-secret-32-bytes-minimum-length")
+
 # Import models FIRST to register them with Base.metadata
 from app.models import Base, GameSession, Position, Blunder
 from app.main import app
 from app.db import get_db
+from app.security import create_access_token
 
 # Use in-memory SQLite for testing with StaticPool to share connection
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -39,12 +44,17 @@ app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
 
 
+def auth_headers(user_id: int = 123, username: str = "ghost_test", is_anonymous: bool = True) -> dict:
+    token = create_access_token(user_id=user_id, username=username, is_anonymous=is_anonymous)
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_start_game_success():
     """Test successful game creation with standard ELO."""
     response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 201
@@ -69,7 +79,7 @@ def test_start_game_low_elo():
     response = client.post(
         "/api/game/start",
         json={"engine_elo": 400},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 201
@@ -82,7 +92,7 @@ def test_start_game_high_elo():
     response = client.post(
         "/api/game/start",
         json={"engine_elo": 3000},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 201
@@ -91,24 +101,24 @@ def test_start_game_high_elo():
 
 
 def test_start_game_missing_auth():
-    """Test that missing X-User-Id header is rejected."""
+    """Test that missing Authorization header is rejected."""
     response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500}
     )
 
-    assert response.status_code == 422  # Missing required header
+    assert response.status_code == 401  # Missing auth token
 
 
 def test_start_game_invalid_user_id():
-    """Test that invalid user_id in header is rejected."""
+    """Test that invalid bearer token is rejected."""
     response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "not-a-number"}
+        headers={"Authorization": "Bearer not-a-token"}
     )
 
-    assert response.status_code == 401  # Invalid user ID
+    assert response.status_code == 401  # Invalid token
 
 
 def test_start_game_missing_elo():
@@ -116,7 +126,7 @@ def test_start_game_missing_elo():
     response = client.post(
         "/api/game/start",
         json={},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 422  # Validation error
@@ -128,7 +138,7 @@ def test_end_game_success():
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
     session_id = start_response.json()["session_id"]
 
@@ -140,7 +150,7 @@ def test_end_game_success():
             "result": "checkmate_win",
             "pgn": "1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#"
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert end_response.status_code == 200
@@ -157,7 +167,7 @@ def test_end_game_with_pgn():
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
     session_id = start_response.json()["session_id"]
 
@@ -170,7 +180,7 @@ def test_end_game_with_pgn():
             "result": "draw",
             "pgn": pgn
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert end_response.status_code == 200
@@ -186,7 +196,7 @@ def test_end_game_all_result_types():
         start_response = client.post(
             "/api/game/start",
             json={"engine_elo": 1500},
-            headers={"X-User-Id": "123"}
+            headers=auth_headers()
         )
         session_id = start_response.json()["session_id"]
 
@@ -198,7 +208,7 @@ def test_end_game_all_result_types():
                 "result": result,
                 "pgn": "1. e4 e5"
             },
-            headers={"X-User-Id": "123"}
+            headers=auth_headers()
         )
 
         assert end_response.status_code == 200
@@ -215,7 +225,7 @@ def test_end_game_not_found():
             "result": "resign",
             "pgn": "1. e4 e5"
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 404
@@ -228,7 +238,7 @@ def test_end_game_wrong_user():
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers(user_id=123, username="ghost_123")
     )
     session_id = start_response.json()["session_id"]
 
@@ -240,7 +250,7 @@ def test_end_game_wrong_user():
             "result": "resign",
             "pgn": "1. e4 e5"
         },
-        headers={"X-User-Id": "456"}
+        headers=auth_headers(user_id=456, username="ghost_456")
     )
 
     assert end_response.status_code == 403
@@ -253,7 +263,7 @@ def test_end_game_already_ended():
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
     session_id = start_response.json()["session_id"]
 
@@ -265,7 +275,7 @@ def test_end_game_already_ended():
             "result": "checkmate_win",
             "pgn": "1. e4 e5"
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     # Try to end it again
@@ -276,7 +286,7 @@ def test_end_game_already_ended():
             "result": "resign",
             "pgn": "1. e4 e5"
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert second_end_response.status_code == 400
@@ -288,7 +298,7 @@ def test_end_game_invalid_result():
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
     session_id = start_response.json()["session_id"]
 
@@ -299,18 +309,18 @@ def test_end_game_invalid_result():
             "result": "invalid_result",
             "pgn": "1. e4 e5"
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 422  # Validation error
 
 
 def test_end_game_missing_auth():
-    """Test that missing X-User-Id header is rejected."""
+    """Test that missing Authorization header is rejected."""
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
     session_id = start_response.json()["session_id"]
 
@@ -323,7 +333,7 @@ def test_end_game_missing_auth():
         }
     )
 
-    assert response.status_code == 422  # Missing required header
+    assert response.status_code == 401  # Missing auth token
 
 
 def test_end_game_missing_pgn():
@@ -331,7 +341,7 @@ def test_end_game_missing_pgn():
     start_response = client.post(
         "/api/game/start",
         json={"engine_elo": 1500},
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
     session_id = start_response.json()["session_id"]
 
@@ -341,7 +351,7 @@ def test_end_game_missing_pgn():
             "session_id": session_id,
             "result": "resign"
         },
-        headers={"X-User-Id": "123"}
+        headers=auth_headers()
     )
 
     assert response.status_code == 422  # Validation error
