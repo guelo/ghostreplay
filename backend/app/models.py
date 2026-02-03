@@ -43,14 +43,17 @@ class Position(Base):
     __tablename__ = "positions"
     __table_args__ = (
         UniqueConstraint("user_id", "fen_hash", name="uq_positions_user_fen_hash"),
+        CheckConstraint("active_color in ('white','black')", name="ck_positions_active_color"),
         Index("idx_positions_user", "user_id"),
         Index("idx_positions_fen_hash", "user_id", "fen_hash"),
+        Index("idx_positions_active_color", "active_color"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     fen_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     fen_raw: Mapped[str] = mapped_column(Text, nullable=False)
+    active_color: Mapped[str] = mapped_column(String(5), nullable=False)
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
