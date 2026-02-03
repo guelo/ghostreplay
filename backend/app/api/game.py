@@ -39,6 +39,7 @@ class GameStartRequest(BaseModel):
 class GameStartResponse(BaseModel):
     session_id: uuid.UUID
     engine_elo: int
+    player_color: PlayerColor
 
 
 class GameEndRequest(BaseModel):
@@ -81,6 +82,7 @@ def start_game(
     return GameStartResponse(
         session_id=session.id,
         engine_elo=session.engine_elo,
+        player_color=request.player_color,
     )
 
 

@@ -93,9 +93,11 @@ def test_start_game_success():
     # Verify response structure
     assert "session_id" in data
     assert "engine_elo" in data
+    assert "player_color" in data
 
     # Verify values
     assert data["engine_elo"] == 1500
+    assert data["player_color"] == "white"  # Default
 
     # Verify session_id is a valid UUID
     try:
@@ -113,8 +115,13 @@ def test_start_game_defaults_player_color_white():
     )
 
     assert response.status_code == 201
-    session_uuid = uuid.UUID(response.json()["session_id"])
+    data = response.json()
+    session_uuid = uuid.UUID(data["session_id"])
 
+    # Verify response includes player_color
+    assert data["player_color"] == "white"
+
+    # Verify database persistence
     db = TestingSessionLocal()
     try:
         session = db.query(GameSession).filter(GameSession.id == session_uuid).first()
@@ -133,8 +140,13 @@ def test_start_game_with_player_color_black():
     )
 
     assert response.status_code == 201
-    session_uuid = uuid.UUID(response.json()["session_id"])
+    data = response.json()
+    session_uuid = uuid.UUID(data["session_id"])
 
+    # Verify response includes player_color
+    assert data["player_color"] == "black"
+
+    # Verify database persistence
     db = TestingSessionLocal()
     try:
         session = db.query(GameSession).filter(GameSession.id == session_uuid).first()
