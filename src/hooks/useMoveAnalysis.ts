@@ -13,10 +13,6 @@ const createRequestId = () => {
 
 type AnalysisStatus = 'booting' | 'ready' | 'error'
 
-type AnalyzeMoveOptions = {
-  movetime?: number
-}
-
 type AnalysisResult = {
   id: string
   move: string
@@ -104,12 +100,7 @@ export const useMoveAnalysis = () => {
   }, [])
 
   const analyzeMove = useCallback(
-    (
-      fen: string,
-      move: string,
-      playerColor: 'white' | 'black',
-      options?: AnalyzeMoveOptions,
-    ) => {
+    (fen: string, move: string, playerColor: 'white' | 'black') => {
       if (status === 'error') {
         return
       }
@@ -124,7 +115,6 @@ export const useMoveAnalysis = () => {
         fen,
         move,
         playerColor,
-        movetime: options?.movetime,
       })
     },
     [status],

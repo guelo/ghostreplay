@@ -125,7 +125,7 @@ const getSideToMove = (fen: string) => {
   return null
 }
 
-const runSearch = async (fen: string, moves: string[], movetime: number) => {
+const runSearch = async (fen: string, moves: string[]) => {
   const pendingEngine = await ensureEngine()
 
   if (!pendingEngine) {
@@ -141,7 +141,7 @@ const runSearch = async (fen: string, moves: string[], movetime: number) => {
       activeSearch = { resolve, reject, lastScore: null }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(' ')}` : ''
       pendingEngine.postMessage(`position fen ${fen}${movesSegment}`)
-      pendingEngine.postMessage(`go movetime ${movetime}`)
+      pendingEngine.postMessage('go depth 18 movetime 2000')
     },
   )
 }
@@ -153,6 +153,7 @@ const handleEngineLine = (line: string) => {
   }
 
   if (line === 'readyok') {
+    engine?.postMessage('setoption name MultiPV value 1')
     engineReady = true
     ctx.postMessage({ type: 'ready' } satisfies AnalysisWorkerResponse)
     drainQueue()
@@ -221,9 +222,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     throw new Error('Invalid FEN supplied for analysis')
   }
 
-  const movetime = request.movetime ?? 1200
-
-  const bestSearch = await runSearch(request.fen, [], movetime)
+  const bestSearch = await runSearch(request.fen, [])
   const bestMove = bestSearch.bestmove
 
   if (!bestMove || bestMove === '(none)') {
@@ -241,14 +240,14 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   const opponentToMove = sideToMove === 'w' ? 'b' : 'w'
 
-  const bestEvalSearch = await runSearch(request.fen, [bestMove], movetime)
+  const bestEvalSearch = await runSearch(request.fen, [bestMove])
   const bestEval = scoreForPlayer(
     bestEvalSearch.score,
     opponentToMove,
     request.playerColor,
   )
 
-  const playedEvalSearch = await runSearch(request.fen, [request.move], movetime)
+  const playedEvalSearch = await runSearch(request.fen, [request.move])
   const playedEval = scoreForPlayer(
     playedEvalSearch.score,
     opponentToMove,
