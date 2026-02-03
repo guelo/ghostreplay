@@ -347,7 +347,6 @@ const ChessGame = () => {
       // Reset the board
       chess.reset()
       setFen(chess.fen())
-      setBoardOrientation(playerColor)
       setEngineMessage(null)
       setGameResult(null)
       setMoveHistory([])
