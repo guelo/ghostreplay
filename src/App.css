@@ -200,14 +200,45 @@
   box-shadow: 0 10px 20px rgba(129, 140, 248, 0.35);
 }
 
+.chess-button.danger {
+  background: linear-gradient(135deg, #f87171, #ef4444);
+  color: #020617;
+  border-color: transparent;
+  box-shadow: 0 10px 20px rgba(239, 68, 68, 0.35);
+}
+
+.chess-button.danger:disabled {
+  background: rgba(100, 100, 100, 0.4);
+  color: #64748b;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
 .chess-button:hover {
   border-color: rgba(248, 250, 252, 0.85);
 }
 
 .chessboard-wrapper {
+  position: relative;
   flex: 1 1 400px;
   max-width: 600px;
   width: min(100%, 600px);
+}
+
+.chessboard-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(2, 6, 23, 0.75);
+  backdrop-filter: blur(2px);
+}
+
+.overlay-button {
+  font-size: 1.25rem;
+  padding: 1rem 2rem;
 }
 
 .engine-status {

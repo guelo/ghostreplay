@@ -4,6 +4,7 @@ import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
 import { useStockfishEngine } from '../hooks/useStockfishEngine'
 import { useMoveAnalysis } from '../hooks/useMoveAnalysis'
+import { startGame, endGame } from '../utils/api'
 
 type BoardOrientation = 'white' | 'black'
 
@@ -35,6 +36,8 @@ const ChessGame = () => {
   } = useStockfishEngine()
   const { analyzeMove, lastAnalysis, status: analysisStatus, isAnalyzing, analyzingMove } = useMoveAnalysis()
   const [engineMessage, setEngineMessage] = useState<string | null>(null)
+  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [isGameActive, setIsGameActive] = useState(false)
 
   const statusText = (() => {
     if (chess.isCheckmate()) {
@@ -184,11 +187,54 @@ const ChessGame = () => {
     return true
   }
 
+  const handleNewGame = async () => {
+    try {
+      // End current session if active
+      if (sessionId && isGameActive) {
+        await endGame(sessionId, 'abandon', chess.pgn())
+      }
+
+      // Start new game session
+      const response = await startGame(1500)
+      setSessionId(response.session_id)
+      setIsGameActive(true)
+
+      // Reset the board
+      chess.reset()
+      setFen(chess.fen())
+      setBoardOrientation('white')
+      setEngineMessage(null)
+      resetEngine()
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to start new game.'
+      setEngineMessage(message)
+    }
+  }
+
+  const handleResign = async () => {
+    if (!sessionId || !isGameActive) {
+      return
+    }
+
+    try {
+      await endGame(sessionId, 'resign', chess.pgn())
+      setIsGameActive(false)
+      setEngineMessage('You resigned.')
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : 'Failed to resign game.'
+      setEngineMessage(message)
+    }
+  }
+
   const handleReset = () => {
     chess.reset()
     setFen(chess.fen())
     setBoardOrientation('white')
     setEngineMessage(null)
+    setSessionId(null)
+    setIsGameActive(false)
     resetEngine()
   }
 
@@ -214,17 +260,42 @@ const ChessGame = () => {
             Orientation: {boardOrientation === 'white' ? 'White' : 'Black'} on
             bottom
           </p>
+          <p className="chess-meta">
+            Session:{' '}
+            <span className={isGameActive ? 'chess-meta-strong' : ''}>
+              {isGameActive ? 'Active' : 'None (click New game to start)'}
+            </span>
+          </p>
           <div className="chess-controls">
-            <button className="chess-button primary" type="button" onClick={handleReset}>
-              Reset game
+            <button
+              className="chess-button danger"
+              type="button"
+              onClick={handleResign}
+              disabled={!isGameActive || chess.isGameOver()}
+            >
+              Resign
             </button>
             <button className="chess-button" type="button" onClick={flipBoard}>
               Flip board
+            </button>
+            <button className="chess-button" type="button" onClick={handleReset}>
+              Reset
             </button>
           </div>
         </div>
 
         <div className="chessboard-wrapper">
+          {!isGameActive && (
+            <div className="chessboard-overlay">
+              <button
+                className="chess-button primary overlay-button"
+                type="button"
+                onClick={handleNewGame}
+              >
+                New game
+              </button>
+            </div>
+          )}
           <Chessboard
             options={{
               position: fen,
@@ -232,7 +303,7 @@ const ChessGame = () => {
               boardOrientation,
               animationDurationInMs: 200,
               allowDragging:
-                engineStatus === 'ready' && chess.turn() === 'w' && !isThinking,
+                isGameActive && engineStatus === 'ready' && chess.turn() === 'w' && !isThinking,
               boardStyle: {
                 borderRadius: '0',
                 boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
