@@ -104,6 +104,18 @@ const normalizeScore = (score: EngineScore | null, sideToMove: 'w' | 'b') => {
   return raw * sign
 }
 
+const scoreForPlayer = (
+  score: EngineScore | null,
+  sideToMove: 'w' | 'b',
+  playerColor: 'white' | 'black',
+) => {
+  const whitePerspective = normalizeScore(score, sideToMove)
+  if (whitePerspective === null) {
+    return null
+  }
+  return playerColor === 'white' ? whitePerspective : -whitePerspective
+}
+
 const getSideToMove = (fen: string) => {
   const parts = fen.split(' ')
   const active = parts[1]
@@ -230,10 +242,18 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   const opponentToMove = sideToMove === 'w' ? 'b' : 'w'
 
   const bestEvalSearch = await runSearch(request.fen, [bestMove], movetime)
-  const bestEval = normalizeScore(bestEvalSearch.score, opponentToMove)
+  const bestEval = scoreForPlayer(
+    bestEvalSearch.score,
+    opponentToMove,
+    request.playerColor,
+  )
 
   const playedEvalSearch = await runSearch(request.fen, [request.move], movetime)
-  const playedEval = normalizeScore(playedEvalSearch.score, opponentToMove)
+  const playedEval = scoreForPlayer(
+    playedEvalSearch.score,
+    opponentToMove,
+    request.playerColor,
+  )
 
   const delta =
     bestEval !== null && playedEval !== null ? bestEval - playedEval : null

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
@@ -39,6 +39,10 @@ const ChessGame = () => {
   const [fen, setFen] = useState(chess.fen())
   const [boardOrientation, setBoardOrientation] =
     useState<BoardOrientation>('white')
+  const [playerColor, setPlayerColor] = useState<BoardOrientation>('white')
+  const [playerColorChoice, setPlayerColorChoice] = useState<
+    BoardOrientation | 'random'
+  >('white')
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([])
   const [viewIndex, setViewIndex] = useState<number | null>(null) // null = viewing live position
   const {
@@ -49,11 +53,20 @@ const ChessGame = () => {
     evaluatePosition,
     resetEngine,
   } = useStockfishEngine()
-  const { analyzeMove, lastAnalysis, status: analysisStatus, isAnalyzing, analyzingMove } = useMoveAnalysis()
+  const {
+    analyzeMove,
+    lastAnalysis,
+    status: analysisStatus,
+    isAnalyzing,
+    analyzingMove,
+  } = useMoveAnalysis()
   const [engineMessage, setEngineMessage] = useState<string | null>(null)
   const [sessionId, setSessionId] = useState<string | null>(null)
   const [isGameActive, setIsGameActive] = useState(false)
   const [gameResult, setGameResult] = useState<GameResult | null>(null)
+  const [isStartingGame, setIsStartingGame] = useState(false)
+  const [startError, setStartError] = useState<string | null>(null)
+  const [showStartOverlay, setShowStartOverlay] = useState(false)
 
   // Get the FEN to display on the board (accounts for viewing past positions)
   const displayedFen = useMemo(() => {
@@ -79,13 +92,11 @@ const ChessGame = () => {
     let result: GameResult | null = null
 
     if (chess.isCheckmate()) {
-      // If it's white's turn, white is in checkmate, so black (engine) wins
-      // User plays white, so if white is checkmated, user loses
-      if (chess.turn() === 'w') {
-        result = { type: 'checkmate_loss', message: 'Checkmate! You lost.' }
-      } else {
-        result = { type: 'checkmate_win', message: 'Checkmate! You won!' }
-      }
+      const loser = chess.turn() === 'w' ? 'white' : 'black'
+      const playerWon = playerColor !== loser
+      result = playerWon
+        ? { type: 'checkmate_win', message: 'Checkmate! You won!' }
+        : { type: 'checkmate_loss', message: 'Checkmate! You lost.' }
     } else if (chess.isStalemate()) {
       result = { type: 'draw', message: 'Stalemate! The game is a draw.' }
     } else if (chess.isThreefoldRepetition()) {
@@ -106,7 +117,10 @@ const ChessGame = () => {
         setEngineMessage(message)
       }
     }
-  }, [chess, sessionId, isGameActive])
+  }, [chess, isGameActive, playerColor, sessionId])
+
+  const isPlayersTurn = chess.turn() === (playerColor === 'white' ? 'w' : 'b')
+  const moveCount = moveHistory.length
 
   const statusText = (() => {
     if (chess.isCheckmate()) {
@@ -180,12 +194,15 @@ const ChessGame = () => {
         : ''
 
     if (lastAnalysis.blunder && lastAnalysis.delta !== null) {
-      return `⚠️ ${lastAnalysis.move}: Blunder! Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
+      return `⚠️ ${lastAnalysis.move}: Blunder! Lost ${Math.max(lastAnalysis.delta, 0)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
     }
 
     if (lastAnalysis.delta !== null) {
       if (lastAnalysis.delta === 0) {
         return `✓ ${lastAnalysis.move}: Best move!${evalText}`
+      }
+      if (lastAnalysis.delta < 0) {
+        return `✓ ${lastAnalysis.move}: Great move! Gained ${Math.abs(lastAnalysis.delta)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
       }
       if (lastAnalysis.delta < 50) {
         return `✓ ${lastAnalysis.move}: Good move. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`
@@ -233,11 +250,44 @@ const ChessGame = () => {
     }
   }, [chess, evaluatePosition, handleGameEnd])
 
+  useEffect(() => {
+    if (!isGameActive) {
+      return
+    }
+
+    if (playerColor !== 'black') {
+      return
+    }
+
+    if (moveCount > 0 || chess.turn() !== 'w') {
+      return
+    }
+
+    if (engineStatus !== 'ready' || isThinking || !isViewingLive) {
+      return
+    }
+
+    void applyEngineMove()
+  }, [
+    applyEngineMove,
+    chess,
+    engineStatus,
+    isGameActive,
+    isThinking,
+    isViewingLive,
+    moveCount,
+    playerColor,
+  ])
+
   const handleDrop = ({
     sourceSquare,
     targetSquare,
   }: PieceDropHandlerArgs) => {
     if (!targetSquare) {
+      return false
+    }
+
+    if (!isPlayersTurn || !isViewingLive) {
       return false
     }
 
@@ -258,7 +308,7 @@ const ChessGame = () => {
     setViewIndex(null) // Ensure we're viewing the live position
 
     const uciMove = `${move.from}${move.to}${move.promotion ?? ''}`
-    analyzeMove(fenBeforeMove, uciMove)
+    analyzeMove(fenBeforeMove, uciMove, playerColor)
 
     if (chess.isGameOver()) {
       void handleGameEnd()
@@ -271,20 +321,33 @@ const ChessGame = () => {
 
   const handleNewGame = async () => {
     try {
+      setIsStartingGame(true)
+      setStartError(null)
       // End current session if active
       if (sessionId && isGameActive) {
         await endGame(sessionId, 'abandon', chess.pgn())
       }
 
       // Start new game session
-      const response = await startGame(1500)
+      const resolvedPlayerColor =
+        playerColorChoice === 'random'
+          ? Math.random() < 0.5
+            ? 'white'
+            : 'black'
+          : playerColorChoice
+      setPlayerColor(resolvedPlayerColor)
+      setBoardOrientation(resolvedPlayerColor)
+
+      const response = await startGame(1500, resolvedPlayerColor)
       setSessionId(response.session_id)
       setIsGameActive(true)
+      setIsStartingGame(false)
+      setShowStartOverlay(false)
 
       // Reset the board
       chess.reset()
       setFen(chess.fen())
-      setBoardOrientation('white')
+      setBoardOrientation(playerColor)
       setEngineMessage(null)
       setGameResult(null)
       setMoveHistory([])
@@ -294,6 +357,8 @@ const ChessGame = () => {
       const message =
         error instanceof Error ? error.message : 'Failed to start new game.'
       setEngineMessage(message)
+      setStartError(message)
+      setIsStartingGame(false)
     }
   }
 
@@ -316,7 +381,7 @@ const ChessGame = () => {
   const handleReset = () => {
     chess.reset()
     setFen(chess.fen())
-    setBoardOrientation('white')
+    setBoardOrientation(playerColor)
     setEngineMessage(null)
     setSessionId(null)
     setIsGameActive(false)
@@ -324,10 +389,27 @@ const ChessGame = () => {
     setMoveHistory([])
     setViewIndex(null)
     resetEngine()
+    setShowStartOverlay(false)
   }
 
   const flipBoard = () => {
     setBoardOrientation((current) => (current === 'white' ? 'black' : 'white'))
+  }
+
+  const handleSelectPlayerColor = (color: BoardOrientation) => {
+    setPlayerColorChoice(color)
+    setPlayerColor(color)
+    if (!isGameActive) {
+      setBoardOrientation(color)
+    }
+  }
+
+  const handleRandomColor = () => {
+    setPlayerColorChoice('random')
+  }
+
+  const handleShowStartOverlay = () => {
+    setShowStartOverlay(true)
   }
 
   return (
@@ -347,6 +429,16 @@ const ChessGame = () => {
           <p className="chess-meta">
             Orientation: {boardOrientation === 'white' ? 'White' : 'Black'} on
             bottom
+          </p>
+          <p className="chess-meta">
+            Playing as:{' '}
+            <span className="chess-meta-strong">
+              {playerColorChoice === 'random' && !isGameActive
+                ? 'Random'
+                : playerColor === 'white'
+                  ? 'White'
+                  : 'Black'}
+            </span>
           </p>
           <p className="chess-meta">
             Session:{' '}
@@ -373,15 +465,51 @@ const ChessGame = () => {
         </div>
 
         <div className="chessboard-wrapper">
-          {!isGameActive && !gameResult && (
+          {showStartOverlay && !isGameActive && (
             <div className="chessboard-overlay">
-              <button
-                className="chess-button primary overlay-button"
-                type="button"
-                onClick={handleNewGame}
-              >
-                New game
-              </button>
+              <div className="chess-start-panel">
+                <p className="chess-start-title">Choose your side</p>
+                <div className="chess-start-options">
+                  <button
+                    className={`chess-button toggle ${playerColorChoice === 'white' ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => handleSelectPlayerColor('white')}
+                    aria-pressed={playerColorChoice === 'white'}
+                    disabled={isStartingGame}
+                  >
+                    Play White
+                  </button>
+                  <button
+                    className={`chess-button toggle ${playerColorChoice === 'random' ? 'active' : ''}`}
+                    type="button"
+                    onClick={handleRandomColor}
+                    aria-pressed={playerColorChoice === 'random'}
+                    disabled={isStartingGame}
+                  >
+                    Play Random
+                  </button>
+                  <button
+                    className={`chess-button toggle ${playerColorChoice === 'black' ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => handleSelectPlayerColor('black')}
+                    aria-pressed={playerColorChoice === 'black'}
+                    disabled={isStartingGame}
+                  >
+                    Play Black
+                  </button>
+                </div>
+                {startError && (
+                  <p className="chess-start-error">{startError}</p>
+                )}
+                <button
+                  className="chess-button primary overlay-button"
+                  type="button"
+                  onClick={handleNewGame}
+                  disabled={isStartingGame}
+                >
+                  {isStartingGame ? 'Starting…' : 'Play'}
+                </button>
+              </div>
             </div>
           )}
           <Chessboard
@@ -391,22 +519,28 @@ const ChessGame = () => {
               boardOrientation,
               animationDurationInMs: 200,
               allowDragging:
-                isGameActive && engineStatus === 'ready' && chess.turn() === 'w' && !isThinking && isViewingLive,
+                isGameActive &&
+                engineStatus === 'ready' &&
+                isPlayersTurn &&
+                !isThinking &&
+                isViewingLive,
               boardStyle: {
                 borderRadius: '0',
                 boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
               },
             }}
           />
-          {gameResult && (
+          {!isGameActive && (
             <div className="game-end-banner">
-              <p className="game-end-banner-message">{gameResult.message}</p>
+              <p className="game-end-banner-message">
+                {gameResult ? gameResult.message : 'Ready for a new game?'}
+              </p>
               <button
                 className="chess-button primary"
                 type="button"
-                onClick={handleNewGame}
+                onClick={handleShowStartOverlay}
               >
-                New Game
+                New game
               </button>
             </div>
           )}

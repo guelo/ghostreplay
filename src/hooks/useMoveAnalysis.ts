@@ -104,7 +104,12 @@ export const useMoveAnalysis = () => {
   }, [])
 
   const analyzeMove = useCallback(
-    (fen: string, move: string, options?: AnalyzeMoveOptions) => {
+    (
+      fen: string,
+      move: string,
+      playerColor: 'white' | 'black',
+      options?: AnalyzeMoveOptions,
+    ) => {
       if (status === 'error') {
         return
       }
@@ -118,6 +123,7 @@ export const useMoveAnalysis = () => {
         id: createRequestId(),
         fen,
         move,
+        playerColor,
         movetime: options?.movetime,
       })
     },

@@ -3,6 +3,7 @@ export type AnalyzeMoveMessage = {
   id: string
   fen: string
   move: string
+  playerColor: 'white' | 'black'
   movetime?: number
 }
 

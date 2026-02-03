@@ -17,11 +17,13 @@ const getAuthHeaders = (): Record<string, string> => {
 
 interface StartGameRequest {
   engine_elo: number
+  player_color: 'white' | 'black'
 }
 
 interface StartGameResponse {
   session_id: string
   engine_elo: number
+  player_color?: 'white' | 'black'
 }
 
 interface EndGameRequest {
@@ -40,12 +42,16 @@ interface EndGameResponse {
  * Start a new game session
  */
 export const startGame = async (
-  engineElo: number = 1500
+  engineElo: number = 1500,
+  playerColor: StartGameRequest['player_color'] = 'white',
 ): Promise<StartGameResponse> => {
   const response = await fetch(`${API_BASE_URL}/api/game/start`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify({ engine_elo: engineElo } satisfies StartGameRequest),
+    body: JSON.stringify({
+      engine_elo: engineElo,
+      player_color: playerColor,
+    } satisfies StartGameRequest),
   })
 
   if (!response.ok) {

@@ -235,6 +235,52 @@
   backdrop-filter: blur(2px);
 }
 
+.chess-start-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  align-items: center;
+  text-align: center;
+  padding: 1.5rem 2rem;
+  border-radius: 1.25rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: 0 18px 35px rgba(2, 6, 23, 0.45);
+}
+
+.chess-start-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.chess-start-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+.chess-start-error {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #fca5a5;
+  max-width: 260px;
+}
+
+.chess-button.toggle {
+  border-color: rgba(148, 163, 184, 0.5);
+  background: rgba(30, 41, 59, 0.8);
+}
+
+.chess-button.toggle.active {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.8), rgba(129, 140, 248, 0.9));
+  color: #0f172a;
+  border-color: transparent;
+  box-shadow: 0 10px 20px rgba(129, 140, 248, 0.3);
+}
+
 .overlay-button {
   font-size: 1.25rem;
   padding: 1rem 2rem;
