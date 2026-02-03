@@ -3,3 +3,4 @@ psycopg[binary]
 sqlalchemy
 alembic
 uvicorn[standard]
+bcrypt
