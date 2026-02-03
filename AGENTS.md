@@ -2,6 +2,7 @@
 
 The overall project and architecure is described in SPEC.md
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
+If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.
 
 This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 

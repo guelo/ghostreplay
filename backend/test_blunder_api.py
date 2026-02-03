@@ -18,6 +18,7 @@ from app.models import Base, GameSession, Position, Blunder, Move
 from app.main import app
 from app.db import get_db
 from app.security import create_access_token
+from app.fen import fen_hash
 
 # Use in-memory SQLite for testing with StaticPool to share connection
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -182,6 +183,50 @@ def test_record_blunder_success():
     assert "is_new" in data
     assert data["is_new"] is True
     assert data["positions_created"] == 4  # Starting pos + after e4 + after e5 + after Qh5
+
+
+def test_record_blunder_links_pre_move_position():
+    """Test that blunder.position_id points to the pre-move position."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    pgn = "1. e4 e5 2. Qh5"
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_blunder,
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=123)
+    )
+
+    assert response.status_code == 201
+    blunder_id = response.json()["blunder_id"]
+
+    db = TestingSessionLocal()
+    try:
+        position_row = db.execute(
+            text(
+                "SELECT id FROM positions WHERE user_id = :user_id AND fen_hash = :fen_hash"
+            ),
+            {"user_id": 123, "fen_hash": fen_hash(fen_before_blunder)},
+        ).fetchone()
+        assert position_row is not None
+
+        blunder_position_id = db.execute(
+            text("SELECT position_id FROM blunders WHERE id = :id"),
+            {"id": blunder_id},
+        ).fetchone()[0]
+
+        assert blunder_position_id == position_row[0]
+    finally:
+        db.close()
 
 
 def test_record_blunder_creates_positions_and_moves():
