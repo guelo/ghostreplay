@@ -108,6 +108,7 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 * **The Ghost Opponent:** If a path is found, the bot plays the exact moves required to reach the blunder position.
 * **Seamless Deviation:** If the user plays a move that deviates from all known blunder paths, the "Ghost" deactivates, and a standard Stockfish engine takes over to finish the game.
 * **Re-Hooking:** If a user deviates but later transposes back into a known position with a downstream blunder, the Ghost reactivates.
+* **Player Side:** The user can play as **White or Black** per session; Ghost targeting only considers blunders made as that side.
 
 ### 2.2 Analysis & Blunder Detection
 
@@ -210,6 +211,7 @@ CREATE TABLE positions (
     user_id BIGINT REFERENCES users(id),
     fen_hash VARCHAR(64) NOT NULL,         -- SHA256 of Normalized FEN
     fen_raw TEXT NOT NULL,
+    active_color VARCHAR(5) NOT NULL,      -- 'white' or 'black' (side to move)
     created_at TIMESTAMP DEFAULT NOW(),
 
     UNIQUE (user_id, fen_hash)
@@ -217,6 +219,7 @@ CREATE TABLE positions (
 
 CREATE INDEX idx_positions_user ON positions(user_id);
 CREATE INDEX idx_positions_fen_hash ON positions(user_id, fen_hash);
+CREATE INDEX idx_positions_user_color ON positions(user_id, active_color);
 ```
 
 #### 5.1.1 FEN Normalization
@@ -261,6 +264,11 @@ def fen_hash(fen: str) -> str:
     """Generate SHA256 hash of normalized FEN."""
     normalized = normalize_fen(fen)
     return hashlib.sha256(normalized.encode()).hexdigest()
+
+def active_color(fen: str) -> str:
+    """Return 'white' or 'black' from the FEN active color field."""
+    parts = fen.split(' ')
+    return 'white' if parts[1] == 'w' else 'black'
 ```
 
 **Example:**
@@ -302,6 +310,7 @@ CREATE INDEX idx_blunders_due ON blunders(user_id, pass_streak, last_reviewed_at
 - SRS pass/fail is determined by **real-time engine evaluation**, not by checking against `bad_move_san`
 - Any move within 50cp of the engine's best passes; any move ≥50cp worse fails
 - The unique constraint means if the user blunders at the same position again (even with a different bad move), the existing blunder record is updated rather than duplicated
+- Blunders are only recorded when it is **the user's turn to move**; Ghost selection filters by the session's `player_color` so users can play either side without cross-contamination
 
 #### 5.2.1 `blunder_reviews` (Review Events)
 
@@ -421,7 +430,7 @@ The position graph can contain cycles (threefold repetition, transpositions). Re
 - **Depth bounds:** Hard cap at 15 moves to prevent exponential blowup (blunders 20+ moves away have negligible "scent")
 - **Cycle detection:** Track visited positions to prevent infinite loops
 
-1. **Input:** Current FEN Hash.
+1. **Input:** Current FEN Hash + `session_id` (to scope to `player_color`).
 2. **Search:** Find all downstream positions connected to this FEN (up to depth limit, avoiding cycles).
 3. **Filter:** Join with `blunders` table to find positions where user has a recorded blunder.
 4. **Scoring:** For each reachable blunder, calculate:
@@ -435,6 +444,8 @@ The position graph can contain cycles (threefold repetition, transpositions). Re
    ```
 5. **Selection:** Pick the path leading to the highest `final_score` blunder.
 6. **Output:** The immediate next move (SAN) on that path.
+
+**Color Scope Rule:** Only consider blunders where the **position side-to-move** equals the session's `player_color`. This prevents mixing blunders made as White with those made as Black. Use `positions.active_color` for efficient filtering.
 
 **Reference Implementation (PostgreSQL):**
 
@@ -478,7 +489,10 @@ SELECT
     ) as urgency_score
 FROM scent_path sp
 JOIN blunders b ON b.position_id = sp.to_position_id
+JOIN positions bp ON bp.id = b.position_id
+JOIN game_sessions gs ON gs.id = :session_id AND gs.user_id = :user_id
 WHERE b.user_id = :user_id
+  AND bp.active_color = gs.player_color
 GROUP BY sp.root_move
 ORDER BY urgency_score DESC, closest_blunder_distance ASC
 LIMIT 1;
@@ -792,13 +806,15 @@ CREATE TABLE game_sessions (
     status VARCHAR(20) NOT NULL DEFAULT 'in_progress',  -- 'in_progress', 'ended', 'abandoned'
     result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
     engine_elo INTEGER NOT NULL,  -- Bot difficulty selected for this game
+    player_color VARCHAR(5) NOT NULL, -- 'white' or 'black' (user side for this session)
     blunder_recorded BOOLEAN NOT NULL DEFAULT FALSE,  -- First-blunder rule flag
     pgn TEXT,                     -- Full game in PGN format
 
     CONSTRAINT valid_status CHECK (status IN ('in_progress', 'ended', 'abandoned')),
     CONSTRAINT valid_result CHECK (result IS NULL OR result IN (
         'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
-    ))
+    )),
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black'))
 );
 
 CREATE INDEX idx_sessions_user ON game_sessions(user_id);
@@ -918,7 +934,6 @@ POST /api/blunder called
 
 * **Single Variation per Game:** The system only records the *first* blunder of a session to keep the graph manageable initially.
 * **No Redis:** All state checks go directly to PostgreSQL (acceptable performance for turn-based MVP).
-* **Color:** MVP supports user playing as **White** only (simplifies graph directionality). *Future: Support Black.*
 
 ---
 
@@ -1057,7 +1072,8 @@ Creates a new game session. The session tracks which game the blunders belong to
 **Request:**
 ```json
 {
-  "engine_elo": "integer"
+  "engine_elo": "integer",
+  "player_color": "white | black"
 }
 ```
 
@@ -1065,7 +1081,8 @@ Creates a new game session. The session tracks which game the blunders belong to
 ```json
 {
   "session_id": "uuid",
-  "engine_elo": "integer"
+  "engine_elo": "integer",
+  "player_color": "white | black"
 }
 ```
 
