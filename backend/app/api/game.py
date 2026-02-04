@@ -2,12 +2,13 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import GameSession
+from app.fen import fen_hash, active_color
+from app.models import Blunder, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/game", tags=["game"])
@@ -52,6 +53,14 @@ class GameEndResponse(BaseModel):
     session_id: uuid.UUID
     result: str
     ended_at: datetime
+
+
+class GhostMoveResponse(BaseModel):
+    fen: str
+    ghost_move: str | None = Field(
+        None,
+        description="A move that leads to a position where the user previously blundered, or null",
+    )
 
 
 @router.post("/start", response_model=GameStartResponse, status_code=201)
@@ -129,3 +138,64 @@ def end_game(
         result=session.result,
         ended_at=session.ended_at,
     )
+
+
+@router.get("/ghost-move", response_model=GhostMoveResponse)
+def get_ghost_move(
+    session_id: uuid.UUID = Query(..., description="Game session ID"),
+    fen: str = Query(..., description="Current board position FEN"),
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> GhostMoveResponse:
+    """
+    Look up a move that leads toward a position where the user previously blundered.
+
+    Scoped to the session's player color. Returns null if no such move exists.
+    """
+    # Fetch and validate session
+    session = db.query(GameSession).filter(GameSession.id == session_id).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Game session not found")
+
+    if session.user_id != user.user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this game")
+
+    # Ghost-move only works when it's the opponent's turn
+    # (ghost suggests the opponent's move to steer towards a blunder position)
+    position_color = active_color(fen)
+    if position_color == session.player_color:
+        # It's the user's turn, ghost doesn't suggest user moves
+        return GhostMoveResponse(fen=fen, ghost_move=None)
+
+    # Look up current position by FEN hash
+    current_position = (
+        db.query(Position)
+        .filter(
+            Position.user_id == user.user_id,
+            Position.fen_hash == fen_hash(fen),
+        )
+        .first()
+    )
+
+    if not current_position:
+        return GhostMoveResponse(fen=fen, ghost_move=None)
+
+    # Find a move from this position that leads to a blunder position
+    # The blunder position must be where it's the user's turn
+    ghost_move = (
+        db.query(Move.move_san)
+        .join(Position, Position.id == Move.to_position_id)
+        .join(Blunder, Blunder.position_id == Move.to_position_id)
+        .filter(
+            Move.from_position_id == current_position.id,
+            Blunder.user_id == user.user_id,
+            Position.active_color == session.player_color,
+        )
+        .first()
+    )
+
+    if not ghost_move:
+        return GhostMoveResponse(fen=fen, ghost_move=None)
+
+    return GhostMoveResponse(fen=fen, ghost_move=ghost_move[0])

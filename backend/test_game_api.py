@@ -360,6 +360,197 @@ def test_end_game_missing_pgn(client, auth_headers):
     assert response.status_code == 422  # Validation error
 
 
+# === Ghost Move Endpoint Tests ===
+
+
+def test_ghost_move_returns_opponent_move_to_blunder(client, auth_headers, create_game_session):
+    """Test ghost-move returns opponent's move leading to a blunder position."""
+    user_id = 123
+
+    # First, record a blunder via /api/blunder
+    # PGN: 1. e4 e5 2. Qh5 (white blunders with Qh5)
+    # Blunder is at position after 1.e4 e5 (white to move)
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    pgn = "1. e4 e5 2. Qh5"
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    blunder_response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_blunder,
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert blunder_response.status_code == 201
+
+    # Now start a NEW game and query ghost-move
+    new_session_id = create_game_session(user_id=user_id, player_color="white")
+
+    # After 1.e4 (black to move), ghost should suggest e5 to reach blunder position
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": new_session_id, "fen": fen_after_e4},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["fen"] == fen_after_e4
+    assert data["ghost_move"] == "e5"
+
+
+def test_ghost_move_no_blunder_in_path(client, auth_headers, create_game_session):
+    """Test ghost-move returns null when no blunder exists in the game graph."""
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    # Query from starting position - no blunders recorded
+    starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": session_id, "fen": starting_fen},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ghost_move"] is None
+
+
+def test_ghost_move_users_turn_returns_null(client, auth_headers, create_game_session):
+    """Test ghost-move returns null when it's the user's turn."""
+    user_id = 123
+
+    # Record a blunder
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    pgn = "1. e4 e5 2. Qh5"
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_blunder,
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+
+    # Start new game and query at the blunder position (white to move)
+    new_session_id = create_game_session(user_id=user_id, player_color="white")
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": new_session_id, "fen": fen_before_blunder},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    # It's white's turn, ghost doesn't suggest - user decides
+    assert response.json()["ghost_move"] is None
+
+
+def test_ghost_move_black_player(client, auth_headers, create_game_session):
+    """Test ghost-move works for black player."""
+    user_id = 123
+
+    # Record a blunder as black
+    # PGN: 1. e4 e5 2. Nf3 Qh4 (black blunders with Qh4)
+    session_id = create_game_session(user_id=user_id, player_color="black")
+    pgn = "1. e4 e5 2. Nf3 Qh4"
+    # FEN after 1.e4 e5 2.Nf3 (black to move)
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2"
+
+    blunder_response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_blunder,
+            "user_move": "Qh4",
+            "best_move": "Nc6",
+            "eval_before": -50,
+            "eval_after": 100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert blunder_response.status_code == 201
+
+    # Start new game as black
+    new_session_id = create_game_session(user_id=user_id, player_color="black")
+
+    # After 1.e4 e5 (white to move), ghost should suggest Nf3 to reach blunder position
+    fen_after_e5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": new_session_id, "fen": fen_after_e5},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ghost_move"] == "Nf3"
+
+
+def test_ghost_move_session_not_found(client, auth_headers):
+    """Test ghost-move returns 404 for non-existent session."""
+    fake_uuid = "00000000-0000-0000-0000-000000000000"
+    starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": fake_uuid, "fen": starting_fen},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_ghost_move_wrong_user(client, auth_headers, create_game_session):
+    """Test ghost-move returns 403 when user doesn't own the session."""
+    # User 123 starts a game
+    session_id = create_game_session(user_id=123, player_color="white")
+    starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+    # User 456 tries to query ghost-move
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": session_id, "fen": starting_fen},
+        headers=auth_headers(user_id=456),
+    )
+
+    assert response.status_code == 403
+    assert "not authorized" in response.json()["detail"].lower()
+
+
+def test_ghost_move_missing_auth(client):
+    """Test ghost-move returns 401 when auth is missing."""
+    starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "fen": starting_fen,
+        },
+    )
+
+    assert response.status_code == 401
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
