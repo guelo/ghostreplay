@@ -55,6 +55,11 @@ interface BlunderResponse {
   is_new: boolean
 }
 
+interface GhostMoveResponse {
+  fen: string
+  ghost_move: string | null
+}
+
 /**
  * Start a new game session
  */
@@ -127,6 +132,30 @@ export const recordBlunder = async (
 
   if (!response.ok) {
     throw new Error(`Failed to record blunder: ${response.statusText}`)
+  }
+
+  return response.json()
+}
+
+/**
+ * Get ghost move for current position
+ */
+export const getGhostMove = async (
+  sessionId: string,
+  fen: string,
+): Promise<GhostMoveResponse> => {
+  const params = new URLSearchParams({
+    session_id: sessionId,
+    fen,
+  })
+
+  const response = await fetch(`${API_BASE_URL}/api/game/ghost-move?${params}`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+  })
+
+  if (!response.ok) {
+    throw new Error(`Failed to get ghost move: ${response.statusText}`)
   }
 
   return response.json()

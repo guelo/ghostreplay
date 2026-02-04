@@ -4,7 +4,7 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
-import { startGame, endGame, recordBlunder } from "../utils/api";
+import { startGame, endGame, recordBlunder, getGhostMove } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
 import MoveList from "./MoveList";
 
@@ -68,6 +68,7 @@ const ChessGame = () => {
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [showStartOverlay, setShowStartOverlay] = useState(false);
+  const [ghostMove, setGhostMove] = useState<string | null>(null);
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -370,6 +371,20 @@ const ChessGame = () => {
     if (chess.isGameOver()) {
       void handleGameEnd();
     } else {
+      // Query ghost-move endpoint for suggested opponent move
+      if (sessionId) {
+        getGhostMove(sessionId, newFen)
+          .then((response) => {
+            setGhostMove(response.ghost_move);
+            if (response.ghost_move) {
+              console.log("[GhostMove] Received:", response.ghost_move);
+            }
+          })
+          .catch((error) => {
+            console.error("[GhostMove] Failed to get ghost move:", error);
+            setGhostMove(null);
+          });
+      }
       void applyEngineMove();
     }
 
@@ -411,6 +426,7 @@ const ChessGame = () => {
       resetEngine();
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
+      setGhostMove(null);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to start new game.";
@@ -450,6 +466,7 @@ const ChessGame = () => {
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
+    setGhostMove(null);
   };
 
   const flipBoard = () => {
@@ -619,6 +636,11 @@ const ChessGame = () => {
               Analyst status:{" "}
               <span className="chess-meta-strong">{analysisStatusText}</span>
             </p>
+            {ghostMove && (
+              <p className="chess-meta">
+                Ghost suggests: <span className="chess-meta-strong">{ghostMove}</span>
+              </p>
+            )}
           </div>
         </div>
 
