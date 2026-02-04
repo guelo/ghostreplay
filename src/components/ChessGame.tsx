@@ -4,7 +4,8 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
-import { startGame, endGame, recordBlunder, getGhostMove } from "../utils/api";
+import { useOpponentMove } from "../hooks/useOpponentMove";
+import { startGame, endGame, recordBlunder } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
 import MoveList from "./MoveList";
 
@@ -68,7 +69,6 @@ const ChessGame = () => {
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [showStartOverlay, setShowStartOverlay] = useState(false);
-  const [ghostMove, setGhostMove] = useState<string | null>(null);
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -266,6 +266,44 @@ const ChessGame = () => {
     }
   }, [chess, evaluatePosition, handleGameEnd]);
 
+  const applyGhostMove = useCallback(
+    async (sanMove: string) => {
+      try {
+        const appliedMove = chess.move(sanMove);
+
+        if (!appliedMove) {
+          throw new Error(`Ghost returned illegal move: ${sanMove}`);
+        }
+
+        const newFen = chess.fen();
+        setFen(newFen);
+        setMoveHistory((prev) => [
+          ...prev,
+          { san: appliedMove.san, fen: newFen },
+        ]);
+        setViewIndex(null);
+        setEngineMessage(null);
+
+        if (chess.isGameOver()) {
+          await handleGameEnd();
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to apply ghost move.";
+        setEngineMessage(message);
+      }
+    },
+    [chess, handleGameEnd]
+  );
+
+  const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
+    sessionId,
+    onApplyGhostMove: applyGhostMove,
+    onApplyEngineMove: applyEngineMove,
+  });
+
   useEffect(() => {
     if (!isGameActive) {
       return;
@@ -371,21 +409,7 @@ const ChessGame = () => {
     if (chess.isGameOver()) {
       void handleGameEnd();
     } else {
-      // Query ghost-move endpoint for suggested opponent move
-      if (sessionId) {
-        getGhostMove(sessionId, newFen)
-          .then((response) => {
-            setGhostMove(response.ghost_move);
-            if (response.ghost_move) {
-              console.log("[GhostMove] Received:", response.ghost_move);
-            }
-          })
-          .catch((error) => {
-            console.error("[GhostMove] Failed to get ghost move:", error);
-            setGhostMove(null);
-          });
-      }
-      void applyEngineMove();
+      void applyOpponentMove(newFen);
     }
 
     return true;
@@ -426,7 +450,7 @@ const ChessGame = () => {
       resetEngine();
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
-      setGhostMove(null);
+      resetMode();
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to start new game.";
@@ -466,7 +490,7 @@ const ChessGame = () => {
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
-    setGhostMove(null);
+    resetMode();
   };
 
   const flipBoard = () => {
@@ -518,6 +542,14 @@ const ChessGame = () => {
               {isGameActive ? "Active" : "None (click New game to start)"}
             </span>
           </p>
+          {isGameActive && (
+            <p className="chess-meta">
+              Opponent:{" "}
+              <span className="chess-meta-strong">
+                {opponentMode === "ghost" ? "Ghost" : "Engine"}
+              </span>
+            </p>
+          )}
           <div className="chess-controls">
             <button
               className="chess-button danger"
@@ -636,11 +668,6 @@ const ChessGame = () => {
               Analyst status:{" "}
               <span className="chess-meta-strong">{analysisStatusText}</span>
             </p>
-            {ghostMove && (
-              <p className="chess-meta">
-                Ghost suggests: <span className="chess-meta-strong">{ghostMove}</span>
-              </p>
-            )}
           </div>
         </div>
 
