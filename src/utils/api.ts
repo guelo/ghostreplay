@@ -56,8 +56,9 @@ interface BlunderResponse {
 }
 
 interface GhostMoveResponse {
-  fen: string
-  ghost_move: string | null
+  mode: 'ghost' | 'engine'
+  move: string | null
+  target_blunder_id: number | null
 }
 
 /**

@@ -18,8 +18,9 @@ describe("determineOpponentMove", () => {
 
   it("returns ghost mode when ghost move is available", async () => {
     getGhostMoveMock.mockResolvedValueOnce({
-      fen: "test-fen",
-      ghost_move: "e4",
+      mode: "ghost",
+      move: "e4",
+      target_blunder_id: 42,
     });
 
     const result = await determineOpponentMove("session-123", "test-fen");
@@ -30,8 +31,9 @@ describe("determineOpponentMove", () => {
 
   it("returns engine mode when ghost move is null", async () => {
     getGhostMoveMock.mockResolvedValueOnce({
-      fen: "test-fen",
-      ghost_move: null,
+      mode: "engine",
+      move: null,
+      target_blunder_id: null,
     });
 
     const result = await determineOpponentMove("session-123", "test-fen");
@@ -67,8 +69,9 @@ describe("useOpponentMove", () => {
 
   it("applies ghost move when available", async () => {
     getGhostMoveMock.mockResolvedValueOnce({
-      fen: "test-fen",
-      ghost_move: "Nf3",
+      mode: "ghost",
+      move: "Nf3",
+      target_blunder_id: 42,
     });
 
     const onApplyGhostMove = vi.fn().mockResolvedValue(undefined);
@@ -93,8 +96,9 @@ describe("useOpponentMove", () => {
 
   it("applies engine move when ghost move is null", async () => {
     getGhostMoveMock.mockResolvedValueOnce({
-      fen: "test-fen",
-      ghost_move: null,
+      mode: "engine",
+      move: null,
+      target_blunder_id: null,
     });
 
     const onApplyGhostMove = vi.fn().mockResolvedValue(undefined);
@@ -162,8 +166,9 @@ describe("useOpponentMove", () => {
 
   it("resets mode to engine", async () => {
     getGhostMoveMock.mockResolvedValueOnce({
-      fen: "test-fen",
-      ghost_move: "e4",
+      mode: "ghost",
+      move: "e4",
+      target_blunder_id: 42,
     });
 
     const { result } = renderHook(() =>

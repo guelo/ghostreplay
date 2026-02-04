@@ -18,10 +18,7 @@ export const determineOpponentMove = async (
 ): Promise<OpponentMoveResult> => {
   try {
     const response = await getGhostMove(sessionId, fen);
-    if (response.ghost_move) {
-      return { mode: "ghost", move: response.ghost_move };
-    }
-    return { mode: "engine", move: null };
+    return { mode: response.mode, move: response.move };
   } catch (error) {
     console.error("[GhostMove] Failed to get ghost move:", error);
     return { mode: "engine", move: null };

@@ -4,10 +4,12 @@ import ChessGame from './ChessGame'
 
 const startGameMock = vi.fn()
 const endGameMock = vi.fn()
+const getGhostMoveMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
+  getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
 }))
 
 vi.mock('../hooks/useStockfishEngine', () => ({
@@ -41,6 +43,9 @@ describe('ChessGame start flow', () => {
   beforeEach(() => {
     startGameMock.mockReset()
     endGameMock.mockReset()
+    getGhostMoveMock.mockReset()
+    // Default: no ghost move available, fall back to engine
+    getGhostMoveMock.mockResolvedValue({ mode: 'engine', move: null, target_blunder_id: null })
   })
 
   afterEach(() => {
@@ -72,5 +77,24 @@ describe('ChessGame start flow', () => {
       expect(screen.getByText('Black')).toBeInTheDocument()
     })
 
+  })
+
+  it('calls ghost-move endpoint when playing as black', async () => {
+    const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+    startGameMock.mockResolvedValueOnce({
+      session_id: 'session-456',
+      engine_elo: 1500,
+      player_color: 'black',
+    })
+
+    render(<ChessGame />)
+
+    fireEvent.click(screen.getByRole('button', { name: /new game/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play black/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }))
+
+    await waitFor(() => {
+      expect(getGhostMoveMock).toHaveBeenCalledWith('session-456', STARTING_FEN)
+    })
   })
 })

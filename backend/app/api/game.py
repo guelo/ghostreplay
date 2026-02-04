@@ -56,11 +56,24 @@ class GameEndResponse(BaseModel):
     ended_at: datetime
 
 
+class GhostMoveMode(str, Enum):
+    """Ghost move response mode."""
+    GHOST = "ghost"
+    ENGINE = "engine"
+
+
 class GhostMoveResponse(BaseModel):
-    fen: str
-    ghost_move: str | None = Field(
+    mode: GhostMoveMode = Field(
+        ...,
+        description="ghost = steering toward blunder, engine = use local Stockfish",
+    )
+    move: str | None = Field(
         None,
-        description="A move that leads to a position where the user previously blundered, or null",
+        description="Next move SAN when mode=ghost, null when mode=engine",
+    )
+    target_blunder_id: int | None = Field(
+        None,
+        description="ID of the blunder being targeted (for debugging/display)",
     )
 
 
@@ -167,7 +180,7 @@ def get_ghost_move(
     position_color = active_color(fen)
     if position_color == session.player_color:
         # It's the user's turn, ghost doesn't suggest user moves
-        return GhostMoveResponse(fen=fen, ghost_move=None)
+        return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
 
     # Look up current position by FEN hash
     current_position = (
@@ -180,10 +193,10 @@ def get_ghost_move(
     )
 
     if not current_position:
-        return GhostMoveResponse(fen=fen, ghost_move=None)
+        return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
 
     # Recursive CTE to find blunders up to 15 moves downstream
-    # Returns the first move in the path that leads to a blunder position
+    # Returns the first move in the path and the target blunder ID
     # Uses string-based path for cycle detection (SQLite/PostgreSQL compatible)
     cte_query = text("""
         WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
@@ -207,7 +220,7 @@ def get_ghost_move(
             WHERE r.depth < 15
               AND INSTR(r.path, ',' || m.to_position_id || ',') = 0
         )
-        SELECT DISTINCT r.first_move
+        SELECT r.first_move, b.id AS blunder_id
         FROM reachable r
         JOIN positions p ON p.id = r.position_id
         JOIN blunders b ON b.position_id = r.position_id
@@ -227,6 +240,10 @@ def get_ghost_move(
     ).fetchone()
 
     if not result:
-        return GhostMoveResponse(fen=fen, ghost_move=None)
+        return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
 
-    return GhostMoveResponse(fen=fen, ghost_move=result[0])
+    return GhostMoveResponse(
+        mode=GhostMoveMode.GHOST,
+        move=result[0],
+        target_blunder_id=result[1],
+    )

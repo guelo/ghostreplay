@@ -403,8 +403,9 @@ def test_ghost_move_returns_opponent_move_to_blunder(client, auth_headers, creat
 
     assert response.status_code == 200
     data = response.json()
-    assert data["fen"] == fen_after_e4
-    assert data["ghost_move"] == "e5"
+    assert data["mode"] == "ghost"
+    assert data["move"] == "e5"
+    assert data["target_blunder_id"] is not None
 
 
 def test_ghost_move_no_blunder_in_path(client, auth_headers, create_game_session):
@@ -422,7 +423,8 @@ def test_ghost_move_no_blunder_in_path(client, auth_headers, create_game_session
     )
 
     assert response.status_code == 200
-    assert response.json()["ghost_move"] is None
+    assert response.json()["mode"] == "engine"
+    assert response.json()["move"] is None
 
 
 def test_ghost_move_users_turn_returns_null(client, auth_headers, create_game_session):
@@ -459,7 +461,8 @@ def test_ghost_move_users_turn_returns_null(client, auth_headers, create_game_se
 
     assert response.status_code == 200
     # It's white's turn, ghost doesn't suggest - user decides
-    assert response.json()["ghost_move"] is None
+    assert response.json()["mode"] == "engine"
+    assert response.json()["move"] is None
 
 
 def test_ghost_move_black_player(client, auth_headers, create_game_session):
@@ -501,7 +504,9 @@ def test_ghost_move_black_player(client, auth_headers, create_game_session):
     )
 
     assert response.status_code == 200
-    assert response.json()["ghost_move"] == "Nf3"
+    assert response.json()["mode"] == "ghost"
+    assert response.json()["move"] == "Nf3"
+    assert response.json()["target_blunder_id"] is not None
 
 
 def test_ghost_move_session_not_found(client, auth_headers):
@@ -593,7 +598,9 @@ def test_ghost_move_finds_blunder_multiple_moves_downstream(client, auth_headers
     assert response.status_code == 200
     data = response.json()
     # Ghost should suggest "e5" - the first move in the path to the blunder position
-    assert data["ghost_move"] == "e5"
+    assert data["mode"] == "ghost"
+    assert data["move"] == "e5"
+    assert data["target_blunder_id"] is not None
 
 
 def _create_position_chain(db_session, user_id: int, length: int):
@@ -672,7 +679,9 @@ def test_ghost_move_finds_blunder_at_max_depth(client, auth_headers, create_game
 
     assert response.status_code == 200
     # Should find the blunder at exactly depth 15
-    assert response.json()["ghost_move"] == "m1"
+    assert response.json()["mode"] == "ghost"
+    assert response.json()["move"] == "m1"
+    assert response.json()["target_blunder_id"] is not None
 
 
 def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_session, db_session):
@@ -710,7 +719,8 @@ def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_sessi
 
     assert response.status_code == 200
     # Should NOT find the blunder at depth 17 (positions 1->2->...->18)
-    assert response.json()["ghost_move"] is None
+    assert response.json()["mode"] == "engine"
+    assert response.json()["move"] is None
 
 
 def test_ghost_move_handles_cycles(client, auth_headers, create_game_session, db_session):
@@ -789,7 +799,9 @@ def test_ghost_move_handles_cycles(client, auth_headers, create_game_session, db
 
     assert response.status_code == 200
     # Should find the blunder despite the cycle, and not hang
-    assert response.json()["ghost_move"] == "a2b"
+    assert response.json()["mode"] == "ghost"
+    assert response.json()["move"] == "a2b"
+    assert response.json()["target_blunder_id"] is not None
 
 
 if __name__ == "__main__":

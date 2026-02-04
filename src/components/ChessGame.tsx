@@ -321,9 +321,9 @@ const ChessGame = () => {
       return;
     }
 
-    void applyEngineMove();
+    void applyOpponentMove(chess.fen());
   }, [
-    applyEngineMove,
+    applyOpponentMove,
     chess,
     engineStatus,
     isGameActive,
