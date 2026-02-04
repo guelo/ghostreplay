@@ -4,11 +4,12 @@ from enum import Enum
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.fen import fen_hash, active_color
-from app.models import Blunder, GameSession, Move, Position
+from app.models import Blunder, GameSession, Position
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/game", tags=["game"])
@@ -181,21 +182,51 @@ def get_ghost_move(
     if not current_position:
         return GhostMoveResponse(fen=fen, ghost_move=None)
 
-    # Find a move from this position that leads to a blunder position
-    # The blunder position must be where it's the user's turn
-    ghost_move = (
-        db.query(Move.move_san)
-        .join(Position, Position.id == Move.to_position_id)
-        .join(Blunder, Blunder.position_id == Move.to_position_id)
-        .filter(
-            Move.from_position_id == current_position.id,
-            Blunder.user_id == user.user_id,
-            Position.active_color == session.player_color,
-        )
-        .first()
-    )
+    # Recursive CTE to find blunders up to 15 moves downstream
+    # Returns the first move in the path that leads to a blunder position
+    # Uses string-based path for cycle detection (SQLite/PostgreSQL compatible)
+    cte_query = text("""
+        WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
+            -- Base case: current position (depth 0, no first_move yet)
+            SELECT
+                :start_position_id,
+                0,
+                ',' || :start_position_id || ',',
+                CAST(NULL AS TEXT)
 
-    if not ghost_move:
+            UNION ALL
+
+            -- Recursive case: follow moves up to depth 15
+            SELECT
+                m.to_position_id,
+                r.depth + 1,
+                r.path || m.to_position_id || ',',
+                COALESCE(r.first_move, m.move_san)
+            FROM reachable r
+            JOIN moves m ON m.from_position_id = r.position_id
+            WHERE r.depth < 15
+              AND INSTR(r.path, ',' || m.to_position_id || ',') = 0
+        )
+        SELECT DISTINCT r.first_move
+        FROM reachable r
+        JOIN positions p ON p.id = r.position_id
+        JOIN blunders b ON b.position_id = r.position_id
+        WHERE b.user_id = :user_id
+          AND p.active_color = :player_color
+          AND r.first_move IS NOT NULL
+        LIMIT 1
+    """)
+
+    result = db.execute(
+        cte_query,
+        {
+            "start_position_id": current_position.id,
+            "user_id": user.user_id,
+            "player_color": session.player_color,
+        },
+    ).fetchone()
+
+    if not result:
         return GhostMoveResponse(fen=fen, ghost_move=None)
 
-    return GhostMoveResponse(fen=fen, ghost_move=ghost_move[0])
+    return GhostMoveResponse(fen=fen, ghost_move=result[0])
