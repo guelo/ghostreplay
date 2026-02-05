@@ -197,12 +197,12 @@ def get_ghost_move(
 
     # Recursive CTE to find blunders up to 15 moves downstream
     # Returns the first move in the path and the target blunder ID
-    # Uses string-based path for cycle detection (SQLite/PostgreSQL compatible)
+    # Uses string-based path for cycle detection
     cte_query = text("""
         WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
             -- Base case: current position (depth 0, no first_move yet)
             SELECT
-                :start_position_id,
+                CAST(:start_position_id AS BIGINT),
                 0,
                 ',' || :start_position_id || ',',
                 CAST(NULL AS TEXT)
@@ -218,7 +218,7 @@ def get_ghost_move(
             FROM reachable r
             JOIN moves m ON m.from_position_id = r.position_id
             WHERE r.depth < 15
-              AND INSTR(r.path, ',' || m.to_position_id || ',') = 0
+              AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'
         )
         SELECT r.first_move, b.id AS blunder_id
         FROM reachable r

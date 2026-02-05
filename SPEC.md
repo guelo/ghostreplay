@@ -197,7 +197,8 @@ graph TD
 
 ## 5. Database Schema
 
-The core innovation is storing chess history as a Graph.
+The core innovation is storing chess history as a Graph. The chesss graph is composed of positions as nodes and moves as edges. A blunder is a move so it is an edge.
+The complication is that the user moves only on every other edge. 
 
 **User Scoping:** All data is scoped per-user. Each user has their own position graph and blunder records. There is no sharing of data between users (MVP).
 
@@ -517,6 +518,8 @@ When the user deviates from the Ghost path, the engine takes over. However, the 
 
 ```
 GET /api/game/ghost-move?session_id=...&fen=...
+After a user makes a move it's /ghost-move's job to see if there's a move that leads to a node where a blunder edge thaat needs to be practiced resides. 
+
 
 1. Compute normalized FEN hash
 2. Look up position by fen_hash in positions table (for this user)
