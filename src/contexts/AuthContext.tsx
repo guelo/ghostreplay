@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   useCallback,
   type ReactNode,
@@ -84,6 +85,15 @@ const storeCredentials = (credentials: Credentials): void => {
   localStorage.setItem(STORAGE_KEYS.credentials, JSON.stringify(credentials))
 }
 
+class AuthError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message)
+  }
+}
+
 /**
  * Call the login API
  */
@@ -99,7 +109,7 @@ const apiLogin = async (
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || 'Login failed')
+    throw new AuthError(error.detail || 'Login failed', response.status)
   }
 
   return response.json()
@@ -140,7 +150,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * 2. If found, login with them
    * 3. If not found, generate new credentials and register
    */
+  const initStarted = useRef(false)
   useEffect(() => {
+    if (initStarted.current) return
+    initStarted.current = true
+
     const initAuth = async () => {
       const storedCredentials = getStoredCredentials()
 
@@ -163,9 +177,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             error: null,
           })
           return
-        } catch {
-          // Stored credentials invalid, generate new ones
-          localStorage.removeItem(STORAGE_KEYS.credentials)
+        } catch (err) {
+          if (err instanceof AuthError && err.status === 401) {
+            // Credentials are genuinely invalid — clear them
+            localStorage.removeItem(STORAGE_KEYS.credentials)
+          } else {
+            // Transient error (network, server down, etc.) — keep credentials
+            setState({
+              user: null,
+              token: null,
+              isLoading: false,
+              error: err instanceof Error ? err.message : 'Authentication failed',
+            })
+            return
+          }
         }
       }
 

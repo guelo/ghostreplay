@@ -110,6 +110,62 @@ describe('AuthContext', () => {
       expect(screen.getByTestId('user-id')).toHaveTextContent('123')
     })
 
+    it('keeps credentials on transient server error', async () => {
+      mockLocalStorage['ghost_replay_credentials'] = JSON.stringify({
+        username: 'ghost_existing',
+        password: 'existing-password-12345678',
+      })
+
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ detail: 'Internal server error' }),
+      })
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      // Should NOT have called register — credentials are preserved
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/auth/login'),
+        expect.any(Object)
+      )
+      // Credentials should still be in localStorage
+      expect(mockLocalStorage['ghost_replay_credentials']).toBeDefined()
+      expect(screen.getByTestId('error')).toHaveTextContent('Internal server error')
+    })
+
+    it('keeps credentials on network error', async () => {
+      mockLocalStorage['ghost_replay_credentials'] = JSON.stringify({
+        username: 'ghost_existing',
+        password: 'existing-password-12345678',
+      })
+
+      mockFetch.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+      expect(mockLocalStorage['ghost_replay_credentials']).toBeDefined()
+      expect(screen.getByTestId('error')).toHaveTextContent('Failed to fetch')
+    })
+
     it('re-registers when stored credentials are invalid', async () => {
       mockLocalStorage['ghost_replay_credentials'] = JSON.stringify({
         username: 'ghost_invalid',
@@ -119,6 +175,7 @@ describe('AuthContext', () => {
       mockFetch
         .mockResolvedValueOnce({
           ok: false,
+          status: 401,
           json: () => Promise.resolve({ detail: 'Invalid credentials' }),
         })
         .mockResolvedValueOnce({
