@@ -92,7 +92,7 @@ describe('lookupOpeningByFen', () => {
     resetOpeningBookCacheForTests()
   })
 
-  it('prefers deeper lines for the same position and includes variation/source', async () => {
+  it('prefers the most general line for the same position and includes variation/source', async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -123,9 +123,8 @@ describe('lookupOpeningByFen', () => {
     )
 
     expect(opening).toEqual({
-      eco: 'C50',
-      name: 'Italian Game: Giuoco Piano',
-      variation: 'Giuoco Piano',
+      eco: 'C20',
+      name: "King's Pawn Game",
       source: 'eco',
     })
   })

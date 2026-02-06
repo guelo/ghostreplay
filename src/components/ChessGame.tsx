@@ -5,6 +5,8 @@ import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useOpponentMove } from "../hooks/useOpponentMove";
+import type { OpeningLookupResult } from "../openings/openingBook";
+import { lookupOpeningByFen } from "../openings/openingBook";
 import { startGame, endGame, recordBlunder } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
 import MoveList from "./MoveList";
@@ -65,6 +67,9 @@ const ChessGame = () => {
   const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isGameActive, setIsGameActive] = useState(false);
+  const [liveOpening, setLiveOpening] = useState<OpeningLookupResult | null>(
+    null
+  );
   const [gameResult, setGameResult] = useState<GameResult | null>(null);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -79,6 +84,7 @@ const ChessGame = () => {
     moveSan: string;
     moveUci: string;
   } | null>(null);
+  const openingLookupRequestIdRef = useRef(0);
 
   // Get the FEN to display on the board (accounts for viewing past positions)
   const displayedFen = useMemo(() => {
@@ -306,6 +312,31 @@ const ChessGame = () => {
 
   useEffect(() => {
     if (!isGameActive) {
+      openingLookupRequestIdRef.current += 1;
+      setLiveOpening(null);
+      return;
+    }
+
+    const requestId = openingLookupRequestIdRef.current + 1;
+    openingLookupRequestIdRef.current = requestId;
+    void lookupOpeningByFen(fen)
+      .then((opening) => {
+        if (openingLookupRequestIdRef.current !== requestId) {
+          return;
+        }
+        if (opening) {
+          setLiveOpening(opening);
+        }
+      })
+      .catch(() => {
+        if (openingLookupRequestIdRef.current !== requestId) {
+          return;
+        }
+      });
+  }, [fen, isGameActive]);
+
+  useEffect(() => {
+    if (!isGameActive) {
       return;
     }
 
@@ -447,6 +478,7 @@ const ChessGame = () => {
       setGameResult(null);
       setMoveHistory([]);
       setViewIndex(null);
+      setLiveOpening(null);
       resetEngine();
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
@@ -486,6 +518,7 @@ const ChessGame = () => {
     setGameResult(null);
     setMoveHistory([]);
     setViewIndex(null);
+    setLiveOpening(null);
     resetEngine();
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
@@ -547,6 +580,16 @@ const ChessGame = () => {
               Opponent:{" "}
               <span className="chess-meta-strong">
                 {opponentMode === "ghost" ? "Ghost" : "Engine"}
+              </span>
+            </p>
+          )}
+          {isGameActive && (
+            <p className="chess-meta">
+              Opening:{" "}
+              <span className="chess-meta-strong">
+                {liveOpening
+                  ? `${liveOpening.eco} ${liveOpening.name}`
+                  : "Unknown"}
               </span>
             </p>
           )}

@@ -67,7 +67,8 @@ const compareCandidates = (a: OpeningCandidate, b: OpeningCandidate): number => 
     return b.ply - a.ply
   }
   if (a.linePlyCount !== b.linePlyCount) {
-    return b.linePlyCount - a.linePlyCount
+    // Prefer the most general line at the current position.
+    return a.linePlyCount - b.linePlyCount
   }
   const ecoCompare = a.entry.eco.localeCompare(b.entry.eco)
   if (ecoCompare !== 0) {

@@ -15,6 +15,7 @@ vi.mock('../utils/api', () => ({
 }))
 
 const evaluatePositionMock = vi.fn()
+const lookupOpeningByFenMock = vi.fn()
 
 vi.mock('../hooks/useStockfishEngine', () => ({
   useStockfishEngine: () => ({
@@ -25,6 +26,10 @@ vi.mock('../hooks/useStockfishEngine', () => ({
     evaluatePosition: evaluatePositionMock,
     resetEngine: vi.fn(),
   }),
+}))
+
+vi.mock('../openings/openingBook', () => ({
+  lookupOpeningByFen: (...args: unknown[]) => lookupOpeningByFenMock(...args),
 }))
 
 let mockLastAnalysis: {
@@ -70,8 +75,10 @@ describe('ChessGame start flow', () => {
     startGameMock.mockReset()
     endGameMock.mockReset()
     getGhostMoveMock.mockReset()
+    lookupOpeningByFenMock.mockReset()
     // Default: no ghost move available, fall back to engine
     getGhostMoveMock.mockResolvedValue({ mode: 'engine', move: null, target_blunder_id: null })
+    lookupOpeningByFenMock.mockResolvedValue(null)
   })
 
   afterEach(() => {
@@ -135,6 +142,7 @@ describe('ChessGame blunder recording', () => {
     recordBlunderMock.mockReset()
     mockAnalyzeMove.mockReset()
     evaluatePositionMock.mockReset()
+    lookupOpeningByFenMock.mockReset()
     mockLastAnalysis = null
     capturedPieceDrop = null
 
@@ -145,6 +153,7 @@ describe('ChessGame blunder recording', () => {
     })
     // Return a valid engine move so applyEngineMove succeeds
     evaluatePositionMock.mockResolvedValue({ move: 'd7d5' })
+    lookupOpeningByFenMock.mockResolvedValue(null)
     recordBlunderMock.mockResolvedValue({
       blunder_id: 1,
       position_id: 10,
@@ -415,3 +424,125 @@ describe('ChessGame blunder recording', () => {
   })
 })
 
+describe('ChessGame opening display', () => {
+  beforeEach(() => {
+    startGameMock.mockReset()
+    getGhostMoveMock.mockReset()
+    evaluatePositionMock.mockReset()
+    lookupOpeningByFenMock.mockReset()
+    capturedPieceDrop = null
+
+    getGhostMoveMock.mockResolvedValue({
+      mode: 'engine',
+      move: null,
+      target_blunder_id: null,
+    })
+    evaluatePositionMock.mockResolvedValue({ move: 'e7e5' })
+    lookupOpeningByFenMock.mockResolvedValue({
+      eco: 'C20',
+      name: "King's Pawn Game",
+      source: 'eco',
+    })
+  })
+
+  it('shows opening only during an active game', async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: 'session-opening',
+      engine_elo: 1500,
+      player_color: 'white',
+    })
+
+    render(<ChessGame />)
+
+    expect(screen.queryByText(/^Opening:/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /new game/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play white/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Opening:')).toBeInTheDocument()
+      expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /reset/i }))
+    expect(screen.queryByText(/^Opening:/i)).not.toBeInTheDocument()
+  })
+
+  it('keeps opening tied to live position while navigating history', async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: 'session-live-opening',
+      engine_elo: 1500,
+      player_color: 'white',
+    })
+    lookupOpeningByFenMock.mockResolvedValue({
+      eco: 'C50',
+      name: 'Italian Game',
+      source: 'eco',
+    })
+
+    render(<ChessGame />)
+
+    fireEvent.click(screen.getByRole('button', { name: /new game/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play white/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }))
+
+    await waitFor(() => {
+      expect(lookupOpeningByFenMock).toHaveBeenCalled()
+    })
+
+    const initialLookupCount = lookupOpeningByFenMock.mock.calls.length
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(lookupOpeningByFenMock.mock.calls.length).toBeGreaterThan(
+        initialLookupCount,
+      )
+      expect(screen.getByText('C50 Italian Game')).toBeInTheDocument()
+    })
+
+    const afterMoveLookupCount = lookupOpeningByFenMock.mock.calls.length
+    fireEvent.click(screen.getByTitle(/previous move/i))
+
+    expect(screen.getByText('C50 Italian Game')).toBeInTheDocument()
+    expect(lookupOpeningByFenMock.mock.calls.length).toBe(afterMoveLookupCount)
+  })
+
+  it('keeps showing the last known opening after leaving book', async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: 'session-sticky-opening',
+      engine_elo: 1500,
+      player_color: 'white',
+    })
+    lookupOpeningByFenMock
+      .mockResolvedValueOnce({
+        eco: 'C20',
+        name: "King's Pawn Game",
+        source: 'eco',
+      })
+      .mockResolvedValue(null)
+
+    render(<ChessGame />)
+
+    fireEvent.click(screen.getByRole('button', { name: /new game/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play white/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(lookupOpeningByFenMock.mock.calls.length).toBeGreaterThanOrEqual(2)
+    })
+
+    expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument()
+  })
+})
