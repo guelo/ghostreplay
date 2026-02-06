@@ -9,7 +9,8 @@ import type {
   AnalysisWorkerResponse,
   AnalyzeMoveMessage,
 } from './analysisMessages'
-import type { EngineInfo, EngineScore } from './stockfishMessages'
+import type { EngineScore } from './stockfishMessages'
+import { parseInfo, scoreForPlayer, getSideToMove, isBlunder } from './analysisUtils'
 
 const ctx = self as DedicatedWorkerGlobalScope
 
@@ -58,72 +59,6 @@ const ensureEngine = async () => {
   return engine
 }
 
-type ParsedInfo = Pick<EngineInfo, 'score'>
-
-const parseInfo = (line: string): ParsedInfo | null => {
-  if (!line.startsWith('info')) {
-    return null
-  }
-
-  const tokens = line.split(' ')
-  const scoreIndex = tokens.indexOf('score')
-
-  if (scoreIndex === -1) {
-    return null
-  }
-
-  const scoreType = tokens[scoreIndex + 1]
-  const scoreValue = Number(tokens[scoreIndex + 2])
-
-  if (Number.isNaN(scoreValue) || (scoreType !== 'cp' && scoreType !== 'mate')) {
-    return null
-  }
-
-  return {
-    score: {
-      type: scoreType,
-      value: scoreValue,
-    },
-  }
-}
-
-const mateToCp = (movesToMate: number) => {
-  const mateBase = 10000
-  const mateDecay = 10
-  const sign = movesToMate >= 0 ? 1 : -1
-  return sign * (mateBase - Math.abs(movesToMate) * mateDecay)
-}
-
-const normalizeScore = (score: EngineScore | null, sideToMove: 'w' | 'b') => {
-  if (!score) {
-    return null
-  }
-
-  const raw = score.type === 'cp' ? score.value : mateToCp(score.value)
-  const sign = sideToMove === 'w' ? 1 : -1
-  return raw * sign
-}
-
-const scoreForPlayer = (
-  score: EngineScore | null,
-  sideToMove: 'w' | 'b',
-  playerColor: 'white' | 'black',
-) => {
-  const whitePerspective = normalizeScore(score, sideToMove)
-  if (whitePerspective === null) {
-    return null
-  }
-  return playerColor === 'white' ? whitePerspective : -whitePerspective
-}
-
-const getSideToMove = (fen: string) => {
-  const parts = fen.split(' ')
-  const active = parts[1]
-  if (active === 'w' || active === 'b') {
-    return active
-  }
-  return null
-}
 
 const runSearch = async (fen: string, moves: string[]) => {
   const pendingEngine = await ensureEngine()
@@ -256,7 +191,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   const delta =
     bestEval !== null && playedEval !== null ? bestEval - playedEval : null
-  const blunder = delta !== null && delta >= 150
+  const blunder = isBlunder(delta)
 
   ctx.postMessage({
     type: 'analysis',

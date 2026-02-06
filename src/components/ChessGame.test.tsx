@@ -1,16 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '../test/utils'
+import { render, screen, fireEvent, waitFor, act } from '../test/utils'
 import ChessGame from './ChessGame'
 
 const startGameMock = vi.fn()
 const endGameMock = vi.fn()
 const getGhostMoveMock = vi.fn()
+const recordBlunderMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
   getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
+  recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
 }))
+
+const evaluatePositionMock = vi.fn()
 
 vi.mock('../hooks/useStockfishEngine', () => ({
   useStockfishEngine: () => ({
@@ -18,25 +22,47 @@ vi.mock('../hooks/useStockfishEngine', () => ({
     error: null,
     info: null,
     isThinking: false,
-    evaluatePosition: vi.fn(),
+    evaluatePosition: evaluatePositionMock,
     resetEngine: vi.fn(),
   }),
 }))
 
+let mockLastAnalysis: {
+  id: string
+  move: string
+  bestMove: string
+  bestEval: number | null
+  playedEval: number | null
+  currentPositionEval: number | null
+  delta: number | null
+  blunder: boolean
+} | null = null
+const mockAnalyzeMove = vi.fn()
+
 vi.mock('../hooks/useMoveAnalysis', () => ({
   useMoveAnalysis: () => ({
-    analyzeMove: vi.fn(),
-    lastAnalysis: null,
+    analyzeMove: mockAnalyzeMove,
+    lastAnalysis: mockLastAnalysis,
     status: 'ready',
     isAnalyzing: false,
     analyzingMove: null,
   }),
 }))
 
+// Capture onPieceDrop from the Chessboard mock so tests can simulate moves
+let capturedPieceDrop: ((args: { sourceSquare: string; targetSquare: string }) => boolean) | null =
+  null
+
 vi.mock('react-chessboard', () => ({
-  Chessboard: ({ options }: { options: { boardOrientation: string } }) => (
-    <div data-testid="chessboard" data-orientation={options.boardOrientation} />
-  ),
+  Chessboard: ({ options }: { options: Record<string, unknown> }) => {
+    capturedPieceDrop = options.onPieceDrop as typeof capturedPieceDrop
+    return (
+      <div
+        data-testid="chessboard"
+        data-orientation={options.boardOrientation as string}
+      />
+    )
+  },
 }))
 
 describe('ChessGame start flow', () => {
@@ -98,3 +124,294 @@ describe('ChessGame start flow', () => {
     })
   })
 })
+
+describe('ChessGame blunder recording', () => {
+  beforeEach(() => {
+    // jsdom doesn't implement scrollIntoView
+    window.HTMLElement.prototype.scrollIntoView = vi.fn()
+    startGameMock.mockReset()
+    endGameMock.mockReset()
+    getGhostMoveMock.mockReset()
+    recordBlunderMock.mockReset()
+    mockAnalyzeMove.mockReset()
+    evaluatePositionMock.mockReset()
+    mockLastAnalysis = null
+    capturedPieceDrop = null
+
+    getGhostMoveMock.mockResolvedValue({
+      mode: 'engine',
+      move: null,
+      target_blunder_id: null,
+    })
+    // Return a valid engine move so applyEngineMove succeeds
+    evaluatePositionMock.mockResolvedValue({ move: 'd7d5' })
+    recordBlunderMock.mockResolvedValue({
+      blunder_id: 1,
+      position_id: 10,
+      positions_created: 3,
+      is_new: true,
+    })
+  })
+
+  afterEach(() => {
+    mockLastAnalysis = null
+    vi.restoreAllMocks()
+  })
+
+  const startGameAsWhite = async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: 'session-blunder',
+      engine_elo: 1500,
+      player_color: 'white',
+    })
+
+    const renderResult = render(<ChessGame />)
+
+    fireEvent.click(screen.getByRole('button', { name: /new game/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play white/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }))
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled()
+    })
+
+    return renderResult
+  }
+
+  it('calls recordBlunder when analysis detects a blunder after user move', async () => {
+    // When analyzeMove is called (during handleDrop), set up a blunder result
+    // for the next render cycle
+    mockAnalyzeMove.mockImplementation(() => {
+      mockLastAnalysis = {
+        id: 'test-blunder',
+        move: 'e2e4',
+        bestMove: 'd2d4',
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        delta: 200,
+        blunder: true,
+      }
+    })
+
+    const { rerender } = await startGameAsWhite()
+
+    // Simulate user making a move (e2 to e4)
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    // Wait for analyzeMove to be called
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.stringContaining('rnbqkbnr'), // FEN before move
+        'e2e4',
+        'white',
+      )
+    })
+
+    // Re-render to pick up the new lastAnalysis from the mock
+    rerender(<ChessGame />)
+
+    await waitFor(() => {
+      expect(recordBlunderMock).toHaveBeenCalledWith(
+        'session-blunder',
+        expect.any(String), // PGN
+        expect.stringContaining('rnbqkbnr'), // FEN before move
+        'e4', // SAN format
+        'd2d4', // best move
+        50, // eval before
+        -150, // eval after
+      )
+    })
+  })
+
+  it('does not call recordBlunder for non-blunder analysis', async () => {
+    mockAnalyzeMove.mockImplementation(() => {
+      mockLastAnalysis = {
+        id: 'test-ok',
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 40,
+        currentPositionEval: 40,
+        delta: 10,
+        blunder: false,
+      }
+    })
+
+    const { rerender } = await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalled()
+    })
+
+    rerender(<ChessGame />)
+
+    // Give effects time to run
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(recordBlunderMock).not.toHaveBeenCalled()
+  })
+
+  it('records only the first blunder per session (first-only rule)', async () => {
+    mockAnalyzeMove.mockImplementation(() => {
+      mockLastAnalysis = {
+        id: 'blunder-1',
+        move: 'e2e4',
+        bestMove: 'd2d4',
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        delta: 200,
+        blunder: true,
+      }
+    })
+
+    const { rerender } = await startGameAsWhite()
+
+    // First move triggers first blunder
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalled()
+    })
+
+    rerender(<ChessGame />)
+
+    await waitFor(() => {
+      expect(recordBlunderMock).toHaveBeenCalledTimes(1)
+    })
+
+    // Simulate a second blunder (different analysis object to trigger useEffect)
+    mockLastAnalysis = {
+      id: 'blunder-2',
+      move: 'e2e4',
+      bestMove: 'g1f3',
+      bestEval: 100,
+      playedEval: -200,
+      currentPositionEval: -200,
+      delta: 300,
+      blunder: true,
+    }
+
+    rerender(<ChessGame />)
+
+    // Wait for any effects
+    await new Promise((r) => setTimeout(r, 50))
+
+    // Should still be exactly 1 call - second blunder NOT recorded
+    expect(recordBlunderMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not call recordBlunder when move UCI does not match analysis', async () => {
+    // Analysis is for a different move than what was played
+    mockAnalyzeMove.mockImplementation(() => {
+      mockLastAnalysis = {
+        id: 'test-mismatch',
+        move: 'g1f3', // Analysis is for Nf3, not e4
+        bestMove: 'd2d4',
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        delta: 200,
+        blunder: true,
+      }
+    })
+
+    const { rerender } = await startGameAsWhite()
+
+    // User plays e2e4, but analysis will claim it's for g1f3
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalled()
+    })
+
+    rerender(<ChessGame />)
+
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(recordBlunderMock).not.toHaveBeenCalled()
+  })
+
+  it('does not call recordBlunder when no session is active', async () => {
+    // Don't start a game - just render with no session
+    mockLastAnalysis = {
+      id: 'no-session',
+      move: 'e2e4',
+      bestMove: 'd2d4',
+      bestEval: 50,
+      playedEval: -150,
+      currentPositionEval: -150,
+      delta: 200,
+      blunder: true,
+    }
+
+    render(<ChessGame />)
+
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(recordBlunderMock).not.toHaveBeenCalled()
+  })
+
+  it('does not retry recordBlunder on API failure', async () => {
+    recordBlunderMock.mockRejectedValueOnce(new Error('Network error'))
+
+    mockAnalyzeMove.mockImplementation(() => {
+      mockLastAnalysis = {
+        id: 'fail-test',
+        move: 'e2e4',
+        bestMove: 'd2d4',
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        delta: 200,
+        blunder: true,
+      }
+    })
+
+    const { rerender } = await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalled()
+    })
+
+    rerender(<ChessGame />)
+
+    await waitFor(() => {
+      expect(recordBlunderMock).toHaveBeenCalledTimes(1)
+    })
+
+    // Even after a second analysis result, no retry since blunderRecordedRef is true
+    mockLastAnalysis = {
+      id: 'fail-test-2',
+      move: 'e2e4',
+      bestMove: 'd2d4',
+      bestEval: 50,
+      playedEval: -150,
+      currentPositionEval: -150,
+      delta: 200,
+      blunder: true,
+    }
+
+    rerender(<ChessGame />)
+
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(recordBlunderMock).toHaveBeenCalledTimes(1)
+  })
+})
+
