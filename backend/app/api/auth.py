@@ -12,7 +12,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
+    password: str = Field(..., min_length=6)
 
 
 class RegisterResponse(BaseModel):
@@ -23,7 +23,7 @@ class RegisterResponse(BaseModel):
 
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
-    password: str = Field(..., min_length=8)
+    password: str = Field(..., min_length=6)
 
 
 class LoginResponse(BaseModel):
@@ -105,7 +105,7 @@ def login(
 
 class ClaimRequest(BaseModel):
     new_username: str = Field(..., min_length=3, max_length=50)
-    new_password: str = Field(..., min_length=8)
+    new_password: str = Field(..., min_length=6)
 
 
 class ClaimResponse(BaseModel):

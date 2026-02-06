@@ -36,7 +36,7 @@ interface AuthState {
 interface AuthContextValue extends AuthState {
   login: (username: string, password: string) => Promise<void>
   logout: () => void
-  claimAccount: (email: string, password: string) => Promise<void>
+  claimAccount: (newUsername: string, newPassword: string) => Promise<void>
 }
 
 interface AuthResponse {
@@ -110,6 +110,31 @@ const apiLogin = async (
   if (!response.ok) {
     const error = await response.json().catch(() => ({}))
     throw new AuthError(error.detail || 'Login failed', response.status)
+  }
+
+  return response.json()
+}
+
+/**
+ * Call the claim API to upgrade an anonymous account
+ */
+const apiClaim = async (
+  token: string,
+  newUsername: string,
+  newPassword: string,
+): Promise<AuthResponse> => {
+  const response = await fetch(`${API_BASE_URL}/api/auth/claim`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ new_username: newUsername, new_password: newPassword }),
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new AuthError(error.detail || 'Account claim failed', response.status)
   }
 
   return response.json()
@@ -283,11 +308,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const claimAccount = useCallback(
-    async (_email: string, _password: string) => {
-      // TODO: Implement account claim endpoint
-      throw new Error('Account claim not yet implemented')
+    async (newUsername: string, newPassword: string) => {
+      if (!state.token) {
+        throw new Error('Must be logged in to claim account')
+      }
+      setState((prev) => ({ ...prev, isLoading: true, error: null }))
+      try {
+        const response = await apiClaim(state.token, newUsername, newPassword)
+        storeCredentials({ username: newUsername, password: newPassword })
+        localStorage.setItem(STORAGE_KEYS.token, response.token)
+        setState({
+          user: {
+            id: response.user_id,
+            username: response.username,
+            isAnonymous: false,
+          },
+          token: response.token,
+          isLoading: false,
+          error: null,
+        })
+      } catch (err) {
+        setState((prev) => ({
+          ...prev,
+          isLoading: false,
+          error: err instanceof Error ? err.message : 'Account claim failed',
+        }))
+        throw err
+      }
     },
-    []
+    [state.token]
   )
 
   return (
