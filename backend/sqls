@@ -1,0 +1,24 @@
+
+  WITH RECURSIVE backtrack AS (
+    SELECT b.position_id,
+           NULL::text AS move_san,
+           0 AS depth,
+           ',' || b.position_id::text || ',' AS path
+    FROM blunders b
+    WHERE b.id = 7
+
+    UNION ALL
+
+    SELECT m.from_position_id,
+           m.move_san,
+           bt.depth + 1,
+           bt.path || m.from_position_id || ','
+    FROM backtrack bt
+    JOIN moves m ON m.to_position_id = bt.position_id
+    WHERE bt.depth < 60
+      AND bt.path NOT LIKE '%,' || m.from_position_id::text || ',%'
+  )
+  SELECT depth, move_san, position_id
+  FROM backtrack
+  WHERE move_san IS NOT NULL
+  ORDER BY depth DESC, move_san;
