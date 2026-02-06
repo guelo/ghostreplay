@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { startGame, endGame, recordBlunder, getGhostMove } from './api'
+import { ApiError, startGame, endGame, recordBlunder, getGhostMove } from './api'
 
 const fetchMock = vi.fn()
 vi.stubGlobal('fetch', fetchMock)
@@ -16,9 +16,15 @@ const localStorageMock = {
 }
 Object.defineProperty(window, 'localStorage', { value: localStorageMock, writable: true })
 
-const mockResponse = (data: Record<string, unknown>, ok = true, statusText = 'OK') => {
+const mockResponse = (
+  data: Record<string, unknown>,
+  ok = true,
+  statusText = 'OK',
+  status = ok ? 200 : 500,
+) => {
   fetchMock.mockResolvedValueOnce({
     ok,
+    status,
     statusText,
     json: () => Promise.resolve(data),
   })
@@ -71,7 +77,7 @@ describe('startGame', () => {
   })
 
   it('throws on non-ok response', async () => {
-    mockResponse({}, false, 'Internal Server Error')
+    mockResponse({}, false, 'Internal Server Error', 500)
 
     await expect(startGame()).rejects.toThrow(
       'Failed to start game: Internal Server Error',
@@ -140,7 +146,7 @@ describe('endGame', () => {
   })
 
   it('throws on non-ok response', async () => {
-    mockResponse({}, false, 'Not Found')
+    mockResponse({}, false, 'Not Found', 404)
 
     await expect(endGame('sess-1', 'resign', '')).rejects.toThrow(
       'Failed to end game: Not Found',
@@ -208,7 +214,7 @@ describe('recordBlunder', () => {
   })
 
   it('throws on non-ok response', async () => {
-    mockResponse({}, false, 'Unprocessable Entity')
+    mockResponse({}, false, 'Unprocessable Entity', 422)
 
     await expect(
       recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100),
@@ -263,10 +269,58 @@ describe('getGhostMove', () => {
   })
 
   it('throws on non-ok response', async () => {
-    mockResponse({}, false, 'Forbidden')
+    mockResponse({}, false, 'Forbidden', 403)
 
     await expect(getGhostMove('sess-1', 'fen')).rejects.toThrow(
       'Failed to get ghost move: Forbidden',
     )
+  })
+
+  it('retries idempotent request on retryable server errors', async () => {
+    mockResponse(
+      {
+        detail: 'Internal server error',
+        error: { code: 'internal_error', message: 'Internal server error', retryable: true },
+      },
+      false,
+      'Internal Server Error',
+      500,
+    )
+    mockResponse({ mode: 'ghost', move: 'e4', target_blunder_id: 11 }, true, 'OK', 200)
+
+    const result = await getGhostMove('sess-1', 'fen')
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(result).toEqual({ mode: 'ghost', move: 'e4', target_blunder_id: 11 })
+  })
+
+  it('throws typed ApiError with normalized fields', async () => {
+    mockResponse(
+      {
+        detail: 'Internal server error',
+        error: {
+          code: 'internal_error',
+          message: 'Database unavailable',
+          details: { service: 'postgres' },
+          retryable: false,
+        },
+      },
+      false,
+      'Internal Server Error',
+      503,
+    )
+
+    try {
+      await getGhostMove('sess-1', 'fen')
+      throw new Error('Expected getGhostMove to fail')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError)
+      const apiError = error as ApiError
+      expect(apiError.status).toBe(503)
+      expect(apiError.code).toBe('internal_error')
+      expect(apiError.message).toBe('Database unavailable')
+      expect(apiError.retryable).toBe(false)
+      expect(apiError.details).toEqual({ service: 'postgres' })
+    }
   })
 })

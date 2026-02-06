@@ -3,6 +3,7 @@
  */
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const RETRY_BASE_DELAY_MS = 200
 
 /**
  * Get headers for authenticated API requests, including JWT token if available.
@@ -13,6 +14,118 @@ const getAuthHeaders = (): Record<string, string> => {
     'Content-Type': 'application/json',
     ...(token && { Authorization: `Bearer ${token}` }),
   }
+}
+
+type ApiErrorEnvelope = {
+  detail?: string
+  error?: {
+    code?: string
+    message?: string
+    details?: unknown
+    retryable?: boolean
+  }
+}
+
+export class ApiError extends Error {
+  status: number
+  code: string
+  details: unknown
+  retryable: boolean
+
+  constructor(
+    message: string,
+    options: {
+      status: number
+      code?: string
+      details?: unknown
+      retryable?: boolean
+    },
+  ) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = options.status
+    this.code = options.code ?? `http_${options.status}`
+    this.details = options.details
+    this.retryable =
+      options.retryable ?? (options.status === 429 || options.status >= 500)
+  }
+}
+
+const delay = async (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms))
+
+const parseJsonSafely = async (
+  response: Response,
+): Promise<ApiErrorEnvelope | null> => {
+  try {
+    return (await response.json()) as ApiErrorEnvelope
+  } catch {
+    return null
+  }
+}
+
+const getErrorMessage = (
+  payload: ApiErrorEnvelope | null,
+  fallback: string,
+  statusText: string,
+): string => {
+  if (payload?.error?.message) return payload.error.message
+  if (payload?.detail) return payload.detail
+  return `${fallback}: ${statusText}`
+}
+
+const createApiError = async (
+  response: Response,
+  fallbackMessage: string,
+): Promise<ApiError> => {
+  const payload = await parseJsonSafely(response)
+  const message = getErrorMessage(payload, fallbackMessage, response.statusText)
+  return new ApiError(message, {
+    status: response.status,
+    code: payload?.error?.code,
+    details: payload?.error?.details,
+    retryable: payload?.error?.retryable,
+  })
+}
+
+const requestJson = async <T>(
+  url: string,
+  init: RequestInit,
+  options?: { retries?: number; fallbackMessage?: string },
+): Promise<T> => {
+  const retries = options?.retries ?? 0
+  const method = init.method ?? 'GET'
+  const fallbackMessage =
+    options?.fallbackMessage ?? `Request failed: ${method} ${url}`
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetch(url, init)
+      if (response.ok) {
+        return response.json() as Promise<T>
+      }
+
+      const apiError = await createApiError(response, fallbackMessage)
+      if (attempt < retries && apiError.retryable) {
+        await delay(RETRY_BASE_DELAY_MS * 2 ** attempt)
+        continue
+      }
+      throw apiError
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error
+      }
+
+      const isNetworkRetryable = attempt < retries
+      if (isNetworkRetryable) {
+        await delay(RETRY_BASE_DELAY_MS * 2 ** attempt)
+        continue
+      }
+      throw error
+    }
+  }
+
+  throw new Error('Unexpected retry loop exit')
 }
 
 interface StartGameRequest {
@@ -68,20 +181,14 @@ export const startGame = async (
   engineElo: number = 1500,
   playerColor: StartGameRequest['player_color'] = 'white',
 ): Promise<StartGameResponse> => {
-  const response = await fetch(`${API_BASE_URL}/api/game/start`, {
+  return requestJson<StartGameResponse>(`${API_BASE_URL}/api/game/start`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({
       engine_elo: engineElo,
       player_color: playerColor,
     } satisfies StartGameRequest),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Failed to start game: ${response.statusText}`)
-  }
-
-  return response.json()
+  }, { fallbackMessage: 'Failed to start game' })
 }
 
 /**
@@ -92,17 +199,11 @@ export const endGame = async (
   result: EndGameRequest['result'],
   pgn: string
 ): Promise<EndGameResponse> => {
-  const response = await fetch(`${API_BASE_URL}/api/game/end`, {
+  return requestJson<EndGameResponse>(`${API_BASE_URL}/api/game/end`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({ session_id: sessionId, result, pgn } satisfies EndGameRequest),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Failed to end game: ${response.statusText}`)
-  }
-
-  return response.json()
+  }, { fallbackMessage: 'Failed to end game' })
 }
 
 /**
@@ -117,7 +218,7 @@ export const recordBlunder = async (
   evalBefore: number,
   evalAfter: number,
 ): Promise<BlunderResponse> => {
-  const response = await fetch(`${API_BASE_URL}/api/blunder`, {
+  return requestJson<BlunderResponse>(`${API_BASE_URL}/api/blunder`, {
     method: 'POST',
     headers: getAuthHeaders(),
     body: JSON.stringify({
@@ -129,13 +230,7 @@ export const recordBlunder = async (
       eval_before: evalBefore,
       eval_after: evalAfter,
     } satisfies BlunderRequest),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Failed to record blunder: ${response.statusText}`)
-  }
-
-  return response.json()
+  }, { fallbackMessage: 'Failed to record blunder' })
 }
 
 /**
@@ -150,14 +245,8 @@ export const getGhostMove = async (
     fen,
   })
 
-  const response = await fetch(`${API_BASE_URL}/api/game/ghost-move?${params}`, {
+  return requestJson<GhostMoveResponse>(`${API_BASE_URL}/api/game/ghost-move?${params}`, {
     method: 'GET',
     headers: getAuthHeaders(),
-  })
-
-  if (!response.ok) {
-    throw new Error(`Failed to get ghost move: ${response.statusText}`)
-  }
-
-  return response.json()
+  }, { retries: 2, fallbackMessage: 'Failed to get ghost move' })
 }
