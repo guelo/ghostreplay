@@ -9,6 +9,7 @@ import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
 import { startGame, endGame, recordBlunder } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
+import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
 import MoveList from "./MoveList";
 
 type BoardOrientation = "white" | "black";
@@ -60,9 +61,11 @@ const ChessGame = () => {
   const {
     analyzeMove,
     lastAnalysis,
+    analysisMap,
     status: analysisStatus,
     isAnalyzing,
     analyzingMove,
+    clearAnalysis,
   } = useMoveAnalysis();
   const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -74,6 +77,10 @@ const ChessGame = () => {
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [showStartOverlay, setShowStartOverlay] = useState(false);
+
+  // Tracks next move index synchronously so async callbacks (engine/ghost)
+  // don't read stale moveHistory.length from closures.
+  const moveCountRef = useRef(0);
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -96,6 +103,21 @@ const ChessGame = () => {
     }
     return moveHistory[viewIndex]?.fen ?? fen;
   }, [viewIndex, fen, moveHistory]);
+
+  // Enrich moves with analysis data for MoveList annotations
+  const annotatedMoves = useMemo(() => {
+    return moveHistory.map((m, i) => {
+      const analysis = analysisMap.get(i);
+      return {
+        san: m.san,
+        classification: analysis ? classifyMove(analysis.delta) : undefined,
+        eval:
+          analysis?.playedEval != null
+            ? toWhitePerspective(analysis.playedEval, i)
+            : undefined,
+      };
+    });
+  }, [moveHistory, analysisMap]);
 
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
@@ -207,9 +229,13 @@ const ChessGame = () => {
       return "Analyst is ready.";
     }
 
+    const whitePerspectiveEval = toWhitePerspective(
+      lastAnalysis.currentPositionEval,
+      lastAnalysis.moveIndex,
+    );
     const evalText =
-      lastAnalysis.currentPositionEval !== null
-        ? ` Eval: ${lastAnalysis.currentPositionEval > 0 ? "+" : ""}${(lastAnalysis.currentPositionEval / 100).toFixed(2)}`
+      whitePerspectiveEval !== null
+        ? ` Eval: ${whitePerspectiveEval > 0 ? "+" : ""}${(whitePerspectiveEval / 100).toFixed(2)}`
         : "";
 
     if (lastAnalysis.blunder && lastAnalysis.delta !== null) {
@@ -232,9 +258,12 @@ const ChessGame = () => {
     return "Analyst is ready.";
   })();
 
+  const opponentColor = playerColor === "white" ? "black" : "white";
+
   const applyEngineMove = useCallback(async () => {
     try {
-      const result = await evaluatePosition(chess.fen());
+      const fenBeforeMove = chess.fen();
+      const result = await evaluatePosition(fenBeforeMove);
 
       if (result.move === "(none)") {
         setEngineMessage("Stockfish has no legal moves.");
@@ -251,6 +280,7 @@ const ChessGame = () => {
       }
 
       const newFen = chess.fen();
+      const moveIndex = moveCountRef.current++;
       setFen(newFen);
       setMoveHistory((prev) => [
         ...prev,
@@ -258,6 +288,9 @@ const ChessGame = () => {
       ]);
       setViewIndex(null); // Ensure we're viewing the live position
       setEngineMessage(null);
+
+      const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
+      analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
 
       // Check if the engine's move ended the game
       if (chess.isGameOver()) {
@@ -270,11 +303,12 @@ const ChessGame = () => {
           : "Unable to apply Stockfish move.";
       setEngineMessage(message);
     }
-  }, [chess, evaluatePosition, handleGameEnd]);
+  }, [chess, evaluatePosition, handleGameEnd, analyzeMove, opponentColor]);
 
   const applyGhostMove = useCallback(
     async (sanMove: string) => {
       try {
+        const fenBeforeMove = chess.fen();
         const appliedMove = chess.move(sanMove);
 
         if (!appliedMove) {
@@ -282,6 +316,7 @@ const ChessGame = () => {
         }
 
         const newFen = chess.fen();
+        const moveIndex = moveCountRef.current++;
         setFen(newFen);
         setMoveHistory((prev) => [
           ...prev,
@@ -289,6 +324,9 @@ const ChessGame = () => {
         ]);
         setViewIndex(null);
         setEngineMessage(null);
+
+        const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
+        analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
 
         if (chess.isGameOver()) {
           await handleGameEnd();
@@ -301,7 +339,7 @@ const ChessGame = () => {
         setEngineMessage(message);
       }
     },
-    [chess, handleGameEnd]
+    [chess, handleGameEnd, analyzeMove, opponentColor]
   );
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
@@ -423,6 +461,7 @@ const ChessGame = () => {
     }
 
     const newFen = chess.fen();
+    const moveIndex = moveCountRef.current++;
     setFen(newFen);
     setMoveHistory((prev) => [...prev, { san: move.san, fen: newFen }]);
     setViewIndex(null); // Ensure we're viewing the live position
@@ -435,7 +474,7 @@ const ChessGame = () => {
       moveSan: move.san,
       moveUci: uciMove,
     };
-    analyzeMove(fenBeforeMove, uciMove, playerColor);
+    analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex);
 
     if (chess.isGameOver()) {
       void handleGameEnd();
@@ -477,9 +516,11 @@ const ChessGame = () => {
       setEngineMessage(null);
       setGameResult(null);
       setMoveHistory([]);
+      moveCountRef.current = 0;
       setViewIndex(null);
       setLiveOpening(null);
       resetEngine();
+      clearAnalysis();
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
       resetMode();
@@ -517,9 +558,11 @@ const ChessGame = () => {
     setIsGameActive(false);
     setGameResult(null);
     setMoveHistory([]);
+    moveCountRef.current = 0;
     setViewIndex(null);
     setLiveOpening(null);
     resetEngine();
+    clearAnalysis();
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
@@ -715,7 +758,7 @@ const ChessGame = () => {
         </div>
 
         <MoveList
-          moves={moveHistory}
+          moves={annotatedMoves}
           currentIndex={viewIndex}
           onNavigate={handleNavigate}
         />

@@ -48,9 +48,11 @@ vi.mock('../hooks/useMoveAnalysis', () => ({
   useMoveAnalysis: () => ({
     analyzeMove: mockAnalyzeMove,
     lastAnalysis: mockLastAnalysis,
+    analysisMap: new Map(),
     status: 'ready',
     isAnalyzing: false,
     analyzingMove: null,
+    clearAnalysis: vi.fn(),
   }),
 }))
 
@@ -216,6 +218,7 @@ describe('ChessGame blunder recording', () => {
         expect.stringContaining('rnbqkbnr'), // FEN before move
         'e2e4',
         'white',
+        0, // move index
       )
     })
 
@@ -421,6 +424,115 @@ describe('ChessGame blunder recording', () => {
     await new Promise((r) => setTimeout(r, 50))
 
     expect(recordBlunderMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ChessGame move analysis', () => {
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn()
+    startGameMock.mockReset()
+    endGameMock.mockReset()
+    getGhostMoveMock.mockReset()
+    recordBlunderMock.mockReset()
+    mockAnalyzeMove.mockReset()
+    evaluatePositionMock.mockReset()
+    lookupOpeningByFenMock.mockReset()
+    mockLastAnalysis = null
+    capturedPieceDrop = null
+
+    getGhostMoveMock.mockResolvedValue({
+      mode: 'engine',
+      move: null,
+      target_blunder_id: null,
+    })
+    evaluatePositionMock.mockResolvedValue({ move: 'd7d5' })
+    lookupOpeningByFenMock.mockResolvedValue(null)
+  })
+
+  afterEach(() => {
+    mockLastAnalysis = null
+    vi.restoreAllMocks()
+  })
+
+  const startGameAsWhite = async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: 'session-analysis',
+      engine_elo: 1500,
+      player_color: 'white',
+    })
+
+    render(<ChessGame />)
+
+    fireEvent.click(screen.getByRole('button', { name: /new game/i }))
+    fireEvent.click(screen.getByRole('button', { name: /play white/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^play$/i }))
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled()
+    })
+  }
+
+  it('calls analyzeMove for both player and engine moves', async () => {
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    // Player move analyzed with player color and index 0
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.stringContaining('rnbqkbnr'),
+        'e2e4',
+        'white',
+        0,
+      )
+    })
+
+    // Engine responds with d7d5 — analyzed with opponent color and index 1
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        'd7d5',
+        'black',
+        1,
+      )
+    })
+  })
+
+  it('calls analyzeMove for ghost moves with opponent color', async () => {
+    // Ghost returns a move instead of engine
+    getGhostMoveMock.mockResolvedValue({
+      mode: 'ghost',
+      move: 'e5',
+      target_blunder_id: null,
+    })
+
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    // Player move
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        'e2e4',
+        'white',
+        0,
+      )
+    })
+
+    // Ghost move analyzed with opponent color
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        'e7e5',
+        'black',
+        1,
+      )
+    })
   })
 })
 

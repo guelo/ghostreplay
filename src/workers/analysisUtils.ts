@@ -55,6 +55,17 @@ export const normalizeScore = (score: EngineScore | null, sideToMove: 'w' | 'b')
   return raw * sign
 }
 
+export const toWhitePerspective = (
+  moverPerspectiveEval: number | null,
+  moveIndex: number | null | undefined,
+) => {
+  if (moverPerspectiveEval === null || moveIndex === null || moveIndex === undefined) {
+    return moverPerspectiveEval
+  }
+
+  return moveIndex % 2 === 0 ? moverPerspectiveEval : -moverPerspectiveEval
+}
+
 export const scoreForPlayer = (
   score: EngineScore | null,
   sideToMove: 'w' | 'b',
@@ -78,4 +89,23 @@ export const getSideToMove = (fen: string) => {
 
 export const isBlunder = (delta: number | null): boolean => {
   return delta !== null && delta >= BLUNDER_THRESHOLD
+}
+
+export type MoveClassification = 'blunder' | 'inaccuracy' | 'good' | 'great' | 'best'
+
+export const classifyMove = (delta: number | null): MoveClassification | null => {
+  if (delta === null) return null
+  if (delta >= BLUNDER_THRESHOLD) return 'blunder'
+  if (delta >= 50) return 'inaccuracy'
+  if (delta < 0) return 'great'
+  if (delta === 0) return 'best'
+  return 'good'
+}
+
+export const ANNOTATION_SYMBOL: Record<MoveClassification, string> = {
+  blunder: '??',
+  inaccuracy: '?!',
+  good: '',
+  great: '!',
+  best: '!',
 }

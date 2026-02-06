@@ -3,9 +3,12 @@ import {
   parseInfo,
   mateToCp,
   normalizeScore,
+  toWhitePerspective,
   scoreForPlayer,
   getSideToMove,
   isBlunder,
+  classifyMove,
+  ANNOTATION_SYMBOL,
   BLUNDER_THRESHOLD,
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
@@ -212,6 +215,24 @@ describe('scoreForPlayer', () => {
   })
 })
 
+describe('toWhitePerspective', () => {
+  it('keeps eval unchanged for white move indices', () => {
+    expect(toWhitePerspective(120, 0)).toBe(120)
+    expect(toWhitePerspective(-80, 2)).toBe(-80)
+  })
+
+  it('flips eval sign for black move indices', () => {
+    expect(toWhitePerspective(120, 1)).toBe(-120)
+    expect(toWhitePerspective(-80, 3)).toBe(80)
+  })
+
+  it('returns input unchanged for null or unknown move index', () => {
+    expect(toWhitePerspective(45, null)).toBe(45)
+    expect(toWhitePerspective(45, undefined)).toBe(45)
+    expect(toWhitePerspective(null, 1)).toBeNull()
+  })
+})
+
 describe('getSideToMove', () => {
   it('returns w for white to move', () => {
     const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1'
@@ -267,5 +288,63 @@ describe('isBlunder', () => {
 
   it('threshold constant is 150', () => {
     expect(BLUNDER_THRESHOLD).toBe(150)
+  })
+})
+
+describe('classifyMove', () => {
+  it('returns null for null delta', () => {
+    expect(classifyMove(null)).toBeNull()
+  })
+
+  it('classifies blunder at threshold', () => {
+    expect(classifyMove(150)).toBe('blunder')
+  })
+
+  it('classifies blunder above threshold', () => {
+    expect(classifyMove(300)).toBe('blunder')
+  })
+
+  it('classifies inaccuracy between 50 and threshold', () => {
+    expect(classifyMove(50)).toBe('inaccuracy')
+    expect(classifyMove(100)).toBe('inaccuracy')
+    expect(classifyMove(149)).toBe('inaccuracy')
+  })
+
+  it('classifies best move at zero delta', () => {
+    expect(classifyMove(0)).toBe('best')
+  })
+
+  it('classifies good move between 0 and 50', () => {
+    expect(classifyMove(1)).toBe('good')
+    expect(classifyMove(25)).toBe('good')
+    expect(classifyMove(49)).toBe('good')
+  })
+
+  it('classifies great move for negative delta', () => {
+    expect(classifyMove(-1)).toBe('great')
+    expect(classifyMove(-50)).toBe('great')
+    expect(classifyMove(-200)).toBe('great')
+  })
+})
+
+describe('ANNOTATION_SYMBOL', () => {
+  it('maps blunder to ??', () => {
+    expect(ANNOTATION_SYMBOL.blunder).toBe('??')
+  })
+
+  it('maps inaccuracy to ?!', () => {
+    expect(ANNOTATION_SYMBOL.inaccuracy).toBe('?!')
+  })
+
+  it('maps good to empty string', () => {
+    expect(ANNOTATION_SYMBOL.good).toBe('')
+  })
+
+  it('maps great to !', () => {
+    expect(ANNOTATION_SYMBOL.great).toBe('!')
+  })
+
+  it('maps best to !', () => {
+    expect(ANNOTATION_SYMBOL.best).toBe('!')
   })
 })

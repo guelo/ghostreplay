@@ -106,7 +106,7 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 
 * **Dynamic Opening:** As the user plays opening moves (e.g., `e4`), the system checks if this path leads to any "Due" blunders.
 * **The Ghost Opponent:** If a path is found, the bot plays the exact moves required to reach the blunder position.
-* **Seamless Deviation:** If the user plays a move that deviates from all known blunder paths, the "Ghost" deactivates, and a standard Stockfish engine takes over to finish the game.
+* **Seamless Deviation:** If the user plays a move that deviates from all known blunder paths, the backend automatically switches to engine-generated opponent moves for continuity.
 * **Re-Hooking:** If a user deviates but later transposes back into a known position with a downstream blunder, the Ghost reactivates.
 * **Player Side:** The user can play as **White or Black** per session; Ghost targeting only considers blunders made as that side.
 
@@ -133,14 +133,13 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 
 ## 3. High-Level Architecture (MVP)
 
-The system uses a **Client-Coordinator-Memory** architecture. Heavy computation is offloaded to the client; the server acts as a lightweight state manager.
+The system uses a **Client-Coordinator-Memory** architecture. Opponent move selection is centralized in the backend, while tactical blunder analysis remains client-side.
 
 ```mermaid
 graph TD
     User[User Browser]
     
     subgraph "Frontend (React)"
-        WorkerA[Stockfish A<br/>(The Opponent)]
         WorkerB[Stockfish B<br/>(The Analyst)]
         GameUI[Board UI]
     end
@@ -154,7 +153,6 @@ graph TD
     end
 
     User --> GameUI
-    GameUI --> WorkerA
     GameUI --> WorkerB
     GameUI --> API
     API --> DB
@@ -163,17 +161,16 @@ graph TD
 
 ### 3.1 Frontend (The Smart Client)
 
-* **Responsibility:** UI, Move Validation, Engine Calculations.
-* **Double Worker Pattern:**
-* **Worker A (Opponent):** Plays the game. In "Ghost Mode," it blindly executes moves sent by the API. In "Engine Mode," it calculates its own moves (Elo 800-2500).
+* **Responsibility:** UI, move validation, and analysis orchestration.
+* **Single Worker Pattern:**
 * **Worker B (Analyst):** Runs in the background at max strength (Skill 20). Analyzes every user move. If `(BestEval - UserEval) > Threshold`, it triggers a `POST /blunder`.
 
 
 
 ### 3.2 Backend (The Coordinator)
 
-* **Responsibility:** Graph traversal and SRS updates.
-* **Stateless:** The API does not hold game state. It receives a FEN (Board Position) and answers: *"What move should the Ghost play next?"*
+* **Responsibility:** Ghost-path traversal, backend opponent-engine inference, and SRS updates.
+* **Stateless:** The API does not hold game state. It receives a FEN (Board Position) and answers: *"What is the next opponent move (ghost or engine)?"*
 
 ### 3.3 Database (The Memory)
 
@@ -189,7 +186,8 @@ graph TD
 | **Frontend** | React + Vite | Fast development, massive ecosystem for state management. |
 | **Chess UI** | `react-chessboard` | Robust wrapper for chessboard.js. |
 | **Chess Logic** | `chess.js` | Standard library for move generation/validation. |
-| **Engine** | `stockfish.js` (WASM) | Runs full Stockfish 16 in the browser via Web Workers. |
+| **Opponent Engine** | Maia-2 (backend service) | Backend returns the next opponent move via a single API endpoint. |
+| **Analysis Engine** | `stockfish.js` (WASM) | Browser-side analyst worker for blunder detection/SRS grading. |
 | **Backend** | Python (FastAPI) | High performance, excellent libraries (`python-chess`). |
 | **Database** | PostgreSQL | Required for Recursive CTEs (Graph traversal queries). |
 
@@ -506,9 +504,9 @@ LIMIT 1;
 
 ### 6.1.1 Re-Hooking Logic (Transposition Detection)
 
-When the user deviates from the Ghost path, the engine takes over. However, the user may later transpose into a known position that has a due blunder downstream. The Ghost should reactivate in this case.
+When the user deviates from the Ghost path, backend engine mode takes over. However, the user may later transpose into a known position that has a due blunder downstream. The Ghost should reactivate in this case.
 
-**When to Check:** Every user move. The `GET /api/game/ghost-move` endpoint is called after each move regardless of current mode.
+**When to Check:** Every user move. The `POST /api/game/next-opponent-move` endpoint is called after each move regardless of current mode.
 
 **Re-Hook Trigger:** The Ghost reactivates when:
 1. The current position exists in the user's graph (matched by normalized FEN hash)
@@ -517,29 +515,32 @@ When the user deviates from the Ghost path, the engine takes over. However, the 
 **Backend Logic:**
 
 ```
-GET /api/game/ghost-move?session_id=...&fen=...
-After a user makes a move it's /ghost-move's job to see if there's a move that leads to a node where a blunder edge thaat needs to be practiced resides. 
+POST /api/game/next-opponent-move
+After a user move, backend returns exactly one opponent move. It first tries Ghost steering; if no due path exists, it falls back to backend engine inference.
 
 
-1. Compute normalized FEN hash
-2. Look up position by fen_hash in positions table (for this user)
-3. If NOT found:
-   → return { "mode": "engine", "move": null }
+1. Validate session ownership and that it's the opponent's turn for `fen`.
+2. Compute normalized FEN hash.
+3. Look up position by `fen_hash` in `positions` table (for this user).
 4. If found:
-   → Run downstream blunder query (recursive CTE joining blunders table)
-   → Filter for blunders with priority > 1.0
-5. If no due blunders reachable:
-   → return { "mode": "engine", "move": null }
-6. If due blunder(s) reachable:
-   → Select highest-priority path
-   → return { "mode": "ghost", "move": "<next_move_san>", "target_blunder_id": <blunder.id> }
+   → Run downstream blunder query (recursive CTE joining `blunders` table).
+   → Filter for blunders with `priority > 1.0`.
+5. If due blunder(s) reachable:
+   → Select highest-priority path.
+   → return:
+     `{ "mode": "ghost", "move": { "uci": "...", "san": "..." }, "target_blunder_id": <id>, "decision_source": "ghost_path" }`
+6. If no due blunders reachable:
+   → run backend engine inference (Maia-2 path).
+   → return:
+     `{ "mode": "engine", "move": { "uci": "...", "san": "..." }, "target_blunder_id": null, "decision_source": "backend_engine" }`
 ```
 
-**Performance Target:** Response time < 100ms for typical graphs (< 10,000 positions).
+**Performance Target:** Ghost-path lookup < 100ms for typical graphs (< 10,000 positions); full fallback (including engine inference) should target sub-second p95 in MVP.
 
 **Caching Consideration (Post-MVP):** Position lookups are hot-path. Consider caching:
 - FEN hash → position existence (simple boolean)
 - Position ID → downstream blunder count (invalidate on new blunder insertion)
+- Warm model/prepared inference artifacts in-process for backend engine calls
 
 ### 6.2 The Blunder Capture Logic
 
@@ -1064,7 +1065,7 @@ Upgrades an anonymous account to a claimed (permanent) account. Allows user to c
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/game/start` | Start new game session |
-| GET | `/api/game/ghost-move` | Get Ghost's next move for position |
+| POST | `/api/game/next-opponent-move` | Get next opponent move (ghost-first, engine fallback) |
 | POST | `/api/game/end` | End game session |
 | POST | `/api/session/:id/moves` | Upload full move analysis for a session |
 
@@ -1089,26 +1090,35 @@ Creates a new game session. The session tracks which game the blunders belong to
 }
 ```
 
-#### GET /api/game/ghost-move
+#### POST /api/game/next-opponent-move
 
-Given a position, returns whether Ghost mode is active and what move to play.
+Given a position, returns the next opponent move from Ghost-path traversal if available, otherwise from backend engine inference.
 
-**Query Parameters:**
-- `session_id` (uuid, required)
-- `fen` (string, required) - Current board position
+**Request:**
+```json
+{
+  "session_id": "uuid",
+  "fen": "string"
+}
+```
 
 **Response (200):**
 ```json
 {
   "mode": "ghost | engine",
-  "move": "string (SAN) | null",
-  "target_blunder_id": "integer | null"
+  "move": {
+    "uci": "string",
+    "san": "string"
+  },
+  "target_blunder_id": "integer | null",
+  "decision_source": "ghost_path | backend_engine"
 }
 ```
 
-- `mode: "ghost"` - Ghost is steering toward a blunder; `move` contains the next move
-- `mode: "engine"` - No blunder path found; client should use local Stockfish
-- `target_blunder_id` - ID of the blunder being targeted (for debugging/display)
+- `mode: "ghost"` - Ghost is steering toward a blunder; `move` contains the next move.
+- `mode: "engine"` - No blunder path found; `move` is produced by backend engine inference.
+- `target_blunder_id` - ID of the blunder being targeted (for debugging/display), or `null` in engine mode.
+- `decision_source` - Backend decision branch used to produce the move.
 
 #### POST /api/game/end
 
@@ -1770,7 +1780,7 @@ When user has no completed games:
 **Frontend Interaction**
 - Pause + feedback modal on replay failure
 - Resume flow after correction
-- UI state when ghost hands off to engine mode
+- UI state when backend response switches between `ghost` and `engine` mode
 
 ### 12.3 Key Test Cases
 

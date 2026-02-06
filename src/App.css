@@ -410,7 +410,7 @@
 .move-list-row {
   display: grid;
   grid-template-columns: 2rem 1fr 1fr;
-  gap: 0.35rem;
+  gap: 0.15rem;
   align-items: center;
 }
 
@@ -422,6 +422,10 @@
 }
 
 .move-button {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 0;
   padding: 0.35rem 0.5rem;
   border: 1px solid transparent;
   background: transparent;
@@ -432,7 +436,11 @@
   font-weight: 500;
   cursor: pointer;
   text-align: left;
-  transition: background 150ms ease, border-color 150ms ease;
+  transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.move-button-placeholder {
+  /* Empty cell to keep grid alignment when black hasn't moved */
 }
 
 .move-button:hover {
@@ -445,6 +453,33 @@
   border-color: rgba(129, 140, 248, 0.6);
   color: #f8fafc;
 }
+
+/* Move annotation symbols (?, !, ??, etc.) */
+.move-annotation {
+  width: 1.4em;
+  text-align: center;
+  font-size: 0.75em;
+  font-weight: 700;
+}
+
+/* Eval number next to move */
+.move-eval {
+  width: 3.2em;
+  text-align: right;
+  font-size: 0.7rem;
+  opacity: 0.6;
+}
+
+/* Move classification colors */
+.move-button.move-blunder { color: #f87171; }
+.move-button.move-inaccuracy { color: #fbbf24; }
+.move-button.move-great { color: #34d399; }
+.move-button.move-best { color: #38bdf8; }
+
+.move-button.move-blunder.selected { color: #fca5a5; }
+.move-button.move-inaccuracy.selected { color: #fde68a; }
+.move-button.move-great.selected { color: #6ee7b7; }
+.move-button.move-best.selected { color: #7dd3fc; }
 
 /* Nav Bar */
 .nav-bar {

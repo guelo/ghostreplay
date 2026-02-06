@@ -1,13 +1,27 @@
 import { useCallback, useEffect, useRef } from 'react'
+import type { MoveClassification } from '../workers/analysisUtils'
+import { ANNOTATION_SYMBOL } from '../workers/analysisUtils'
 
 type Move = {
   san: string
+  classification?: MoveClassification | null
+  eval?: number | null // centipawns, white perspective
 }
 
 type MoveListProps = {
   moves: Move[]
   currentIndex: number | null // null means viewing latest position
   onNavigate: (index: number | null) => void
+}
+
+const formatEval = (cp: number): string => {
+  const value = cp / 100
+  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`
+}
+
+const classificationClass = (c?: MoveClassification | null): string => {
+  if (!c) return ''
+  return `move-${c}`
 }
 
 const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
@@ -90,6 +104,27 @@ const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
   const isAtStart = effectiveIndex === -1
   const isAtLatest = currentIndex === null
 
+  const renderMoveCell = (move: Move, index: number) => {
+    const isSelected = index === effectiveIndex
+    const annotation = move.classification ? ANNOTATION_SYMBOL[move.classification] : ''
+    const colorClass = classificationClass(move.classification)
+
+    return (
+      <button
+        ref={isSelected ? selectedMoveRef : null}
+        className={`move-button ${colorClass} ${isSelected ? 'selected' : ''}`}
+        type="button"
+        onClick={() => handleMoveClick(index)}
+      >
+        <span className="move-annotation">{annotation}</span>
+        <span className="move-san">{move.san}</span>
+        <span className="move-eval">
+          {move.eval != null ? formatEval(move.eval) : ''}
+        </span>
+      </button>
+    )
+  }
+
   return (
     <div className="move-list-container">
       <div className="move-list-header">
@@ -146,27 +181,11 @@ const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
             {movePairs.map((pair, pairIndex) => (
               <div key={pair.number} className="move-list-row">
                 <span className="move-number">{pair.number}.</span>
-                <button
-                  ref={pairIndex * 2 === effectiveIndex ? selectedMoveRef : null}
-                  className={`move-button ${pairIndex * 2 === effectiveIndex ? 'selected' : ''}`}
-                  type="button"
-                  onClick={() => handleMoveClick(pairIndex * 2)}
-                >
-                  {pair.white.san}
-                </button>
-                {pair.black && (
-                  <button
-                    ref={
-                      pairIndex * 2 + 1 === effectiveIndex
-                        ? selectedMoveRef
-                        : null
-                    }
-                    className={`move-button ${pairIndex * 2 + 1 === effectiveIndex ? 'selected' : ''}`}
-                    type="button"
-                    onClick={() => handleMoveClick(pairIndex * 2 + 1)}
-                  >
-                    {pair.black.san}
-                  </button>
+                {renderMoveCell(pair.white, pairIndex * 2)}
+                {pair.black ? (
+                  renderMoveCell(pair.black, pairIndex * 2 + 1)
+                ) : (
+                  <span className="move-button-placeholder" />
                 )}
               </div>
             ))}

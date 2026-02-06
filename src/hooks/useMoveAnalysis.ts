@@ -13,13 +13,14 @@ const createRequestId = () => {
 
 type AnalysisStatus = 'booting' | 'ready' | 'error'
 
-type AnalysisResult = {
+export type AnalysisResult = {
   id: string
   move: string
   bestMove: string
   bestEval: number | null
   playedEval: number | null
   currentPositionEval: number | null
+  moveIndex: number | null
   delta: number | null
   blunder: boolean
 }
@@ -31,6 +32,9 @@ export const useMoveAnalysis = () => {
   const [lastAnalysis, setLastAnalysis] = useState<AnalysisResult | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [analyzingMove, setAnalyzingMove] = useState<string | null>(null)
+  const [analysisMap, setAnalysisMap] = useState<Map<number, AnalysisResult>>(new Map())
+  // Maps request IDs to move indices so we can file results into analysisMap
+  const pendingMoveIndices = useRef<Map<string, number>>(new Map())
 
   useEffect(() => {
     const worker = new Worker(
@@ -50,25 +54,40 @@ export const useMoveAnalysis = () => {
           setIsAnalyzing(true)
           setAnalyzingMove(message.move)
           break
-        case 'analysis':
+        case 'analysis': {
           setIsAnalyzing(false)
           setAnalyzingMove(null)
-          setLastAnalysis({
+          const moveIndex = pendingMoveIndices.current.get(message.id)
+          if (moveIndex !== undefined) {
+            pendingMoveIndices.current.delete(message.id)
+          }
+
+          const result: AnalysisResult = {
             id: message.id,
             move: message.move,
             bestMove: message.bestMove,
             bestEval: message.bestEval,
             playedEval: message.playedEval,
             currentPositionEval: message.playedEval,
+            moveIndex: moveIndex ?? null,
             delta: message.delta,
             blunder: message.blunder,
-          })
+          }
+          setLastAnalysis(result)
+          if (moveIndex !== undefined) {
+            setAnalysisMap(prev => {
+              const next = new Map(prev)
+              next.set(moveIndex, result)
+              return next
+            })
+          }
           if (message.blunder && message.delta !== null) {
             console.log(
               `[Analyst] Blunder detected: Δ${message.delta}cp (best ${message.bestMove}).`,
             )
           }
           break
+        }
         case 'error':
           setStatus('error')
           setError(message.error)
@@ -100,7 +119,7 @@ export const useMoveAnalysis = () => {
   }, [])
 
   const analyzeMove = useCallback(
-    (fen: string, move: string, playerColor: 'white' | 'black') => {
+    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number) => {
       if (status === 'error') {
         return
       }
@@ -109,9 +128,14 @@ export const useMoveAnalysis = () => {
         return
       }
 
+      const id = createRequestId()
+      if (moveIndex !== undefined) {
+        pendingMoveIndices.current.set(id, moveIndex)
+      }
+
       workerRef.current.postMessage({
         type: 'analyze-move',
-        id: createRequestId(),
+        id,
         fen,
         move,
         playerColor,
@@ -120,12 +144,20 @@ export const useMoveAnalysis = () => {
     [status],
   )
 
+  const clearAnalysis = useCallback(() => {
+    setLastAnalysis(null)
+    setAnalysisMap(new Map())
+    pendingMoveIndices.current.clear()
+  }, [])
+
   return {
     status,
     error,
     lastAnalysis,
+    analysisMap,
     isAnalyzing,
     analyzingMove,
     analyzeMove,
+    clearAnalysis,
   }
 }

@@ -132,6 +132,7 @@ describe('useMoveAnalysis', () => {
       bestEval: 50,
       playedEval: -150,
       currentPositionEval: -150,
+      moveIndex: null,
       delta: 200,
       blunder: true,
     })
@@ -228,6 +229,165 @@ describe('useMoveAnalysis', () => {
     expect(result.current.analyzingMove).toBeNull()
   })
 
+  it('stores result in analysisMap when moveIndex is provided', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    // Call analyzeMove with moveIndex
+    act(() => {
+      result.current.analyzeMove(
+        'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        'e2e4',
+        'white',
+        0,
+      )
+    })
+
+    // Get the request ID from the posted message
+    const postedMessage = postMessageMock.mock.calls[0][0]
+    const requestId = postedMessage.id
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'd2d4',
+        bestEval: 50,
+        playedEval: 30,
+        delta: 20,
+        blunder: false,
+      })
+    })
+
+    expect(result.current.analysisMap.size).toBe(1)
+    expect(result.current.analysisMap.get(0)).toEqual(
+      expect.objectContaining({ move: 'e2e4', delta: 20 }),
+    )
+  })
+
+  it('accumulates multiple results in analysisMap at different indices', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    // First move at index 0
+    act(() => {
+      result.current.analyzeMove('fen-1', 'e2e4', 'white', 0)
+    })
+    const id1 = postMessageMock.mock.calls[0][0].id
+
+    // Second move at index 2
+    act(() => {
+      result.current.analyzeMove('fen-2', 'd2d4', 'white', 2)
+    })
+    const id2 = postMessageMock.mock.calls[1][0].id
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: id1,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 50,
+        delta: 0,
+        blunder: false,
+      })
+    })
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: id2,
+        move: 'd2d4',
+        bestMove: 'd2d4',
+        bestEval: 40,
+        playedEval: 30,
+        delta: 10,
+        blunder: false,
+      })
+    })
+
+    expect(result.current.analysisMap.size).toBe(2)
+    expect(result.current.analysisMap.get(0)?.move).toBe('e2e4')
+    expect(result.current.analysisMap.get(2)?.move).toBe('d2d4')
+  })
+
+  it('does not store in analysisMap when moveIndex is omitted', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    // Call without moveIndex
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white')
+    })
+
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 50,
+        delta: 0,
+        blunder: false,
+      })
+    })
+
+    expect(result.current.analysisMap.size).toBe(0)
+    // But lastAnalysis should still be set
+    expect(result.current.lastAnalysis).not.toBeNull()
+  })
+
+  it('clears all state on clearAnalysis', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 50,
+        delta: 0,
+        blunder: false,
+      })
+    })
+
+    expect(result.current.analysisMap.size).toBe(1)
+    expect(result.current.lastAnalysis).not.toBeNull()
+
+    act(() => {
+      result.current.clearAnalysis()
+    })
+
+    expect(result.current.analysisMap.size).toBe(0)
+    expect(result.current.lastAnalysis).toBeNull()
+  })
+
   it('handles analysis with null eval values', () => {
     const { result } = renderHook(() => useMoveAnalysis())
 
@@ -255,6 +415,7 @@ describe('useMoveAnalysis', () => {
       bestEval: null,
       playedEval: null,
       currentPositionEval: null,
+      moveIndex: null,
       delta: null,
       blunder: false,
     })
