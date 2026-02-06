@@ -12,6 +12,19 @@ import { shouldRecordBlunder } from "../utils/blunder";
 import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
 import MoveList from "./MoveList";
 
+const GhostIcon = () => (
+  <svg
+    className="ghost-icon"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    aria-hidden="true"
+  >
+    <path d="M12 2C7.58 2 4 5.58 4 10v10.5c0 .83 1 1.25 1.59.66l1.41-1.41 1.41 1.41a.996.996 0 0 0 1.41 0L11.24 19.75l1.41 1.41a.996.996 0 0 0 1.41 0l1.41-1.41 1.41 1.41c.59.59 1.59.17 1.59-.66V10c0-4.42-3.58-8-8-8Zm-2 11a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm4 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Z" />
+  </svg>
+);
+
 type BoardOrientation = "white" | "black";
 
 type MoveRecord = {
@@ -621,11 +634,16 @@ const ChessGame = () => {
             </span>
           </p>
           {isGameActive && (
-            <p className="chess-meta">
+            <p className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}>
               Opponent:{" "}
-              <span className="chess-meta-strong">
-                {opponentMode === "ghost" ? "Ghost" : "Engine"}
-              </span>
+              {opponentMode === "ghost" ? (
+                <>
+                  <GhostIcon />{" "}
+                  <span className="chess-meta-strong ghost-mode-label">Ghost</span>
+                </>
+              ) : (
+                <span className="chess-meta-strong">Engine</span>
+              )}
             </p>
           )}
           {isGameActive && (

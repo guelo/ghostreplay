@@ -302,6 +302,28 @@
   font-weight: 600;
 }
 
+/* Ghost mode indicator */
+.chess-meta--ghost {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.ghost-mode-label {
+  color: #c4b5fd;
+}
+
+.ghost-icon {
+  display: block;
+  color: #c4b5fd;
+  animation: ghost-float 2s ease-in-out infinite;
+}
+
+@keyframes ghost-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
 /* Game End Banner */
 .game-end-banner {
   margin-top: 1rem;
