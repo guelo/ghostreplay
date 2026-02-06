@@ -78,6 +78,29 @@ const getStoredCredentials = (): Credentials | null => {
   }
 }
 
+interface TokenPayload {
+  sub: string
+  username: string
+  is_anonymous: boolean
+  exp: number
+}
+
+/**
+ * Decode a JWT payload without verifying the signature.
+ * Returns null if the token is malformed or expired.
+ */
+const decodeToken = (token: string): TokenPayload | null => {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    const payload = JSON.parse(atob(parts[1])) as TokenPayload
+    if (payload.exp * 1000 <= Date.now()) return null
+    return payload
+  } catch {
+    return null
+  }
+}
+
 /**
  * Store credentials in localStorage
  */
@@ -181,21 +204,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     initStarted.current = true
 
     const initAuth = async () => {
+      // Fast path: restore session from a valid stored JWT — no API call needed
+      const storedToken = localStorage.getItem(STORAGE_KEYS.token)
+      if (storedToken) {
+        const payload = decodeToken(storedToken)
+        if (payload) {
+          setState({
+            user: {
+              id: Number(payload.sub),
+              username: payload.username,
+              isAnonymous: payload.is_anonymous,
+            },
+            token: storedToken,
+            isLoading: false,
+            error: null,
+          })
+          return
+        }
+        // Token expired or malformed — clear it and fall through
+        localStorage.removeItem(STORAGE_KEYS.token)
+      }
+
       const storedCredentials = getStoredCredentials()
 
       if (storedCredentials) {
-        // Try to login with stored credentials
+        // Token missing/expired but we have credentials — re-login
         try {
           const response = await apiLogin(
             storedCredentials.username,
             storedCredentials.password
           )
           localStorage.setItem(STORAGE_KEYS.token, response.token)
+          const refreshedPayload = decodeToken(response.token)
           setState({
             user: {
               id: response.user_id,
               username: response.username,
-              isAnonymous: true,
+              isAnonymous: refreshedPayload?.is_anonymous ?? true,
             },
             token: response.token,
             isLoading: false,

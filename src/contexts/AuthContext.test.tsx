@@ -3,6 +3,15 @@ import { render, screen, waitFor, act, cleanup } from '@testing-library/react'
 import { renderHook } from '@testing-library/react'
 import { AuthProvider, useAuth } from './AuthContext'
 
+/**
+ * Build a fake JWT with the given payload (no real signature).
+ */
+function makeJwt(payload: Record<string, unknown>): string {
+  const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
+  const body = btoa(JSON.stringify(payload))
+  return `${header}.${body}.fake-signature`
+}
+
 const mockAuthResponse = {
   token: 'mock-jwt-token',
   user_id: 123,
@@ -204,6 +213,95 @@ describe('AuthContext', () => {
         expect.stringContaining('/api/auth/register'),
         expect.any(Object)
       )
+    })
+  })
+
+  describe('token restoration', () => {
+    it('restores claimed user from stored JWT without API call', async () => {
+      const token = makeJwt({
+        sub: '456',
+        username: 'claimed_user',
+        is_anonymous: false,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      mockLocalStorage['ghost_replay_token'] = token
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(mockFetch).not.toHaveBeenCalled()
+      expect(screen.getByTestId('user-id')).toHaveTextContent('456')
+      expect(screen.getByTestId('username')).toHaveTextContent('claimed_user')
+      expect(screen.getByTestId('is-anonymous')).toHaveTextContent('false')
+      expect(screen.getByTestId('token')).toHaveTextContent(token)
+    })
+
+    it('restores anonymous user from stored JWT without API call', async () => {
+      const token = makeJwt({
+        sub: '123',
+        username: 'ghost_abc12345',
+        is_anonymous: true,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      mockLocalStorage['ghost_replay_token'] = token
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(mockFetch).not.toHaveBeenCalled()
+      expect(screen.getByTestId('user-id')).toHaveTextContent('123')
+      expect(screen.getByTestId('is-anonymous')).toHaveTextContent('true')
+    })
+
+    it('falls through to credentials when token is expired', async () => {
+      const expiredToken = makeJwt({
+        sub: '456',
+        username: 'claimed_user',
+        is_anonymous: false,
+        exp: Math.floor(Date.now() / 1000) - 60,
+      })
+      mockLocalStorage['ghost_replay_token'] = expiredToken
+      mockLocalStorage['ghost_replay_credentials'] = JSON.stringify({
+        username: 'claimed_user',
+        password: 'my-secure-password-123',
+      })
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      // Should have fallen through to credential-based login
+      expect(mockFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/auth/login'),
+        expect.objectContaining({ method: 'POST' })
+      )
+      // Expired token should have been cleared
+      expect(mockLocalStorage['ghost_replay_token']).toBe('mock-jwt-token')
     })
   })
 
