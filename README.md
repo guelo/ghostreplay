@@ -36,10 +36,12 @@ The client now bundles [`react-chessboard`](https://www.npmjs.com/package/react-
 - `src/main.tsx` mounts React and wires up the global styles
 - `src/App.tsx` renders the hero, feature cards, chessboard, and status message
 - `src/components/ChessGame.tsx` powers the local chess sandbox with react-chessboard + chess.js
-- `src/openings/openingBook.ts` loads the vendored ECO opening dataset with caching
+- `src/openings/openingBook.ts` loads the vendored ECO opening dataset + precomputed position index with caching
+- `scripts/build-opening-position-index.mjs` regenerates the precomputed opening position index
 - `src/App.css` + `src/index.css` define the temporary theme and layout
 - `public/` holds assets that should be copied verbatim into the build output
 - `public/data/openings/eco.json` is the full local ECO opening book (no runtime network dependency)
+- `public/data/openings/eco.byPosition.json` is the precomputed normalized-position lookup index
 - `vite.config.ts`, `tsconfig.*.json`, and `eslint.config.js` configure the tooling
 
 ## Next steps

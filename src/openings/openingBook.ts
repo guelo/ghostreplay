@@ -15,6 +15,18 @@ type OpeningBookFile = {
   entries: OpeningBookEntry[]
 }
 
+type OpeningPositionIndexEntry = {
+  eco: string
+  name: string
+}
+
+type OpeningPositionIndexFile = {
+  dataset: string
+  source_commit: string
+  position_count: number
+  by_position: Record<string, OpeningPositionIndexEntry>
+}
+
 export type OpeningBook = {
   dataset: string
   sourceCommit: string
@@ -24,16 +36,11 @@ export type OpeningBook = {
 }
 
 const OPENING_BOOK_URL = '/data/openings/eco.json'
+const OPENING_POSITION_INDEX_URL = '/data/openings/eco.byPosition.json'
 const OPENING_SOURCE = 'eco'
 
 let openingBookPromise: Promise<OpeningBook> | null = null
 const openingLookupCache = new Map<string, OpeningLookupResult | null>()
-
-type OpeningCandidate = {
-  entry: OpeningBookEntry
-  ply: number
-  linePlyCount: number
-}
 
 export type OpeningLookupResult = {
   eco: string
@@ -55,70 +62,14 @@ const parseVariation = (name: string): string | undefined => {
   return name.slice(separator + 1).trim() || undefined
 }
 
-const toLookupResult = (entry: OpeningBookEntry): OpeningLookupResult => ({
+const toLookupResult = (
+  entry: Pick<OpeningBookEntry, 'eco' | 'name'>,
+): OpeningLookupResult => ({
   eco: entry.eco,
   name: entry.name,
   variation: parseVariation(entry.name),
   source: OPENING_SOURCE,
 })
-
-const compareCandidates = (a: OpeningCandidate, b: OpeningCandidate): number => {
-  if (a.ply !== b.ply) {
-    return b.ply - a.ply
-  }
-  if (a.linePlyCount !== b.linePlyCount) {
-    // Prefer the most general line at the current position.
-    return a.linePlyCount - b.linePlyCount
-  }
-  const ecoCompare = a.entry.eco.localeCompare(b.entry.eco)
-  if (ecoCompare !== 0) {
-    return ecoCompare
-  }
-  return a.entry.name.localeCompare(b.entry.name)
-}
-
-const buildPositionIndex = (
-  entries: OpeningBookEntry[],
-): Map<string, OpeningLookupResult> => {
-  const bestByPosition = new Map<string, OpeningCandidate>()
-  for (const entry of entries) {
-    const moves = entry.uci.trim().split(/\s+/).filter(Boolean)
-    if (moves.length === 0) {
-      continue
-    }
-
-    const board = new Chess()
-    for (let ply = 0; ply < moves.length; ply += 1) {
-      const move = moves[ply]
-      const parsed = board.move({
-        from: move.slice(0, 2),
-        to: move.slice(2, 4),
-        promotion: move.slice(4, 5) || undefined,
-      })
-      if (!parsed) {
-        break
-      }
-
-      const position = normalizeFen(board.fen())
-      const candidate: OpeningCandidate = {
-        entry,
-        ply: ply + 1,
-        linePlyCount: moves.length,
-      }
-      const current = bestByPosition.get(position)
-      if (!current || compareCandidates(candidate, current) < 0) {
-        bestByPosition.set(position, candidate)
-      }
-    }
-  }
-
-  return new Map(
-    [...bestByPosition.entries()].map(([position, candidate]) => [
-      position,
-      toLookupResult(candidate.entry),
-    ]),
-  )
-}
 
 const assertOpeningBook = (value: unknown): OpeningBookFile => {
   if (!value || typeof value !== 'object') {
@@ -138,22 +89,59 @@ const assertOpeningBook = (value: unknown): OpeningBookFile => {
   return parsed as OpeningBookFile
 }
 
+const assertOpeningPositionIndex = (value: unknown): OpeningPositionIndexFile => {
+  if (!value || typeof value !== 'object') {
+    throw new Error('Opening position index payload is invalid.')
+  }
+
+  const parsed = value as Partial<OpeningPositionIndexFile>
+  if (
+    typeof parsed.dataset !== 'string' ||
+    typeof parsed.source_commit !== 'string' ||
+    typeof parsed.position_count !== 'number' ||
+    !parsed.by_position ||
+    typeof parsed.by_position !== 'object'
+  ) {
+    throw new Error('Opening position index payload is malformed.')
+  }
+
+  return parsed as OpeningPositionIndexFile
+}
+
+const fetchJson = async (url: string, label: string): Promise<unknown> => {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Failed to load ${label} (${response.status} ${response.statusText})`)
+  }
+  return response.json()
+}
+
 export const getOpeningBook = async (): Promise<OpeningBook> => {
   if (!openingBookPromise) {
-    openingBookPromise = fetch(OPENING_BOOK_URL)
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(
-            `Failed to load opening book (${response.status} ${response.statusText})`,
-          )
-        }
-        return response.json()
-      })
-      .then((payload) => {
-        const file = assertOpeningBook(payload)
+    openingBookPromise = Promise.all([
+      fetchJson(OPENING_BOOK_URL, 'opening book'),
+      fetchJson(OPENING_POSITION_INDEX_URL, 'opening position index'),
+    ])
+      .then(([bookPayload, indexPayload]) => {
+        const file = assertOpeningBook(bookPayload)
         if (file.entries.length !== file.entry_count) {
           throw new Error(
             `Opening book count mismatch (expected ${file.entry_count}, got ${file.entries.length})`,
+          )
+        }
+
+        const index = assertOpeningPositionIndex(indexPayload)
+        if (
+          index.dataset !== file.dataset ||
+          index.source_commit !== file.source_commit
+        ) {
+          throw new Error('Opening position index metadata mismatch.')
+        }
+
+        const positionEntries = Object.entries(index.by_position)
+        if (positionEntries.length !== index.position_count) {
+          throw new Error(
+            `Opening position index count mismatch (expected ${index.position_count}, got ${positionEntries.length})`,
           )
         }
 
@@ -162,7 +150,12 @@ export const getOpeningBook = async (): Promise<OpeningBook> => {
           sourceCommit: file.source_commit,
           entries: file.entries,
           byEpd: new Map(file.entries.map((entry) => [entry.epd, entry])),
-          byPosition: buildPositionIndex(file.entries),
+          byPosition: new Map(
+            positionEntries.map(([position, entry]) => [
+              position,
+              toLookupResult(entry),
+            ]),
+          ),
         }
       })
       .catch((error) => {

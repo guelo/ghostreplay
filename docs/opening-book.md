@@ -1,6 +1,9 @@
 # Opening Book Loader
 
-The client ships a vendored opening book at `public/data/openings/eco.json`.
+The client ships a vendored opening book and precomputed position index:
+
+- `public/data/openings/eco.json`
+- `public/data/openings/eco.byPosition.json`
 
 Use `getOpeningBook()` to load and cache it:
 
@@ -28,6 +31,6 @@ const opening = await lookupOpeningByFen(fen)
 - `OpeningBook.byPosition`: `Map<string, OpeningLookupResult>` indexed by normalized FEN/EPD
 - `lookupOpeningByFen(fen: string): Promise<OpeningLookupResult | null>`
 
-`lookupOpeningByFen()` normalizes incoming FEN (fields 1-4 with canonical en-passant), supports transpositions by indexing every ply of each opening line, and memoizes per-position results.
+`lookupOpeningByFen()` normalizes incoming FEN (fields 1-4 with canonical en-passant), performs O(1) transposition-aware lookups against the precomputed index, and memoizes per-position results.
 
-`getOpeningBook()` fetches once, memoizes the parsed result, and resets the cache if loading fails so callers can retry.
+`getOpeningBook()` fetches both files once, memoizes the parsed result, and resets the cache if loading fails so callers can retry.

@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "openings:build-index": "node scripts/build-opening-position-index.mjs",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run"
