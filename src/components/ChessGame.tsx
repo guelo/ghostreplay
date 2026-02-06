@@ -229,9 +229,11 @@ const ChessGame = () => {
       return "Analyst is ready.";
     }
 
+    const lastMoveIndex =
+      lastAnalysis.moveIndex ?? (moveHistory.length > 0 ? moveHistory.length - 1 : null);
     const whitePerspectiveEval = toWhitePerspective(
       lastAnalysis.currentPositionEval,
-      lastAnalysis.moveIndex,
+      lastMoveIndex,
     );
     const evalText =
       whitePerspectiveEval !== null

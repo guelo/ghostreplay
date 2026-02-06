@@ -265,8 +265,9 @@ describe('useMoveAnalysis', () => {
 
     expect(result.current.analysisMap.size).toBe(1)
     expect(result.current.analysisMap.get(0)).toEqual(
-      expect.objectContaining({ move: 'e2e4', delta: 20 }),
+      expect.objectContaining({ move: 'e2e4', delta: 20, moveIndex: 0 }),
     )
+    expect(result.current.lastAnalysis?.moveIndex).toBe(0)
   })
 
   it('accumulates multiple results in analysisMap at different indices', () => {
