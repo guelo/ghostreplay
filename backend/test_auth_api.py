@@ -210,3 +210,161 @@ def test_register_special_chars_username(client):
 
     assert response.status_code == 201
     assert response.json()["username"] == "user@test.com"
+
+
+# --- POST /api/auth/claim ---
+
+
+def _register_anonymous(client) -> dict:
+    """Helper: register an anonymous user and return the response data."""
+    resp = client.post(
+        "/api/auth/register",
+        json={"username": "anon_temp", "password": "password123"},
+    )
+    assert resp.status_code == 201
+    return resp.json()
+
+
+def test_claim_success(client, db_session):
+    """Test upgrading an anonymous account to a claimed account."""
+    reg = _register_anonymous(client)
+
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "realuser", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["username"] == "realuser"
+    assert data["user_id"] == reg["user_id"]
+    assert "token" in data
+
+    # Verify DB was updated
+    user = db_session.query(User).filter(User.id == reg["user_id"]).first()
+    assert user.username == "realuser"
+    assert user.is_anonymous is False
+
+
+def test_claim_returns_valid_jwt(client):
+    """Test that claim returns a JWT with is_anonymous=False."""
+    reg = _register_anonymous(client)
+
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "claimed", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+
+    assert response.status_code == 200
+    payload = decode_access_token(response.json()["token"])
+    assert payload.username == "claimed"
+    assert payload.is_anonymous is False
+
+
+def test_claim_already_claimed(client):
+    """Test that claiming an already-claimed account returns 409."""
+    reg = _register_anonymous(client)
+
+    # First claim succeeds
+    resp1 = client.post(
+        "/api/auth/claim",
+        json={"new_username": "first", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+    assert resp1.status_code == 200
+
+    # Second claim with original token fails (user is no longer anonymous)
+    resp2 = client.post(
+        "/api/auth/claim",
+        json={"new_username": "second", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+    assert resp2.status_code == 409
+    assert "already claimed" in resp2.json()["detail"]
+
+
+def test_claim_username_taken(client):
+    """Test that claiming with an existing username returns 409."""
+    # Register two anonymous users
+    reg1 = _register_anonymous(client)
+    client.post(
+        "/api/auth/register",
+        json={"username": "taken_name", "password": "password123"},
+    )
+
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "taken_name", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg1['token']}"},
+    )
+
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+
+def test_claim_no_token(client):
+    """Test that claim without Authorization header returns 422."""
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "notoken", "new_password": "newpass123"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_claim_invalid_token(client):
+    """Test that claim with invalid token returns 401."""
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "badtoken", "new_password": "newpass123"},
+        headers={"Authorization": "Bearer invalid.jwt.token"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_claim_username_too_short(client):
+    """Test that new_username under 3 chars is rejected."""
+    reg = _register_anonymous(client)
+
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "ab", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_claim_password_too_short(client):
+    """Test that new_password under 8 chars is rejected."""
+    reg = _register_anonymous(client)
+
+    response = client.post(
+        "/api/auth/claim",
+        json={"new_username": "validname", "new_password": "short"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_claim_can_login_with_new_credentials(client):
+    """Test that after claiming, the user can login with new credentials."""
+    reg = _register_anonymous(client)
+
+    client.post(
+        "/api/auth/claim",
+        json={"new_username": "newlogin", "new_password": "newpass123"},
+        headers={"Authorization": f"Bearer {reg['token']}"},
+    )
+
+    login_resp = client.post(
+        "/api/auth/login",
+        json={"username": "newlogin", "password": "newpass123"},
+    )
+
+    assert login_resp.status_code == 200
+    assert login_resp.json()["user_id"] == reg["user_id"]
