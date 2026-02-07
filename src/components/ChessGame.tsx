@@ -55,6 +55,14 @@ type GameResult = {
   message: string;
 };
 
+type BlunderAlert = {
+  moveSan: string;
+  moveUci: string;
+  bestMoveUci: string;
+  bestMoveSan: string;
+  delta: number;
+};
+
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 const ChessGame = () => {
@@ -96,6 +104,8 @@ const ChessGame = () => {
   const [startError, setStartError] = useState<string | null>(null);
   const [showStartOverlay, setShowStartOverlay] = useState(false);
   const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
+  const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
+  const [showFlash, setShowFlash] = useState(false);
 
   // Tracks next move index synchronously so async callbacks (engine/ghost)
   // don't read stale moveHistory.length from closures.
@@ -137,6 +147,23 @@ const ChessGame = () => {
       };
     });
   }, [moveHistory, analysisMap]);
+
+  // Compute arrows from blunder alert
+  const blunderArrows = useMemo(() => {
+    if (!blunderAlert) return [];
+    return [
+      {
+        startSquare: blunderAlert.moveUci.slice(0, 2),
+        endSquare: blunderAlert.moveUci.slice(2, 4),
+        color: "rgba(248, 113, 113, 0.8)",
+      },
+      {
+        startSquare: blunderAlert.bestMoveUci.slice(0, 2),
+        endSquare: blunderAlert.bestMoveUci.slice(2, 4),
+        color: "rgba(52, 211, 153, 0.8)",
+      },
+    ];
+  }, [blunderAlert]);
 
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
@@ -551,6 +578,67 @@ const ChessGame = () => {
     void postBlunder();
   }, [lastAnalysis, sessionId, isGameActive]);
 
+  // Blunder alert: show flash + toast + arrows for player blunders
+  useEffect(() => {
+    if (
+      !lastAnalysis?.blunder ||
+      lastAnalysis.delta === null ||
+      lastAnalysis.moveIndex === null
+    ) {
+      return;
+    }
+
+    if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) {
+      return;
+    }
+
+    const moveSan =
+      moveHistory[lastAnalysis.moveIndex]?.san ?? lastAnalysis.move;
+
+    let bestMoveSan = lastAnalysis.bestMove;
+    try {
+      const fenBeforeMove =
+        lastAnalysis.moveIndex === 0
+          ? STARTING_FEN
+          : moveHistory[lastAnalysis.moveIndex - 1]?.fen;
+      if (fenBeforeMove) {
+        const tempChess = new Chess(fenBeforeMove);
+        const from = lastAnalysis.bestMove.slice(0, 2);
+        const to = lastAnalysis.bestMove.slice(2, 4);
+        const promotion = lastAnalysis.bestMove.slice(4) || undefined;
+        const bestMoveResult = tempChess.move({ from, to, promotion });
+        if (bestMoveResult) {
+          bestMoveSan = bestMoveResult.san;
+        }
+      }
+    } catch {
+      // Fall back to UCI notation
+    }
+
+    setBlunderAlert({
+      moveSan,
+      moveUci: lastAnalysis.move,
+      bestMoveUci: lastAnalysis.bestMove,
+      bestMoveSan,
+      delta: lastAnalysis.delta,
+    });
+    setShowFlash(true);
+  }, [lastAnalysis, isPlayerMoveIndex, moveHistory]);
+
+  // Auto-dismiss flash after animation
+  useEffect(() => {
+    if (!showFlash) return;
+    const timer = setTimeout(() => setShowFlash(false), 400);
+    return () => clearTimeout(timer);
+  }, [showFlash]);
+
+  // Auto-dismiss blunder toast after 4 seconds
+  useEffect(() => {
+    if (!blunderAlert) return;
+    const timer = setTimeout(() => setBlunderAlert(null), 4000);
+    return () => clearTimeout(timer);
+  }, [blunderAlert]);
+
   const handleDrop = ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
     if (!targetSquare) {
       return false;
@@ -570,6 +658,8 @@ const ChessGame = () => {
     if (!move) {
       return false;
     }
+
+    setBlunderAlert(null);
 
     const newFen = chess.fen();
     const moveIndex = moveCountRef.current++;
@@ -632,6 +722,8 @@ const ChessGame = () => {
       setLiveOpening(null);
       resetEngine();
       clearAnalysis();
+      setBlunderAlert(null);
+      setShowFlash(false);
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
       resetMode();
@@ -674,6 +766,8 @@ const ChessGame = () => {
     setLiveOpening(null);
     resetEngine();
     clearAnalysis();
+    setBlunderAlert(null);
+    setShowFlash(false);
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
@@ -775,71 +869,99 @@ const ChessGame = () => {
         </div>
 
         <div className="chessboard-wrapper">
-          {showStartOverlay && !isGameActive && (
-            <div className="chessboard-overlay">
-              <div className="chess-start-panel">
-                <p className="chess-start-title">Choose your side</p>
-                <div className="chess-start-options">
+          <div className="chessboard-board-area">
+            {showStartOverlay && !isGameActive && (
+              <div className="chessboard-overlay">
+                <div className="chess-start-panel">
+                  <p className="chess-start-title">Choose your side</p>
+                  <div className="chess-start-options">
+                    <button
+                      className={`chess-button toggle ${playerColorChoice === "white" ? "active" : ""}`}
+                      type="button"
+                      onClick={() => handleSelectPlayerColor("white")}
+                      aria-pressed={playerColorChoice === "white"}
+                      disabled={isStartingGame}
+                    >
+                      Play White
+                    </button>
+                    <button
+                      className={`chess-button toggle ${playerColorChoice === "random" ? "active" : ""}`}
+                      type="button"
+                      onClick={handleRandomColor}
+                      aria-pressed={playerColorChoice === "random"}
+                      disabled={isStartingGame}
+                    >
+                      Play Random
+                    </button>
+                    <button
+                      className={`chess-button toggle ${playerColorChoice === "black" ? "active" : ""}`}
+                      type="button"
+                      onClick={() => handleSelectPlayerColor("black")}
+                      aria-pressed={playerColorChoice === "black"}
+                      disabled={isStartingGame}
+                    >
+                      Play Black
+                    </button>
+                  </div>
+                  {startError && (
+                    <p className="chess-start-error">{startError}</p>
+                  )}
                   <button
-                    className={`chess-button toggle ${playerColorChoice === "white" ? "active" : ""}`}
+                    className="chess-button primary overlay-button"
                     type="button"
-                    onClick={() => handleSelectPlayerColor("white")}
-                    aria-pressed={playerColorChoice === "white"}
+                    onClick={handleNewGame}
                     disabled={isStartingGame}
                   >
-                    Play White
-                  </button>
-                  <button
-                    className={`chess-button toggle ${playerColorChoice === "random" ? "active" : ""}`}
-                    type="button"
-                    onClick={handleRandomColor}
-                    aria-pressed={playerColorChoice === "random"}
-                    disabled={isStartingGame}
-                  >
-                    Play Random
-                  </button>
-                  <button
-                    className={`chess-button toggle ${playerColorChoice === "black" ? "active" : ""}`}
-                    type="button"
-                    onClick={() => handleSelectPlayerColor("black")}
-                    aria-pressed={playerColorChoice === "black"}
-                    disabled={isStartingGame}
-                  >
-                    Play Black
+                    {isStartingGame ? "Starting…" : "Play"}
                   </button>
                 </div>
-                {startError && (
-                  <p className="chess-start-error">{startError}</p>
-                )}
-                <button
-                  className="chess-button primary overlay-button"
-                  type="button"
-                  onClick={handleNewGame}
-                  disabled={isStartingGame}
-                >
-                  {isStartingGame ? "Starting…" : "Play"}
-                </button>
               </div>
-            </div>
-          )}
-          <Chessboard
-            options={{
-              position: displayedFen,
-              onPieceDrop: handleDrop,
-              boardOrientation,
-              animationDurationInMs: 200,
-              allowDragging:
-                isGameActive &&
-                engineStatus === "ready" &&
-                isPlayersTurn &&
-                !isThinking &&
-                isViewingLive,
-              boardStyle: {
-                borderRadius: "0",
-                boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
-              },
-            }}
-          />
+            )}
+            {showFlash && <div className="blunder-flash" />}
+            <Chessboard
+              options={{
+                position: displayedFen,
+                onPieceDrop: handleDrop,
+                boardOrientation,
+                animationDurationInMs: 200,
+                allowDragging:
+                  isGameActive &&
+                  engineStatus === "ready" &&
+                  isPlayersTurn &&
+                  !isThinking &&
+                  isViewingLive,
+                arrows:
+                  blunderArrows.length > 0 ? blunderArrows : undefined,
+                boardStyle: {
+                  borderRadius: "0",
+                  boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
+                },
+              }}
+            />
+            {blunderAlert && (
+              <div
+                className="blunder-toast"
+                onClick={() => setBlunderAlert(null)}
+                role="alert"
+              >
+                <div className="blunder-toast__header">
+                  <span>Blunder</span>
+                  <span className="blunder-toast__delta">
+                    &minus;{(blunderAlert.delta / 100).toFixed(1)}
+                  </span>
+                </div>
+                <p className="blunder-toast__detail">
+                  You played: <strong>{blunderAlert.moveSan}</strong>
+                </p>
+                <p className="blunder-toast__detail">
+                  Best was:{" "}
+                  <span className="blunder-toast__best">
+                    {blunderAlert.bestMoveSan}
+                  </span>
+                </p>
+              </div>
+            )}
+          </div>
           {!isGameActive && (
             <div className="game-end-banner">
               <p className="game-end-banner-message">

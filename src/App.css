@@ -224,6 +224,88 @@
   width: min(100%, 600px);
 }
 
+.chessboard-board-area {
+  position: relative;
+}
+
+/* Blunder flash overlay */
+.blunder-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  background: rgba(248, 113, 113, 0.3);
+  animation: blunder-flash-anim 400ms ease-out forwards;
+}
+
+@keyframes blunder-flash-anim {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Blunder toast */
+.blunder-toast {
+  position: absolute;
+  bottom: 0.75rem;
+  right: 0.75rem;
+  z-index: 8;
+  padding: 0.75rem 1rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  background: rgba(15, 23, 42, 0.92);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.6);
+  color: #f8fafc;
+  font-size: 0.85rem;
+  cursor: pointer;
+  animation: blunder-toast-in 250ms ease-out;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+@keyframes blunder-toast-in {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.blunder-toast__header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: #f87171;
+}
+
+.blunder-toast__delta {
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #fca5a5;
+}
+
+.blunder-toast__detail {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.8rem;
+}
+
+.blunder-toast__detail strong {
+  color: #f8fafc;
+  font-weight: 600;
+}
+
+.blunder-toast__best {
+  color: #34d399;
+  font-weight: 600;
+}
+
 .chessboard-overlay {
   position: absolute;
   inset: 0;
