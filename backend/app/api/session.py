@@ -5,6 +5,7 @@ from enum import Enum
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import case, func
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -49,6 +50,34 @@ class SessionMovesRequest(BaseModel):
 
 class SessionMovesResponse(BaseModel):
     moves_inserted: int
+
+
+class SessionAnalysisMove(BaseModel):
+    move_number: int
+    color: MoveColor
+    move_san: str
+    fen_after: str
+    eval_cp: int | None = None
+    eval_mate: int | None = None
+    best_move_san: str | None = None
+    best_move_eval_cp: int | None = None
+    eval_delta: int | None = None
+    classification: MoveClassification | None = None
+
+
+class SessionAnalysisSummary(BaseModel):
+    blunders: int
+    mistakes: int
+    inaccuracies: int
+    average_centipawn_loss: int
+
+
+class SessionAnalysisResponse(BaseModel):
+    session_id: uuid.UUID
+    pgn: str | None
+    result: str | None
+    moves: list[SessionAnalysisMove]
+    summary: SessionAnalysisSummary
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -157,3 +186,71 @@ def upsert_session_moves(
     db.commit()
 
     return SessionMovesResponse(moves_inserted=len(values))
+
+
+@router.get("/{session_id}/analysis", response_model=SessionAnalysisResponse)
+def get_session_analysis(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> SessionAnalysisResponse:
+    game_session = _get_session_or_404(db, session_id)
+    _ensure_session_owned_by_user(game_session, user)
+
+    color_order = case((SessionMove.color == MoveColor.WHITE.value, 0), else_=1)
+    session_moves = (
+        db.query(SessionMove)
+        .filter(SessionMove.session_id == session_id)
+        .order_by(SessionMove.move_number.asc(), color_order.asc())
+        .all()
+    )
+
+    summary_row = (
+        db.query(
+            func.sum(case((SessionMove.classification == MoveClassification.BLUNDER.value, 1), else_=0)).label(
+                "blunders"
+            ),
+            func.sum(case((SessionMove.classification == MoveClassification.MISTAKE.value, 1), else_=0)).label(
+                "mistakes"
+            ),
+            func.sum(
+                case((SessionMove.classification == MoveClassification.INACCURACY.value, 1), else_=0)
+            ).label("inaccuracies"),
+            func.avg(SessionMove.eval_delta).label("average_centipawn_loss"),
+        )
+        .filter(SessionMove.session_id == session_id)
+        .one()
+    )
+
+    average_centipawn_loss = (
+        int(round(summary_row.average_centipawn_loss))
+        if summary_row.average_centipawn_loss is not None
+        else 0
+    )
+
+    return SessionAnalysisResponse(
+        session_id=game_session.id,
+        pgn=game_session.pgn,
+        result=game_session.result,
+        moves=[
+            SessionAnalysisMove(
+                move_number=move.move_number,
+                color=move.color,
+                move_san=move.move_san,
+                fen_after=move.fen_after,
+                eval_cp=move.eval_cp,
+                eval_mate=move.eval_mate,
+                best_move_san=move.best_move_san,
+                best_move_eval_cp=move.best_move_eval_cp,
+                eval_delta=move.eval_delta,
+                classification=move.classification,
+            )
+            for move in session_moves
+        ],
+        summary=SessionAnalysisSummary(
+            blunders=int(summary_row.blunders or 0),
+            mistakes=int(summary_row.mistakes or 0),
+            inaccuracies=int(summary_row.inaccuracies or 0),
+            average_centipawn_loss=average_centipawn_loss,
+        ),
+    )

@@ -199,3 +199,131 @@ def test_session_moves_duplicate_payload_rejected(client, auth_headers, create_g
     )
     assert response.status_code == 422
     assert "duplicate move entry" in response.json()["detail"].lower()
+
+
+def test_session_analysis_success(client, auth_headers, create_game_session):
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "checkmate_win",
+            "pgn": "1. e4 e5 2. Nf3",
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert end_response.status_code == 200
+
+    upload_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 2,
+                    "color": "white",
+                    "move_san": "Nf3",
+                    "fen_after": "fen-2w",
+                    "eval_cp": 30,
+                    "eval_mate": None,
+                    "best_move_san": "Nf3",
+                    "best_move_eval_cp": 30,
+                    "eval_delta": 0,
+                    "classification": "excellent",
+                },
+                {
+                    "move_number": 1,
+                    "color": "black",
+                    "move_san": "e5",
+                    "fen_after": "fen-1b",
+                    "eval_cp": 10,
+                    "eval_mate": None,
+                    "best_move_san": "c5",
+                    "best_move_eval_cp": 25,
+                    "eval_delta": 15,
+                    "classification": "mistake",
+                },
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": "fen-1w",
+                    "eval_cp": 20,
+                    "eval_mate": None,
+                    "best_move_san": "e4",
+                    "best_move_eval_cp": 20,
+                    "eval_delta": 0,
+                    "classification": "inaccuracy",
+                },
+                {
+                    "move_number": 2,
+                    "color": "black",
+                    "move_san": "Nc6",
+                    "fen_after": "fen-2b",
+                    "eval_cp": 5,
+                    "eval_mate": None,
+                    "best_move_san": "d6",
+                    "best_move_eval_cp": 50,
+                    "eval_delta": 45,
+                    "classification": "blunder",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert upload_response.status_code == 200
+
+    response = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["session_id"] == session_id
+    assert data["result"] == "checkmate_win"
+    assert data["pgn"] == "1. e4 e5 2. Nf3"
+    assert data["summary"] == {
+        "blunders": 1,
+        "mistakes": 1,
+        "inaccuracies": 1,
+        "average_centipawn_loss": 15,
+    }
+    assert [move["move_san"] for move in data["moves"]] == ["e4", "e5", "Nf3", "Nc6"]
+
+
+def test_session_analysis_empty_moves_returns_zero_summary(client, auth_headers, create_game_session):
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    response = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 200
+    assert response.json()["moves"] == []
+    assert response.json()["summary"] == {
+        "blunders": 0,
+        "mistakes": 0,
+        "inaccuracies": 0,
+        "average_centipawn_loss": 0,
+    }
+
+
+def test_session_analysis_session_not_found(client, auth_headers):
+    response = client.get(
+        "/api/session/00000000-0000-0000-0000-000000000000/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_session_analysis_wrong_user_forbidden(client, auth_headers, create_game_session):
+    session_id = create_game_session(user_id=999, player_color="white")
+
+    response = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 403
+    assert "not authorized" in response.json()["detail"].lower()
