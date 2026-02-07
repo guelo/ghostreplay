@@ -25,7 +25,7 @@ describe("determineOpponentMove", () => {
 
     const result = await determineOpponentMove("session-123", "test-fen");
 
-    expect(result).toEqual({ mode: "ghost", move: "e4" });
+    expect(result).toEqual({ mode: "ghost", move: "e4", targetBlunderId: 42 });
     expect(getGhostMoveMock).toHaveBeenCalledWith("session-123", "test-fen");
   });
 
@@ -38,7 +38,7 @@ describe("determineOpponentMove", () => {
 
     const result = await determineOpponentMove("session-123", "test-fen");
 
-    expect(result).toEqual({ mode: "engine", move: null });
+    expect(result).toEqual({ mode: "engine", move: null, targetBlunderId: null });
   });
 
   it("returns engine mode on API error", async () => {
@@ -46,7 +46,7 @@ describe("determineOpponentMove", () => {
 
     const result = await determineOpponentMove("session-123", "test-fen");
 
-    expect(result).toEqual({ mode: "engine", move: null });
+    expect(result).toEqual({ mode: "engine", move: null, targetBlunderId: null });
   });
 });
 
@@ -90,7 +90,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("ghost");
-    expect(onApplyGhostMove).toHaveBeenCalledWith("Nf3");
+    expect(onApplyGhostMove).toHaveBeenCalledWith("Nf3", 42);
     expect(onApplyEngineMove).not.toHaveBeenCalled();
   });
 

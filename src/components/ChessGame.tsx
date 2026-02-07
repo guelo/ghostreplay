@@ -118,6 +118,7 @@ const ChessGame = () => {
   const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
+  const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
 
   // Tracks next move index synchronously so async callbacks (engine/ghost)
   // don't read stale moveHistory.length from closures.
@@ -598,7 +599,7 @@ const ChessGame = () => {
   }, [chess, evaluatePosition, handleGameEnd, analyzeMove, opponentColor]);
 
   const applyGhostMove = useCallback(
-    async (sanMove: string) => {
+    async (sanMove: string, targetBlunderId: number | null) => {
       try {
         const fenBeforeMove = chess.fen();
         const appliedMove = chess.move(sanMove);
@@ -617,6 +618,13 @@ const ChessGame = () => {
         setViewIndex(null);
         setEngineMessage(null);
 
+        // Mark position as under review if ghost-move targets a blunder
+        // and it's now the player's turn (side-to-move matches playerColor)
+        const sideToMove = chess.turn() === "w" ? "white" : "black";
+        if (targetBlunderId !== null && sideToMove === playerColor) {
+          setBlunderReviewId(targetBlunderId);
+        }
+
         const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
         analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
 
@@ -631,7 +639,7 @@ const ChessGame = () => {
         setEngineMessage(message);
       }
     },
-    [chess, handleGameEnd, analyzeMove, opponentColor],
+    [chess, handleGameEnd, analyzeMove, opponentColor, playerColor],
   );
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
@@ -886,6 +894,7 @@ const ChessGame = () => {
       uploadedAnalysisSessionsRef.current.clear();
       setBlunderAlert(null);
       setShowFlash(false);
+      setBlunderReviewId(null);
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
       resetMode();

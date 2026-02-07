@@ -6,6 +6,7 @@ export type OpponentMode = "ghost" | "engine";
 export type OpponentMoveResult = {
   mode: OpponentMode;
   move: string | null;
+  targetBlunderId: number | null;
 };
 
 /**
@@ -18,16 +19,20 @@ export const determineOpponentMove = async (
 ): Promise<OpponentMoveResult> => {
   try {
     const response = await getGhostMove(sessionId, fen);
-    return { mode: response.mode, move: response.move };
+    return {
+      mode: response.mode,
+      move: response.move,
+      targetBlunderId: response.target_blunder_id,
+    };
   } catch (error) {
     console.error("[GhostMove] Failed to get ghost move:", error);
-    return { mode: "engine", move: null };
+    return { mode: "engine", move: null, targetBlunderId: null };
   }
 };
 
 type UseOpponentMoveOptions = {
   sessionId: string | null;
-  onApplyGhostMove: (sanMove: string) => Promise<void>;
+  onApplyGhostMove: (sanMove: string, targetBlunderId: number | null) => Promise<void>;
   onApplyEngineMove: () => Promise<void>;
 };
 
@@ -54,7 +59,7 @@ export const useOpponentMove = ({
 
       if (result.mode === "ghost" && result.move) {
         console.log("[GhostMove] Applying ghost move:", result.move);
-        await onApplyGhostMove(result.move);
+        await onApplyGhostMove(result.move, result.targetBlunderId);
       } else {
         await onApplyEngineMove();
       }
