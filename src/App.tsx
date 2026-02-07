@@ -1,10 +1,11 @@
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import ChessGame from "./components/ChessGame";
 import { useAuth } from "./contexts/useAuth";
 import "./App.css";
 
 function App() {
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
 
   return (
     <main className="app-shell">
@@ -41,7 +42,11 @@ function App() {
         </section>
       </div>
 
-      <ChessGame />
+      <ChessGame
+        onOpenHistory={(opts) =>
+          navigate("/history", { state: opts })
+        }
+      />
     </main>
   );
 }

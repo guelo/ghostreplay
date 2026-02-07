@@ -401,6 +401,61 @@
   padding: 1rem 2rem;
 }
 
+.chess-post-game-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  align-items: center;
+  text-align: center;
+  padding: 1.5rem 2rem;
+  border-radius: 1.25rem;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.85);
+  box-shadow: 0 18px 35px rgba(2, 6, 23, 0.45);
+}
+
+.chess-post-game-message {
+  margin: 0;
+  font-size: 1rem;
+  color: #cbd5e1;
+}
+
+.chess-post-game-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+/* History page placeholder */
+.history-shell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 3rem 1rem;
+  text-align: center;
+}
+
+.history-shell__title {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.history-shell__hint {
+  margin: 0;
+  font-size: 0.95rem;
+  color: #94a3b8;
+}
+
+.history-shell__placeholder {
+  margin: 0;
+  font-size: 1rem;
+  color: #64748b;
+}
+
 .engine-status {
   margin-top: 1rem;
   padding: 0.85rem 1rem;
