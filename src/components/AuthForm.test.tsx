@@ -13,7 +13,7 @@ vi.mock('react-router-dom', async () => {
   return { ...actual, useNavigate: () => mockNavigate }
 })
 
-vi.mock('../contexts/AuthContext', () => ({
+vi.mock('../contexts/useAuth', () => ({
   useAuth: () => ({
     login: mockLogin,
     claimAccount: mockClaimAccount,

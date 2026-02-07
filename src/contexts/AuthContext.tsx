@@ -1,12 +1,11 @@
 import {
-  createContext,
-  useContext,
   useEffect,
   useRef,
   useState,
   useCallback,
   type ReactNode,
 } from 'react'
+import { AuthContext, type AuthState } from './authContextShared'
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -20,32 +19,11 @@ interface Credentials {
   password: string
 }
 
-interface User {
-  id: number
-  username: string
-  isAnonymous: boolean
-}
-
-interface AuthState {
-  user: User | null
-  token: string | null
-  isLoading: boolean
-  error: string | null
-}
-
-interface AuthContextValue extends AuthState {
-  login: (username: string, password: string) => Promise<void>
-  logout: () => void
-  claimAccount: (newUsername: string, newPassword: string) => Promise<void>
-}
-
 interface AuthResponse {
   token: string
   user_id: number
   username: string
 }
-
-const AuthContext = createContext<AuthContextValue | null>(null)
 
 /**
  * Generate a random string for anonymous credentials
@@ -109,11 +87,14 @@ const storeCredentials = (credentials: Credentials): void => {
 }
 
 class AuthError extends Error {
+  status: number
+
   constructor(
     message: string,
-    public status: number,
+    status: number,
   ) {
     super(message)
+    this.status = status
   }
 }
 
@@ -389,15 +370,4 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   )
-}
-
-/**
- * Hook to access auth context
- */
-export function useAuth(): AuthContextValue {
-  const context = useContext(AuthContext)
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider')
-  }
-  return context
 }

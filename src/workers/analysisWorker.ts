@@ -164,6 +164,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     ctx.postMessage({
       type: 'analysis',
       id: request.id,
+      move: request.move,
       bestMove: bestMove || '(none)',
       bestEval: null,
       playedEval: null,

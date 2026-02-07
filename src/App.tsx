@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import ChessGame from "./components/ChessGame";
-import { useAuth } from "./contexts/AuthContext";
+import { useAuth } from "./contexts/useAuth";
 import "./App.css";
 
 function App() {

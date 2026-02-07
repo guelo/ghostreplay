@@ -4,6 +4,7 @@ import { useMoveAnalysis } from './useMoveAnalysis'
 
 type MessageHandler = (event: MessageEvent) => void
 type ErrorHandler = (event: ErrorEvent) => void
+type WorkerListener = MessageHandler | ErrorHandler
 
 let messageHandler: MessageHandler | null = null
 let errorHandler: ErrorHandler | null = null
@@ -16,7 +17,7 @@ function MockWorker() {
   // @ts-expect-error -- mock constructor
   this.postMessage = postMessageMock
   // @ts-expect-error -- mock constructor
-  this.addEventListener = vi.fn((type: string, handler: Function) => {
+  this.addEventListener = vi.fn((type: string, handler: WorkerListener) => {
     if (type === 'message') messageHandler = handler as MessageHandler
     if (type === 'error') errorHandler = handler as ErrorHandler
   })

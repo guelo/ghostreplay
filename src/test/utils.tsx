@@ -1,11 +1,19 @@
-import { ReactElement, ReactNode } from 'react'
-import { render, RenderOptions } from '@testing-library/react'
+import type { ReactElement, ReactNode } from 'react'
+import {
+  render,
+  type RenderOptions,
+  act,
+  fireEvent,
+  screen,
+  waitFor,
+} from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 
 interface WrapperProps {
   children: ReactNode
 }
 
-interface CustomRenderOptions extends Omit<RenderOptions, 'wrapper'> {
+type CustomRenderOptions = Omit<RenderOptions, 'wrapper'> & {
   // Add custom options here as needed
   // For example, when auth context is added:
   // authState?: Partial<AuthState>
@@ -36,8 +44,6 @@ function customRender(
   return render(ui, { wrapper: Wrapper, ...options })
 }
 
-// Re-export everything from React Testing Library
-export * from '@testing-library/react'
-
 // Override render method
 export { customRender as render }
+export { act, fireEvent, screen, userEvent, waitFor }
