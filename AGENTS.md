@@ -4,17 +4,18 @@ The overall project and architecure is described in SPEC.md
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
 
-## Quick Reference
+## Multi-Agent Workspace Rules
 
-```bash
-bd ready              # Find available work
-bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
-bd close <id>         # Complete work
-bd sync               # Sync with git
-```
+This repo may be edited by multiple agents/users at the same time.
+
+- Assume unrelated modified/untracked files are expected.
+- Do not stash, reset, checkout, or revert files you did not edit for the current task.
+- Do not include unrelated files in commits.
+- Stage only explicit task files (path-by-path `git add/qui <file>`).
+- If branch is ahead and push is requested, skip `git pull --rebase` unless explicitly told.
+- If unexpected files appear, ignore them unless user asks to include them.
+
 
 ## Issue Tracking
 
@@ -24,6 +25,8 @@ Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for a
 **Quick reference:**
 - `bd ready` - Find unblocked work
 - `bd create "Title" --type task --priority 2` - Create issue
+  - Note: When creating beads issues, always set --id to g-<slug> where <slug> is a 5–20 char lowercase kebab-case mini-
+      summary. IDs must be unique. If a slug is already taken, the agent should append a short suffix
 - `bd close <id>` - Complete work
 - `bd sync` - Sync with git (run at session end)
 
@@ -32,6 +35,7 @@ For full workflow details: `bd prime`
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+Before running git workflow steps, follow `Multi-Agent Workspace Rules` above to avoid touching unrelated local changes.
 
 **MANDATORY WORKFLOW:**
 

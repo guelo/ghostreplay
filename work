@@ -1,0 +1,76 @@
+R ○ g-0iz [● P2] [task] - Backend: GET /api/history endpoint (blocked by: g-817, g-z5y, blocks: g-05i)
+R ○ g-817 [● P2] [feature] - Epic: Game history browser ( blocks: g-a4a, g-lk8, g-0iz, g-05i, g-4r3)
+X ◐ g-z5y [● P2] [task] - Backend: POST /api/session/:id/moves endpoint (blocked by: , blocks: g-0iz, g-ulk)
+X ○ g-ulk [● P2] [task] - Frontend: Batch upload move analysis on game end (blocked by: g-z5y, g-7gl)
+X ○ g-td6 [● P2] [task] - DB: Create session_moves table migration (blocked by: g-7gl, blocks: g-z5y, g-vp6)
+R ○ g-7gl [● P2] [feature] - Epic: Post-game analysis view----------DOESNT BLOCKK (, blocks: g-07f, g-9sp, g-dbq, g-td6, g-zrs, g-z5y, g-jbn, g-vp6, g-ulk)
+○ g-05i [● P2] [task] - Frontend: Build game history list view (blocked by: g-0iz, g-817, blocks: g-a4a, g-lk8)
+○ g-4r3 [● P2] [task] - Frontend: Add post-game 'View Analysis?' prompt (blocked by: g-kzb, g-817)
+○ g-a4a [● P2] [task] - Frontend: Implement game card click → analysis view (blocked by: g-05i, g-vp6, g-817)
+* ○ g-vp6 [● P2] [task] - Backend: GET /api/session/:id/analysis endpoint (blocked by: g-td6, g-7gl, blocks: g-07f, g-9sp, g-a4a, g-dbq, g-zrs, g-jbn)
+
+
+L ○ g-2qx [● P4] [feature] - [IMPL] Add user Elo over time graph (blocked by: g-9zt)
+L ○ g-9zt [● P4] [feature] - [IMPL] Add user stats dashboard (blocked by:, blocks: g-2qx)
+L ○ g-5fm · [IMPL] Add adaptive difficulty based on win rate   [● P4 · OPEN]
+L ○ g-vmu [● P3] [feature] - [IMPL] Add engine skill level selection (blocked by: g-npr, g-29c.2, blocks: g-5fm)
+
+L ○ g-0ho [● P1] [task] - Frontend: Show pass feedback (blocked by: g-1pl, g-e9x)
+L ○ g-1pl [● P1] [task] - Frontend: Evaluate user move at blunder position (≥50cp = fail) (blocked by: g-kt9, g-766, g-e9x, blocks: g-7ov, g-0ho)
+L ○ g-0ho [● P1] [task] - Frontend: Show pass feedback (blocked by: g-1pl, g-e9x)
+L ○ g-7ov [● P1] [task] - Frontend: Show fail feedback and pause game (blocked by: g-1pl, g-e9x)
+*L ○ g-kt9 [● P1] [task] - Frontend: Detect when user reaches blunder position (blocked by: g-gbh, g-e9x, blocks: g-1pl)
+
+
+
+○ g-29c.2.4 [● P1] [task] [api frontend integration] - Frontend integration: replace split opponent flow (blocked by: g-29c.2, g-29c.2.2, blocks: g-29c.2.6, g-29c.2.5)
+○ g-29c.2.3 [● P1] [task] [backend infra maia2] - Maia runtime bootstrap and model cache in backend (blocked by: g-29c.2, blocks: g-29c.2.2)
+○ g-29c.2.2 [● P1] [task] [api backend ghost] - Ghost-first decision engine in backend endpoint (blocked by: g-29c.2, g-29c.2.1, g-29c.2.3, blocks: g-29c.2.6, g-29c.2.4)
+○ g-29c.2.1 [● P1] [task] [api backend maia2] - Backend API contract for next-opponent-move (blocked by: g-29c.2, blocks: g-29c.2.2)
+○ g-29c.2 [● P1] [epic] - [IMPL] Unified backend opponent move pipeline (ghost + maia) (blocked by: g-29c.1, blocks: g-29c.2.1, g-29c.2.3, g-29c.2.6, g-29c.2.2, g-29c.2.5, g-vmu, g-29c.2.4, g-29c)
+○ g-e9x.1 [● P1] [feature] - Frontend: Blunder review view with SRS status and detailed metadata (blocked by: g-e9x, g-zrs, g-jxj)
+○ g-d86 [● P1] [task] - Update positions inserts to set active_color
+○ g-jxj [● P1] [task] - Backend: GET /api/blunders endpoint - list with due filter (blocked by: g-766, g-e9x, blocks: g-e9x.1)
+○ g-0ho [● P1] [task] - Frontend: Show pass feedback (blocked by: g-1pl, g-e9x)
+○ g-7ov [● P1] [task] - Frontend: Show fail feedback and pause game (blocked by: g-1pl, g-e9x)
+○ g-766 [● P1] [task] - Backend: POST /api/srs/review endpoint (blocked by: g-0id, g-e9x, blocks: g-jxj, g-1pl)
+○ g-0id [● P1] [task] - DB: Create blunder_reviews table migration (blocked by: g-e9x, blocks: g-766)
+○ g-u14 [● P1] [task] - Frontend: Handle ghost re-hooking (transposition) (blocked by: g-0v6, g-g5w)
+○ g-eo1 [● P1] [task] - Backend: Implement SRS priority calculation (blocked by: g-g5w)
+○ g-e9x [● P1] [feature] - Epic: SRS review system (pass/fail updates) (blocked by: g-bjo, g-pk5, g-hhh, g-g5w, blocks: g-7ov, g-jxj, g-0id, g-1pl, g-0ho, g-e9x.1, g-6dj, g-kt9, g-766, g-5f2)
+○ g-g5w [● P1] [feature] - Epic: Ghost steers user to recorded blunders (blocked by: g-bjo, g-pk5, g-hhh, blocks: g-4p7, g-0v6, g-eo1, g-u14, g-gbh, g-axp, g-26v, g-kj5, g-e9x, g-49g)
+○ g-2kyc [● P2] [task] - Add eval bar
+○ g-a6wi [● P2] [task] - Add sounds
+○ g-3qbb [● P2] [task] - rename blunders to ghost library
+○ g-29c.2.6 [● P2] [task] [observability performance testing] - Test, perf, and observability hardening for unified endpoint (blocked by: g-29c.2, g-29c.2.2, g-29c.2.4)
+○ g-29c.2.5 [● P2] [task] [api backend cleanup] - Deprecate /api/game/ghost-move and complete contract migration (blocked by: g-29c.2, g-29c.2.4)
+○ g-29c [● P2] [feature] - Feature: Continuous Maia-2 difficulty slider across full Elo range (blocked by: g-29c.2)
+○ g-92r [● P2] [feature] - Frontend: Implement legal move highlights
+○ g-3c0 [● P2] [task] - Frontend: Add offer draw button
+○ g-lk8 [● P2] [task] - Frontend: Build empty state for history (blocked by: g-05i, g-817)
+○ g-05i [● P2] [task] - Frontend: Build game history list view (blocked by: g-0iz, g-817, blocks: g-a4a, g-lk8)
+○ g-07f [● P2] [task] - Frontend: Build evaluation bar component (blocked by: g-vp6, g-7gl)
+○ g-9sp [● P2] [task] - Frontend: Build position analysis panel (blocked by: g-vp6, g-7gl)
+○ g-jbn [● P2] [task] - Frontend: Build move list component (blocked by: g-vp6, g-7gl)
+○ g-dbq [● P2] [task] - Frontend: Build evaluation graph component (blocked by: g-vp6, g-7gl)
+○ g-zrs [● P2] [task] - Frontend: Build analysis view board component (blocked by: g-vp6, g-7gl, blocks: g-e9x.1)
+○ g-vp6 [● P2] [task] - Backend: GET /api/session/:id/analysis endpoint (blocked by: g-td6, g-7gl, blocks: g-07f, g-9sp, g-a4a, g-dbq, g-zrs, g-jbn)
+○ g-817 [● P2] [feature] - Epic: Game history browser (blocked by: g-pk5, blocks: g-a4a, g-lk8, g-0iz, g-05i, g-4r3)
+○ g-lib-toast [● P3] [task] - UI: Toast feedback for Ghost Library add action
+○ g-608 [● P3] [task] - DevOps: Setup database backups (blocked by: g-3lc)
+○ g-ax1 [● P3] [task] - DevOps: Choose hosting platform and deploy (blocked by: g-3lc)
+○ g-7c9 [● P3] [task] - DevOps: Setup environment variable configuration (blocked by: g-3lc)
+○ g-r3p [● P3] [task] - DevOps: Create database migration runner (blocked by: g-3lc)
+○ g-6qu [● P3] [task] - DevOps: Setup docker-compose for local development (blocked by: g-3lc)
+○ g-82o [● P3] [task] - DevOps: Create Dockerfile for React frontend (blocked by: g-3lc)
+○ g-1ix [● P3] [task] - DevOps: Create Dockerfile for FastAPI backend (blocked by: g-3lc)
+○ g-6dj [● P3] [task] - E2E: Test full game → blunder → ghost → SRS flow (blocked by: g-e9x, g-14w)
+○ g-14w [● P3] [task] - E2E: Setup Playwright and test database (blocks: g-6dj)
+○ g-5f2 [● P3] [task] - Backend: Unit tests for SRS priority calculation (blocked by: g-e9x)
+○ g-3lc [● P3] [feature] - Epic: Production deployment setup (blocks: g-6qu, g-82o, g-ax1, g-1ix, g-7c9, g-r3p, g-608)
+○ g-5a8 [● P3] [feature] - [IMPL] Add OAuth login (Lichess/Chess.com)
+○ g-5fm [● P4] [feature] - [IMPL] Add adaptive difficulty based on win rate (blocked by: g-vmu)
+○ g-4wy [● P4] [task] - [IMPL] Address graph scalability and pruning
+○ g-k9g [● P4] [task] - [IMPL] Handle multi-tab concurrent sessions
+○ g-inn [● P4] [feature] - [IMPL] Add time control options
+○ g-csy [● P4] [task] - [IMPL] Define deployment architecture
