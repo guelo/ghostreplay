@@ -45,8 +45,7 @@ class Position(Base):
         UniqueConstraint("user_id", "fen_hash", name="uq_positions_user_fen_hash"),
         CheckConstraint("active_color in ('white','black')", name="ck_positions_active_color"),
         Index("idx_positions_user", "user_id"),
-        Index("idx_positions_fen_hash", "user_id", "fen_hash"),
-        Index("idx_positions_active_color", "active_color"),
+        Index("idx_positions_user_active_color", "user_id", "active_color"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -62,7 +61,7 @@ class Blunder(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "position_id", name="uq_blunders_user_position"),
         Index("idx_blunders_user", "user_id"),
-        Index("idx_blunders_position", "position_id"),
+        Index("idx_blunders_position_user", "position_id", "user_id"),
         Index("idx_blunders_due", "user_id", "pass_streak", "last_reviewed_at"),
     )
 
