@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
-import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
+import { useMoveAnalysis, type AnalysisResult } from "../hooks/useMoveAnalysis";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
@@ -12,9 +12,15 @@ import {
   endGame,
   recordBlunder,
   recordManualBlunder,
+  uploadSessionMoves,
+  type SessionMoveUpload,
 } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
-import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
+import {
+  classifyMove,
+  classifySessionMove,
+  toWhitePerspective,
+} from "../workers/analysisUtils";
 import MoveList from "./MoveList";
 
 const GhostIcon = () => (
@@ -64,6 +70,12 @@ type BlunderAlert = {
 };
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
+
+const sleep = (ms: number) =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 const ChessGame = () => {
   const chess = useMemo(() => new Chess(), []);
@@ -121,6 +133,27 @@ const ChessGame = () => {
     moveUci: string;
   } | null>(null);
   const openingLookupRequestIdRef = useRef(0);
+  const analysisMapRef = useRef<Map<number, AnalysisResult>>(new Map());
+  const moveHistoryRef = useRef<MoveRecord[]>([]);
+  const analysisStatusRef = useRef(analysisStatus);
+  const isAnalyzingRef = useRef(isAnalyzing);
+  const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    analysisMapRef.current = analysisMap;
+  }, [analysisMap]);
+
+  useEffect(() => {
+    moveHistoryRef.current = moveHistory;
+  }, [moveHistory]);
+
+  useEffect(() => {
+    analysisStatusRef.current = analysisStatus;
+  }, [analysisStatus]);
+
+  useEffect(() => {
+    isAnalyzingRef.current = isAnalyzing;
+  }, [isAnalyzing]);
 
   // Get the FEN to display on the board (accounts for viewing past positions)
   const displayedFen = useMemo(() => {
@@ -194,6 +227,120 @@ const ChessGame = () => {
     }
     return isPlayerMoveIndex(selectedMoveIndex);
   }, [sessionId, selectedMoveIndex, isPlayerMoveIndex]);
+
+  const parseUciToSan = useCallback((fenBeforeMove: string, uciMove: string) => {
+    if (!uciMove || uciMove === "(none)" || uciMove.length < 4) {
+      return null;
+    }
+
+    try {
+      const replay = new Chess(fenBeforeMove);
+      const from = uciMove.slice(0, 2);
+      const to = uciMove.slice(2, 4);
+      const promotion = uciMove.slice(4) || undefined;
+      const result = replay.move({ from, to, promotion });
+      return result?.san ?? null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const buildSessionMoveUploads = useCallback(
+    (
+      history: MoveRecord[],
+      analysesByIndex: Map<number, AnalysisResult>,
+    ): SessionMoveUpload[] => {
+      return history.map((move, index) => {
+        const analysis = analysesByIndex.get(index);
+        const fenBeforeMove =
+          index === 0 ? STARTING_FEN : history[index - 1]?.fen ?? STARTING_FEN;
+
+        return {
+          move_number: Math.floor(index / 2) + 1,
+          color: index % 2 === 0 ? "white" : "black",
+          move_san: move.san,
+          fen_after: move.fen,
+          eval_cp: analysis?.playedEval ?? null,
+          eval_mate: null,
+          best_move_san: analysis
+            ? parseUciToSan(fenBeforeMove, analysis.bestMove)
+            : null,
+          best_move_eval_cp: analysis?.bestEval ?? null,
+          eval_delta: analysis?.delta ?? null,
+          classification: classifySessionMove(analysis?.delta ?? null),
+        };
+      });
+    },
+    [parseUciToSan],
+  );
+
+  const waitForQueuedAnalyses = useCallback(async (expectedMoves: number) => {
+    if (expectedMoves <= 0) {
+      return;
+    }
+
+    if (
+      analysisStatusRef.current === "error" ||
+      analysisMapRef.current.size >= expectedMoves
+    ) {
+      return;
+    }
+
+    const initialSize = analysisMapRef.current.size;
+    await sleep(150);
+    if (
+      analysisStatusRef.current === "error" ||
+      analysisMapRef.current.size >= expectedMoves
+    ) {
+      return;
+    }
+
+    if (!isAnalyzingRef.current && analysisMapRef.current.size === initialSize) {
+      return;
+    }
+
+    const deadline = Date.now() + ANALYSIS_UPLOAD_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (
+        analysisStatusRef.current === "error" ||
+        analysisMapRef.current.size >= expectedMoves
+      ) {
+        return;
+      }
+
+      if (!isAnalyzingRef.current) {
+        const sizeBeforeIdleCheck = analysisMapRef.current.size;
+        await sleep(100);
+        if (analysisMapRef.current.size === sizeBeforeIdleCheck) {
+          return;
+        }
+      } else {
+        await sleep(50);
+      }
+    }
+  }, []);
+
+  const uploadSessionAnalysisBatch = useCallback(
+    async (targetSessionId: string, expectedMoveCount: number) => {
+      if (uploadedAnalysisSessionsRef.current.has(targetSessionId)) {
+        return;
+      }
+
+      await waitForQueuedAnalyses(expectedMoveCount);
+
+      const historySnapshot = [...moveHistoryRef.current];
+      if (historySnapshot.length === 0) {
+        uploadedAnalysisSessionsRef.current.add(targetSessionId);
+        return;
+      }
+
+      const analysesSnapshot = new Map(analysisMapRef.current);
+      const payload = buildSessionMoveUploads(historySnapshot, analysesSnapshot);
+      await uploadSessionMoves(targetSessionId, payload);
+      uploadedAnalysisSessionsRef.current.add(targetSessionId);
+    },
+    [buildSessionMoveUploads, waitForQueuedAnalyses],
+  );
 
   const buildManualCapturePayload = useCallback(
     (moveIndex: number) => {
@@ -287,6 +434,11 @@ const ChessGame = () => {
 
     if (result) {
       try {
+        try {
+          await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
+        } catch (uploadError) {
+          console.error("[SessionMoves] Failed to upload session moves:", uploadError);
+        }
         await endGame(sessionId, result.type, chess.pgn());
         setIsGameActive(false);
         setGameResult(result);
@@ -296,7 +448,7 @@ const ChessGame = () => {
         setEngineMessage(message);
       }
     }
-  }, [chess, isGameActive, playerColor, sessionId]);
+  }, [chess, isGameActive, playerColor, sessionId, uploadSessionAnalysisBatch]);
 
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
@@ -421,11 +573,11 @@ const ChessGame = () => {
 
       const newFen = chess.fen();
       const moveIndex = moveCountRef.current++;
+      const nextMove = { san: appliedMove.san, fen: newFen };
+      const nextMoveHistory = [...moveHistoryRef.current, nextMove];
+      moveHistoryRef.current = nextMoveHistory;
       setFen(newFen);
-      setMoveHistory((prev) => [
-        ...prev,
-        { san: appliedMove.san, fen: newFen },
-      ]);
+      setMoveHistory(nextMoveHistory);
       setViewIndex(null); // Ensure we're viewing the live position
       setEngineMessage(null);
 
@@ -457,11 +609,11 @@ const ChessGame = () => {
 
         const newFen = chess.fen();
         const moveIndex = moveCountRef.current++;
+        const nextMove = { san: appliedMove.san, fen: newFen };
+        const nextMoveHistory = [...moveHistoryRef.current, nextMove];
+        moveHistoryRef.current = nextMoveHistory;
         setFen(newFen);
-        setMoveHistory((prev) => [
-          ...prev,
-          { san: appliedMove.san, fen: newFen },
-        ]);
+        setMoveHistory(nextMoveHistory);
         setViewIndex(null);
         setEngineMessage(null);
 
@@ -479,7 +631,7 @@ const ChessGame = () => {
         setEngineMessage(message);
       }
     },
-    [chess, handleGameEnd, analyzeMove, opponentColor]
+    [chess, handleGameEnd, analyzeMove, opponentColor],
   );
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
@@ -663,8 +815,11 @@ const ChessGame = () => {
 
     const newFen = chess.fen();
     const moveIndex = moveCountRef.current++;
+    const nextMove = { san: move.san, fen: newFen };
+    const nextMoveHistory = [...moveHistoryRef.current, nextMove];
+    moveHistoryRef.current = nextMoveHistory;
     setFen(newFen);
-    setMoveHistory((prev) => [...prev, { san: move.san, fen: newFen }]);
+    setMoveHistory(nextMoveHistory);
     setViewIndex(null); // Ensure we're viewing the live position
 
     const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
@@ -692,6 +847,11 @@ const ChessGame = () => {
       setStartError(null);
       // End current session if active
       if (sessionId && isGameActive) {
+        try {
+          await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
+        } catch (uploadError) {
+          console.error("[SessionMoves] Failed to upload session moves:", uploadError);
+        }
         await endGame(sessionId, "abandon", chess.pgn());
       }
 
@@ -722,6 +882,8 @@ const ChessGame = () => {
       setLiveOpening(null);
       resetEngine();
       clearAnalysis();
+      moveHistoryRef.current = [];
+      uploadedAnalysisSessionsRef.current.clear();
       setBlunderAlert(null);
       setShowFlash(false);
       blunderRecordedRef.current = false;
@@ -742,6 +904,11 @@ const ChessGame = () => {
     }
 
     try {
+      try {
+        await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
+      } catch (uploadError) {
+        console.error("[SessionMoves] Failed to upload session moves:", uploadError);
+      }
       await endGame(sessionId, "resign", chess.pgn());
       setIsGameActive(false);
       setGameResult({ type: "resign", message: "You resigned." });
@@ -766,6 +933,8 @@ const ChessGame = () => {
     setLiveOpening(null);
     resetEngine();
     clearAnalysis();
+    moveHistoryRef.current = [];
+    uploadedAnalysisSessionsRef.current.clear();
     setBlunderAlert(null);
     setShowFlash(false);
     setShowStartOverlay(false);

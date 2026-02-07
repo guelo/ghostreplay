@@ -4,6 +4,7 @@ import ChessGame from './ChessGame'
 
 const startGameMock = vi.fn()
 const endGameMock = vi.fn()
+const uploadSessionMovesMock = vi.fn()
 const getGhostMoveMock = vi.fn()
 const recordBlunderMock = vi.fn()
 const recordManualBlunderMock = vi.fn()
@@ -11,6 +12,7 @@ const recordManualBlunderMock = vi.fn()
 vi.mock('../utils/api', () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
+  uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
   recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
@@ -41,16 +43,18 @@ let mockLastAnalysis: {
   bestEval: number | null
   playedEval: number | null
   currentPositionEval: number | null
+  moveIndex?: number | null
   delta: number | null
   blunder: boolean
 } | null = null
+let mockAnalysisMap = new Map<number, unknown>()
 const mockAnalyzeMove = vi.fn()
 
 vi.mock('../hooks/useMoveAnalysis', () => ({
   useMoveAnalysis: () => ({
     analyzeMove: mockAnalyzeMove,
     lastAnalysis: mockLastAnalysis,
-    analysisMap: new Map(),
+    analysisMap: mockAnalysisMap,
     status: 'ready',
     isAnalyzing: false,
     analyzingMove: null,
@@ -78,9 +82,12 @@ describe('ChessGame start flow', () => {
   beforeEach(() => {
     startGameMock.mockReset()
     endGameMock.mockReset()
+    uploadSessionMovesMock.mockReset()
     getGhostMoveMock.mockReset()
     recordManualBlunderMock.mockReset()
     lookupOpeningByFenMock.mockReset()
+    mockAnalysisMap = new Map()
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
     // Default: no ghost move available, fall back to engine
     getGhostMoveMock.mockResolvedValue({ mode: 'engine', move: null, target_blunder_id: null })
     lookupOpeningByFenMock.mockResolvedValue(null)
@@ -146,6 +153,7 @@ describe('ChessGame blunder recording', () => {
     window.HTMLElement.prototype.scrollIntoView = vi.fn()
     startGameMock.mockReset()
     endGameMock.mockReset()
+    uploadSessionMovesMock.mockReset()
     getGhostMoveMock.mockReset()
     recordBlunderMock.mockReset()
     recordManualBlunderMock.mockReset()
@@ -153,6 +161,7 @@ describe('ChessGame blunder recording', () => {
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()
     mockLastAnalysis = null
+    mockAnalysisMap = new Map()
     capturedPieceDrop = null
 
     getGhostMoveMock.mockResolvedValue({
@@ -175,6 +184,7 @@ describe('ChessGame blunder recording', () => {
       positions_created: 1,
       is_new: true,
     })
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
   })
 
   afterEach(() => {
@@ -529,6 +539,7 @@ describe('ChessGame move analysis', () => {
     window.HTMLElement.prototype.scrollIntoView = vi.fn()
     startGameMock.mockReset()
     endGameMock.mockReset()
+    uploadSessionMovesMock.mockReset()
     getGhostMoveMock.mockReset()
     recordBlunderMock.mockReset()
     recordManualBlunderMock.mockReset()
@@ -536,6 +547,7 @@ describe('ChessGame move analysis', () => {
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()
     mockLastAnalysis = null
+    mockAnalysisMap = new Map()
     capturedPieceDrop = null
 
     getGhostMoveMock.mockResolvedValue({
@@ -545,6 +557,7 @@ describe('ChessGame move analysis', () => {
     })
     evaluatePositionMock.mockResolvedValue({ move: 'd7d5' })
     lookupOpeningByFenMock.mockResolvedValue(null)
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
   })
 
   afterEach(() => {
@@ -632,14 +645,103 @@ describe('ChessGame move analysis', () => {
       )
     })
   })
+
+  it('uploads player and engine move analysis batch on resign', async () => {
+    endGameMock.mockResolvedValue({
+      session_id: 'session-analysis',
+      blunders_recorded: 0,
+      blunders_reviewed: 0,
+    })
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 2 })
+
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        'd7d5',
+        'black',
+        1,
+      )
+    })
+
+    mockAnalysisMap.set(0, {
+      id: 'analysis-0',
+      move: 'e2e4',
+      bestMove: 'e2e4',
+      bestEval: 25,
+      playedEval: 25,
+      currentPositionEval: 25,
+      moveIndex: 0,
+      delta: 0,
+      blunder: false,
+    })
+    mockAnalysisMap.set(1, {
+      id: 'analysis-1',
+      move: 'd7d5',
+      bestMove: 'd7d5',
+      bestEval: 16,
+      playedEval: 8,
+      currentPositionEval: 8,
+      moveIndex: 1,
+      delta: 8,
+      blunder: false,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /resign/i }))
+
+    await waitFor(() => {
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+    })
+
+    expect(uploadSessionMovesMock).toHaveBeenCalledWith(
+      'session-analysis',
+      [
+        expect.objectContaining({
+          move_number: 1,
+          color: 'white',
+          move_san: 'e4',
+          fen_after: expect.any(String),
+          eval_cp: 25,
+          eval_mate: null,
+          best_move_san: 'e4',
+          best_move_eval_cp: 25,
+          eval_delta: 0,
+          classification: 'best',
+        }),
+        expect.objectContaining({
+          move_number: 1,
+          color: 'black',
+          move_san: 'd5',
+          fen_after: expect.any(String),
+          eval_cp: 8,
+          eval_mate: null,
+          best_move_san: 'd5',
+          best_move_eval_cp: 16,
+          eval_delta: 8,
+          classification: 'excellent',
+        }),
+      ],
+    )
+
+    await waitFor(() => {
+      expect(endGameMock).toHaveBeenCalledWith('session-analysis', 'resign', expect.any(String))
+    })
+  })
 })
 
 describe('ChessGame opening display', () => {
   beforeEach(() => {
     startGameMock.mockReset()
+    uploadSessionMovesMock.mockReset()
     getGhostMoveMock.mockReset()
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()
+    mockAnalysisMap = new Map()
     capturedPieceDrop = null
 
     getGhostMoveMock.mockResolvedValue({
@@ -653,6 +755,7 @@ describe('ChessGame opening display', () => {
       name: "King's Pawn Game",
       source: 'eco',
     })
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
   })
 
   it('shows opening only during an active game', async () => {

@@ -3,6 +3,7 @@ import {
   ApiError,
   startGame,
   endGame,
+  uploadSessionMoves,
   recordBlunder,
   recordManualBlunder,
   getGhostMove,
@@ -172,6 +173,96 @@ describe('endGame', () => {
       const body = JSON.parse(fetchMock.mock.calls[0][1].body)
       expect(body.result).toBe(result)
     }
+  })
+})
+
+describe('uploadSessionMoves', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('sends POST request to session moves endpoint', async () => {
+    mockResponse({ moves_inserted: 2 })
+
+    await uploadSessionMoves('sess-1', [
+      {
+        move_number: 1,
+        color: 'white',
+        move_san: 'e4',
+        fen_after: 'fen-1',
+        eval_cp: 20,
+        eval_mate: null,
+        best_move_san: 'e4',
+        best_move_eval_cp: 20,
+        eval_delta: 0,
+        classification: 'best',
+      },
+      {
+        move_number: 1,
+        color: 'black',
+        move_san: 'e5',
+        fen_after: 'fen-2',
+        eval_cp: 10,
+        eval_mate: null,
+        best_move_san: 'e5',
+        best_move_eval_cp: 12,
+        eval_delta: 2,
+        classification: 'excellent',
+      },
+    ])
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/session/sess-1/moves'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          moves: [
+            {
+              move_number: 1,
+              color: 'white',
+              move_san: 'e4',
+              fen_after: 'fen-1',
+              eval_cp: 20,
+              eval_mate: null,
+              best_move_san: 'e4',
+              best_move_eval_cp: 20,
+              eval_delta: 0,
+              classification: 'best',
+            },
+            {
+              move_number: 1,
+              color: 'black',
+              move_san: 'e5',
+              fen_after: 'fen-2',
+              eval_cp: 10,
+              eval_mate: null,
+              best_move_san: 'e5',
+              best_move_eval_cp: 12,
+              eval_delta: 2,
+              classification: 'excellent',
+            },
+          ],
+        }),
+      }),
+    )
+  })
+
+  it('returns parsed response', async () => {
+    const expected = { moves_inserted: 4 }
+    mockResponse(expected)
+
+    const result = await uploadSessionMoves('sess-1', [])
+
+    expect(result).toEqual(expected)
+  })
+
+  it('throws on non-ok response', async () => {
+    mockResponse({}, false, 'Unprocessable Entity', 422)
+
+    await expect(uploadSessionMoves('sess-1', [])).rejects.toThrow(
+      'Failed to upload session moves: Unprocessable Entity',
+    )
   })
 })
 

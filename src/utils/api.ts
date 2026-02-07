@@ -151,6 +151,37 @@ interface EndGameResponse {
   blunders_reviewed: number
 }
 
+export type SessionMoveColor = 'white' | 'black'
+
+export type SessionMoveClassification =
+  | 'best'
+  | 'excellent'
+  | 'good'
+  | 'inaccuracy'
+  | 'mistake'
+  | 'blunder'
+
+export interface SessionMoveUpload {
+  move_number: number
+  color: SessionMoveColor
+  move_san: string
+  fen_after: string
+  eval_cp: number | null
+  eval_mate: number | null
+  best_move_san: string | null
+  best_move_eval_cp: number | null
+  eval_delta: number | null
+  classification: SessionMoveClassification | null
+}
+
+interface SessionMovesRequest {
+  moves: SessionMoveUpload[]
+}
+
+interface SessionMovesResponse {
+  moves_inserted: number
+}
+
 interface BlunderRequest {
   session_id: string
   pgn: string
@@ -214,6 +245,24 @@ export const endGame = async (
     headers: getAuthHeaders(),
     body: JSON.stringify({ session_id: sessionId, result, pgn } satisfies EndGameRequest),
   }, { fallbackMessage: 'Failed to end game' })
+}
+
+/**
+ * Upload analyzed session moves in a single batch.
+ */
+export const uploadSessionMoves = async (
+  sessionId: string,
+  moves: SessionMoveUpload[],
+): Promise<SessionMovesResponse> => {
+  return requestJson<SessionMovesResponse>(
+    `${API_BASE_URL}/api/session/${sessionId}/moves`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ moves } satisfies SessionMovesRequest),
+    },
+    { fallbackMessage: 'Failed to upload session moves' },
+  )
 }
 
 /**

@@ -93,6 +93,14 @@ export const isBlunder = (delta: number | null): boolean => {
 
 export type MoveClassification = 'blunder' | 'inaccuracy' | 'good' | 'great' | 'best'
 
+export type SessionMoveClassification =
+  | 'best'
+  | 'excellent'
+  | 'good'
+  | 'inaccuracy'
+  | 'mistake'
+  | 'blunder'
+
 export const classifyMove = (delta: number | null): MoveClassification | null => {
   if (delta === null) return null
   if (delta >= BLUNDER_THRESHOLD) return 'blunder'
@@ -100,6 +108,20 @@ export const classifyMove = (delta: number | null): MoveClassification | null =>
   if (delta < 0) return 'great'
   if (delta === 0) return 'best'
   return 'good'
+}
+
+export const classifySessionMove = (
+  delta: number | null,
+): SessionMoveClassification | null => {
+  if (delta === null) return null
+
+  const normalizedDelta = Math.max(delta, 0)
+  if (normalizedDelta === 0) return 'best'
+  if (normalizedDelta <= 10) return 'excellent'
+  if (normalizedDelta <= 50) return 'good'
+  if (normalizedDelta <= 100) return 'inaccuracy'
+  if (normalizedDelta <= 149) return 'mistake'
+  return 'blunder'
 }
 
 export const ANNOTATION_SYMBOL: Record<MoveClassification, string> = {

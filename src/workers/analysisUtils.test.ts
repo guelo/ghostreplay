@@ -8,6 +8,7 @@ import {
   getSideToMove,
   isBlunder,
   classifyMove,
+  classifySessionMove,
   ANNOTATION_SYMBOL,
   BLUNDER_THRESHOLD,
 } from './analysisUtils'
@@ -346,5 +347,42 @@ describe('ANNOTATION_SYMBOL', () => {
 
   it('maps best to !', () => {
     expect(ANNOTATION_SYMBOL.best).toBe('!')
+  })
+})
+
+describe('classifySessionMove', () => {
+  it('returns null for null delta', () => {
+    expect(classifySessionMove(null)).toBeNull()
+  })
+
+  it('classifies best at zero and negative deltas', () => {
+    expect(classifySessionMove(0)).toBe('best')
+    expect(classifySessionMove(-1)).toBe('best')
+    expect(classifySessionMove(-250)).toBe('best')
+  })
+
+  it('classifies excellent between 1 and 10', () => {
+    expect(classifySessionMove(1)).toBe('excellent')
+    expect(classifySessionMove(10)).toBe('excellent')
+  })
+
+  it('classifies good between 11 and 50', () => {
+    expect(classifySessionMove(11)).toBe('good')
+    expect(classifySessionMove(50)).toBe('good')
+  })
+
+  it('classifies inaccuracy between 51 and 100', () => {
+    expect(classifySessionMove(51)).toBe('inaccuracy')
+    expect(classifySessionMove(100)).toBe('inaccuracy')
+  })
+
+  it('classifies mistake between 101 and 149', () => {
+    expect(classifySessionMove(101)).toBe('mistake')
+    expect(classifySessionMove(149)).toBe('mistake')
+  })
+
+  it('classifies blunder at and above 150', () => {
+    expect(classifySessionMove(150)).toBe('blunder')
+    expect(classifySessionMove(400)).toBe('blunder')
   })
 })
