@@ -85,10 +85,29 @@ def _create_test_schema(conn) -> None:
             FOREIGN KEY (to_position_id) REFERENCES positions(id)
         )
     """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS session_moves (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            move_number INTEGER NOT NULL,
+            color VARCHAR(5) NOT NULL,
+            move_san VARCHAR(10) NOT NULL,
+            fen_after TEXT NOT NULL,
+            eval_cp INTEGER,
+            eval_mate INTEGER,
+            best_move_san VARCHAR(10),
+            best_move_eval_cp INTEGER,
+            eval_delta INTEGER,
+            classification VARCHAR(20),
+            UNIQUE(session_id, move_number, color),
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+        )
+    """))
     conn.commit()
 
 
 def _reset_test_schema(conn) -> None:
+    conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))
     conn.execute(text("DROP TABLE IF EXISTS blunders"))
     conn.execute(text("DROP TABLE IF EXISTS positions"))

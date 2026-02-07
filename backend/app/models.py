@@ -112,3 +112,29 @@ class Move(Base):
         ForeignKey("positions.id"),
         nullable=False,
     )
+
+
+class SessionMove(Base):
+    __tablename__ = "session_moves"
+    __table_args__ = (
+        CheckConstraint("color in ('white','black')", name="ck_session_moves_color"),
+        UniqueConstraint("session_id", "move_number", "color", name="uq_session_moves_session_move_color"),
+        Index("idx_session_moves_session", "session_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("game_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    move_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    color: Mapped[str] = mapped_column(String(5), nullable=False)
+    move_san: Mapped[str] = mapped_column(String(10), nullable=False)
+    fen_after: Mapped[str] = mapped_column(Text, nullable=False)
+    eval_cp: Mapped[int | None] = mapped_column(Integer)
+    eval_mate: Mapped[int | None] = mapped_column(Integer)
+    best_move_san: Mapped[str | None] = mapped_column(String(10))
+    best_move_eval_cp: Mapped[int | None] = mapped_column(Integer)
+    eval_delta: Mapped[int | None] = mapped_column(Integer)
+    classification: Mapped[str | None] = mapped_column(String(20))
