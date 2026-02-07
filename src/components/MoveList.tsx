@@ -12,6 +12,9 @@ type MoveListProps = {
   moves: Move[]
   currentIndex: number | null // null means viewing latest position
   onNavigate: (index: number | null) => void
+  canAddSelectedMove?: boolean
+  isAddingSelectedMove?: boolean
+  onAddSelectedMove?: (index: number) => void
 }
 
 const formatEval = (cp: number): string => {
@@ -24,7 +27,14 @@ const classificationClass = (c?: MoveClassification | null): string => {
   return `move-${c}`
 }
 
-const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
+const MoveList = ({
+  moves,
+  currentIndex,
+  onNavigate,
+  canAddSelectedMove = false,
+  isAddingSelectedMove = false,
+  onAddSelectedMove,
+}: MoveListProps) => {
   const moveListRef = useRef<HTMLDivElement>(null)
   const selectedMoveRef = useRef<HTMLButtonElement>(null)
 
@@ -103,6 +113,11 @@ const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
 
   const isAtStart = effectiveIndex === -1
   const isAtLatest = currentIndex === null
+  const showAddButton =
+    Boolean(onAddSelectedMove) &&
+    moves.length > 0 &&
+    effectiveIndex >= 0 &&
+    canAddSelectedMove
 
   const renderMoveCell = (move: Move, index: number) => {
     const isSelected = index === effectiveIndex
@@ -129,11 +144,27 @@ const MoveList = ({ moves, currentIndex, onNavigate }: MoveListProps) => {
     <div className="move-list-container">
       <div className="move-list-header">
         <span className="move-list-title">Moves</span>
-        <span className={`move-list-viewing ${isAtLatest ? 'hidden' : ''}`}>
-          Viewing position {effectiveIndex + 1}/{moves.length}
-        </span>
+        <div className="move-list-actions">
+          <span className={`move-list-viewing ${isAtLatest ? 'hidden' : ''}`}>
+            Viewing position {effectiveIndex + 1}/{moves.length}
+          </span>
+          {showAddButton ? (
+            <button
+              className="move-list-add-button"
+              type="button"
+              onClick={() => {
+                if (onAddSelectedMove && effectiveIndex >= 0) {
+                  onAddSelectedMove(effectiveIndex)
+                }
+              }}
+              disabled={isAddingSelectedMove}
+              title="Add selected move to ghost library"
+            >
+              {isAddingSelectedMove ? 'Adding…' : 'Add to Ghost Library'}
+            </button>
+          ) : null}
+        </div>
       </div>
-
       <div className="move-list-nav">
         <button
           className="move-nav-button"

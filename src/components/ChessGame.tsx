@@ -7,7 +7,12 @@ import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
-import { startGame, endGame, recordBlunder } from "../utils/api";
+import {
+  startGame,
+  endGame,
+  recordBlunder,
+  recordManualBlunder,
+} from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
 import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
 import MoveList from "./MoveList";
@@ -90,6 +95,7 @@ const ChessGame = () => {
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [showStartOverlay, setShowStartOverlay] = useState(false);
+  const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
 
   // Tracks next move index synchronously so async callbacks (engine/ghost)
   // don't read stale moveHistory.length from closures.
@@ -138,6 +144,98 @@ const ChessGame = () => {
   const handleNavigate = useCallback((index: number | null) => {
     setViewIndex(index);
   }, []);
+
+  const isPlayerMoveIndex = useCallback(
+    (index: number) => {
+      if (index < 0) return false;
+      const isWhiteMove = index % 2 === 0;
+      return playerColor === "white" ? isWhiteMove : !isWhiteMove;
+    },
+    [playerColor],
+  );
+
+  const selectedMoveIndex = useMemo(() => {
+    if (moveHistory.length === 0) {
+      return null;
+    }
+    return viewIndex ?? moveHistory.length - 1;
+  }, [moveHistory.length, viewIndex]);
+
+  const canAddSelectedMove = useMemo(() => {
+    if (!sessionId || selectedMoveIndex === null) {
+      return false;
+    }
+    return isPlayerMoveIndex(selectedMoveIndex);
+  }, [sessionId, selectedMoveIndex, isPlayerMoveIndex]);
+
+  const buildManualCapturePayload = useCallback(
+    (moveIndex: number) => {
+      if (moveIndex < 0 || moveIndex >= moveHistory.length) {
+        return null;
+      }
+
+      const preMoveFen =
+        moveIndex === 0 ? STARTING_FEN : moveHistory[moveIndex - 1]?.fen;
+      if (!preMoveFen) {
+        return null;
+      }
+
+      const replay = new Chess();
+      for (let i = 0; i <= moveIndex; i += 1) {
+        const applied = replay.move(moveHistory[i].san);
+        if (!applied) {
+          return null;
+        }
+      }
+
+      const analysis = analysisMap.get(moveIndex);
+      const userMove = moveHistory[moveIndex].san;
+
+      return {
+        pgn: replay.pgn(),
+        fen: preMoveFen,
+        userMove,
+        bestMove: analysis?.bestMove ?? userMove,
+        evalBefore: analysis?.bestEval ?? 0,
+        evalAfter: analysis?.playedEval ?? (analysis?.bestEval ?? 0),
+      };
+    },
+    [analysisMap, moveHistory],
+  );
+
+  const handleAddSelectedMove = useCallback(
+    async (moveIndex: number) => {
+      if (!sessionId) {
+        return;
+      }
+
+      if (!isPlayerMoveIndex(moveIndex)) {
+        return;
+      }
+
+      const payload = buildManualCapturePayload(moveIndex);
+      if (!payload) {
+        return;
+      }
+
+      setIsAddingToLibrary(true);
+      try {
+        await recordManualBlunder(
+          sessionId,
+          payload.pgn,
+          payload.fen,
+          payload.userMove,
+          payload.bestMove,
+          payload.evalBefore,
+          payload.evalAfter,
+        );
+      } catch {
+      } finally {
+        setIsAddingToLibrary(false);
+      }
+    },
+    [buildManualCapturePayload, isPlayerMoveIndex, sessionId],
+  );
 
   const handleGameEnd = useCallback(async () => {
     if (!sessionId || !isGameActive) return;
@@ -779,6 +877,9 @@ const ChessGame = () => {
           moves={annotatedMoves}
           currentIndex={viewIndex}
           onNavigate={handleNavigate}
+          canAddSelectedMove={canAddSelectedMove}
+          isAddingSelectedMove={isAddingToLibrary}
+          onAddSelectedMove={handleAddSelectedMove}
         />
       </div>
     </section>

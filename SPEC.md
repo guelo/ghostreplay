@@ -174,8 +174,9 @@ graph TD
 
 ### 3.3 Database (The Memory)
 
-* **Responsibility:** Storing the graph of positions and moves.
+* **Responsibility:** Storing the Ghost Library graph of positions and moves, plus the user decision targets that are practiced later.
 * **Graph Structure:** Moves are not stored as linear games, but as a **directed graph** of unique FEN positions. Note: While games progress forward in time, the position graph can contain cycles (e.g., threefold repetition, perpetual checks, transpositions that revisit the same FEN). Recursive queries must include cycle detection and depth bounds.
+* **Ghost Library Semantics:** The Ghost Library includes both auto-identified blunders and manually selected MoveList decisions.
 
 ---
 
@@ -195,10 +196,10 @@ graph TD
 
 ## 5. Database Schema
 
-The core innovation is storing chess history as a Graph. The chesss graph is composed of positions as nodes and moves as edges. A blunder is a move so it is an edge.
-The complication is that the user moves only on every other edge. 
+The core innovation is storing chess history as a graph. The graph is composed of positions as nodes and moves as edges. The Ghost Library is this graph plus user decision targets stored in `blunders`.
+The complication is that the user moves only on every other edge, so capture logic must validate side-to-move ownership.
 
-**User Scoping:** All data is scoped per-user. Each user has their own position graph and blunder records. There is no sharing of data between users (MVP).
+**User Scoping:** All data is scoped per-user. Each user has their own position graph and Ghost Library targets. There is no sharing of data between users (MVP).
 
 ### 5.1 `positions` (Nodes)
 
@@ -277,25 +278,27 @@ Normalized: rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3
 Hash:       a1b2c3d4... (SHA256)
 ```
 
-### 5.2 `blunders` (User Decisions)
+### 5.2 `blunders` (Ghost Library Targets)
 
-Represents a bad move choice the user made from a specific position. This is the core SRS entity—blunders are decisions, not positions.
+Represents a decision point the user will practice from a specific position. This is the core SRS entity for the Ghost Library. Entries come from both:
+- auto-detected blunders (`POST /api/blunder`)
+- manually selected moves from MoveList (`POST /api/blunder/manual`)
 
 ```sql
 CREATE TABLE blunders (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
     position_id BIGINT NOT NULL REFERENCES positions(id),  -- Pre-move position (decision point)
-    bad_move_san VARCHAR(10) NOT NULL,     -- The move the user played
-    best_move_san VARCHAR(10) NOT NULL,    -- Engine's recommended move
-    eval_loss_cp INTEGER NOT NULL,         -- Centipawn loss (positive value)
+    bad_move_san VARCHAR(10) NOT NULL,     -- Selected move captured at this decision point
+    best_move_san VARCHAR(10) NOT NULL,    -- Engine recommended move at capture time
+    eval_loss_cp INTEGER NOT NULL,         -- Centipawn delta at capture time (0 allowed for manual captures)
 
     -- SRS Fields
     pass_streak INTEGER NOT NULL DEFAULT 0,
     last_reviewed_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
-    UNIQUE (user_id, position_id)          -- One blunder per position per user
+    UNIQUE (user_id, position_id)          -- One ghost-library target per position per user
 );
 
 CREATE INDEX idx_blunders_user ON blunders(user_id);
@@ -305,11 +308,11 @@ CREATE INDEX idx_blunders_due ON blunders(user_id, pass_streak, last_reviewed_at
 
 **Key semantics:**
 - `position_id` references the **pre-move** position—where the user faced the decision
-- `bad_move_san` is the user's original mistake (for display: "You played Qxd4 here before")
+- `bad_move_san` is the move captured when the target was added (for auto blunders this is the mistake; for manual captures it may be a good move)
 - SRS pass/fail is determined by **real-time engine evaluation**, not by checking against `bad_move_san`
 - Any move within 50cp of the engine's best passes; any move ≥50cp worse fails
-- The unique constraint means if the user blunders at the same position again (even with a different bad move), the existing blunder record is updated rather than duplicated
-- Blunders are only recorded when it is **the user's turn to move**; Ghost selection filters by the session's `player_color` so users can play either side without cross-contamination
+- The unique constraint means duplicate adds at the same position return the existing target (`is_new=false`, shown in UI as "already in library")
+- Targets are only recorded when it is **the user's turn to move**; Ghost selection filters by the session's `player_color` so users can play either side without cross-contamination
 
 #### 5.2.1 `blunder_reviews` (Review Events)
 
@@ -542,13 +545,16 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
 - Position ID → downstream blunder count (invalidate on new blunder insertion)
 - Warm model/prepared inference artifacts in-process for backend engine calls
 
-### 6.2 The Blunder Capture Logic
+### 6.2 Ghost Library Capture Logic
+
+Ghost Library targets enter the system through two capture paths.
+
+#### 6.2.1 Automatic Capture (analysis-triggered blunder)
 
 1. User plays move M from position P_before, resulting in position P_after.
 2. **Worker B** (Frontend) calculates:
    * E_best (Eval of engine's best move from P_before)
    * E_user (Eval after user's move M)
-
 3. If delta ≥ 150cp (blunder detection threshold):
    * Frontend sends `POST /api/blunder` with:
      * `pgn`: Full game history up to and including the bad move (e.g., `"1. e4 e5 2. Nf3 Nc6 3. Bb5 a6"`)
@@ -561,11 +567,23 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
      2. **Sanity check:** Verify position before final move matches provided `fen`. Reject with 422 if mismatch.
      3. **Insert positions:** For each position in the replay (including start), upsert into `positions` table (deduplicated by `fen_hash`)
      4. **Insert edges:** For each move in the PGN, upsert into `moves` table connecting consecutive positions
-     5. **Create blunder record:** Insert into `blunders` table referencing P_before (the decision point)
+     5. **Create ghost-library target:** Insert/reuse row in `blunders` referencing P_before (the decision point)
+4. This path enforces the session's first-auto-blunder rule via `game_sessions.blunder_recorded`.
 
-**Why store the full path:** The Ghost's scent query (Section 6.1) traverses from the current board position downstream to find reachable blunders. Without intermediate positions in the graph, there's no path to traverse — Ghost would always fall back to engine mode.
+#### 6.2.2 Manual Capture (MoveList-selected move)
 
-**Critical semantic:** The blunder references the **pre-move position** (P_before), because that's where the user faced the decision and will be tested again during SRS review.
+1. User selects a move in MoveList and clicks **Add to Ghost Library**.
+2. The client may call this flow during both active and ended games.
+3. There is no capture threshold for this path: any eligible player move can be added.
+4. Frontend sends `POST /api/blunder/manual` with PGN history through the selected move plus the selected pre-move FEN.
+5. Backend replays that PGN history and upserts positions/moves exactly as in automatic capture.
+6. Backend inserts/reuses the same `blunders` table keyed by `(user_id, position_id)`, then returns `is_new`.
+7. If `is_new=false`, frontend shows duplicate UX: **"already in library"**.
+8. Manual capture does not mutate `game_sessions.blunder_recorded`.
+
+**Why store the full path:** The Ghost's scent query (Section 6.1) traverses from the current board position downstream to find reachable targets. Without intermediate positions in the graph, there's no path to traverse — Ghost would always fall back to engine mode.
+
+**Critical semantic:** Every target references the **pre-move position** (P_before), because that's where the user faced the decision and will be tested again during SRS review.
 
 
 
@@ -766,13 +784,13 @@ Engine evaluations fluctuate during iterative deepening. The protocol uses **dep
 
 **Memory:** Each evaluation result is held in memory during the game and batch-uploaded on game end (see Section 7.4).
 
-**Error recovery:** If Worker B fails to initialize (WASM load failure), the game continues without analysis. The `session_moves` table will be empty for that game, and no blunders can be recorded.
+**Error recovery:** If Worker B fails to initialize (WASM load failure), the game continues without analysis. The `session_moves` table will be empty for that game, and no automatic blunders can be recorded (manual MoveList capture is still available).
 
 ---
 
 ## 7. Game Sessions & Lifecycle
 
-A **game session** represents a single game from start to termination. Sessions enforce the "first blunder only" rule, track game outcomes, and store game history with analysis.
+A **game session** represents a single game from start to termination. Sessions enforce the "first auto-blunder only" rule for analysis-triggered capture, track game outcomes, and store game history with analysis.
 
 ### 7.1 Session Definition
 
@@ -811,7 +829,7 @@ CREATE TABLE game_sessions (
     result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
     engine_elo INTEGER NOT NULL,  -- Bot difficulty selected for this game
     player_color VARCHAR(5) NOT NULL, -- 'white' or 'black' (user side for this session)
-    blunder_recorded BOOLEAN NOT NULL DEFAULT FALSE,  -- First-blunder rule flag
+    blunder_recorded BOOLEAN NOT NULL DEFAULT FALSE,  -- First auto-blunder rule flag (manual captures bypass)
     pgn TEXT,                     -- Full game in PGN format
 
     CONSTRAINT valid_status CHECK (status IN ('in_progress', 'ended', 'abandoned')),
@@ -867,9 +885,9 @@ CREATE INDEX idx_session_moves_session ON session_moves(session_id);
 3. On game end → Frontend sends full analysis batch to `POST /api/session/{id}/moves`
 4. Server bulk-inserts all `session_moves` records
 
-### 7.5 First-Blunder Rule Enforcement
+### 7.5 First-Auto-Blunder Rule Enforcement
 
-The `blunder_recorded` flag ensures only one blunder per session enters the graph:
+The `blunder_recorded` flag ensures only one automatically detected blunder per session enters the graph:
 
 ```
 POST /api/blunder called
@@ -899,6 +917,7 @@ POST /api/blunder called
 2. Server checks `blunder_recorded` flag on session
 3. If `FALSE`: Insert blunder into graph, set flag `TRUE`, return `201 Created`
 4. If `TRUE`: Skip insertion, return `200 OK` with `{ "recorded": false, "reason": "session_limit" }`
+5. `POST /api/blunder/manual` is not subject to this flag (manual capture is allowed in active and ended sessions).
 
 ### 7.6 Game Termination
 
@@ -924,7 +943,7 @@ POST /api/blunder called
 - Session metadata (start/end times, result, engine Elo)
 - Full PGN of the game
 - Per-move engine analysis (eval, best move, classification)
-- Blunders recorded during the session (in the positions graph)
+- Ghost Library targets: auto blunders and manually selected MoveList decisions (in the positions graph)
 
 **Browser Refresh Behavior (MVP):**
 - Refreshing mid-game loses the current game state
@@ -1189,17 +1208,19 @@ Bulk-ingests the analyzed move data collected during the session. The request mi
 - Endpoint is called once per completed game; repeat calls replace the existing move set for idempotency.
 - Any PGN string is still sent to `/api/game/end` (stored in `game_sessions.pgn`), while this endpoint remains JSON so downstream analytics don't need to re-parse PGN comments.
 
-### 9.4 Blunders
+### 9.4 Blunders / Ghost Library Targets
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/blunder` | Record a new blunder |
-| GET | `/api/blunders` | List user's blunders |
-| GET | `/api/blunders/:id` | Get single blunder details |
+| POST | `/api/blunder` | Record an auto-detected blunder (analysis-triggered) |
+| POST | `/api/blunder/manual` | Manually add a MoveList decision to the Ghost Library |
+| GET | `/api/blunders` | List user's Ghost Library targets |
+| GET | `/api/blunders/:id` | Get single Ghost Library target details |
 
 #### POST /api/blunder
 
-Records a blunder detected by the client-side engine. Stores the full path from game start to the blunder position in the graph.
+Records a blunder detected by the client-side engine (delta >= 150cp). Stores the full path from game start to the blunder position in the graph.
+This endpoint enforces the first-auto-blunder-per-session rule.
 
 **Request:**
 ```json
@@ -1232,11 +1253,45 @@ Records a blunder detected by the client-side engine. Stores the full path from 
 ```
 
 - `positions_created`: Number of new positions added to graph (0 if path already existed)
-- `is_new: false` means this position already had a blunder record (existing record updated)
+- `is_new: false` means this position already has a Ghost Library target (frontend message: "already in library")
+
+#### POST /api/blunder/manual
+
+Manually adds a MoveList decision point to the Ghost Library. This endpoint is allowed for both active and ended sessions.
+
+**Request:**
+```json
+{
+  "session_id": "uuid",
+  "pgn": "string (game history up to and including the selected move)",
+  "fen": "string (position BEFORE selected move - used as sanity check)",
+  "user_move": "string (SAN of selected move)",
+  "best_move": "string | null (engine best move if available)",
+  "eval_before": "integer | null (centipawns, optional metadata)",
+  "eval_after": "integer | null (centipawns, optional metadata)"
+}
+```
+
+**Rules:**
+1. No 150cp threshold is applied; any eligible player move can be added.
+2. Backend replays PGN and upserts positions/moves exactly like automatic capture.
+3. Backend inserts/reuses `(user_id, position_id)` target row in `blunders`.
+4. Duplicate capture returns `is_new=false` so UI can show "already in library".
+5. This endpoint does not set or check `game_sessions.blunder_recorded`.
+
+**Response (201):**
+```json
+{
+  "blunder_id": "integer",
+  "position_id": "integer",
+  "positions_created": "integer",
+  "is_new": "boolean"
+}
+```
 
 #### GET /api/blunders
 
-Lists the user's recorded blunders.
+Lists the user's recorded Ghost Library targets (auto blunders + manual MoveList selections).
 
 **Query Parameters:**
 - `due` (boolean, optional) - Only return blunders with priority > 1.0
@@ -1250,7 +1305,7 @@ Lists the user's recorded blunders.
       "id": "integer",
       "position_id": "integer",
       "fen": "string (the decision point position)",
-      "bad_move": "string (SAN of user's mistake)",
+      "bad_move": "string (SAN captured when target was added)",
       "best_move": "string (SAN of engine's recommendation)",
       "eval_loss_cp": "integer",
       "pass_streak": "integer",
@@ -1270,7 +1325,7 @@ Lists the user's recorded blunders.
   "id": "integer",
   "position_id": "integer",
   "fen": "string (the decision point position)",
-  "bad_move": "string (SAN of user's mistake)",
+  "bad_move": "string (SAN captured when target was added)",
   "best_move": "string (SAN of engine's recommendation)",
   "eval_loss_cp": "integer",
   "pass_streak": "integer",
@@ -1768,9 +1823,10 @@ When user has no completed games:
 - Re-hooking on transpositions (normalized FEN hashing)
 
 **Blunder Detection**
-- First mistake only per session
+- First auto-detected mistake only per session
 - Threshold handling (>=150cp blunder, >=50cp replay failure)
 - Pre-move position reference (P_before) for stored blunders
+- Manual MoveList capture supports any player move (no >=150cp requirement)
 
 **Graph Traversal**
 - Recursive query cycle detection
@@ -1791,7 +1847,8 @@ When user has no completed games:
 | Ghost | user deviates off path | ghost deactivates |
 | Ghost | user transposes back to known node | ghost reactivates |
 | Blunder | blunder stored against pre-move FEN | decision point preserved |
-| Analysis | first blunder only | later mistakes ignored |
+| Analysis | first auto blunder only | later mistakes ignored unless manually added |
+| Manual add | duplicate position capture | `is_new=false` and UI shows "already in library" |
 
 ### 12.4 Test Data & Determinism
 

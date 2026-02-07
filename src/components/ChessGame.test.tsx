@@ -6,12 +6,14 @@ const startGameMock = vi.fn()
 const endGameMock = vi.fn()
 const getGhostMoveMock = vi.fn()
 const recordBlunderMock = vi.fn()
+const recordManualBlunderMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
   getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
+  recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
 }))
 
 const evaluatePositionMock = vi.fn()
@@ -77,6 +79,7 @@ describe('ChessGame start flow', () => {
     startGameMock.mockReset()
     endGameMock.mockReset()
     getGhostMoveMock.mockReset()
+    recordManualBlunderMock.mockReset()
     lookupOpeningByFenMock.mockReset()
     // Default: no ghost move available, fall back to engine
     getGhostMoveMock.mockResolvedValue({ mode: 'engine', move: null, target_blunder_id: null })
@@ -142,6 +145,7 @@ describe('ChessGame blunder recording', () => {
     endGameMock.mockReset()
     getGhostMoveMock.mockReset()
     recordBlunderMock.mockReset()
+    recordManualBlunderMock.mockReset()
     mockAnalyzeMove.mockReset()
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()
@@ -160,6 +164,12 @@ describe('ChessGame blunder recording', () => {
       blunder_id: 1,
       position_id: 10,
       positions_created: 3,
+      is_new: true,
+    })
+    recordManualBlunderMock.mockResolvedValue({
+      blunder_id: 2,
+      position_id: 11,
+      positions_created: 1,
       is_new: true,
     })
   })
@@ -425,6 +435,90 @@ describe('ChessGame blunder recording', () => {
 
     expect(recordBlunderMock).toHaveBeenCalledTimes(1)
   })
+
+  it('adds selected player move to ghost library from MoveList', async () => {
+    evaluatePositionMock.mockResolvedValue({ move: '(none)' })
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /e4/i }))
+    fireEvent.click(screen.getByRole('button', { name: /add to ghost library/i }))
+
+    await waitFor(() => {
+      expect(recordManualBlunderMock).toHaveBeenCalledWith(
+        'session-blunder',
+        expect.stringContaining('1. e4'),
+        'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+        'e4',
+        'e4',
+        0,
+        0,
+      )
+    })
+  })
+
+  it('handles duplicate add without rendering status line', async () => {
+    evaluatePositionMock.mockResolvedValue({ move: '(none)' })
+    recordManualBlunderMock.mockResolvedValueOnce({
+      blunder_id: 2,
+      position_id: 11,
+      positions_created: 0,
+      is_new: false,
+    })
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /add to ghost library/i }))
+
+    await waitFor(() => {
+      expect(recordManualBlunderMock).toHaveBeenCalledTimes(1)
+    })
+
+    expect(screen.queryByText('Already in library.')).not.toBeInTheDocument()
+    expect(screen.queryByText('Added to ghost library.')).not.toBeInTheDocument()
+  })
+
+  it('allows manual add after game has ended', async () => {
+    evaluatePositionMock.mockResolvedValue({ move: '(none)' })
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /resign/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText('You resigned.')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /add to ghost library/i }))
+
+    await waitFor(() => {
+      expect(recordManualBlunderMock).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('hides add button when selected move is not a player move', async () => {
+    evaluatePositionMock.mockResolvedValue({ move: 'd7d5' })
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /d5/i }))
+
+    expect(
+      screen.queryByRole('button', { name: /add to ghost library/i }),
+    ).not.toBeInTheDocument()
+  })
 })
 
 describe('ChessGame move analysis', () => {
@@ -434,6 +528,7 @@ describe('ChessGame move analysis', () => {
     endGameMock.mockReset()
     getGhostMoveMock.mockReset()
     recordBlunderMock.mockReset()
+    recordManualBlunderMock.mockReset()
     mockAnalyzeMove.mockReset()
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()

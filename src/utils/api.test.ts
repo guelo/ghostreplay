@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { ApiError, startGame, endGame, recordBlunder, getGhostMove } from './api'
+import {
+  ApiError,
+  startGame,
+  endGame,
+  recordBlunder,
+  recordManualBlunder,
+  getGhostMove,
+} from './api'
 
 const fetchMock = vi.fn()
 vi.stubGlobal('fetch', fetchMock)
@@ -229,6 +236,60 @@ describe('recordBlunder', () => {
 
     const [, options] = fetchMock.mock.calls[0]
     expect(options.headers.Authorization).toBe('Bearer jwt-123')
+  })
+})
+
+describe('recordManualBlunder', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('sends correct request body to manual endpoint', async () => {
+    mockResponse({ blunder_id: 1, position_id: 10, positions_created: 3, is_new: true })
+
+    await recordManualBlunder(
+      'sess-1',
+      '1. e4',
+      'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      'e4',
+      null,
+      null,
+      null,
+    )
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/blunder/manual'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          session_id: 'sess-1',
+          pgn: '1. e4',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          user_move: 'e4',
+          best_move: null,
+          eval_before: null,
+          eval_after: null,
+        }),
+      }),
+    )
+  })
+
+  it('returns parsed response', async () => {
+    const expected = { blunder_id: 1, position_id: 10, positions_created: 3, is_new: false }
+    mockResponse(expected)
+
+    const result = await recordManualBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 20, 5)
+
+    expect(result).toEqual(expected)
+  })
+
+  it('throws on non-ok response', async () => {
+    mockResponse({}, false, 'Unauthorized', 401)
+
+    await expect(
+      recordManualBlunder('sess-1', '1. e4', 'fen', 'e4', null, null, null),
+    ).rejects.toThrow('Failed to add move to ghost library: Unauthorized')
   })
 })
 

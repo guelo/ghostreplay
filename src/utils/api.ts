@@ -161,6 +161,16 @@ interface BlunderRequest {
   eval_after: number
 }
 
+interface ManualBlunderRequest {
+  session_id: string
+  pgn: string
+  fen: string
+  user_move: string
+  best_move: string | null
+  eval_before: number | null
+  eval_after: number | null
+}
+
 interface BlunderResponse {
   blunder_id: number | null
   position_id: number
@@ -231,6 +241,33 @@ export const recordBlunder = async (
       eval_after: evalAfter,
     } satisfies BlunderRequest),
   }, { fallbackMessage: 'Failed to record blunder' })
+}
+
+/**
+ * Manually add a selected move to ghost library
+ */
+export const recordManualBlunder = async (
+  sessionId: string,
+  pgn: string,
+  fen: string,
+  userMove: string,
+  bestMove: string | null,
+  evalBefore: number | null,
+  evalAfter: number | null,
+): Promise<BlunderResponse> => {
+  return requestJson<BlunderResponse>(`${API_BASE_URL}/api/blunder/manual`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      session_id: sessionId,
+      pgn,
+      fen,
+      user_move: userMove,
+      best_move: bestMove,
+      eval_before: evalBefore,
+      eval_after: evalAfter,
+    } satisfies ManualBlunderRequest),
+  }, { fallbackMessage: 'Failed to add move to ghost library' })
 }
 
 /**

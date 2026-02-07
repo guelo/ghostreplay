@@ -425,6 +425,134 @@ def test_record_blunder_eval_loss_calculation(client, auth_headers, create_game_
     assert result[0] == 150
 
 
+def test_record_manual_blunder_success(client, auth_headers, create_game_session):
+    """Manual endpoint records a selected move into ghost library."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    response = client.post(
+        "/api/blunder/manual",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4",
+            "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "user_move": "e4",
+            "best_move": None,
+            "eval_before": None,
+            "eval_after": None,
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["is_new"] is True
+    assert data["positions_created"] >= 1
+
+
+def test_record_manual_blunder_duplicate_returns_not_new(client, auth_headers, create_game_session):
+    """Manual duplicate add returns is_new=false for same pre-move position."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    payload = {
+        "session_id": session_id,
+        "pgn": "1. e4",
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "user_move": "e4",
+        "best_move": "d4",
+        "eval_before": 20,
+        "eval_after": 15,
+    }
+
+    first = client.post("/api/blunder/manual", json=payload, headers=auth_headers(user_id=123))
+    assert first.status_code == 201
+    assert first.json()["is_new"] is True
+
+    second = client.post("/api/blunder/manual", json=payload, headers=auth_headers(user_id=123))
+    assert second.status_code == 201
+    assert second.json()["is_new"] is False
+
+
+def test_record_manual_blunder_allows_ended_session(client, auth_headers, create_game_session):
+    """Manual endpoint works for ended sessions as well as active sessions."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "draw",
+            "pgn": "1. e4",
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert end_response.status_code == 200
+
+    manual_response = client.post(
+        "/api/blunder/manual",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4",
+            "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "user_move": "e4",
+            "best_move": None,
+            "eval_before": None,
+            "eval_after": None,
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert manual_response.status_code == 201
+
+
+def test_record_manual_blunder_wrong_color(client, auth_headers, create_game_session):
+    """Manual capture rejects opponent-side decision points."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    response = client.post(
+        "/api/blunder/manual",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4 e5",
+            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "user_move": "e5",
+            "best_move": None,
+            "eval_before": None,
+            "eval_after": None,
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 400
+    assert "black to move" in response.json()["detail"].lower()
+
+
+def test_record_manual_blunder_does_not_set_session_flag(client, auth_headers, create_game_session, db_session):
+    """Manual capture must not toggle first-auto-blunder session flag."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).first()
+    assert session is not None
+    assert session.blunder_recorded is False
+
+    response = client.post(
+        "/api/blunder/manual",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4",
+            "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "user_move": "e4",
+            "best_move": None,
+            "eval_before": None,
+            "eval_after": None,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 201
+
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).first()
+    assert session is not None
+    assert session.blunder_recorded is False
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

@@ -408,6 +408,44 @@ def test_ghost_move_returns_opponent_move_to_blunder(client, auth_headers, creat
     assert data["target_blunder_id"] is not None
 
 
+def test_ghost_move_returns_move_to_manual_library_target(client, auth_headers, create_game_session):
+    """Manual /api/blunder/manual targets should be reachable by ghost-move traversal."""
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    # Manual add for position after 1.e4 e5 (white to move), selected move is 2.Nf3
+    manual_response = client.post(
+        "/api/blunder/manual",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4 e5 2. Nf3",
+            "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "user_move": "Nf3",
+            "best_move": "Nf3",
+            "eval_before": 30,
+            "eval_after": 30,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert manual_response.status_code == 201
+    assert manual_response.json()["is_new"] is True
+
+    new_session_id = create_game_session(user_id=user_id, player_color="white")
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": new_session_id, "fen": fen_after_e4},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "ghost"
+    assert data["move"] == "e5"
+    assert data["target_blunder_id"] is not None
+
+
 def test_ghost_move_no_blunder_in_path(client, auth_headers, create_game_session):
     """Test ghost-move returns null when no blunder exists in the game graph."""
     user_id = 123

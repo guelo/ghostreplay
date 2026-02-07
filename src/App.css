@@ -382,6 +382,33 @@
   visibility: hidden;
 }
 
+.move-list-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.move-list-add-button {
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(30, 41, 59, 0.5);
+  color: #cbd5e1;
+  border-radius: 0.35rem;
+  padding: 0.25rem 0.45rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.move-list-add-button:hover:not(:disabled) {
+  border-color: rgba(148, 163, 184, 0.6);
+  background: rgba(51, 65, 85, 0.7);
+}
+
+.move-list-add-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .move-list-nav {
   display: flex;
   gap: 0.5rem;
