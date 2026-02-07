@@ -90,7 +90,7 @@ describe('ChessGame start flow', () => {
     vi.restoreAllMocks()
   })
 
-  it('resolves random color on Play', async () => {
+  it('defaults to random color on Play', async () => {
     vi.spyOn(Math, 'random').mockReturnValueOnce(0.9)
     startGameMock.mockResolvedValueOnce({
       session_id: 'session-123',
@@ -101,7 +101,10 @@ describe('ChessGame start flow', () => {
     render(<ChessGame />)
 
     fireEvent.click(screen.getByRole('button', { name: /new game/i }))
-    fireEvent.click(screen.getByRole('button', { name: /play random/i }))
+    expect(screen.getByRole('button', { name: /play random/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
 
     expect(screen.getByText('Random')).toBeInTheDocument()
 

@@ -73,7 +73,7 @@ const ChessGame = () => {
   const [playerColor, setPlayerColor] = useState<BoardOrientation>("white");
   const [playerColorChoice, setPlayerColorChoice] = useState<
     BoardOrientation | "random"
-  >("white");
+  >("random");
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [viewIndex, setViewIndex] = useState<number | null>(null); // null = viewing live position
   const {
@@ -791,6 +791,7 @@ const ChessGame = () => {
   };
 
   const handleShowStartOverlay = () => {
+    setPlayerColorChoice("random");
     setShowStartOverlay(true);
   };
 
