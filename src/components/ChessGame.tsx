@@ -119,6 +119,7 @@ const ChessGame = () => {
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
+  const [showPassToast, setShowPassToast] = useState(false);
 
   // Tracks next move index synchronously so async callbacks (engine/ghost)
   // don't read stale moveHistory.length from closures.
@@ -799,6 +800,13 @@ const ChessGame = () => {
     return () => clearTimeout(timer);
   }, [blunderAlert]);
 
+  // Auto-dismiss pass toast after 3 seconds
+  useEffect(() => {
+    if (!showPassToast) return;
+    const timer = setTimeout(() => setShowPassToast(false), 3000);
+    return () => clearTimeout(timer);
+  }, [showPassToast]);
+
   const handleDrop = ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
     if (!targetSquare) {
       return false;
@@ -895,6 +903,7 @@ const ChessGame = () => {
       setBlunderAlert(null);
       setShowFlash(false);
       setBlunderReviewId(null);
+      setShowPassToast(false);
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
       resetMode();
@@ -946,6 +955,7 @@ const ChessGame = () => {
     uploadedAnalysisSessionsRef.current.clear();
     setBlunderAlert(null);
     setShowFlash(false);
+    setShowPassToast(false);
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
@@ -1137,6 +1147,18 @@ const ChessGame = () => {
                   <span className="blunder-toast__best">
                     {blunderAlert.bestMoveSan}
                   </span>
+                </p>
+              </div>
+            )}
+            {showPassToast && (
+              <div
+                className="review-pass-toast"
+                onClick={() => setShowPassToast(false)}
+                role="status"
+              >
+                <span className="review-pass-toast__label">Correct!</span>
+                <p className="review-pass-toast__detail">
+                  You avoided your past mistake.
                 </p>
               </div>
             )}
