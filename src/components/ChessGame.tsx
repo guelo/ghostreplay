@@ -377,9 +377,7 @@ const ChessGame = () => {
         if (openingLookupRequestIdRef.current !== requestId) {
           return;
         }
-        if (opening) {
-          setLiveOpening(opening);
-        }
+        setLiveOpening(opening ?? null);
       })
       .catch(() => {
         if (openingLookupRequestIdRef.current !== requestId) {

@@ -623,7 +623,7 @@ describe('ChessGame opening display', () => {
     expect(lookupOpeningByFenMock.mock.calls.length).toBe(afterMoveLookupCount)
   })
 
-  it('keeps showing the last known opening after leaving book', async () => {
+  it('shows Unknown after leaving the opening book', async () => {
     startGameMock.mockResolvedValueOnce({
       session_id: 'session-sticky-opening',
       engine_elo: 1500,
@@ -655,6 +655,6 @@ describe('ChessGame opening display', () => {
       expect(lookupOpeningByFenMock.mock.calls.length).toBeGreaterThanOrEqual(2)
     })
 
-    expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument()
+    expect(screen.getByText('Unknown')).toBeInTheDocument()
   })
 })
