@@ -76,6 +76,21 @@ class Blunder(Base):
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class BlunderReview(Base):
+    __tablename__ = "blunder_reviews"
+    __table_args__ = (
+        Index("idx_blunder_reviews_blunder", "blunder_id", "reviewed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    blunder_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("blunders.id", ondelete="CASCADE"), nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("game_sessions.id"), nullable=False)
+    reviewed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    move_played_san: Mapped[str] = mapped_column(String(10), nullable=False)
+    eval_delta_cp: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class GameSession(Base):
     __tablename__ = "game_sessions"
     __table_args__ = (

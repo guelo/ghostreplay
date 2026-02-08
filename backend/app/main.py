@@ -14,6 +14,7 @@ from app.api.game import router as game_router
 from app.api.history import router as history_router
 from app.api.stats import router as stats_router
 from app.api.session import router as session_router
+from app.api.srs import router as srs_router
 from app.db import engine
 from app.security import AuthMiddleware
 
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(history_router)
     app.include_router(stats_router)
     app.include_router(session_router)
+    app.include_router(srs_router)
 
     def _build_error_response(
         status_code: int,

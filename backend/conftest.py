@@ -103,10 +103,24 @@ def _create_test_schema(conn) -> None:
             FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
         )
     """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS blunder_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            blunder_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            reviewed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            passed BOOLEAN NOT NULL,
+            move_played_san VARCHAR(10) NOT NULL,
+            eval_delta_cp INTEGER NOT NULL,
+            FOREIGN KEY (blunder_id) REFERENCES blunders(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id)
+        )
+    """))
     conn.commit()
 
 
 def _reset_test_schema(conn) -> None:
+    conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))
     conn.execute(text("DROP TABLE IF EXISTS blunders"))

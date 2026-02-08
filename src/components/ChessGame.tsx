@@ -213,10 +213,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
 
-  const handleNavigate = useCallback((index: number | null) => {
-    setViewIndex(index);
-  }, []);
-
   const isPlayerMoveIndex = useCallback(
     (index: number) => {
       if (index < 0) return false;
@@ -224,6 +220,55 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return playerColor === "white" ? isWhiteMove : !isWhiteMove;
     },
     [playerColor],
+  );
+
+  const handleNavigate = useCallback(
+    (index: number | null) => {
+      setViewIndex(index);
+
+      // Re-show blunder alert when clicking on a player's blunder move
+      if (index !== null && index >= 0) {
+        const analysis = analysisMap.get(index);
+        if (
+          analysis?.blunder &&
+          analysis.delta !== null &&
+          isPlayerMoveIndex(index)
+        ) {
+          const moveSan = moveHistory[index]?.san ?? analysis.move;
+          let bestMoveSan = analysis.bestMove;
+          try {
+            const fenBeforeMove =
+              index === 0
+                ? STARTING_FEN
+                : moveHistory[index - 1]?.fen;
+            if (fenBeforeMove) {
+              const tempChess = new Chess(fenBeforeMove);
+              const from = analysis.bestMove.slice(0, 2);
+              const to = analysis.bestMove.slice(2, 4);
+              const promotion = analysis.bestMove.slice(4) || undefined;
+              const bestMoveResult = tempChess.move({ from, to, promotion });
+              if (bestMoveResult) {
+                bestMoveSan = bestMoveResult.san;
+              }
+            }
+          } catch {
+            // Fall back to UCI notation
+          }
+          setBlunderAlert({
+            moveSan,
+            moveUci: analysis.move,
+            bestMoveUci: analysis.bestMove,
+            bestMoveSan,
+            delta: analysis.delta,
+          });
+          return;
+        }
+      }
+
+      // Clear blunder alert when navigating to a non-blunder move
+      setBlunderAlert(null);
+    },
+    [analysisMap, isPlayerMoveIndex, moveHistory],
   );
 
   const selectedMoveIndex = useMemo(() => {
