@@ -1,16 +1,16 @@
-import { Link, useNavigate } from "react-router-dom";
-import ChessGame from "./components/ChessGame";
-import { useAuth } from "./contexts/useAuth";
-import "./App.css";
+import { Link } from "react-router-dom";
+import { useAuth } from "../contexts/useAuth";
+import "../App.css";
 
-function App() {
+function StatsPage() {
   const { user, logout } = useAuth();
-  const navigate = useNavigate();
 
   return (
     <main className="app-shell">
       <nav className="nav-bar">
-        <span className="nav-bar__brand">Ghost Replay</span>
+        <Link to="/" className="nav-bar__brand">
+          Ghost Replay
+        </Link>
         <div className="nav-bar__actions">
           <Link to="/stats" className="nav-bar__link">Stats</Link>
           {user?.isAnonymous ? (
@@ -38,18 +38,18 @@ function App() {
       </nav>
 
       <div className="constrained-content">
-        <section className="hero">
-          <h1>Face the blunder. Fix the player.</h1>
+        <section className="stats-shell">
+          <h1 className="stats-shell__title">Your Stats</h1>
+          <p className="stats-shell__placeholder">
+            Stats and graphs coming soon.
+          </p>
+          <Link to="/" className="chess-button primary">
+            Back to Game
+          </Link>
         </section>
       </div>
-
-      <ChessGame
-        onOpenHistory={(opts) =>
-          navigate("/history", { state: opts })
-        }
-      />
     </main>
   );
 }
 
-export default App;
+export default StatsPage;

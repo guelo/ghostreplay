@@ -17,6 +17,7 @@ function HistoryPage() {
           Ghost Replay
         </Link>
         <div className="nav-bar__actions">
+          <Link to="/stats" className="nav-bar__link">Stats</Link>
           {user?.isAnonymous ? (
             <>
               <Link to="/register" className="chess-button primary nav-bar__btn">
