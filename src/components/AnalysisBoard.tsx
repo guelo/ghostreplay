@@ -4,6 +4,7 @@ import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
 import type { AnalysisMove, SessionMoveClassification } from '../utils/api'
 import type { MoveClassification } from '../workers/analysisUtils'
+import AnalysisGraph from './AnalysisGraph'
 import MoveList from './MoveList'
 
 const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
@@ -82,6 +83,9 @@ const AnalysisBoard = ({
       })),
     [moves],
   )
+
+  // Extract eval values for the graph
+  const evals = useMemo(() => moves.map((m) => m.eval_cp), [moves])
 
   // Combined moves for MoveList when in what-if mode
   const moveListMoves = useMemo(() => {
@@ -246,6 +250,14 @@ const AnalysisBoard = ({
           />
         </div>
       </div>
+
+      {!isInWhatIf && evals.length > 0 && (
+        <AnalysisGraph
+          evals={evals}
+          currentIndex={currentIndex}
+          onSelectMove={handleNavigate}
+        />
+      )}
 
       {isInWhatIf && (
         <div className="analysis-board__whatif-bar">
