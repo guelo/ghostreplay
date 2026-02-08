@@ -41,6 +41,8 @@ export const parseInfo = (line: string): ParsedInfo | null => {
 export const mateToCp = (movesToMate: number) => {
   const mateBase = 10000
   const mateDecay = 10
+  // mate 0 means the side to move is checkmated (lost)
+  if (movesToMate === 0) return -mateBase
   const sign = movesToMate >= 0 ? 1 : -1
   return sign * (mateBase - Math.abs(movesToMate) * mateDecay)
 }

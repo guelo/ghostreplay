@@ -107,10 +107,9 @@ describe('mateToCp', () => {
     expect(mateIn1 - mateIn5).toBe(40) // 4 moves * 10 decay
   })
 
-  it('handles mate in 0 (edge case)', () => {
-    // sign = 0 >= 0 ? 1 : -1 = 1
-    // 1 * (10000 - 0 * 10) = 10000
-    expect(mateToCp(0)).toBe(10000)
+  it('handles mate in 0 (checkmate position — side to move is mated)', () => {
+    // mate 0 means the position is checkmate; the side to move lost
+    expect(mateToCp(0)).toBe(-10000)
   })
 
   it('preserves symmetry for positive and negative mates', () => {
