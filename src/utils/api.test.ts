@@ -7,6 +7,7 @@ import {
   recordBlunder,
   recordManualBlunder,
   getGhostMove,
+  getStatsSummary,
 } from './api'
 
 const fetchMock = vi.fn()
@@ -474,5 +475,154 @@ describe('getGhostMove', () => {
       expect(apiError.retryable).toBe(false)
       expect(apiError.details).toEqual({ service: 'postgres' })
     }
+  })
+})
+
+describe('getStatsSummary', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('sends default window query parameter', async () => {
+    mockResponse({
+      window_days: 30,
+      generated_at: '2026-01-01T00:00:00Z',
+      games: {
+        played: 0,
+        completed: 0,
+        active: 0,
+        record: { wins: 0, losses: 0, draws: 0, resigns: 0, abandons: 0 },
+        avg_duration_seconds: 0,
+        avg_moves: 0,
+      },
+      colors: {
+        white: {
+          games: 0,
+          completed: 0,
+          wins: 0,
+          losses: 0,
+          draws: 0,
+          avg_cpl: 0,
+          blunders_per_100_moves: 0,
+        },
+        black: {
+          games: 0,
+          completed: 0,
+          wins: 0,
+          losses: 0,
+          draws: 0,
+          avg_cpl: 0,
+          blunders_per_100_moves: 0,
+        },
+      },
+      moves: {
+        player_moves: 0,
+        avg_cpl: 0,
+        mistakes_per_100_moves: 0,
+        blunders_per_100_moves: 0,
+        quality_distribution: {
+          best: 0,
+          excellent: 0,
+          good: 0,
+          inaccuracy: 0,
+          mistake: 0,
+          blunder: 0,
+        },
+      },
+      library: {
+        blunders_total: 0,
+        positions_total: 0,
+        edges_total: 0,
+        new_blunders_in_window: 0,
+        avg_blunder_eval_loss_cp: 0,
+        top_costly_blunders: [],
+      },
+      data_completeness: {
+        sessions_with_uploaded_moves_pct: 0,
+        notes: [],
+      },
+    })
+
+    await getStatsSummary()
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(options.method).toBe('GET')
+    expect(url).toContain('/api/stats/summary')
+    expect(url).toContain('window_days=30')
+  })
+
+  it('sends provided window query parameter', async () => {
+    mockResponse({
+      window_days: 90,
+      generated_at: '2026-01-01T00:00:00Z',
+      games: {
+        played: 0,
+        completed: 0,
+        active: 0,
+        record: { wins: 0, losses: 0, draws: 0, resigns: 0, abandons: 0 },
+        avg_duration_seconds: 0,
+        avg_moves: 0,
+      },
+      colors: {
+        white: {
+          games: 0,
+          completed: 0,
+          wins: 0,
+          losses: 0,
+          draws: 0,
+          avg_cpl: 0,
+          blunders_per_100_moves: 0,
+        },
+        black: {
+          games: 0,
+          completed: 0,
+          wins: 0,
+          losses: 0,
+          draws: 0,
+          avg_cpl: 0,
+          blunders_per_100_moves: 0,
+        },
+      },
+      moves: {
+        player_moves: 0,
+        avg_cpl: 0,
+        mistakes_per_100_moves: 0,
+        blunders_per_100_moves: 0,
+        quality_distribution: {
+          best: 0,
+          excellent: 0,
+          good: 0,
+          inaccuracy: 0,
+          mistake: 0,
+          blunder: 0,
+        },
+      },
+      library: {
+        blunders_total: 0,
+        positions_total: 0,
+        edges_total: 0,
+        new_blunders_in_window: 0,
+        avg_blunder_eval_loss_cp: 0,
+        top_costly_blunders: [],
+      },
+      data_completeness: {
+        sessions_with_uploaded_moves_pct: 0,
+        notes: [],
+      },
+    })
+
+    await getStatsSummary(90)
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toContain('window_days=90')
+  })
+
+  it('throws on non-ok response', async () => {
+    mockResponse({}, false, 'Bad Request', 400)
+
+    await expect(getStatsSummary(30)).rejects.toThrow(
+      'Failed to load stats summary: Bad Request',
+    )
   })
 })

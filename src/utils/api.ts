@@ -413,3 +413,103 @@ export const getGhostMove = async (
     headers: getAuthHeaders(),
   }, { retries: 2, fallbackMessage: 'Failed to get ghost move' })
 }
+
+export type StatsWindowDays = 0 | 7 | 30 | 90 | 365
+
+export interface StatsGameRecord {
+  wins: number
+  losses: number
+  draws: number
+  resigns: number
+  abandons: number
+}
+
+export interface StatsGamesSummary {
+  played: number
+  completed: number
+  active: number
+  record: StatsGameRecord
+  avg_duration_seconds: number
+  avg_moves: number
+}
+
+export interface StatsColorSummary {
+  games: number
+  completed: number
+  wins: number
+  losses: number
+  draws: number
+  avg_cpl: number
+  blunders_per_100_moves: number
+}
+
+export interface StatsColorSplitSummary {
+  white: StatsColorSummary
+  black: StatsColorSummary
+}
+
+export interface StatsMoveQualityDistribution {
+  best: number
+  excellent: number
+  good: number
+  inaccuracy: number
+  mistake: number
+  blunder: number
+}
+
+export interface StatsMoveSummary {
+  player_moves: number
+  avg_cpl: number
+  mistakes_per_100_moves: number
+  blunders_per_100_moves: number
+  quality_distribution: StatsMoveQualityDistribution
+}
+
+export interface StatsTopCostlyBlunder {
+  blunder_id: number
+  eval_loss_cp: number
+  bad_move_san: string
+  best_move_san: string
+  created_at: string
+}
+
+export interface StatsLibrarySummary {
+  blunders_total: number
+  positions_total: number
+  edges_total: number
+  new_blunders_in_window: number
+  avg_blunder_eval_loss_cp: number
+  top_costly_blunders: StatsTopCostlyBlunder[]
+}
+
+export interface StatsDataCompletenessSummary {
+  sessions_with_uploaded_moves_pct: number
+  notes: string[]
+}
+
+export interface StatsSummaryResponse {
+  window_days: number
+  generated_at: string
+  games: StatsGamesSummary
+  colors: StatsColorSplitSummary
+  moves: StatsMoveSummary
+  library: StatsLibrarySummary
+  data_completeness: StatsDataCompletenessSummary
+}
+
+/**
+ * Fetch account-level stats summary for a selected time window.
+ */
+export const getStatsSummary = async (
+  windowDays: StatsWindowDays = 30,
+): Promise<StatsSummaryResponse> => {
+  const params = new URLSearchParams({
+    window_days: String(windowDays),
+  })
+
+  return requestJson<StatsSummaryResponse>(
+    `${API_BASE_URL}/api/stats/summary?${params}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load stats summary' },
+  )
+}
