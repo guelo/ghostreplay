@@ -69,6 +69,15 @@ type BlunderAlert = {
   delta: number;
 };
 
+type OpenHistoryOptions = {
+  select: "latest";
+  source: "post_game_view_analysis" | "post_game_history";
+};
+
+type ChessGameProps = {
+  onOpenHistory?: (options: OpenHistoryOptions) => void;
+};
+
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
 
@@ -77,7 +86,7 @@ const sleep = (ms: number) =>
     setTimeout(resolve, ms);
   });
 
-const ChessGame = () => {
+const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const chess = useMemo(() => new Chess(), []);
   const [fen, setFen] = useState(chess.fen());
   const [boardOrientation, setBoardOrientation] =
@@ -120,6 +129,7 @@ const ChessGame = () => {
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
+  const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
 
   // Tracks next move index synchronously so async callbacks (engine/ghost)
   // don't read stale moveHistory.length from closures.
@@ -444,6 +454,7 @@ const ChessGame = () => {
         await endGame(sessionId, result.type, chess.pgn());
         setIsGameActive(false);
         setGameResult(result);
+        setShowPostGamePrompt(true);
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to end game.";
@@ -904,6 +915,7 @@ const ChessGame = () => {
       setShowFlash(false);
       setBlunderReviewId(null);
       setShowPassToast(false);
+      setShowPostGamePrompt(false);
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
       resetMode();
@@ -930,6 +942,7 @@ const ChessGame = () => {
       await endGame(sessionId, "resign", chess.pgn());
       setIsGameActive(false);
       setGameResult({ type: "resign", message: "You resigned." });
+      setShowPostGamePrompt(true);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to resign game.";
@@ -956,6 +969,7 @@ const ChessGame = () => {
     setBlunderAlert(null);
     setShowFlash(false);
     setShowPassToast(false);
+    setShowPostGamePrompt(false);
     setShowStartOverlay(false);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
@@ -980,8 +994,38 @@ const ChessGame = () => {
 
   const handleShowStartOverlay = () => {
     setPlayerColorChoice("random");
+    setShowPostGamePrompt(false);
     setShowStartOverlay(true);
   };
+
+  const handleViewAnalysis = () => {
+    setShowPostGamePrompt(false);
+    onOpenHistory?.({ select: "latest", source: "post_game_view_analysis" });
+  };
+
+  const handleViewHistory = () => {
+    setShowPostGamePrompt(false);
+    onOpenHistory?.({ select: "latest", source: "post_game_history" });
+  };
+
+  const gameStatusBadge = (() => {
+    if (isGameActive) {
+      return { label: "Live", className: "game-status-badge--live" };
+    }
+    if (!gameResult) return null;
+    switch (gameResult.type) {
+      case "checkmate_win":
+        return { label: "Win — Checkmate", className: "game-status-badge--win" };
+      case "checkmate_loss":
+        return { label: "Loss — Checkmate", className: "game-status-badge--loss" };
+      case "draw":
+        return { label: "Draw", className: "game-status-badge--other" };
+      case "resign":
+        return { label: "Resigned", className: "game-status-badge--other" };
+      default:
+        return null;
+    }
+  })();
 
   return (
     <section className="chess-section">
@@ -992,6 +1036,11 @@ const ChessGame = () => {
       <div className="chess-layout">
         <div className="chess-panel" aria-live="polite">
           <p className="chess-status">{statusText}</p>
+          {gameStatusBadge && (
+            <span className={`game-status-badge ${gameStatusBadge.className}`}>
+              {gameStatusBadge.label}
+            </span>
+          )}
           <p className="chess-meta">
             Orientation: {boardOrientation === "white" ? "White" : "Black"} on
             bottom
@@ -1106,6 +1155,9 @@ const ChessGame = () => {
                 </div>
               </div>
             )}
+            {!isGameActive && gameResult && !showStartOverlay && (
+              <div className="chessboard-ended-scrim" />
+            )}
             {showFlash && <div className="blunder-flash" />}
             <Chessboard
               options={{
@@ -1163,7 +1215,35 @@ const ChessGame = () => {
               </div>
             )}
           </div>
-          {!isGameActive && (
+          {showPostGamePrompt && gameResult && (
+            <div className="game-end-banner" role="region" aria-label="Post-game options">
+              <p className="game-end-banner-message">{gameResult.message}</p>
+              <div className="chess-post-game-actions">
+                <button
+                  className="chess-button primary"
+                  type="button"
+                  onClick={handleViewAnalysis}
+                >
+                  View Analysis
+                </button>
+                <button
+                  className="chess-button"
+                  type="button"
+                  onClick={handleShowStartOverlay}
+                >
+                  New Game
+                </button>
+                <button
+                  className="chess-button"
+                  type="button"
+                  onClick={handleViewHistory}
+                >
+                  History
+                </button>
+              </div>
+            </div>
+          )}
+          {!isGameActive && !showPostGamePrompt && (
             <div className="game-end-banner">
               <p className="game-end-banner-message">
                 {gameResult ? gameResult.message : "Ready for a new game?"}
