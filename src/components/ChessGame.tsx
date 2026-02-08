@@ -127,7 +127,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
-  const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
+  const [, setBlunderReviewId] = useState<number | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
 
@@ -287,12 +287,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   );
 
   const waitForQueuedAnalyses = useCallback(async (expectedMoves: number) => {
+    const analysisHasErrored = () => analysisStatusRef.current === "error";
+
     if (expectedMoves <= 0) {
       return;
     }
 
     if (
-      analysisStatusRef.current === "error" ||
+      analysisHasErrored() ||
       analysisMapRef.current.size >= expectedMoves
     ) {
       return;
@@ -301,7 +303,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     const initialSize = analysisMapRef.current.size;
     await sleep(150);
     if (
-      analysisStatusRef.current === "error" ||
+      analysisHasErrored() ||
       analysisMapRef.current.size >= expectedMoves
     ) {
       return;
@@ -314,7 +316,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     const deadline = Date.now() + ANALYSIS_UPLOAD_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (
-        analysisStatusRef.current === "error" ||
+        analysisHasErrored() ||
         analysisMapRef.current.size >= expectedMoves
       ) {
         return;
@@ -415,7 +417,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           payload.evalBefore,
           payload.evalAfter,
         );
-      } catch {
+      } catch (error) {
+        console.error("[BlunderLibrary] Failed to record manual blunder:", error);
       } finally {
         setIsAddingToLibrary(false);
       }

@@ -58,13 +58,13 @@ function HistoryPage() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
     fetchHistory()
       .then((data) => {
         if (cancelled) return;
         setGames(data);
         if (data.length > 0) {
+          setAnalysisLoading(true);
+          setAnalysis(null);
           setSelectedId(data[0].session_id);
         }
       })
@@ -82,12 +82,9 @@ function HistoryPage() {
 
   useEffect(() => {
     if (!selectedId) {
-      setAnalysis(null);
       return;
     }
     let cancelled = false;
-    setAnalysisLoading(true);
-    setAnalysis(null);
     fetchAnalysis(selectedId)
       .then((data) => {
         if (!cancelled) setAnalysis(data);
@@ -178,7 +175,14 @@ function HistoryPage() {
                       type="button"
                       role="option"
                       aria-selected={game.session_id === selectedId}
-                      onClick={() => setSelectedId(game.session_id)}
+                      onClick={() => {
+                        if (game.session_id === selectedId) {
+                          return;
+                        }
+                        setAnalysisLoading(true);
+                        setAnalysis(null);
+                        setSelectedId(game.session_id);
+                      }}
                     >
                       <div className="game-card__top">
                         <span className={`game-card__result ${resultClass(game.result)}`}>

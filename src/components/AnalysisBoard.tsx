@@ -3,6 +3,7 @@ import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
 import type { AnalysisMove, SessionMoveClassification } from '../utils/api'
+import { toWhitePerspective } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import AnalysisGraph from './AnalysisGraph'
 import MoveList from './MoveList'
@@ -76,16 +77,19 @@ const AnalysisBoard = ({
   // Map AnalysisMove[] to Move[] for MoveList
   const mappedMoves = useMemo(
     () =>
-      moves.map((m) => ({
+      moves.map((m, i) => ({
         san: m.move_san,
         classification: mapClassification(m.classification),
-        eval: m.eval_cp,
+        eval: toWhitePerspective(m.eval_cp, i),
       })),
     [moves],
   )
 
   // Extract eval values for the graph
-  const evals = useMemo(() => moves.map((m) => m.eval_cp), [moves])
+  const evals = useMemo(
+    () => moves.map((m, i) => toWhitePerspective(m.eval_cp, i)),
+    [moves],
+  )
 
   // Combined moves for MoveList when in what-if mode
   const moveListMoves = useMemo(() => {
@@ -191,6 +195,7 @@ const AnalysisBoard = ({
 
       try {
         const tempChess = new Chess(baseFen)
+        if (!targetSquare) return false
         const result = tempChess.move({
           from: sourceSquare,
           to: targetSquare,
@@ -271,13 +276,16 @@ const AnalysisBoard = ({
       {currentMove && !isInWhatIf && (
         <div className="analysis-board__position-info">
           <div className="analysis-board__position-info-row">
-            {currentMove.eval_cp != null && (
-              <span
-                className={`analysis-board__eval-text ${currentMove.eval_cp >= 0 ? 'analysis-board__eval-text--positive' : 'analysis-board__eval-text--negative'}`}
-              >
-                {formatEvalCp(currentMove.eval_cp)}
-              </span>
-            )}
+            {currentMove.eval_cp != null && (() => {
+              const wp = toWhitePerspective(currentMove.eval_cp, effectiveIndex)!
+              return (
+                <span
+                  className={`analysis-board__eval-text ${wp >= 0 ? 'analysis-board__eval-text--positive' : 'analysis-board__eval-text--negative'}`}
+                >
+                  {formatEvalCp(wp)}
+                </span>
+              )
+            })()}
             {currentMove.classification && (
               <span
                 className={`analysis-board__classification analysis-board__classification--${currentMove.classification}`}
