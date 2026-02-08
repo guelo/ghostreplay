@@ -11,6 +11,7 @@ from app.api.auth import router as auth_router
 from app.api.blunder import router as blunder_router
 from app.api.health import router as health_router
 from app.api.game import router as game_router
+from app.api.history import router as history_router
 from app.api.session import router as session_router
 from app.db import engine
 from app.security import AuthMiddleware
@@ -42,6 +43,7 @@ def create_app() -> FastAPI:
     app.include_router(blunder_router)
     app.include_router(health_router)
     app.include_router(game_router)
+    app.include_router(history_router)
     app.include_router(session_router)
 
     def _build_error_response(
