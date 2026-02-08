@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/useAuth";
-import { fetchHistory, type HistoryGame } from "../utils/api";
+import { fetchHistory, fetchAnalysis, type HistoryGame, type SessionAnalysis } from "../utils/api";
 import "../App.css";
 
 function resultLabel(result: string | null): string {
@@ -52,6 +52,8 @@ function HistoryPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +78,29 @@ function HistoryPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!selectedId) {
+      setAnalysis(null);
+      return;
+    }
+    let cancelled = false;
+    setAnalysisLoading(true);
+    setAnalysis(null);
+    fetchAnalysis(selectedId)
+      .then((data) => {
+        if (!cancelled) setAnalysis(data);
+      })
+      .catch(() => {
+        // Analysis fetch failed — pane will fall back to summary from history list
+      })
+      .finally(() => {
+        if (!cancelled) setAnalysisLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId]);
 
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
 
@@ -197,31 +222,100 @@ function HistoryPage() {
                       Playing {selectedGame.player_color}
                       {selectedGame.ended_at && <> &middot; {formatDate(selectedGame.ended_at)}</>}
                     </p>
-                    <div className="analysis-pane__summary">
-                      <div className="analysis-stat">
-                        <span className="analysis-stat__value">{selectedGame.summary.total_moves}</span>
-                        <span className="analysis-stat__label">Moves</span>
+
+                    {analysisLoading && (
+                      <p className="analysis-pane__placeholder">Loading analysis...</p>
+                    )}
+
+                    {!analysisLoading && analysis && (
+                      <>
+                        <div className="analysis-pane__summary">
+                          <div className="analysis-stat">
+                            <span className="analysis-stat__value">{analysis.moves.length}</span>
+                            <span className="analysis-stat__label">Moves</span>
+                          </div>
+                          <div className="analysis-stat">
+                            <span className="analysis-stat__value">{analysis.summary.blunders}</span>
+                            <span className="analysis-stat__label">Blunders</span>
+                          </div>
+                          <div className="analysis-stat">
+                            <span className="analysis-stat__value">{analysis.summary.mistakes}</span>
+                            <span className="analysis-stat__label">Mistakes</span>
+                          </div>
+                          <div className="analysis-stat">
+                            <span className="analysis-stat__value">{analysis.summary.inaccuracies}</span>
+                            <span className="analysis-stat__label">Inaccuracies</span>
+                          </div>
+                          <div className="analysis-stat">
+                            <span className="analysis-stat__value">{analysis.summary.average_centipawn_loss}</span>
+                            <span className="analysis-stat__label">Avg CPL</span>
+                          </div>
+                        </div>
+
+                        <div className="analysis-pane__board-placeholder">
+                          Board and eval graph coming soon.
+                        </div>
+
+                        <div className="analysis-move-list">
+                          <h3 className="analysis-move-list__title">Moves</h3>
+                          <ol className="analysis-move-list__moves">
+                            {analysis.moves
+                              .filter((m) => m.color === "white")
+                              .map((whiteMove) => {
+                                const blackMove = analysis.moves.find(
+                                  (m) => m.move_number === whiteMove.move_number && m.color === "black",
+                                );
+                                return (
+                                  <li key={whiteMove.move_number} className="analysis-move-list__row">
+                                    <span className="analysis-move-list__num">{whiteMove.move_number}.</span>
+                                    <span
+                                      className={`analysis-move-list__move${
+                                        whiteMove.classification ? ` analysis-move-list__move--${whiteMove.classification}` : ""
+                                      }`}
+                                    >
+                                      {whiteMove.move_san}
+                                    </span>
+                                    {blackMove && (
+                                      <span
+                                        className={`analysis-move-list__move${
+                                          blackMove.classification ? ` analysis-move-list__move--${blackMove.classification}` : ""
+                                        }`}
+                                      >
+                                        {blackMove.move_san}
+                                      </span>
+                                    )}
+                                  </li>
+                                );
+                              })}
+                          </ol>
+                        </div>
+                      </>
+                    )}
+
+                    {!analysisLoading && !analysis && (
+                      <div className="analysis-pane__summary">
+                        <div className="analysis-stat">
+                          <span className="analysis-stat__value">{selectedGame.summary.total_moves}</span>
+                          <span className="analysis-stat__label">Moves</span>
+                        </div>
+                        <div className="analysis-stat">
+                          <span className="analysis-stat__value">{selectedGame.summary.blunders}</span>
+                          <span className="analysis-stat__label">Blunders</span>
+                        </div>
+                        <div className="analysis-stat">
+                          <span className="analysis-stat__value">{selectedGame.summary.mistakes}</span>
+                          <span className="analysis-stat__label">Mistakes</span>
+                        </div>
+                        <div className="analysis-stat">
+                          <span className="analysis-stat__value">{selectedGame.summary.inaccuracies}</span>
+                          <span className="analysis-stat__label">Inaccuracies</span>
+                        </div>
+                        <div className="analysis-stat">
+                          <span className="analysis-stat__value">{selectedGame.summary.average_centipawn_loss}</span>
+                          <span className="analysis-stat__label">Avg CPL</span>
+                        </div>
                       </div>
-                      <div className="analysis-stat">
-                        <span className="analysis-stat__value">{selectedGame.summary.blunders}</span>
-                        <span className="analysis-stat__label">Blunders</span>
-                      </div>
-                      <div className="analysis-stat">
-                        <span className="analysis-stat__value">{selectedGame.summary.mistakes}</span>
-                        <span className="analysis-stat__label">Mistakes</span>
-                      </div>
-                      <div className="analysis-stat">
-                        <span className="analysis-stat__value">{selectedGame.summary.inaccuracies}</span>
-                        <span className="analysis-stat__label">Inaccuracies</span>
-                      </div>
-                      <div className="analysis-stat">
-                        <span className="analysis-stat__value">{selectedGame.summary.average_centipawn_loss}</span>
-                        <span className="analysis-stat__label">Avg CPL</span>
-                      </div>
-                    </div>
-                    <p className="analysis-pane__placeholder">
-                      Move-by-move analysis coming soon.
-                    </p>
+                    )}
                   </div>
                 ) : (
                   <p className="analysis-pane__placeholder">

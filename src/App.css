@@ -683,6 +683,84 @@
   padding: 1rem 0;
 }
 
+.analysis-pane__board-placeholder {
+  margin: 1rem 0;
+  padding: 2rem 1rem;
+  border-radius: 0.75rem;
+  border: 1px dashed #334155;
+  background: rgba(15, 23, 42, 0.4);
+  color: #64748b;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.analysis-move-list__title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 0.5rem;
+}
+
+.analysis-move-list__moves {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.analysis-move-list__row {
+  display: grid;
+  grid-template-columns: 2rem 1fr 1fr;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.9rem;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+}
+
+.analysis-move-list__row:hover {
+  background: rgba(79, 70, 229, 0.1);
+}
+
+.analysis-move-list__num {
+  color: #64748b;
+  text-align: right;
+  padding-right: 0.25rem;
+}
+
+.analysis-move-list__move {
+  color: #e2e8f0;
+  cursor: default;
+}
+
+.analysis-move-list__move--blunder {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.analysis-move-list__move--mistake {
+  color: #f59e0b;
+  font-weight: 600;
+}
+
+.analysis-move-list__move--inaccuracy {
+  color: #eab308;
+}
+
+.analysis-move-list__move--best {
+  color: #22c55e;
+}
+
+.analysis-move-list__move--excellent {
+  color: #34d399;
+}
+
 .engine-status {
   margin-top: 1rem;
   padding: 0.85rem 1rem;

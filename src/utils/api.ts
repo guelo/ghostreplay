@@ -360,6 +360,43 @@ export const fetchHistory = async (
 }
 
 /**
+ * Session analysis types
+ */
+export interface AnalysisMove {
+  move_number: number
+  color: SessionMoveColor
+  move_san: string
+  fen_after: string
+  eval_cp: number | null
+  eval_mate: number | null
+  best_move_san: string | null
+  best_move_eval_cp: number | null
+  eval_delta: number | null
+  classification: SessionMoveClassification | null
+}
+
+export interface SessionAnalysis {
+  session_id: string
+  pgn: string | null
+  result: string | null
+  moves: AnalysisMove[]
+  summary: GameSummary
+}
+
+/**
+ * Fetch analysis data for a specific game session
+ */
+export const fetchAnalysis = async (
+  sessionId: string,
+): Promise<SessionAnalysis> => {
+  return requestJson<SessionAnalysis>(
+    `${API_BASE_URL}/api/session/${sessionId}/analysis`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load game analysis' },
+  )
+}
+
+/**
  * Get ghost move for current position
  */
 export const getGhostMove = async (
