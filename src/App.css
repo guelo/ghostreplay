@@ -761,6 +761,130 @@
   color: #34d399;
 }
 
+/* ── AnalysisBoard ── */
+
+.analysis-board {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.analysis-board__layout {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.analysis-board__board-col {
+  flex: 1;
+  min-width: 0;
+  max-width: 400px;
+}
+
+.analysis-board__moves-col {
+  flex: 0 0 200px;
+}
+
+.analysis-board__whatif-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.08);
+  color: #fbbf24;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.analysis-board__whatif-bar button {
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  padding: 0.3rem 0.65rem;
+  border-radius: 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.analysis-board__position-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid #334155;
+  background: rgba(15, 23, 42, 0.5);
+  font-size: 0.85rem;
+  color: #94a3b8;
+}
+
+.analysis-board__position-info-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.analysis-board__eval-text {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.analysis-board__eval-text--positive { color: #f8fafc; }
+.analysis-board__eval-text--negative { color: #94a3b8; }
+
+.analysis-board__classification {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: capitalize;
+  padding: 0.15rem 0.45rem;
+  border-radius: 0.25rem;
+}
+
+.analysis-board__classification--blunder {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.analysis-board__classification--mistake {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+}
+
+.analysis-board__classification--inaccuracy {
+  color: #eab308;
+  background: rgba(234, 179, 8, 0.15);
+}
+
+.analysis-board__classification--good {
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.analysis-board__classification--excellent,
+.analysis-board__classification--best {
+  color: #22c55e;
+  background: rgba(34, 197, 94, 0.15);
+}
+
+.analysis-board__played-move { color: #f87171; }
+.analysis-board__best-move { color: #34d399; }
+
+@media (max-width: 720px) {
+  .analysis-board__layout {
+    flex-direction: column;
+  }
+  .analysis-board__board-col {
+    max-width: 100%;
+  }
+  .analysis-board__moves-col {
+    flex: none;
+    width: 100%;
+  }
+}
+
 .engine-status {
   margin-top: 1rem;
   padding: 0.85rem 1rem;

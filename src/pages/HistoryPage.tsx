@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/useAuth";
 import { fetchHistory, fetchAnalysis, type HistoryGame, type SessionAnalysis } from "../utils/api";
+import AnalysisBoard from "../components/AnalysisBoard";
 import "../App.css";
 
 function resultLabel(result: string | null): string {
@@ -252,43 +253,10 @@ function HistoryPage() {
                           </div>
                         </div>
 
-                        <div className="analysis-pane__board-placeholder">
-                          Board and eval graph coming soon.
-                        </div>
-
-                        <div className="analysis-move-list">
-                          <h3 className="analysis-move-list__title">Moves</h3>
-                          <ol className="analysis-move-list__moves">
-                            {analysis.moves
-                              .filter((m) => m.color === "white")
-                              .map((whiteMove) => {
-                                const blackMove = analysis.moves.find(
-                                  (m) => m.move_number === whiteMove.move_number && m.color === "black",
-                                );
-                                return (
-                                  <li key={whiteMove.move_number} className="analysis-move-list__row">
-                                    <span className="analysis-move-list__num">{whiteMove.move_number}.</span>
-                                    <span
-                                      className={`analysis-move-list__move${
-                                        whiteMove.classification ? ` analysis-move-list__move--${whiteMove.classification}` : ""
-                                      }`}
-                                    >
-                                      {whiteMove.move_san}
-                                    </span>
-                                    {blackMove && (
-                                      <span
-                                        className={`analysis-move-list__move${
-                                          blackMove.classification ? ` analysis-move-list__move--${blackMove.classification}` : ""
-                                        }`}
-                                      >
-                                        {blackMove.move_san}
-                                      </span>
-                                    )}
-                                  </li>
-                                );
-                              })}
-                          </ol>
-                        </div>
+                        <AnalysisBoard
+                          moves={analysis.moves}
+                          boardOrientation={selectedGame.player_color as "white" | "black"}
+                        />
                       </>
                     )}
 
