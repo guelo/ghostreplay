@@ -24,11 +24,11 @@ Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for a
 
 **Quick reference:**
 - `bd ready` - Find unblocked work
-- `bd create "Title" --type task --priority 2` - Create issue
-  - Note: When creating beads issues, always set --id to g-<slug> where <slug> is a 5–20 char lowercase kebab-case mini-
-      summary. IDs must be unique. If a slug is already taken, the agent should append a short suffix
+- `bd create --id=g-<slug> --title="..." --type task --priority 2` - Create issue
 - `bd close <id>` - Complete work
 - `bd sync` - Sync with git (run at session end)
+
+> **REQUIRED**: Always pass `--id=g-<slug>` when creating issues. `<slug>` must be 5–20 char lowercase kebab-case mini-summary (e.g. `g-fix-login-redirect`). Never let beads auto-generate IDs.
 
 For full workflow details: `bd prime`
 

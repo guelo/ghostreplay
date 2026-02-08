@@ -6,83 +6,83 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 
 ## Table of Contents
 
-1. [Product Description](#1-product-description)
-   - [The Core Loop](#the-core-loop)
-2. [User Stories & Features](#2-user-stories--features)
-   - [2.1 Gameplay & Ghost Mode](#21-gameplay--ghost-mode)
-   - [2.2 Analysis & Blunder Detection](#22-analysis--blunder-detection)
-   - [2.3 Spaced Repetition System (SRS)](#23-spaced-repetition-system-srs)
-3. [High-Level Architecture (MVP)](#3-high-level-architecture-mvp)
-   - [3.1 Frontend (The Smart Client)](#31-frontend-the-smart-client)
-   - [3.2 Backend (The Coordinator)](#32-backend-the-coordinator)
-   - [3.3 Database (The Memory)](#33-database-the-memory)
-4. [Tech Stack](#4-tech-stack)
-5. [Database Schema](#5-database-schema)
-   - [5.1 `positions` (Nodes)](#51-positions-nodes)
-     - [5.1.1 FEN Normalization](#511-fen-normalization)
-   - [5.2 `blunders` (User Decisions)](#52-blunders-user-decisions)
-     - [5.2.1 `blunder_reviews` (Review Events)](#521-blunder_reviews-review-events)
-   - [5.3 `moves` (Edges)](#53-moves-edges)
-   - [5.4 `users` (Identity)](#54-users-identity)
-   - [5.5 Authentication](#55-authentication)
-6. [Data & Logic Flow](#6-data--logic-flow)
-   - [6.1 The "Scent" Logic (Next Move Selection)](#61-the-scent-logic-next-move-selection)
-     - [6.1.1 Re-Hooking Logic (Transposition Detection)](#611-re-hooking-logic-transposition-detection)
-   - [6.2 The Blunder Capture Logic](#62-the-blunder-capture-logic)
-   - [6.3 The SRS Update Logic](#63-the-srs-update-logic)
-     - [6.3.1 Replay Priority Score](#631-replay-priority-score)
-     - [6.3.2 Update Rules](#632-update-rules)
-     - [6.3.3 Evaluation Thresholds](#633-evaluation-thresholds)
-   - [6.4 Engine Evaluation Protocol](#64-engine-evaluation-protocol)
-     - [6.4.1 Search Parameters](#641-search-parameters)
-     - [6.4.2 Evaluation Perspective (Sign Convention)](#642-evaluation-perspective-sign-convention)
-     - [6.4.3 Mate Score Conversion](#643-mate-score-conversion)
-     - [6.4.4 Evaluation Stability](#644-evaluation-stability)
-     - [6.4.5 Edge Cases](#645-edge-cases)
-     - [6.4.6 Frontend Implementation Notes](#646-frontend-implementation-notes)
-7. [Game Sessions & Lifecycle](#7-game-sessions--lifecycle)
-   - [7.1 Session Definition](#71-session-definition)
-   - [7.2 Game States](#72-game-states)
-   - [7.3 Session Schema](#73-session-schema)
-   - [7.4 Move Analysis Storage](#74-move-analysis-storage)
-   - [7.5 First-Blunder Rule Enforcement](#75-first-blunder-rule-enforcement)
-   - [7.6 Game Termination](#76-game-termination)
-   - [7.7 Session Persistence](#77-session-persistence)
-8. [MVP Constraints & Scope](#8-mvp-constraints--scope)
-9. [API Specification](#9-api-specification)
-   - [9.1 Base URL](#91-base-url)
-   - [9.2 Authentication](#92-authentication)
-   - [9.3 Game Flow](#93-game-flow)
-   - [9.4 Blunders](#94-blunders)
-   - [9.5 SRS (Spaced Repetition)](#95-srs-spaced-repetition)
-   - [9.6 Error Responses](#96-error-responses)
-   - [9.7 Design Decisions](#97-design-decisions)
-10. [After-Game Analysis Display](#10-after-game-analysis-display)
-    - [10.1 Screen Layout](#101-screen-layout)
-    - [10.2 Components](#102-components)
-      - [10.2.1 Chessboard](#1021-chessboard)
-      - [10.2.2 Evaluation Graph](#1022-evaluation-graph)
-      - [10.2.3 Evaluation Bar](#1023-evaluation-bar)
-      - [10.2.4 Navigation Controls](#1024-navigation-controls)
-      - [10.2.5 Move List](#1025-move-list)
-      - [10.2.6 Position Analysis Panel](#1026-position-analysis-panel)
-    - [10.3 Data Source](#103-data-source)
-    - [10.4 API Endpoint](#104-api-endpoint)
-    - [10.5 Entry Points](#105-entry-points)
-    - [10.6 MVP Constraints](#106-mvp-constraints)
-11. [Game History View](#11-game-history-view)
-    - [11.1 Entry Points](#111-entry-points)
-    - [11.2 Screen Layout](#112-screen-layout)
-    - [11.3 Game Card Data](#113-game-card-data)
-    - [11.4 Interaction Flow](#114-interaction-flow)
-    - [11.5 API Endpoint](#115-api-endpoint)
-    - [11.6 Empty State](#116-empty-state)
-    - [11.7 MVP Constraints](#117-mvp-constraints)
-12. [Testing Strategy](#12-testing-strategy)
-    - [12.1 Tooling](#121-tooling)
-    - [12.2 Coverage Priorities (MVP)](#122-coverage-priorities-mvp)
-    - [12.3 Key Test Cases](#123-key-test-cases)
-    - [12.4 Test Data & Determinism](#124-test-data--determinism)
+1. Product Description
+   - The Core Loop
+2. User Stories & Features
+   - 2.1 Gameplay & Ghost Mode
+   - 2.2 Analysis & Blunder Detection
+   - 2.3 Spaced Repetition System (SRS)
+3. High-Level Architecture (MVP)
+   - 3.1 Frontend (The Smart Client)
+   - 3.2 Backend (The Coordinator)
+   - 3.3 Database (The Memory)
+4. Tech Stack
+5. Database Schema
+   - 5.1 `positions` (Nodes)
+     - 5.1.1 FEN Normalization
+   - 5.2 `blunders` (Ghost Move Library Targets)
+     - 5.2.1 `blunder_reviews` (Review Events)
+   - 5.3 `moves` (Edges)
+   - 5.4 `users` (Identity)
+   - 5.5 Authentication
+6. Data & Logic Flow
+   - 6.1 The "Scent" Logic (Next Move Selection)
+     - 6.1.1 Re-Hooking Logic (Transposition Detection)
+   - 6.2 Ghost Move Library Capture Logic
+   - 6.3 The SRS Update Logic
+     - 6.3.1 Replay Priority Score
+     - 6.3.2 Update Rules
+     - 6.3.3 Evaluation Thresholds
+   - 6.4 Engine Evaluation Protocol
+     - 6.4.1 Search Parameters
+     - 6.4.2 Evaluation Perspective (Sign Convention)
+     - 6.4.3 Mate Score Conversion
+     - 6.4.4 Evaluation Stability
+     - 6.4.5 Edge Cases
+     - 6.4.6 Frontend Implementation Notes
+7. Game Sessions & Lifecycle
+   - 7.1 Session Definition
+   - 7.2 Game States
+   - 7.3 Session Schema
+   - 7.4 Move Analysis Storage
+   - 7.5 First-Blunder Rule Enforcement
+   - 7.6 Game Termination
+   - 7.7 Session Persistence
+8. MVP Constraints & Scope
+9. API Specification
+   - 9.1 Base URL
+   - 9.2 Authentication
+   - 9.3 Game Flow
+   - 9.4 Blunders / Ghost Move Library Targets
+   - 9.5 SRS (Spaced Repetition)
+   - 9.6 Error Responses
+   - 9.7 Design Decisions
+10. After-Game Analysis Display
+    - 10.1 Screen Layout
+    - 10.2 Components
+      - 10.2.1 Chessboard
+      - 10.2.2 Evaluation Graph
+      - 10.2.3 Evaluation Bar
+      - 10.2.4 Navigation Controls
+      - 10.2.5 Move List
+      - 10.2.6 Position Analysis Panel
+    - 10.3 Data Source
+    - 10.4 API Endpoint
+    - 10.5 Entry Points
+    - 10.6 MVP Constraints
+11. Game History View
+    - 11.1 Entry Points
+    - 11.2 Screen Layout
+    - 11.3 Game Card Data
+    - 11.4 Interaction Flow
+    - 11.5 API Endpoint
+    - 11.6 Empty State
+    - 11.7 MVP Constraints
+12. Testing Strategy
+    - 12.1 Tooling
+    - 12.2 Coverage Priorities (MVP)
+    - 12.3 Key Test Cases
+    - 12.4 Test Data & Determinism
 
 ---
 
@@ -94,7 +94,7 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 
 1. **Play:** The user plays a game against a bot.
 2. **Analyze:** The client-side engine detects blunders in real-time.
-3. **Store:** Blunders are saved to a personal "Chess Graph" database.
+3. **Store:** Blunders are saved to a personal Ghost Move Library database.
 4. **Replay (The Ghost):** In future games, the bot prioritizes move sequences that steer the user back into positions where they previously blundered.
 5. **Spaced Repetition:** If the user repeats the mistake, the game pauses for immediate correction. The interval for reviewing that specific blunder resets. If the user plays the correct move, the blunder is pushed further into the future (SRS).
 
@@ -113,8 +113,9 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 ### 2.2 Analysis & Blunder Detection
 
 * **Client-Side Analysis:** Blunders are detected in the browser using a secondary Web Worker to save server costs.
-* **Blunder Definition:** A move is recorded as a blunder if the evaluation drops by ≥150 centipawns compared to the engine's best move.
-* **First Mistake Only:** To prevent exponential data growth, only the *first* blunder of any single game session is recorded into the graph.
+* **Recording Threshold:** A move is recorded as a Ghost Move Library target if the evaluation drops by ≥50 centipawns compared to the engine's best move (inaccuracy level and above).
+* **Opening Moves Only:** Only mistakes in the first 10 moves of the game are eligible for automatic recording. Opening positions have low branching factor and are the most likely to recur in future games, making them viable Ghost steering targets.
+* **First Mistake Only:** To prevent exponential data growth, only the *first* recorded mistake of any single game session is saved into the Ghost Move Library.
 
 ### 2.3 Spaced Repetition System (SRS)
 
@@ -122,6 +123,9 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 * **Priority Factors:**
   * `pass_streak` — Consecutive correct responses (higher = lower priority)
   * `time_since_last_review` — Time elapsed since last encounter (longer = higher priority)
+  * `eval_loss_cp` — Severity of the original mistake (larger = higher priority)
+  * `distance` — Moves to reach the blunder from the current position (closer = higher priority)
+* **Steering Radius:** The Ghost only targets blunders reachable within 5 moves of the current position. Anything beyond 5 moves is ignored — the branching factor makes deeper steering unreliable.
 * **Binary Grading:** Pass or fail only. No easy/good/hard ratings — chess moves are unambiguous.
 * **Instant Feedback:** When a user reaches a stored blunder position:
   * **Failure:** If they play a move ≥50cp worse than the best move, the game pauses. "You made this mistake again." → `pass_streak` resets to 0.
@@ -149,7 +153,7 @@ graph TD
     end
 
     subgraph "Database (PostgreSQL)"
-        DB[(Chess Graph & SRS)]
+        DB[(Ghost Move Library & SRS)]
     end
 
     User --> GameUI
@@ -174,9 +178,9 @@ graph TD
 
 ### 3.3 Database (The Memory)
 
-* **Responsibility:** Storing the Ghost Library graph of positions and moves, plus the user decision targets that are practiced later.
-* **Graph Structure:** Moves are not stored as linear games, but as a **directed graph** of unique FEN positions. Note: While games progress forward in time, the position graph can contain cycles (e.g., threefold repetition, perpetual checks, transpositions that revisit the same FEN). Recursive queries must include cycle detection and depth bounds.
-* **Ghost Library Semantics:** The Ghost Library includes both auto-identified blunders and manually selected MoveList decisions.
+* **Responsibility:** Storing the Ghost Move Library graph (`positions` + `moves`), plus the user decision targets that are practiced later.
+* **Graph Structure:** Moves are not stored as linear games, but as a **directed graph** of unique FEN positions. Note: While games progress forward in time, the Ghost Move Library can contain cycles (e.g., threefold repetition, perpetual checks, transpositions that revisit the same FEN). Recursive queries must include cycle detection and depth bounds.
+* **Ghost Move Library Semantics:** The Ghost Move Library is the move graph itself (`positions` + `moves`); auto-identified blunders and manually selected MoveList decisions are stored as target rows in `blunders`.
 
 ---
 
@@ -196,14 +200,14 @@ graph TD
 
 ## 5. Database Schema
 
-The core innovation is storing chess history as a graph. The graph is composed of positions as nodes and moves as edges. The Ghost Library is this graph plus user decision targets stored in `blunders`.
+The core innovation is storing chess history as the Ghost Move Library. The Ghost Move Library is composed of positions as nodes and moves as edges, with user decision targets stored in `blunders`.
 The complication is that the user moves only on every other edge, so capture logic must validate side-to-move ownership.
 
-**User Scoping:** All data is scoped per-user. Each user has their own position graph and Ghost Library targets. There is no sharing of data between users (MVP).
+**User Scoping:** All data is scoped per-user. Each user has their own Ghost Move Library graph (`positions` + `moves`) and target rows in `blunders`. There is no sharing of data between users (MVP).
 
 ### 5.1 `positions` (Nodes)
 
-Represents a unique board state. Positions are pure graph nodes—they contain no blunder or SRS data.
+Represents a unique board state. Positions are pure Ghost Move Library nodes—they contain no blunder or SRS data.
 
 ```sql
 CREATE TABLE positions (
@@ -278,9 +282,9 @@ Normalized: rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3
 Hash:       a1b2c3d4... (SHA256)
 ```
 
-### 5.2 `blunders` (Ghost Library Targets)
+### 5.2 `blunders` (Ghost Move Library Targets)
 
-Represents a decision point the user will practice from a specific position. This is the core SRS entity for the Ghost Library. Entries come from both:
+Represents a decision point the user will practice from a specific position. This is the core SRS entity linked to the Ghost Move Library. Entries come from both:
 - auto-detected blunders (`POST /api/blunder`)
 - manually selected moves from MoveList (`POST /api/blunder/manual`)
 
@@ -428,23 +432,24 @@ When the user plays a move, the API must decide: *Continue Ghost path OR Switch 
 
 **Query Logic (Recursive CTE with Safeguards):**
 
-The position graph can contain cycles (threefold repetition, transpositions). Recursive queries **must** include:
-- **Depth bounds:** Hard cap at 15 moves to prevent exponential blowup (blunders 20+ moves away have negligible "scent")
+The Ghost Move Library can contain cycles (threefold repetition, transpositions). Recursive queries **must** include:
+- **Depth bounds:** Hard cap at 5 moves. Beyond 5 moves the branching factor makes steering unreliable, so deeper blunders are not considered.
 - **Cycle detection:** Track visited positions to prevent infinite loops
 
 1. **Input:** Current FEN Hash + `session_id` (to scope to `player_color`).
-2. **Search:** Find all downstream positions connected to this FEN (up to depth limit, avoiding cycles).
-3. **Filter:** Join with `blunders` table to find positions where user has a recorded blunder.
-4. **Scoring:** For each reachable blunder, calculate:
+2. **Search:** Find all downstream positions connected to this FEN (up to 5 moves, avoiding cycles).
+3. **Filter:** Join with `blunders` table to find positions where user has a recorded target.
+4. **Scoring:** For each reachable target, calculate:
    ```
    expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)
    hours_since_review = (NOW - last_reviewed_at) in hours
-   priority = hours_since_review / expected_interval
+   srs_priority = hours_since_review / expected_interval
 
+   -- Weight by severity (bigger mistakes surface first)
    -- Adjust for distance (closer blunders slightly preferred)
-   final_score = priority / (1 + 0.1 * distance)
+   score = srs_priority * (eval_loss_cp / 50) / (1 + 0.1 * distance)
    ```
-5. **Selection:** Pick the path leading to the highest `final_score` blunder.
+5. **Selection:** Pick the path leading to the highest `score` blunder.
 6. **Output:** The immediate next move (SAN) on that path.
 
 **Color Scope Rule:** Only consider blunders where the **position side-to-move** equals the session's `player_color`. This prevents mixing blunders made as White with those made as Black. Use `positions.active_color` for efficient filtering.
@@ -477,18 +482,17 @@ WITH RECURSIVE scent_path AS (
     FROM moves child
     JOIN scent_path parent ON parent.to_position_id = child.from_position_id
     WHERE
-        parent.depth < 15                                          -- Depth limit (circuit breaker)
+        parent.depth < 5                                           -- Depth limit: 5-move steering radius
         AND NOT (child.to_position_id = ANY(parent.path_history))  -- Cycle detection
 )
 SELECT
     sp.root_move,
-    COUNT(*) as distinct_blunders,
-    MIN(sp.depth) as closest_blunder_distance,
-    SUM(
-        CASE WHEN (EXTRACT(EPOCH FROM NOW() - b.last_reviewed_at) / 3600)
-                  / (1 * POWER(2, b.pass_streak)) > 1.0
-             THEN 10 ELSE 1 END
-    ) as urgency_score
+    MAX(
+        (EXTRACT(EPOCH FROM NOW() - b.last_reviewed_at) / 3600)
+        / (1.0 * POWER(2, b.pass_streak))
+        * (b.eval_loss_cp / 50.0)
+        / (1.0 + 0.1 * sp.depth)
+    ) as best_score
 FROM scent_path sp
 JOIN blunders b ON b.position_id = sp.to_position_id
 JOIN positions bp ON bp.id = b.position_id
@@ -496,12 +500,12 @@ JOIN game_sessions gs ON gs.id = :session_id AND gs.user_id = :user_id
 WHERE b.user_id = :user_id
   AND bp.active_color = gs.player_color
 GROUP BY sp.root_move
-ORDER BY urgency_score DESC, closest_blunder_distance ASC
+ORDER BY best_score DESC
 LIMIT 1;
 ```
 
 **Key Safeguards:**
-- `depth < 15`: Primary circuit breaker—stops traversal after 15 moves, ensuring query returns in milliseconds
+- `depth < 5`: Steering radius—only considers blunders reachable within 5 moves, where the Ghost can reliably steer
 - `path_history` array: Accumulates visited position IDs along each path
 - `NOT ... = ANY(path_history)`: Prevents following edges that would create a cycle in the current traversal path
 
@@ -512,8 +516,8 @@ When the user deviates from the Ghost path, backend engine mode takes over. Howe
 **When to Check:** Every user move. The `POST /api/game/next-opponent-move` endpoint is called after each move regardless of current mode.
 
 **Re-Hook Trigger:** The Ghost reactivates when:
-1. The current position exists in the user's graph (matched by normalized FEN hash)
-2. At least one blunder record with `priority > 1.0` is reachable downstream (via the `blunders` table)
+1. The current position exists in the user's Ghost Move Library (matched by normalized FEN hash)
+2. At least one blunder target with `srs_priority > 1.0` is reachable within 5 moves downstream (via the `blunders` table)
 
 **Backend Logic:**
 
@@ -526,8 +530,8 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
 2. Compute normalized FEN hash.
 3. Look up position by `fen_hash` in `positions` table (for this user).
 4. If found:
-   → Run downstream blunder query (recursive CTE joining `blunders` table).
-   → Filter for blunders with `priority > 1.0`.
+   → Run downstream blunder query (recursive CTE joining `blunders` table, depth ≤ 5).
+   → Filter for blunders with `srs_priority > 1.0`.
 5. If due blunder(s) reachable:
    → Select highest-priority path.
    → return:
@@ -538,16 +542,16 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
      `{ "mode": "engine", "move": { "uci": "...", "san": "..." }, "target_blunder_id": null, "decision_source": "backend_engine" }`
 ```
 
-**Performance Target:** Ghost-path lookup < 100ms for typical graphs (< 10,000 positions); full fallback (including engine inference) should target sub-second p95 in MVP.
+**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including engine inference) should target sub-second p95 in MVP.
 
 **Caching Consideration (Post-MVP):** Position lookups are hot-path. Consider caching:
 - FEN hash → position existence (simple boolean)
 - Position ID → downstream blunder count (invalidate on new blunder insertion)
 - Warm model/prepared inference artifacts in-process for backend engine calls
 
-### 6.2 Ghost Library Capture Logic
+### 6.2 Ghost Move Library Capture Logic
 
-Ghost Library targets enter the system through two capture paths.
+Ghost Move Library targets enter the system through two capture paths.
 
 #### 6.2.1 Automatic Capture (analysis-triggered blunder)
 
@@ -555,14 +559,14 @@ Ghost Library targets enter the system through two capture paths.
 2. **Worker B** (Frontend) calculates:
    * E_best (Eval of engine's best move from P_before)
    * E_user (Eval after user's move M)
-3. If delta ≥ 150cp (blunder detection threshold):
+3. If delta ≥ 50cp (recording threshold) **and** the move is within the first 10 moves of the game:
    * Frontend sends `POST /api/blunder` with:
      * `pgn`: Full game history up to and including the bad move (e.g., `"1. e4 e5 2. Nf3 Nc6 3. Bb5 a6"`)
      * `fen`: The position BEFORE the bad move (P_before) — used as sanity check
      * `user_move`: The bad move played (SAN)
      * `best_move`: Engine's recommended move (SAN)
      * `eval_before` / `eval_after`: Centipawn evaluations
-   * Backend builds the full graph path:
+   * Backend builds the full Ghost Move Library path:
      1. **Replay PGN** using `python-chess` to generate all intermediate positions
      2. **Sanity check:** Verify position before final move matches provided `fen`. Reject with 422 if mismatch.
      3. **Insert positions:** For each position in the replay (including start), upsert into `positions` table (deduplicated by `fen_hash`)
@@ -572,7 +576,7 @@ Ghost Library targets enter the system through two capture paths.
 
 #### 6.2.2 Manual Capture (MoveList-selected move)
 
-1. User selects a move in MoveList and clicks **Add to Ghost Library**.
+1. User selects a move in MoveList and clicks **Add to Ghost Move Library**.
 2. The client may call this flow during both active and ended games.
 3. There is no capture threshold for this path: any eligible player move can be added.
 4. Frontend sends `POST /api/blunder/manual` with PGN history through the selected move plus the selected pre-move FEN.
@@ -581,7 +585,7 @@ Ghost Library targets enter the system through two capture paths.
 7. If `is_new=false`, frontend shows duplicate UX: **"already in library"**.
 8. Manual capture does not mutate `game_sessions.blunder_recorded`.
 
-**Why store the full path:** The Ghost's scent query (Section 6.1) traverses from the current board position downstream to find reachable targets. Without intermediate positions in the graph, there's no path to traverse — Ghost would always fall back to engine mode.
+**Why store the full path:** The Ghost's scent query (Section 6.1) traverses from the current board position downstream to find reachable targets. Without intermediate positions in the Ghost Move Library, there's no path to traverse — Ghost would always fall back to engine mode.
 
 **Critical semantic:** Every target references the **pre-move position** (P_before), because that's where the user faced the decision and will be tested again during SRS review.
 
@@ -593,20 +597,33 @@ Ghost Library targets enter the system through two capture paths.
 
 #### 6.3.1 Replay Priority Score
 
-Each blunder record has a priority score that determines selection probability:
+Each blunder record has an SRS priority that tracks how overdue it is, combined with severity weighting for selection:
 
 ```
 expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)
 hours_since_review = (NOW - last_reviewed_at) in hours
-priority = hours_since_review / expected_interval
+srs_priority = hours_since_review / expected_interval
 ```
+
+A blunder is **due** when `srs_priority > 1.0` (overdue for review).
+
+When selecting which blunder to steer toward during a game, severity and distance are factored in:
+
+```
+score = srs_priority * (eval_loss_cp / 50) / (1 + 0.1 * distance)
+```
+
+- `eval_loss_cp / 50`: Severity weight — a 200cp blunder scores 4× higher than a 50cp inaccuracy at the same overdue-ness
+- `1 + 0.1 * distance`: Distance tiebreaker — closer blunders slightly preferred within the 5-move steering radius
 
 **Constants (MVP defaults):**
 - `BASE_INTERVAL = 1` (hour)
 - `BACKOFF_FACTOR = 2.0` (exponential backoff)
 - `MAX_INTERVAL = 4320` (180 days in hours, cap)
+- `STEERING_RADIUS = 5` (max moves to steer toward a blunder)
+- `RECORDING_MOVE_CAP = 10` (only record mistakes in the first 10 moves)
 
-**Examples:**
+**SRS Priority Examples (before severity/distance weighting):**
 | pass_streak | expected_interval | After 1hr | After 24hr | After 7 days |
 |-------------|-------------------|-----------|------------|--------------|
 | 0 (new)     | 1 hr              | 1.0       | 24.0       | 168.0        |
@@ -615,7 +632,14 @@ priority = hours_since_review / expected_interval
 | 5           | 32 hr             | 0.03      | 0.75       | 5.25         |
 | 10          | 1024 hr (~43 days)| 0.001     | 0.02       | 0.16         |
 
-Higher priority = more likely to be selected when Ghost chooses a path.
+**Selection Score Examples (srs_priority=2.0, distance=1):**
+| eval_loss_cp | Severity Weight | Score |
+|--------------|-----------------|-------|
+| 50cp         | 1.0×            | 1.82  |
+| 100cp        | 2.0×            | 3.64  |
+| 200cp        | 4.0×            | 7.27  |
+
+Higher score = more likely to be selected when Ghost chooses a path.
 
 #### 6.3.2 Update Rules
 
@@ -627,7 +651,7 @@ Higher priority = more likely to be selected when Ghost chooses a path.
    * Move drops eval by ≥50cp compared to best move
    * Result: `Fail`
    * Backend updates `blunders` record: `pass_streak = 0`, `last_reviewed_at = NOW`
-   * Note: Any move outside the 50cp threshold fails, whether it's a minor inaccuracy or a major blunder.
+   * Note: Any move outside the 50cp threshold fails, whether it's a minor inaccuracy or a major blunder. This is the same threshold used for recording.
 
 5. **Scenario B (Pass - Good move):**
    * Move is within 50cp of best move's eval
@@ -636,12 +660,12 @@ Higher priority = more likely to be selected when Ghost chooses a path.
 
 #### 6.3.3 Evaluation Thresholds
 
-The system uses two distinct thresholds:
+The system uses a single 50cp threshold for both recording and review:
 
 | Threshold | Value | Purpose |
 |-----------|-------|---------|
 | **SRS Pass** | 50cp | Move must be within 50cp of best to pass review |
-| **Blunder Detection** | 150cp | Move must lose ≥150cp to be recorded as new blunder |
+| **Recording** | 50cp | Move must lose ≥50cp to be recorded as Ghost Move Library target |
 
 **SRS Pass Criteria:**
 A move passes review if the **real-time engine evaluation** shows:
@@ -652,14 +676,15 @@ This means:
 - Any move within 50cp of optimal passes (multiple solutions accepted)
 - The stored `bad_move_san` is for display only, not for pass/fail logic
 
-**Blunder Detection Criteria:**
-A move is recorded as a new blunder if:
-- Eval drop ≥ 150cp compared to engine's best move
+**Recording Criteria:**
+A move is recorded as a new Ghost Move Library target if:
+- Eval drop ≥ 50cp compared to engine's best move
+- The move is within the first 10 moves of the game
 
 **Design Rationale:**
-- 50cp pass threshold ensures the user finds a genuinely good move, not just "not terrible"
-- 150cp blunder threshold avoids recording minor inaccuracies (50-149cp) as blunders
-- The gap prevents noise: a 100cp mistake fails the current review but won't pollute the blunder graph
+- 50cp threshold catches inaccuracies, not just major blunders — opening inaccuracies are worth drilling because the positions recur frequently
+- The first-10-moves cap keeps the target pool focused on reachable positions (low branching factor in openings) and prevents the library from filling with unreachable middlegame/endgame positions
+- Severity weighting in the priority formula ensures major blunders still surface before minor inaccuracies
 
 ### 6.4 Engine Evaluation Protocol
 
@@ -744,8 +769,8 @@ Constants:
 | Scenario | Calculation | Result |
 |----------|-------------|--------|
 | Had M3, played move keeps M5 | `9970 - 9950 = 20cp` | Pass (< 50cp) |
-| Had M3, played move loses to +500 | `9970 - 500 = 9470cp` | Blunder (≥ 150cp) |
-| Had +200, blundered into M-5 | `200 - (-9950) = 10150cp` | Blunder (≥ 150cp) |
+| Had M3, played move loses to +500 | `9970 - 500 = 9470cp` | Recorded (≥ 50cp) |
+| Had +200, blundered into M-5 | `200 - (-9950) = 10150cp` | Recorded (≥ 50cp) |
 | Had M-10, delayed to M-15 | `-9900 - (-9850) = -50cp` → abs = 50cp | Borderline pass |
 
 **Database storage:** When eval is a mate score:
@@ -776,7 +801,7 @@ Engine evaluations fluctuate during iterative deepening. The protocol uses **dep
 | **Threefold repetition claim available** | Engine may report 0cp; user's non-draw move compared to 0 |
 | **50-move rule proximity** | Engine accounts internally; may report draw |
 | **Worker crash/timeout** | Skip evaluation for that move; log error; do not flag as blunder |
-| **Eval exactly at threshold** | ≥150cp = blunder, ≥50cp = fail (inclusive boundaries) |
+| **Eval exactly at threshold** | ≥50cp = recorded and fails review (inclusive boundary) |
 
 #### 6.4.6 Frontend Implementation Notes
 
@@ -887,7 +912,7 @@ CREATE INDEX idx_session_moves_session ON session_moves(session_id);
 
 ### 7.5 First-Auto-Blunder Rule Enforcement
 
-The `blunder_recorded` flag ensures only one automatically detected blunder per session enters the graph:
+The `blunder_recorded` flag ensures only one automatically detected blunder per session enters the Ghost Move Library:
 
 ```
 POST /api/blunder called
@@ -915,7 +940,7 @@ POST /api/blunder called
 **API Behavior:**
 1. Client sends `POST /api/blunder` with `{ session_id, fen, user_move, eval_delta }`
 2. Server checks `blunder_recorded` flag on session
-3. If `FALSE`: Insert blunder into graph, set flag `TRUE`, return `201 Created`
+3. If `FALSE`: Insert blunder into the Ghost Move Library, set flag `TRUE`, return `201 Created`
 4. If `TRUE`: Skip insertion, return `200 OK` with `{ "recorded": false, "reason": "session_limit" }`
 5. `POST /api/blunder/manual` is not subject to this flag (manual capture is allowed in active and ended sessions).
 
@@ -943,7 +968,7 @@ POST /api/blunder called
 - Session metadata (start/end times, result, engine Elo)
 - Full PGN of the game
 - Per-move engine analysis (eval, best move, classification)
-- Ghost Library targets: auto blunders and manually selected MoveList decisions (in the positions graph)
+- Ghost Move Library targets: auto blunders and manually selected MoveList decisions (anchored to the `positions` + `moves` graph)
 
 **Browser Refresh Behavior (MVP):**
 - Refreshing mid-game loses the current game state
@@ -955,7 +980,7 @@ POST /api/blunder called
 
 ## 8. MVP Constraints & Scope
 
-* **Single Variation per Game:** The system only records the *first* blunder of a session to keep the graph manageable initially.
+* **Single Variation per Game:** The system only records the *first* blunder of a session to keep the Ghost Move Library manageable initially.
 * **No Redis:** All state checks go directly to PostgreSQL (acceptable performance for turn-based MVP).
 
 ---
@@ -1208,19 +1233,19 @@ Bulk-ingests the analyzed move data collected during the session. The request mi
 - Endpoint is called once per completed game; repeat calls replace the existing move set for idempotency.
 - Any PGN string is still sent to `/api/game/end` (stored in `game_sessions.pgn`), while this endpoint remains JSON so downstream analytics don't need to re-parse PGN comments.
 
-### 9.4 Blunders / Ghost Library Targets
+### 9.4 Blunders / Ghost Move Library Targets
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/blunder` | Record an auto-detected blunder (analysis-triggered) |
-| POST | `/api/blunder/manual` | Manually add a MoveList decision to the Ghost Library |
-| GET | `/api/blunders` | List user's Ghost Library targets |
-| GET | `/api/blunders/:id` | Get single Ghost Library target details |
+| POST | `/api/blunder/manual` | Manually add a MoveList decision to the Ghost Move Library |
+| GET | `/api/blunders` | List user's Ghost Move Library targets |
+| GET | `/api/blunders/:id` | Get single Ghost Move Library target details |
 
 #### POST /api/blunder
 
-Records a blunder detected by the client-side engine (delta >= 150cp). Stores the full path from game start to the blunder position in the graph.
-This endpoint enforces the first-auto-blunder-per-session rule.
+Records a mistake detected by the client-side engine (delta >= 50cp, within first 10 moves). Stores the full path from game start to the target position in the Ghost Move Library.
+This endpoint enforces the first-auto-blunder-per-session rule and the 10-move recording cap.
 
 **Request:**
 ```json
@@ -1238,7 +1263,7 @@ This endpoint enforces the first-auto-blunder-per-session rule.
 **Backend Processing:**
 1. Parse PGN and replay to generate all intermediate positions
 2. Verify position before final move matches `fen` (reject with 422 if mismatch)
-3. Upsert all positions into graph (deduplicated by `fen_hash`)
+3. Upsert all positions into the Ghost Move Library (deduplicated by `fen_hash`)
 4. Upsert all edges connecting consecutive positions
 5. Create blunder record referencing the pre-move position (decision point)
 
@@ -1252,12 +1277,12 @@ This endpoint enforces the first-auto-blunder-per-session rule.
 }
 ```
 
-- `positions_created`: Number of new positions added to graph (0 if path already existed)
-- `is_new: false` means this position already has a Ghost Library target (frontend message: "already in library")
+- `positions_created`: Number of new positions added to the Ghost Move Library (0 if path already existed)
+- `is_new: false` means this position already has a Ghost Move Library target (frontend message: "already in library")
 
 #### POST /api/blunder/manual
 
-Manually adds a MoveList decision point to the Ghost Library. This endpoint is allowed for both active and ended sessions.
+Manually adds a MoveList decision point to the Ghost Move Library. This endpoint is allowed for both active and ended sessions.
 
 **Request:**
 ```json
@@ -1273,7 +1298,7 @@ Manually adds a MoveList decision point to the Ghost Library. This endpoint is a
 ```
 
 **Rules:**
-1. No 150cp threshold is applied; any eligible player move can be added.
+1. No 50cp threshold is applied; any eligible player move can be added.
 2. Backend replays PGN and upserts positions/moves exactly like automatic capture.
 3. Backend inserts/reuses `(user_id, position_id)` target row in `blunders`.
 4. Duplicate capture returns `is_new=false` so UI can show "already in library".
@@ -1291,10 +1316,10 @@ Manually adds a MoveList decision point to the Ghost Library. This endpoint is a
 
 #### GET /api/blunders
 
-Lists the user's recorded Ghost Library targets (auto blunders + manual MoveList selections).
+Lists the user's recorded Ghost Move Library targets (auto blunders + manual MoveList selections).
 
 **Query Parameters:**
-- `due` (boolean, optional) - Only return blunders with priority > 1.0
+- `due` (boolean, optional) - Only return blunders with srs_priority > 1.0 (overdue for review)
 - `limit` (integer, optional, default 50, max 100)
 
 **Response (200):**
@@ -1809,7 +1834,7 @@ When user has no completed games:
 | Layer | Tooling | Scope |
 | --- | --- | --- |
 | Unit (Frontend) | Vitest | Pure functions, state reducers, utilities |
-| Unit (Backend) | pytest | SRS math, graph helpers, DB query builders |
+| Unit (Backend) | pytest | SRS math, Ghost Move Library helpers, DB query builders |
 | Integration (Frontend) | React Testing Library | UI flows, board events, ghost state transitions |
 | Integration (Backend) | pytest + httpx | API endpoints, DB interactions, SRS updates |
 | E2E | Playwright | Full user journeys in the browser |
@@ -1823,10 +1848,11 @@ When user has no completed games:
 - Re-hooking on transpositions (normalized FEN hashing)
 
 **Blunder Detection**
-- First auto-detected mistake only per session
-- Threshold handling (>=150cp blunder, >=50cp replay failure)
+- First auto-detected mistake only per session (within first 10 moves)
+- Threshold handling (>=50cp recording, >=50cp replay failure)
 - Pre-move position reference (P_before) for stored blunders
-- Manual MoveList capture supports any player move (no >=150cp requirement)
+- 10-move recording cap enforcement (moves 11+ rejected)
+- Manual MoveList capture supports any player move (no threshold requirement)
 
 **Graph Traversal**
 - Recursive query cycle detection
