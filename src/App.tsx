@@ -12,6 +12,7 @@ function App() {
       <nav className="nav-bar">
         <span className="nav-bar__brand">Ghost Replay</span>
         <div className="nav-bar__actions">
+          <Link to="/history" className="nav-bar__link">History</Link>
           <Link to="/stats" className="nav-bar__link">Stats</Link>
           {user?.isAnonymous ? (
             <>

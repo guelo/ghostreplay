@@ -12,6 +12,7 @@ function StatsPage() {
           Ghost Replay
         </Link>
         <div className="nav-bar__actions">
+          <Link to="/history" className="nav-bar__link">History</Link>
           <Link to="/stats" className="nav-bar__link">Stats</Link>
           {user?.isAnonymous ? (
             <>

@@ -320,6 +320,46 @@ export const recordManualBlunder = async (
 }
 
 /**
+ * History types
+ */
+export interface GameSummary {
+  total_moves: number
+  blunders: number
+  mistakes: number
+  inaccuracies: number
+  average_centipawn_loss: number
+}
+
+export interface HistoryGame {
+  session_id: string
+  started_at: string
+  ended_at: string | null
+  result: string | null
+  engine_elo: number
+  player_color: string
+  summary: GameSummary
+}
+
+interface HistoryResponse {
+  games: HistoryGame[]
+}
+
+/**
+ * Fetch game history for the current user
+ */
+export const fetchHistory = async (
+  limit: number = 50,
+): Promise<HistoryGame[]> => {
+  const params = new URLSearchParams({ limit: String(limit) })
+  const resp = await requestJson<HistoryResponse>(
+    `${API_BASE_URL}/api/history?${params}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load game history' },
+  )
+  return resp.games
+}
+
+/**
  * Get ghost move for current position
  */
 export const getGhostMove = async (
