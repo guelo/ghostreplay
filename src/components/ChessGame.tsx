@@ -70,6 +70,15 @@ type BlunderAlert = {
   delta: number;
 };
 
+type ReviewFailInfo = {
+  userMoveSan: string;
+  bestMoveSan: string;
+  userMoveUci: string;
+  bestMoveUci: string;
+  evalLoss: number;
+  moveIndex: number;
+};
+
 type OpenHistoryOptions = {
   select: "latest";
   source: "post_game_view_analysis" | "post_game_history";
@@ -120,7 +129,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isGameActive, setIsGameActive] = useState(false);
   const [liveOpening, setLiveOpening] = useState<OpeningLookupResult | null>(
-    null
+    null,
   );
   const [gameResult, setGameResult] = useState<GameResult | null>(null);
   const [isStartingGame, setIsStartingGame] = useState(false);
@@ -131,6 +140,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
+  const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(null);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [optionSquares, setOptionSquares] = useState<
@@ -204,8 +214,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     });
   }, [moveHistory, analysisMap]);
 
-  // Compute arrows from blunder alert
+  // Compute arrows from review fail modal or blunder alert
   const blunderArrows = useMemo(() => {
+    if (reviewFailModal) {
+      return [
+        {
+          startSquare: reviewFailModal.userMoveUci.slice(0, 2),
+          endSquare: reviewFailModal.userMoveUci.slice(2, 4),
+          color: "rgba(248, 113, 113, 0.8)",
+        },
+        {
+          startSquare: reviewFailModal.bestMoveUci.slice(0, 2),
+          endSquare: reviewFailModal.bestMoveUci.slice(2, 4),
+          color: "rgba(52, 211, 153, 0.8)",
+        },
+      ];
+    }
     if (!blunderAlert) return [];
     return [
       {
@@ -219,7 +243,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         color: "rgba(52, 211, 153, 0.8)",
       },
     ];
-  }, [blunderAlert]);
+  }, [reviewFailModal, blunderAlert]);
 
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
@@ -249,9 +273,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           let bestMoveSan = analysis.bestMove;
           try {
             const fenBeforeMove =
-              index === 0
-                ? STARTING_FEN
-                : moveHistory[index - 1]?.fen;
+              index === 0 ? STARTING_FEN : moveHistory[index - 1]?.fen;
             if (fenBeforeMove) {
               const tempChess = new Chess(fenBeforeMove);
               const from = analysis.bestMove.slice(0, 2);
@@ -296,22 +318,25 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return isPlayerMoveIndex(selectedMoveIndex);
   }, [sessionId, selectedMoveIndex, isPlayerMoveIndex]);
 
-  const parseUciToSan = useCallback((fenBeforeMove: string, uciMove: string) => {
-    if (!uciMove || uciMove === "(none)" || uciMove.length < 4) {
-      return null;
-    }
+  const parseUciToSan = useCallback(
+    (fenBeforeMove: string, uciMove: string) => {
+      if (!uciMove || uciMove === "(none)" || uciMove.length < 4) {
+        return null;
+      }
 
-    try {
-      const replay = new Chess(fenBeforeMove);
-      const from = uciMove.slice(0, 2);
-      const to = uciMove.slice(2, 4);
-      const promotion = uciMove.slice(4) || undefined;
-      const result = replay.move({ from, to, promotion });
-      return result?.san ?? null;
-    } catch {
-      return null;
-    }
-  }, []);
+      try {
+        const replay = new Chess(fenBeforeMove);
+        const from = uciMove.slice(0, 2);
+        const to = uciMove.slice(2, 4);
+        const promotion = uciMove.slice(4) || undefined;
+        const result = replay.move({ from, to, promotion });
+        return result?.san ?? null;
+      } catch {
+        return null;
+      }
+    },
+    [],
+  );
 
   const clearMoveHighlights = useCallback(() => {
     setSelectedSquare(null);
@@ -328,8 +353,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const newSquares: Record<string, React.CSSProperties> = {};
       for (const move of moves) {
         const target = chess.get(move.to);
-        const isCapture =
-          target && target.color !== chess.get(square)?.color;
+        const isCapture = target && target.color !== chess.get(square)?.color;
         newSquares[move.to] = {
           background: isCapture
             ? "rgba(255, 0, 0, 0.4)"
@@ -356,7 +380,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return history.map((move, index) => {
         const analysis = analysesByIndex.get(index);
         const fenBeforeMove =
-          index === 0 ? STARTING_FEN : history[index - 1]?.fen ?? STARTING_FEN;
+          index === 0
+            ? STARTING_FEN
+            : (history[index - 1]?.fen ?? STARTING_FEN);
 
         return {
           move_number: Math.floor(index / 2) + 1,
@@ -384,23 +410,20 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
-    if (
-      analysisHasErrored() ||
-      analysisMapRef.current.size >= expectedMoves
-    ) {
+    if (analysisHasErrored() || analysisMapRef.current.size >= expectedMoves) {
       return;
     }
 
     const initialSize = analysisMapRef.current.size;
     await sleep(150);
-    if (
-      analysisHasErrored() ||
-      analysisMapRef.current.size >= expectedMoves
-    ) {
+    if (analysisHasErrored() || analysisMapRef.current.size >= expectedMoves) {
       return;
     }
 
-    if (!isAnalyzingRef.current && analysisMapRef.current.size === initialSize) {
+    if (
+      !isAnalyzingRef.current &&
+      analysisMapRef.current.size === initialSize
+    ) {
       return;
     }
 
@@ -440,7 +463,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
 
       const analysesSnapshot = new Map(analysisMapRef.current);
-      const payload = buildSessionMoveUploads(historySnapshot, analysesSnapshot);
+      const payload = buildSessionMoveUploads(
+        historySnapshot,
+        analysesSnapshot,
+      );
       await uploadSessionMoves(targetSessionId, payload);
       uploadedAnalysisSessionsRef.current.add(targetSessionId);
     },
@@ -476,7 +502,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         userMove,
         bestMove: analysis?.bestMove ?? userMove,
         evalBefore: analysis?.bestEval ?? 0,
-        evalAfter: analysis?.playedEval ?? (analysis?.bestEval ?? 0),
+        evalAfter: analysis?.playedEval ?? analysis?.bestEval ?? 0,
       };
     },
     [analysisMap, moveHistory],
@@ -509,7 +535,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           payload.evalAfter,
         );
       } catch (error) {
-        console.error("[BlunderLibrary] Failed to record manual blunder:", error);
+        console.error(
+          "[BlunderLibrary] Failed to record manual blunder:",
+          error,
+        );
       } finally {
         setIsAddingToLibrary(false);
       }
@@ -543,7 +572,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         try {
           await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
         } catch (uploadError) {
-          console.error("[SessionMoves] Failed to upload session moves:", uploadError);
+          console.error(
+            "[SessionMoves] Failed to upload session moves:",
+            uploadError,
+          );
         }
         await endGame(sessionId, result.type, chess.pgn());
         setIsGameActive(false);
@@ -633,7 +665,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
 
     const lastMoveIndex =
-      lastAnalysis.moveIndex ?? (moveHistory.length > 0 ? moveHistory.length - 1 : null);
+      lastAnalysis.moveIndex ??
+      (moveHistory.length > 0 ? moveHistory.length - 1 : null);
     const whitePerspectiveEval = toWhitePerspective(
       lastAnalysis.currentPositionEval,
       lastMoveIndex,
@@ -795,6 +828,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             setMoveHistory(nextMoveHistory);
             setViewIndex(null);
 
+            if (blunderReviewId !== null) {
+              pendingSrsReviewRef.current = {
+                blunderId: blunderReviewId,
+                moveIndex,
+                userMoveSan: move.san,
+              };
+              setBlunderReviewId(null);
+            }
+
             const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
             pendingAnalysisContextRef.current = {
               fen: fenBeforeMove,
@@ -829,6 +871,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
     },
     [
+      blunderReviewId,
       chess,
       isGameActive,
       isViewingLive,
@@ -934,7 +977,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // SRS review grading: evaluate user move from a targeted blunder position.
   useEffect(() => {
-    if (!sessionId || !isGameActive || !lastAnalysis || lastAnalysis.moveIndex === null) {
+    if (
+      !sessionId ||
+      !isGameActive ||
+      !lastAnalysis ||
+      lastAnalysis.moveIndex === null
+    ) {
       return;
     }
 
@@ -951,6 +999,38 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
     const evalLossCp = Math.max(lastAnalysis.delta, 0);
     const passed = evalLossCp < SRS_REVIEW_FAIL_THRESHOLD_CP;
+
+    if (!passed) {
+      let bestMoveSan = lastAnalysis.bestMove;
+      const fenBeforeMove =
+        lastAnalysis.moveIndex === 0
+          ? STARTING_FEN
+          : moveHistoryRef.current[lastAnalysis.moveIndex - 1]?.fen;
+      if (fenBeforeMove) {
+        try {
+          const tempChess = new Chess(fenBeforeMove);
+          const from = lastAnalysis.bestMove.slice(0, 2);
+          const to = lastAnalysis.bestMove.slice(2, 4);
+          const promotion = lastAnalysis.bestMove.slice(4) || undefined;
+          const bestMoveResult = tempChess.move({ from, to, promotion });
+          if (bestMoveResult) {
+            bestMoveSan = bestMoveResult.san;
+          }
+        } catch {
+          // Fall back to UCI notation
+        }
+      }
+
+      setReviewFailModal({
+        userMoveSan: pendingReview.userMoveSan,
+        bestMoveSan,
+        userMoveUci: lastAnalysis.move,
+        bestMoveUci: lastAnalysis.bestMove,
+        evalLoss: evalLossCp,
+        moveIndex: lastAnalysis.moveIndex,
+      });
+      setViewIndex(lastAnalysis.moveIndex - 1);
+    }
 
     const postReview = async () => {
       try {
@@ -1100,6 +1180,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return true;
   };
 
+  const handleDismissReviewFail = useCallback(() => {
+    setReviewFailModal(null);
+    setViewIndex(null);
+  }, []);
+
   const handleNewGame = async () => {
     try {
       setIsStartingGame(true);
@@ -1109,7 +1194,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         try {
           await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
         } catch (uploadError) {
-          console.error("[SessionMoves] Failed to upload session moves:", uploadError);
+          console.error(
+            "[SessionMoves] Failed to upload session moves:",
+            uploadError,
+          );
         }
         await endGame(sessionId, "abandon", chess.pgn());
       }
@@ -1147,6 +1235,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setShowFlash(false);
       setBlunderReviewId(null);
       setShowPassToast(false);
+      setReviewFailModal(null);
       setShowPostGamePrompt(false);
       clearMoveHighlights();
       blunderRecordedRef.current = false;
@@ -1171,7 +1260,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       try {
         await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
       } catch (uploadError) {
-        console.error("[SessionMoves] Failed to upload session moves:", uploadError);
+        console.error(
+          "[SessionMoves] Failed to upload session moves:",
+          uploadError,
+        );
       }
       await endGame(sessionId, "resign", chess.pgn());
       setIsGameActive(false);
@@ -1203,6 +1295,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setBlunderAlert(null);
     setShowFlash(false);
     setShowPassToast(false);
+    setReviewFailModal(null);
     setShowPostGamePrompt(false);
     setShowStartOverlay(false);
     setBlunderReviewId(null);
@@ -1252,9 +1345,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (!gameResult) return null;
     switch (gameResult.type) {
       case "checkmate_win":
-        return { label: "Win — Checkmate", className: "game-status-badge--win" };
+        return {
+          label: "Win — Checkmate",
+          className: "game-status-badge--win",
+        };
       case "checkmate_loss":
-        return { label: "Loss — Checkmate", className: "game-status-badge--loss" };
+        return {
+          label: "Loss — Checkmate",
+          className: "game-status-badge--loss",
+        };
       case "draw":
         return { label: "Draw", className: "game-status-badge--other" };
       case "resign":
@@ -1299,12 +1398,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             </span>
           </p>
           {isGameActive && (
-            <p className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}>
+            <p
+              className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}
+            >
               Opponent:{" "}
               {opponentMode === "ghost" ? (
                 <>
                   <GhostIcon />{" "}
-                  <span className="chess-meta-strong ghost-mode-label">Ghost</span>
+                  <span className="chess-meta-strong ghost-mode-label">
+                    Ghost
+                  </span>
                 </>
               ) : (
                 <span className="chess-meta-strong">Engine</span>
@@ -1323,10 +1426,38 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           )}
           {isReviewMomentActive && (
             <div className="review-warning-toast" role="alert">
-              <span className="review-warning-toast__label">Review Position</span>
+              <span className="review-warning-toast__label">
+                Review Position
+              </span>
               <p className="review-warning-toast__detail">
-                Be careful. You screwed this position up last time.
+                Be careful. You've messed this position up before.
               </p>
+            </div>
+          )}
+          {reviewFailModal && (
+            <div className="review-fail-panel" role="alert">
+              <span className="review-fail-panel__label">
+                You made this mistake again!
+              </span>
+              <p className="review-fail-panel__detail">
+                You played:{" "}
+                <strong className="review-fail-panel__bad">
+                  {reviewFailModal.userMoveSan}
+                </strong>
+              </p>
+              <p className="review-fail-panel__detail">
+                Best was:{" "}
+                <span className="review-fail-panel__best">
+                  {reviewFailModal.bestMoveSan}
+                </span>
+              </p>
+              <button
+                className="chess-button primary"
+                type="button"
+                onClick={handleDismissReviewFail}
+              >
+                Continue
+              </button>
             </div>
           )}
           <div className="chess-controls">
@@ -1418,8 +1549,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   !isThinking &&
                   isViewingLive,
                 squareStyles: optionSquares,
-                arrows:
-                  blunderArrows.length > 0 ? blunderArrows : undefined,
+                arrows: blunderArrows.length > 0 ? blunderArrows : undefined,
                 boardStyle: {
                   borderRadius: "0",
                   boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
@@ -1463,7 +1593,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             )}
           </div>
           {showPostGamePrompt && gameResult && (
-            <div className="game-end-banner" role="region" aria-label="Post-game options">
+            <div
+              className="game-end-banner"
+              role="region"
+              aria-label="Post-game options"
+            >
               <p className="game-end-banner-message">{gameResult.message}</p>
               <div className="chess-post-game-actions">
                 <button

@@ -339,6 +339,54 @@
   font-size: 0.8rem;
 }
 
+/* Review fail panel (side panel) */
+.review-fail-panel {
+  margin: 0.35rem 0 0.5rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(248, 113, 113, 0.55);
+  background: rgba(15, 23, 42, 0.94);
+  box-shadow: 0 8px 18px rgba(2, 6, 23, 0.4);
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+  max-width: 420px;
+  animation: blunder-toast-in 250ms ease-out;
+}
+
+.review-fail-panel__label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #f87171;
+}
+
+.review-fail-panel__detail {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #fecaca;
+}
+
+.review-fail-panel__bad {
+  color: #f87171;
+  font-weight: 600;
+}
+
+.review-fail-panel__best {
+  color: #34d399;
+  font-weight: 600;
+}
+
+.review-fail-panel .chess-button {
+  margin-top: 0.35rem;
+  align-self: flex-start;
+  font-size: 0.8rem;
+  padding: 0.4rem 1rem;
+}
+
 /* Review warning toast */
 .review-warning-toast {
   margin: 0.35rem 0 0.5rem;
