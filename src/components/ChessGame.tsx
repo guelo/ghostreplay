@@ -1321,6 +1321,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               </span>
             </p>
           )}
+          {isReviewMomentActive && (
+            <div className="review-warning-toast" role="alert">
+              <span className="review-warning-toast__label">Review Position</span>
+              <p className="review-warning-toast__detail">
+                Be careful. You screwed this position up last time.
+              </p>
+            </div>
+          )}
           <div className="chess-controls">
             <button
               className="chess-button danger"
@@ -1396,14 +1404,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               <div className="chessboard-ended-scrim" />
             )}
             {showFlash && <div className="blunder-flash" />}
-            {isReviewMomentActive && (
-              <div className="review-warning-toast" role="alert">
-                <span className="review-warning-toast__label">Review Position</span>
-                <p className="review-warning-toast__detail">
-                  Be careful. You screwed this position up last time.
-                </p>
-              </div>
-            )}
             <Chessboard
               options={{
                 position: displayedFen,
