@@ -132,6 +132,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [optionSquares, setOptionSquares] = useState<
+    Record<string, React.CSSProperties>
+  >({});
 
   // Tracks next move index synchronously so async callbacks (engine/ghost)
   // don't read stale moveHistory.length from closures.
@@ -308,6 +312,41 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return null;
     }
   }, []);
+
+  const clearMoveHighlights = useCallback(() => {
+    setSelectedSquare(null);
+    setOptionSquares({});
+  }, []);
+
+  const getMoveOptions = useCallback(
+    (square: string): boolean => {
+      const moves = chess.moves({ square, verbose: true });
+      if (moves.length === 0) {
+        return false;
+      }
+
+      const newSquares: Record<string, React.CSSProperties> = {};
+      for (const move of moves) {
+        const target = chess.get(move.to);
+        const isCapture =
+          target && target.color !== chess.get(square)?.color;
+        newSquares[move.to] = {
+          background: isCapture
+            ? "rgba(255, 0, 0, 0.4)"
+            : "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
+          borderRadius: "50%",
+        };
+      }
+
+      newSquares[square] = {
+        background: "rgba(255, 255, 0, 0.4)",
+      };
+
+      setOptionSquares(newSquares);
+      return true;
+    },
+    [chess],
+  );
 
   const buildSessionMoveUploads = useCallback(
     (
@@ -723,6 +762,86 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     onApplyEngineMove: applyEngineMove,
   });
 
+  const handleSquareClick = useCallback(
+    ({ square }: { square: string }) => {
+      const playersTurn =
+        chess.turn() === (playerColor === "white" ? "w" : "b");
+      if (!isGameActive || !playersTurn || !isViewingLive) {
+        clearMoveHighlights();
+        return;
+      }
+
+      // If a square is already selected, try to make a move to the clicked square
+      if (selectedSquare) {
+        let move = null;
+        try {
+          const fenBeforeMove = chess.fen();
+          move = chess.move({
+            from: selectedSquare,
+            to: square,
+            promotion: "q",
+          });
+
+          if (move) {
+            clearMoveHighlights();
+            setBlunderAlert(null);
+
+            const newFen = chess.fen();
+            const moveIndex = moveCountRef.current++;
+            const nextMove = { san: move.san, fen: newFen };
+            const nextMoveHistory = [...moveHistoryRef.current, nextMove];
+            moveHistoryRef.current = nextMoveHistory;
+            setFen(newFen);
+            setMoveHistory(nextMoveHistory);
+            setViewIndex(null);
+
+            const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
+            pendingAnalysisContextRef.current = {
+              fen: fenBeforeMove,
+              pgn: chess.pgn(),
+              moveSan: move.san,
+              moveUci: uciMove,
+            };
+            analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex);
+
+            if (chess.isGameOver()) {
+              void handleGameEnd();
+            } else {
+              void applyOpponentMove(newFen);
+            }
+            return;
+          }
+        } catch {
+          // Invalid move (e.g. clicking a friendly piece) — fall through
+        }
+
+        // Move was illegal — fall through to try selecting the new square
+      }
+
+      // Try to select a new piece
+      const piece = chess.get(square);
+      const playerSide = playerColor === "white" ? "w" : "b";
+      if (piece && piece.color === playerSide) {
+        setSelectedSquare(square);
+        getMoveOptions(square);
+      } else {
+        clearMoveHighlights();
+      }
+    },
+    [
+      chess,
+      isGameActive,
+      isViewingLive,
+      selectedSquare,
+      playerColor,
+      analyzeMove,
+      applyOpponentMove,
+      clearMoveHighlights,
+      getMoveOptions,
+      handleGameEnd,
+    ],
+  );
+
   useEffect(() => {
     if (!isGameActive) {
       openingLookupRequestIdRef.current += 1;
@@ -941,6 +1060,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return false;
     }
 
+    clearMoveHighlights();
     setBlunderAlert(null);
 
     const newFen = chess.fen();
@@ -1028,6 +1148,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setBlunderReviewId(null);
       setShowPassToast(false);
       setShowPostGamePrompt(false);
+      clearMoveHighlights();
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
       pendingSrsReviewRef.current = null;
@@ -1085,6 +1206,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowPostGamePrompt(false);
     setShowStartOverlay(false);
     setBlunderReviewId(null);
+    clearMoveHighlights();
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
     pendingSrsReviewRef.current = null;
@@ -1286,6 +1408,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               options={{
                 position: displayedFen,
                 onPieceDrop: handleDrop,
+                onSquareClick: handleSquareClick,
                 boardOrientation,
                 animationDurationInMs: 200,
                 allowDragging:
@@ -1294,6 +1417,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   isPlayersTurn &&
                   !isThinking &&
                   isViewingLive,
+                squareStyles: optionSquares,
                 arrows:
                   blunderArrows.length > 0 ? blunderArrows : undefined,
                 boardStyle: {
