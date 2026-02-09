@@ -22,6 +22,7 @@ import {
   classifySessionMove,
   toWhitePerspective,
 } from "../workers/analysisUtils";
+import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
 
 const GhostIcon = () => (
@@ -310,6 +311,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
     return viewIndex ?? moveHistory.length - 1;
   }, [moveHistory.length, viewIndex]);
+
+  const selectedEvalCp = useMemo(() => {
+    if (selectedMoveIndex === null || selectedMoveIndex < 0) {
+      return null;
+    }
+    const selectedAnalysis = analysisMap.get(selectedMoveIndex);
+    return toWhitePerspective(
+      selectedAnalysis?.playedEval ?? null,
+      selectedMoveIndex,
+    );
+  }, [analysisMap, selectedMoveIndex]);
 
   const canAddSelectedMove = useMemo(() => {
     if (!sessionId || selectedMoveIndex === null) {
@@ -1483,7 +1495,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         </div>
 
         <div className="chessboard-wrapper">
-          <div className="chessboard-board-area">
+          <div className="chessboard-board-with-eval">
+            <EvalBar
+              whitePerspectiveCp={selectedEvalCp}
+              whiteOnBottom={boardOrientation === "white"}
+            />
+            <div className="chessboard-board-area">
             {showStartOverlay && !isGameActive && (
               <div className="chessboard-overlay">
                 <div className="chess-start-panel">
@@ -1591,6 +1608,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 </p>
               </div>
             )}
+            </div>
           </div>
           {showPostGamePrompt && gameResult && (
             <div

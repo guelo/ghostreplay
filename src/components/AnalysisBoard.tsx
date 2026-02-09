@@ -6,6 +6,7 @@ import type { AnalysisMove, SessionMoveClassification } from '../utils/api'
 import { toWhitePerspective } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import AnalysisGraph from './AnalysisGraph'
+import EvalBar from './EvalBar'
 import MoveList from './MoveList'
 
 const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
@@ -60,6 +61,17 @@ const sanToSquares = (
 const formatEvalCp = (cp: number): string => {
   const value = cp / 100
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`
+}
+
+const toWhitePerspectiveMate = (
+  moverPerspectiveMate: number | null,
+  moveIndex: number | null | undefined,
+) => {
+  if (moverPerspectiveMate === null || moveIndex === null || moveIndex === undefined) {
+    return moverPerspectiveMate
+  }
+
+  return moveIndex % 2 === 0 ? moverPerspectiveMate : -moverPerspectiveMate
 }
 
 const AnalysisBoard = ({
@@ -166,6 +178,16 @@ const AnalysisBoard = ({
     return moves[effectiveIndex] ?? null
   }, [isInWhatIf, effectiveIndex, moves])
 
+  const currentEvalCp = useMemo(() => {
+    if (isInWhatIf || effectiveIndex < 0) return null
+    return toWhitePerspective(currentMove?.eval_cp ?? null, effectiveIndex)
+  }, [isInWhatIf, effectiveIndex, currentMove])
+
+  const currentEvalMate = useMemo(() => {
+    if (isInWhatIf || effectiveIndex < 0) return null
+    return toWhitePerspectiveMate(currentMove?.eval_mate ?? null, effectiveIndex)
+  }, [isInWhatIf, effectiveIndex, currentMove])
+
   // Handle MoveList navigation
   const handleNavigate = useCallback(
     (index: number | null) => {
@@ -232,20 +254,31 @@ const AnalysisBoard = ({
     <div className="analysis-board">
       <div className="analysis-board__layout">
         <div className="analysis-board__board-col">
-          <Chessboard
-            options={{
-              position: displayedFen,
-              boardOrientation,
-              onPieceDrop: handleDrop,
-              allowDragging: true,
-              animationDurationInMs: 200,
-              arrows,
-              boardStyle: {
-                borderRadius: '0',
-                boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
-              },
-            }}
-          />
+          <div className="analysis-board__board-with-eval">
+            {!isInWhatIf && (
+              <EvalBar
+                whitePerspectiveCp={currentEvalCp}
+                whitePerspectiveMate={currentEvalMate}
+                whiteOnBottom={boardOrientation === 'white'}
+              />
+            )}
+            <div className="analysis-board__board-frame">
+              <Chessboard
+                options={{
+                  position: displayedFen,
+                  boardOrientation,
+                  onPieceDrop: handleDrop,
+                  allowDragging: true,
+                  animationDurationInMs: 200,
+                  arrows,
+                  boardStyle: {
+                    borderRadius: '0',
+                    boxShadow: '0 20px 45px rgba(2, 6, 23, 0.5)',
+                  },
+                }}
+              />
+            </div>
+          </div>
         </div>
         <div className="analysis-board__moves-col">
           <MoveList
@@ -276,16 +309,13 @@ const AnalysisBoard = ({
       {currentMove && !isInWhatIf && (
         <div className="analysis-board__position-info">
           <div className="analysis-board__position-info-row">
-            {currentMove.eval_cp != null && (() => {
-              const wp = toWhitePerspective(currentMove.eval_cp, effectiveIndex)!
-              return (
-                <span
-                  className={`analysis-board__eval-text ${wp >= 0 ? 'analysis-board__eval-text--positive' : 'analysis-board__eval-text--negative'}`}
-                >
-                  {formatEvalCp(wp)}
-                </span>
-              )
-            })()}
+            {(currentEvalCp !== null || currentEvalMate !== null) && (
+              <span
+                className={`analysis-board__eval-text ${(currentEvalCp !== null && currentEvalCp < 0) || (currentEvalMate !== null && currentEvalMate < 0) ? 'analysis-board__eval-text--negative' : 'analysis-board__eval-text--positive'}`}
+              >
+                {currentEvalMate !== null ? `M${currentEvalMate}` : formatEvalCp(currentEvalCp!)}
+              </span>
+            )}
             {currentMove.classification && (
               <span
                 className={`analysis-board__classification analysis-board__classification--${currentMove.classification}`}
