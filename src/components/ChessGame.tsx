@@ -520,6 +520,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
+  const isReviewMomentActive =
+    blunderReviewId !== null &&
+    isGameActive &&
+    isPlayersTurn &&
+    isViewingLive &&
+    !chess.isGameOver();
 
   const statusText = (() => {
     if (chess.isCheckmate()) {
@@ -1268,6 +1274,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               <div className="chessboard-ended-scrim" />
             )}
             {showFlash && <div className="blunder-flash" />}
+            {isReviewMomentActive && (
+              <div className="review-warning-toast" role="alert">
+                <span className="review-warning-toast__label">Review Position</span>
+                <p className="review-warning-toast__detail">
+                  Be careful. You screwed this position up last time.
+                </p>
+              </div>
+            )}
             <Chessboard
               options={{
                 position: displayedFen,

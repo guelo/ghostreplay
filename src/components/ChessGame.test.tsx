@@ -543,6 +543,42 @@ describe('ChessGame blunder recording', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('shows review warning when arriving at a previously failed position', async () => {
+    getGhostMoveMock
+      .mockResolvedValueOnce({
+        mode: 'ghost',
+        move: 'e5',
+        target_blunder_id: 77,
+      })
+      .mockResolvedValue({
+        mode: 'engine',
+        move: null,
+        target_blunder_id: null,
+      })
+
+    await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Be careful. You screwed this position up last time.'),
+      ).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'g1', targetSquare: 'f3' })
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText('Be careful. You screwed this position up last time.'),
+      ).not.toBeInTheDocument()
+    })
+  })
+
   it('records SRS pass for review target when eval delta is below 50cp', async () => {
     getGhostMoveMock
       .mockResolvedValueOnce({
