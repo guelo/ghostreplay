@@ -7,6 +7,7 @@ import {
   recordBlunder,
   recordManualBlunder,
   getGhostMove,
+  reviewSrsBlunder,
   getStatsSummary,
 } from './api'
 
@@ -475,6 +476,46 @@ describe('getGhostMove', () => {
       expect(apiError.retryable).toBe(false)
       expect(apiError.details).toEqual({ service: 'postgres' })
     }
+  })
+})
+
+describe('reviewSrsBlunder', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('sends correct review payload', async () => {
+    mockResponse({
+      blunder_id: 42,
+      pass_streak: 3,
+      priority: 1.25,
+      next_expected_review: '2026-02-08T12:00:00Z',
+    })
+
+    await reviewSrsBlunder('sess-1', 42, false, 'Qh5', 50)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/srs/review'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          session_id: 'sess-1',
+          blunder_id: 42,
+          passed: false,
+          user_move: 'Qh5',
+          eval_delta: 50,
+        }),
+      }),
+    )
+  })
+
+  it('throws on non-ok response', async () => {
+    mockResponse({}, false, 'Unauthorized', 401)
+
+    await expect(
+      reviewSrsBlunder('sess-1', 42, true, 'Nf3', 20),
+    ).rejects.toThrow('Failed to record SRS review: Unauthorized')
   })
 })
 

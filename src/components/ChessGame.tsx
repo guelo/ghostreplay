@@ -12,6 +12,7 @@ import {
   endGame,
   recordBlunder,
   recordManualBlunder,
+  reviewSrsBlunder,
   uploadSessionMoves,
   type SessionMoveUpload,
 } from "../utils/api";
@@ -80,6 +81,7 @@ type ChessGameProps = {
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
+const SRS_REVIEW_FAIL_THRESHOLD_CP = 50;
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
@@ -127,7 +129,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
-  const [, setBlunderReviewId] = useState<number | null>(null);
+  const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
 
@@ -143,6 +145,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     pgn: string;
     moveSan: string;
     moveUci: string;
+  } | null>(null);
+  const pendingSrsReviewRef = useRef<{
+    blunderId: number;
+    moveIndex: number;
+    userMoveSan: string;
   } | null>(null);
   const openingLookupRequestIdRef = useRef(0);
   const analysisMapRef = useRef<Map<number, AnalysisResult>>(new Map());
@@ -683,6 +690,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         const sideToMove = chess.turn() === "w" ? "white" : "black";
         if (targetBlunderId !== null && sideToMove === playerColor) {
           setBlunderReviewId(targetBlunderId);
+        } else {
+          setBlunderReviewId(null);
         }
 
         const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
@@ -798,6 +807,46 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     void postBlunder();
   }, [lastAnalysis, sessionId, isGameActive]);
 
+  // SRS review grading: evaluate user move from a targeted blunder position.
+  useEffect(() => {
+    if (!sessionId || !isGameActive || !lastAnalysis || lastAnalysis.moveIndex === null) {
+      return;
+    }
+
+    const pendingReview = pendingSrsReviewRef.current;
+    if (!pendingReview || pendingReview.moveIndex !== lastAnalysis.moveIndex) {
+      return;
+    }
+
+    pendingSrsReviewRef.current = null;
+
+    if (lastAnalysis.delta === null) {
+      return;
+    }
+
+    const evalLossCp = Math.max(lastAnalysis.delta, 0);
+    const passed = evalLossCp < SRS_REVIEW_FAIL_THRESHOLD_CP;
+
+    const postReview = async () => {
+      try {
+        await reviewSrsBlunder(
+          sessionId,
+          pendingReview.blunderId,
+          passed,
+          pendingReview.userMoveSan,
+          evalLossCp,
+        );
+        if (passed) {
+          setShowPassToast(true);
+        }
+      } catch (error) {
+        console.error("[SRS] Failed to record review:", error);
+      }
+    };
+
+    void postReview();
+  }, [isGameActive, lastAnalysis, sessionId]);
+
   // Blunder alert: show flash + toast + arrows for player blunders
   useEffect(() => {
     if (
@@ -897,6 +946,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setMoveHistory(nextMoveHistory);
     setViewIndex(null); // Ensure we're viewing the live position
 
+    if (blunderReviewId !== null) {
+      pendingSrsReviewRef.current = {
+        blunderId: blunderReviewId,
+        moveIndex,
+        userMoveSan: move.san,
+      };
+      setBlunderReviewId(null);
+    }
+
     const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
     // Store context for blunder detection before engine moves
     pendingAnalysisContextRef.current = {
@@ -966,6 +1024,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setShowPostGamePrompt(false);
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
+      pendingSrsReviewRef.current = null;
       resetMode();
     } catch (error) {
       const message =
@@ -1019,8 +1078,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowPassToast(false);
     setShowPostGamePrompt(false);
     setShowStartOverlay(false);
+    setBlunderReviewId(null);
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
+    pendingSrsReviewRef.current = null;
     resetMode();
   };
 

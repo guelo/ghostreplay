@@ -8,6 +8,7 @@ const uploadSessionMovesMock = vi.fn()
 const getGhostMoveMock = vi.fn()
 const recordBlunderMock = vi.fn()
 const recordManualBlunderMock = vi.fn()
+const reviewSrsBlunderMock = vi.fn()
 
 vi.mock('../utils/api', () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
@@ -16,6 +17,7 @@ vi.mock('../utils/api', () => ({
   getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
   recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
+  reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
 }))
 
 const evaluatePositionMock = vi.fn()
@@ -85,6 +87,7 @@ describe('ChessGame start flow', () => {
     uploadSessionMovesMock.mockReset()
     getGhostMoveMock.mockReset()
     recordManualBlunderMock.mockReset()
+    reviewSrsBlunderMock.mockReset()
     lookupOpeningByFenMock.mockReset()
     mockAnalysisMap = new Map()
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
@@ -157,6 +160,7 @@ describe('ChessGame blunder recording', () => {
     getGhostMoveMock.mockReset()
     recordBlunderMock.mockReset()
     recordManualBlunderMock.mockReset()
+    reviewSrsBlunderMock.mockReset()
     mockAnalyzeMove.mockReset()
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()
@@ -183,6 +187,12 @@ describe('ChessGame blunder recording', () => {
       position_id: 11,
       positions_created: 1,
       is_new: true,
+    })
+    reviewSrsBlunderMock.mockResolvedValue({
+      blunder_id: 42,
+      pass_streak: 1,
+      priority: 0,
+      next_expected_review: '2026-02-08T00:00:00Z',
     })
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
   })
@@ -532,6 +542,122 @@ describe('ChessGame blunder recording', () => {
       screen.queryByRole('button', { name: /add to ghost library/i }),
     ).not.toBeInTheDocument()
   })
+
+  it('records SRS pass for review target when eval delta is below 50cp', async () => {
+    getGhostMoveMock
+      .mockResolvedValueOnce({
+        mode: 'ghost',
+        move: 'e5',
+        target_blunder_id: 42,
+      })
+      .mockResolvedValue({
+        mode: 'engine',
+        move: null,
+        target_blunder_id: null,
+      })
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          mockLastAnalysis = {
+            id: 'review-pass',
+            move,
+            bestMove: 'g1f3',
+            bestEval: 40,
+            playedEval: 20,
+            currentPositionEval: 20,
+            moveIndex: 2,
+            delta: 20,
+            blunder: false,
+          }
+        }
+      },
+    )
+
+    const { rerender } = await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        'e7e5',
+        'black',
+        1,
+      )
+    })
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'g1', targetSquare: 'f3' })
+    })
+    rerender(<ChessGame />)
+
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
+        'session-blunder',
+        42,
+        true,
+        'Nf3',
+        20,
+      )
+    })
+    expect(screen.getByText('You avoided your past mistake.')).toBeInTheDocument()
+  })
+
+  it('records SRS fail for review target when eval delta is 50cp or higher', async () => {
+    getGhostMoveMock
+      .mockResolvedValueOnce({
+        mode: 'ghost',
+        move: 'e5',
+        target_blunder_id: 99,
+      })
+      .mockResolvedValue({
+        mode: 'engine',
+        move: null,
+        target_blunder_id: null,
+      })
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          mockLastAnalysis = {
+            id: 'review-fail',
+            move,
+            bestMove: 'g1f3',
+            bestEval: 40,
+            playedEval: -10,
+            currentPositionEval: -10,
+            moveIndex: 2,
+            delta: 50,
+            blunder: false,
+          }
+        }
+      },
+    )
+
+    const { rerender } = await startGameAsWhite()
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'e2', targetSquare: 'e4' })
+    })
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: 'g1', targetSquare: 'f3' })
+    })
+    rerender(<ChessGame />)
+
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
+        'session-blunder',
+        99,
+        false,
+        'Nf3',
+        50,
+      )
+    })
+    expect(screen.queryByText('You avoided your past mistake.')).not.toBeInTheDocument()
+  })
 })
 
 describe('ChessGame move analysis', () => {
@@ -543,6 +669,7 @@ describe('ChessGame move analysis', () => {
     getGhostMoveMock.mockReset()
     recordBlunderMock.mockReset()
     recordManualBlunderMock.mockReset()
+    reviewSrsBlunderMock.mockReset()
     mockAnalyzeMove.mockReset()
     evaluatePositionMock.mockReset()
     lookupOpeningByFenMock.mockReset()
@@ -557,6 +684,12 @@ describe('ChessGame move analysis', () => {
     })
     evaluatePositionMock.mockResolvedValue({ move: 'd7d5' })
     lookupOpeningByFenMock.mockResolvedValue(null)
+    reviewSrsBlunderMock.mockResolvedValue({
+      blunder_id: 1,
+      pass_streak: 1,
+      priority: 0,
+      next_expected_review: '2026-02-08T00:00:00Z',
+    })
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 })
   })
 

@@ -215,6 +215,21 @@ interface GhostMoveResponse {
   target_blunder_id: number | null
 }
 
+interface SrsReviewRequest {
+  session_id: string
+  blunder_id: number
+  passed: boolean
+  user_move: string
+  eval_delta: number
+}
+
+interface SrsReviewResponse {
+  blunder_id: number
+  pass_streak: number
+  priority: number
+  next_expected_review: string
+}
+
 /**
  * Start a new game session
  */
@@ -412,6 +427,29 @@ export const getGhostMove = async (
     method: 'GET',
     headers: getAuthHeaders(),
   }, { retries: 2, fallbackMessage: 'Failed to get ghost move' })
+}
+
+/**
+ * Record pass/fail review outcome for a targeted blunder.
+ */
+export const reviewSrsBlunder = async (
+  sessionId: string,
+  blunderId: number,
+  passed: boolean,
+  userMove: string,
+  evalDelta: number,
+): Promise<SrsReviewResponse> => {
+  return requestJson<SrsReviewResponse>(`${API_BASE_URL}/api/srs/review`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      session_id: sessionId,
+      blunder_id: blunderId,
+      passed,
+      user_move: userMove,
+      eval_delta: evalDelta,
+    } satisfies SrsReviewRequest),
+  }, { fallbackMessage: 'Failed to record SRS review' })
 }
 
 export type StatsWindowDays = 0 | 7 | 30 | 90 | 365
