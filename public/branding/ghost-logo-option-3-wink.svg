@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Ghost Replay mascot option 3</title>
+  <desc id="desc">Playful lilac ghost mascot winking, now wearing a small tilted hat.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f6edff"/>
+      <stop offset="100%" stop-color="#d0abff"/>
+    </linearGradient>
+    <linearGradient id="hat" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8f6bd1"/>
+      <stop offset="100%" stop-color="#65429e"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#body)" stroke="#6f4fa5" stroke-width="8" stroke-linejoin="round" d="M128 36c-40 0-71 30-71 68v67c0 8 7 13 14 10l14-7 15 9 15-9 13 9 13-9 15 9 15-9 14 7c7 3 14-2 14-10v-67c0-38-31-68-71-68Z"/>
+  <ellipse cx="126" cy="53" rx="39" ry="9" fill="#5a3a8c" stroke="#3b245f" stroke-width="5"/>
+  <path fill="url(#hat)" stroke="#3b245f" stroke-width="5" stroke-linejoin="round" d="M100 52 145 16l23 39Z"/>
+  <path d="M113 42h42" stroke="#f6dc8f" stroke-width="6" stroke-linecap="round"/>
+  <path d="M90 112c8-8 20-8 28 0" fill="none" stroke="#362353" stroke-width="7" stroke-linecap="round"/>
+  <ellipse cx="157" cy="113" rx="13" ry="16" fill="#2f1f4b"/>
+  <circle cx="161" cy="107" r="4" fill="#ffffff"/>
+  <path d="M99 146c11 13 42 13 53 0" fill="none" stroke="#5c3d90" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="88" cy="138" r="6" fill="#e7cbff"/>
+  <circle cx="168" cy="138" r="6" fill="#e7cbff"/>
+</svg>

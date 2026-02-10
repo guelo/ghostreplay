@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Ghost Replay mascot option 2</title>
+  <desc id="desc">Lilac ghost mascot with round glasses and a confident grin.</desc>
+  <defs>
+    <linearGradient id="body" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#efe3ff"/>
+      <stop offset="100%" stop-color="#cda7ff"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#body)" stroke="#644695" stroke-width="8" stroke-linejoin="round" d="M128 34c-40 0-72 31-72 70v67c0 9 8 14 16 10l13-6 14 10 14-10 15 10 15-10 14 10 14-10 13 6c8 4 16-1 16-10v-67c0-39-32-70-72-70Z"/>
+  <circle cx="102" cy="113" r="19" fill="none" stroke="#34224f" stroke-width="7"/>
+  <circle cx="154" cy="113" r="19" fill="none" stroke="#34224f" stroke-width="7"/>
+  <path d="M121 113h14" stroke="#34224f" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="102" cy="113" r="8" fill="#2e1d4c"/>
+  <circle cx="154" cy="113" r="8" fill="#2e1d4c"/>
+  <circle cx="105" cy="110" r="3" fill="#ffffff"/>
+  <circle cx="157" cy="110" r="3" fill="#ffffff"/>
+  <path d="M101 145c12 8 42 8 54 0" fill="none" stroke="#553783" stroke-width="7" stroke-linecap="round"/>
+  <path d="m187 66 7 8m0-8-7 8" stroke="#8a61c7" stroke-width="5" stroke-linecap="round"/>
+</svg>
