@@ -1,38 +1,235 @@
 :root {
-  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont,
-    sans-serif;
-  line-height: 1.6;
-  font-weight: 400;
-  color: #e2e8f0;
-  background-color: #020617;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+    /* ========================================
+     BASE PRIMITIVE COLORS (Single Source of Truth)
+     ======================================== */
+
+    /* Neutrals - Brown Cream Palette */
+    --color-cream-50: #f5f0e8;
+    --color-cream-100: #ede4d6;
+    --color-cream-200: #f4aa6d;
+    --color-cream-300: #d9ccb3;
+    --color-cream-400: #c9b89a;
+    --color-brown-900: #2d2416;
+    --color-brown-700: #5a4f3a;
+    --color-brown-500: #7a6f5a;
+
+    /* Brand */
+    --color-blue-500: #3b82f6;
+    --color-indigo-500: #6366f1;
+
+    /* Semantic Base */
+    --color-green-500: #22c55e;
+    --color-green-400: #86efac;
+    --color-green-600: #16a34a;
+    --color-yellow-500: #f59e0b;
+    --color-yellow-400: #fbbf24;
+    --color-yellow-600: #ca8a04;
+    --color-orange-500: #f97316;
+    --color-red-500: #ef4444;
+    --color-red-400: #f87171;
+    --color-red-600: #dc2626;
+    --color-sky-500: #0ea5e9;
+    --color-sky-600: #0284c7;
+    --color-slate-500: #64748b;
+
+    /* Status */
+    --color-purple-500: #a855f7;
+    --color-purple-200: #e9d5ff;
+    --color-violet-500: #8b5cf6;
+    --color-violet-200: #ddd6fe;
+    --color-amber-700: #b45309;
+    --color-amber-600: #d97706;
+    --color-emerald-600: #059669;
+    --color-emerald-500: #10b981;
+
+    /* Special */
+    --color-violet-100: #ede9fe;
+    --color-white: #ffffff;
+    --color-black: #000000;
+    --color-gray-200: #e5e7eb;
+
+    /* ========================================
+     SEMANTIC COLORS (Reference Primitives)
+     ======================================== */
+
+    --bg-primary: var(--color-cream-50);
+    --bg-secondary: var(--color-cream-100);
+    --bg-tertiary: var(--color-cream-200);
+    --text-primary: var(--color-brown-900);
+    --text-secondary: var(--color-brown-700);
+    --text-tertiary: var(--color-brown-500);
+    --border-color: var(--color-cream-300);
+    --border-color-strong: var(--color-cream-400);
+
+    /* Brand */
+    --brand-primary: var(--color-blue-500);
+    --brand-secondary: var(--color-indigo-500);
+
+    /* Feedback Colors */
+    --success: var(--color-green-500);
+    --success-light: var(--color-green-400);
+    --success-dark: var(--color-green-600);
+    --warning: var(--color-yellow-500);
+    --warning-light: var(--color-yellow-400);
+    --warning-dark: var(--color-yellow-600);
+    --error: var(--color-red-500);
+    --error-light: var(--color-red-400);
+    --error-dark: var(--color-red-600);
+    --info: var(--color-sky-500);
+    --info-dark: var(--color-sky-600);
+
+    /* Evaluation (Reference Feedback Colors) */
+    --eval-excellent: var(--success);
+    --eval-good: var(--color-slate-500);
+    --eval-inaccuracy: var(--warning);
+    --eval-mistake: var(--color-orange-500);
+    --eval-blunder: var(--error);
+
+    /* ========================================
+     COMPONENT COLORS (Reference Semantic)
+     ======================================== */
+
+    /* Surfaces */
+    --modal-bg: var(--bg-primary);
+    --surface-elevated: var(--bg-primary);
+    --card-bg: var(--bg-primary);
+    --card-bg-hover: var(--bg-secondary);
+    --card-bg-selected: var(--color-violet-100);
+    --input-bg: var(--bg-primary);
+    --button-secondary-bg: var(--bg-tertiary);
+
+    /* Overlays (with opacity) */
+    --overlay-bg: color-mix(in srgb, var(--bg-primary) 95%, transparent);
+    --surface-bg: color-mix(in srgb, var(--bg-secondary) 90%, transparent);
+    --overlay-scrim: color-mix(in srgb, var(--text-primary) 50%, transparent);
+
+    /* Feedback Backgrounds */
+    --success-bg: color-mix(in srgb, var(--success) 15%, transparent);
+    --success-border: var(--success);
+    --warning-bg: color-mix(in srgb, var(--color-yellow-400) 50%, transparent);
+    --warning-light-bg: color-mix(
+        in srgb,
+        var(--warning-light) 10%,
+        transparent
+    );
+    --warning-light-bg-alt: color-mix(
+        in srgb,
+        var(--warning-light) 15%,
+        transparent
+    );
+    --error-bg: color-mix(in srgb, var(--color-red-400) 50%, transparent);
+    --error-bg-subtle: color-mix(in srgb, var(--error) 15%, transparent);
+    --info-bg: color-mix(in srgb, var(--info) 10%, transparent);
+
+    /* Evaluation Backgrounds */
+    --eval-excellent-bg: color-mix(
+        in srgb,
+        var(--eval-excellent) 10%,
+        transparent
+    );
+    --eval-inaccuracy-bg: color-mix(
+        in srgb,
+        var(--eval-inaccuracy) 10%,
+        transparent
+    );
+    --eval-mistake-bg: color-mix(in srgb, var(--eval-mistake) 10%, transparent);
+    --eval-blunder-bg: color-mix(in srgb, var(--eval-blunder) 10%, transparent);
+    --eval-blunder-flash: color-mix(
+        in srgb,
+        var(--eval-blunder) 20%,
+        transparent
+    );
+
+    /* Graph & Analysis */
+    --graph-area-dark: color-mix(in srgb, var(--text-primary) 8%, transparent);
+    --graph-area-light: color-mix(
+        in srgb,
+        var(--bg-secondary) 40%,
+        transparent
+    );
+    --scrim-ended: color-mix(in srgb, var(--text-primary) 8%, transparent);
+
+    /* Status Colors */
+    --status-live: var(--color-purple-500);
+    --status-live-light: var(--color-purple-200);
+    --status-ghost: var(--color-violet-500);
+    --status-ghost-light: var(--color-violet-200);
+    --status-other: var(--color-amber-700);
+    --status-other-bg: color-mix(in srgb, var(--status-other) 15%, transparent);
+    --status-other-border: var(--color-amber-600);
+    --teal-dark: var(--color-emerald-600);
+    --teal: var(--color-emerald-500);
+    --teal-bg: color-mix(in srgb, var(--teal) 8%, transparent);
+    --teal-border: color-mix(in srgb, var(--teal) 30%, transparent);
+
+    /* Interactive States */
+    --hover-overlay: color-mix(in srgb, black 5%, transparent);
+    --active-overlay: color-mix(in srgb, black 10%, transparent);
+
+    /* Chessboard - Black/White for player representation */
+    --eval-bar-bg: var(--color-gray-200);
+    --eval-bar-border: var(--border-color-strong);
+    --eval-bar-white: var(--color-white);
+    --eval-bar-black: var(--color-black);
+
+    /* Shadows */
+    --shadow-sm: 0 1px 2px color-mix(in srgb, black 5%, transparent);
+    --shadow-md: 0 4px 6px color-mix(in srgb, black 7%, transparent);
+    --shadow-lg: 0 10px 25px color-mix(in srgb, black 10%, transparent);
+    --shadow-xl: 0 20px 40px color-mix(in srgb, black 15%, transparent);
+
+    /* Gradients */
+    --gradient-brand: linear-gradient(
+        135deg,
+        var(--brand-primary),
+        var(--brand-secondary)
+    );
+    --gradient-error: linear-gradient(135deg, var(--error-light), var(--error));
+    --text-on-gradient: var(--color-white);
+
+    font-family:
+        "Inter",
+        "Segoe UI",
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        sans-serif;
+    line-height: 1.6;
+    font-weight: 400;
+    color: var(--text-primary);
+    background-color: var(--bg-primary);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
 }
 
 *,
 *::before,
 *::after {
-  box-sizing: border-box;
+    box-sizing: border-box;
 }
 
 body {
-  margin: 0;
-  min-height: 100vh;
-  background: radial-gradient(circle at top, #0f172a 0%, #020617 65%, #01030b 100%);
-  color: inherit;
+    margin: 0;
+    min-height: 100vh;
+    background: linear-gradient(
+        to bottom,
+        var(--bg-primary) 0%,
+        var(--bg-tertiary) 100%
+    );
+    color: inherit;
 }
 
 #root {
-  min-height: 100vh;
+    min-height: 100vh;
 }
 
 a {
-  color: inherit;
-  text-decoration: none;
+    color: inherit;
+    text-decoration: none;
 }
 
 button {
-  font: inherit;
+    font: inherit;
 }

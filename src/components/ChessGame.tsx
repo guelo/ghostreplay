@@ -1390,10 +1390,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             </span>
           )}
           <p className="chess-meta">
-            Orientation: {boardOrientation === "white" ? "White" : "Black"} on
-            bottom
-          </p>
-          <p className="chess-meta">
             Playing as:{" "}
             <span className="chess-meta-strong">
               {playerColorChoice === "random" && !isGameActive
@@ -1504,6 +1500,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             {showStartOverlay && !isGameActive && (
               <div className="chessboard-overlay">
                 <div className="chess-start-panel">
+                  <button
+                    className="chess-start-close"
+                    type="button"
+                    onClick={() => setShowStartOverlay(false)}
+                    disabled={isStartingGame}
+                    aria-label="Close"
+                  >
+                    ×
+                  </button>
                   <p className="chess-start-title">Choose your side</p>
                   <div className="chess-start-options">
                     <button
