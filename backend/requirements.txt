@@ -6,6 +6,8 @@ uvicorn[standard]
 bcrypt
 PyJWT
 chess
+# Server-side Stockfish for VMU centipawn-loss evaluation
+stockfish>=3.28.0
 # Maia-2 engine dependencies (requires Python 3.12 or earlier)
 # PyTorch does not yet have wheels for Python 3.13+
 maia2==0.9
