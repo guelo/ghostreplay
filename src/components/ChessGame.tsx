@@ -1026,6 +1026,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     const evalLossCp = Math.max(lastAnalysis.delta, 0);
     const passed = evalLossCp < SRS_REVIEW_FAIL_THRESHOLD_CP;
 
+    if (passed) {
+      setShowPassToast(true);
+    }
+
     if (!passed) {
       let bestMoveSan = lastAnalysis.bestMove;
       const fenBeforeMove =
@@ -1067,9 +1071,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           pendingReview.userMoveSan,
           evalLossCp,
         );
-        if (passed) {
-          setShowPassToast(true);
-        }
       } catch (error) {
         console.error("[SRS] Failed to record review:", error);
       }
