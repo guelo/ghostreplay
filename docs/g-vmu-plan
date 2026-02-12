@@ -1,0 +1,452 @@
+# VMU: Variable-strength Maia-2 Upgrade
+
+## Problem
+
+Maia-2 buckets ELO into 11 discrete bins: one "under 1100" catch-all,
+nine 100-point bins from 1100–2000, and one "over 2000" catch-all.
+Everything below 1100 produces identical move distributions — the model
+has no ability to differentiate 600 from 1000.
+
+Ghost Replay's `engine_elo` on game sessions accepts 500–2200, but
+sub-1100 sessions all get the same opponent. Players who are genuinely
+below 1100 (a large segment of chess learners) face a bot that feels
+uniformly "medium-weak" regardless of their configured ELO.
+
+## Solution
+
+Wrap Maia-2 in a **move-selection controller** that:
+
+1. Uses Maia-2 as a **human-plausibility filter** (candidate generation)
+2. Uses Stockfish as a **centipawn-loss evaluator** (strength calibration)
+3. Picks moves whose **eval loss matches a target distribution** for the
+   desired ELO
+
+Maia-2 supplies the style. The controller supplies the weakness curve.
+
+Above 1100 where Maia-2 bins already differentiate, the controller can
+still improve realism by sampling from the probability distribution
+rather than always picking the argmax.
+
+---
+
+## Architecture
+
+### Current pipeline (no changes)
+
+```
+POST /api/game/next-opponent-move
+  │
+  ├─ Stage 1: find_ghost_move()     ← deterministic steering toward user blunders
+  │                                     (unchanged — ghost path is independent of engine)
+  │
+  └─ Stage 2: MaiaEngineService     ← neural-net fallback when no ghost path exists
+       └─ get_best_move(fen, elo)   ← THIS IS WHAT WE REPLACE
+```
+
+### New pipeline
+
+```
+POST /api/game/next-opponent-move
+  │
+  ├─ Stage 1: find_ghost_move()              (unchanged)
+  │
+  └─ Stage 2: OpponentMoveController         (new)
+       │
+       ├─ Step A: Maia-2 candidate generation
+       │    └─ get move_probs at effective_elo = max(1100, target_elo)
+       │    └─ take top-K candidates (K=8) where prob > threshold
+       │
+       ├─ Step B: Stockfish evaluation
+       │    └─ evaluate each candidate at low depth
+       │    └─ compute centipawn loss vs best move for each
+       │
+       └─ Step C: Move selection
+            └─ sample target_loss from ELO-appropriate distribution
+            └─ pick candidate whose actual loss is closest to target_loss
+            └─ apply inhumanness filters (uniqueness gap, forcing-line length)
+```
+
+---
+
+## Detailed design
+
+### 1. Stockfish backend service
+
+**Decision: Use server-side Stockfish, not frontend WASM.**
+
+Rationale: The frontend WASM Stockfish is for post-move analysis visible
+to the user. The opponent-move controller needs Stockfish eval *before*
+choosing a move — this must happen server-side in the same request cycle.
+
+**Recommendation: Use the `stockfish` PyPI package** (thin UCI wrapper
+around the Stockfish binary). It's well-maintained, supports all UCI
+options, and the binary can be installed via Homebrew (dev) or bundled
+in the Docker image (prod).
+
+```
+pip install stockfish
+brew install stockfish   # or apt-get install stockfish
+```
+
+New file: `backend/app/stockfish_service.py`
+
+```python
+class StockfishService:
+    """Thin wrapper for server-side Stockfish evaluation."""
+
+    _instance: ClassVar[Stockfish | None] = None
+
+    # UCI configuration — intentionally weak search for speed
+    EVAL_DEPTH = 12          # enough to see basic tactics, fast on CPU
+    HASH_MB = 64             # small table, adequate for single-position eval
+    THREADS = 1              # one thread per eval, no contention
+
+    @classmethod
+    def evaluate_moves(
+        cls,
+        fen: str,
+        candidate_ucis: list[str],
+    ) -> list[CandidateEval]:
+        """
+        Evaluate a list of candidate moves and return centipawn scores.
+
+        Returns list of CandidateEval(uci, cp_score, cp_loss_vs_best).
+        """
+        ...
+```
+
+**Recommendation: EVAL_DEPTH = 12.** Deep enough to catch simple
+tactics (forks, pins, 3-move combos) that define the 800–1500 range.
+Shallow enough that eval takes <50ms per candidate on modern hardware.
+At 8 candidates, total Stockfish time is ~400ms — acceptable within the
+existing ~200ms Maia inference budget (total ~600ms per move).
+
+### 2. Maia-2 candidate generation
+
+Modify `MaiaEngineService` to expose the full probability distribution,
+not just the argmax.
+
+New method: `get_move_candidates(fen, elo, top_k=8, min_prob=0.01)`
+
+```python
+@classmethod
+def get_move_candidates(
+    cls,
+    fen: str,
+    elo: int,
+    top_k: int = 8,
+    min_prob: float = 0.01,
+) -> list[MaiaCandidate]:
+    """
+    Get top-K human-plausible candidate moves from Maia-2.
+
+    Args:
+        elo: Effective ELO (clamped to 1100 minimum internally,
+             since Maia-2 has no resolution below that)
+        top_k: Maximum candidates to return
+        min_prob: Minimum probability threshold — moves below this
+                  are too unlikely for any human at any level
+    Returns:
+        List of MaiaCandidate(uci, san, probability) sorted by prob desc
+    """
+    effective_elo = max(1100, elo)
+    # ... inference, take top K above threshold ...
+```
+
+**Recommendation: top_k=8, min_prob=0.01.**
+
+- 8 candidates is enough to include "reasonable human alternatives"
+  without flooding Stockfish with garbage moves.
+- 0.01 (1%) filters out moves Maia considers vanishingly unlikely for
+  *any* human — these would break immersion even as "blunders."
+
+### 3. Centipawn-loss target distribution
+
+The core of the weakness controller. For a given target ELO, define the
+distribution of centipawn loss per move.
+
+**Recommendation: Use empirical data from Lichess rating-band analysis.**
+
+A reasonable starting model (can be tuned from real game data later):
+
+| Target ELO | Median cp loss | 90th pctile cp loss | Blunder rate (>200cp) |
+|------------|---------------|--------------------|-----------------------|
+| 600        | 65            | 350                | 18%                   |
+| 800        | 45            | 250                | 12%                   |
+| 1000       | 30            | 180                | 8%                    |
+| 1100+      | defer to Maia argmax with optional sampling              |
+
+Implementation: model the per-move loss as a **log-normal distribution**
+parameterized by (mu, sigma) that vary with target ELO.
+
+```python
+def sample_target_loss(target_elo: int) -> float:
+    """
+    Sample a centipawn loss target for this move.
+
+    Returns 0 most of the time (play well), occasionally returns
+    a large value (blunder). Distribution shape varies by ELO.
+    """
+    # Linear interpolation of log-normal parameters
+    # Tuned from Lichess aggregate stats by rating band
+    mu = lerp(elo=target_elo, points=[(600, 3.5), (800, 3.0), (1000, 2.5)])
+    sigma = lerp(elo=target_elo, points=[(600, 1.2), (800, 1.0), (1000, 0.8)])
+    return max(0, lognormal(mu, sigma))
+```
+
+**Decision needed: Should the loss target be purely random, or should it
+be position-aware?**
+
+Recommendation: Start with **purely random** (simpler, still produces
+good results). Position-aware refinements (e.g., "blunder more in
+tactical positions") are a future enhancement that requires classifying
+position types — premature for MVP.
+
+### 4. Move selection logic
+
+The controller that ties everything together.
+
+```python
+class OpponentMoveController:
+    """
+    Select opponent moves using Maia-2 candidates + Stockfish calibration.
+
+    For ELO >= 1100: Maia-2 sampling from probability distribution
+    For ELO < 1100:  Maia-2 candidates + centipawn-loss targeting
+    """
+
+    # Threshold above which Maia-2 bins are meaningful
+    MAIA_EFFECTIVE_FLOOR = 1100
+
+    @classmethod
+    def choose_move(cls, fen: str, target_elo: int) -> ControllerMove:
+        if target_elo >= cls.MAIA_EFFECTIVE_FLOOR:
+            return cls._maia_sampling(fen, target_elo)
+        else:
+            return cls._calibrated_selection(fen, target_elo)
+
+    @classmethod
+    def _maia_sampling(cls, fen: str, target_elo: int) -> ControllerMove:
+        """
+        For ELO >= 1100: sample from Maia-2's probability distribution.
+
+        Instead of always picking argmax, sample with temperature=1.0
+        to get natural variety. Maia's distribution already encodes
+        human-like variation at this ELO.
+        """
+        candidates = MaiaEngineService.get_move_candidates(fen, target_elo)
+        # Weighted random sample from Maia probabilities
+        move = weighted_sample(candidates)
+        return ControllerMove(uci=move.uci, san=move.san, method="maia_sample")
+
+    @classmethod
+    def _calibrated_selection(cls, fen: str, target_elo: int) -> ControllerMove:
+        """
+        For ELO < 1100: Maia candidates + Stockfish loss targeting.
+
+        1. Get human-plausible candidates from Maia (at ELO 1100 floor)
+        2. Evaluate each with Stockfish
+        3. Sample a target loss from the ELO's loss distribution
+        4. Pick the candidate whose loss is closest to the target
+        """
+        candidates = MaiaEngineService.get_move_candidates(fen, elo=1100)
+        evals = StockfishService.evaluate_moves(fen, [c.uci for c in candidates])
+
+        target_loss = sample_target_loss(target_elo)
+
+        # Merge Maia probs with Stockfish evals
+        scored = []
+        for cand, ev in zip(candidates, evals):
+            # Distance from target loss (lower = better fit)
+            loss_fit = abs(ev.cp_loss_vs_best - target_loss)
+
+            # Mild penalty for very low Maia probability
+            # (avoids selecting moves that look alien even as blunders)
+            human_penalty = -log(max(cand.probability, 0.001))
+
+            score = loss_fit + HUMAN_PENALTY_WEIGHT * human_penalty
+            scored.append((cand, ev, score))
+
+        # Pick the candidate with the best (lowest) combined score
+        scored.sort(key=lambda x: x[2])
+        best = scored[0]
+        return ControllerMove(
+            uci=best[0].uci,
+            san=best[0].san,
+            method="calibrated",
+            cp_loss=best[1].cp_loss_vs_best,
+            target_loss=target_loss,
+        )
+```
+
+**Recommendation: HUMAN_PENALTY_WEIGHT = 15.0** (initial value).
+
+This means a move with 1% Maia probability gets a penalty of ~100,
+while a move with 25% probability gets ~21. A 80cp difference in loss
+fit would be needed to overcome a 5x probability difference. Tune
+empirically — the key invariant is that obviously alien moves should
+almost never be selected, even if their cp loss happens to match the
+target.
+
+### 5. Inhumanness filters (optional, post-MVP)
+
+These are the additional metrics from the Stockfish-lowering research.
+They refine the controller but are **not needed for MVP**.
+
+**Uniqueness gap filter**: If Stockfish's best move eval is >250cp
+better than the 2nd-best, the position is an "only-move" situation.
+In these positions, always play the best move regardless of target loss
+— even weak humans find the only move when everything else loses
+immediately.
+
+**Forcing-line filter**: If the PV for a candidate involves >6 ply of
+checks/captures, it's likely a computer-only tactic. Penalize or skip
+these candidates.
+
+**Recommendation: Defer to post-MVP.** The core centipawn-loss targeting
+already produces good results. These filters address edge cases (~5% of
+positions) that can be added incrementally.
+
+---
+
+## Integration with existing code
+
+### Files to modify
+
+| File | Change |
+|------|--------|
+| `backend/app/maia_engine.py` | Add `get_move_candidates()` method alongside existing `get_best_move()` |
+| `backend/app/api/game.py:470-496` | Replace direct `MaiaEngineService.get_best_move()` call with `OpponentMoveController.choose_move()` |
+| `backend/requirements.txt` | Add `stockfish>=3.28.0` |
+
+### New files
+
+| File | Purpose |
+|------|---------|
+| `backend/app/stockfish_service.py` | Stockfish UCI wrapper (eval-only, no game management) |
+| `backend/app/opponent_move_controller.py` | Move selection logic (the core of this plan) |
+| `backend/app/loss_distribution.py` | Centipawn-loss target sampling by ELO |
+
+### Response schema (unchanged)
+
+The `NextOpponentMoveResponse` schema does not change. The controller
+is an internal refactor behind the same `mode=engine` response. The
+`decision_source` field already distinguishes ghost vs engine.
+
+**Recommendation: Add a `method` field to the response** for debugging
+and analytics — `"maia_sample"` vs `"calibrated"`. This helps us
+measure how often the calibrated path fires and correlate with user
+experience. Low-priority but cheap.
+
+---
+
+## Configuration
+
+New environment variables:
+
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `STOCKFISH_PATH` | `/usr/local/bin/stockfish` | Path to Stockfish binary |
+| `STOCKFISH_EVAL_DEPTH` | `12` | Search depth for candidate evaluation |
+| `VMU_HUMAN_PENALTY_WEIGHT` | `15.0` | Weight of Maia probability in move scoring |
+| `VMU_ENABLED` | `true` | Feature flag — when false, falls back to current argmax behavior |
+
+**Recommendation: Include the feature flag.** This lets us deploy the
+Stockfish dependency and new code without changing behavior, then
+enable per-environment. Critical for safe rollout.
+
+---
+
+## Performance budget
+
+| Step | Time (CPU) | Notes |
+|------|-----------|-------|
+| Maia-2 inference | ~150ms | Unchanged from current |
+| Stockfish eval x 8 candidates | ~400ms | 12-depth, ~50ms each |
+| Controller logic | <1ms | Pure math |
+| **Total** | **~550ms** | vs current ~150ms |
+
+The ~400ms increase is significant but acceptable:
+- Opponent moves are not latency-critical (user just made their move,
+  a half-second "thinking" pause feels natural)
+- Only fires for sub-1100 sessions (above 1100, just Maia sampling)
+- Can be reduced by lowering EVAL_DEPTH or evaluating fewer candidates
+
+**Recommendation: Accept the latency increase for MVP.** If it becomes
+a problem, batch Stockfish evals using MultiPV on the pre-move position
+instead of evaluating each candidate individually. MultiPV N=8 at
+depth 12 is faster than 8 separate depth-12 searches.
+
+---
+
+## Testing strategy
+
+### Unit tests
+
+- `test_loss_distribution.py` — Verify loss sampling produces expected
+  statistical properties (mean, variance, range) for each ELO band.
+  Run 10k samples, check moments.
+
+- `test_opponent_move_controller.py` — Mock Maia and Stockfish services.
+  Verify:
+  - ELO >= 1100 uses maia_sampling path
+  - ELO < 1100 uses calibrated_selection path
+  - Candidate with closest loss to target is selected
+  - Human penalty affects ranking correctly
+
+- `test_stockfish_service.py` — Verify eval output format, cp_loss
+  computation, handling of mate scores and drawn positions.
+
+### Smoke tests
+
+- Same structure as existing `tests/test_opponent_move_smoke.py`:
+  play 10 positions at ELO 800 and ELO 1500, verify legal moves are
+  returned and the controller reports the expected method.
+
+### Manual validation
+
+- Play full games at ELO 600, 800, 1000, 1200, 1500.
+- Subjective: does 800 feel distinctly weaker than 1200?
+- Quantitative: log cp_loss per move, verify the distribution matches
+  the target parameters.
+
+---
+
+## Rollout plan
+
+1. **Phase 1: Stockfish backend service** — Add `stockfish_service.py`,
+   deploy with binary. Verify evals are correct on known positions.
+   Feature-flagged off.
+
+2. **Phase 2: Controller + loss distribution** — Add the controller
+   and loss model. Wire into `game.py` behind `VMU_ENABLED=false`.
+   Write tests.
+
+3. **Phase 3: Enable for sub-1100** — Set `VMU_ENABLED=true`. Monitor
+   latency, cp_loss distributions, and user feedback.
+
+4. **Phase 4: Extend to all ELOs** — Replace argmax with Maia sampling
+   for 1100+ sessions too. This gives natural move variety at all levels.
+
+5. **Phase 5 (optional): Inhumanness filters** — Add uniqueness-gap
+   and forcing-line filters for edge-case positions.
+
+---
+
+## Open questions
+
+1. **Loss distribution parameters** — The log-normal parameters above
+   are estimates. We should validate against actual Lichess data by
+   rating band. A one-time analysis of ~100k games per band would give
+   empirical (mu, sigma) values.
+
+2. **Opponent ELO in Maia inference** — Currently we pass `elo_self=elo`
+   for both player and opponent. For the controller, we always pass 1100
+   for sub-1100 sessions. Should `elo_oppo` be set to the user's actual
+   rating for more realistic Maia distributions? Probably yes, but the
+   effect is minor — recommend deferring.
+
+3. **Mate-in-N positions** — When Stockfish sees forced mate, cp_loss is
+   expressed in mate-moves, not centipawns. The controller needs a
+   policy: always play the mating move? Or sometimes miss it for realism?
+   Recommendation: always play mate-in-1, sample for mate-in-3+.
