@@ -77,6 +77,50 @@ class GhostMoveResponse(BaseModel):
     )
 
 
+class MoveDetails(BaseModel):
+    """Move representation with both UCI and SAN formats."""
+    uci: str = Field(..., description="Move in UCI notation (e.g., 'e2e4')")
+    san: str = Field(..., description="Move in SAN notation (e.g., 'e4')")
+
+
+class DecisionSource(str, Enum):
+    """Source of the opponent move decision."""
+    GHOST_PATH = "ghost_path"
+    BACKEND_ENGINE = "backend_engine"
+
+
+class OpponentMoveMode(str, Enum):
+    """Opponent move response mode."""
+    GHOST = "ghost"
+    ENGINE = "engine"
+
+
+class NextOpponentMoveRequest(BaseModel):
+    """Request for next opponent move."""
+    session_id: uuid.UUID = Field(..., description="Game session ID")
+    fen: str = Field(..., description="Current board position FEN")
+
+
+class NextOpponentMoveResponse(BaseModel):
+    """Response for next opponent move (unified ghost + engine endpoint)."""
+    mode: OpponentMoveMode = Field(
+        ...,
+        description="ghost = steering toward blunder, engine = backend inference",
+    )
+    move: MoveDetails = Field(
+        ...,
+        description="Next opponent move in both UCI and SAN formats",
+    )
+    target_blunder_id: int | None = Field(
+        None,
+        description="ID of the blunder being targeted (ghost mode only)",
+    )
+    decision_source: DecisionSource = Field(
+        ...,
+        description="Backend decision branch used to produce the move",
+    )
+
+
 @router.post("/start", response_model=GameStartResponse, status_code=201)
 def start_game(
     request: GameStartRequest,
@@ -247,3 +291,83 @@ def get_ghost_move(
         move=result[0],
         target_blunder_id=result[1],
     )
+
+
+@router.post("/next-opponent-move", response_model=NextOpponentMoveResponse)
+def get_next_opponent_move(
+    request: NextOpponentMoveRequest,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> NextOpponentMoveResponse:
+    """
+    Get the next opponent move using unified ghost-first pipeline with backend engine fallback.
+
+    This endpoint replaces the split orchestration (ghost endpoint + local engine fallback)
+    with a single decision-maker that returns exactly one opponent move.
+
+    Flow:
+    1. Validate session ownership and FEN input
+    2. Attempt ghost-path traversal (look for due blunders within steering radius)
+    3. If ghost path exists, return ghost move
+    4. Otherwise, fall back to backend engine inference (Maia)
+    """
+    # Fetch and validate session
+    session = db.query(GameSession).filter(GameSession.id == request.session_id).first()
+
+    if not session:
+        raise HTTPException(status_code=404, detail="Game session not found")
+
+    if session.user_id != user.user_id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this game")
+
+    # Validate FEN and check it's the opponent's turn
+    try:
+        position_color = active_color(request.fen)
+    except (IndexError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid FEN: {e}")
+
+    if position_color == session.player_color:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot get opponent move when it's the player's turn",
+        )
+
+    # TODO (g-29c.2.2): Implement ghost-first decision engine
+    # - Look up current position by FEN hash
+    # - Run recursive CTE to find due blunders within steering radius (depth <= 5)
+    # - If due blunders exist, return ghost move with target_blunder_id
+
+    # TODO (g-29c.2.3): Implement Maia runtime bootstrap
+    # - Load Maia model with process-level caching
+    # - Run inference on current position at configured Elo
+    # - Return engine move with decision_source="backend_engine"
+
+    # Placeholder response: return a legal random move in engine mode
+    # This allows frontend integration (g-29c.2.4) to proceed while
+    # ghost/Maia implementation is completed
+    try:
+        import chess
+        board = chess.Board(request.fen)
+
+        if board.is_game_over():
+            raise HTTPException(status_code=400, detail="Game is over, no legal moves")
+
+        # Get first legal move (deterministic placeholder)
+        legal_moves = list(board.legal_moves)
+        if not legal_moves:
+            raise HTTPException(status_code=400, detail="No legal moves available")
+
+        move = legal_moves[0]
+        san_notation = board.san(move)  # Must be called before push
+
+        return NextOpponentMoveResponse(
+            mode=OpponentMoveMode.ENGINE,
+            move=MoveDetails(
+                uci=move.uci(),
+                san=san_notation,
+            ),
+            target_blunder_id=None,
+            decision_source=DecisionSource.BACKEND_ENGINE,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid FEN: {e}")
