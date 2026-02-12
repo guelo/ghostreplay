@@ -10,7 +10,13 @@ import type {
   AnalyzeMoveMessage,
 } from './analysisMessages'
 import type { EngineScore } from './stockfishMessages'
-import { parseInfo, scoreForPlayer, getSideToMove, isBlunder } from './analysisUtils'
+import {
+  parseInfo,
+  scoreForPlayer,
+  getSideToMove,
+  isBlunder,
+  isWithinRecordingMoveCap,
+} from './analysisUtils'
 
 const ctx = self as DedicatedWorkerGlobalScope
 
@@ -192,7 +198,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   const delta =
     bestEval !== null && playedEval !== null ? bestEval - playedEval : null
-  const blunder = isBlunder(delta)
+  const blunder =
+    isBlunder(delta) &&
+    (request.moveIndex === undefined || isWithinRecordingMoveCap(request.moveIndex))
 
   ctx.postMessage({
     type: 'analysis',

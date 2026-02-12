@@ -5,7 +5,10 @@
 
 import type { EngineScore } from './stockfishMessages'
 
-export const BLUNDER_THRESHOLD = 150
+export const BLUNDER_THRESHOLD = 50
+export const MOVE_LIST_BLUNDER_THRESHOLD = 150
+export const RECORDING_MOVE_CAP_FULL_MOVES = 10
+const RECORDING_MOVE_CAP_PLY = RECORDING_MOVE_CAP_FULL_MOVES * 2
 
 export type ParsedInfo = {
   score: EngineScore
@@ -93,6 +96,15 @@ export const isBlunder = (delta: number | null): boolean => {
   return delta !== null && delta >= BLUNDER_THRESHOLD
 }
 
+export const isWithinRecordingMoveCap = (
+  moveIndex: number | null | undefined,
+): boolean => {
+  if (moveIndex === null || moveIndex === undefined || moveIndex < 0) {
+    return false
+  }
+  return moveIndex < RECORDING_MOVE_CAP_PLY
+}
+
 export type MoveClassification = 'blunder' | 'inaccuracy' | 'good' | 'great' | 'best'
 
 export type SessionMoveClassification =
@@ -105,7 +117,7 @@ export type SessionMoveClassification =
 
 export const classifyMove = (delta: number | null): MoveClassification | null => {
   if (delta === null) return null
-  if (delta >= BLUNDER_THRESHOLD) return 'blunder'
+  if (delta >= MOVE_LIST_BLUNDER_THRESHOLD) return 'blunder'
   if (delta >= 50) return 'inaccuracy'
   if (delta < 0) return 'great'
   if (delta === 0) return 'best'

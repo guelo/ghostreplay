@@ -232,6 +232,37 @@ def test_record_blunder_fen_mismatch(client, auth_headers, create_game_session):
     assert "mismatch" in response.json()["detail"].lower()
 
 
+def test_record_blunder_rejects_after_first_10_full_moves(
+    client, auth_headers, create_game_session
+):
+    """Auto-recording endpoint enforces first-10-full-moves cap."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    # Repeat knight shuffles to reach white's 11th move.
+    pgn = (
+        "1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8 5. Nf3 Nf6 "
+        "6. Ng1 Ng8 7. Nf3 Nf6 8. Ng1 Ng8 9. Nf3 Nf6 10. Ng1 Ng8 11. Nf3"
+    )
+    fen_before_11th_move = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+    response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_11th_move,
+            "user_move": "Nf3",
+            "best_move": "d4",
+            "eval_before": 40,
+            "eval_after": -20,
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 422
+    assert "first 10 full moves" in response.json()["detail"].lower()
+
+
 def test_record_blunder_wrong_color(client, auth_headers, create_game_session):
     """Test 400 when blunder position is opponent's move."""
     # Player is white, but PGN ends with black's move

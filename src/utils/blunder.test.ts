@@ -25,6 +25,7 @@ describe('shouldRecordBlunder', () => {
     pgn: '1. e4',
     moveSan: 'e4', // SAN format (for API)
     moveUci: 'e2e4', // UCI format (for matching with analysis)
+    moveIndex: 0,
     ...overrides,
   })
 
@@ -146,11 +147,11 @@ describe('shouldRecordBlunder', () => {
     expect(result!.evalAfter).toBe(0)
   })
 
-  it('handles edge case: delta exactly at threshold (150cp)', () => {
-    // Note: the blunder flag is set by the analysis worker based on delta >= 150
+  it('handles edge case: delta exactly at threshold (50cp)', () => {
+    // Note: the blunder flag is set by the analysis worker based on delta >= 50
     // This test verifies we correctly pass through when blunder=true
     const result = shouldRecordBlunder({
-      analysis: makeAnalysis({ delta: 150, blunder: true }),
+      analysis: makeAnalysis({ delta: 50, blunder: true }),
       context: makeContext(),
       sessionId: 'session-123',
       isGameActive: true,
@@ -177,5 +178,17 @@ describe('shouldRecordBlunder', () => {
     expect(result).not.toBeNull()
     expect(result!.evalBefore).toBe(500)
     expect(result!.evalAfter).toBe(-800)
+  })
+
+  it('returns null for moves after full move 10', () => {
+    const result = shouldRecordBlunder({
+      analysis: makeAnalysis(),
+      context: makeContext({ moveIndex: 20 }),
+      sessionId: 'session-123',
+      isGameActive: true,
+      alreadyRecorded: false,
+    })
+
+    expect(result).toBeNull()
   })
 })

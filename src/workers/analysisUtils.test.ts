@@ -7,10 +7,12 @@ import {
   scoreForPlayer,
   getSideToMove,
   isBlunder,
+  isWithinRecordingMoveCap,
   classifyMove,
   classifySessionMove,
   ANNOTATION_SYMBOL,
   BLUNDER_THRESHOLD,
+  MOVE_LIST_BLUNDER_THRESHOLD,
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
 
@@ -117,7 +119,7 @@ describe('mateToCp', () => {
   })
 
   it('always exceeds blunder threshold for any mate', () => {
-    // Even mate in 100: 10000 - 100*10 = 9000 >> 150
+    // Even mate in 100: 10000 - 100*10 = 9000 >> 50
     expect(Math.abs(mateToCp(100))).toBeGreaterThan(BLUNDER_THRESHOLD)
   })
 })
@@ -262,18 +264,18 @@ describe('getSideToMove', () => {
 
 describe('isBlunder', () => {
   it('returns true when delta equals threshold', () => {
-    expect(isBlunder(150)).toBe(true)
+    expect(isBlunder(50)).toBe(true)
   })
 
   it('returns true when delta exceeds threshold', () => {
-    expect(isBlunder(200)).toBe(true)
+    expect(isBlunder(51)).toBe(true)
     expect(isBlunder(500)).toBe(true)
     expect(isBlunder(9990)).toBe(true)
   })
 
   it('returns false when delta is below threshold', () => {
-    expect(isBlunder(149)).toBe(false)
-    expect(isBlunder(100)).toBe(false)
+    expect(isBlunder(49)).toBe(false)
+    expect(isBlunder(10)).toBe(false)
     expect(isBlunder(0)).toBe(false)
   })
 
@@ -286,8 +288,24 @@ describe('isBlunder', () => {
     expect(isBlunder(null)).toBe(false)
   })
 
-  it('threshold constant is 150', () => {
-    expect(BLUNDER_THRESHOLD).toBe(150)
+  it('threshold constant is 50', () => {
+    expect(BLUNDER_THRESHOLD).toBe(50)
+  })
+})
+
+describe('isWithinRecordingMoveCap', () => {
+  it('includes all moves through full move 10', () => {
+    expect(isWithinRecordingMoveCap(0)).toBe(true)
+    expect(isWithinRecordingMoveCap(19)).toBe(true)
+  })
+
+  it('excludes moves after full move 10', () => {
+    expect(isWithinRecordingMoveCap(20)).toBe(false)
+  })
+
+  it('returns false for null/undefined indices', () => {
+    expect(isWithinRecordingMoveCap(null)).toBe(false)
+    expect(isWithinRecordingMoveCap(undefined)).toBe(false)
   })
 })
 
@@ -297,7 +315,7 @@ describe('classifyMove', () => {
   })
 
   it('classifies blunder at threshold', () => {
-    expect(classifyMove(150)).toBe('blunder')
+    expect(classifyMove(MOVE_LIST_BLUNDER_THRESHOLD)).toBe('blunder')
   })
 
   it('classifies blunder above threshold', () => {

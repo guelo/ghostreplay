@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
 
@@ -133,13 +134,16 @@ export const useMoveAnalysis = () => {
         pendingMoveIndices.current.set(id, moveIndex)
       }
 
-      workerRef.current.postMessage({
+      const message: AnalyzeMoveMessage = {
         type: 'analyze-move',
         id,
         fen,
         move,
         playerColor,
-      })
+        ...(moveIndex !== undefined ? { moveIndex } : {}),
+      }
+
+      workerRef.current.postMessage(message)
     },
     [status],
   )

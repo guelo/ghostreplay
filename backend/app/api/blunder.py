@@ -22,6 +22,7 @@ from app.models import Blunder, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/blunder", tags=["blunder"])
+AUTO_RECORDING_MAX_FULL_MOVES = 10
 
 
 class BlunderRequest(BaseModel):
@@ -87,7 +88,17 @@ def _ensure_session_owned_by_user(
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
 
 
-def _replay_pgn(request_pgn: str, request_fen: str) -> ReplayData:
+def _full_moves_played(half_moves: int) -> int:
+    """Convert ply count to full-move count (1.e4 = full move 1)."""
+    return (half_moves + 1) // 2
+
+
+def _replay_pgn(
+    request_pgn: str,
+    request_fen: str,
+    *,
+    max_full_moves: int | None = None,
+) -> ReplayData:
     pgn_io = StringIO(request_pgn)
     game = chess.pgn.read_game(pgn_io)
     if game is None:
@@ -110,6 +121,14 @@ def _replay_pgn(request_pgn: str, request_fen: str) -> ReplayData:
 
     if len(positions_data) < 2:
         raise HTTPException(status_code=422, detail="PGN must contain at least one move")
+
+    if max_full_moves is not None:
+        full_moves = _full_moves_played(len(moves_data))
+        if full_moves > max_full_moves:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Automatic blunder recording is limited to the first {max_full_moves} full moves",
+            )
 
     pre_move_fen_raw, pre_move_hash, pre_move_color = positions_data[-2]
     if normalize_fen(pre_move_fen_raw) != normalize_fen(request_fen):
@@ -227,8 +246,9 @@ def _record_target(
     eval_before: int,
     eval_after: int,
     mark_first_blunder_recorded: bool,
+    max_full_moves: int | None = None,
 ) -> BlunderResponse:
-    replay_data = _replay_pgn(pgn, fen)
+    replay_data = _replay_pgn(pgn, fen, max_full_moves=max_full_moves)
 
     if replay_data.pre_move_color != session.player_color:
         raise HTTPException(
@@ -314,6 +334,7 @@ def record_blunder(
         eval_before=request.eval_before,
         eval_after=request.eval_after,
         mark_first_blunder_recorded=True,
+        max_full_moves=AUTO_RECORDING_MAX_FULL_MOVES,
     )
 
 

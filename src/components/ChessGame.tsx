@@ -21,6 +21,7 @@ import { shouldRecordBlunder } from "../utils/blunder";
 import {
   classifyMove,
   classifySessionMove,
+  isWithinRecordingMoveCap,
   toWhitePerspective,
 } from "../workers/analysisUtils";
 import EvalBar from "./EvalBar";
@@ -177,6 +178,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     pgn: string;
     moveSan: string;
     moveUci: string;
+    moveIndex: number;
   } | null>(null);
   const pendingSrsReviewRef = useRef<{
     blunderId: number;
@@ -893,6 +895,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               pgn: chess.pgn(),
               moveSan: move.san,
               moveUci: uciMove,
+              moveIndex,
             };
             analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex);
 
@@ -1118,6 +1121,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
+    if (!isWithinRecordingMoveCap(lastAnalysis.moveIndex)) {
+      return;
+    }
+
     if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) {
       return;
     }
@@ -1231,6 +1238,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       pgn: chess.pgn(),
       moveSan: move.san,
       moveUci: uciMove,
+      moveIndex,
     };
     analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex);
 

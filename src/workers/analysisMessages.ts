@@ -4,6 +4,7 @@ export type AnalyzeMoveMessage = {
   fen: string
   move: string
   playerColor: 'white' | 'black'
+  moveIndex?: number
 }
 
 export type AnalysisWorkerRequest =

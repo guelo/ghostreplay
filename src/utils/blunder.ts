@@ -1,3 +1,5 @@
+import { isWithinRecordingMoveCap } from '../workers/analysisUtils'
+
 /**
  * Blunder detection utilities
  */
@@ -16,6 +18,7 @@ export type BlunderContext = {
   pgn: string
   moveSan: string
   moveUci: string // For matching with analysis result
+  moveIndex: number
 }
 
 export type BlunderCheckParams = {
@@ -60,6 +63,11 @@ export const shouldRecordBlunder = (
 
   // No context stored for this analysis
   if (!context) {
+    return null
+  }
+
+  // Only record automatic blunders in the first 10 full moves.
+  if (!isWithinRecordingMoveCap(context.moveIndex)) {
     return null
   }
 
