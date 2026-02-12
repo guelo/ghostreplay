@@ -402,37 +402,32 @@ def get_next_opponent_move(
             )
 
     # Step 2: Backend engine fallback
-    # TODO (g-29c.2.3): Implement Maia runtime bootstrap
-    # - Load Maia model with process-level caching
-    # - Run inference on current position at configured Elo
-    # - Return engine move with decision_source="backend_engine"
-
-    # Placeholder: return a legal move using basic chess engine
-    # This allows frontend integration (g-29c.2.4) to proceed while
-    # Maia implementation is completed
+    # Use Maia-2 inference to generate opponent move at session's configured Elo
     try:
-        import chess
-        board = chess.Board(request.fen)
+        from app.maia_engine import MaiaEngineService, MaiaEngineUnavailableError
 
-        if board.is_game_over():
-            raise HTTPException(status_code=400, detail="Game is over, no legal moves")
-
-        # Get first legal move (deterministic placeholder)
-        legal_moves = list(board.legal_moves)
-        if not legal_moves:
-            raise HTTPException(status_code=400, detail="No legal moves available")
-
-        move = legal_moves[0]
-        san_notation = board.san(move)  # Must be called before push
+        # Get best move from Maia at session's configured Elo
+        maia_move = MaiaEngineService.get_best_move(
+            fen=request.fen,
+            elo=session.engine_elo,
+        )
 
         return NextOpponentMoveResponse(
             mode=OpponentMoveMode.ENGINE,
             move=MoveDetails(
-                uci=move.uci(),
-                san=san_notation,
+                uci=maia_move.uci,
+                san=maia_move.san,
             ),
             target_blunder_id=None,
             decision_source=DecisionSource.BACKEND_ENGINE,
         )
+
+    except MaiaEngineUnavailableError as e:
+        # Model cannot be loaded or initialized - return 503 Service Unavailable
+        raise HTTPException(
+            status_code=503,
+            detail=f"Maia engine unavailable: {e}",
+        )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid FEN: {e}")
+        # Invalid FEN or Elo range
+        raise HTTPException(status_code=400, detail=f"Invalid input: {e}")

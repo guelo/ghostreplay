@@ -6,3 +6,8 @@ uvicorn[standard]
 bcrypt
 PyJWT
 chess
+# Maia-2 engine dependencies (requires Python 3.12 or earlier)
+# PyTorch does not yet have wheels for Python 3.13+
+maia2==0.9
+torch>=2.2.0,<2.3.0
+numpy>=1.26.0,<2.0.0

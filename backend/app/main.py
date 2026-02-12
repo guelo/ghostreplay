@@ -21,8 +21,28 @@ from app.security import AuthMiddleware
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Database health check
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
+
+    # Optional: Warm up Maia engine to avoid cold-start latency
+    # If model loading fails, log warning but don't prevent app startup
+    try:
+        from app.maia_engine import MaiaEngineService
+        import logging
+        import os
+
+        # Only warm up if explicitly enabled via environment variable
+        # This allows deployment without Maia model for testing/staging
+        if os.getenv("MAIA_WARMUP_ENABLED", "false").lower() == "true":
+            logging.info("Maia warmup enabled, loading model...")
+            MaiaEngineService.warmup()
+        else:
+            logging.info("Maia warmup disabled (set MAIA_WARMUP_ENABLED=true to enable)")
+    except Exception as e:
+        import logging
+        logging.warning(f"Maia engine warmup failed: {e}. Engine will be loaded on first request.")
+
     yield
     engine.dispose()
 
