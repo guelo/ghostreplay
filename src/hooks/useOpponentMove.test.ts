@@ -5,83 +5,104 @@ import {
   useOpponentMove,
 } from "./useOpponentMove";
 
-const getGhostMoveMock = vi.fn();
+const getNextOpponentMoveMock = vi.fn();
 
 vi.mock("../utils/api", () => ({
-  getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
+  getNextOpponentMove: (...args: unknown[]) =>
+    getNextOpponentMoveMock(...args),
 }));
+
+/** Helper to build a NextOpponentMoveResponse-shaped object. */
+const backendResponse = (
+  mode: "ghost" | "engine",
+  san: string,
+  targetBlunderId: number | null = null,
+  decisionSource: "ghost_path" | "backend_engine" = mode === "ghost"
+    ? "ghost_path"
+    : "backend_engine"
+) => ({
+  mode,
+  move: { uci: san === "Nf3" ? "g1f3" : "e2e4", san },
+  target_blunder_id: targetBlunderId,
+  decision_source: decisionSource,
+});
 
 describe("determineOpponentMove", () => {
   beforeEach(() => {
-    getGhostMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
   });
 
   it("returns ghost mode when ghost move is available", async () => {
-    getGhostMoveMock.mockResolvedValueOnce({
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("ghost", "e4", 42)
+    );
+
+    const result = await determineOpponentMove("session-123", "test-fen");
+
+    expect(result).toEqual({
       mode: "ghost",
       move: "e4",
-      target_blunder_id: 42,
+      targetBlunderId: 42,
     });
+    expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
+      "session-123",
+      "test-fen"
+    );
+  });
+
+  it("returns engine mode with move from backend", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("engine", "e4")
+    );
 
     const result = await determineOpponentMove("session-123", "test-fen");
 
-    expect(result).toEqual({ mode: "ghost", move: "e4", targetBlunderId: 42 });
-    expect(getGhostMoveMock).toHaveBeenCalledWith("session-123", "test-fen");
-  });
-
-  it("returns engine mode when ghost move is null", async () => {
-    getGhostMoveMock.mockResolvedValueOnce({
+    expect(result).toEqual({
       mode: "engine",
-      move: null,
-      target_blunder_id: null,
+      move: "e4",
+      targetBlunderId: null,
     });
-
-    const result = await determineOpponentMove("session-123", "test-fen");
-
-    expect(result).toEqual({ mode: "engine", move: null, targetBlunderId: null });
   });
 
-  it("returns engine mode on API error", async () => {
-    getGhostMoveMock.mockRejectedValueOnce(new Error("Network error"));
+  it("returns null on API error (triggers local fallback)", async () => {
+    getNextOpponentMoveMock.mockRejectedValueOnce(new Error("Network error"));
 
     const result = await determineOpponentMove("session-123", "test-fen");
 
-    expect(result).toEqual({ mode: "engine", move: null, targetBlunderId: null });
+    expect(result).toBeNull();
   });
 });
 
 describe("useOpponentMove", () => {
   beforeEach(() => {
-    getGhostMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
   });
 
   it("initializes with engine mode", () => {
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
-        onApplyGhostMove: vi.fn(),
-        onApplyEngineMove: vi.fn(),
+        onApplyBackendMove: vi.fn(),
+        onApplyLocalFallback: vi.fn(),
       })
     );
 
     expect(result.current.opponentMode).toBe("engine");
   });
 
-  it("applies ghost move when available", async () => {
-    getGhostMoveMock.mockResolvedValueOnce({
-      mode: "ghost",
-      move: "Nf3",
-      target_blunder_id: 42,
-    });
+  it("applies ghost move from backend", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("ghost", "Nf3", 42)
+    );
 
-    const onApplyGhostMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyEngineMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
 
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
-        onApplyGhostMove,
-        onApplyEngineMove,
+        onApplyBackendMove,
+        onApplyLocalFallback,
       })
     );
 
@@ -90,25 +111,23 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("ghost");
-    expect(onApplyGhostMove).toHaveBeenCalledWith("Nf3", 42);
-    expect(onApplyEngineMove).not.toHaveBeenCalled();
+    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", 42);
+    expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
-  it("applies engine move when ghost move is null", async () => {
-    getGhostMoveMock.mockResolvedValueOnce({
-      mode: "engine",
-      move: null,
-      target_blunder_id: null,
-    });
+  it("applies engine move from backend (no local fallback)", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("engine", "e4")
+    );
 
-    const onApplyGhostMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyEngineMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
 
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
-        onApplyGhostMove,
-        onApplyEngineMove,
+        onApplyBackendMove,
+        onApplyLocalFallback,
       })
     );
 
@@ -117,21 +136,21 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(onApplyGhostMove).not.toHaveBeenCalled();
-    expect(onApplyEngineMove).toHaveBeenCalled();
+    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", null);
+    expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
-  it("falls back to engine mode on API error", async () => {
-    getGhostMoveMock.mockRejectedValueOnce(new Error("API error"));
+  it("falls back to local engine on API error", async () => {
+    getNextOpponentMoveMock.mockRejectedValueOnce(new Error("API error"));
 
-    const onApplyGhostMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyEngineMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
 
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
-        onApplyGhostMove,
-        onApplyEngineMove,
+        onApplyBackendMove,
+        onApplyLocalFallback,
       })
     );
 
@@ -140,18 +159,19 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(onApplyEngineMove).toHaveBeenCalled();
+    expect(onApplyBackendMove).not.toHaveBeenCalled();
+    expect(onApplyLocalFallback).toHaveBeenCalled();
   });
 
-  it("uses engine mode when sessionId is null", async () => {
-    const onApplyGhostMove = vi.fn().mockResolvedValue(undefined);
-    const onApplyEngineMove = vi.fn().mockResolvedValue(undefined);
+  it("uses local engine when sessionId is null", async () => {
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
 
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: null,
-        onApplyGhostMove,
-        onApplyEngineMove,
+        onApplyBackendMove,
+        onApplyLocalFallback,
       })
     );
 
@@ -160,22 +180,20 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(getGhostMoveMock).not.toHaveBeenCalled();
-    expect(onApplyEngineMove).toHaveBeenCalled();
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+    expect(onApplyLocalFallback).toHaveBeenCalled();
   });
 
   it("resets mode to engine", async () => {
-    getGhostMoveMock.mockResolvedValueOnce({
-      mode: "ghost",
-      move: "e4",
-      target_blunder_id: 42,
-    });
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("ghost", "e4", 42)
+    );
 
     const { result } = renderHook(() =>
       useOpponentMove({
         sessionId: "session-123",
-        onApplyGhostMove: vi.fn().mockResolvedValue(undefined),
-        onApplyEngineMove: vi.fn().mockResolvedValue(undefined),
+        onApplyBackendMove: vi.fn().mockResolvedValue(undefined),
+        onApplyLocalFallback: vi.fn().mockResolvedValue(undefined),
       })
     );
 

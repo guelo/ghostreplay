@@ -5,7 +5,7 @@ import ChessGame from "./ChessGame";
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
-const getGhostMoveMock = vi.fn();
+const getNextOpponentMoveMock = vi.fn();
 const recordBlunderMock = vi.fn();
 const recordManualBlunderMock = vi.fn();
 const reviewSrsBlunderMock = vi.fn();
@@ -14,7 +14,7 @@ vi.mock("../utils/api", () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
-  getGhostMove: (...args: unknown[]) => getGhostMoveMock(...args),
+  getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
   recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
   reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
@@ -86,17 +86,18 @@ describe("ChessGame start flow", () => {
     startGameMock.mockReset();
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
-    getGhostMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
     lookupOpeningByFenMock.mockReset();
     mockAnalysisMap = new Map();
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
-    // Default: no ghost move available, fall back to engine
-    getGhostMoveMock.mockResolvedValue({
+    // Default: backend returns engine-mode move
+    getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
-      move: null,
+      move: { uci: "d7d5", san: "d5" },
       target_blunder_id: null,
+      decision_source: "backend_engine",
     });
     lookupOpeningByFenMock.mockResolvedValue(null);
   });
@@ -133,7 +134,7 @@ describe("ChessGame start flow", () => {
     });
   });
 
-  it("calls ghost-move endpoint when playing as black", async () => {
+  it("calls unified opponent-move endpoint when playing as black", async () => {
     const STARTING_FEN =
       "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     startGameMock.mockResolvedValueOnce({
@@ -149,7 +150,7 @@ describe("ChessGame start flow", () => {
     fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
-      expect(getGhostMoveMock).toHaveBeenCalledWith(
+      expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
         "session-456",
         STARTING_FEN,
       );
@@ -164,7 +165,7 @@ describe("ChessGame blunder recording", () => {
     startGameMock.mockReset();
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
-    getGhostMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
     recordBlunderMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
@@ -175,13 +176,12 @@ describe("ChessGame blunder recording", () => {
     mockAnalysisMap = new Map();
     capturedPieceDrop = null;
 
-    getGhostMoveMock.mockResolvedValue({
+    getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
-      move: null,
+      move: { uci: "d7d5", san: "d5" },
       target_blunder_id: null,
+      decision_source: "backend_engine",
     });
-    // Return a valid engine move so applyEngineMove succeeds
-    evaluatePositionMock.mockResolvedValue({ move: "d7d5" });
     lookupOpeningByFenMock.mockResolvedValue(null);
     recordBlunderMock.mockResolvedValue({
       blunder_id: 1,
@@ -467,7 +467,6 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("adds selected player move to ghost library from MoveList", async () => {
-    evaluatePositionMock.mockResolvedValue({ move: "(none)" });
     await startGameAsWhite();
 
     await act(async () => {
@@ -493,7 +492,6 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("handles duplicate add without rendering status line", async () => {
-    evaluatePositionMock.mockResolvedValue({ move: "(none)" });
     recordManualBlunderMock.mockResolvedValueOnce({
       blunder_id: 2,
       position_id: 11,
@@ -506,6 +504,8 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
 
+    // Select player move (opponent d5 is now auto-selected as last move)
+    fireEvent.click(screen.getByRole("button", { name: /e4/i }));
     fireEvent.click(
       screen.getByRole("button", { name: /add to ghost library/i }),
     );
@@ -521,7 +521,6 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("allows manual add after game has ended", async () => {
-    evaluatePositionMock.mockResolvedValue({ move: "(none)" });
     await startGameAsWhite();
 
     await act(async () => {
@@ -534,6 +533,8 @@ describe("ChessGame blunder recording", () => {
       expect(screen.getByText("You resigned.")).toBeInTheDocument();
     });
 
+    // Select player move (opponent d5 is auto-selected as last move)
+    fireEvent.click(screen.getByRole("button", { name: /e4/i }));
     fireEvent.click(
       screen.getByRole("button", { name: /add to ghost library/i }),
     );
@@ -544,7 +545,6 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("hides add button when selected move is not a player move", async () => {
-    evaluatePositionMock.mockResolvedValue({ move: "d7d5" });
     await startGameAsWhite();
 
     await act(async () => {
@@ -559,16 +559,18 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("records SRS pass for review target when eval delta is below 50cp", async () => {
-    getGhostMoveMock
+    getNextOpponentMoveMock
       .mockResolvedValueOnce({
         mode: "ghost",
-        move: "e5",
+        move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 42,
+        decision_source: "ghost_path",
       })
       .mockResolvedValue({
         mode: "engine",
-        move: null,
+        move: { uci: "b8c6", san: "Nc6" },
         target_blunder_id: null,
+        decision_source: "backend_engine",
       });
 
     mockAnalyzeMove.mockImplementation(
@@ -624,16 +626,18 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("records SRS fail for review target when eval delta is 50cp or higher", async () => {
-    getGhostMoveMock
+    getNextOpponentMoveMock
       .mockResolvedValueOnce({
         mode: "ghost",
-        move: "e5",
+        move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 99,
+        decision_source: "ghost_path",
       })
       .mockResolvedValue({
         mode: "engine",
-        move: null,
+        move: { uci: "b8c6", san: "Nc6" },
         target_blunder_id: null,
+        decision_source: "backend_engine",
       });
 
     mockAnalyzeMove.mockImplementation(
@@ -679,16 +683,18 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("shows SRS pass toast even if review submission fails", async () => {
-    getGhostMoveMock
+    getNextOpponentMoveMock
       .mockResolvedValueOnce({
         mode: "ghost",
-        move: "e5",
+        move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 77,
+        decision_source: "ghost_path",
       })
       .mockResolvedValue({
         mode: "engine",
-        move: null,
+        move: { uci: "b8c6", san: "Nc6" },
         target_blunder_id: null,
+        decision_source: "backend_engine",
       });
 
     mockAnalyzeMove.mockImplementation(
@@ -744,7 +750,7 @@ describe("ChessGame move analysis", () => {
     startGameMock.mockReset();
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
-    getGhostMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
     recordBlunderMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
@@ -755,12 +761,12 @@ describe("ChessGame move analysis", () => {
     mockAnalysisMap = new Map();
     capturedPieceDrop = null;
 
-    getGhostMoveMock.mockResolvedValue({
+    getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
-      move: null,
+      move: { uci: "d7d5", san: "d5" },
       target_blunder_id: null,
+      decision_source: "backend_engine",
     });
-    evaluatePositionMock.mockResolvedValue({ move: "d7d5" });
     lookupOpeningByFenMock.mockResolvedValue(null);
     reviewSrsBlunderMock.mockResolvedValue({
       blunder_id: 1,
@@ -824,10 +830,11 @@ describe("ChessGame move analysis", () => {
 
   it("calls analyzeMove for ghost moves with opponent color", async () => {
     // Ghost returns a move instead of engine
-    getGhostMoveMock.mockResolvedValue({
+    getNextOpponentMoveMock.mockResolvedValue({
       mode: "ghost",
-      move: "e5",
+      move: { uci: "e7e5", san: "e5" },
       target_blunder_id: null,
+      decision_source: "ghost_path",
     });
 
     await startGameAsWhite();
@@ -950,18 +957,18 @@ describe("ChessGame opening display", () => {
   beforeEach(() => {
     startGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
-    getGhostMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
     evaluatePositionMock.mockReset();
     lookupOpeningByFenMock.mockReset();
     mockAnalysisMap = new Map();
     capturedPieceDrop = null;
 
-    getGhostMoveMock.mockResolvedValue({
+    getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
-      move: null,
+      move: { uci: "e7e5", san: "e5" },
       target_blunder_id: null,
+      decision_source: "backend_engine",
     });
-    evaluatePositionMock.mockResolvedValue({ move: "e7e5" });
     lookupOpeningByFenMock.mockResolvedValue({
       eco: "C20",
       name: "King's Pawn Game",

@@ -825,8 +825,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
     sessionId,
-    onApplyGhostMove: applyGhostMove,
-    onApplyEngineMove: applyEngineMove,
+    onApplyBackendMove: applyGhostMove,
+    onApplyLocalFallback: applyEngineMove,
   });
 
   const handleSquareClick = useCallback(

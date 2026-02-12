@@ -215,6 +215,13 @@ interface GhostMoveResponse {
   target_blunder_id: number | null
 }
 
+interface NextOpponentMoveResponse {
+  mode: 'ghost' | 'engine'
+  move: { uci: string; san: string }
+  target_blunder_id: number | null
+  decision_source: 'ghost_path' | 'backend_engine'
+}
+
 interface SrsReviewRequest {
   session_id: string
   blunder_id: number
@@ -413,6 +420,7 @@ export const fetchAnalysis = async (
 
 /**
  * Get ghost move for current position
+ * @deprecated Use getNextOpponentMove instead
  */
 export const getGhostMove = async (
   sessionId: string,
@@ -427,6 +435,20 @@ export const getGhostMove = async (
     method: 'GET',
     headers: getAuthHeaders(),
   }, { retries: 2, fallbackMessage: 'Failed to get ghost move' })
+}
+
+/**
+ * Get next opponent move via unified backend pipeline (ghost + engine).
+ */
+export const getNextOpponentMove = async (
+  sessionId: string,
+  fen: string,
+): Promise<NextOpponentMoveResponse> => {
+  return requestJson<NextOpponentMoveResponse>(`${API_BASE_URL}/api/game/next-opponent-move`, {
+    method: 'POST',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ session_id: sessionId, fen }),
+  }, { retries: 2, fallbackMessage: 'Failed to get opponent move' })
 }
 
 /**

@@ -1,48 +1,53 @@
 import { useCallback, useState } from "react";
-import { getGhostMove } from "../utils/api";
+import { getNextOpponentMove } from "../utils/api";
 
 export type OpponentMode = "ghost" | "engine";
 
 export type OpponentMoveResult = {
   mode: OpponentMode;
-  move: string | null;
+  move: string;
   targetBlunderId: number | null;
 };
 
 /**
- * Determines the opponent's move by querying the ghost-move endpoint.
- * Returns ghost move if available, otherwise signals to use engine.
+ * Queries the unified backend endpoint for the next opponent move.
+ * Returns the move on success, or null on network/server error
+ * so the caller can fall back to the local engine.
  */
 export const determineOpponentMove = async (
   sessionId: string,
   fen: string
-): Promise<OpponentMoveResult> => {
+): Promise<OpponentMoveResult | null> => {
   try {
-    const response = await getGhostMove(sessionId, fen);
+    const response = await getNextOpponentMove(sessionId, fen);
     return {
       mode: response.mode,
-      move: response.move,
+      move: response.move.san,
       targetBlunderId: response.target_blunder_id,
     };
   } catch (error) {
-    console.error("[GhostMove] Failed to get ghost move:", error);
-    return { mode: "engine", move: null, targetBlunderId: null };
+    console.error("[OpponentMove] Backend unavailable:", error);
+    return null;
   }
 };
 
 type UseOpponentMoveOptions = {
   sessionId: string | null;
-  onApplyGhostMove: (sanMove: string, targetBlunderId: number | null) => Promise<void>;
-  onApplyEngineMove: () => Promise<void>;
+  onApplyBackendMove: (
+    sanMove: string,
+    targetBlunderId: number | null
+  ) => Promise<void>;
+  onApplyLocalFallback: () => Promise<void>;
 };
 
 /**
- * Hook that manages opponent move selection between ghost and engine modes.
+ * Hook that manages opponent move selection via the unified backend endpoint.
+ * Falls back to the local Stockfish engine on network errors.
  */
 export const useOpponentMove = ({
   sessionId,
-  onApplyGhostMove,
-  onApplyEngineMove,
+  onApplyBackendMove,
+  onApplyLocalFallback,
 }: UseOpponentMoveOptions) => {
   const [opponentMode, setOpponentMode] = useState<OpponentMode>("engine");
 
@@ -50,21 +55,25 @@ export const useOpponentMove = ({
     async (fen: string) => {
       if (!sessionId) {
         setOpponentMode("engine");
-        await onApplyEngineMove();
+        await onApplyLocalFallback();
         return;
       }
 
       const result = await determineOpponentMove(sessionId, fen);
-      setOpponentMode(result.mode);
 
-      if (result.mode === "ghost" && result.move) {
-        console.log("[GhostMove] Applying ghost move:", result.move);
-        await onApplyGhostMove(result.move, result.targetBlunderId);
+      if (result) {
+        setOpponentMode(result.mode);
+        console.log(
+          `[OpponentMove] Applying ${result.mode} move:`,
+          result.move
+        );
+        await onApplyBackendMove(result.move, result.targetBlunderId);
       } else {
-        await onApplyEngineMove();
+        setOpponentMode("engine");
+        await onApplyLocalFallback();
       }
     },
-    [sessionId, onApplyGhostMove, onApplyEngineMove]
+    [sessionId, onApplyBackendMove, onApplyLocalFallback]
   );
 
   const resetMode = useCallback(() => {
