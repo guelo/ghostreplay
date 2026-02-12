@@ -468,21 +468,21 @@ def get_next_opponent_move(
             )
 
     # Step 2: Backend engine fallback
-    # Use Maia-2 inference to generate opponent move at session's configured Elo
+    # Use OpponentMoveController (Maia-2 + optional Stockfish calibration)
     try:
-        from app.maia_engine import MaiaEngineService, MaiaEngineUnavailableError
+        from app.maia_engine import MaiaEngineUnavailableError
+        from app.opponent_move_controller import choose_move
 
-        # Get best move from Maia at session's configured Elo
-        maia_move = MaiaEngineService.get_best_move(
+        controller_move = choose_move(
             fen=request.fen,
-            elo=session.engine_elo,
+            target_elo=session.engine_elo,
         )
 
         return NextOpponentMoveResponse(
             mode=OpponentMoveMode.ENGINE,
             move=MoveDetails(
-                uci=maia_move.uci,
-                san=maia_move.san,
+                uci=controller_move.uci,
+                san=controller_move.san,
             ),
             target_blunder_id=None,
             decision_source=DecisionSource.BACKEND_ENGINE,

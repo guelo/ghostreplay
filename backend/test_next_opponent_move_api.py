@@ -272,16 +272,14 @@ def test_next_opponent_move_engine_branch_happy_path(
     client, auth_headers, create_game_session
 ):
     """Engine branch returns mode=engine when no ghost data exists."""
-    from app.maia_engine import MaiaMove
+    from app.opponent_move_controller import ControllerMove
 
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    fake_move = MaiaMove(uci="e7e5", san="e5", confidence=0.85)
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia_argmax")
 
-    with patch("app.maia_engine.MaiaEngineService") as mock_maia:
-        mock_maia.get_best_move.return_value = fake_move
-
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
             "/api/game/next-opponent-move",
             json={
