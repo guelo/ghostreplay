@@ -11,3 +11,10 @@ chess
 maia2==0.9
 torch>=2.2.0,<2.3.0
 numpy>=1.26.0,<2.0.0
+# Undeclared transitive deps of maia2
+einops
+gdown
+pandas
+pyzstd
+requests
+tqdm
