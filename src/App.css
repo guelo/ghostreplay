@@ -505,6 +505,17 @@
   color: var(--text-primary);
 }
 
+.review-warning-toast__header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.review-warning-toast__icon {
+  flex: 0 0 auto;
+  color: var(--warning-dark);
+}
+
 .review-warning-toast__detail {
   margin: 0;
   font-size: 0.8rem;

@@ -39,6 +39,19 @@ const GhostIcon = () => (
   </svg>
 );
 
+const WarningTriangleIcon = () => (
+  <svg
+    className="review-warning-toast__icon"
+    width="48"
+    height="48"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    aria-hidden="true"
+  >
+    <path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" />
+  </svg>
+);
+
 type BoardOrientation = "white" | "black";
 
 type MoveRecord = {
@@ -1449,9 +1462,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           )}
           {isReviewMomentActive && (
             <div className="review-warning-toast" role="alert">
-              <span className="review-warning-toast__label">
-                Review Position
-              </span>
+              <div className="review-warning-toast__header">
+                <WarningTriangleIcon />
+                <span className="review-warning-toast__label">
+                  Review Position
+                </span>
+              </div>
               <p className="review-warning-toast__detail">
                 Be careful. You've messed this position up before.
               </p>
