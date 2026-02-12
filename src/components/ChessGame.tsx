@@ -157,6 +157,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
+  const [showRehookToast, setShowRehookToast] = useState(false);
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(null);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
@@ -188,6 +189,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const analysisStatusRef = useRef(analysisStatus);
   const isAnalyzingRef = useRef(isAnalyzing);
   const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
+  const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
 
   useEffect(() => {
     analysisMapRef.current = analysisMap;
@@ -829,6 +831,20 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     onApplyLocalFallback: applyEngineMove,
   });
 
+  useEffect(() => {
+    if (!isGameActive) {
+      previousOpponentModeRef.current = null;
+      setShowRehookToast(false);
+      return;
+    }
+
+    const previousMode = previousOpponentModeRef.current;
+    if (previousMode === "engine" && opponentMode === "ghost") {
+      setShowRehookToast(true);
+    }
+    previousOpponentModeRef.current = opponentMode;
+  }, [isGameActive, opponentMode]);
+
   const handleSquareClick = useCallback(
     ({ square }: { square: string }) => {
       const playersTurn =
@@ -1160,6 +1176,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => clearTimeout(timer);
   }, [showPassToast]);
 
+  // Auto-dismiss re-hook toast after 3 seconds
+  useEffect(() => {
+    if (!showRehookToast) return;
+    const timer = setTimeout(() => setShowRehookToast(false), 3000);
+    return () => clearTimeout(timer);
+  }, [showRehookToast]);
+
   const handleDrop = ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
     if (!targetSquare) {
       return false;
@@ -1335,6 +1358,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setBlunderAlert(null);
     setShowFlash(false);
     setShowPassToast(false);
+    setShowRehookToast(false);
     setReviewFailModal(null);
     setShowPostGamePrompt(false);
     setShowStartOverlay(false);
@@ -1641,6 +1665,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 <span className="review-pass-toast__label">Correct!</span>
                 <p className="review-pass-toast__detail">
                   You avoided your past mistake.
+                </p>
+              </div>
+            )}
+            {showRehookToast && (
+              <div
+                className="rehook-toast"
+                onClick={() => setShowRehookToast(false)}
+                role="status"
+              >
+                <span className="rehook-toast__label">Ghost reactivated</span>
+                <p className="rehook-toast__detail">
+                  Ghost reactivated: steering to past mistake
                 </p>
               </div>
             )}

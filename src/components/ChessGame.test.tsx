@@ -558,6 +558,44 @@ describe("ChessGame blunder recording", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows re-hook notification when opponent mode switches from engine to ghost", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "engine",
+        move: { uci: "d7d5", san: "d5" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      })
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 42,
+        decision_source: "ghost_path",
+      });
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    expect(
+      screen.queryByText("Ghost reactivated: steering to past mistake"),
+    ).not.toBeInTheDocument();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Ghost reactivated: steering to past mistake"),
+      ).toBeInTheDocument();
+    });
+
+    expect(screen.getByText("Ghost")).toBeInTheDocument();
+  });
+
   it("records SRS pass for review target when eval delta is below 50cp", async () => {
     getNextOpponentMoveMock
       .mockResolvedValueOnce({
