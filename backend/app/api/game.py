@@ -1,4 +1,5 @@
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -9,10 +10,37 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.fen import fen_hash, active_color
-from app.models import Blunder, GameSession, Position
+from app.models import GameSession, Position
 from app.security import TokenPayload, get_current_user
+from app.srs_math import calculate_priority
 
 router = APIRouter(prefix="/api/game", tags=["game"])
+
+STEERING_RADIUS = 5
+SEVERITY_NORMALIZER_CP = 50.0
+DISTANCE_WEIGHT_SLOPE = 0.1
+
+
+@dataclass(frozen=True)
+class GhostMoveCandidate:
+    first_move: str
+    blunder_id: int
+    depth: int
+    eval_loss_cp: int
+    pass_streak: int
+    last_reviewed_at: datetime | None
+    created_at: datetime | None
+
+    def score(self, now: datetime) -> float:
+        priority = calculate_priority(
+            pass_streak=self.pass_streak,
+            last_reviewed_at=self.last_reviewed_at,
+            created_at=self.created_at,
+            now=now,
+        )
+        severity_weight = max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP
+        distance_weight = 1.0 / (1.0 + DISTANCE_WEIGHT_SLOPE * self.depth)
+        return priority * severity_weight * distance_weight
 
 
 def find_ghost_move(
@@ -24,7 +52,7 @@ def find_ghost_move(
     """
     Find a move that steers toward a position where the user previously blundered.
 
-    Uses recursive path traversal to search up to 15 moves downstream for reachable
+    Uses recursive path traversal to search up to 5 moves downstream for reachable
     blunders that match the player's color.
 
     Args:
@@ -49,8 +77,8 @@ def find_ghost_move(
     if not current_position:
         return (None, None)
 
-    # Recursive CTE to find blunders up to 15 moves downstream
-    # Returns the first move in the path and the target blunder ID
+    # Recursive CTE to find candidate blunders up to the steering radius.
+    # Returns the first move in each path and candidate metadata for scoring.
     # Uses string-based path for cycle detection
     cte_query = text("""
         WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
@@ -63,7 +91,7 @@ def find_ghost_move(
 
             UNION ALL
 
-            -- Recursive case: follow moves up to depth 15
+            -- Recursive case: follow moves up to configured steering radius
             SELECT
                 m.to_position_id,
                 r.depth + 1,
@@ -71,32 +99,70 @@ def find_ghost_move(
                 COALESCE(r.first_move, m.move_san)
             FROM reachable r
             JOIN moves m ON m.from_position_id = r.position_id
-            WHERE r.depth < 15
+            WHERE r.depth < :steering_radius
               AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'
         )
-        SELECT r.first_move, b.id AS blunder_id
+        SELECT
+            r.first_move,
+            b.id AS blunder_id,
+            r.depth,
+            b.eval_loss_cp,
+            b.pass_streak,
+            b.last_reviewed_at,
+            b.created_at
         FROM reachable r
         JOIN positions p ON p.id = r.position_id
         JOIN blunders b ON b.position_id = r.position_id
         WHERE b.user_id = :user_id
           AND p.active_color = :player_color
           AND r.first_move IS NOT NULL
-        LIMIT 1
     """)
 
-    result = db.execute(
+    candidate_rows = db.execute(
         cte_query,
         {
             "start_position_id": current_position.id,
             "user_id": user_id,
             "player_color": player_color,
+            "steering_radius": STEERING_RADIUS,
         },
-    ).fetchone()
+    ).fetchall()
 
-    if not result:
+    if not candidate_rows:
         return (None, None)
 
-    return (result[0], result[1])
+    now = datetime.now(timezone.utc)
+    best_candidate: GhostMoveCandidate | None = None
+    best_key: tuple[float, float, int, int, str] | None = None
+
+    for row in candidate_rows:
+        candidate = GhostMoveCandidate(
+            first_move=row[0],
+            blunder_id=row[1],
+            depth=row[2],
+            eval_loss_cp=row[3],
+            pass_streak=row[4],
+            last_reviewed_at=row[5],
+            created_at=row[6],
+        )
+        score = candidate.score(now)
+
+        # Tie-breakers keep behavior deterministic in tests and production.
+        rank_key = (
+            score,
+            -float(candidate.depth),
+            candidate.eval_loss_cp,
+            -candidate.blunder_id,
+            candidate.first_move,
+        )
+        if best_key is None or rank_key > best_key:
+            best_key = rank_key
+            best_candidate = candidate
+
+    if best_candidate is None:
+        return (None, None)
+
+    return (best_candidate.first_move, best_candidate.blunder_id)
 
 
 class GameResult(str, Enum):

@@ -683,20 +683,20 @@ def _create_position_chain(db_session, user_id: int, length: int):
 
 
 def test_ghost_move_finds_blunder_at_max_depth(client, auth_headers, create_game_session, db_session):
-    """Test ghost-move finds a blunder exactly at depth 15 (the limit)."""
+    """Test ghost-move finds a blunder exactly at depth 5 (the steering radius)."""
     from app.models import Blunder
 
     user_id = 123
 
-    # Create chain of 17 positions (0 through 16)
-    # Query from position 1, blunder at position 16 = depth 15
-    positions = _create_position_chain(db_session, user_id, 17)
+    # Create chain of 7 positions (0 through 6)
+    # Query from position 1, blunder at position 6 = depth 5
+    positions = _create_position_chain(db_session, user_id, 7)
 
-    # Create a blunder at position 16 (depth 15 from position 1)
-    # Position 16 has active_color="white" (16 % 2 == 0)
+    # Create a blunder at position 6 (depth 5 from position 1)
+    # Position 6 has active_color="white" (6 % 2 == 0)
     blunder = Blunder(
         user_id=user_id,
-        position_id=positions[16].id,
+        position_id=positions[6].id,
         bad_move_san="bad",
         best_move_san="good",
         eval_loss_cp=200,
@@ -708,7 +708,7 @@ def test_ghost_move_finds_blunder_at_max_depth(client, auth_headers, create_game
     session_id = create_game_session(user_id=user_id, player_color="white")
 
     # Query from position 1 (black to move = opponent's turn)
-    # Blunder is at position 16, which is exactly 15 moves away
+    # Blunder is at position 6, exactly 5 moves away
     response = client.get(
         "/api/game/ghost-move",
         params={"session_id": session_id, "fen": positions[1].fen_raw},
@@ -716,27 +716,27 @@ def test_ghost_move_finds_blunder_at_max_depth(client, auth_headers, create_game
     )
 
     assert response.status_code == 200
-    # Should find the blunder at exactly depth 15
+    # Should find the blunder at exactly depth 5
     assert response.json()["mode"] == "ghost"
     assert response.json()["move"] == "m1"
     assert response.json()["target_blunder_id"] is not None
 
 
 def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_session, db_session):
-    """Test ghost-move does not find blunders beyond depth 15."""
+    """Test ghost-move does not find blunders beyond depth 5."""
     from app.models import Blunder
 
     user_id = 123
 
-    # Create chain of 19 positions (0 through 18)
-    # Query from position 1, blunder at position 18 = depth 17 (beyond limit)
-    positions = _create_position_chain(db_session, user_id, 19)
+    # Create chain of 9 positions (0 through 8)
+    # Query from position 1, blunder at position 8 = depth 7 (beyond limit)
+    positions = _create_position_chain(db_session, user_id, 9)
 
-    # Create a blunder at position 18 (depth 17 from position 1, beyond limit of 15)
-    # Position 18 has active_color="white" (18 % 2 == 0)
+    # Create a blunder at position 8 (depth 7 from position 1, beyond limit of 5)
+    # Position 8 has active_color="white" (8 % 2 == 0)
     blunder = Blunder(
         user_id=user_id,
-        position_id=positions[18].id,
+        position_id=positions[8].id,
         bad_move_san="bad",
         best_move_san="good",
         eval_loss_cp=200,
@@ -748,7 +748,7 @@ def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_sessi
     session_id = create_game_session(user_id=user_id, player_color="white")
 
     # Query from position 1 (black to move = opponent's turn for white player)
-    # Blunder is at position 18, which is 17 moves away (beyond depth 15)
+    # Blunder is at position 8, which is 7 moves away (beyond depth 5)
     response = client.get(
         "/api/game/ghost-move",
         params={"session_id": session_id, "fen": positions[1].fen_raw},
@@ -756,9 +756,158 @@ def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_sessi
     )
 
     assert response.status_code == 200
-    # Should NOT find the blunder at depth 17 (positions 1->2->...->18)
+    # Should NOT find the blunder at depth 7 (positions 1->2->...->8)
     assert response.json()["mode"] == "engine"
     assert response.json()["move"] is None
+
+
+def test_ghost_move_prefers_higher_severity_when_priority_equal(
+    client, auth_headers, create_game_session, db_session
+):
+    """With equal priority/distance, higher eval_loss_cp should win."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+
+    # Opponent-to-move start position for white player.
+    fen_start = "8/8/8/8/8/8/8/K6k b - - 0 1"
+    fen_low = "8/8/8/8/8/8/8/1K5k w - - 0 2"
+    fen_high = "8/8/8/8/8/8/8/2K4k w - - 0 2"
+
+    pos_start = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_start),
+        fen_raw=fen_start,
+        active_color="black",
+    )
+    pos_low = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_low),
+        fen_raw=fen_low,
+        active_color="white",
+    )
+    pos_high = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_high),
+        fen_raw=fen_high,
+        active_color="white",
+    )
+    db_session.add_all([pos_start, pos_low, pos_high])
+    db_session.flush()
+
+    db_session.add_all([
+        Move(from_position_id=pos_start.id, move_san="mLow", to_position_id=pos_low.id),
+        Move(from_position_id=pos_start.id, move_san="mHigh", to_position_id=pos_high.id),
+    ])
+    db_session.add_all([
+        Blunder(
+            user_id=user_id,
+            position_id=pos_low.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=50,
+            last_reviewed_at=now - timedelta(hours=2),
+        ),
+        Blunder(
+            user_id=user_id,
+            position_id=pos_high.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=200,
+            last_reviewed_at=now - timedelta(hours=2),
+        ),
+    ])
+    db_session.commit()
+
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": session_id, "fen": fen_start},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "ghost"
+    assert response.json()["move"] == "mHigh"
+
+
+def test_ghost_move_prefers_more_overdue_when_severity_equal(
+    client, auth_headers, create_game_session, db_session
+):
+    """With equal severity/distance, higher SRS priority should win."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+
+    fen_start = "8/8/8/8/8/8/8/K5k1 b - - 0 1"
+    fen_recent = "8/8/8/8/8/8/8/1K4k1 w - - 0 2"
+    fen_overdue = "8/8/8/8/8/8/8/2K3k1 w - - 0 2"
+
+    pos_start = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_start),
+        fen_raw=fen_start,
+        active_color="black",
+    )
+    pos_recent = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_recent),
+        fen_raw=fen_recent,
+        active_color="white",
+    )
+    pos_overdue = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_overdue),
+        fen_raw=fen_overdue,
+        active_color="white",
+    )
+    db_session.add_all([pos_start, pos_recent, pos_overdue])
+    db_session.flush()
+
+    db_session.add_all([
+        Move(from_position_id=pos_start.id, move_san="mRecent", to_position_id=pos_recent.id),
+        Move(from_position_id=pos_start.id, move_san="mOverdue", to_position_id=pos_overdue.id),
+    ])
+    db_session.add_all([
+        Blunder(
+            user_id=user_id,
+            position_id=pos_recent.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=100,
+            pass_streak=0,
+            last_reviewed_at=now - timedelta(minutes=15),
+        ),
+        Blunder(
+            user_id=user_id,
+            position_id=pos_overdue.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=100,
+            pass_streak=0,
+            last_reviewed_at=now - timedelta(hours=6),
+        ),
+    ])
+    db_session.commit()
+
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    response = client.get(
+        "/api/game/ghost-move",
+        params={"session_id": session_id, "fen": fen_start},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "ghost"
+    assert response.json()["move"] == "mOverdue"
 
 
 def test_ghost_move_handles_cycles(client, auth_headers, create_game_session, db_session):

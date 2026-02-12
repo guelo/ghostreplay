@@ -10,12 +10,9 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession
 from app.security import TokenPayload, get_current_user
+from app.srs_math import calculate_priority, expected_interval_hours
 
 router = APIRouter(prefix="/api/srs", tags=["srs"])
-
-BASE_INTERVAL_HOURS = 1.0
-BACKOFF_FACTOR = 2.0
-MAX_INTERVAL_HOURS = 4320.0
 
 
 class SrsReviewRequest(BaseModel):
@@ -31,29 +28,6 @@ class SrsReviewResponse(BaseModel):
     pass_streak: int
     priority: float
     next_expected_review: datetime
-
-
-def _as_utc(timestamp: datetime) -> datetime:
-    if timestamp.tzinfo is None:
-        return timestamp.replace(tzinfo=timezone.utc)
-    return timestamp.astimezone(timezone.utc)
-
-
-def _expected_interval_hours(pass_streak: int) -> float:
-    interval = BASE_INTERVAL_HOURS * (BACKOFF_FACTOR ** max(pass_streak, 0))
-    return min(interval, MAX_INTERVAL_HOURS)
-
-
-def _calculate_priority(blunder: Blunder, now: datetime) -> float:
-    last_reviewed_at = blunder.last_reviewed_at or blunder.created_at
-    if not last_reviewed_at:
-        return 0.0
-
-    hours_since_review = max(
-        (_as_utc(now) - _as_utc(last_reviewed_at)).total_seconds() / 3600.0,
-        0.0,
-    )
-    return hours_since_review / _expected_interval_hours(blunder.pass_streak)
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -106,12 +80,17 @@ def review_blunder(
     )
     db.commit()
 
-    interval_hours = _expected_interval_hours(blunder.pass_streak)
+    interval_hours = expected_interval_hours(blunder.pass_streak)
     next_expected_review = reviewed_at + timedelta(hours=interval_hours)
 
     return SrsReviewResponse(
         blunder_id=blunder.id,
         pass_streak=blunder.pass_streak,
-        priority=_calculate_priority(blunder, reviewed_at),
+        priority=calculate_priority(
+            pass_streak=blunder.pass_streak,
+            last_reviewed_at=blunder.last_reviewed_at,
+            created_at=blunder.created_at,
+            now=reviewed_at,
+        ),
         next_expected_review=next_expected_review,
     )

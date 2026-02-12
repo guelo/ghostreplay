@@ -88,7 +88,7 @@ def test_cte_ghost_move_under_100ms(db_session):
 
     positions = _seed_position_graph(db_session, user_id)
 
-    # Same CTE as game.py ghost-move endpoint.
+    # Same CTE shape as game.py ghost-move endpoint (5-ply steering radius).
     # Uses INTEGER instead of BIGINT for SQLite compatibility.
     cte_query = text("""
         WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
@@ -105,7 +105,7 @@ def test_cte_ghost_move_under_100ms(db_session):
                 COALESCE(r.first_move, m.move_san)
             FROM reachable r
             JOIN moves m ON m.from_position_id = r.position_id
-            WHERE r.depth < 15
+            WHERE r.depth < 5
               AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'
         )
         SELECT r.first_move, b.id AS blunder_id
