@@ -842,6 +842,112 @@ def test_ghost_move_handles_cycles(client, auth_headers, create_game_session, db
     assert response.json()["target_blunder_id"] is not None
 
 
+# === Next Opponent Move Endpoint Tests ===
+
+
+def test_next_opponent_move_ghost_path(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns ghost move with UCI and SAN when path exists."""
+    user_id = 123
+
+    # Record a blunder via /api/blunder
+    # PGN: 1. e4 e5 2. Qh5 (white blunders with Qh5)
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    pgn = "1. e4 e5 2. Qh5"
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    blunder_response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_blunder,
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert blunder_response.status_code == 201
+
+    # Start a NEW game and query next-opponent-move
+    new_session_id = create_game_session(user_id=user_id, player_color="white")
+
+    # After 1.e4 (black to move), ghost should suggest e5 to reach blunder position
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    response = client.post(
+        "/api/game/next-opponent-move",
+        json={"session_id": str(new_session_id), "fen": fen_after_e4},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "ghost"
+    assert data["move"]["san"] == "e5"
+    assert data["move"]["uci"] == "e7e5"
+    assert data["target_blunder_id"] is not None
+    assert data["decision_source"] == "ghost_path"
+
+
+def test_next_opponent_move_engine_fallback(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns engine move when no ghost path exists."""
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    # Query from position where it's black's turn (opponent's turn) - no blunders recorded
+    # After 1.e4 (black to move)
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    response = client.post(
+        "/api/game/next-opponent-move",
+        json={"session_id": str(session_id), "fen": fen_after_e4},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "engine"
+    assert "uci" in data["move"]
+    assert "san" in data["move"]
+    assert data["target_blunder_id"] is None
+    assert data["decision_source"] == "backend_engine"
+
+
+def test_next_opponent_move_players_turn_error(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns error when it's the player's turn."""
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    # Position where it's white's turn (player's turn)
+    white_turn_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    response = client.post(
+        "/api/game/next-opponent-move",
+        json={"session_id": str(session_id), "fen": white_turn_fen},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 400
+    assert "player's turn" in response.json()["detail"].lower()
+
+
+def test_next_opponent_move_invalid_fen(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns error for invalid FEN."""
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    response = client.post(
+        "/api/game/next-opponent-move",
+        json={"session_id": str(session_id), "fen": "invalid-fen"},
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 400
+    assert "invalid fen" in response.json()["detail"].lower()
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

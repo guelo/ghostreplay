@@ -15,6 +15,90 @@ from app.security import TokenPayload, get_current_user
 router = APIRouter(prefix="/api/game", tags=["game"])
 
 
+def find_ghost_move(
+    db: Session,
+    user_id: int,
+    fen: str,
+    player_color: str,
+) -> tuple[str | None, int | None]:
+    """
+    Find a move that steers toward a position where the user previously blundered.
+
+    Uses recursive path traversal to search up to 15 moves downstream for reachable
+    blunders that match the player's color.
+
+    Args:
+        db: Database session
+        user_id: User ID to scope blunder lookup
+        fen: Current board position FEN
+        player_color: Player color from game session ('white' or 'black')
+
+    Returns:
+        Tuple of (move_san, target_blunder_id) if ghost path exists, else (None, None)
+    """
+    # Look up current position by FEN hash
+    current_position = (
+        db.query(Position)
+        .filter(
+            Position.user_id == user_id,
+            Position.fen_hash == fen_hash(fen),
+        )
+        .first()
+    )
+
+    if not current_position:
+        return (None, None)
+
+    # Recursive CTE to find blunders up to 15 moves downstream
+    # Returns the first move in the path and the target blunder ID
+    # Uses string-based path for cycle detection
+    cte_query = text("""
+        WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
+            -- Base case: current position (depth 0, no first_move yet)
+            SELECT
+                CAST(:start_position_id AS BIGINT),
+                0,
+                ',' || :start_position_id || ',',
+                CAST(NULL AS TEXT)
+
+            UNION ALL
+
+            -- Recursive case: follow moves up to depth 15
+            SELECT
+                m.to_position_id,
+                r.depth + 1,
+                r.path || m.to_position_id || ',',
+                COALESCE(r.first_move, m.move_san)
+            FROM reachable r
+            JOIN moves m ON m.from_position_id = r.position_id
+            WHERE r.depth < 15
+              AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'
+        )
+        SELECT r.first_move, b.id AS blunder_id
+        FROM reachable r
+        JOIN positions p ON p.id = r.position_id
+        JOIN blunders b ON b.position_id = r.position_id
+        WHERE b.user_id = :user_id
+          AND p.active_color = :player_color
+          AND r.first_move IS NOT NULL
+        LIMIT 1
+    """)
+
+    result = db.execute(
+        cte_query,
+        {
+            "start_position_id": current_position.id,
+            "user_id": user_id,
+            "player_color": player_color,
+        },
+    ).fetchone()
+
+    if not result:
+        return (None, None)
+
+    return (result[0], result[1])
+
+
 class GameResult(str, Enum):
     """Possible game results."""
     CHECKMATE_WIN = "checkmate_win"
@@ -226,70 +310,21 @@ def get_ghost_move(
         # It's the user's turn, ghost doesn't suggest user moves
         return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
 
-    # Look up current position by FEN hash
-    current_position = (
-        db.query(Position)
-        .filter(
-            Position.user_id == user.user_id,
-            Position.fen_hash == fen_hash(fen),
-        )
-        .first()
+    # Use shared ghost path traversal logic
+    move_san, target_blunder_id = find_ghost_move(
+        db=db,
+        user_id=user.user_id,
+        fen=fen,
+        player_color=session.player_color,
     )
 
-    if not current_position:
-        return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
-
-    # Recursive CTE to find blunders up to 15 moves downstream
-    # Returns the first move in the path and the target blunder ID
-    # Uses string-based path for cycle detection
-    cte_query = text("""
-        WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
-            -- Base case: current position (depth 0, no first_move yet)
-            SELECT
-                CAST(:start_position_id AS BIGINT),
-                0,
-                ',' || :start_position_id || ',',
-                CAST(NULL AS TEXT)
-
-            UNION ALL
-
-            -- Recursive case: follow moves up to depth 15
-            SELECT
-                m.to_position_id,
-                r.depth + 1,
-                r.path || m.to_position_id || ',',
-                COALESCE(r.first_move, m.move_san)
-            FROM reachable r
-            JOIN moves m ON m.from_position_id = r.position_id
-            WHERE r.depth < 15
-              AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'
-        )
-        SELECT r.first_move, b.id AS blunder_id
-        FROM reachable r
-        JOIN positions p ON p.id = r.position_id
-        JOIN blunders b ON b.position_id = r.position_id
-        WHERE b.user_id = :user_id
-          AND p.active_color = :player_color
-          AND r.first_move IS NOT NULL
-        LIMIT 1
-    """)
-
-    result = db.execute(
-        cte_query,
-        {
-            "start_position_id": current_position.id,
-            "user_id": user.user_id,
-            "player_color": session.player_color,
-        },
-    ).fetchone()
-
-    if not result:
+    if move_san is None:
         return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
 
     return GhostMoveResponse(
         mode=GhostMoveMode.GHOST,
-        move=result[0],
-        target_blunder_id=result[1],
+        move=move_san,
+        target_blunder_id=target_blunder_id,
     )
 
 
@@ -332,19 +367,49 @@ def get_next_opponent_move(
             detail="Cannot get opponent move when it's the player's turn",
         )
 
-    # TODO (g-29c.2.2): Implement ghost-first decision engine
-    # - Look up current position by FEN hash
-    # - Run recursive CTE to find due blunders within steering radius (depth <= 5)
-    # - If due blunders exist, return ghost move with target_blunder_id
+    # Step 1: Ghost-first path traversal
+    # Use shared ghost path traversal logic to find moves toward due blunders
+    move_san, target_blunder_id = find_ghost_move(
+        db=db,
+        user_id=user.user_id,
+        fen=request.fen,
+        player_color=session.player_color,
+    )
 
+    # If ghost path exists, convert SAN to both UCI and SAN formats
+    if move_san is not None:
+        import chess
+        try:
+            board = chess.Board(request.fen)
+            # Parse SAN to get the move object
+            move = board.parse_san(move_san)
+
+            return NextOpponentMoveResponse(
+                mode=OpponentMoveMode.GHOST,
+                move=MoveDetails(
+                    uci=move.uci(),
+                    san=move_san,
+                ),
+                target_blunder_id=target_blunder_id,
+                decision_source=DecisionSource.GHOST_PATH,
+            )
+        except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError) as e:
+            # If SAN parsing fails, log and fall through to engine fallback
+            # This should not happen in normal operation but provides resilience
+            import logging
+            logging.warning(
+                f"Failed to parse ghost SAN move '{move_san}' for FEN '{request.fen}': {e}"
+            )
+
+    # Step 2: Backend engine fallback
     # TODO (g-29c.2.3): Implement Maia runtime bootstrap
     # - Load Maia model with process-level caching
     # - Run inference on current position at configured Elo
     # - Return engine move with decision_source="backend_engine"
 
-    # Placeholder response: return a legal random move in engine mode
+    # Placeholder: return a legal move using basic chess engine
     # This allows frontend integration (g-29c.2.4) to proceed while
-    # ghost/Maia implementation is completed
+    # Maia implementation is completed
     try:
         import chess
         board = chess.Board(request.fen)
