@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
+import type { Square } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
@@ -92,6 +93,8 @@ type ChessGameProps = {
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
 const SRS_REVIEW_FAIL_THRESHOLD_CP = 50;
+
+const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
 
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
@@ -357,15 +360,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const getMoveOptions = useCallback(
     (square: string): boolean => {
+      if (!isSquare(square)) {
+        return false;
+      }
+
       const moves = chess.moves({ square, verbose: true });
       if (moves.length === 0) {
         return false;
       }
 
+      const sourcePiece = chess.get(square);
       const newSquares: Record<string, React.CSSProperties> = {};
       for (const move of moves) {
         const target = chess.get(move.to);
-        const isCapture = target && target.color !== chess.get(square)?.color;
+        const isCapture =
+          sourcePiece != null && target != null && target.color !== sourcePiece.color;
         newSquares[move.to] = {
           background: isCapture
             ? "rgba(255, 0, 0, 0.4)"
@@ -873,6 +882,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
 
       // Try to select a new piece
+      if (!isSquare(square)) {
+        clearMoveHighlights();
+        return;
+      }
+
       const piece = chess.get(square);
       const playerSide = playerColor === "white" ? "w" : "b";
       if (piece && piece.color === playerSide) {

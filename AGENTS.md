@@ -4,6 +4,11 @@ The overall project and architecure is described in SPEC.md
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.
 
+## Testing Guidance
+
+- Avoid overly detailed UI/interface tests (exact layout structure, cosmetic copy, or styling-specific assertions).
+- Prefer testing behavior contracts, data flow, and critical user outcomes instead of pixel-level or nav-chrome details.
+
 
 ## Multi-Agent Workspace Rules
 

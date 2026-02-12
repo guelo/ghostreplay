@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { useAuth } from "../contexts/useAuth";
 import { fetchHistory, fetchAnalysis, type HistoryGame, type SessionAnalysis } from "../utils/api";
 import AnalysisBoard from "../components/AnalysisBoard";
+import AppNav from "../components/AppNav";
 import "../App.css";
 
 function resultLabel(result: string | null): string {
@@ -42,7 +42,6 @@ function formatDate(iso: string): string {
 }
 
 function HistoryPage() {
-  const { user, logout } = useAuth();
   const location = useLocation();
   const state = location.state as {
     select?: "latest";
@@ -104,36 +103,7 @@ function HistoryPage() {
 
   return (
     <main className="app-shell">
-      <nav className="nav-bar">
-        <Link to="/" className="nav-bar__brand">
-          Ghost Replay
-        </Link>
-        <div className="nav-bar__actions">
-          <Link to="/history" className="nav-bar__link">History</Link>
-          <Link to="/stats" className="nav-bar__link">Stats</Link>
-          {user?.isAnonymous ? (
-            <>
-              <Link to="/register" className="chess-button primary nav-bar__btn">
-                Register
-              </Link>
-              <Link to="/login" className="nav-bar__link">
-                Log in
-              </Link>
-            </>
-          ) : (
-            <>
-              <span className="nav-bar__user">{user?.username}</span>
-              <button
-                className="nav-bar__link"
-                type="button"
-                onClick={logout}
-              >
-                Log out
-              </button>
-            </>
-          )}
-        </div>
-      </nav>
+      <AppNav />
 
       <div className="constrained-content">
         <section className="history-shell">
@@ -159,7 +129,7 @@ function HistoryPage() {
           {!loading && !error && games.length === 0 && (
             <div className="history-shell__empty">
               <p className="history-shell__placeholder">No games yet.</p>
-              <Link to="/" className="chess-button primary">
+              <Link to="/game" className="chess-button primary">
                 Play a Game
               </Link>
             </div>

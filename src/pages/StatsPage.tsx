@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { useAuth } from "../contexts/useAuth";
 import {
   getStatsSummary,
   type StatsSummaryResponse,
   type StatsWindowDays,
 } from "../utils/api";
+import AppNav from "../components/AppNav";
 import "../App.css";
 
 const WINDOW_OPTIONS: Array<{ label: string; value: StatsWindowDays }> = [
@@ -67,7 +67,6 @@ function isEmptySummary(data: StatsSummaryResponse): boolean {
 }
 
 function StatsPage() {
-  const { user, logout } = useAuth();
   const [windowDays, setWindowDays] = useState<StatsWindowDays>(30);
   const [summary, setSummary] = useState<StatsSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -103,36 +102,7 @@ function StatsPage() {
 
   return (
     <main className="app-shell">
-      <nav className="nav-bar">
-        <Link to="/" className="nav-bar__brand">
-          Ghost Replay
-        </Link>
-        <div className="nav-bar__actions">
-          <Link to="/history" className="nav-bar__link">History</Link>
-          <Link to="/stats" className="nav-bar__link">Stats</Link>
-          {user?.isAnonymous ? (
-            <>
-              <Link to="/register" className="chess-button primary nav-bar__btn">
-                Register
-              </Link>
-              <Link to="/login" className="nav-bar__link">
-                Log in
-              </Link>
-            </>
-          ) : (
-            <>
-              <span className="nav-bar__user">{user?.username}</span>
-              <button
-                className="nav-bar__link"
-                type="button"
-                onClick={logout}
-              >
-                Log out
-              </button>
-            </>
-          )}
-        </div>
-      </nav>
+      <AppNav />
 
       <div className="constrained-content">
         <section className="stats-shell">
