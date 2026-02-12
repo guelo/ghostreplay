@@ -743,6 +743,19 @@
   text-align: center;
 }
 
+.history-shell__empty-icon {
+  font-size: 2.5rem;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+.history-shell__empty-title {
+  margin: 0;
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
 .history-shell__back {
   align-self: flex-start;
 }

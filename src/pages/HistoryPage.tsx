@@ -65,6 +65,10 @@ function HistoryPage() {
           setAnalysisLoading(true);
           setAnalysis(null);
           setSelectedId(data[0].session_id);
+        } else {
+          setSelectedId(null);
+          setAnalysis(null);
+          setAnalysisLoading(false);
         }
       })
       .catch((err) => {
@@ -128,9 +132,15 @@ function HistoryPage() {
 
           {!loading && !error && games.length === 0 && (
             <div className="history-shell__empty">
-              <p className="history-shell__placeholder">No games yet.</p>
+              <span className="history-shell__empty-icon" aria-hidden="true">
+                {"\u2654"}
+              </span>
+              <p className="history-shell__empty-title">No games played yet</p>
+              <p className="history-shell__placeholder">
+                Play your first game to start building your history!
+              </p>
               <Link to="/game" className="chess-button primary">
-                Play a Game
+                Start New Game
               </Link>
             </div>
           )}
