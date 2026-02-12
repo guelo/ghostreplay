@@ -63,6 +63,22 @@ const formatEvalCp = (cp: number): string => {
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`
 }
 
+const formatEvalValue = (cp: number | null, mate: number | null): string | null => {
+  if (mate !== null) return `M${mate}`
+  if (cp !== null) return formatEvalCp(cp)
+  return null
+}
+
+const evalTextClass = (cp: number | null, mate: number | null): string =>
+  (cp !== null && cp < 0) || (mate !== null && mate < 0)
+    ? 'analysis-board__eval-text--negative'
+    : 'analysis-board__eval-text--positive'
+
+const formatEvalDelta = (delta: number | null): string | null => {
+  if (delta === null) return null
+  return `${delta >= 0 ? '+' : ''}${delta} cp`
+}
+
 const toWhitePerspectiveMate = (
   moverPerspectiveMate: number | null,
   moveIndex: number | null | undefined,
@@ -188,6 +204,26 @@ const AnalysisBoard = ({
     return toWhitePerspectiveMate(currentMove?.eval_mate ?? null, effectiveIndex)
   }, [isInWhatIf, effectiveIndex, currentMove])
 
+  const currentBestEvalCp = useMemo(() => {
+    if (isInWhatIf || effectiveIndex < 0) return null
+    return toWhitePerspective(currentMove?.best_move_eval_cp ?? null, effectiveIndex)
+  }, [isInWhatIf, effectiveIndex, currentMove])
+
+  const playedEvalText = useMemo(
+    () => formatEvalValue(currentEvalCp, currentEvalMate),
+    [currentEvalCp, currentEvalMate],
+  )
+
+  const bestEvalText = useMemo(
+    () => formatEvalValue(currentBestEvalCp, null),
+    [currentBestEvalCp],
+  )
+
+  const evalDeltaText = useMemo(
+    () => formatEvalDelta(currentMove?.eval_delta ?? null),
+    [currentMove],
+  )
+
   // Handle MoveList navigation
   const handleNavigate = useCallback(
     (index: number | null) => {
@@ -309,11 +345,46 @@ const AnalysisBoard = ({
       {currentMove && !isInWhatIf && (
         <div className="analysis-board__position-info">
           <div className="analysis-board__position-info-row">
-            {(currentEvalCp !== null || currentEvalMate !== null) && (
-              <span
-                className={`analysis-board__eval-text ${(currentEvalCp !== null && currentEvalCp < 0) || (currentEvalMate !== null && currentEvalMate < 0) ? 'analysis-board__eval-text--negative' : 'analysis-board__eval-text--positive'}`}
-              >
-                {currentEvalMate !== null ? `M${currentEvalMate}` : formatEvalCp(currentEvalCp!)}
+            <span className="analysis-board__played-label">
+              Played:{' '}
+              <strong className="analysis-board__played-move">
+                {currentMove.move_san}
+              </strong>
+              {playedEvalText && (
+                <span
+                  className={`analysis-board__eval-text ${evalTextClass(currentEvalCp, currentEvalMate)}`}
+                >
+                  {' '}
+                  ({playedEvalText})
+                </span>
+              )}
+            </span>
+          </div>
+          {currentMove.best_move_san && (
+            <div className="analysis-board__position-info-row">
+              <span className="analysis-board__best-label">
+                Best:{' '}
+                <strong className="analysis-board__best-move">
+                  {currentMove.best_move_san}
+                </strong>
+                {bestEvalText && (
+                  <span
+                    className={`analysis-board__eval-text ${evalTextClass(currentBestEvalCp, null)}`}
+                  >
+                    {' '}
+                    ({bestEvalText})
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+          <div className="analysis-board__position-info-row">
+            {evalDeltaText && (
+              <span className="analysis-board__delta-label">
+                Delta:{' '}
+                <strong className="analysis-board__delta-value">
+                  {evalDeltaText}
+                </strong>
               </span>
             )}
             {currentMove.classification && (
@@ -324,23 +395,6 @@ const AnalysisBoard = ({
               </span>
             )}
           </div>
-          {currentMove.best_move_san &&
-            currentMove.best_move_san !== currentMove.move_san && (
-              <div className="analysis-board__position-info-row">
-                <span className="analysis-board__played-label">
-                  Played:{' '}
-                  <strong className="analysis-board__played-move">
-                    {currentMove.move_san}
-                  </strong>
-                </span>
-                <span className="analysis-board__best-label">
-                  Best:{' '}
-                  <strong className="analysis-board__best-move">
-                    {currentMove.best_move_san}
-                  </strong>
-                </span>
-              </div>
-            )}
         </div>
       )}
     </div>

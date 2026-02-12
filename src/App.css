@@ -1073,6 +1073,7 @@
 .analysis-board__position-info-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.75rem;
 }
 
@@ -1116,6 +1117,16 @@
 .analysis-board__classification--best {
   color: var(--eval-excellent);
   background: var(--eval-excellent-bg);
+}
+
+.analysis-board__played-label,
+.analysis-board__best-label,
+.analysis-board__delta-label {
+  font-weight: 500;
+}
+
+.analysis-board__delta-value {
+  color: var(--text-primary);
 }
 
 .analysis-board__played-move { color: var(--error-light); }
