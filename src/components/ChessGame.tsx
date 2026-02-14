@@ -58,6 +58,7 @@ type BoardOrientation = "white" | "black";
 type MoveRecord = {
   san: string;
   fen: string; // Position after this move
+  uci: string;
 };
 
 const formatScore = (score?: { type: "cp" | "mate"; value: number }) => {
@@ -124,6 +125,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [playerColorChoice, setPlayerColorChoice] = useState<
     BoardOrientation | "random"
   >("random");
+  const [engineElo, setEngineElo] = useState(800);
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [viewIndex, setViewIndex] = useState<number | null>(null); // null = viewing live position
   const {
@@ -757,15 +759,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       const newFen = chess.fen();
       const moveIndex = moveCountRef.current++;
-      const nextMove = { san: appliedMove.san, fen: newFen };
+      const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
+      const nextMove = { san: appliedMove.san, fen: newFen, uci: uciMove };
       const nextMoveHistory = [...moveHistoryRef.current, nextMove];
       moveHistoryRef.current = nextMoveHistory;
       setFen(newFen);
       setMoveHistory(nextMoveHistory);
       setViewIndex(null); // Ensure we're viewing the live position
       setEngineMessage(null);
-
-      const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
       analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
 
       // Check if the engine's move ended the game
@@ -793,7 +794,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
         const newFen = chess.fen();
         const moveIndex = moveCountRef.current++;
-        const nextMove = { san: appliedMove.san, fen: newFen };
+        const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
+        const nextMove = { san: appliedMove.san, fen: newFen, uci: uciMove };
         const nextMoveHistory = [...moveHistoryRef.current, nextMove];
         moveHistoryRef.current = nextMoveHistory;
         setFen(newFen);
@@ -810,7 +812,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           setBlunderReviewId(null);
         }
 
-        const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
         analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
 
         if (chess.isGameOver()) {
@@ -873,7 +874,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
             const newFen = chess.fen();
             const moveIndex = moveCountRef.current++;
-            const nextMove = { san: move.san, fen: newFen };
+            const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
+            const nextMove = { san: move.san, fen: newFen, uci: uciMove };
             const nextMoveHistory = [...moveHistoryRef.current, nextMove];
             moveHistoryRef.current = nextMoveHistory;
             setFen(newFen);
@@ -889,7 +891,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               setBlunderReviewId(null);
             }
 
-            const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
             pendingAnalysisContextRef.current = {
               fen: fenBeforeMove,
               pgn: chess.pgn(),
@@ -1215,7 +1216,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
     const newFen = chess.fen();
     const moveIndex = moveCountRef.current++;
-    const nextMove = { san: move.san, fen: newFen };
+    const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
+    const nextMove = { san: move.san, fen: newFen, uci: uciMove };
     const nextMoveHistory = [...moveHistoryRef.current, nextMove];
     moveHistoryRef.current = nextMoveHistory;
     setFen(newFen);
@@ -1231,7 +1233,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setBlunderReviewId(null);
     }
 
-    const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
     // Store context for blunder detection before engine moves
     pendingAnalysisContextRef.current = {
       fen: fenBeforeMove,
@@ -1283,7 +1284,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setPlayerColor(resolvedPlayerColor);
       setBoardOrientation(resolvedPlayerColor);
 
-      const response = await startGame(1500, resolvedPlayerColor);
+      const response = await startGame(engineElo, resolvedPlayerColor);
       setSessionId(response.session_id);
       setIsGameActive(true);
       setIsStartingGame(false);
@@ -1396,6 +1397,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleShowStartOverlay = () => {
     setPlayerColorChoice("random");
+    setEngineElo(800);
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
   };
@@ -1572,7 +1574,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   >
                     ×
                   </button>
-                  <p className="chess-start-title">Choose your side</p>
+                  <p className="chess-start-title">Difficulty</p>
+                  <div className="chess-elo-selector">
+                    <input
+                      type="range"
+                      min={100}
+                      max={2000}
+                      step={50}
+                      value={engineElo}
+                      onChange={(e) => setEngineElo(Number(e.target.value))}
+                      disabled={isStartingGame}
+                      className="chess-elo-slider"
+                    />
+                    <span className="chess-elo-label">{engineElo}</span>
+                  </div>
+                  <p className="chess-start-title">Side</p>
                   <div className="chess-start-options">
                     <button
                       className={`chess-button toggle ${playerColorChoice === "white" ? "active" : ""}`}
