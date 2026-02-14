@@ -13,6 +13,21 @@ from sqlalchemy import text
 from app.fen import fen_hash
 
 
+def test_ghost_move_route_removed(client, auth_headers, create_game_session):
+    """Legacy ghost-move route is removed after unified contract migration."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    response = client.get(
+        "/api/game/ghost-move",
+        params={
+            "session_id": session_id,
+            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 404
+
+
 def test_next_opponent_move_validates_session_exists(client, auth_headers):
     """Endpoint returns 404 when session does not exist."""
     fake_session_id = uuid.uuid4()
@@ -100,18 +115,20 @@ def test_next_opponent_move_happy_path_returns_valid_contract(
     - Response includes decision_source
     - Response includes target_blunder_id (null for engine mode)
     """
-    # Create white session
-    session_id = create_game_session(user_id=123, player_color="white")
+    from app.opponent_move_controller import ControllerMove
 
-    # FEN shows black to move (opponent's turn)
-    response = client.post(
-        "/api/game/next-opponent-move",
-        json={
-            "session_id": session_id,
-            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-        },
-        headers=auth_headers(user_id=123),
-    )
+    session_id = create_game_session(user_id=123, player_color="white")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            },
+            headers=auth_headers(user_id=123),
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -137,17 +154,20 @@ def test_next_opponent_move_returns_legal_move(
     client, auth_headers, create_game_session
 ):
     """Endpoint returns a legal chess move in valid notation."""
-    session_id = create_game_session(user_id=123, player_color="white")
+    from app.opponent_move_controller import ControllerMove
 
-    # Starting position, black to move
-    response = client.post(
-        "/api/game/next-opponent-move",
-        json={
-            "session_id": session_id,
-            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-        },
-        headers=auth_headers(user_id=123),
-    )
+    session_id = create_game_session(user_id=123, player_color="white")
+    fake_move = ControllerMove(uci="g8f6", san="Nf6", method="maia3_api")
+
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            },
+            headers=auth_headers(user_id=123),
+        )
 
     assert response.status_code == 200
     data = response.json()
@@ -155,26 +175,29 @@ def test_next_opponent_move_returns_legal_move(
     # Move should be in valid format
     assert isinstance(data["move"]["uci"], str)
     assert isinstance(data["move"]["san"], str)
-    assert len(data["move"]["uci"]) >= 4  # e.g., "e7e5"
-    assert len(data["move"]["san"]) >= 2  # e.g., "e5"
+    assert len(data["move"]["uci"]) >= 4  # e.g., "g8f6"
+    assert len(data["move"]["san"]) >= 2  # e.g., "Nf6"
 
 
 def test_next_opponent_move_black_player_validates_turn(
     client, auth_headers, create_game_session
 ):
     """Endpoint validates opponent turn correctly when player is black."""
-    # Create black session
+    from app.opponent_move_controller import ControllerMove
+
     session_id = create_game_session(user_id=123, player_color="black")
+    fake_move = ControllerMove(uci="e2e4", san="e4", method="maia3_api")
 
     # FEN shows white to move (opponent's turn for black player)
-    response = client.post(
-        "/api/game/next-opponent-move",
-        json={
-            "session_id": session_id,
-            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1",
-        },
-        headers=auth_headers(user_id=123),
-    )
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1",
+            },
+            headers=auth_headers(user_id=123),
+        )
 
     # Should succeed (opponent's turn)
     assert response.status_code == 200
@@ -277,7 +300,7 @@ def test_next_opponent_move_engine_branch_happy_path(
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia_argmax")
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
 
     with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
         response = client.post(
@@ -296,3 +319,30 @@ def test_next_opponent_move_engine_branch_happy_path(
     assert data["target_blunder_id"] is None
     assert data["move"]["uci"] == "e7e5"
     assert data["move"]["san"] == "e5"
+
+
+def test_next_opponent_move_passes_moves_to_controller(
+    client, auth_headers, create_game_session
+):
+    """Engine branch forwards the moves list from the request to choose_move()."""
+    from app.opponent_move_controller import ControllerMove
+
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    fake_move = ControllerMove(uci="d7d5", san="d5", method="maia3_api")
+
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move) as mock_choose:
+        client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "moves": ["e2e4"],
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+
+        mock_choose.assert_called_once()
+        call_kwargs = mock_choose.call_args
+        assert call_kwargs.kwargs["moves"] == ["e2e4"]

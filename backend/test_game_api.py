@@ -360,11 +360,19 @@ def test_end_game_missing_pgn(client, auth_headers):
     assert response.status_code == 422  # Validation error
 
 
-# === Ghost Move Endpoint Tests ===
+# === Opponent Move Endpoint Steering Tests ===
 
 
-def test_ghost_move_returns_opponent_move_to_blunder(client, auth_headers, create_game_session):
-    """Test ghost-move returns opponent's move leading to a blunder position."""
+def _post_next_opponent_move(client, auth_headers, session_id, fen, user_id: int = 123):
+    return client.post(
+        "/api/game/next-opponent-move",
+        json={"session_id": str(session_id), "fen": fen},
+        headers=auth_headers(user_id=user_id),
+    )
+
+
+def test_next_opponent_move_returns_opponent_move_to_blunder(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns opponent's move leading to a blunder position."""
     user_id = 123
 
     # First, record a blunder via /api/blunder
@@ -389,27 +397,27 @@ def test_ghost_move_returns_opponent_move_to_blunder(client, auth_headers, creat
     )
     assert blunder_response.status_code == 201
 
-    # Now start a NEW game and query ghost-move
+    # Now start a NEW game and query next-opponent-move
     new_session_id = create_game_session(user_id=user_id, player_color="white")
 
     # After 1.e4 (black to move), ghost should suggest e5 to reach blunder position
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": new_session_id, "fen": fen_after_e4},
-        headers=auth_headers(user_id=user_id),
+    response = _post_next_opponent_move(
+        client, auth_headers, new_session_id, fen_after_e4, user_id=user_id
     )
 
     assert response.status_code == 200
     data = response.json()
     assert data["mode"] == "ghost"
-    assert data["move"] == "e5"
+    assert data["move"]["san"] == "e5"
+    assert data["move"]["uci"] == "e7e5"
     assert data["target_blunder_id"] is not None
+    assert data["decision_source"] == "ghost_path"
 
 
-def test_ghost_move_returns_move_to_manual_library_target(client, auth_headers, create_game_session):
-    """Manual /api/blunder/manual targets should be reachable by ghost-move traversal."""
+def test_next_opponent_move_returns_move_to_manual_library_target(client, auth_headers, create_game_session):
+    """Manual /api/blunder/manual targets should be reachable by next-opponent-move traversal."""
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
@@ -433,40 +441,46 @@ def test_ghost_move_returns_move_to_manual_library_target(client, auth_headers, 
     new_session_id = create_game_session(user_id=user_id, player_color="white")
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": new_session_id, "fen": fen_after_e4},
-        headers=auth_headers(user_id=user_id),
+    response = _post_next_opponent_move(
+        client, auth_headers, new_session_id, fen_after_e4, user_id=user_id
     )
 
     assert response.status_code == 200
     data = response.json()
     assert data["mode"] == "ghost"
-    assert data["move"] == "e5"
+    assert data["move"]["san"] == "e5"
+    assert data["move"]["uci"] == "e7e5"
     assert data["target_blunder_id"] is not None
+    assert data["decision_source"] == "ghost_path"
 
 
-def test_ghost_move_no_blunder_in_path(client, auth_headers, create_game_session):
-    """Test ghost-move returns null when no blunder exists in the game graph."""
+def test_next_opponent_move_no_blunder_in_path(client, auth_headers, create_game_session):
+    """Test next-opponent-move falls back to engine when no blunder exists in graph."""
+    from unittest.mock import patch
+    from app.opponent_move_controller import ControllerMove
+
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    # Query from starting position - no blunders recorded
-    starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": starting_fen},
-        headers=auth_headers(user_id=user_id),
-    )
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = _post_next_opponent_move(
+            client, auth_headers, session_id, fen_after_e4, user_id=user_id
+        )
 
     assert response.status_code == 200
-    assert response.json()["mode"] == "engine"
-    assert response.json()["move"] is None
+    data = response.json()
+    assert data["mode"] == "engine"
+    assert data["move"]["san"]
+    assert data["move"]["uci"]
+    assert data["target_blunder_id"] is None
+    assert data["decision_source"] == "backend_engine"
 
 
-def test_ghost_move_users_turn_returns_null(client, auth_headers, create_game_session):
-    """Test ghost-move returns null when it's the user's turn."""
+def test_next_opponent_move_users_turn_returns_error(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns 400 when it's the user's turn."""
     user_id = 123
 
     # Record a blunder
@@ -491,20 +505,16 @@ def test_ghost_move_users_turn_returns_null(client, auth_headers, create_game_se
     # Start new game and query at the blunder position (white to move)
     new_session_id = create_game_session(user_id=user_id, player_color="white")
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": new_session_id, "fen": fen_before_blunder},
-        headers=auth_headers(user_id=user_id),
+    response = _post_next_opponent_move(
+        client, auth_headers, new_session_id, fen_before_blunder, user_id=user_id
     )
 
-    assert response.status_code == 200
-    # It's white's turn, ghost doesn't suggest - user decides
-    assert response.json()["mode"] == "engine"
-    assert response.json()["move"] is None
+    assert response.status_code == 400
+    assert "player's turn" in response.json()["detail"].lower()
 
 
-def test_ghost_move_black_player(client, auth_headers, create_game_session):
-    """Test ghost-move works for black player."""
+def test_next_opponent_move_black_player(client, auth_headers, create_game_session):
+    """Test next-opponent-move works for black player."""
     user_id = 123
 
     # Record a blunder as black
@@ -535,57 +545,54 @@ def test_ghost_move_black_player(client, auth_headers, create_game_session):
     # After 1.e4 e5 (white to move), ghost should suggest Nf3 to reach blunder position
     fen_after_e5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": new_session_id, "fen": fen_after_e5},
-        headers=auth_headers(user_id=user_id),
+    response = _post_next_opponent_move(
+        client, auth_headers, new_session_id, fen_after_e5, user_id=user_id
     )
 
     assert response.status_code == 200
-    assert response.json()["mode"] == "ghost"
-    assert response.json()["move"] == "Nf3"
-    assert response.json()["target_blunder_id"] is not None
+    data = response.json()
+    assert data["mode"] == "ghost"
+    assert data["move"]["san"] == "Nf3"
+    assert data["move"]["uci"] == "g1f3"
+    assert data["target_blunder_id"] is not None
+    assert data["decision_source"] == "ghost_path"
 
 
-def test_ghost_move_session_not_found(client, auth_headers):
-    """Test ghost-move returns 404 for non-existent session."""
+def test_next_opponent_move_session_not_found(client, auth_headers):
+    """Test next-opponent-move returns 404 for non-existent session."""
     fake_uuid = "00000000-0000-0000-0000-000000000000"
     starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": fake_uuid, "fen": starting_fen},
-        headers=auth_headers(),
+    response = _post_next_opponent_move(
+        client, auth_headers, fake_uuid, starting_fen
     )
 
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
 
 
-def test_ghost_move_wrong_user(client, auth_headers, create_game_session):
-    """Test ghost-move returns 403 when user doesn't own the session."""
+def test_next_opponent_move_wrong_user(client, auth_headers, create_game_session):
+    """Test next-opponent-move returns 403 when user doesn't own the session."""
     # User 123 starts a game
     session_id = create_game_session(user_id=123, player_color="white")
     starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-    # User 456 tries to query ghost-move
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": starting_fen},
-        headers=auth_headers(user_id=456),
+    # User 456 tries to query next-opponent-move
+    response = _post_next_opponent_move(
+        client, auth_headers, session_id, starting_fen, user_id=456
     )
 
     assert response.status_code == 403
     assert "not authorized" in response.json()["detail"].lower()
 
 
-def test_ghost_move_missing_auth(client):
-    """Test ghost-move returns 401 when auth is missing."""
+def test_next_opponent_move_missing_auth(client):
+    """Test next-opponent-move returns 401 when auth is missing."""
     starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={
+    response = client.post(
+        "/api/game/next-opponent-move",
+        json={
             "session_id": "00000000-0000-0000-0000-000000000000",
             "fen": starting_fen,
         },
@@ -594,8 +601,8 @@ def test_ghost_move_missing_auth(client):
     assert response.status_code == 401
 
 
-def test_ghost_move_finds_blunder_multiple_moves_downstream(client, auth_headers, create_game_session):
-    """Test ghost-move finds a blunder 3 moves downstream via recursive CTE."""
+def test_next_opponent_move_finds_blunder_multiple_moves_downstream(client, auth_headers, create_game_session):
+    """Test next-opponent-move finds a blunder 3 moves downstream via recursive CTE."""
     user_id = 123
 
     # Record a blunder at move 4 (white's second move)
@@ -621,24 +628,24 @@ def test_ghost_move_finds_blunder_multiple_moves_downstream(client, auth_headers
     )
     assert blunder_response.status_code == 201
 
-    # Now start a NEW game and query ghost-move from earlier in the game
+    # Now start a NEW game and query next-opponent-move from earlier in the game
     new_session_id = create_game_session(user_id=user_id, player_color="white")
 
     # After 1.e4 (black to move) - blunder is 3 half-moves away
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": new_session_id, "fen": fen_after_e4},
-        headers=auth_headers(user_id=user_id),
+    response = _post_next_opponent_move(
+        client, auth_headers, new_session_id, fen_after_e4, user_id=user_id
     )
 
     assert response.status_code == 200
     data = response.json()
     # Ghost should suggest "e5" - the first move in the path to the blunder position
     assert data["mode"] == "ghost"
-    assert data["move"] == "e5"
+    assert data["move"]["san"] == "e5"
+    assert data["move"]["uci"] == "e7e5"
     assert data["target_blunder_id"] is not None
+    assert data["decision_source"] == "ghost_path"
 
 
 def _create_position_chain(db_session, user_id: int, length: int):
@@ -682,8 +689,9 @@ def _create_position_chain(db_session, user_id: int, length: int):
     return positions
 
 
-def test_ghost_move_finds_blunder_at_max_depth(client, auth_headers, create_game_session, db_session):
-    """Test ghost-move finds a blunder exactly at depth 5 (the steering radius)."""
+def test_find_ghost_move_finds_blunder_at_max_depth(db_session):
+    """find_ghost_move finds a blunder exactly at depth 5 (the steering radius)."""
+    from app.api.game import find_ghost_move
     from app.models import Blunder
 
     user_id = 123
@@ -704,26 +712,21 @@ def test_ghost_move_finds_blunder_at_max_depth(client, auth_headers, create_game
     db_session.add(blunder)
     db_session.commit()
 
-    # Create a game session as white
-    session_id = create_game_session(user_id=user_id, player_color="white")
-
-    # Query from position 1 (black to move = opponent's turn)
-    # Blunder is at position 6, exactly 5 moves away
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": positions[1].fen_raw},
-        headers=auth_headers(user_id=user_id),
+    move_san, target_blunder_id = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=positions[1].fen_raw,
+        player_color="white",
     )
 
-    assert response.status_code == 200
     # Should find the blunder at exactly depth 5
-    assert response.json()["mode"] == "ghost"
-    assert response.json()["move"] == "m1"
-    assert response.json()["target_blunder_id"] is not None
+    assert move_san == "m1"
+    assert target_blunder_id is not None
 
 
-def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_session, db_session):
-    """Test ghost-move does not find blunders beyond depth 5."""
+def test_find_ghost_move_respects_depth_limit(db_session):
+    """find_ghost_move does not find blunders beyond depth 5."""
+    from app.api.game import find_ghost_move
     from app.models import Blunder
 
     user_id = 123
@@ -744,29 +747,23 @@ def test_ghost_move_respects_depth_limit(client, auth_headers, create_game_sessi
     db_session.add(blunder)
     db_session.commit()
 
-    # Create a game session as white
-    session_id = create_game_session(user_id=user_id, player_color="white")
-
-    # Query from position 1 (black to move = opponent's turn for white player)
-    # Blunder is at position 8, which is 7 moves away (beyond depth 5)
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": positions[1].fen_raw},
-        headers=auth_headers(user_id=user_id),
+    move_san, target_blunder_id = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=positions[1].fen_raw,
+        player_color="white",
     )
 
-    assert response.status_code == 200
     # Should NOT find the blunder at depth 7 (positions 1->2->...->8)
-    assert response.json()["mode"] == "engine"
-    assert response.json()["move"] is None
+    assert move_san is None
+    assert target_blunder_id is None
 
 
-def test_ghost_move_prefers_higher_severity_when_priority_equal(
-    client, auth_headers, create_game_session, db_session
-):
+def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session):
     """With equal priority/distance, higher eval_loss_cp should win."""
     from datetime import datetime, timedelta, timezone
 
+    from app.api.game import find_ghost_move
     from app.fen import fen_hash
     from app.models import Blunder, Move, Position
 
@@ -823,24 +820,22 @@ def test_ghost_move_prefers_higher_severity_when_priority_equal(
     ])
     db_session.commit()
 
-    session_id = create_game_session(user_id=user_id, player_color="white")
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": fen_start},
-        headers=auth_headers(user_id=user_id),
+    move_san, target_blunder_id = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_start,
+        player_color="white",
     )
 
-    assert response.status_code == 200
-    assert response.json()["mode"] == "ghost"
-    assert response.json()["move"] == "mHigh"
+    assert move_san == "mHigh"
+    assert target_blunder_id is not None
 
 
-def test_ghost_move_prefers_more_overdue_when_severity_equal(
-    client, auth_headers, create_game_session, db_session
-):
+def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
     """With equal severity/distance, higher SRS priority should win."""
     from datetime import datetime, timedelta, timezone
 
+    from app.api.game import find_ghost_move
     from app.fen import fen_hash
     from app.models import Blunder, Move, Position
 
@@ -898,20 +893,20 @@ def test_ghost_move_prefers_more_overdue_when_severity_equal(
     ])
     db_session.commit()
 
-    session_id = create_game_session(user_id=user_id, player_color="white")
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": fen_start},
-        headers=auth_headers(user_id=user_id),
+    move_san, target_blunder_id = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_start,
+        player_color="white",
     )
 
-    assert response.status_code == 200
-    assert response.json()["mode"] == "ghost"
-    assert response.json()["move"] == "mOverdue"
+    assert move_san == "mOverdue"
+    assert target_blunder_id is not None
 
 
-def test_ghost_move_handles_cycles(client, auth_headers, create_game_session, db_session):
-    """Test ghost-move handles cycles in the position graph without infinite loops."""
+def test_find_ghost_move_handles_cycles(db_session):
+    """find_ghost_move handles cycles in the position graph without infinite loops."""
+    from app.api.game import find_ghost_move
     from app.models import Blunder, Move, Position
     from app.fen import fen_hash
 
@@ -973,22 +968,16 @@ def test_ghost_move_handles_cycles(client, auth_headers, create_game_session, db
     db_session.add(blunder)
     db_session.commit()
 
-    # Create game session as white
-    session_id = create_game_session(user_id=user_id, player_color="white")
-
-    # Query from position A (black to move = opponent's turn)
-    # Should find path A -> B -> D and return "a2b"
-    response = client.get(
-        "/api/game/ghost-move",
-        params={"session_id": session_id, "fen": fen_a},
-        headers=auth_headers(user_id=user_id),
+    move_san, target_blunder_id = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_a,
+        player_color="white",
     )
 
-    assert response.status_code == 200
     # Should find the blunder despite the cycle, and not hang
-    assert response.json()["mode"] == "ghost"
-    assert response.json()["move"] == "a2b"
-    assert response.json()["target_blunder_id"] is not None
+    assert move_san == "a2b"
+    assert target_blunder_id is not None
 
 
 # === Next Opponent Move Endpoint Tests ===
@@ -1042,18 +1031,21 @@ def test_next_opponent_move_ghost_path(client, auth_headers, create_game_session
 
 def test_next_opponent_move_engine_fallback(client, auth_headers, create_game_session):
     """Test next-opponent-move returns engine move when no ghost path exists."""
+    from unittest.mock import patch
+    from app.opponent_move_controller import ControllerMove
+
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
 
-    # Query from position where it's black's turn (opponent's turn) - no blunders recorded
-    # After 1.e4 (black to move)
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 
-    response = client.post(
-        "/api/game/next-opponent-move",
-        json={"session_id": str(session_id), "fen": fen_after_e4},
-        headers=auth_headers(user_id=user_id),
-    )
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={"session_id": str(session_id), "fen": fen_after_e4},
+            headers=auth_headers(user_id=user_id),
+        )
 
     assert response.status_code == 200
     data = response.json()
