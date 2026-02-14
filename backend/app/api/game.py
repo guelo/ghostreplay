@@ -401,10 +401,9 @@ def get_next_opponent_move(
                 f"Failed to parse ghost SAN move '{move_san}' for FEN '{request.fen}': {e}"
             )
 
-    # Step 2: Backend engine fallback
-    # Use OpponentMoveController (Maia-2 + optional Stockfish calibration)
+    # Step 2: Backend engine fallback — remote Maia3 API
     try:
-        from app.maia_engine import MaiaEngineUnavailableError
+        from app.maia3_client import Maia3Error
         from app.opponent_move_controller import choose_move
 
         controller_move = choose_move(
@@ -423,12 +422,10 @@ def get_next_opponent_move(
             decision_source=DecisionSource.BACKEND_ENGINE,
         )
 
-    except MaiaEngineUnavailableError as e:
-        # Model cannot be loaded or initialized - return 503 Service Unavailable
+    except Maia3Error as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Maia engine unavailable: {e}",
+            detail=f"Maia3 API unavailable: {e}",
         )
     except ValueError as e:
-        # Invalid FEN or Elo range
         raise HTTPException(status_code=400, detail=f"Invalid input: {e}")
