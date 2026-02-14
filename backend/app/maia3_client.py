@@ -48,6 +48,7 @@ def get_move(moves: list[str], target_elo: int) -> Maia3Move:
         Maia3Error: On network failure, non-200 response, or bad JSON.
     """
     maia_name = elo_to_maia_name(target_elo)
+    logger.info("Maia3 request: model=%s elo=%d moves=%d", maia_name, target_elo, len(moves))
 
     try:
         resp = requests.post(
@@ -75,9 +76,11 @@ def get_move(moves: list[str], target_elo: int) -> Maia3Move:
 
     try:
         data = resp.json()
-        return Maia3Move(
+        move = Maia3Move(
             uci=data["top_move"],
             move_delay=data.get("move_delay", 0.0),
         )
+        logger.info("Maia3 response: move=%s delay=%.2f (HTTP %d, %.0fms)", move.uci, move.move_delay, resp.status_code, resp.elapsed.total_seconds() * 1000)
+        return move
     except (ValueError, KeyError, TypeError) as exc:
         raise Maia3Error(f"Maia3 response parse error: {exc}") from exc
