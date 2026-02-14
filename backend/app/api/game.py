@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -206,27 +206,6 @@ class GameEndResponse(BaseModel):
     ended_at: datetime
 
 
-class GhostMoveMode(str, Enum):
-    """Ghost move response mode."""
-    GHOST = "ghost"
-    ENGINE = "engine"
-
-
-class GhostMoveResponse(BaseModel):
-    mode: GhostMoveMode = Field(
-        ...,
-        description="ghost = steering toward blunder, engine = use local Stockfish",
-    )
-    move: str | None = Field(
-        None,
-        description="Next move SAN when mode=ghost, null when mode=engine",
-    )
-    target_blunder_id: int | None = Field(
-        None,
-        description="ID of the blunder being targeted (for debugging/display)",
-    )
-
-
 class MoveDetails(BaseModel):
     """Move representation with both UCI and SAN formats."""
     uci: str = Field(..., description="Move in UCI notation (e.g., 'e2e4')")
@@ -249,6 +228,7 @@ class NextOpponentMoveRequest(BaseModel):
     """Request for next opponent move."""
     session_id: uuid.UUID = Field(..., description="Game session ID")
     fen: str = Field(..., description="Current board position FEN")
+    moves: list[str] = Field(default_factory=list, description="UCI move history from game start")
 
 
 class NextOpponentMoveResponse(BaseModel):
@@ -348,52 +328,6 @@ def end_game(
     )
 
 
-@router.get("/ghost-move", response_model=GhostMoveResponse)
-def get_ghost_move(
-    session_id: uuid.UUID = Query(..., description="Game session ID"),
-    fen: str = Query(..., description="Current board position FEN"),
-    db: Session = Depends(get_db),
-    user: TokenPayload = Depends(get_current_user),
-) -> GhostMoveResponse:
-    """
-    Look up a move that leads toward a position where the user previously blundered.
-
-    Scoped to the session's player color. Returns null if no such move exists.
-    """
-    # Fetch and validate session
-    session = db.query(GameSession).filter(GameSession.id == session_id).first()
-
-    if not session:
-        raise HTTPException(status_code=404, detail="Game session not found")
-
-    if session.user_id != user.user_id:
-        raise HTTPException(status_code=403, detail="Not authorized to access this game")
-
-    # Ghost-move only works when it's the opponent's turn
-    # (ghost suggests the opponent's move to steer towards a blunder position)
-    position_color = active_color(fen)
-    if position_color == session.player_color:
-        # It's the user's turn, ghost doesn't suggest user moves
-        return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
-
-    # Use shared ghost path traversal logic
-    move_san, target_blunder_id = find_ghost_move(
-        db=db,
-        user_id=user.user_id,
-        fen=fen,
-        player_color=session.player_color,
-    )
-
-    if move_san is None:
-        return GhostMoveResponse(mode=GhostMoveMode.ENGINE, move=None, target_blunder_id=None)
-
-    return GhostMoveResponse(
-        mode=GhostMoveMode.GHOST,
-        move=move_san,
-        target_blunder_id=target_blunder_id,
-    )
-
-
 @router.post("/next-opponent-move", response_model=NextOpponentMoveResponse)
 def get_next_opponent_move(
     request: NextOpponentMoveRequest,
@@ -476,6 +410,7 @@ def get_next_opponent_move(
         controller_move = choose_move(
             fen=request.fen,
             target_elo=session.engine_elo,
+            moves=request.moves,
         )
 
         return NextOpponentMoveResponse(

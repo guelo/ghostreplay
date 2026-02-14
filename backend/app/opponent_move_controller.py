@@ -39,12 +39,17 @@ class ControllerMove:
     method: str  # "maia_argmax", "maia_sample", or "calibrated"
 
 
-def choose_move(fen: str, target_elo: int) -> ControllerMove:
+def choose_move(fen: str, target_elo: int, moves: list[str] | None = None) -> ControllerMove:
     """
     Select an opponent move for the given position and target ELO.
 
     When VMU_ENABLED is false, falls back to Maia-2 argmax (the
     pre-existing behavior).
+
+    Args:
+        fen: Current board position FEN.
+        target_elo: Target ELO for move selection.
+        moves: UCI move history from game start (used by Maia3 API).
 
     Raises:
         MaiaEngineUnavailableError: If Maia-2 model is unavailable

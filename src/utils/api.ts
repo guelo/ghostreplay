@@ -209,12 +209,6 @@ interface BlunderResponse {
   is_new: boolean
 }
 
-interface GhostMoveResponse {
-  mode: 'ghost' | 'engine'
-  move: string | null
-  target_blunder_id: number | null
-}
-
 interface NextOpponentMoveResponse {
   mode: 'ghost' | 'engine'
   move: { uci: string; san: string }
@@ -419,35 +413,17 @@ export const fetchAnalysis = async (
 }
 
 /**
- * Get ghost move for current position
- * @deprecated Use getNextOpponentMove instead
- */
-export const getGhostMove = async (
-  sessionId: string,
-  fen: string,
-): Promise<GhostMoveResponse> => {
-  const params = new URLSearchParams({
-    session_id: sessionId,
-    fen,
-  })
-
-  return requestJson<GhostMoveResponse>(`${API_BASE_URL}/api/game/ghost-move?${params}`, {
-    method: 'GET',
-    headers: getAuthHeaders(),
-  }, { retries: 2, fallbackMessage: 'Failed to get ghost move' })
-}
-
-/**
  * Get next opponent move via unified backend pipeline (ghost + engine).
  */
 export const getNextOpponentMove = async (
   sessionId: string,
   fen: string,
+  moves: string[] = [],
 ): Promise<NextOpponentMoveResponse> => {
   return requestJson<NextOpponentMoveResponse>(`${API_BASE_URL}/api/game/next-opponent-move`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify({ session_id: sessionId, fen }),
+    body: JSON.stringify({ session_id: sessionId, fen, moves }),
   }, { retries: 2, fallbackMessage: 'Failed to get opponent move' })
 }
 

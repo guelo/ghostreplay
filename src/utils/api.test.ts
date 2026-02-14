@@ -6,7 +6,7 @@ import {
   uploadSessionMoves,
   recordBlunder,
   recordManualBlunder,
-  getGhostMove,
+  getNextOpponentMove,
   reviewSrsBlunder,
   getStatsSummary,
 } from './api'
@@ -386,38 +386,68 @@ describe('recordManualBlunder', () => {
   })
 })
 
-describe('getGhostMove', () => {
+describe('getNextOpponentMove', () => {
   beforeEach(() => {
     fetchMock.mockReset()
     mockStore = {}
   })
 
-  it('sends GET request with query parameters', async () => {
-    mockResponse({ mode: 'ghost', move: 'e4', target_blunder_id: 42 })
+  it('sends POST request with JSON body', async () => {
+    mockResponse({
+      mode: 'ghost',
+      move: { uci: 'e7e5', san: 'e5' },
+      target_blunder_id: 42,
+      decision_source: 'ghost_path',
+    })
 
     const fen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
-    await getGhostMove('sess-1', fen)
+    await getNextOpponentMove('sess-1', fen, ['e2e4', 'e7e5'])
 
     const [url, options] = fetchMock.mock.calls[0]
-    expect(options.method).toBe('GET')
-    expect(url).toContain('session_id=sess-1')
-    expect(url).toContain('/api/game/ghost-move')
+    expect(url).toContain('/api/game/next-opponent-move')
+    expect(options.method).toBe('POST')
+    expect(options.body).toBe(JSON.stringify({ session_id: 'sess-1', fen, moves: ['e2e4', 'e7e5'] }))
+  })
+
+  it('defaults to empty moves array when not provided', async () => {
+    mockResponse({
+      mode: 'engine',
+      move: { uci: 'e7e5', san: 'e5' },
+      target_blunder_id: null,
+      decision_source: 'backend_engine',
+    })
+
+    await getNextOpponentMove('sess-1', 'some-fen')
+
+    const [, options] = fetchMock.mock.calls[0]
+    const body = JSON.parse(options.body)
+    expect(body.moves).toEqual([])
   })
 
   it('returns ghost mode response', async () => {
-    const expected = { mode: 'ghost', move: 'Nf3', target_blunder_id: 7 }
+    const expected = {
+      mode: 'ghost',
+      move: { uci: 'g8f6', san: 'Nf6' },
+      target_blunder_id: 7,
+      decision_source: 'ghost_path',
+    }
     mockResponse(expected)
 
-    const result = await getGhostMove('sess-1', 'some-fen')
+    const result = await getNextOpponentMove('sess-1', 'some-fen')
 
     expect(result).toEqual(expected)
   })
 
   it('returns engine mode response', async () => {
-    const expected = { mode: 'engine', move: null, target_blunder_id: null }
+    const expected = {
+      mode: 'engine',
+      move: { uci: 'e7e5', san: 'e5' },
+      target_blunder_id: null,
+      decision_source: 'backend_engine',
+    }
     mockResponse(expected)
 
-    const result = await getGhostMove('sess-1', 'some-fen')
+    const result = await getNextOpponentMove('sess-1', 'some-fen')
 
     expect(result).toEqual(expected)
   })
@@ -425,27 +455,42 @@ describe('getGhostMove', () => {
   it('throws on non-ok response', async () => {
     mockResponse({}, false, 'Forbidden', 403)
 
-    await expect(getGhostMove('sess-1', 'fen')).rejects.toThrow(
-      'Failed to get ghost move: Forbidden',
+    await expect(getNextOpponentMove('sess-1', 'fen')).rejects.toThrow(
+      'Failed to get opponent move: Forbidden',
     )
   })
 
   it('retries idempotent request on retryable server errors', async () => {
     mockResponse(
       {
-        detail: 'Internal server error',
+        detail: 'Service unavailable',
         error: { code: 'internal_error', message: 'Internal server error', retryable: true },
       },
       false,
-      'Internal Server Error',
-      500,
+      'Service Unavailable',
+      503,
     )
-    mockResponse({ mode: 'ghost', move: 'e4', target_blunder_id: 11 }, true, 'OK', 200)
+    mockResponse(
+      {
+        mode: 'ghost',
+        move: { uci: 'e7e5', san: 'e5' },
+        target_blunder_id: 11,
+        decision_source: 'ghost_path',
+      },
+      true,
+      'OK',
+      200,
+    )
 
-    const result = await getGhostMove('sess-1', 'fen')
+    const result = await getNextOpponentMove('sess-1', 'fen')
 
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(result).toEqual({ mode: 'ghost', move: 'e4', target_blunder_id: 11 })
+    expect(result).toEqual({
+      mode: 'ghost',
+      move: { uci: 'e7e5', san: 'e5' },
+      target_blunder_id: 11,
+      decision_source: 'ghost_path',
+    })
   })
 
   it('throws typed ApiError with normalized fields', async () => {
@@ -465,8 +510,8 @@ describe('getGhostMove', () => {
     )
 
     try {
-      await getGhostMove('sess-1', 'fen')
-      throw new Error('Expected getGhostMove to fail')
+      await getNextOpponentMove('sess-1', 'fen')
+      throw new Error('Expected getNextOpponentMove to fail')
     } catch (error) {
       expect(error).toBeInstanceOf(ApiError)
       const apiError = error as ApiError

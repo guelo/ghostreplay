@@ -16,10 +16,11 @@ export type OpponentMoveResult = {
  */
 export const determineOpponentMove = async (
   sessionId: string,
-  fen: string
+  fen: string,
+  moves: string[] = [],
 ): Promise<OpponentMoveResult | null> => {
   try {
-    const response = await getNextOpponentMove(sessionId, fen);
+    const response = await getNextOpponentMove(sessionId, fen, moves);
     return {
       mode: response.mode,
       move: response.move.san,
@@ -52,14 +53,14 @@ export const useOpponentMove = ({
   const [opponentMode, setOpponentMode] = useState<OpponentMode>("engine");
 
   const applyOpponentMove = useCallback(
-    async (fen: string) => {
+    async (fen: string, moves: string[] = []) => {
       if (!sessionId) {
         setOpponentMode("engine");
         await onApplyLocalFallback();
         return;
       }
 
-      const result = await determineOpponentMove(sessionId, fen);
+      const result = await determineOpponentMove(sessionId, fen, moves);
 
       if (result) {
         setOpponentMode(result.mode);

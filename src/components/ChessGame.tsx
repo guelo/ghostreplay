@@ -903,7 +903,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             if (chess.isGameOver()) {
               void handleGameEnd();
             } else {
-              void applyOpponentMove(newFen);
+              void applyOpponentMove(newFen, moveHistoryRef.current.map(m => m.uci));
             }
             return;
           }
@@ -984,7 +984,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
-    void applyOpponentMove(chess.fen());
+    void applyOpponentMove(chess.fen(), moveHistoryRef.current.map(m => m.uci));
   }, [
     applyOpponentMove,
     chess,
@@ -1246,7 +1246,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (chess.isGameOver()) {
       void handleGameEnd();
     } else {
-      void applyOpponentMove(newFen);
+      void applyOpponentMove(newFen, moveHistoryRef.current.map(m => m.uci));
     }
 
     return true;
