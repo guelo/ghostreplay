@@ -27,6 +27,12 @@ import {
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
 
+/** Maia3 ELO bins – must match backend/app/maia3_client.py:ELO_BINS */
+const MAIA_ELO_BINS = [
+  600, 800, 1000, 1100, 1200, 1300, 1400, 1500,
+  1600, 1700, 1800, 1900, 2000, 2200, 2400, 2600,
+] as const;
+
 const GhostIcon = () => (
   <svg
     className="ghost-icon"
@@ -1578,11 +1584,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   <div className="chess-elo-selector">
                     <input
                       type="range"
-                      min={100}
-                      max={2000}
-                      step={50}
-                      value={engineElo}
-                      onChange={(e) => setEngineElo(Number(e.target.value))}
+                      min={0}
+                      max={MAIA_ELO_BINS.length - 1}
+                      step={1}
+                      value={MAIA_ELO_BINS.indexOf(engineElo)}
+                      onChange={(e) => setEngineElo(MAIA_ELO_BINS[Number(e.target.value)])}
                       disabled={isStartingGame}
                       className="chess-elo-slider"
                     />
