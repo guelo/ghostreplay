@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.fen import fen_hash, active_color
-from app.models import GameSession, Position
+from app.models import GameSession, Position, RatingHistory
+from app.rating import DEFAULT_RATING, RESULT_SCORES, compute_new_rating
 from app.security import TokenPayload, get_current_user
 from app.srs_math import calculate_priority
 
@@ -198,12 +199,20 @@ class GameEndRequest(BaseModel):
     session_id: uuid.UUID = Field(..., description="Game session ID")
     result: GameResult = Field(..., description="Game result")
     pgn: str = Field(..., description="PGN of the game")
+    is_rated: bool = Field(True, description="Whether this game counts for rating")
+
+
+class RatingChange(BaseModel):
+    rating_before: int
+    rating_after: int
+    is_provisional: bool
 
 
 class GameEndResponse(BaseModel):
     session_id: uuid.UUID
     result: str
     ended_at: datetime
+    rating: RatingChange | None = None
 
 
 class MoveDetails(BaseModel):
@@ -317,6 +326,39 @@ def end_game(
     session.result = request.result.value
     session.ended_at = datetime.now(timezone.utc)
     session.pgn = request.pgn
+    session.is_rated = request.is_rated
+
+    # Compute rating change for rated results
+    rating_change = None
+    if request.is_rated and request.result.value in RESULT_SCORES:
+        latest = (
+            db.query(RatingHistory)
+            .filter(RatingHistory.user_id == user.user_id)
+            .order_by(RatingHistory.recorded_at.desc())
+            .first()
+        )
+        current_rating = latest.rating if latest else DEFAULT_RATING
+        games_played = latest.games_played if latest else 0
+
+        new_rating, is_provisional = compute_new_rating(
+            current_rating, session.engine_elo, request.result.value, games_played
+        )
+
+        rating_row = RatingHistory(
+            user_id=user.user_id,
+            game_session_id=session.id,
+            rating=new_rating,
+            is_provisional=is_provisional,
+            games_played=games_played + 1,
+            recorded_at=session.ended_at,
+        )
+        db.add(rating_row)
+
+        rating_change = RatingChange(
+            rating_before=current_rating,
+            rating_after=new_rating,
+            is_provisional=is_provisional,
+        )
 
     db.commit()
     db.refresh(session)
@@ -325,6 +367,7 @@ def end_game(
         session_id=session.id,
         result=session.result,
         ended_at=session.ended_at,
+        rating=rating_change,
     )
 
 

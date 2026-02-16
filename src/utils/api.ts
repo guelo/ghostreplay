@@ -143,12 +143,39 @@ interface EndGameRequest {
   session_id: string
   result: 'checkmate_win' | 'checkmate_loss' | 'resign' | 'draw' | 'abandon'
   pgn: string
+  is_rated: boolean
+}
+
+export interface RatingChange {
+  rating_before: number
+  rating_after: number
+  is_provisional: boolean
 }
 
 interface EndGameResponse {
   session_id: string
-  blunders_recorded: number
-  blunders_reviewed: number
+  result: string
+  ended_at: string
+  rating: RatingChange | null
+}
+
+export interface CurrentRatingResponse {
+  current_rating: number
+  is_provisional: boolean
+  games_played: number
+}
+
+export interface RatingPoint {
+  timestamp: string
+  rating: number
+  is_provisional: boolean
+  game_session_id: string
+}
+
+export interface RatingHistoryResponse {
+  ratings: RatingPoint[]
+  current_rating: number
+  games_played: number
 }
 
 export type SessionMoveColor = 'white' | 'black'
@@ -254,13 +281,37 @@ export const startGame = async (
 export const endGame = async (
   sessionId: string,
   result: EndGameRequest['result'],
-  pgn: string
+  pgn: string,
+  isRated: boolean = true,
 ): Promise<EndGameResponse> => {
   return requestJson<EndGameResponse>(`${API_BASE_URL}/api/game/end`, {
     method: 'POST',
     headers: getAuthHeaders(),
-    body: JSON.stringify({ session_id: sessionId, result, pgn } satisfies EndGameRequest),
+    body: JSON.stringify({ session_id: sessionId, result, pgn, is_rated: isRated } satisfies EndGameRequest),
   }, { fallbackMessage: 'Failed to end game' })
+}
+
+/**
+ * Fetch the user's current Elo rating.
+ */
+export const fetchCurrentRating = async (): Promise<CurrentRatingResponse> => {
+  return requestJson<CurrentRatingResponse>(`${API_BASE_URL}/api/stats/current-rating`, {
+    method: 'GET',
+    headers: getAuthHeaders(),
+  }, { fallbackMessage: 'Failed to fetch rating' })
+}
+
+/**
+ * Fetch the user's rating history for a given time range.
+ */
+export const fetchRatingHistory = async (
+  range: '7d' | '30d' | '90d' | 'all' = 'all',
+): Promise<RatingHistoryResponse> => {
+  return requestJson<RatingHistoryResponse>(
+    `${API_BASE_URL}/api/stats/rating-history?range=${range}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to fetch rating history' },
+  )
 }
 
 /**

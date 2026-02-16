@@ -11,10 +11,12 @@ import { lookupOpeningByFen } from "../openings/openingBook";
 import {
   startGame,
   endGame,
+  fetchCurrentRating,
   recordBlunder,
   recordManualBlunder,
   reviewSrsBlunder,
   uploadSessionMoves,
+  type RatingChange,
   type SessionMoveUpload,
 } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
@@ -169,6 +171,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [showRehookToast, setShowRehookToast] = useState(false);
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(null);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
+  const [isRated, setIsRated] = useState(true);
+  const [showRevertWarning, setShowRevertWarning] = useState(false);
+  const [playerRating, setPlayerRating] = useState<number>(1200);
+  const [isProvisional, setIsProvisional] = useState(true);
+  const [ratingChange, setRatingChange] = useState<RatingChange | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
@@ -200,6 +207,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const isAnalyzingRef = useRef(isAnalyzing);
   const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
+
+  useEffect(() => {
+    fetchCurrentRating()
+      .then((data) => {
+        setPlayerRating(data.current_rating);
+        setIsProvisional(data.is_provisional);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     analysisMapRef.current = analysisMap;
@@ -623,7 +639,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             uploadError,
           );
         }
-        await endGame(sessionId, result.type, chess.pgn());
+        const endResponse = await endGame(sessionId, result.type, chess.pgn(), isRated);
+        if (endResponse.rating) {
+          setRatingChange(endResponse.rating);
+          setPlayerRating(endResponse.rating.rating_after);
+          setIsProvisional(endResponse.rating.is_provisional);
+        }
         setIsGameActive(false);
         setGameResult(result);
         setShowPostGamePrompt(true);
@@ -633,7 +654,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         setEngineMessage(message);
       }
     }
-  }, [chess, isGameActive, playerColor, sessionId, uploadSessionAnalysisBatch]);
+  }, [chess, isGameActive, isRated, playerColor, sessionId, uploadSessionAnalysisBatch]);
 
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
@@ -1277,7 +1298,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             uploadError,
           );
         }
-        await endGame(sessionId, "abandon", chess.pgn());
+        await endGame(sessionId, "abandon", chess.pgn(), isRated);
       }
 
       // Start new game session
@@ -1301,6 +1322,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setFen(chess.fen());
       setEngineMessage(null);
       setGameResult(null);
+      setRatingChange(null);
       setMoveHistory([]);
       moveCountRef.current = 0;
       setViewIndex(null);
@@ -1315,6 +1337,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setShowPassToast(false);
       setReviewFailModal(null);
       setShowPostGamePrompt(false);
+      setIsRated(true);
+      setShowRevertWarning(false);
       clearMoveHighlights();
       blunderRecordedRef.current = false;
       pendingAnalysisContextRef.current = null;
@@ -1343,7 +1367,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           uploadError,
         );
       }
-      await endGame(sessionId, "resign", chess.pgn());
+      const endResponse = await endGame(sessionId, "resign", chess.pgn(), isRated);
+      if (endResponse.rating) {
+        setRatingChange(endResponse.rating);
+        setPlayerRating(endResponse.rating.rating_after);
+        setIsProvisional(endResponse.rating.is_provisional);
+      }
       setIsGameActive(false);
       setGameResult({ type: "resign", message: "You resigned." });
       setShowPostGamePrompt(true);
@@ -1353,6 +1382,46 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setEngineMessage(message);
     }
   };
+
+  const executeRevert = useCallback(() => {
+    if (!isGameActive || moveHistory.length === 0 || chess.isGameOver()) return;
+
+    setIsRated(false);
+    setShowRevertWarning(false);
+
+    // Determine how many half-moves to undo:
+    // If it's the player's turn, opponent already replied → undo 2 (opponent + player)
+    // If it's the opponent's turn, player just moved → undo 1 (player only)
+    const isPlayerTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
+    const undoCount = isPlayerTurn && moveHistory.length >= 2 ? 2 : 1;
+
+    for (let i = 0; i < undoCount; i++) {
+      chess.undo();
+    }
+
+    const newHistory = moveHistory.slice(0, -undoCount);
+    moveHistoryRef.current = newHistory;
+    moveCountRef.current = newHistory.length;
+    setMoveHistory(newHistory);
+    setFen(chess.fen());
+    setViewIndex(null);
+    setBlunderReviewId(null);
+    setBlunderAlert(null);
+    pendingSrsReviewRef.current = null;
+    pendingAnalysisContextRef.current = null;
+  }, [chess, isGameActive, moveHistory, playerColor]);
+
+  const handleRevertClick = useCallback(() => {
+    if (isRated) {
+      setShowRevertWarning(true);
+    } else {
+      executeRevert();
+    }
+  }, [isRated, executeRevert]);
+
+  const cancelRevert = useCallback(() => {
+    setShowRevertWarning(false);
+  }, []);
 
   const handleReset = () => {
     chess.reset();
@@ -1378,6 +1447,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowPostGamePrompt(false);
     setShowStartOverlay(false);
     setBlunderReviewId(null);
+    setIsRated(true);
+    setShowRevertWarning(false);
     clearMoveHighlights();
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
@@ -1457,6 +1528,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               {gameStatusBadge.label}
             </span>
           )}
+          {!isRated && isGameActive && (
+            <span className="unrated-badge">Unrated</span>
+          )}
           <p className="chess-meta">
             Playing as:{" "}
             <span className="chess-meta-strong">
@@ -1465,6 +1539,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 : playerColor === "white"
                   ? "White"
                   : "Black"}
+            </span>
+          </p>
+          <p className="chess-meta">
+            Rating:{" "}
+            <span className="chess-meta-strong">
+              {playerRating}
+              {isProvisional ? "?" : ""}
             </span>
           </p>
           <p className="chess-meta">
@@ -1548,6 +1629,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             >
               Resign
             </button>
+            {isGameActive && (
+              <button
+                className="chess-button"
+                type="button"
+                onClick={handleRevertClick}
+                disabled={moveHistory.length === 0 || chess.isGameOver()}
+              >
+                Revert
+              </button>
+            )}
             <button className="chess-button" type="button" onClick={flipBoard}>
               Flip board
             </button>
@@ -1638,6 +1729,35 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 </div>
               </div>
             )}
+            {showRevertWarning && (
+              <div className="chessboard-overlay">
+                <div className="revert-warning-dialog" role="alertdialog" aria-labelledby="revert-warning-title">
+                  <WarningTriangleIcon />
+                  <p id="revert-warning-title" className="revert-warning-dialog__title">
+                    This game will not be rated
+                  </p>
+                  <p className="revert-warning-dialog__body">
+                    Reverting a move removes this game from your rating history. This cannot be undone.
+                  </p>
+                  <div className="revert-warning-dialog__actions">
+                    <button
+                      className="chess-button danger"
+                      type="button"
+                      onClick={executeRevert}
+                    >
+                      Revert anyway
+                    </button>
+                    <button
+                      className="chess-button"
+                      type="button"
+                      onClick={cancelRevert}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             {!isGameActive && gameResult && !showStartOverlay && (
               <div className="chessboard-ended-scrim" />
             )}
@@ -1719,6 +1839,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               aria-label="Post-game options"
             >
               <p className="game-end-banner-message">{gameResult.message}</p>
+              {ratingChange && (
+                <p className={`rating-delta ${ratingChange.rating_after >= ratingChange.rating_before ? "rating-delta--up" : "rating-delta--down"}`}>
+                  {ratingChange.rating_after >= ratingChange.rating_before ? "+" : ""}
+                  {ratingChange.rating_after - ratingChange.rating_before}
+                  {" "}
+                  <span className="rating-delta__value">
+                    ({ratingChange.rating_before} → {ratingChange.rating_after}{ratingChange.is_provisional ? "?" : ""})
+                  </span>
+                </p>
+              )}
               <div className="chess-post-game-actions">
                 <button
                   className="chess-button primary"

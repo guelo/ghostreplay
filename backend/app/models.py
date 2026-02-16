@@ -108,6 +108,7 @@ class GameSession(Base):
     result: Mapped[str | None] = mapped_column(String(20))
     engine_elo: Mapped[int] = mapped_column(Integer, nullable=False)
     blunder_recorded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_rated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     player_color: Mapped[str] = mapped_column(String(5), nullable=False, server_default="white")
     pgn: Mapped[str | None] = mapped_column(Text)
 
@@ -126,6 +127,25 @@ class Move(Base):
         BigInteger,
         ForeignKey("positions.id"),
         nullable=False,
+    )
+
+
+class RatingHistory(Base):
+    __tablename__ = "rating_history"
+    __table_args__ = (
+        Index("idx_rating_history_user_timestamp", "user_id", "recorded_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
+    game_session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("game_sessions.id"), nullable=False
+    )
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_provisional: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    games_played: Mapped[int] = mapped_column(Integer, nullable=False)
+    recorded_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 
