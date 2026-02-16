@@ -45,6 +45,7 @@ def _create_test_schema(conn) -> None:
             result VARCHAR(20),
             engine_elo INTEGER NOT NULL,
             blunder_recorded BOOLEAN NOT NULL DEFAULT 0,
+            is_rated BOOLEAN NOT NULL DEFAULT 1,
             player_color VARCHAR(5) NOT NULL DEFAULT 'white',
             pgn TEXT
         )
@@ -104,6 +105,17 @@ def _create_test_schema(conn) -> None:
         )
     """))
     conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS rating_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            game_session_id TEXT NOT NULL,
+            rating INTEGER NOT NULL,
+            is_provisional BOOLEAN NOT NULL,
+            games_played INTEGER NOT NULL,
+            recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    conn.execute(text("""
         CREATE TABLE IF NOT EXISTS blunder_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             blunder_id INTEGER NOT NULL,
@@ -121,6 +133,7 @@ def _create_test_schema(conn) -> None:
 
 def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
+    conn.execute(text("DROP TABLE IF EXISTS rating_history"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))
     conn.execute(text("DROP TABLE IF EXISTS blunders"))
