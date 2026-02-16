@@ -142,7 +142,7 @@ The system uses a **Client-Coordinator-Memory** architecture. Opponent move sele
 ```mermaid
 graph TD
     User[User Browser]
-    
+
     subgraph "Frontend (React)"
         WorkerB[Stockfish B<br/>(The Analyst)]
         GameUI[Board UI]
@@ -156,10 +156,13 @@ graph TD
         DB[(Ghost Move Library & SRS)]
     end
 
+    Maia3[Maia3 API<br/>maiachess.com]
+
     User --> GameUI
     GameUI --> WorkerB
     GameUI --> API
     API --> DB
+    API --> Maia3
 
 ```
 
@@ -173,8 +176,8 @@ graph TD
 
 ### 3.2 Backend (The Coordinator)
 
-* **Responsibility:** Ghost-path traversal, backend opponent-engine inference, and SRS updates.
-* **Stateless:** The API does not hold game state. It receives a FEN (Board Position) and answers: *"What is the next opponent move (ghost or engine)?"*
+* **Responsibility:** Ghost-path traversal, opponent move selection (via remote Maia3 API), and SRS updates.
+* **Stateless:** The API does not hold game state. It receives the current FEN and move history, then answers: *"What is the next opponent move (ghost or engine)?"*
 
 ### 3.3 Database (The Memory)
 
@@ -191,7 +194,7 @@ graph TD
 | **Frontend** | React + Vite | Fast development, massive ecosystem for state management. |
 | **Chess UI** | `react-chessboard` | Robust wrapper for chessboard.js. |
 | **Chess Logic** | `chess.js` | Standard library for move generation/validation. |
-| **Opponent Engine** | Maia-2 (backend service) | Backend returns the next opponent move via a single API endpoint. |
+| **Opponent Engine** | Maia3 (remote API via maiachess.com) | Backend proxies move requests to the Maia3 API, selecting the appropriate ELO model (600–2600). No local model files or GPU required. |
 | **Analysis Engine** | `stockfish.js` (WASM) | Browser-side analyst worker for blunder detection/SRS grading. |
 | **Backend** | Python (FastAPI) | High performance, excellent libraries (`python-chess`). |
 | **Database** | PostgreSQL | Required for Recursive CTEs (Graph traversal queries). |
@@ -537,17 +540,16 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
    → return:
      `{ "mode": "ghost", "move": { "uci": "...", "san": "..." }, "target_blunder_id": <id>, "decision_source": "ghost_path" }`
 6. If no due blunders reachable:
-   → run backend engine inference (Maia-2 path).
+   → call remote Maia3 API for engine move.
    → return:
      `{ "mode": "engine", "move": { "uci": "...", "san": "..." }, "target_blunder_id": null, "decision_source": "backend_engine" }`
 ```
 
-**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including engine inference) should target sub-second p95 in MVP.
+**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200-500ms network latency per engine fallback call.
 
 **Caching Consideration (Post-MVP):** Position lookups are hot-path. Consider caching:
 - FEN hash → position existence (simple boolean)
 - Position ID → downstream blunder count (invalidate on new blunder insertion)
-- Warm model/prepared inference artifacts in-process for backend engine calls
 
 ### 6.2 Ghost Move Library Capture Logic
 
@@ -1136,15 +1138,18 @@ Creates a new game session. The session tracks which game the blunders belong to
 
 #### POST /api/game/next-opponent-move
 
-Given a position, returns the next opponent move from Ghost-path traversal if available, otherwise from backend engine inference.
+Given a position, returns the next opponent move from Ghost-path traversal if available, otherwise from the remote Maia3 API.
 
 **Request:**
 ```json
 {
   "session_id": "uuid",
-  "fen": "string"
+  "fen": "string",
+  "moves": ["string (UCI)", "..."]
 }
 ```
+
+- `moves`: Full game move history as UCI strings from the starting position (e.g. `["e2e4", "e7e5", "g1f3"]`). Required for engine fallback — the Maia3 API accepts move history rather than FEN. The frontend tracks these alongside its existing `moveHistory` state.
 
 **Response (200):**
 ```json
@@ -1160,7 +1165,7 @@ Given a position, returns the next opponent move from Ghost-path traversal if av
 ```
 
 - `mode: "ghost"` - Ghost is steering toward a blunder; `move` contains the next move.
-- `mode: "engine"` - No blunder path found; `move` is produced by backend engine inference.
+- `mode: "engine"` - No blunder path found; `move` is produced by the remote Maia3 API.
 - `target_blunder_id` - ID of the blunder being targeted (for debugging/display), or `null` in engine mode.
 - `decision_source` - Backend decision branch used to produce the move.
 

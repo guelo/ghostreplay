@@ -65,7 +65,8 @@ for line in lines:
     else:
         continue
 
-    id_match = re.search(r"(g-[\w.]+)", line)
+    # Issue IDs are kebab-case and may also include dotted suffixes (e.g., g-foo-bar, g-29c.2)
+    id_match = re.search(r"(g-[\w.-]+)", line)
     if not id_match:
         continue
     iid = id_match.group(1)

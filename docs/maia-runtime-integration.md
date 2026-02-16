@@ -8,6 +8,20 @@
 
 This document describes the Maia-2 chess engine runtime integration in the Ghost Replay backend service. The implementation provides reliable Maia inference with lazy model loading, process-level caching, and graceful degradation.
 
+## API Migration (g-29c.2.5)
+
+Legacy `GET /api/game/ghost-move` has been retired in favor of a single backend contract:
+
+- Current endpoint: `POST /api/game/next-opponent-move`
+- Request: `{"session_id":"<uuid>","fen":"<fen>"}`
+- Response includes both move formats: `move.uci` and `move.san`
+- Decision metadata is explicit via `decision_source` (`ghost_path` or `backend_engine`)
+
+Client migration mapping:
+
+- Old `mode=ghost` + `move=<san>` -> New `mode=ghost` + `move.san=<san>`
+- Old `mode=engine` + `move=null` -> New `mode=engine` + `move` resolved by backend engine
+
 ## Architecture
 
 ### Components
