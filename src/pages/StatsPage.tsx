@@ -6,6 +6,7 @@ import {
   type StatsWindowDays,
 } from "../utils/api";
 import AppNav from "../components/AppNav";
+import RatingGraph from "../components/RatingGraph";
 import "../App.css";
 
 const WINDOW_OPTIONS: Array<{ label: string; value: StatsWindowDays }> = [
@@ -151,6 +152,8 @@ function StatsPage() {
               </button>
             </div>
           )}
+
+          <RatingGraph />
 
           {!loading && !error && summary && (
             <>

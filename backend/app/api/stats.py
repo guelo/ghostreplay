@@ -9,7 +9,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Blunder, GameSession, Move, Position, SessionMove
+from app.models import Blunder, GameSession, Move, Position, RatingHistory, SessionMove
+from app.rating import DEFAULT_RATING
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -104,6 +105,91 @@ def _safe_rate(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return _round1((numerator * 100.0) / denominator)
+
+
+class CurrentRatingResponse(BaseModel):
+    current_rating: int
+    is_provisional: bool
+    games_played: int
+
+
+@router.get("/current-rating", response_model=CurrentRatingResponse)
+def get_current_rating(
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> CurrentRatingResponse:
+    latest = (
+        db.query(RatingHistory)
+        .filter(RatingHistory.user_id == user.user_id)
+        .order_by(RatingHistory.recorded_at.desc())
+        .first()
+    )
+    if latest:
+        return CurrentRatingResponse(
+            current_rating=latest.rating,
+            is_provisional=latest.is_provisional,
+            games_played=latest.games_played,
+        )
+    return CurrentRatingResponse(
+        current_rating=DEFAULT_RATING,
+        is_provisional=True,
+        games_played=0,
+    )
+
+
+class RatingPoint(BaseModel):
+    timestamp: datetime
+    rating: int
+    is_provisional: bool
+    game_session_id: str
+
+
+class RatingHistoryResponse(BaseModel):
+    ratings: list[RatingPoint]
+    current_rating: int
+    games_played: int
+
+
+@router.get("/rating-history", response_model=RatingHistoryResponse)
+def get_rating_history(
+    range: str = Query("all", pattern="^(7d|30d|90d|all)$"),
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> RatingHistoryResponse:
+    query = (
+        db.query(RatingHistory)
+        .filter(RatingHistory.user_id == user.user_id)
+        .order_by(RatingHistory.recorded_at.asc())
+    )
+
+    if range != "all":
+        days = int(range.rstrip("d"))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        query = query.filter(RatingHistory.recorded_at >= cutoff)
+
+    rows = query.all()
+
+    # Get latest rating regardless of time filter
+    latest = (
+        db.query(RatingHistory)
+        .filter(RatingHistory.user_id == user.user_id)
+        .order_by(RatingHistory.recorded_at.desc())
+        .first()
+    )
+
+    return RatingHistoryResponse(
+        ratings=[
+            RatingPoint(
+                timestamp=row.recorded_at,
+                rating=row.rating,
+                is_provisional=row.is_provisional,
+                game_session_id=str(row.game_session_id),
+            )
+            for row in rows
+        ],
+        current_rating=latest.rating if latest else DEFAULT_RATING,
+        games_played=latest.games_played if latest else 0,
+    )
 
 
 def _base_color_summary() -> ColorSummary:
