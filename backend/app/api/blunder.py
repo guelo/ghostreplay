@@ -1,18 +1,21 @@
-"""Blunder recording endpoint.
+"""Blunder recording and listing endpoints.
 
 Receives blunder data from frontend, replays PGN to build position graph,
-and records the blunder for spaced repetition review.
+and records the blunder for spaced repetition review.  Also provides a
+GET endpoint to list a user's blunders with SRS priority.
 """
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from io import StringIO
+from typing import Sequence
 
 import chess
 import chess.pgn
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -20,6 +23,7 @@ from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import Blunder, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
+from app.srs_math import calculate_priority
 
 router = APIRouter(prefix="/api/blunder", tags=["blunder"])
 AUTO_RECORDING_MAX_FULL_MOVES = 10
@@ -364,3 +368,68 @@ def record_manual_blunder(
         eval_after=eval_after,
         mark_first_blunder_recorded=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/blunder  –  list user's blunders with SRS priority
+# ---------------------------------------------------------------------------
+
+
+class BlunderListItem(BaseModel):
+    id: int
+    fen: str
+    bad_move: str
+    best_move: str
+    eval_loss_cp: int
+    pass_streak: int
+    last_reviewed_at: datetime | None
+    created_at: datetime
+    srs_priority: float
+
+
+@router.get("", response_model=list[BlunderListItem])
+def list_blunders(
+    due: bool = Query(False, description="If true, only return blunders with srs_priority > 1.0"),
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> list[BlunderListItem]:
+    """Return the authenticated user's blunders with calculated SRS priority."""
+    rows: Sequence[Blunder] = (
+        db.query(Blunder)
+        .join(Position, Blunder.position_id == Position.id)
+        .filter(Blunder.user_id == user.user_id)
+        .all()
+    )
+
+    now = datetime.now(timezone.utc)
+    items: list[BlunderListItem] = []
+    for b in rows:
+        priority = calculate_priority(
+            pass_streak=b.pass_streak,
+            last_reviewed_at=b.last_reviewed_at,
+            created_at=b.created_at,
+            now=now,
+        )
+        if due and priority <= 1.0:
+            continue
+
+        position: Position | None = (
+            db.query(Position).filter(Position.id == b.position_id).first()
+        )
+        items.append(
+            BlunderListItem(
+                id=b.id,
+                fen=position.fen_raw if position else "",
+                bad_move=b.bad_move_san,
+                best_move=b.best_move_san,
+                eval_loss_cp=b.eval_loss_cp,
+                pass_streak=b.pass_streak,
+                last_reviewed_at=b.last_reviewed_at,
+                created_at=b.created_at,
+                srs_priority=round(priority, 4),
+            )
+        )
+
+    # Sort by priority descending (most urgent first)
+    items.sort(key=lambda x: x.srs_priority, reverse=True)
+    return items
