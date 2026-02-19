@@ -82,19 +82,22 @@ const runSearch = async (fen: string, moves: string[]) => {
       activeSearch = { resolve, reject, lastScore: null }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(' ')}` : ''
       pendingEngine.postMessage(`position fen ${fen}${movesSegment}`)
-      pendingEngine.postMessage('go depth 18 movetime 2000')
+      pendingEngine.postMessage('go depth 20 movetime 3000')
     },
   )
 }
 
 const handleEngineLine = (line: string) => {
   if (line === 'uciok') {
+    engine?.postMessage('setoption name Hash value 128')
+    const threads = Math.min(Math.max(Math.floor(navigator.hardwareConcurrency / 2), 1), 4)
+    engine?.postMessage(`setoption name Threads value ${threads}`)
+    engine?.postMessage('setoption name MultiPV value 1')
     engine?.postMessage('isready')
     return
   }
 
   if (line === 'readyok') {
-    engine?.postMessage('setoption name MultiPV value 1')
     engineReady = true
     ctx.postMessage({ type: 'ready' } satisfies AnalysisWorkerResponse)
     drainQueue()
@@ -182,10 +185,11 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   const opponentToMove = sideToMove === 'w' ? 'b' : 'w'
 
-  const bestEvalSearch = await runSearch(request.fen, [bestMove])
+  // bestSearch.score is the eval from sideToMove's perspective assuming best play.
+  // No need for a separate search after the best move — minimax already accounts for it.
   const bestEval = scoreForPlayer(
-    bestEvalSearch.score,
-    opponentToMove,
+    bestSearch.score,
+    sideToMove,
     request.playerColor,
   )
 
@@ -198,8 +202,10 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   const delta =
     bestEval !== null && playedEval !== null ? bestEval - playedEval : null
+  const forced = request.legalMoveCount !== undefined && request.legalMoveCount <= 2
   const blunder =
-    isBlunder(delta) &&
+    !forced &&
+    isBlunder(delta, bestEval) &&
     (request.moveIndex === undefined || isWithinRecordingMoveCap(request.moveIndex))
 
   ctx.postMessage({

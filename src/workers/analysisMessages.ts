@@ -5,6 +5,7 @@ export type AnalyzeMoveMessage = {
   move: string
   playerColor: 'white' | 'black'
   moveIndex?: number
+  legalMoveCount?: number
 }
 
 export type AnalysisWorkerRequest =

@@ -92,8 +92,27 @@ export const getSideToMove = (fen: string) => {
   return null
 }
 
-export const isBlunder = (delta: number | null): boolean => {
-  return delta !== null && delta >= BLUNDER_THRESHOLD
+/**
+ * Determines if a move is a blunder based on eval drop and position context.
+ * The threshold scales with how lost the position already is:
+ * - In equal positions (±200cp): base threshold of 50cp
+ * - When already losing badly: threshold increases (losing 50cp more when down 500 is less meaningful)
+ * - preEval is from the player's perspective (positive = advantage)
+ */
+export const isBlunder = (delta: number | null, preEval?: number | null): boolean => {
+  if (delta === null || delta < BLUNDER_THRESHOLD) {
+    return false
+  }
+
+  if (preEval === null || preEval === undefined) {
+    return delta >= BLUNDER_THRESHOLD
+  }
+
+  // Scale threshold: when already losing, require a bigger drop to flag as blunder.
+  // At eval 0: threshold = 50. At eval -500: threshold = 100. At eval -1000: threshold = 150.
+  const disadvantage = Math.max(-preEval, 0)
+  const scaledThreshold = BLUNDER_THRESHOLD + disadvantage * 0.1
+  return delta >= scaledThreshold
 }
 
 export const isWithinRecordingMoveCap = (

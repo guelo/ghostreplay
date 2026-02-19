@@ -291,6 +291,45 @@ describe('isBlunder', () => {
   it('threshold constant is 50', () => {
     expect(BLUNDER_THRESHOLD).toBe(50)
   })
+
+  describe('context-aware with preEval', () => {
+    it('uses base threshold in equal positions', () => {
+      expect(isBlunder(50, 0)).toBe(true)
+      expect(isBlunder(49, 0)).toBe(false)
+    })
+
+    it('uses base threshold when player is winning', () => {
+      expect(isBlunder(50, 300)).toBe(true)
+      expect(isBlunder(49, 300)).toBe(false)
+    })
+
+    it('raises threshold when player is losing', () => {
+      // At preEval -500: threshold = 50 + 500*0.1 = 100
+      expect(isBlunder(99, -500)).toBe(false)
+      expect(isBlunder(100, -500)).toBe(true)
+    })
+
+    it('raises threshold further when deeply losing', () => {
+      // At preEval -1000: threshold = 50 + 1000*0.1 = 150
+      expect(isBlunder(149, -1000)).toBe(false)
+      expect(isBlunder(150, -1000)).toBe(true)
+    })
+
+    it('still rejects deltas below base threshold regardless of preEval', () => {
+      expect(isBlunder(30, 0)).toBe(false)
+      expect(isBlunder(30, -1000)).toBe(false)
+    })
+
+    it('falls back to base threshold when preEval is null', () => {
+      expect(isBlunder(50, null)).toBe(true)
+      expect(isBlunder(49, null)).toBe(false)
+    })
+
+    it('falls back to base threshold when preEval is undefined', () => {
+      expect(isBlunder(50, undefined)).toBe(true)
+      expect(isBlunder(49, undefined)).toBe(false)
+    })
+  })
 })
 
 describe('isWithinRecordingMoveCap', () => {

@@ -120,7 +120,7 @@ export const useMoveAnalysis = () => {
   }, [])
 
   const analyzeMove = useCallback(
-    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number) => {
+    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number) => {
       if (status === 'error') {
         return
       }
@@ -141,6 +141,7 @@ export const useMoveAnalysis = () => {
         move,
         playerColor,
         ...(moveIndex !== undefined ? { moveIndex } : {}),
+        ...(legalMoveCount !== undefined ? { legalMoveCount } : {}),
       }
 
       workerRef.current.postMessage(message)
