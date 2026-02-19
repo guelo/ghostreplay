@@ -28,6 +28,7 @@ import {
 } from "../workers/analysisUtils";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
+import type { MoveListBubble } from "./MoveList";
 
 /** Maia3 ELO bins – must match backend/app/maia3_client.py:ELO_BINS */
 const MAIA_ELO_BINS = [
@@ -67,19 +68,6 @@ type MoveRecord = {
   san: string;
   fen: string; // Position after this move
   uci: string;
-};
-
-const formatScore = (score?: { type: "cp" | "mate"; value: number }) => {
-  if (!score) {
-    return null;
-  }
-
-  if (score.type === "mate") {
-    return `M${score.value}`;
-  }
-
-  const value = score.value / 100;
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 };
 
 type GameResult = {
@@ -684,90 +672,43 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return `${active} to move${suffix}`;
   })();
 
-  const engineStatusText = (() => {
-    if (engineError) {
-      return engineError;
-    }
 
-    if (engineMessage) {
-      return engineMessage;
-    }
-
-    if (engineStatus === "booting") {
-      return "Stockfish is warming up…";
-    }
-
-    if (engineStatus === "error") {
-      return "Stockfish is unavailable.";
-    }
-
-    if (isThinking) {
-      const formattedScore = formatScore(engineInfo?.score);
-      const parts = [
-        "Stockfish is thinking…",
-        engineInfo?.depth ? `depth ${engineInfo.depth}` : null,
-        formattedScore ? `eval ${formattedScore}` : null,
-      ].filter(Boolean);
-      return parts.join(" · ");
-    }
-
-    return "Stockfish is ready.";
-  })();
-
-  const analysisStatusText = (() => {
-    if (analysisStatus === "booting") {
-      return "Analyst is warming up…";
-    }
-
-    if (analysisStatus === "error") {
-      return "Analyst is unavailable.";
-    }
-
+  const moveBubble = useMemo((): MoveListBubble | null => {
     if (isAnalyzing && analyzingMove) {
-      return `Analyzing ${analyzingMove}…`;
+      const idx = moveHistory.length - 1;
+      if (idx < 0) return null;
+      return { moveIndex: idx, text: `Analyzing ${analyzingMove}\u2026`, variant: "analyzing" };
     }
 
-    if (!lastAnalysis) {
-      return "Analyst is ready.";
+    if (!lastAnalysis || lastAnalysis.moveIndex == null) return null;
+
+    const idx = lastAnalysis.moveIndex;
+    const delta = lastAnalysis.delta;
+
+    if (lastAnalysis.blunder && delta !== null) {
+      return {
+        moveIndex: idx,
+        text: `Blunder! Lost ${Math.max(delta, 0)}cp. Best: ${lastAnalysis.bestMove}`,
+        variant: "blunder",
+      };
     }
 
-    const lastMoveIndex =
-      lastAnalysis.moveIndex ??
-      (moveHistory.length > 0 ? moveHistory.length - 1 : null);
-    const whitePerspectiveEval = toWhitePerspective(
-      lastAnalysis.currentPositionEval,
-      lastMoveIndex,
-    );
-    const evalText =
-      whitePerspectiveEval !== null
-        ? ` Eval: ${whitePerspectiveEval > 0 ? "+" : ""}${(whitePerspectiveEval / 100).toFixed(2)}`
-        : "";
-
-    if (lastAnalysis.blunder && lastAnalysis.delta !== null) {
-      return `⚠️ ${lastAnalysis.move}: Blunder! Lost ${Math.max(lastAnalysis.delta, 0)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
+    if (delta !== null) {
+      if (delta === 0) return { moveIndex: idx, text: "Best move!", variant: "best" };
+      if (delta < 0) return { moveIndex: idx, text: `Great move! Gained ${Math.abs(delta)}cp`, variant: "great" };
+      if (delta < 50) return { moveIndex: idx, text: `Good. Lost ${delta}cp`, variant: "good" };
+      return { moveIndex: idx, text: `Inaccuracy. Lost ${delta}cp. Best: ${lastAnalysis.bestMove}`, variant: "inaccuracy" };
     }
 
-    if (lastAnalysis.delta !== null) {
-      if (lastAnalysis.delta === 0) {
-        return `✓ ${lastAnalysis.move}: Best move!${evalText}`;
-      }
-      if (lastAnalysis.delta < 0) {
-        return `✓ ${lastAnalysis.move}: Great move! Gained ${Math.abs(lastAnalysis.delta)}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
-      }
-      if (lastAnalysis.delta < 50) {
-        return `✓ ${lastAnalysis.move}: Good move. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
-      }
-      return `${lastAnalysis.move}: Inaccuracy. Lost ${lastAnalysis.delta}cp. Best: ${lastAnalysis.bestMove}.${evalText}`;
-    }
-
-    return "Analyst is ready.";
-  })();
+    return null;
+  }, [isAnalyzing, analyzingMove, lastAnalysis, moveHistory.length]);
 
   const opponentColor = playerColor === "white" ? "black" : "white";
 
   const applyEngineMove = useCallback(async () => {
     try {
       const fenBeforeMove = chess.fen();
+      const legalMoveCount = chess.moves().length;
       const result = await evaluatePosition(fenBeforeMove);
 
       if (result.move === "(none)") {
@@ -794,7 +735,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setMoveHistory(nextMoveHistory);
       setViewIndex(null); // Ensure we're viewing the live position
       setEngineMessage(null);
-      analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
+      analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex, legalMoveCount);
 
       // Check if the engine's move ended the game
       if (chess.isGameOver()) {
@@ -813,6 +754,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     async (sanMove: string, targetBlunderId: number | null) => {
       try {
         const fenBeforeMove = chess.fen();
+        const legalMoveCount = chess.moves().length;
         const appliedMove = chess.move(sanMove);
 
         if (!appliedMove) {
@@ -839,7 +781,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           setBlunderReviewId(null);
         }
 
-        analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex);
+        analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex, legalMoveCount);
 
         if (chess.isGameOver()) {
           await handleGameEnd();
@@ -889,6 +831,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         let move = null;
         try {
           const fenBeforeMove = chess.fen();
+          const legalMoveCount = chess.moves().length;
           move = chess.move({
             from: selectedSquare,
             to: square,
@@ -925,7 +868,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               moveUci: uciMove,
               moveIndex,
             };
-            analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex);
+            analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex, legalMoveCount);
 
             if (chess.isGameOver()) {
               void handleGameEnd();
@@ -1228,6 +1171,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
 
     const fenBeforeMove = chess.fen();
+    const legalMoveCount = chess.moves().length;
     const move = chess.move({
       from: sourceSquare,
       to: targetSquare,
@@ -1268,7 +1212,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       moveUci: uciMove,
       moveIndex,
     };
-    analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex);
+    analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex, legalMoveCount);
 
     if (chess.isGameOver()) {
       void handleGameEnd();
@@ -1888,23 +1832,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               </button>
             </div>
           )}
-          <div className="engine-status">
-            <p className="chess-meta">
-              Engine status:{" "}
-              <span className="chess-meta-strong">{engineStatusText}</span>
-            </p>
-            {engineInfo?.pv && isThinking && (
-              <p className="chess-meta">
-                Candidate line: {engineInfo.pv.slice(0, 4).join(" ")}
-              </p>
-            )}
-          </div>
-          <div className="engine-status">
-            <p className="chess-meta">
-              Analyst status:{" "}
-              <span className="chess-meta-strong">{analysisStatusText}</span>
-            </p>
-          </div>
         </div>
 
         <MoveList
@@ -1914,6 +1841,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           canAddSelectedMove={canAddSelectedMove}
           isAddingSelectedMove={isAddingToLibrary}
           onAddSelectedMove={handleAddSelectedMove}
+          bubble={moveBubble}
         />
       </div>
     </section>

@@ -1274,15 +1274,72 @@
   }
 }
 
-.engine-status {
-  margin-top: 1rem;
-  padding: 0.85rem 1rem;
-  border-radius: 1rem;
-  border: 1px solid var(--border-color-strong);
+/* Analyst speech bubble in move list */
+.move-bubble {
+  margin: 0.15rem 0 0.25rem 2rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 500;
+  animation: blunder-toast-in 200ms ease-out;
+  position: relative;
+}
+.move-bubble::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 0.8rem;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+}
+.move-bubble--analyzing {
   background: var(--bg-tertiary);
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
+  border: 1px solid var(--border-color);
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+.move-bubble--analyzing::before {
+  border-bottom: 5px solid var(--bg-tertiary);
+}
+.move-bubble--blunder {
+  background: color-mix(in srgb, var(--eval-blunder) 12%, var(--bg-tertiary));
+  border: 1px solid var(--eval-blunder);
+  color: var(--eval-blunder);
+}
+.move-bubble--blunder::before {
+  border-bottom: 5px solid color-mix(in srgb, var(--eval-blunder) 12%, var(--bg-tertiary));
+}
+.move-bubble--inaccuracy {
+  background: color-mix(in srgb, var(--eval-inaccuracy) 12%, var(--bg-tertiary));
+  border: 1px solid var(--eval-inaccuracy);
+  color: var(--eval-inaccuracy);
+}
+.move-bubble--inaccuracy::before {
+  border-bottom: 5px solid color-mix(in srgb, var(--eval-inaccuracy) 12%, var(--bg-tertiary));
+}
+.move-bubble--good {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+}
+.move-bubble--good::before {
+  border-bottom: 5px solid var(--bg-tertiary);
+}
+.move-bubble--great {
+  background: color-mix(in srgb, var(--eval-excellent) 12%, var(--bg-tertiary));
+  border: 1px solid var(--eval-excellent);
+  color: var(--eval-excellent);
+}
+.move-bubble--great::before {
+  border-bottom: 5px solid color-mix(in srgb, var(--eval-excellent) 12%, var(--bg-tertiary));
+}
+.move-bubble--best {
+  background: color-mix(in srgb, var(--brand-primary) 12%, var(--bg-tertiary));
+  border: 1px solid var(--brand-primary);
+  color: var(--brand-primary);
+}
+.move-bubble--best::before {
+  border-bottom: 5px solid color-mix(in srgb, var(--brand-primary) 12%, var(--bg-tertiary));
 }
 
 .chess-meta-strong {
@@ -1699,6 +1756,238 @@
 
 .auth-form__footer a:hover {
   text-decoration: underline;
+}
+
+/* Blunders page */
+.blunders-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.blunders-shell__header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.5rem;
+}
+
+.blunders-shell__title {
+  margin: 0;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  color: var(--text-primary);
+}
+
+.blunders-shell__summary {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+}
+
+.blunders-shell__count--due {
+  color: var(--eval-blunder);
+  font-weight: 600;
+}
+
+.blunders-shell__placeholder {
+  color: var(--text-tertiary);
+  padding: 1rem 0;
+}
+
+.blunders-shell__error {
+  color: var(--error);
+  padding: 1rem 0;
+}
+
+.blunders-shell__empty {
+  text-align: center;
+  padding: 3rem 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.blunders-shell__empty-icon {
+  font-size: 3rem;
+  opacity: 0.3;
+}
+
+.blunders-shell__empty-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+/* Blunders two-column layout */
+.blunders-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 1.25rem;
+  min-height: 400px;
+}
+
+@media (max-width: 720px) {
+  .blunders-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.blunder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.blunder-card {
+  width: 100%;
+  display: flex;
+  gap: 0.65rem;
+  padding: 0.55rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border-color);
+  background: var(--card-bg);
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-secondary);
+  font: inherit;
+  transition: border-color 0.15s, background 0.15s;
+  align-items: center;
+}
+
+.blunder-card:hover {
+  border-color: var(--border-color-strong);
+  background: var(--card-bg-hover);
+}
+
+.blunder-card--selected {
+  border-color: var(--brand-secondary);
+  background: var(--card-bg-selected);
+}
+
+.blunder-card__board {
+  width: 80px;
+  min-width: 80px;
+  pointer-events: none;
+}
+
+.blunder-card__info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.blunder-card__moves {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.blunder-card__bad {
+  color: var(--eval-blunder);
+}
+
+.blunder-card__arrow {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+}
+
+.blunder-card__best {
+  color: var(--success);
+}
+
+.blunder-card__meta {
+  display: flex;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  align-items: center;
+}
+
+.blunder-card__eval {
+  color: var(--eval-blunder);
+  font-weight: 600;
+}
+
+.blunder-card__due {
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.blunder-card__due--urgent {
+  background: var(--error-bg-subtle);
+  color: var(--error-dark);
+}
+
+.blunder-card__due--ok {
+  background: var(--status-other-bg);
+  color: var(--text-tertiary);
+}
+
+/* Blunder detail pane */
+.blunder-detail {
+  border: 1px solid var(--border-color);
+  border-radius: 0.75rem;
+  background: var(--card-bg);
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.blunder-detail__shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.blunder-detail__board-area {
+  width: 100%;
+}
+
+.blunder-detail__metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.75rem;
+}
+
+.blunder-detail__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.blunder-detail__stat-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+}
+
+.blunder-detail__stat-value {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.blunder-detail__stat-value--loss {
+  color: var(--eval-blunder);
+}
+
+.blunder-detail__placeholder {
+  color: var(--text-tertiary);
+  padding: 2rem 1rem;
+  text-align: center;
 }
 
 /* Stats page */

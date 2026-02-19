@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useRef } from 'react'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { ANNOTATION_SYMBOL } from '../workers/analysisUtils'
 
@@ -8,6 +8,12 @@ type Move = {
   eval?: number | null // centipawns, white perspective
 }
 
+export type MoveListBubble = {
+  moveIndex: number
+  text: string
+  variant: 'analyzing' | 'blunder' | 'inaccuracy' | 'good' | 'great' | 'best'
+}
+
 type MoveListProps = {
   moves: Move[]
   currentIndex: number | null // null means viewing latest position
@@ -15,6 +21,7 @@ type MoveListProps = {
   canAddSelectedMove?: boolean
   isAddingSelectedMove?: boolean
   onAddSelectedMove?: (index: number) => void
+  bubble?: MoveListBubble | null
 }
 
 const formatEval = (cp: number): string => {
@@ -34,9 +41,11 @@ const MoveList = ({
   canAddSelectedMove = false,
   isAddingSelectedMove = false,
   onAddSelectedMove,
+  bubble = null,
 }: MoveListProps) => {
   const moveListRef = useRef<HTMLDivElement>(null)
   const selectedMoveRef = useRef<HTMLButtonElement>(null)
+  const bubbleRef = useRef<HTMLDivElement>(null)
 
   // Effective index for display purposes (null means at the end)
   const effectiveIndex = currentIndex ?? moves.length - 1
@@ -100,6 +109,16 @@ const MoveList = ({
       })
     }
   }, [effectiveIndex])
+
+  // Auto-scroll bubble into view
+  useEffect(() => {
+    if (bubbleRef.current && moveListRef.current) {
+      bubbleRef.current.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+      })
+    }
+  }, [bubble?.moveIndex, bubble?.text])
 
   // Group moves into pairs (white move, black move)
   const movePairs: { number: number; white: Move; black?: Move }[] = []
@@ -209,17 +228,28 @@ const MoveList = ({
           <p className="move-list-empty">No moves yet</p>
         ) : (
           <div className="move-list-grid">
-            {movePairs.map((pair, pairIndex) => (
-              <div key={pair.number} className="move-list-row">
-                <span className="move-number">{pair.number}.</span>
-                {renderMoveCell(pair.white, pairIndex * 2)}
-                {pair.black ? (
-                  renderMoveCell(pair.black, pairIndex * 2 + 1)
-                ) : (
-                  <span className="move-button-placeholder" />
-                )}
-              </div>
-            ))}
+            {movePairs.map((pair, pairIndex) => {
+              const showBubble = bubble &&
+                (bubble.moveIndex === pairIndex * 2 || bubble.moveIndex === pairIndex * 2 + 1)
+              return (
+                <React.Fragment key={pair.number}>
+                  <div className="move-list-row">
+                    <span className="move-number">{pair.number}.</span>
+                    {renderMoveCell(pair.white, pairIndex * 2)}
+                    {pair.black ? (
+                      renderMoveCell(pair.black, pairIndex * 2 + 1)
+                    ) : (
+                      <span className="move-button-placeholder" />
+                    )}
+                  </div>
+                  {showBubble && (
+                    <div ref={bubbleRef} className={`move-bubble move-bubble--${bubble.variant}`}>
+                      {bubble.text}
+                    </div>
+                  )}
+                </React.Fragment>
+              )
+            })}
           </div>
         )}
       </div>
