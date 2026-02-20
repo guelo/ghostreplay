@@ -30,3 +30,6 @@ __pycache__/
 
 # Models
 maia2/maia2_models/
+
+backend/maia2_models/
+maia2_models/
