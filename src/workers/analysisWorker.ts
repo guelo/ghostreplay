@@ -12,8 +12,8 @@ import type {
 import type { EngineScore } from './stockfishMessages'
 import {
   parseInfo,
-  scoreForPlayer,
   getSideToMove,
+  computeAnalysisResult,
   isBlunder,
   isWithinRecordingMoveCap,
 } from './analysisUtils'
@@ -183,25 +183,25 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     return
   }
 
-  const opponentToMove = sideToMove === 'w' ? 'b' : 'w'
-
-  // bestSearch.score is the eval from sideToMove's perspective assuming best play.
-  // No need for a separate search after the best move — minimax already accounts for it.
-  const bestEval = scoreForPlayer(
-    bestSearch.score,
-    sideToMove,
-    request.playerColor,
-  )
-
+  // Evaluate the position after the played move
   const playedEvalSearch = await runSearch(request.fen, [request.move])
-  const playedEval = scoreForPlayer(
-    playedEvalSearch.score,
-    opponentToMove,
-    request.playerColor,
-  )
 
-  const delta =
-    bestEval !== null && playedEval !== null ? bestEval - playedEval : null
+  // When best != played, search after the best move too for an apples-to-apples
+  // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because
+  // independent searches reach different depths, inflating the delta.
+  const postBestScore = request.move === bestMove
+    ? playedEvalSearch.score
+    : (await runSearch(request.fen, [bestMove])).score
+
+  const { bestEval, playedEval, delta } = computeAnalysisResult({
+    bestMove,
+    playedMove: request.move,
+    postPlayedScore: playedEvalSearch.score,
+    postBestScore,
+    sideToMove,
+    playerColor: request.playerColor,
+  })
+
   const forced = request.legalMoveCount !== undefined && request.legalMoveCount <= 2
   const blunder =
     !forced &&

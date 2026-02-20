@@ -6,6 +6,7 @@ import {
   toWhitePerspective,
   scoreForPlayer,
   getSideToMove,
+  computeAnalysisResult,
   isBlunder,
   isWithinRecordingMoveCap,
   classifyMove,
@@ -259,6 +260,94 @@ describe('getSideToMove', () => {
 
   it('handles FEN with only board part', () => {
     expect(getSideToMove('rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR')).toBeNull()
+  })
+})
+
+describe('computeAnalysisResult', () => {
+  it('returns delta zero when played move is the best move despite eval disagreement', () => {
+    // Reproduces the 1.e4 false-blunder bug: the pre-move minimax search
+    // returned +97cp but the post-move search returned cp:-29 from black's
+    // POV (= +29 for white). The old code compared these two independent
+    // search results directly: 97 - 29 = 68 >= 50 threshold → false blunder.
+    //
+    // The fix: when bestMove === playedMove, postBestScore IS postPlayedScore
+    // (same search), so delta is always 0.
+    const postPlayedScore: EngineScore = { type: 'cp', value: -29 }
+
+    const result = computeAnalysisResult({
+      bestMove: 'e2e4',
+      playedMove: 'e2e4',
+      postPlayedScore,
+      postBestScore: postPlayedScore,
+      sideToMove: 'w',
+      playerColor: 'white',
+    })
+
+    expect(result.playedEval).toBe(29)
+    expect(result.bestEval).toBe(29)
+    expect(result.delta).toBe(0)
+  })
+
+  it('computes delta from post-move evals, not pre-move minimax', () => {
+    // White played e4, but best move was d4.
+    // Old code used the pre-move minimax eval (+90cp) as bestEval — a search
+    // artifact from depth/timing variance in WASM. The post-d4 search returns
+    // cp:-30 from black's POV (= +30 for white), and the post-e4 search
+    // returns cp:-20 (= +20 for white).
+    //
+    // Old (buggy): delta = 90 - 20 = 70 → false blunder
+    // New (fixed): delta = 30 - 20 = 10 → correct small inaccuracy
+    const postBestScore: EngineScore = { type: 'cp', value: -30 }
+    const postPlayedScore: EngineScore = { type: 'cp', value: -20 }
+
+    const result = computeAnalysisResult({
+      bestMove: 'd2d4',
+      playedMove: 'e2e4',
+      postPlayedScore,
+      postBestScore,
+      sideToMove: 'w',
+      playerColor: 'white',
+    })
+
+    expect(result.bestEval).toBe(30)
+    expect(result.playedEval).toBe(20)
+    expect(result.delta).toBe(10)
+  })
+
+  it('converts scores from opponent perspective for black player', () => {
+    // Black played e5, best was d5. After d5 white to move: cp:10.
+    // After e5 white to move: cp:40.
+    const postBestScore: EngineScore = { type: 'cp', value: 10 }
+    const postPlayedScore: EngineScore = { type: 'cp', value: 40 }
+
+    const result = computeAnalysisResult({
+      bestMove: 'd7d5',
+      playedMove: 'e7e5',
+      postPlayedScore,
+      postBestScore,
+      sideToMove: 'b',
+      playerColor: 'black',
+    })
+
+    // normalizeScore(10, 'w') = 10, black player → -10
+    // normalizeScore(40, 'w') = 40, black player → -40
+    // delta = -10 - (-40) = 30
+    expect(result.bestEval).toBe(-10)
+    expect(result.playedEval).toBe(-40)
+    expect(result.delta).toBe(30)
+  })
+
+  it('returns null delta when score is missing', () => {
+    const result = computeAnalysisResult({
+      bestMove: 'd2d4',
+      playedMove: 'e2e4',
+      postPlayedScore: null,
+      postBestScore: { type: 'cp', value: -30 },
+      sideToMove: 'w',
+      playerColor: 'white',
+    })
+
+    expect(result.delta).toBeNull()
   })
 })
 

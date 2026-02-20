@@ -93,6 +93,33 @@ export const getSideToMove = (fen: string) => {
 }
 
 /**
+ * Computes bestEval, playedEval, and delta from post-move search scores.
+ *
+ * Both scores must come from positions AFTER their respective moves (i.e. from
+ * the opponent-to-move perspective). Using the pre-move minimax eval as bestEval
+ * is unreliable because independent WASM Stockfish searches reach different
+ * depths, inflating the delta (e.g. the 1.e4 false-blunder: minimax +97cp vs
+ * post-move +29cp for the same resulting position).
+ */
+export const computeAnalysisResult = (input: {
+  bestMove: string
+  playedMove: string
+  postPlayedScore: EngineScore | null
+  postBestScore: EngineScore | null
+  sideToMove: 'w' | 'b'
+  playerColor: 'white' | 'black'
+}): { bestEval: number | null; playedEval: number | null; delta: number | null } => {
+  const opponentToMove = input.sideToMove === 'w' ? 'b' : 'w'
+  const playedEval = scoreForPlayer(input.postPlayedScore, opponentToMove, input.playerColor)
+  const bestEval = input.bestMove === input.playedMove
+    ? playedEval
+    : scoreForPlayer(input.postBestScore, opponentToMove, input.playerColor)
+
+  const delta = bestEval !== null && playedEval !== null ? bestEval - playedEval : null
+  return { bestEval, playedEval, delta }
+}
+
+/**
  * Determines if a move is a blunder based on eval drop and position context.
  * The threshold scales with how lost the position already is:
  * - In equal positions (±200cp): base threshold of 50cp
