@@ -37,6 +37,9 @@ function AppNav({ showLogo = false }: AppNavProps) {
         <Link to="/history" className="nav-bar__link">
           History
         </Link>
+        <Link to="/blunders" className="nav-bar__link">
+          Blunders
+        </Link>
         <Link to="/stats" className="nav-bar__link">
           Stats
         </Link>

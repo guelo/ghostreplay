@@ -501,6 +501,36 @@ export const reviewSrsBlunder = async (
   }, { fallbackMessage: 'Failed to record SRS review' })
 }
 
+export interface BlunderListItem {
+  id: number
+  fen: string
+  bad_move: string
+  best_move: string
+  eval_loss_cp: number
+  pass_streak: number
+  last_reviewed_at: string | null
+  created_at: string
+  srs_priority: number
+  last_session_id: string | null
+  last_played_at: string | null
+}
+
+/**
+ * Fetch the user's blunder library, optionally filtered to only due items.
+ */
+export const fetchBlunders = async (
+  due: boolean = false,
+): Promise<BlunderListItem[]> => {
+  const params = new URLSearchParams()
+  if (due) params.set('due', 'true')
+  const qs = params.toString()
+  return requestJson<BlunderListItem[]>(
+    `${API_BASE_URL}/api/blunder${qs ? `?${qs}` : ''}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load blunders' },
+  )
+}
+
 export type StatsWindowDays = 0 | 7 | 30 | 90 | 365
 
 export interface StatsGameRecord {

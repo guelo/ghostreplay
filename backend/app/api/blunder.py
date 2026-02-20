@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
-from app.models import Blunder, GameSession, Move, Position
+from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
 from app.srs_math import calculate_priority
 
@@ -217,6 +217,7 @@ def _upsert_blunder_target(
     user_move: str,
     best_move: str,
     eval_loss: int,
+    source_session_id: uuid.UUID | None = None,
 ) -> tuple[int, bool]:
     existing_blunder = db.query(Blunder).filter(
         Blunder.user_id == user_id,
@@ -232,6 +233,7 @@ def _upsert_blunder_target(
         bad_move_san=user_move,
         best_move_san=best_move,
         eval_loss_cp=eval_loss,
+        source_session_id=source_session_id,
     )
     db.add(blunder)
     db.flush()
@@ -282,6 +284,7 @@ def _record_target(
         user_move=user_move,
         best_move=best_move,
         eval_loss=eval_before - eval_after,
+        source_session_id=session.id,
     )
 
     if mark_first_blunder_recorded:
@@ -385,6 +388,8 @@ class BlunderListItem(BaseModel):
     last_reviewed_at: datetime | None
     created_at: datetime
     srs_priority: float
+    last_session_id: str | None = None
+    last_played_at: datetime | None = None
 
 
 @router.get("", response_model=list[BlunderListItem])
@@ -401,6 +406,47 @@ def list_blunders(
         .all()
     )
 
+    # Batch-fetch the most recent review per blunder for last_session_id
+    blunder_ids = [b.id for b in rows]
+    latest_reviews: dict[int, BlunderReview] = {}
+    if blunder_ids:
+        from sqlalchemy import func as sa_func
+
+        subq = (
+            db.query(
+                BlunderReview.blunder_id,
+                sa_func.max(BlunderReview.reviewed_at).label("max_reviewed"),
+            )
+            .filter(BlunderReview.blunder_id.in_(blunder_ids))
+            .group_by(BlunderReview.blunder_id)
+            .subquery()
+        )
+        review_rows = (
+            db.query(BlunderReview)
+            .join(
+                subq,
+                (BlunderReview.blunder_id == subq.c.blunder_id)
+                & (BlunderReview.reviewed_at == subq.c.max_reviewed),
+            )
+            .all()
+        )
+        for r in review_rows:
+            latest_reviews[r.blunder_id] = r
+
+    # Fetch session ended_at for all relevant sessions
+    session_ids = set()
+    for b in rows:
+        review = latest_reviews.get(b.id)
+        if review:
+            session_ids.add(review.session_id)
+        elif b.source_session_id:
+            session_ids.add(b.source_session_id)
+
+    session_ended: dict[uuid.UUID, datetime | None] = {}
+    if session_ids:
+        for gs in db.query(GameSession).filter(GameSession.id.in_(session_ids)):
+            session_ended[gs.id] = gs.ended_at
+
     now = datetime.now(timezone.utc)
     items: list[BlunderListItem] = []
     for b in rows:
@@ -416,6 +462,19 @@ def list_blunders(
         position: Position | None = (
             db.query(Position).filter(Position.id == b.position_id).first()
         )
+
+        # Prefer the most recent review session, fall back to source session
+        review = latest_reviews.get(b.id)
+        if review:
+            last_sid = review.session_id
+            last_played = session_ended.get(review.session_id) or review.reviewed_at
+        elif b.source_session_id:
+            last_sid = b.source_session_id
+            last_played = session_ended.get(b.source_session_id)
+        else:
+            last_sid = None
+            last_played = None
+
         items.append(
             BlunderListItem(
                 id=b.id,
@@ -427,6 +486,8 @@ def list_blunders(
                 last_reviewed_at=b.last_reviewed_at,
                 created_at=b.created_at,
                 srs_priority=round(priority, 4),
+                last_session_id=str(last_sid) if last_sid else None,
+                last_played_at=last_played,
             )
         )
 

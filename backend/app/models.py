@@ -74,6 +74,7 @@ class Blunder(Base):
     pass_streak: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_reviewed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    source_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("game_sessions.id"), nullable=True)
 
 
 class BlunderReview(Base):
