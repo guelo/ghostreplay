@@ -9,12 +9,16 @@ const getNextOpponentMoveMock = vi.fn();
 const recordBlunderMock = vi.fn();
 const recordManualBlunderMock = vi.fn();
 const reviewSrsBlunderMock = vi.fn();
+const fetchCurrentRatingMock = vi.fn();
+const audioPlayMock = vi.fn();
+const audioCtorSpy = vi.fn();
 
 vi.mock("../utils/api", () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
+  fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
   recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
   reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
@@ -80,6 +84,15 @@ vi.mock("react-chessboard", () => ({
     );
   },
 }));
+
+beforeEach(() => {
+  fetchCurrentRatingMock.mockReset();
+  fetchCurrentRatingMock.mockResolvedValue({
+    current_rating: 1200,
+    is_provisional: true,
+    games_played: 0,
+  });
+});
 
 describe("ChessGame start flow", () => {
   beforeEach(() => {
@@ -201,11 +214,25 @@ describe("ChessGame blunder recording", () => {
       priority: 0,
       next_expected_review: "2026-02-08T00:00:00Z",
     });
+    audioPlayMock.mockReset();
+    audioPlayMock.mockResolvedValue(undefined);
+    audioCtorSpy.mockReset();
+    class MockAudio {
+      constructor(src: string) {
+        audioCtorSpy(src);
+      }
+
+      play() {
+        return audioPlayMock();
+      }
+    }
+    vi.stubGlobal("Audio", MockAudio);
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
   });
 
   afterEach(() => {
     mockLastAnalysis = null;
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -275,6 +302,40 @@ describe("ChessGame blunder recording", () => {
         50, // eval before
         -150, // eval after
       );
+    });
+  });
+
+  it("plays a random bundled blunder audio clip when player blunders", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    mockAnalyzeMove.mockImplementation(() => {
+      mockLastAnalysis = {
+        id: "blunder-audio",
+        move: "e2e4",
+        bestMove: "d2d4",
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        moveIndex: 0,
+        delta: 200,
+        blunder: true,
+      };
+    });
+
+    const { rerender } = await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalled();
+    });
+
+    rerender(<ChessGame />);
+
+    await waitFor(() => {
+      expect(audioCtorSpy).toHaveBeenCalledWith("/audio/blunder1.m4a");
+      expect(audioPlayMock).toHaveBeenCalled();
     });
   });
 

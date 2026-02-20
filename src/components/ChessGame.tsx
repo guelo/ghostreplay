@@ -104,6 +104,10 @@ type ChessGameProps = {
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
 const SRS_REVIEW_FAIL_THRESHOLD_CP = 50;
+const BLUNDER_AUDIO_CLIPS = Array.from(
+  { length: 10 },
+  (_, index) => `/audio/blunder${index + 1}.m4a`,
+);
 
 const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
 
@@ -111,6 +115,19 @@ const sleep = (ms: number) =>
   new Promise<void>((resolve) => {
     setTimeout(resolve, ms);
   });
+
+const playRandomBlunderAudio = () => {
+  if (typeof Audio === "undefined" || BLUNDER_AUDIO_CLIPS.length === 0) {
+    return;
+  }
+
+  const randomIndex = Math.floor(Math.random() * BLUNDER_AUDIO_CLIPS.length);
+  const clip = BLUNDER_AUDIO_CLIPS[randomIndex];
+  const audio = new Audio(clip);
+  void audio.play().catch(() => {
+    // Ignore playback failures (missing file, browser policy, etc.).
+  });
+};
 
 const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const chess = useMemo(() => new Chess(), []);
@@ -1131,6 +1148,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       delta: lastAnalysis.delta,
     });
     setShowFlash(true);
+    playRandomBlunderAudio();
   }, [lastAnalysis, isPlayerMoveIndex, moveHistory]);
 
   // Auto-dismiss flash after animation
