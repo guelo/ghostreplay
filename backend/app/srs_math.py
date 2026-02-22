@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-BASE_INTERVAL_HOURS = 1.0
+BASE_INTERVAL_HOURS = 4.0
 BACKOFF_FACTOR = 2.0
 MAX_INTERVAL_HOURS = 4320.0
 
