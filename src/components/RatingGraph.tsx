@@ -100,6 +100,7 @@ const CustomTooltip = ({
 
 function RatingGraph() {
   const [range, setRange] = useState<Range>("all");
+  const [showProvisional, setShowProvisional] = useState(true);
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -136,10 +137,16 @@ function RatingGraph() {
     };
   })();
 
-  const renderChart = () => {
-    if (!data || data.ratings.length === 0) return null;
+  const filteredRatings = data
+    ? showProvisional
+      ? data.ratings
+      : data.ratings.filter((r) => !r.is_provisional)
+    : [];
 
-    const chartData = buildChartData(data.ratings);
+  const renderChart = () => {
+    if (filteredRatings.length === 0) return null;
+
+    const chartData = buildChartData(filteredRatings);
     const hasProvisional = chartData.some((p) => p.provisionalRating != null);
     const hasStable = chartData.some((p) => p.stableRating != null);
 
@@ -206,7 +213,19 @@ function RatingGraph() {
   return (
     <section className="stats-section">
       <div className="rating-graph__header">
-        <h2 className="stats-section__title">Rating</h2>
+        <div className="rating-graph__header-left">
+          <h2 className="stats-section__title">Rating</h2>
+          {data && data.ratings.some((r) => r.is_provisional) && (
+            <label className="rating-graph__toggle">
+              <input
+                type="checkbox"
+                checked={showProvisional}
+                onChange={(e) => setShowProvisional(e.target.checked)}
+              />
+              Show provisional
+            </label>
+          )}
+        </div>
         <div
           className="rating-graph__range-picker"
           role="group"
@@ -241,6 +260,12 @@ function RatingGraph() {
           </p>
         )}
 
+        {!loading && !error && data && data.ratings.length > 0 && filteredRatings.length === 0 && (
+          <p className="rating-graph__empty">
+            No stable ratings yet. Complete more games to see your rating!
+          </p>
+        )}
+
         {!loading &&
           !error &&
           data &&
@@ -252,7 +277,7 @@ function RatingGraph() {
             </p>
           )}
 
-        {!loading && !error && data && data.ratings.length > 0 && renderChart()}
+        {!loading && !error && data && filteredRatings.length > 0 && renderChart()}
 
         {!loading && !error && data && data.ratings.length > 0 && (
           <p className="rating-graph__current">

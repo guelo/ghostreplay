@@ -20,6 +20,7 @@ vi.mock("../contexts/useAuth", () => ({
 
 vi.mock("../utils/api", () => ({
   getStatsSummary: (...args: unknown[]) => getStatsSummaryMock(...args),
+  fetchRatingHistory: vi.fn().mockResolvedValue({ ratings: [], current_rating: 1200, games_played: 0 }),
 }));
 
 const baseSummary = {
@@ -213,12 +214,12 @@ describe("StatsPage", () => {
       expect(screen.getByText("Games")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "90d" }));
+    await user.click(screen.getAllByRole("button", { name: "90d" })[0]);
 
     await waitFor(() => {
       expect(getStatsSummaryMock).toHaveBeenLastCalledWith(90);
     });
 
-    expect(screen.getByRole("button", { name: "90d" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getAllByRole("button", { name: "90d" })[0]).toHaveAttribute("aria-pressed", "true");
   });
 });

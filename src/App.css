@@ -2227,6 +2227,28 @@
   margin-bottom: 0.5rem;
 }
 
+.rating-graph__header-left {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+}
+
+.rating-graph__toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.rating-graph__toggle input {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent, #7c6fe0);
+}
+
 .rating-graph__range-picker {
   display: flex;
   gap: 0.35rem;
