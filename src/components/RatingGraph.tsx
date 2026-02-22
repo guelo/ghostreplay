@@ -126,27 +126,22 @@ function RatingGraph() {
     };
   }, [range]);
 
+  const dedupeTickFormatter = (() => {
+    let lastLabel = "";
+    return (tick: number) => {
+      const label = formatDate(new Date(tick).toISOString());
+      if (label === lastLabel) return "";
+      lastLabel = label;
+      return label;
+    };
+  })();
+
   const renderChart = () => {
     if (!data || data.ratings.length === 0) return null;
 
     const chartData = buildChartData(data.ratings);
     const hasProvisional = chartData.some((p) => p.provisionalRating != null);
     const hasStable = chartData.some((p) => p.stableRating != null);
-
-    // Compute evenly spaced x-axis ticks, deduplicated by formatted label
-    const tMin = chartData[0].date;
-    const tMax = chartData[chartData.length - 1].date;
-    const xTicks: number[] = [];
-    const tickCount = Math.min(5, chartData.length);
-    const seen = new Set<string>();
-    for (let k = 0; k < tickCount; k++) {
-      const t = tickCount === 1 ? tMin : tMin + (k / (tickCount - 1)) * (tMax - tMin);
-      const label = formatDate(new Date(t).toISOString());
-      if (!seen.has(label)) {
-        seen.add(label);
-        xTicks.push(t);
-      }
-    }
 
     return (
       <ResponsiveContainer width="100%" height={260}>
@@ -160,9 +155,8 @@ function RatingGraph() {
             dataKey="date"
             type="number"
             scale="time"
-            domain={[tMin, tMax]}
-            ticks={xTicks}
-            tickFormatter={(tick: number) => formatDate(new Date(tick).toISOString())}
+            domain={["auto", "auto"]}
+            tickFormatter={dedupeTickFormatter}
             tick={{ fill: "var(--text-tertiary)", fontSize: 11 }}
             stroke="var(--border-color)"
             tickLine={false}
