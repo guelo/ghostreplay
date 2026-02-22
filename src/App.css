@@ -1616,6 +1616,14 @@
   margin-bottom: 0;
 }
 
+.home-page .nav-bar {
+  align-items: flex-start;
+}
+
+.home-page .nav-bar__brand--logo {
+  align-items: flex-start;
+}
+
 .nav-bar__brand {
   text-transform: uppercase;
   letter-spacing: 0.2em;
@@ -1633,8 +1641,8 @@
 }
 
 .nav-bar__logo {
-  width: clamp(48px, 7vw, 64px);
-  height: clamp(48px, 7vw, 64px);
+  width: clamp(72px, 10vw, 112px);
+  height: clamp(72px, 10vw, 112px);
 }
 
 .nav-bar__actions {
