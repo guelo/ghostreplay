@@ -219,6 +219,7 @@ body {
         var(--bg-tertiary) 100%
     );
     color: inherit;
+    scrollbar-gutter: stable;
 }
 
 #root {
