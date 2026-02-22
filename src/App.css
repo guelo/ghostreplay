@@ -1516,7 +1516,8 @@
 
 .move-list-scroll {
   flex: 1;
-  overflow-y: scroll;
+  overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
 }
 
