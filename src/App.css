@@ -1633,8 +1633,8 @@
 }
 
 .nav-bar__logo {
-  width: clamp(72px, 10vw, 112px);
-  height: clamp(72px, 10vw, 112px);
+  width: clamp(48px, 7vw, 64px);
+  height: clamp(48px, 7vw, 64px);
 }
 
 .nav-bar__actions {
