@@ -1,4 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+} from "recharts";
 import {
   fetchRatingHistory,
   type RatingHistoryResponse,
@@ -15,67 +24,86 @@ const RANGE_OPTIONS: Array<{ label: string; value: Range }> = [
 ];
 
 const PROVISIONAL_THRESHOLD = 20;
-
-// Chart layout constants
-const PADDING = { top: 20, right: 16, bottom: 32, left: 48 };
+const ACCENT = "var(--accent, #7c6fe0)";
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function niceAxis(min: number, max: number, ticks: number): number[] {
-  if (min === max) {
-    return [min - 50, min, min + 50];
-  }
-  const range = max - min;
-  const rough = range / (ticks - 1);
-  const mag = 10 ** Math.floor(Math.log10(rough));
-  const nice = [1, 2, 5, 10].find((n) => n * mag >= rough)! * mag;
-  const lo = Math.floor(min / nice) * nice;
-  const hi = Math.ceil(max / nice) * nice;
-  const result: number[] = [];
-  for (let v = lo; v <= hi; v += nice) {
-    result.push(v);
-  }
-  return result;
+interface ChartPoint {
+  timestamp: string;
+  date: number;
+  provisionalRating?: number;
+  stableRating?: number;
+  isProvisional: boolean;
+  rating: number;
 }
 
-function buildPath(
-  points: RatingPoint[],
-  xScale: (i: number) => number,
-  yScale: (v: number) => number,
-): string {
-  return points
-    .map((p, i) => `${i === 0 ? "M" : "L"}${xScale(i)},${yScale(p.rating)}`)
-    .join(" ");
+function buildChartData(points: RatingPoint[]): ChartPoint[] {
+  const provEnd = points.findIndex((p) => !p.is_provisional);
+
+  return points.map((p, i) => {
+    const isProvisional = p.is_provisional;
+    const isOverlap = provEnd !== -1 && i === provEnd;
+
+    return {
+      timestamp: p.timestamp,
+      date: new Date(p.timestamp).getTime(),
+      rating: p.rating,
+      isProvisional,
+      provisionalRating: isProvisional || isOverlap ? p.rating : undefined,
+      stableRating: !isProvisional ? p.rating : undefined,
+    };
+  });
 }
+
+const hollowDot = (props: Record<string, unknown>) => {
+  const { cx, cy, value } = props as { cx: number; cy: number; value?: number };
+  if (value == null) return null;
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={3}
+      fill="none"
+      stroke={ACCENT}
+      strokeWidth={1.5}
+    />
+  );
+};
+
+const filledDot = (props: Record<string, unknown>) => {
+  const { cx, cy, value } = props as { cx: number; cy: number; value?: number };
+  if (value == null) return null;
+  return <circle cx={cx} cy={cy} r={3} fill={ACCENT} />;
+};
+
+const CustomTooltip = ({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: ChartPoint }>;
+}) => {
+  if (!active || !payload?.length) return null;
+  const point = payload[0].payload;
+  return (
+    <div className="rating-graph__tooltip">
+      <strong>{point.rating}</strong>
+      {point.isProvisional ? " (provisional)" : ""}
+      <br />
+      {formatDate(point.timestamp)}
+    </div>
+  );
+};
 
 function RatingGraph() {
   const [range, setRange] = useState<Range>("all");
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(600);
-  const height = 260;
 
-  // Responsive width
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setWidth(entry.contentRect.width);
-      }
-    });
-    observer.observe(el);
-    setWidth(el.clientWidth);
-    return () => observer.disconnect();
-  }, []);
-
-  // Fetch data
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -98,126 +126,86 @@ function RatingGraph() {
     };
   }, [range]);
 
-  const chartW = width - PADDING.left - PADDING.right;
-  const chartH = height - PADDING.top - PADDING.bottom;
-
   const renderChart = () => {
     if (!data || data.ratings.length === 0) return null;
 
-    const points = data.ratings;
-    const ratings = points.map((p) => p.rating);
-    const minR = Math.min(...ratings);
-    const maxR = Math.max(...ratings);
-    const yTicks = niceAxis(minR, maxR, 5);
-    const yMin = yTicks[0];
-    const yMax = yTicks[yTicks.length - 1];
+    const chartData = buildChartData(data.ratings);
+    const hasProvisional = chartData.some((p) => p.provisionalRating != null);
+    const hasStable = chartData.some((p) => p.stableRating != null);
 
-    const xScale = (i: number) =>
-      PADDING.left +
-      (points.length === 1 ? chartW / 2 : (i / (points.length - 1)) * chartW);
-    const yScale = (v: number) =>
-      PADDING.top +
-      chartH -
-      (yMax === yMin ? chartH / 2 : ((v - yMin) / (yMax - yMin)) * chartH);
-
-    // Split into provisional and stable segments
-    const provEnd = points.findIndex((p) => !p.is_provisional);
-    const provPoints = provEnd === -1 ? points : points.slice(0, provEnd + 1);
-    const stablePoints =
-      provEnd === -1 ? [] : points.slice(provEnd);
-
-    // X-axis labels — pick ~5 evenly spaced
-    const xLabelCount = Math.min(5, points.length);
-    const xLabels: Array<{ i: number; label: string }> = [];
-    for (let k = 0; k < xLabelCount; k++) {
-      const i =
-        xLabelCount === 1
-          ? 0
-          : Math.round((k / (xLabelCount - 1)) * (points.length - 1));
-      xLabels.push({ i, label: formatDate(points[i].timestamp) });
+    // Compute evenly spaced x-axis ticks, deduplicated by formatted label
+    const tMin = chartData[0].date;
+    const tMax = chartData[chartData.length - 1].date;
+    const xTicks: number[] = [];
+    const tickCount = Math.min(5, chartData.length);
+    const seen = new Set<string>();
+    for (let k = 0; k < tickCount; k++) {
+      const t = tickCount === 1 ? tMin : tMin + (k / (tickCount - 1)) * (tMax - tMin);
+      const label = formatDate(new Date(t).toISOString());
+      if (!seen.has(label)) {
+        seen.add(label);
+        xTicks.push(t);
+      }
     }
 
     return (
-      <svg
-        ref={svgRef}
-        width={width}
-        height={height}
-        className="rating-graph__svg"
-      >
-        {/* Y grid + labels */}
-        {yTicks.map((tick) => (
-          <g key={tick}>
-            <line
-              x1={PADDING.left}
-              y1={yScale(tick)}
-              x2={PADDING.left + chartW}
-              y2={yScale(tick)}
-              className="rating-graph__grid-line"
+      <ResponsiveContainer width="100%" height={260}>
+        <LineChart data={chartData}>
+          <CartesianGrid
+            strokeDasharray="4 3"
+            stroke="var(--border-color)"
+            vertical={false}
+          />
+          <XAxis
+            dataKey="date"
+            type="number"
+            scale="time"
+            domain={[tMin, tMax]}
+            ticks={xTicks}
+            tickFormatter={(tick: number) => formatDate(new Date(tick).toISOString())}
+            tick={{ fill: "var(--text-tertiary)", fontSize: 11 }}
+            stroke="var(--border-color)"
+            tickLine={false}
+          />
+          <YAxis
+            domain={["auto", "auto"]}
+            tick={{ fill: "var(--text-tertiary)", fontSize: 11 }}
+            stroke="var(--border-color)"
+            tickLine={false}
+            width={44}
+          />
+          <Tooltip
+            content={<CustomTooltip />}
+            cursor={{ stroke: "var(--border-color)" }}
+          />
+          {hasProvisional && (
+            <Line
+              type="linear"
+              dataKey="provisionalRating"
+              stroke={ACCENT}
+              strokeDasharray="6 4"
+              strokeWidth={2}
+              opacity={0.6}
+              dot={hollowDot}
+              activeDot={false}
+              connectNulls
+              isAnimationActive={false}
             />
-            <text
-              x={PADDING.left - 8}
-              y={yScale(tick)}
-              className="rating-graph__axis-label"
-              textAnchor="end"
-              dominantBaseline="middle"
-            >
-              {tick}
-            </text>
-          </g>
-        ))}
-
-        {/* X labels */}
-        {xLabels.map(({ i, label }) => (
-          <text
-            key={i}
-            x={xScale(i)}
-            y={height - 6}
-            className="rating-graph__axis-label"
-            textAnchor="middle"
-          >
-            {label}
-          </text>
-        ))}
-
-        {/* Provisional line (dashed) */}
-        {provPoints.length > 1 && (
-          <path
-            d={buildPath(provPoints, xScale, yScale)}
-            className="rating-graph__line rating-graph__line--provisional"
-            fill="none"
-          />
-        )}
-
-        {/* Stable line (solid) */}
-        {stablePoints.length > 1 && (
-          <path
-            d={buildPath(
-              stablePoints,
-              (i) => xScale(i + provEnd),
-              yScale,
-            )}
-            className="rating-graph__line rating-graph__line--stable"
-            fill="none"
-          />
-        )}
-
-        {/* Dots */}
-        {points.map((p, i) => (
-          <circle
-            key={p.game_session_id}
-            cx={xScale(i)}
-            cy={yScale(p.rating)}
-            r={3}
-            className={`rating-graph__dot${p.is_provisional ? " rating-graph__dot--provisional" : ""}`}
-          >
-            <title>
-              {p.rating}
-              {p.is_provisional ? " (provisional)" : ""} —{" "}
-              {formatDate(p.timestamp)}
-            </title>
-          </circle>
-        ))}
-      </svg>
+          )}
+          {hasStable && (
+            <Line
+              type="linear"
+              dataKey="stableRating"
+              stroke={ACCENT}
+              strokeWidth={2}
+              dot={filledDot}
+              activeDot={false}
+              connectNulls
+              isAnimationActive={false}
+            />
+          )}
+        </LineChart>
+      </ResponsiveContainer>
     );
   };
 
@@ -244,7 +232,7 @@ function RatingGraph() {
         </div>
       </div>
 
-      <div ref={containerRef} className="rating-graph__container">
+      <div className="rating-graph__container">
         {loading && (
           <p className="stats-shell__placeholder">Loading rating...</p>
         )}

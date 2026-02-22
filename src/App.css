@@ -2243,48 +2243,14 @@
   align-items: center;
 }
 
-.rating-graph__svg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.rating-graph__grid-line {
-  stroke: var(--border-color);
-  stroke-width: 1;
-  stroke-dasharray: 4 3;
-}
-
-.rating-graph__axis-label {
-  fill: var(--text-tertiary);
-  font-size: 11px;
-  font-family: inherit;
-}
-
-.rating-graph__line {
-  stroke-width: 2;
-  stroke-linejoin: round;
-  stroke-linecap: round;
-}
-
-.rating-graph__line--stable {
-  stroke: var(--accent, #7c6fe0);
-}
-
-.rating-graph__line--provisional {
-  stroke: var(--accent, #7c6fe0);
-  opacity: 0.6;
-  stroke-dasharray: 6 4;
-}
-
-.rating-graph__dot {
-  fill: var(--accent, #7c6fe0);
-}
-
-.rating-graph__dot--provisional {
-  fill: none;
-  stroke: var(--accent, #7c6fe0);
-  stroke-width: 1.5;
+.rating-graph__tooltip {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.8rem;
+  color: var(--text-primary);
+  line-height: 1.4;
 }
 
 .rating-graph__empty {
