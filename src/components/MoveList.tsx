@@ -161,29 +161,53 @@ const MoveList = ({
 
   return (
     <div className="move-list-container">
-      <div className="move-list-header">
-        <span className="move-list-title">Moves</span>
-        <div className="move-list-actions">
-          <span className={`move-list-viewing ${isAtLatest ? 'hidden' : ''}`}>
-            Viewing position {effectiveIndex + 1}/{moves.length}
-          </span>
-          {showAddButton ? (
-            <button
-              className="move-list-add-button"
-              type="button"
-              onClick={() => {
-                if (onAddSelectedMove && effectiveIndex >= 0) {
-                  onAddSelectedMove(effectiveIndex)
-                }
-              }}
-              disabled={isAddingSelectedMove}
-              title="Add selected move to ghost library"
-            >
-              {isAddingSelectedMove ? 'Adding…' : 'Add to Ghost Library'}
-            </button>
-          ) : null}
-        </div>
+      <div className="move-list-scroll" ref={moveListRef}>
+        {moves.length === 0 ? (
+          <p className="move-list-empty">No moves yet</p>
+        ) : (
+          <div className="move-list-grid">
+            {movePairs.map((pair, pairIndex) => {
+              const showBubble = bubble &&
+                (bubble.moveIndex === pairIndex * 2 || bubble.moveIndex === pairIndex * 2 + 1)
+              return (
+                <React.Fragment key={pair.number}>
+                  <div className="move-list-row">
+                    <span className="move-number">{pair.number}.</span>
+                    {renderMoveCell(pair.white, pairIndex * 2)}
+                    {pair.black ? (
+                      renderMoveCell(pair.black, pairIndex * 2 + 1)
+                    ) : (
+                      <span className="move-button-placeholder" />
+                    )}
+                  </div>
+                  {showBubble && (
+                    <div ref={bubbleRef} className={`move-bubble move-bubble--${bubble.variant}`}>
+                      {bubble.text}
+                    </div>
+                  )}
+                </React.Fragment>
+              )
+            })}
+          </div>
+        )}
       </div>
+
+      {showAddButton ? (
+        <button
+          className="move-list-add-button"
+          type="button"
+          onClick={() => {
+            if (onAddSelectedMove && effectiveIndex >= 0) {
+              onAddSelectedMove(effectiveIndex)
+            }
+          }}
+          disabled={isAddingSelectedMove}
+          title="Add selected move to ghost library"
+        >
+          {isAddingSelectedMove ? 'Adding…' : 'Add to Ghost Library'}
+        </button>
+      ) : null}
+
       <div className="move-list-nav">
         <button
           className="move-nav-button"
@@ -221,37 +245,6 @@ const MoveList = ({
         >
           ⟩⟩
         </button>
-      </div>
-
-      <div className="move-list-scroll" ref={moveListRef}>
-        {moves.length === 0 ? (
-          <p className="move-list-empty">No moves yet</p>
-        ) : (
-          <div className="move-list-grid">
-            {movePairs.map((pair, pairIndex) => {
-              const showBubble = bubble &&
-                (bubble.moveIndex === pairIndex * 2 || bubble.moveIndex === pairIndex * 2 + 1)
-              return (
-                <React.Fragment key={pair.number}>
-                  <div className="move-list-row">
-                    <span className="move-number">{pair.number}.</span>
-                    {renderMoveCell(pair.white, pairIndex * 2)}
-                    {pair.black ? (
-                      renderMoveCell(pair.black, pairIndex * 2 + 1)
-                    ) : (
-                      <span className="move-button-placeholder" />
-                    )}
-                  </div>
-                  {showBubble && (
-                    <div ref={bubbleRef} className={`move-bubble move-bubble--${bubble.variant}`}>
-                      {bubble.text}
-                    </div>
-                  )}
-                </React.Fragment>
-              )
-            })}
-          </div>
-        )}
       </div>
     </div>
   )

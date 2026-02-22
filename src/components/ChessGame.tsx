@@ -162,8 +162,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [viewIndex, setViewIndex] = useState<number | null>(null); // null = viewing live position
   const {
     status: engineStatus,
-    error: engineError,
-    info: engineInfo,
     isThinking,
     evaluatePosition,
     resetEngine,
@@ -177,7 +175,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     analyzingMove,
     clearAnalysis,
   } = useMoveAnalysis();
-  const [engineMessage, setEngineMessage] = useState<string | null>(null);
+  const [, setEngineMessage] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isGameActive, setIsGameActive] = useState(false);
   const [liveOpening, setLiveOpening] = useState<OpeningLookupResult | null>(
