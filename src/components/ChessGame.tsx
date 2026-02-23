@@ -36,6 +36,20 @@ const MAIA_ELO_BINS = [
   1600, 1700, 1800, 1900, 2000, 2200, 2400, 2600,
 ] as const;
 
+/** Gaussian-sample a difficulty bin near the user's Elo (σ controls spread). */
+function sampleEloBin(userElo: number, sigma = 125): (typeof MAIA_ELO_BINS)[number] {
+  const weights = MAIA_ELO_BINS.map(
+    (bin) => Math.exp(-((userElo - bin) ** 2) / (2 * sigma ** 2)),
+  );
+  const total = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  for (let i = 0; i < weights.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return MAIA_ELO_BINS[i];
+  }
+  return MAIA_ELO_BINS[MAIA_ELO_BINS.length - 1];
+}
+
 const MAIA_BOT_NAMES: Record<(typeof MAIA_ELO_BINS)[number], string> = {
   600: "Boo Bud 600",
   800: "Wisp Cub 800",
@@ -235,6 +249,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       .then((data) => {
         setPlayerRating(data.current_rating);
         setIsProvisional(data.is_provisional);
+        setEngineElo(sampleEloBin(data.current_rating));
       })
       .catch(() => {});
   }, []);
@@ -1459,7 +1474,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleShowStartOverlay = () => {
     setPlayerColorChoice("random");
-    setEngineElo(800);
+    setEngineElo(sampleEloBin(playerRating));
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
   };
