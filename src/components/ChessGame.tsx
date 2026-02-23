@@ -1206,6 +1206,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return false;
     }
 
+    if (sourceSquare === targetSquare) {
+      return false;
+    }
+
     const fenBeforeMove = chess.fen();
     const legalMoveCount = chess.moves().length;
     const move = chess.move({
