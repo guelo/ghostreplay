@@ -72,8 +72,10 @@ def _create_test_schema(conn) -> None:
             pass_streak INTEGER NOT NULL DEFAULT 0,
             last_reviewed_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            source_session_id TEXT,
             UNIQUE(user_id, position_id),
-            FOREIGN KEY (position_id) REFERENCES positions(id)
+            FOREIGN KEY (position_id) REFERENCES positions(id),
+            FOREIGN KEY (source_session_id) REFERENCES game_sessions(id)
         )
     """))
     conn.execute(text("""

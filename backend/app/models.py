@@ -22,11 +22,14 @@ class Base(DeclarativeBase):
     pass
 
 
+BIGINT_SQLITE = BigInteger().with_variant(Integer, "sqlite")
+
+
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
     username: Mapped[str | None] = mapped_column(String(50))
     password_hash: Mapped[str | None] = mapped_column(String(255))
     is_anonymous: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
@@ -48,8 +51,8 @@ class Position(Base):
         Index("idx_positions_user_active_color", "user_id", "active_color"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
     fen_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     fen_raw: Mapped[str] = mapped_column(Text, nullable=False)
     active_color: Mapped[str] = mapped_column(String(5), nullable=False)
@@ -65,9 +68,9 @@ class Blunder(Base):
         Index("idx_blunders_due", "user_id", "pass_streak", "last_reviewed_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    position_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("positions.id"), nullable=False)
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    position_id: Mapped[int] = mapped_column(BIGINT_SQLITE, ForeignKey("positions.id"), nullable=False)
     bad_move_san: Mapped[str] = mapped_column(String(10), nullable=False)
     best_move_san: Mapped[str] = mapped_column(String(10), nullable=False)
     eval_loss_cp: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -83,8 +86,8 @@ class BlunderReview(Base):
         Index("idx_blunder_reviews_blunder", "blunder_id", "reviewed_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    blunder_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("blunders.id", ondelete="CASCADE"), nullable=False)
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    blunder_id: Mapped[int] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id", ondelete="CASCADE"), nullable=False)
     session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("game_sessions.id"), nullable=False)
     reviewed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -102,7 +105,7 @@ class GameSession(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
     started_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     ended_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -118,14 +121,14 @@ class Move(Base):
     __tablename__ = "moves"
 
     from_position_id: Mapped[int] = mapped_column(
-        BigInteger,
+        BIGINT_SQLITE,
         ForeignKey("positions.id"),
         primary_key=True,
         nullable=False,
     )
     move_san: Mapped[str] = mapped_column(String(10), primary_key=True, nullable=False)
     to_position_id: Mapped[int] = mapped_column(
-        BigInteger,
+        BIGINT_SQLITE,
         ForeignKey("positions.id"),
         nullable=False,
     )
@@ -137,8 +140,8 @@ class RatingHistory(Base):
         Index("idx_rating_history_user_timestamp", "user_id", "recorded_at"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id"), nullable=False)
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, ForeignKey("users.id"), nullable=False)
     game_session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("game_sessions.id"), nullable=False
     )
@@ -158,7 +161,7 @@ class SessionMove(Base):
         Index("idx_session_moves_session", "session_id"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
     session_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("game_sessions.id", ondelete="CASCADE"),
