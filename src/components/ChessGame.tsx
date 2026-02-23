@@ -1268,7 +1268,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setViewIndex(null);
   }, []);
 
-  const handleNewGame = async () => {
+  const handleNewGame = async (colorOverride?: BoardOrientation | "random") => {
     try {
       setIsStartingGame(true);
       setStartError(null);
@@ -1286,12 +1286,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
 
       // Start new game session
+      const effectiveChoice = colorOverride ?? playerColorChoice;
       const resolvedPlayerColor =
-        playerColorChoice === "random"
+        effectiveChoice === "random"
           ? Math.random() < 0.5
             ? "white"
             : "black"
-          : playerColorChoice;
+          : effectiveChoice;
       setPlayerColor(resolvedPlayerColor);
       setBoardOrientation(resolvedPlayerColor);
 
@@ -1672,28 +1673,25 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   <p className="chess-start-title">Side</p>
                   <div className="chess-start-options">
                     <button
-                      className={`chess-button toggle ${playerColorChoice === "white" ? "active" : ""}`}
+                      className="chess-button primary"
                       type="button"
-                      onClick={() => handleSelectPlayerColor("white")}
-                      aria-pressed={playerColorChoice === "white"}
+                      onClick={() => handleNewGame("white")}
                       disabled={isStartingGame}
                     >
                       Play White
                     </button>
                     <button
-                      className={`chess-button toggle ${playerColorChoice === "random" ? "active" : ""}`}
+                      className="chess-button primary"
                       type="button"
-                      onClick={handleRandomColor}
-                      aria-pressed={playerColorChoice === "random"}
+                      onClick={() => handleNewGame("random")}
                       disabled={isStartingGame}
                     >
                       Play Random
                     </button>
                     <button
-                      className={`chess-button toggle ${playerColorChoice === "black" ? "active" : ""}`}
+                      className="chess-button primary"
                       type="button"
-                      onClick={() => handleSelectPlayerColor("black")}
-                      aria-pressed={playerColorChoice === "black"}
+                      onClick={() => handleNewGame("black")}
                       disabled={isStartingGame}
                     >
                       Play Black
@@ -1702,14 +1700,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   {startError && (
                     <p className="chess-start-error">{startError}</p>
                   )}
-                  <button
-                    className="chess-button primary overlay-button"
-                    type="button"
-                    onClick={handleNewGame}
-                    disabled={isStartingGame}
-                  >
-                    {isStartingGame ? "Starting…" : "Play"}
-                  </button>
                 </div>
               </div>
             )}
