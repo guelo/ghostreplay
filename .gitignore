@@ -33,3 +33,9 @@ maia2/maia2_models/
 
 backend/maia2_models/
 maia2_models/
+
+# Playwright
+playwright-report/
+test-results/
+blob-report/
+backend/.tmp/e2e.sqlite3

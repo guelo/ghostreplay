@@ -19,6 +19,20 @@ npm run build       # compile TypeScript and create a production build
 npm run preview     # preview the production build locally
 ```
 
+## End-to-end testing (Playwright)
+
+```bash
+npm run test:e2e
+```
+
+Playwright will launch:
+
+- the FastAPI backend via `scripts/e2e/start_backend.sh`
+- a seeded E2E database with deterministic test users/blunder fixtures
+- the Vite frontend with `VITE_API_URL` pointed at the E2E backend
+
+See `e2e/README.md` for seeded account details and additional E2E commands.
+
 The default dev command prints the local URL in the terminal. Open it in a browser and you should see the home page at `/`. Use the **Play a Game** CTA (or navigate to `/game`) to launch gameplay.
 
 ## Verifying the chess game
