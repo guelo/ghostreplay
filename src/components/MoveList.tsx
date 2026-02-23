@@ -138,7 +138,7 @@ const MoveList = ({
     effectiveIndex >= 0 &&
     canAddSelectedMove
 
-  const renderMoveCell = (move: Move, index: number) => {
+  const renderMoveCell = (move: Move, index: number, side: 'white' | 'black') => {
     const isSelected = index === effectiveIndex
     const annotation = move.classification ? ANNOTATION_SYMBOL[move.classification] : ''
     const colorClass = classificationClass(move.classification)
@@ -146,12 +146,11 @@ const MoveList = ({
     return (
       <button
         ref={isSelected ? selectedMoveRef : null}
-        className={`move-button ${colorClass} ${isSelected ? 'selected' : ''}`}
+        className={`move-button move-col-${side} ${colorClass} ${isSelected ? 'selected' : ''}`}
         type="button"
         onClick={() => handleMoveClick(index)}
       >
-        <span className="move-annotation">{annotation}</span>
-        <span className="move-san">{move.san}</span>
+        <span className="move-san">{annotation}{move.san}</span>
         <span className="move-eval">
           {move.eval != null ? formatEval(move.eval) : ''}
         </span>
@@ -171,15 +170,13 @@ const MoveList = ({
                 (bubble.moveIndex === pairIndex * 2 || bubble.moveIndex === pairIndex * 2 + 1)
               return (
                 <React.Fragment key={pair.number}>
-                  <div className="move-list-row">
-                    <span className="move-number">{pair.number}.</span>
-                    {renderMoveCell(pair.white, pairIndex * 2)}
-                    {pair.black ? (
-                      renderMoveCell(pair.black, pairIndex * 2 + 1)
-                    ) : (
-                      <span className="move-button-placeholder" />
-                    )}
-                  </div>
+                  <span className="move-number">{pair.number}</span>
+                  {renderMoveCell(pair.white, pairIndex * 2, 'white')}
+                  {pair.black ? (
+                    renderMoveCell(pair.black, pairIndex * 2 + 1, 'black')
+                  ) : (
+                    <span className="move-button-placeholder" />
+                  )}
                   {showBubble && (
                     <div ref={bubbleRef} className={`move-bubble move-bubble--${bubble.variant}`}>
                       {bubble.text}

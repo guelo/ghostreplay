@@ -181,7 +181,7 @@
 
 .chess-layout {
   display: grid;
-  grid-template-columns: 240px minmax(0, 600px) minmax(180px, 240px);
+  grid-template-columns: 240px minmax(0, 600px) minmax(200px, 260px);
   grid-template-areas: "panel board moves";
   gap: 1.5rem;
   align-items: start;
@@ -1110,7 +1110,7 @@
 }
 
 .analysis-board__moves-col {
-  flex: 0 0 200px;
+  flex: 0 0 230px;
 }
 
 .analysis-board__board-with-eval {
@@ -1276,6 +1276,7 @@
 
 /* Analyst speech bubble in move list */
 .move-bubble {
+  grid-column: 1 / -1;
   margin: 0.15rem 0 0.25rem 2rem;
   padding: 0.35rem 0.6rem;
   border-radius: 0.5rem;
@@ -1425,7 +1426,7 @@
 /* Move List */
 .move-list-container {
   grid-area: moves;
-  padding: 0.85rem 1rem;
+  padding: 0.85rem 0.5rem;
   border-radius: 1rem;
   border: 1px solid var(--border-color-strong);
   background: var(--card-bg);
@@ -1529,35 +1530,33 @@
 }
 
 .move-list-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-}
-
-.move-list-row {
   display: grid;
-  grid-template-columns: 2rem 1fr 1fr;
-  gap: 0.15rem;
+  grid-template-columns: 1.5rem 1fr 1fr;
   align-items: center;
 }
 
 .move-number {
+  grid-column: 1;
   color: var(--text-tertiary);
   font-size: 0.85rem;
   text-align: right;
-  padding-right: 0.25rem;
+  padding: 0.35rem 0.25rem 0.35rem 0.15rem;
+  border-right: 1px solid var(--border-color);
+  overflow: visible;
+  white-space: nowrap;
 }
 
 .move-button {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: baseline;
+  display: flex;
+  flex-direction: column;
   gap: 0;
-  padding: 0.35rem 0.5rem;
+  padding: 0.35rem 0.3rem;
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
-  border-radius: 0.35rem;
+  border-radius: 0;
+  white-space: nowrap;
+  overflow: hidden;
   font-size: 0.9rem;
   font-family: 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
   font-weight: 500;
@@ -1566,9 +1565,16 @@
   transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
 }
 
-.move-button-placeholder {
-  /* Empty cell to keep grid alignment when black hasn't moved */
+.move-col-white {
+  grid-column: 2;
 }
+
+.move-col-black,
+.move-button-placeholder {
+  grid-column: 3;
+  border-left: 1px solid var(--border-color);
+}
+
 
 .move-button:hover {
   background: var(--hover-overlay);
@@ -1581,20 +1587,15 @@
   color: var(--text-primary);
 }
 
-/* Move annotation symbols (?, !, ??, etc.) */
-.move-annotation {
-  width: 1.4em;
-  text-align: center;
-  font-size: 0.75em;
-  font-weight: 700;
+/* Eval number below move */
+.move-eval {
+  font-size: 0.65rem;
+  opacity: 0.5;
+  line-height: 1;
 }
 
-/* Eval number next to move */
-.move-eval {
-  width: 3.2em;
-  text-align: right;
-  font-size: 0.7rem;
-  opacity: 0.6;
+.move-eval:empty {
+  display: none;
 }
 
 /* Move classification colors */
