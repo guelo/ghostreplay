@@ -120,7 +120,10 @@ describe("ChessGame start flow", () => {
   });
 
   it("defaults to random color on Play", async () => {
-    vi.spyOn(Math, "random").mockReturnValueOnce(0.9);
+    // Math.random is called multiple times: sampleEloBin on mount, sampleEloBin
+    // when opening the overlay, and once for color resolution in handleNewGame.
+    // Return 0.9 for all calls so the color resolves to "black" (0.9 >= 0.5).
+    vi.spyOn(Math, "random").mockReturnValue(0.9);
     startGameMock.mockResolvedValueOnce({
       session_id: "session-123",
       engine_elo: 1500,
@@ -130,16 +133,13 @@ describe("ChessGame start flow", () => {
     render(<ChessGame />);
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
-    expect(
-      screen.getByRole("button", { name: /play random/i }),
-    ).toHaveAttribute("aria-pressed", "true");
-
-    expect(screen.getByText("Random")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play random/i }));
 
     await waitFor(() => {
-      expect(startGameMock).toHaveBeenCalledWith(1500, "black");
+      expect(startGameMock).toHaveBeenCalledWith(
+        expect.any(Number),
+        "black",
+      );
     });
 
     await waitFor(() => {
@@ -160,12 +160,12 @@ describe("ChessGame start flow", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play black/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
       expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
         "session-456",
         STARTING_FEN,
+        [],
       );
     });
   });
@@ -177,6 +177,7 @@ describe("ChessGame blunder recording", () => {
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
     startGameMock.mockReset();
     endGameMock.mockReset();
+    endGameMock.mockResolvedValue({});
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
     recordBlunderMock.mockReset();
@@ -247,7 +248,6 @@ describe("ChessGame blunder recording", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
       expect(startGameMock).toHaveBeenCalled();
@@ -286,6 +286,7 @@ describe("ChessGame blunder recording", () => {
         "e2e4",
         "white",
         0, // move index
+        expect.any(Number),
       );
     });
 
@@ -702,6 +703,7 @@ describe("ChessGame blunder recording", () => {
         "e7e5",
         "black",
         1,
+        expect.any(Number),
       );
     });
 
@@ -892,7 +894,6 @@ describe("ChessGame move analysis", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
       expect(startGameMock).toHaveBeenCalled();
@@ -913,6 +914,7 @@ describe("ChessGame move analysis", () => {
         "e2e4",
         "white",
         0,
+        expect.any(Number),
       );
     });
 
@@ -923,6 +925,7 @@ describe("ChessGame move analysis", () => {
         "d7d5",
         "black",
         1,
+        expect.any(Number),
       );
     });
   });
@@ -949,6 +952,7 @@ describe("ChessGame move analysis", () => {
         "e2e4",
         "white",
         0,
+        expect.any(Number),
       );
     });
 
@@ -959,6 +963,7 @@ describe("ChessGame move analysis", () => {
         "e7e5",
         "black",
         1,
+        expect.any(Number),
       );
     });
   });
@@ -983,6 +988,7 @@ describe("ChessGame move analysis", () => {
         "d7d5",
         "black",
         1,
+        expect.any(Number),
       );
     });
 
@@ -1047,6 +1053,7 @@ describe("ChessGame move analysis", () => {
         "session-analysis",
         "resign",
         expect.any(String),
+        expect.any(Boolean),
       );
     });
   });
@@ -1089,7 +1096,6 @@ describe("ChessGame opening display", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
       expect(screen.getByText("Opening:")).toBeInTheDocument();
@@ -1116,7 +1122,6 @@ describe("ChessGame opening display", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
       expect(lookupOpeningByFenMock).toHaveBeenCalled();
@@ -1160,7 +1165,6 @@ describe("ChessGame opening display", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^play$/i }));
 
     await waitFor(() => {
       expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
