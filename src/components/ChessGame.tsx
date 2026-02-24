@@ -27,6 +27,7 @@ import {
   toWhitePerspective,
 } from "../workers/analysisUtils";
 import EvalBar from "./EvalBar";
+import MaterialDisplay from "./MaterialDisplay";
 import MoveList from "./MoveList";
 import type { MoveListBubble } from "./MoveList";
 
@@ -1879,15 +1880,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           )}
         </div>
 
-        <MoveList
-          moves={annotatedMoves}
-          currentIndex={viewIndex}
-          onNavigate={handleNavigate}
-          canAddSelectedMove={canAddSelectedMove}
-          isAddingSelectedMove={isAddingToLibrary}
-          onAddSelectedMove={handleAddSelectedMove}
-          bubble={moveBubble}
-        />
+        <div className="moves-column">
+          <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
+          <MoveList
+            moves={annotatedMoves}
+            currentIndex={viewIndex}
+            onNavigate={handleNavigate}
+            canAddSelectedMove={canAddSelectedMove}
+            isAddingSelectedMove={isAddingToLibrary}
+            onAddSelectedMove={handleAddSelectedMove}
+            bubble={moveBubble}
+          />
+          <MaterialDisplay fen={displayedFen} perspective={playerColor} />
+        </div>
       </div>
     </section>
   );
