@@ -1890,6 +1890,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             isAddingSelectedMove={isAddingToLibrary}
             onAddSelectedMove={handleAddSelectedMove}
             bubble={moveBubble}
+            playerColor={playerColor}
           />
           <MaterialDisplay fen={displayedFen} perspective={playerColor} />
         </div>

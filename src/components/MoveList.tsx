@@ -22,6 +22,7 @@ type MoveListProps = {
   isAddingSelectedMove?: boolean
   onAddSelectedMove?: (index: number) => void
   bubble?: MoveListBubble | null
+  playerColor?: 'white' | 'black'
 }
 
 const formatEval = (cp: number): string => {
@@ -42,6 +43,7 @@ const MoveList = ({
   isAddingSelectedMove = false,
   onAddSelectedMove,
   bubble = null,
+  playerColor = 'white',
 }: MoveListProps) => {
   const moveListRef = useRef<HTMLDivElement>(null)
   const selectedMoveRef = useRef<HTMLButtonElement>(null)
@@ -165,6 +167,9 @@ const MoveList = ({
           <p className="move-list-empty">No moves yet</p>
         ) : (
           <div className="move-list-grid">
+            <span className="move-list-header" />
+            <span className="move-list-header">{playerColor === 'white' ? 'You' : 'Engine'}</span>
+            <span className="move-list-header">{playerColor === 'black' ? 'You' : 'Engine'}</span>
             {movePairs.map((pair, pairIndex) => {
               const showBubble = bubble &&
                 (bubble.moveIndex === pairIndex * 2 || bubble.moveIndex === pairIndex * 2 + 1)
