@@ -104,11 +104,15 @@ function RatingGraph() {
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Synchronously reset loading/error state before the effect runs
+  const handleRangeChange = (newRange: Range) => {
+    setRange(newRange);
+    setLoading(true);
+    setError(null);
+  };
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
 
     fetchRatingHistory(range)
       .then((res) => {
@@ -237,7 +241,7 @@ function RatingGraph() {
               type="button"
               className={`stats-window-picker__button${range === opt.value ? " stats-window-picker__button--active" : ""}`}
               aria-pressed={range === opt.value}
-              onClick={() => setRange(opt.value)}
+              onClick={() => handleRangeChange(opt.value)}
             >
               {opt.label}
             </button>

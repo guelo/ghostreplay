@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
@@ -102,13 +102,6 @@ const AnalysisBoard = ({
   )
   const [whatIfMoves, setWhatIfMoves] = useState<WhatIfMove[]>([])
   const [whatIfBranchPoint, setWhatIfBranchPoint] = useState(-1)
-
-  // Reset to initialMoveIndex when it changes (e.g. different blunder selected)
-  useEffect(() => {
-    setCurrentIndex(initialMoveIndex ?? null)
-    setWhatIfMoves([])
-    setWhatIfBranchPoint(-1)
-  }, [initialMoveIndex])
 
   const isInWhatIf = whatIfMoves.length > 0
   const effectiveIndex = currentIndex ?? moves.length - 1

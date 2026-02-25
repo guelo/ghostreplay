@@ -141,6 +141,7 @@ describe('endGame', () => {
           session_id: 'sess-1',
           result: 'checkmate_win',
           pgn: '1. e4 e5 2. Qh5 Nc6 3. Bc4 Nf6 4. Qxf7#',
+          is_rated: true,
         }),
       }),
     )

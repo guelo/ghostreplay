@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { Link } from "react-router-dom";
 import {
@@ -81,10 +81,14 @@ function BlundersPage() {
   const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  const handleToggleDueOnly = () => {
+    setDueOnly((v) => !v);
     setLoading(true);
     setError(null);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
     fetchBlunders(dueOnly)
       .then((data) => {
         if (cancelled) return;
@@ -112,16 +116,21 @@ function BlundersPage() {
 
   const selected = blunders.find((b) => b.id === selectedId) ?? null;
 
+  // Reset analysis state synchronously during render when selection changes
+  const prevSessionRef = useRef(selected?.last_session_id);
+  if (prevSessionRef.current !== selected?.last_session_id) {
+    prevSessionRef.current = selected?.last_session_id;
+    setAnalysis(null);
+    setAnalysisLoading(!!selected?.last_session_id);
+  }
+
   // Fetch full game analysis when a blunder with a session is selected
   useEffect(() => {
     if (!selected?.last_session_id) {
-      setAnalysis(null);
       return;
     }
 
     let cancelled = false;
-    setAnalysisLoading(true);
-    setAnalysis(null);
     fetchAnalysis(selected.last_session_id)
       .then((data) => {
         if (!cancelled) setAnalysis(data);
@@ -170,7 +179,7 @@ function BlundersPage() {
               <button
                 type="button"
                 className={`chess-button toggle${dueOnly ? " active" : ""}`}
-                onClick={() => setDueOnly((v) => !v)}
+                onClick={handleToggleDueOnly}
               >
                 {dueOnly ? "Show all" : "Due only"}
               </button>
