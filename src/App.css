@@ -1436,6 +1436,86 @@
     }
 }
 
+/* Ghost info anchor (positions the popover below the button) */
+.ghost-info-anchor {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+/* Ghost info button */
+.ghost-info-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--status-ghost);
+    padding: 0;
+    display: flex;
+    align-items: center;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+
+.ghost-info-btn:hover {
+    opacity: 1;
+}
+
+/* Ghost info box */
+.ghost-info-box {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 0.35rem;
+    padding: 0.6rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--status-ghost);
+    background: var(--card-bg);
+    box-shadow: var(--shadow-md);
+    z-index: 10;
+    min-width: 150px;
+}
+
+.ghost-info-box__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.4rem;
+}
+
+.ghost-info-box__title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--status-ghost);
+}
+
+.ghost-info-box__close {
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 1.1rem;
+    padding: 0 0.15rem;
+    line-height: 1;
+}
+
+.ghost-info-box__close:hover {
+    color: var(--text-primary);
+}
+
+.ghost-info-box__board {
+    width: 200px;
+    height: 200px;
+    margin: 0 auto 0.4rem;
+}
+
+.ghost-info-box__srs {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+}
+
 /* Game End Banner */
 .game-end-banner {
     margin-top: 1rem;

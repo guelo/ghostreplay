@@ -34,8 +34,8 @@ import type { MoveListBubble } from "./MoveList";
 
 /** Maia3 ELO bins – must match backend/app/maia3_client.py:ELO_BINS */
 const MAIA_ELO_BINS = [
-  600, 800, 1000, 1100, 1200, 1300, 1400, 1500,
-  1600, 1700, 1800, 1900, 2000, 2200, 2400, 2600,
+  600, 800, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000,
+  2200, 2400, 2600,
 ] as const;
 
 /** Compute expected Elo stakes (win/loss deltas) for the difficulty selector. */
@@ -45,7 +45,8 @@ function eloStakes(
   isProvisional: boolean,
 ): { winDelta: number; lossDelta: number } {
   const k = isProvisional ? 40 : 20;
-  const expected = 1.0 / (1.0 + 10.0 ** ((opponentRating - playerRating) / 400.0));
+  const expected =
+    1.0 / (1.0 + 10.0 ** ((opponentRating - playerRating) / 400.0));
   return {
     winDelta: Math.round(k * (1 - expected)),
     lossDelta: Math.round(k * (0 - expected)),
@@ -53,9 +54,12 @@ function eloStakes(
 }
 
 /** Gaussian-sample a difficulty bin near the user's Elo (σ controls spread). */
-function sampleEloBin(userElo: number, sigma = 125): (typeof MAIA_ELO_BINS)[number] {
-  const weights = MAIA_ELO_BINS.map(
-    (bin) => Math.exp(-((userElo - bin) ** 2) / (2 * sigma ** 2)),
+function sampleEloBin(
+  userElo: number,
+  sigma = 125,
+): (typeof MAIA_ELO_BINS)[number] {
+  const weights = MAIA_ELO_BINS.map((bin) =>
+    Math.exp(-((userElo - bin) ** 2) / (2 * sigma ** 2)),
   );
   const total = weights.reduce((a, b) => a + b, 0);
   let r = Math.random() * total;
@@ -196,7 +200,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [playerColorChoice, setPlayerColorChoice] = useState<
     BoardOrientation | "random"
   >("random");
-  const [engineElo, setEngineElo] = useState<(typeof MAIA_ELO_BINS)[number]>(800);
+  const [engineElo, setEngineElo] =
+    useState<(typeof MAIA_ELO_BINS)[number]>(800);
   const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
   const [viewIndex, setViewIndex] = useState<number | null>(null); // null = viewing live position
   const {
@@ -228,10 +233,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
-  const [blunderReviewSrs, setBlunderReviewSrs] = useState<TargetBlunderSrs | null>(null);
+  const [blunderReviewSrs, setBlunderReviewSrs] =
+    useState<TargetBlunderSrs | null>(null);
+  const [blunderTargetFen, setBlunderTargetFen] = useState<string | null>(null);
+  const [showGhostInfo, setShowGhostInfo] = useState(false);
+  const ghostInfoAnchorRef = useRef<HTMLSpanElement>(null);
   const [showPassToast, setShowPassToast] = useState(false);
   const [showRehookToast, setShowRehookToast] = useState(false);
-  const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(null);
+  const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(
+    null,
+  );
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const [isRated, setIsRated] = useState(true);
   const [showRevertWarning, setShowRevertWarning] = useState(false);
@@ -478,7 +489,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       for (const move of moves) {
         const target = chess.get(move.to);
         const isCapture =
-          sourcePiece != null && target != null && target.color !== sourcePiece.color;
+          sourcePiece != null &&
+          target != null &&
+          target.color !== sourcePiece.color;
         newSquares[move.to] = {
           background: isCapture
             ? "rgba(255, 0, 0, 0.4)"
@@ -702,7 +715,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             uploadError,
           );
         }
-        const endResponse = await endGame(sessionId, result.type, chess.pgn(), isRated);
+        const endResponse = await endGame(
+          sessionId,
+          result.type,
+          chess.pgn(),
+          isRated,
+        );
         if (endResponse.rating) {
           setRatingChange(endResponse.rating);
           setPlayerRating(endResponse.rating.rating_after);
@@ -717,7 +735,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         setEngineMessage(message);
       }
     }
-  }, [chess, isGameActive, isRated, playerColor, sessionId, uploadSessionAnalysisBatch]);
+  }, [
+    chess,
+    isGameActive,
+    isRated,
+    playerColor,
+    sessionId,
+    uploadSessionAnalysisBatch,
+  ]);
 
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
@@ -747,12 +772,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return `${active} to move${suffix}`;
   })();
 
-
   const moveBubble = useMemo((): MoveListBubble | null => {
     if (isAnalyzing && analyzingMove) {
       const idx = moveHistory.length - 1;
       if (idx < 0) return null;
-      return { moveIndex: idx, text: `Analyzing ${analyzingMove}\u2026`, variant: "analyzing" };
+      return {
+        moveIndex: idx,
+        text: `Analyzing ${analyzingMove}\u2026`,
+        variant: "analyzing",
+      };
     }
 
     if (!lastAnalysis || lastAnalysis.moveIndex == null) return null;
@@ -770,14 +798,35 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
 
     if (delta !== null) {
-      if (delta === 0) return { moveIndex: idx, text: "Best move!", variant: "best" };
-      if (delta < 0) return { moveIndex: idx, text: `Great move! Gained ${Math.abs(delta)}cp`, variant: "great" };
-      if (delta < 50) return { moveIndex: idx, text: `Good. Lost ${delta}cp`, variant: "good" };
-      return { moveIndex: idx, text: `Inaccuracy. Lost ${delta}cp. Best: ${lastAnalysis.bestMove}`, variant: "inaccuracy" };
+      if (delta === 0)
+        return { moveIndex: idx, text: "Best move!", variant: "best" };
+      if (delta < 0)
+        return {
+          moveIndex: idx,
+          text: `Great move! Gained ${Math.abs(delta)}cp`,
+          variant: "great",
+        };
+      if (delta < 50)
+        return {
+          moveIndex: idx,
+          text: `Good. Lost ${delta}cp`,
+          variant: "good",
+        };
+      return {
+        moveIndex: idx,
+        text: `Inaccuracy. Lost ${delta}cp. Best: ${lastAnalysis.bestMove}`,
+        variant: "inaccuracy",
+      };
     }
 
     return null;
-  }, [isAnalyzing, analyzingMove, lastAnalysis, moveHistory.length, isPlayerMoveIndex]);
+  }, [
+    isAnalyzing,
+    analyzingMove,
+    lastAnalysis,
+    moveHistory.length,
+    isPlayerMoveIndex,
+  ]);
 
   const opponentColor = playerColor === "white" ? "black" : "white";
 
@@ -811,7 +860,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setMoveHistory(nextMoveHistory);
       setViewIndex(null); // Ensure we're viewing the live position
       setEngineMessage(null);
-      analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex, legalMoveCount);
+      analyzeMove(
+        fenBeforeMove,
+        uciMove,
+        opponentColor,
+        moveIndex,
+        legalMoveCount,
+      );
 
       // Check if the engine's move ended the game
       if (chess.isGameOver()) {
@@ -827,7 +882,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [chess, evaluatePosition, handleGameEnd, analyzeMove, opponentColor]);
 
   const applyGhostMove = useCallback(
-    async (sanMove: string, targetBlunderId: number | null, targetBlunderSrs: TargetBlunderSrs | null) => {
+    async (
+      sanMove: string,
+      targetBlunderId: number | null,
+      targetBlunderSrs: TargetBlunderSrs | null,
+      targetFen: string | null,
+    ) => {
       try {
         const fenBeforeMove = chess.fen();
         const legalMoveCount = chess.moves().length;
@@ -854,12 +914,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         if (targetBlunderId !== null && sideToMove === playerColor) {
           setBlunderReviewId(targetBlunderId);
           setBlunderReviewSrs(targetBlunderSrs);
+          setBlunderTargetFen(targetFen);
         } else {
           setBlunderReviewId(null);
           setBlunderReviewSrs(null);
+          setBlunderTargetFen(null);
+          setShowGhostInfo(false);
         }
 
-        analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex, legalMoveCount);
+        analyzeMove(
+          fenBeforeMove,
+          uciMove,
+          opponentColor,
+          moveIndex,
+          legalMoveCount,
+        );
 
         if (chess.isGameOver()) {
           await handleGameEnd();
@@ -947,12 +1016,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               moveUci: uciMove,
               moveIndex,
             };
-            analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex, legalMoveCount);
+            analyzeMove(
+              fenBeforeMove,
+              uciMove,
+              playerColor,
+              moveIndex,
+              legalMoveCount,
+            );
 
             if (chess.isGameOver()) {
               void handleGameEnd();
             } else {
-              void applyOpponentMove(newFen, moveHistoryRef.current.map(m => m.uci));
+              void applyOpponentMove(
+                newFen,
+                moveHistoryRef.current.map((m) => m.uci),
+              );
             }
             return;
           }
@@ -1033,7 +1111,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
-    void applyOpponentMove(chess.fen(), moveHistoryRef.current.map(m => m.uci));
+    void applyOpponentMove(
+      chess.fen(),
+      moveHistoryRef.current.map((m) => m.uci),
+    );
   }, [
     applyOpponentMove,
     chess,
@@ -1241,6 +1322,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => clearTimeout(timer);
   }, [showRehookToast]);
 
+  // Close ghost info popover on click outside
+  useEffect(() => {
+    if (!showGhostInfo) return;
+    const handler = (e: MouseEvent) => {
+      if (ghostInfoAnchorRef.current && !ghostInfoAnchorRef.current.contains(e.target as Node)) {
+        setShowGhostInfo(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showGhostInfo]);
+
   const handleDrop = ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
     if (!targetSquare) {
       return false;
@@ -1302,7 +1395,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (chess.isGameOver()) {
       void handleGameEnd();
     } else {
-      void applyOpponentMove(newFen, moveHistoryRef.current.map(m => m.uci));
+      void applyOpponentMove(
+        newFen,
+        moveHistoryRef.current.map((m) => m.uci),
+      );
     }
 
     return true;
@@ -1398,7 +1494,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           uploadError,
         );
       }
-      const endResponse = await endGame(sessionId, "resign", chess.pgn(), isRated);
+      const endResponse = await endGame(
+        sessionId,
+        "resign",
+        chess.pgn(),
+        isRated,
+      );
       if (endResponse.rating) {
         setRatingChange(endResponse.rating);
         setPlayerRating(endResponse.rating.rating_after);
@@ -1586,9 +1687,79 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   <span className="chess-meta-strong ghost-mode-label">
                     Ghost
                   </span>
+                  {isReviewMomentActive && (
+                    <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
+                      <button
+                        className="ghost-info-btn"
+                        onClick={() => setShowGhostInfo((v) => !v)}
+                        aria-label="Toggle ghost info"
+                        title="Ghost target info"
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="currentColor"
+                          aria-hidden="true"
+                        >
+                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm1 15h-2v-6h2v6Zm0-8h-2V7h2v2Z" />
+                        </svg>
+                      </button>
+                      {showGhostInfo && (
+                        <div className="ghost-info-box">
+                          <div className="ghost-info-box__header">
+                            <span className="ghost-info-box__title">
+                              Ghost Target Blunder Position
+                            </span>
+                            <button
+                              className="ghost-info-box__close"
+                              onClick={() => setShowGhostInfo(false)}
+                              aria-label="Close ghost info"
+                            >
+                              &times;
+                            </button>
+                          </div>
+                          {blunderTargetFen && (
+                            <div className="ghost-info-box__board">
+                              <Chessboard
+                                options={{
+                                  position: blunderTargetFen,
+                                  boardOrientation: boardOrientation,
+                                  allowDragging: false,
+                                  animationDurationInMs: 0,
+                                  boardStyle: { borderRadius: "4px" },
+                                }}
+                              />
+                            </div>
+                          )}
+                          {blunderReviewSrs && (
+                            <div className="ghost-info-box__srs">
+                              <span>
+                                Last seen:{" "}
+                                {blunderReviewSrs.last_reviewed_at
+                                  ? formatLastSeen(
+                                      blunderReviewSrs.last_reviewed_at,
+                                    )
+                                  : "never"}
+                              </span>
+                              <span>
+                                Pass/Fail: {blunderReviewSrs.pass_count}/
+                                {blunderReviewSrs.fail_count}
+                              </span>
+                              <span>
+                                Streak: {blunderReviewSrs.pass_streak}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </span>
+                  )}
                 </>
               ) : (
-                <span className="chess-meta-strong">{MAIA_BOT_NAMES[engineElo]}</span>
+                <span className="chess-meta-strong">
+                  {MAIA_BOT_NAMES[engineElo]}
+                </span>
               )}
             </p>
           )}
@@ -1613,20 +1784,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               <p className="review-warning-toast__detail">
                 Be careful. You've messed this position up before.
               </p>
-              {blunderReviewSrs && (
-                <div className="review-warning-toast__srs">
-                  <span>
-                    Last seen:{" "}
-                    {blunderReviewSrs.last_reviewed_at
-                      ? formatLastSeen(blunderReviewSrs.last_reviewed_at)
-                      : "never"}
-                  </span>
-                  <span>
-                    Pass/Fail: {blunderReviewSrs.pass_count}/{blunderReviewSrs.fail_count}
-                  </span>
-                  <span>Streak: {blunderReviewSrs.pass_streak}</span>
-                </div>
-              )}
             </div>
           )}
           {reviewFailModal && (
@@ -1694,176 +1851,196 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               whiteOnBottom={boardOrientation === "white"}
             />
             <div className="chessboard-board-area">
-            {showStartOverlay && !isGameActive && (
-              <div className="chessboard-overlay">
-                <div className="chess-start-panel">
-                  <button
-                    className="chess-start-close"
-                    type="button"
-                    onClick={() => setShowStartOverlay(false)}
-                    disabled={isStartingGame}
-                    aria-label="Close"
+              {showStartOverlay && !isGameActive && (
+                <div className="chessboard-overlay">
+                  <div className="chess-start-panel">
+                    <button
+                      className="chess-start-close"
+                      type="button"
+                      onClick={() => setShowStartOverlay(false)}
+                      disabled={isStartingGame}
+                      aria-label="Close"
+                    >
+                      ×
+                    </button>
+                    <p className="chess-start-title">Difficulty</p>
+                    <div className="chess-elo-selector">
+                      <input
+                        type="range"
+                        min={0}
+                        max={MAIA_ELO_BINS.length - 1}
+                        step={1}
+                        value={MAIA_ELO_BINS.indexOf(engineElo)}
+                        onChange={(e) =>
+                          setEngineElo(MAIA_ELO_BINS[Number(e.target.value)])
+                        }
+                        disabled={isStartingGame}
+                        className="chess-elo-slider"
+                      />
+                      <span className="chess-elo-label">
+                        {MAIA_BOT_NAMES[engineElo]}
+                      </span>
+                    </div>
+                    {(() => {
+                      const { winDelta, lossDelta } = eloStakes(
+                        playerRating,
+                        engineElo,
+                        isProvisional,
+                      );
+                      return (
+                        <p className="elo-stakes">
+                          <span className="elo-stakes__win">
+                            Win +{winDelta}
+                          </span>
+                          {" / "}
+                          <span className="elo-stakes__loss">
+                            Loss {lossDelta}
+                          </span>
+                        </p>
+                      );
+                    })()}
+                    <p className="chess-start-title">Side</p>
+                    <div className="chess-start-options">
+                      <button
+                        className="chess-button primary"
+                        type="button"
+                        onClick={() => handleNewGame("white")}
+                        disabled={isStartingGame}
+                      >
+                        Play White
+                      </button>
+                      <button
+                        className="chess-button primary"
+                        type="button"
+                        onClick={() => handleNewGame("random")}
+                        disabled={isStartingGame}
+                      >
+                        Play Random
+                      </button>
+                      <button
+                        className="chess-button primary"
+                        type="button"
+                        onClick={() => handleNewGame("black")}
+                        disabled={isStartingGame}
+                      >
+                        Play Black
+                      </button>
+                    </div>
+                    {startError && (
+                      <p className="chess-start-error">{startError}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {showRevertWarning && (
+                <div className="chessboard-overlay">
+                  <div
+                    className="revert-warning-dialog"
+                    role="alertdialog"
+                    aria-labelledby="revert-warning-title"
                   >
-                    ×
-                  </button>
-                  <p className="chess-start-title">Difficulty</p>
-                  <div className="chess-elo-selector">
-                    <input
-                      type="range"
-                      min={0}
-                      max={MAIA_ELO_BINS.length - 1}
-                      step={1}
-                      value={MAIA_ELO_BINS.indexOf(engineElo)}
-                      onChange={(e) => setEngineElo(MAIA_ELO_BINS[Number(e.target.value)])}
-                      disabled={isStartingGame}
-                      className="chess-elo-slider"
-                    />
-                    <span className="chess-elo-label">{MAIA_BOT_NAMES[engineElo]}</span>
+                    <WarningTriangleIcon />
+                    <p
+                      id="revert-warning-title"
+                      className="revert-warning-dialog__title"
+                    >
+                      This game will not be rated
+                    </p>
+                    <p className="revert-warning-dialog__body">
+                      Reverting a move removes this game from your rating
+                      history. This cannot be undone.
+                    </p>
+                    <div className="revert-warning-dialog__actions">
+                      <button
+                        className="chess-button danger"
+                        type="button"
+                        onClick={executeRevert}
+                      >
+                        Revert anyway
+                      </button>
+                      <button
+                        className="chess-button"
+                        type="button"
+                        onClick={cancelRevert}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
-                  {(() => {
-                    const { winDelta, lossDelta } = eloStakes(playerRating, engineElo, isProvisional);
-                    return (
-                      <p className="elo-stakes">
-                        <span className="elo-stakes__win">Win +{winDelta}</span>
-                        {" / "}
-                        <span className="elo-stakes__loss">Loss {lossDelta}</span>
-                      </p>
-                    );
-                  })()}
-                  <p className="chess-start-title">Side</p>
-                  <div className="chess-start-options">
-                    <button
-                      className="chess-button primary"
-                      type="button"
-                      onClick={() => handleNewGame("white")}
-                      disabled={isStartingGame}
-                    >
-                      Play White
-                    </button>
-                    <button
-                      className="chess-button primary"
-                      type="button"
-                      onClick={() => handleNewGame("random")}
-                      disabled={isStartingGame}
-                    >
-                      Play Random
-                    </button>
-                    <button
-                      className="chess-button primary"
-                      type="button"
-                      onClick={() => handleNewGame("black")}
-                      disabled={isStartingGame}
-                    >
-                      Play Black
-                    </button>
-                  </div>
-                  {startError && (
-                    <p className="chess-start-error">{startError}</p>
-                  )}
                 </div>
-              </div>
-            )}
-            {showRevertWarning && (
-              <div className="chessboard-overlay">
-                <div className="revert-warning-dialog" role="alertdialog" aria-labelledby="revert-warning-title">
-                  <WarningTriangleIcon />
-                  <p id="revert-warning-title" className="revert-warning-dialog__title">
-                    This game will not be rated
+              )}
+              {!isGameActive && gameResult && !showStartOverlay && (
+                <div className="chessboard-ended-scrim" />
+              )}
+              {showFlash && <div className="blunder-flash" />}
+              <Chessboard
+                options={{
+                  position: displayedFen,
+                  onPieceDrop: handleDrop,
+                  onSquareClick: handleSquareClick,
+                  boardOrientation,
+                  animationDurationInMs: 200,
+                  allowDragging:
+                    isGameActive &&
+                    engineStatus === "ready" &&
+                    isPlayersTurn &&
+                    !isThinking &&
+                    isViewingLive,
+                  squareStyles: optionSquares,
+                  arrows: blunderArrows.length > 0 ? blunderArrows : undefined,
+                  boardStyle: {
+                    borderRadius: "0",
+                    boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
+                  },
+                }}
+              />
+              {blunderAlert && (
+                <div
+                  className="blunder-toast"
+                  onClick={() => setBlunderAlert(null)}
+                  role="alert"
+                >
+                  <div className="blunder-toast__header">
+                    <span>Blunder</span>
+                    <span className="blunder-toast__delta">
+                      &minus;{(blunderAlert.delta / 100).toFixed(1)}
+                    </span>
+                  </div>
+                  <p className="blunder-toast__detail">
+                    You played: <strong>{blunderAlert.moveSan}</strong>
                   </p>
-                  <p className="revert-warning-dialog__body">
-                    Reverting a move removes this game from your rating history. This cannot be undone.
+                  <p className="blunder-toast__detail">
+                    Best was:{" "}
+                    <span className="blunder-toast__best">
+                      {blunderAlert.bestMoveSan}
+                    </span>
                   </p>
-                  <div className="revert-warning-dialog__actions">
-                    <button
-                      className="chess-button danger"
-                      type="button"
-                      onClick={executeRevert}
-                    >
-                      Revert anyway
-                    </button>
-                    <button
-                      className="chess-button"
-                      type="button"
-                      onClick={cancelRevert}
-                    >
-                      Cancel
-                    </button>
-                  </div>
                 </div>
-              </div>
-            )}
-            {!isGameActive && gameResult && !showStartOverlay && (
-              <div className="chessboard-ended-scrim" />
-            )}
-            {showFlash && <div className="blunder-flash" />}
-            <Chessboard
-              options={{
-                position: displayedFen,
-                onPieceDrop: handleDrop,
-                onSquareClick: handleSquareClick,
-                boardOrientation,
-                animationDurationInMs: 200,
-                allowDragging:
-                  isGameActive &&
-                  engineStatus === "ready" &&
-                  isPlayersTurn &&
-                  !isThinking &&
-                  isViewingLive,
-                squareStyles: optionSquares,
-                arrows: blunderArrows.length > 0 ? blunderArrows : undefined,
-                boardStyle: {
-                  borderRadius: "0",
-                  boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
-                },
-              }}
-            />
-            {blunderAlert && (
-              <div
-                className="blunder-toast"
-                onClick={() => setBlunderAlert(null)}
-                role="alert"
-              >
-                <div className="blunder-toast__header">
-                  <span>Blunder</span>
-                  <span className="blunder-toast__delta">
-                    &minus;{(blunderAlert.delta / 100).toFixed(1)}
-                  </span>
+              )}
+              {showPassToast && (
+                <div
+                  className="review-pass-toast"
+                  onClick={() => setShowPassToast(false)}
+                  role="status"
+                >
+                  <span className="review-pass-toast__label">Correct!</span>
+                  <p className="review-pass-toast__detail">
+                    You avoided your past mistake.
+                  </p>
                 </div>
-                <p className="blunder-toast__detail">
-                  You played: <strong>{blunderAlert.moveSan}</strong>
-                </p>
-                <p className="blunder-toast__detail">
-                  Best was:{" "}
-                  <span className="blunder-toast__best">
-                    {blunderAlert.bestMoveSan}
-                  </span>
-                </p>
-              </div>
-            )}
-            {showPassToast && (
-              <div
-                className="review-pass-toast"
-                onClick={() => setShowPassToast(false)}
-                role="status"
-              >
-                <span className="review-pass-toast__label">Correct!</span>
-                <p className="review-pass-toast__detail">
-                  You avoided your past mistake.
-                </p>
-              </div>
-            )}
-            {showRehookToast && (
-              <div
-                className="rehook-toast"
-                onClick={() => setShowRehookToast(false)}
-                role="status"
-              >
-                <span className="rehook-toast__label">Ghost reactivated</span>
-                <p className="rehook-toast__detail">
-                  Ghost reactivated: steering to past mistake
-                </p>
-              </div>
-            )}
+              )}
+              {showRehookToast && (
+                <div
+                  className="rehook-toast"
+                  onClick={() => setShowRehookToast(false)}
+                  role="status"
+                >
+                  <span className="rehook-toast__label">Ghost reactivated</span>
+                  <p className="rehook-toast__detail">
+                    Ghost reactivated: steering to past mistake
+                  </p>
+                </div>
+              )}
             </div>
           </div>
           {showPostGamePrompt && gameResult && (
@@ -1874,12 +2051,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             >
               <p className="game-end-banner-message">{gameResult.message}</p>
               {ratingChange && (
-                <p className={`rating-delta ${ratingChange.rating_after >= ratingChange.rating_before ? "rating-delta--up" : "rating-delta--down"}`}>
-                  {ratingChange.rating_after >= ratingChange.rating_before ? "+" : ""}
-                  {ratingChange.rating_after - ratingChange.rating_before}
-                  {" "}
+                <p
+                  className={`rating-delta ${ratingChange.rating_after >= ratingChange.rating_before ? "rating-delta--up" : "rating-delta--down"}`}
+                >
+                  {ratingChange.rating_after >= ratingChange.rating_before
+                    ? "+"
+                    : ""}
+                  {ratingChange.rating_after - ratingChange.rating_before}{" "}
                   <span className="rating-delta__value">
-                    ({ratingChange.rating_before} → {ratingChange.rating_after}{ratingChange.is_provisional ? "?" : ""})
+                    ({ratingChange.rating_before} → {ratingChange.rating_after}
+                    {ratingChange.is_provisional ? "?" : ""})
                   </span>
                 </p>
               )}

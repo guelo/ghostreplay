@@ -8,6 +8,7 @@ export type OpponentMoveResult = {
   move: string;
   targetBlunderId: number | null;
   targetBlunderSrs: TargetBlunderSrs | null;
+  targetFen: string | null;
 };
 
 /**
@@ -27,6 +28,7 @@ export const determineOpponentMove = async (
       move: response.move.san,
       targetBlunderId: response.target_blunder_id,
       targetBlunderSrs: response.target_blunder_srs,
+      targetFen: response.target_fen,
     };
   } catch (error) {
     console.error("[OpponentMove] Backend unavailable:", error);
@@ -40,6 +42,7 @@ type UseOpponentMoveOptions = {
     sanMove: string,
     targetBlunderId: number | null,
     targetBlunderSrs: TargetBlunderSrs | null,
+    targetFen: string | null,
   ) => Promise<void>;
   onApplyLocalFallback: () => Promise<void>;
 };
@@ -71,7 +74,7 @@ export const useOpponentMove = ({
           `[OpponentMove] Applying ${result.mode} move:`,
           result.move
         );
-        await onApplyBackendMove(result.move, result.targetBlunderId, result.targetBlunderSrs);
+        await onApplyBackendMove(result.move, result.targetBlunderId, result.targetBlunderSrs, result.targetFen);
       } else {
         setOpponentMode("engine");
         await onApplyLocalFallback();

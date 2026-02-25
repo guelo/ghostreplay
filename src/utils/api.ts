@@ -248,6 +248,7 @@ interface NextOpponentMoveResponse {
   move: { uci: string; san: string }
   target_blunder_id: number | null
   target_blunder_srs: TargetBlunderSrs | null
+  target_fen: string | null
   decision_source: 'ghost_path' | 'backend_engine'
 }
 

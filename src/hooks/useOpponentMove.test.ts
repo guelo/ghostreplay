@@ -21,11 +21,13 @@ const backendResponse = (
     ? "ghost_path"
     : "backend_engine",
   targetBlunderSrs: { last_reviewed_at: string | null; pass_count: number; fail_count: number; pass_streak: number } | null = null,
+  targetFen: string | null = null,
 ) => ({
   mode,
   move: { uci: san === "Nf3" ? "g1f3" : "e2e4", san },
   target_blunder_id: targetBlunderId,
   target_blunder_srs: targetBlunderSrs,
+  target_fen: targetFen,
   decision_source: decisionSource,
 });
 
@@ -46,6 +48,7 @@ describe("determineOpponentMove", () => {
       move: "e4",
       targetBlunderId: 42,
       targetBlunderSrs: null,
+      targetFen: null,
     });
     expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
       "session-123",
@@ -66,6 +69,7 @@ describe("determineOpponentMove", () => {
       move: "e4",
       targetBlunderId: null,
       targetBlunderSrs: null,
+      targetFen: null,
     });
   });
 
@@ -116,7 +120,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("ghost");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", 42, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", 42, null, null);
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
@@ -141,7 +145,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", null, null, null);
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 

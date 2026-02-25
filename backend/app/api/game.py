@@ -266,6 +266,10 @@ class NextOpponentMoveResponse(BaseModel):
         None,
         description="SRS info for the targeted blunder (ghost mode only)",
     )
+    target_fen: str | None = Field(
+        None,
+        description="FEN of the blunder position the ghost is steering toward (ghost mode only)",
+    )
     decision_source: DecisionSource = Field(
         ...,
         description="Backend decision branch used to produce the move",
@@ -452,7 +456,12 @@ def get_next_opponent_move(
             ).fetchone()
 
             blunder_row = db.execute(
-                text("SELECT pass_streak FROM blunders WHERE id = :id"),
+                text("""
+                    SELECT b.pass_streak, p.fen_raw
+                    FROM blunders b
+                    JOIN positions p ON p.id = b.position_id
+                    WHERE b.id = :id
+                """),
                 {"id": target_blunder_id},
             ).fetchone()
 
@@ -463,6 +472,8 @@ def get_next_opponent_move(
                 pass_streak=blunder_row[0] if blunder_row else 0,
             )
 
+            target_fen = blunder_row[1] if blunder_row else None
+
             return NextOpponentMoveResponse(
                 mode=OpponentMoveMode.GHOST,
                 move=MoveDetails(
@@ -471,6 +482,7 @@ def get_next_opponent_move(
                 ),
                 target_blunder_id=target_blunder_id,
                 target_blunder_srs=target_srs,
+                target_fen=target_fen,
                 decision_source=DecisionSource.GHOST_PATH,
             )
         except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError) as e:
