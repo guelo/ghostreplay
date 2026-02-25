@@ -3,7 +3,8 @@ import { Chess } from 'chess.js'
 import { Chessboard } from 'react-chessboard'
 import type { PieceDropHandlerArgs } from 'react-chessboard'
 import type { AnalysisMove, SessionMoveClassification } from '../utils/api'
-import { toWhitePerspective } from '../workers/analysisUtils'
+import { useMoveAnalysis } from '../hooks/useMoveAnalysis'
+import { classifyMove, toWhitePerspective } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import AnalysisGraph from './AnalysisGraph'
 import EvalBar from './EvalBar'
@@ -102,6 +103,7 @@ const AnalysisBoard = ({
   )
   const [whatIfMoves, setWhatIfMoves] = useState<WhatIfMove[]>([])
   const [whatIfBranchPoint, setWhatIfBranchPoint] = useState(-1)
+  const { analyzeMove, analysisMap, clearAnalysis } = useMoveAnalysis()
 
   const isInWhatIf = whatIfMoves.length > 0
   const effectiveIndex = currentIndex ?? moves.length - 1
@@ -127,9 +129,19 @@ const AnalysisBoard = ({
   const moveListMoves = useMemo(() => {
     if (!isInWhatIf) return mappedMoves
     const base = mappedMoves.slice(0, whatIfBranchPoint + 1)
-    const branch = whatIfMoves.map((m) => ({ san: m.san }))
+    const branch = whatIfMoves.map((m, i) => {
+      const absIndex = whatIfBranchPoint + 1 + i
+      const analysis = analysisMap.get(absIndex)
+      return {
+        san: m.san,
+        classification: analysis ? classifyMove(analysis.delta) : undefined,
+        eval: analysis?.playedEval != null
+          ? toWhitePerspective(analysis.playedEval, absIndex)
+          : undefined,
+      }
+    })
     return [...base, ...branch]
-  }, [isInWhatIf, mappedMoves, whatIfBranchPoint, whatIfMoves])
+  }, [isInWhatIf, mappedMoves, whatIfBranchPoint, whatIfMoves, analysisMap])
 
   // Current move list index accounting for what-if
   const moveListIndex = useMemo(() => {
@@ -235,10 +247,11 @@ const AnalysisBoard = ({
         // Clicking a main-line move exits what-if
         setWhatIfMoves([])
         setWhatIfBranchPoint(-1)
+        clearAnalysis()
       }
       setCurrentIndex(index)
     },
-    [isInWhatIf],
+    [isInWhatIf, clearAnalysis],
   )
 
   // Handle piece drop for what-if exploration
@@ -265,21 +278,24 @@ const AnalysisBoard = ({
         })
         if (!result) return false
 
+        const branchPt = isInWhatIf ? whatIfBranchPoint : effectiveIndex
         if (!isInWhatIf) {
           // Entering what-if mode
           setWhatIfBranchPoint(effectiveIndex)
         }
 
+        const moveIndex = branchPt + 1 + whatIfMoves.length
         setWhatIfMoves((prev) => [
           ...prev,
           { san: result.san, fen: tempChess.fen() },
         ])
+        analyzeMove(baseFen, result.san, boardOrientation, moveIndex)
         return true
       } catch {
         return false
       }
     },
-    [isInWhatIf, whatIfMoves, startingFen, displayedFen, effectiveIndex],
+    [isInWhatIf, whatIfMoves, whatIfBranchPoint, startingFen, displayedFen, effectiveIndex, analyzeMove, boardOrientation],
   )
 
   // Exit what-if mode
@@ -287,8 +303,9 @@ const AnalysisBoard = ({
     const branchIdx = whatIfBranchPoint
     setWhatIfMoves([])
     setWhatIfBranchPoint(-1)
+    clearAnalysis()
     setCurrentIndex(branchIdx >= moves.length - 1 ? null : branchIdx)
-  }, [whatIfBranchPoint, moves.length])
+  }, [whatIfBranchPoint, moves.length, clearAnalysis])
 
   return (
     <div className="analysis-board">
