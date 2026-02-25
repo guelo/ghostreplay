@@ -275,6 +275,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     userMoveSan: string;
   } | null>(null);
   const openingLookupRequestIdRef = useRef(0);
+  // Index 0 = starting position (before any move), index N = after move N
+  const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);
   const analysisMapRef = useRef<Map<number, AnalysisResult>>(new Map());
   const moveHistoryRef = useRef<MoveRecord[]>([]);
   const analysisStatusRef = useRef(analysisStatus);
@@ -364,6 +366,23 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       },
     ];
   }, [reviewFailModal, blunderAlert]);
+
+  // Opening label that tracks with move navigation
+  const displayedOpening = useMemo(() => {
+    const history = openingHistoryRef.current;
+    // history[0] = starting position, history[N] = after move N
+    // viewIndex null = live, viewIndex -1 = starting position, viewIndex N = after move N
+    const idx = viewIndex === null
+      ? history.length - 1
+      : viewIndex === -1
+        ? 0
+        : viewIndex + 1;
+    // Walk backwards to find the last known opening at or before this index
+    for (let i = Math.min(idx, history.length - 1); i >= 0; i--) {
+      if (history[i]) return history[i];
+    }
+    return null;
+  }, [viewIndex, liveOpening]); // liveOpening dependency triggers recalc when history updates
 
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
@@ -1081,6 +1100,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
+    // Index 0 = starting position, index N = after move N
+    const historyIdx = moveHistory.length;
     const requestId = openingLookupRequestIdRef.current + 1;
     openingLookupRequestIdRef.current = requestId;
     void lookupOpeningByFen(fen)
@@ -1088,14 +1109,28 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         if (openingLookupRequestIdRef.current !== requestId) {
           return;
         }
-        setLiveOpening(opening ?? null);
+        const history = openingHistoryRef.current;
+        if (opening) {
+          history[historyIdx] = opening;
+        } else {
+          // Carry forward last known opening
+          let lastKnown: OpeningLookupResult | null = null;
+          for (let i = historyIdx - 1; i >= 0; i--) {
+            if (history[i]) {
+              lastKnown = history[i];
+              break;
+            }
+          }
+          history[historyIdx] = lastKnown;
+        }
+        setLiveOpening(history[historyIdx] ?? null);
       })
       .catch(() => {
         if (openingLookupRequestIdRef.current !== requestId) {
           return;
         }
       });
-  }, [fen, isGameActive]);
+  }, [fen, isGameActive, moveHistory.length]);
 
   useEffect(() => {
     if (!isGameActive) {
@@ -1456,6 +1491,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       moveCountRef.current = 0;
       setViewIndex(null);
       setLiveOpening(null);
+      openingHistoryRef.current = [];
       resetEngine();
       clearAnalysis();
       moveHistoryRef.current = [];
@@ -1571,6 +1607,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveCountRef.current = 0;
     setViewIndex(null);
     setLiveOpening(null);
+    openingHistoryRef.current = [];
     resetEngine();
     clearAnalysis();
     moveHistoryRef.current = [];
@@ -1770,8 +1807,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             <p className="chess-meta">
               Opening:{" "}
               <span className="chess-meta-strong">
-                {liveOpening
-                  ? `${liveOpening.eco} ${liveOpening.name}`
+                {displayedOpening
+                  ? `${displayedOpening.eco} ${displayedOpening.name}`
                   : "Unknown"}
               </span>
             </p>

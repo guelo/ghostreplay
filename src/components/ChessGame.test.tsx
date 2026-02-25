@@ -1065,6 +1065,7 @@ describe("ChessGame move analysis", () => {
 
 describe("ChessGame opening display", () => {
   beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
     startGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
@@ -1151,7 +1152,7 @@ describe("ChessGame opening display", () => {
     expect(lookupOpeningByFenMock.mock.calls.length).toBe(afterMoveLookupCount);
   });
 
-  it("shows Unknown after leaving the opening book", async () => {
+  it("keeps last known opening after leaving the opening book", async () => {
     startGameMock.mockResolvedValueOnce({
       session_id: "session-sticky-opening",
       engine_elo: 1500,
@@ -1184,6 +1185,8 @@ describe("ChessGame opening display", () => {
       );
     });
 
-    expect(screen.getByText("Unknown")).toBeInTheDocument();
+    // Should retain the last known opening, not show "Unknown"
+    expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
+    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
   });
 });
