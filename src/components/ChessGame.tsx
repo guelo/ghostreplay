@@ -21,6 +21,7 @@ import {
   type TargetBlunderSrs,
 } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
+import { normalize_fen } from "../utils/fen";
 import {
   classifyMove,
   classifySessionMove,
@@ -748,6 +749,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const moveCount = moveHistory.length;
   const isReviewMomentActive =
     blunderReviewId !== null &&
+    blunderTargetFen !== null &&
+    normalize_fen(fen) === normalize_fen(blunderTargetFen) &&
     isGameActive &&
     isPlayersTurn &&
     isViewingLive &&
@@ -1687,7 +1690,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   <span className="chess-meta-strong ghost-mode-label">
                     Ghost
                   </span>
-                  {isReviewMomentActive && (
+                  {blunderReviewId !== null && (
                     <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
                       <button
                         className="ghost-info-btn"

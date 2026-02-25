@@ -632,6 +632,7 @@ describe("ChessGame blunder recording", () => {
         mode: "ghost",
         move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 42,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
         decision_source: "ghost_path",
       });
 
@@ -664,6 +665,7 @@ describe("ChessGame blunder recording", () => {
         mode: "ghost",
         move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 42,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
         decision_source: "ghost_path",
       })
       .mockResolvedValue({
@@ -732,6 +734,7 @@ describe("ChessGame blunder recording", () => {
         mode: "ghost",
         move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 99,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
         decision_source: "ghost_path",
       })
       .mockResolvedValue({
@@ -789,6 +792,7 @@ describe("ChessGame blunder recording", () => {
         mode: "ghost",
         move: { uci: "e7e5", san: "e5" },
         target_blunder_id: 77,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
         decision_source: "ghost_path",
       })
       .mockResolvedValue({
