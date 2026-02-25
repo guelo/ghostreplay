@@ -103,7 +103,7 @@ const AnalysisBoard = ({
   )
   const [whatIfMoves, setWhatIfMoves] = useState<WhatIfMove[]>([])
   const [whatIfBranchPoint, setWhatIfBranchPoint] = useState(-1)
-  const { analyzeMove, analysisMap, clearAnalysis } = useMoveAnalysis()
+  const { analyzeMove, analysisMap, lastAnalysis, clearAnalysis } = useMoveAnalysis()
 
   const isInWhatIf = whatIfMoves.length > 0
   const effectiveIndex = currentIndex ?? moves.length - 1
@@ -225,6 +225,12 @@ const AnalysisBoard = ({
     return toWhitePerspective(currentMove?.best_move_eval_cp ?? null, effectiveIndex)
   }, [isInWhatIf, effectiveIndex, currentMove])
 
+  // Eval for the EvalBar during what-if mode (white perspective)
+  const whatIfEvalCp = useMemo(() => {
+    if (!isInWhatIf || !lastAnalysis || lastAnalysis.moveIndex === null) return null
+    return toWhitePerspective(lastAnalysis.playedEval, lastAnalysis.moveIndex)
+  }, [isInWhatIf, lastAnalysis])
+
   const playedEvalText = useMemo(
     () => formatEvalValue(currentEvalCp, currentEvalMate),
     [currentEvalCp, currentEvalMate],
@@ -312,13 +318,11 @@ const AnalysisBoard = ({
       <div className="analysis-board__layout">
         <div className="analysis-board__board-col">
           <div className="analysis-board__board-with-eval">
-            {!isInWhatIf && (
-              <EvalBar
-                whitePerspectiveCp={currentEvalCp}
-                whitePerspectiveMate={currentEvalMate}
-                whiteOnBottom={boardOrientation === 'white'}
-              />
-            )}
+            <EvalBar
+              whitePerspectiveCp={isInWhatIf ? whatIfEvalCp : currentEvalCp}
+              whitePerspectiveMate={isInWhatIf ? null : currentEvalMate}
+              whiteOnBottom={boardOrientation === 'white'}
+            />
             <div className="analysis-board__board-frame">
               <Chessboard
                 options={{
