@@ -101,6 +101,7 @@ const CustomTooltip = ({
 function RatingGraph() {
   const [range, setRange] = useState<Range>("all");
   const [showProvisional, setShowProvisional] = useState(true);
+  const [provisionalDefaultSet, setProvisionalDefaultSet] = useState(false);
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -116,7 +117,14 @@ function RatingGraph() {
 
     fetchRatingHistory(range)
       .then((res) => {
-        if (!cancelled) setData(res);
+        if (!cancelled) {
+          setData(res);
+          if (!provisionalDefaultSet) {
+            const stableCount = res.ratings.filter((r) => !r.is_provisional).length;
+            if (stableCount > 3) setShowProvisional(false);
+            setProvisionalDefaultSet(true);
+          }
+        }
       })
       .catch((err: unknown) => {
         if (!cancelled)
