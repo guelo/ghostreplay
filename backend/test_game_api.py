@@ -712,7 +712,7 @@ def test_find_ghost_move_finds_blunder_at_max_depth(db_session):
     db_session.add(blunder)
     db_session.commit()
 
-    move_san, target_blunder_id = find_ghost_move(
+    move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=positions[1].fen_raw,
@@ -747,7 +747,7 @@ def test_find_ghost_move_respects_depth_limit(db_session):
     db_session.add(blunder)
     db_session.commit()
 
-    move_san, target_blunder_id = find_ghost_move(
+    move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=positions[1].fen_raw,
@@ -820,7 +820,7 @@ def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session)
     ])
     db_session.commit()
 
-    move_san, target_blunder_id = find_ghost_move(
+    move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
@@ -893,7 +893,7 @@ def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
     ])
     db_session.commit()
 
-    move_san, target_blunder_id = find_ghost_move(
+    move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
@@ -968,7 +968,7 @@ def test_find_ghost_move_handles_cycles(db_session):
     db_session.add(blunder)
     db_session.commit()
 
-    move_san, target_blunder_id = find_ghost_move(
+    move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_a,

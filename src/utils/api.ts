@@ -236,10 +236,18 @@ interface BlunderResponse {
   is_new: boolean
 }
 
+export interface TargetBlunderSrs {
+  last_reviewed_at: string | null
+  pass_count: number
+  fail_count: number
+  pass_streak: number
+}
+
 interface NextOpponentMoveResponse {
   mode: 'ghost' | 'engine'
   move: { uci: string; san: string }
   target_blunder_id: number | null
+  target_blunder_srs: TargetBlunderSrs | null
   decision_source: 'ghost_path' | 'backend_engine'
 }
 

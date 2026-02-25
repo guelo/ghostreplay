@@ -18,6 +18,7 @@ import {
   uploadSessionMoves,
   type RatingChange,
   type SessionMoveUpload,
+  type TargetBlunderSrs,
 } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
 import {
@@ -36,6 +37,20 @@ const MAIA_ELO_BINS = [
   600, 800, 1000, 1100, 1200, 1300, 1400, 1500,
   1600, 1700, 1800, 1900, 2000, 2200, 2400, 2600,
 ] as const;
+
+/** Compute expected Elo stakes (win/loss deltas) for the difficulty selector. */
+function eloStakes(
+  playerRating: number,
+  opponentRating: number,
+  isProvisional: boolean,
+): { winDelta: number; lossDelta: number } {
+  const k = isProvisional ? 40 : 20;
+  const expected = 1.0 / (1.0 + 10.0 ** ((opponentRating - playerRating) / 400.0));
+  return {
+    winDelta: Math.round(k * (1 - expected)),
+    lossDelta: Math.round(k * (0 - expected)),
+  };
+}
 
 /** Gaussian-sample a difficulty bin near the user's Elo (σ controls spread). */
 function sampleEloBin(userElo: number, sigma = 125): (typeof MAIA_ELO_BINS)[number] {
@@ -95,6 +110,15 @@ const WarningTriangleIcon = () => (
     <path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" />
   </svg>
 );
+
+function formatLastSeen(isoDate: string): string {
+  const ms = Date.now() - new Date(isoDate).getTime();
+  if (ms < 0) return "just now";
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))}m ago`;
+  if (hours < 24) return `${Math.round(hours)}h ago`;
+  return new Date(isoDate).toLocaleDateString();
+}
 
 type BoardOrientation = "white" | "black";
 
@@ -204,6 +228,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
+  const [blunderReviewSrs, setBlunderReviewSrs] = useState<TargetBlunderSrs | null>(null);
   const [showPassToast, setShowPassToast] = useState(false);
   const [showRehookToast, setShowRehookToast] = useState(false);
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(null);
@@ -802,7 +827,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [chess, evaluatePosition, handleGameEnd, analyzeMove, opponentColor]);
 
   const applyGhostMove = useCallback(
-    async (sanMove: string, targetBlunderId: number | null) => {
+    async (sanMove: string, targetBlunderId: number | null, targetBlunderSrs: TargetBlunderSrs | null) => {
       try {
         const fenBeforeMove = chess.fen();
         const legalMoveCount = chess.moves().length;
@@ -828,8 +853,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         const sideToMove = chess.turn() === "w" ? "white" : "black";
         if (targetBlunderId !== null && sideToMove === playerColor) {
           setBlunderReviewId(targetBlunderId);
+          setBlunderReviewSrs(targetBlunderSrs);
         } else {
           setBlunderReviewId(null);
+          setBlunderReviewSrs(null);
         }
 
         analyzeMove(fenBeforeMove, uciMove, opponentColor, moveIndex, legalMoveCount);
@@ -910,6 +937,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 userMoveSan: move.san,
               };
               setBlunderReviewId(null);
+              setBlunderReviewSrs(null);
             }
 
             pendingAnalysisContextRef.current = {
@@ -1258,6 +1286,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         userMoveSan: move.san,
       };
       setBlunderReviewId(null);
+      setBlunderReviewSrs(null);
     }
 
     // Store context for blunder detection before engine moves
@@ -1335,6 +1364,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setBlunderAlert(null);
       setShowFlash(false);
       setBlunderReviewId(null);
+      setBlunderReviewSrs(null);
       setShowPassToast(false);
       setReviewFailModal(null);
       setShowPostGamePrompt(false);
@@ -1407,6 +1437,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setFen(chess.fen());
     setViewIndex(null);
     setBlunderReviewId(null);
+    setBlunderReviewSrs(null);
     setBlunderAlert(null);
     pendingSrsReviewRef.current = null;
     pendingAnalysisContextRef.current = null;
@@ -1448,6 +1479,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowPostGamePrompt(false);
     setShowStartOverlay(false);
     setBlunderReviewId(null);
+    setBlunderReviewSrs(null);
     setIsRated(true);
     setShowRevertWarning(false);
     clearMoveHighlights();
@@ -1459,18 +1491,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const flipBoard = () => {
     setBoardOrientation((current) => (current === "white" ? "black" : "white"));
-  };
-
-  const handleSelectPlayerColor = (color: BoardOrientation) => {
-    setPlayerColorChoice(color);
-    setPlayerColor(color);
-    if (!isGameActive) {
-      setBoardOrientation(color);
-    }
-  };
-
-  const handleRandomColor = () => {
-    setPlayerColorChoice("random");
   };
 
   const handleShowStartOverlay = () => {
@@ -1593,6 +1613,20 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               <p className="review-warning-toast__detail">
                 Be careful. You've messed this position up before.
               </p>
+              {blunderReviewSrs && (
+                <div className="review-warning-toast__srs">
+                  <span>
+                    Last seen:{" "}
+                    {blunderReviewSrs.last_reviewed_at
+                      ? formatLastSeen(blunderReviewSrs.last_reviewed_at)
+                      : "never"}
+                  </span>
+                  <span>
+                    Pass/Fail: {blunderReviewSrs.pass_count}/{blunderReviewSrs.fail_count}
+                  </span>
+                  <span>Streak: {blunderReviewSrs.pass_streak}</span>
+                </div>
+              )}
             </div>
           )}
           {reviewFailModal && (
@@ -1686,6 +1720,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     />
                     <span className="chess-elo-label">{MAIA_BOT_NAMES[engineElo]}</span>
                   </div>
+                  {(() => {
+                    const { winDelta, lossDelta } = eloStakes(playerRating, engineElo, isProvisional);
+                    return (
+                      <p className="elo-stakes">
+                        <span className="elo-stakes__win">Win +{winDelta}</span>
+                        {" / "}
+                        <span className="elo-stakes__loss">Loss {lossDelta}</span>
+                      </p>
+                    );
+                  })()}
                   <p className="chess-start-title">Side</p>
                   <div className="chess-start-options">
                     <button

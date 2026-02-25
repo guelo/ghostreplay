@@ -63,7 +63,7 @@ def find_ghost_move(
         player_color: Player color from game session ('white' or 'black')
 
     Returns:
-        Tuple of (move_san, target_blunder_id) if ghost path exists, else (None, None)
+        Tuple of (move_san, target_blunder_id, last_reviewed_at) if ghost path exists, else (None, None, None)
     """
     # Look up current position by FEN hash
     current_position = (
@@ -76,7 +76,7 @@ def find_ghost_move(
     )
 
     if not current_position:
-        return (None, None)
+        return (None, None, None)
 
     # Recursive CTE to find candidate blunders up to the steering radius.
     # Returns the first move in each path and candidate metadata for scoring.
@@ -130,7 +130,7 @@ def find_ghost_move(
     ).fetchall()
 
     if not candidate_rows:
-        return (None, None)
+        return (None, None, None)
 
     now = datetime.now(timezone.utc)
     best_candidate: GhostMoveCandidate | None = None
@@ -161,9 +161,9 @@ def find_ghost_move(
             best_candidate = candidate
 
     if best_candidate is None:
-        return (None, None)
+        return (None, None, None)
 
-    return (best_candidate.first_move, best_candidate.blunder_id)
+    return (best_candidate.first_move, best_candidate.blunder_id, best_candidate.last_reviewed_at)
 
 
 class GameResult(str, Enum):
@@ -240,6 +240,14 @@ class NextOpponentMoveRequest(BaseModel):
     moves: list[str] = Field(default_factory=list, description="UCI move history from game start")
 
 
+class TargetBlunderSrs(BaseModel):
+    """SRS metadata for the blunder being targeted by a ghost move."""
+    last_reviewed_at: str | None = Field(None, description="ISO timestamp of last review")
+    pass_count: int = Field(0, description="Total times passed")
+    fail_count: int = Field(0, description="Total times failed")
+    pass_streak: int = Field(0, description="Current consecutive pass streak")
+
+
 class NextOpponentMoveResponse(BaseModel):
     """Response for next opponent move (unified ghost + engine endpoint)."""
     mode: OpponentMoveMode = Field(
@@ -253,6 +261,10 @@ class NextOpponentMoveResponse(BaseModel):
     target_blunder_id: int | None = Field(
         None,
         description="ID of the blunder being targeted (ghost mode only)",
+    )
+    target_blunder_srs: TargetBlunderSrs | None = Field(
+        None,
+        description="SRS info for the targeted blunder (ghost mode only)",
     )
     decision_source: DecisionSource = Field(
         ...,
@@ -412,7 +424,7 @@ def get_next_opponent_move(
 
     # Step 1: Ghost-first path traversal
     # Use shared ghost path traversal logic to find moves toward due blunders
-    move_san, target_blunder_id = find_ghost_move(
+    move_san, target_blunder_id, blunder_last_reviewed = find_ghost_move(
         db=db,
         user_id=user.user_id,
         fen=request.fen,
@@ -427,6 +439,30 @@ def get_next_opponent_move(
             # Parse SAN to get the move object
             move = board.parse_san(move_san)
 
+            # Fetch SRS review counts for the targeted blunder
+            review_counts = db.execute(
+                text("""
+                    SELECT
+                        SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS pass_count,
+                        SUM(CASE WHEN passed THEN 0 ELSE 1 END) AS fail_count
+                    FROM blunder_reviews
+                    WHERE blunder_id = :blunder_id
+                """),
+                {"blunder_id": target_blunder_id},
+            ).fetchone()
+
+            blunder_row = db.execute(
+                text("SELECT pass_streak FROM blunders WHERE id = :id"),
+                {"id": target_blunder_id},
+            ).fetchone()
+
+            target_srs = TargetBlunderSrs(
+                last_reviewed_at=blunder_last_reviewed.isoformat() if blunder_last_reviewed else None,
+                pass_count=review_counts[0] or 0 if review_counts else 0,
+                fail_count=review_counts[1] or 0 if review_counts else 0,
+                pass_streak=blunder_row[0] if blunder_row else 0,
+            )
+
             return NextOpponentMoveResponse(
                 mode=OpponentMoveMode.GHOST,
                 move=MoveDetails(
@@ -434,6 +470,7 @@ def get_next_opponent_move(
                     san=move_san,
                 ),
                 target_blunder_id=target_blunder_id,
+                target_blunder_srs=target_srs,
                 decision_source=DecisionSource.GHOST_PATH,
             )
         except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError) as e:
