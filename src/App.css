@@ -184,11 +184,10 @@
 
 .chess-layout {
     display: grid;
-    grid-template-columns: 240px minmax(0, 600px) minmax(200px, 260px);
+    grid-template-columns: 240px minmax(0, 1fr) minmax(200px, 260px);
     grid-template-areas: "panel board moves";
     gap: 1.5rem;
     align-items: start;
-    max-width: 1400px;
     margin: 0 auto;
 }
 
@@ -261,6 +260,7 @@
     grid-area: board;
     position: relative;
     width: 100%;
+    max-width: calc(100dvh - 14rem);
 }
 
 .chessboard-board-with-eval {
@@ -1586,7 +1586,7 @@
     flex-direction: column;
     gap: 0.25rem;
     align-self: stretch;
-    max-height: 600px;
+    max-height: calc(100dvh - 14rem);
 }
 
 /* Material Display */
@@ -2565,7 +2565,7 @@
     }
 
     .chess-layout {
-        grid-template-columns: minmax(0, 600px) minmax(180px, 240px);
+        grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
         grid-template-areas:
             "panel panel"
             "board moves";
