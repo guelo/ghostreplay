@@ -100,6 +100,15 @@ function parseInfo(line: string): EngineInfo | null {
     }
   }
 
+  const multipvIndex = tokens.indexOf('multipv')
+
+  if (multipvIndex !== -1) {
+    const multipvValue = Number(tokens[multipvIndex + 1])
+    if (!Number.isNaN(multipvValue)) {
+      info.multipv = multipvValue
+    }
+  }
+
   const pvIndex = tokens.indexOf('pv')
 
   if (pvIndex !== -1) {
@@ -131,6 +140,8 @@ function startEvaluation(request: EvaluatePositionMessage) {
       ? ` moves ${request.moves.join(' ')}`
       : ''
 
+  const multipv = request.multipv ?? 1
+  pendingEngine.postMessage(`setoption name MultiPV value ${multipv}`)
   pendingEngine.postMessage(`position fen ${request.fen}${movesSegment}`)
 
   const movetime = request.movetime ?? 1500
@@ -146,6 +157,14 @@ function handleEngineLine(line: string) {
   }
 
   if (line === 'readyok') {
+    if (!engineReady) {
+      const threads = Math.min(
+        Math.max(1, Math.floor(navigator.hardwareConcurrency / 2)),
+        4,
+      )
+      engine?.postMessage(`setoption name Threads value ${threads}`)
+      engine?.postMessage('setoption name Hash value 64')
+    }
     engineReady = true
     ctx.postMessage({ type: 'ready' })
     flushQueuedOperations()

@@ -1160,6 +1160,21 @@
     flex: 0 0 230px;
 }
 
+.analysis-board__toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.5rem;
+    font-size: 0.8rem;
+    color: var(--text-secondary, #94a3b8);
+    cursor: pointer;
+    user-select: none;
+}
+
+.analysis-board__toggle input[type="checkbox"] {
+    accent-color: #3b82f6;
+}
+
 .analysis-board__board-with-eval {
     display: flex;
     align-items: stretch;

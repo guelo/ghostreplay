@@ -8,6 +8,7 @@ type EngineStatus = 'booting' | 'ready' | 'error'
 
 type EvaluationOptions = {
   movetime?: number
+  multipv?: number
 }
 
 type EvaluationResult = {
@@ -42,7 +43,7 @@ export const useStockfishEngine = () => {
   const [error, setError] = useState<string | null>(
     sharedArrayBufferAvailable ? null : sharedArrayBufferError,
   )
-  const [info, setInfo] = useState<EngineInfo | null>(null)
+  const [info, setInfo] = useState<EngineInfo[]>([])
   const [isThinking, setIsThinking] = useState(false)
 
   useEffect(() => {
@@ -69,11 +70,16 @@ export const useStockfishEngine = () => {
         case 'thinking':
           activeRequestId.current = message.id
           setIsThinking(true)
-          setInfo(null)
+          setInfo([])
           break
         case 'info':
           if (message.id === activeRequestId.current) {
-            setInfo(message.info)
+            setInfo((prev) => {
+              const idx = (message.info.multipv ?? 1) - 1
+              const next = [...prev]
+              next[idx] = message.info
+              return next
+            })
           }
           break
         case 'bestmove': {
@@ -87,7 +93,6 @@ export const useStockfishEngine = () => {
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
             setIsThinking(false)
-            setInfo(null)
           }
           break
         }
@@ -145,12 +150,14 @@ export const useStockfishEngine = () => {
         return Promise.reject(new Error('Stockfish worker not ready'))
       }
 
+      setInfo([])
       const requestId = createRequestId()
       const payload = {
         type: 'evaluate-position' as const,
         id: requestId,
         fen,
         movetime: options?.movetime ?? 1200,
+        multipv: options?.multipv,
       }
 
       const result = new Promise<EvaluationResult>((resolve, reject) => {
@@ -171,7 +178,7 @@ export const useStockfishEngine = () => {
     workerRef.current.postMessage({ type: 'newgame' })
     activeRequestId.current = null
     setIsThinking(false)
-    setInfo(null)
+    setInfo([])
     pendingEvaluations.current.forEach((entry) => {
       entry.reject(new Error('Engine reset'))
     })

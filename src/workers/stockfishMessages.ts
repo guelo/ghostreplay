@@ -4,6 +4,7 @@ export type EvaluatePositionMessage = {
   fen: string
   moves?: string[]
   movetime?: number
+  multipv?: number
 }
 
 export type WorkerRequest =
@@ -20,6 +21,7 @@ export type EngineInfo = {
   depth?: number
   score?: EngineScore
   pv?: string[]
+  multipv?: number
 }
 
 export type WorkerResponse =

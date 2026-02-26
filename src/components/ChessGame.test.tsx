@@ -31,7 +31,7 @@ vi.mock("../hooks/useStockfishEngine", () => ({
   useStockfishEngine: () => ({
     status: "ready",
     error: null,
-    info: null,
+    info: [],
     isThinking: false,
     evaluatePosition: evaluatePositionMock,
     resetEngine: vi.fn(),
