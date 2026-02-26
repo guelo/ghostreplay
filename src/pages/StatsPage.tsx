@@ -87,7 +87,9 @@ function StatsPage() {
       .catch((err: unknown) => {
         if (!cancelled) {
           setSummary(null);
-          setError(err instanceof Error ? err.message : "Failed to load stats summary");
+          setError(
+            err instanceof Error ? err.message : "Failed to load stats summary",
+          );
         }
       })
       .finally(() => {
@@ -114,7 +116,11 @@ function StatsPage() {
             </p>
           </header>
 
-          <div className="stats-window-picker" role="group" aria-label="Stats window">
+          <div
+            className="stats-window-picker"
+            role="group"
+            aria-label="Stats window"
+          >
             {WINDOW_OPTIONS.map((option) => (
               <button
                 key={option.value}
@@ -159,7 +165,8 @@ function StatsPage() {
             <>
               {isEmptySummary(summary) && (
                 <p className="stats-shell__empty">
-                  No games in this window yet. Play a game to start building stats.
+                  No games in this window yet. Play a game to start building
+                  stats.
                 </p>
               )}
 
@@ -172,7 +179,9 @@ function StatsPage() {
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Completed</p>
-                    <p className="stats-card__value">{summary.games.completed}</p>
+                    <p className="stats-card__value">
+                      {summary.games.completed}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Active</p>
@@ -180,23 +189,33 @@ function StatsPage() {
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Wins</p>
-                    <p className="stats-card__value">{summary.games.record.wins}</p>
+                    <p className="stats-card__value">
+                      {summary.games.record.wins}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Losses</p>
-                    <p className="stats-card__value">{summary.games.record.losses}</p>
+                    <p className="stats-card__value">
+                      {summary.games.record.losses}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Draws</p>
-                    <p className="stats-card__value">{summary.games.record.draws}</p>
+                    <p className="stats-card__value">
+                      {summary.games.record.draws}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Resigns</p>
-                    <p className="stats-card__value">{summary.games.record.resigns}</p>
+                    <p className="stats-card__value">
+                      {summary.games.record.resigns}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Abandons</p>
-                    <p className="stats-card__value">{summary.games.record.abandons}</p>
+                    <p className="stats-card__value">
+                      {summary.games.record.abandons}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Avg Duration</p>
@@ -206,7 +225,9 @@ function StatsPage() {
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Avg Moves</p>
-                    <p className="stats-card__value">{formatAverage(summary.games.avg_moves)}</p>
+                    <p className="stats-card__value">
+                      {formatAverage(summary.games.avg_moves)}
+                    </p>
                   </article>
                 </div>
               </section>
@@ -216,11 +237,15 @@ function StatsPage() {
                 <div className="stats-grid stats-grid--four">
                   <article className="stats-card">
                     <p className="stats-card__label">Player Moves</p>
-                    <p className="stats-card__value">{summary.moves.player_moves}</p>
+                    <p className="stats-card__value">
+                      {summary.moves.player_moves}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Avg CPL</p>
-                    <p className="stats-card__value">{formatAverage(summary.moves.avg_cpl)}</p>
+                    <p className="stats-card__value">
+                      {formatAverage(summary.moves.avg_cpl)}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Mistakes / 100</p>
@@ -235,12 +260,24 @@ function StatsPage() {
                     </p>
                   </article>
                 </div>
-                <div className="stats-quality-list" role="list" aria-label="Move quality distribution">
+                <div
+                  className="stats-quality-list"
+                  role="list"
+                  aria-label="Move quality distribution"
+                >
                   {QUALITY_KEYS.map((item) => (
-                    <div key={item.key} className="stats-quality-item" role="listitem">
-                      <span className="stats-quality-item__label">{item.label}</span>
+                    <div
+                      key={item.key}
+                      className="stats-quality-item"
+                      role="listitem"
+                    >
+                      <span className="stats-quality-item__label">
+                        {item.label}
+                      </span>
                       <span className="stats-quality-item__value">
-                        {formatPercent(summary.moves.quality_distribution[item.key])}
+                        {formatPercent(
+                          summary.moves.quality_distribution[item.key],
+                        )}
                       </span>
                     </div>
                   ))}
@@ -252,18 +289,32 @@ function StatsPage() {
                 <div className="stats-grid stats-grid--two">
                   <article className="stats-card">
                     <p className="stats-card__label">White</p>
-                    <p className="stats-card__inline">Games: {summary.colors.white.games}</p>
-                    <p className="stats-card__inline">Avg CPL: {formatAverage(summary.colors.white.avg_cpl)}</p>
                     <p className="stats-card__inline">
-                      Blunders / 100: {formatPercent(summary.colors.white.blunders_per_100_moves)}
+                      Games: {summary.colors.white.games}
+                    </p>
+                    <p className="stats-card__inline">
+                      Avg CPL: {formatAverage(summary.colors.white.avg_cpl)}
+                    </p>
+                    <p className="stats-card__inline">
+                      Blunders / 100:{" "}
+                      {formatPercent(
+                        summary.colors.white.blunders_per_100_moves,
+                      )}
                     </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Black</p>
-                    <p className="stats-card__inline">Games: {summary.colors.black.games}</p>
-                    <p className="stats-card__inline">Avg CPL: {formatAverage(summary.colors.black.avg_cpl)}</p>
                     <p className="stats-card__inline">
-                      Blunders / 100: {formatPercent(summary.colors.black.blunders_per_100_moves)}
+                      Games: {summary.colors.black.games}
+                    </p>
+                    <p className="stats-card__inline">
+                      Avg CPL: {formatAverage(summary.colors.black.avg_cpl)}
+                    </p>
+                    <p className="stats-card__inline">
+                      Blunders / 100:{" "}
+                      {formatPercent(
+                        summary.colors.black.blunders_per_100_moves,
+                      )}
                     </p>
                   </article>
                 </div>
@@ -274,33 +325,50 @@ function StatsPage() {
                 <div className="stats-grid stats-grid--three">
                   <article className="stats-card">
                     <p className="stats-card__label">Blunders Total</p>
-                    <p className="stats-card__value">{summary.library.blunders_total}</p>
+                    <p className="stats-card__value">
+                      {summary.library.blunders_total}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Positions Total</p>
-                    <p className="stats-card__value">{summary.library.positions_total}</p>
+                    <p className="stats-card__value">
+                      {summary.library.positions_total}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Edges Total</p>
-                    <p className="stats-card__value">{summary.library.edges_total}</p>
+                    <p className="stats-card__value">
+                      {summary.library.edges_total}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">New Blunders</p>
-                    <p className="stats-card__value">{summary.library.new_blunders_in_window}</p>
+                    <p className="stats-card__value">
+                      {summary.library.new_blunders_in_window}
+                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Avg Blunder Loss (cp)</p>
-                    <p className="stats-card__value">{summary.library.avg_blunder_eval_loss_cp}</p>
+                    <p className="stats-card__value">
+                      {summary.library.avg_blunder_eval_loss_cp}
+                    </p>
                   </article>
                 </div>
                 <div className="stats-list-card">
-                  <h3 className="stats-list-card__title">Top Costly Blunders</h3>
+                  <h3 className="stats-list-card__title">
+                    Top Costly Blunders
+                  </h3>
                   {summary.library.top_costly_blunders.length === 0 ? (
-                    <p className="stats-list-card__empty">No blunders captured yet.</p>
+                    <p className="stats-list-card__empty">
+                      No blunders captured yet.
+                    </p>
                   ) : (
                     <ul className="stats-list-card__list">
                       {summary.library.top_costly_blunders.map((blunder) => (
-                        <li key={blunder.blunder_id} className="stats-list-card__item">
+                        <li
+                          key={blunder.blunder_id}
+                          className="stats-list-card__item"
+                        >
                           <span>
                             {blunder.bad_move_san} vs {blunder.best_move_san}
                           </span>
@@ -318,7 +386,12 @@ function StatsPage() {
                 <div className="stats-list-card">
                   <p className="stats-card__inline">
                     Sessions with uploaded moves:{" "}
-                    <strong>{formatPercent(summary.data_completeness.sessions_with_uploaded_moves_pct)}</strong>
+                    <strong>
+                      {formatPercent(
+                        summary.data_completeness
+                          .sessions_with_uploaded_moves_pct,
+                      )}
+                    </strong>
                   </p>
                   <ul className="stats-notes">
                     {summary.data_completeness.notes.map((note) => (
@@ -329,10 +402,6 @@ function StatsPage() {
               </section>
             </>
           )}
-
-          <Link to="/" className="chess-button secondary stats-shell__back">
-            Back to Game
-          </Link>
         </section>
       </div>
     </main>

@@ -17,6 +17,7 @@ type AnalysisBoardProps = {
   boardOrientation: 'white' | 'black'
   startingFen?: string
   initialMoveIndex?: number
+  footer?: React.ReactNode
 }
 
 type WhatIfMove = {
@@ -97,6 +98,7 @@ const AnalysisBoard = ({
   boardOrientation,
   startingFen = STARTING_FEN,
   initialMoveIndex,
+  footer,
 }: AnalysisBoardProps) => {
   const [currentIndex, setCurrentIndex] = useState<number | null>(
     initialMoveIndex ?? null,
@@ -351,11 +353,14 @@ const AnalysisBoard = ({
       </div>
 
       {!isInWhatIf && evals.length > 0 && (
-        <AnalysisGraph
-          evals={evals}
-          currentIndex={currentIndex}
-          onSelectMove={handleNavigate}
-        />
+        <div className="analysis-board__graph-row">
+          <AnalysisGraph
+            evals={evals}
+            currentIndex={currentIndex}
+            onSelectMove={handleNavigate}
+          />
+          {footer && <div className="analysis-board__graph-footer">{footer}</div>}
+        </div>
       )}
 
       {isInWhatIf && (
