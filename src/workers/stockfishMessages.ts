@@ -4,6 +4,7 @@ export type EvaluatePositionMessage = {
   fen: string
   moves?: string[]
   movetime?: number
+  depth?: number
   multipv?: number
 }
 

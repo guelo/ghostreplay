@@ -8,6 +8,7 @@ type EngineStatus = 'booting' | 'ready' | 'error'
 
 type EvaluationOptions = {
   movetime?: number
+  depth?: number
   multipv?: number
 }
 
@@ -45,6 +46,8 @@ export const useStockfishEngine = () => {
   )
   const [info, setInfo] = useState<EngineInfo[]>([])
   const [isThinking, setIsThinking] = useState(false)
+  const evalCache = useRef<Map<string, EngineInfo[]>>(new Map())
+  const activeFen = useRef<string | null>(null)
 
   useEffect(() => {
     if (!sharedArrayBufferAvailable) {
@@ -93,6 +96,13 @@ export const useStockfishEngine = () => {
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
             setIsThinking(false)
+            // Cache completed result by FEN
+            if (activeFen.current) {
+              setInfo((current) => {
+                evalCache.current.set(activeFen.current!, current)
+                return current
+              })
+            }
           }
           break
         }
@@ -150,13 +160,24 @@ export const useStockfishEngine = () => {
         return Promise.reject(new Error('Stockfish worker not ready'))
       }
 
+      // Return cached result if available
+      const cached = evalCache.current.get(fen)
+      if (cached) {
+        setInfo(cached)
+        setIsThinking(false)
+        activeFen.current = fen
+        return Promise.resolve({ move: cached[0]?.pv?.[0] ?? '', raw: '' })
+      }
+
       setInfo([])
+      activeFen.current = fen
       const requestId = createRequestId()
       const payload = {
         type: 'evaluate-position' as const,
         id: requestId,
         fen,
         movetime: options?.movetime ?? 1200,
+        depth: options?.depth,
         multipv: options?.multipv,
       }
 
@@ -169,6 +190,14 @@ export const useStockfishEngine = () => {
     },
     [error, status],
   )
+
+  const stopSearch = useCallback(() => {
+    if (!workerRef.current) return
+    workerRef.current.postMessage({ type: 'command', command: 'stop' })
+    activeRequestId.current = null
+    setIsThinking(false)
+    setInfo([])
+  }, [])
 
   const resetEngine = useCallback(() => {
     if (!workerRef.current) {
@@ -190,6 +219,7 @@ export const useStockfishEngine = () => {
     error,
     isThinking,
     info,
+    stopSearch,
     evaluatePosition,
     resetEngine,
   }

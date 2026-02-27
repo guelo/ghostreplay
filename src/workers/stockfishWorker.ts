@@ -144,8 +144,12 @@ function startEvaluation(request: EvaluatePositionMessage) {
   pendingEngine.postMessage(`setoption name MultiPV value ${multipv}`)
   pendingEngine.postMessage(`position fen ${request.fen}${movesSegment}`)
 
-  const movetime = request.movetime ?? 1500
-  pendingEngine.postMessage(`go movetime ${movetime}`)
+  if (request.depth) {
+    pendingEngine.postMessage(`go depth ${request.depth}`)
+  } else {
+    const movetime = request.movetime ?? 1500
+    pendingEngine.postMessage(`go movetime ${movetime}`)
+  }
 }
 
 function handleEngineLine(line: string) {
