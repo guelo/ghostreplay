@@ -871,7 +871,7 @@
 
 /* History page: wider content, viewport-driven board */
 .history-page .constrained-content {
-    max-width: 1200px;
+    max-width: fit-content;
 }
 
 .history-page .analysis-board {
