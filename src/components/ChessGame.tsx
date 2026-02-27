@@ -321,6 +321,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return moveHistory[viewIndex]?.fen ?? fen;
   }, [viewIndex, fen, moveHistory]);
 
+  const lastMoveSquares = useMemo((): Record<string, React.CSSProperties> => {
+    const idx = viewIndex === null ? moveHistory.length - 1 : viewIndex;
+    if (idx < 0 || idx >= moveHistory.length) return {};
+    const uci = moveHistory[idx].uci;
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    const style: React.CSSProperties = { background: "rgba(255, 255, 0, 0.4)" };
+    return { [from]: style, [to]: style };
+  }, [viewIndex, moveHistory]);
+
   // Enrich moves with analysis data for MoveList annotations
   const annotatedMoves = useMemo(() => {
     return moveHistory.map((m, i) => {
@@ -2033,7 +2043,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     isPlayersTurn &&
                     !isThinking &&
                     isViewingLive,
-                  squareStyles: optionSquares,
+                  squareStyles: { ...lastMoveSquares, ...optionSquares },
                   arrows: blunderArrows.length > 0 ? blunderArrows : undefined,
                   boardStyle: {
                     borderRadius: "0",

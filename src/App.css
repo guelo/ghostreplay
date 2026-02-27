@@ -1234,7 +1234,9 @@
 }
 
 @keyframes engine-spin {
-    to { transform: rotate(360deg); }
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .analysis-board__moves-col > .move-list-container {
@@ -1696,7 +1698,7 @@
 
 /* Move List */
 .move-list-container {
-    padding: 0.85rem 0.5rem;
+    padding: 0;
     border-radius: 1rem;
     border: 1px solid var(--border-color-strong);
     background: var(--card-bg);
@@ -1808,7 +1810,7 @@
 
 .move-list-grid {
     display: grid;
-    grid-template-columns: 1.5rem 1fr 1fr;
+    grid-template-columns: 2.5rem 1fr 1fr;
     align-items: center;
 }
 
@@ -1824,6 +1826,16 @@
     top: 0;
     background: var(--bg-secondary);
     z-index: 1;
+}
+
+.move-list-header-eval {
+    text-transform: none;
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    background: rgba(59, 130, 246, 0.2);
 }
 
 .move-number {
@@ -1880,11 +1892,16 @@
     color: var(--text-primary);
 }
 
-/* Eval number below move */
+/* Delta arrows below move */
 .move-eval {
-    font-size: 0.65rem;
-    opacity: 0.5;
+    font-size: 0.75rem;
+    font-weight: 700;
+    opacity: 0.7;
     line-height: 1;
+}
+
+.move-delta-arrow {
+    font-size: 1.7em;
 }
 
 .move-eval:empty {

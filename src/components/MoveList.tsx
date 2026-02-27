@@ -30,6 +30,15 @@ const formatEval = (cp: number): string => {
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`
 }
 
+/** Format eval change from white's perspective. Positive = eval went up for white. */
+const formatDelta = (changeCp: number): React.ReactNode => {
+  if (Math.abs(changeCp) < 5) return '=0'
+  const rounded = Math.round(changeCp / 100 * 10) / 10 // round to 0.1 pawns
+  const arrow = rounded > 0 ? '↑' : '↓'
+  const value = Math.abs(rounded).toFixed(1)
+  return <><span className="move-delta-arrow">{arrow}</span>{value}</>
+}
+
 const classificationClass = (c?: MoveClassification | null): string => {
   if (!c) return ''
   return `move-${c}`
@@ -144,6 +153,9 @@ const MoveList = ({
     const isSelected = index === effectiveIndex
     const annotation = move.classification ? ANNOTATION_SYMBOL[move.classification] : ''
     const colorClass = classificationClass(move.classification)
+    // Compute eval change from white's perspective (first move uses 0 as baseline)
+    const prevEval = index > 0 ? moves[index - 1].eval : 0
+    const evalChange = move.eval != null && prevEval != null ? move.eval - prevEval : null
 
     return (
       <button
@@ -154,7 +166,7 @@ const MoveList = ({
       >
         <span className="move-san">{annotation}{move.san}</span>
         <span className="move-eval">
-          {move.eval != null ? formatEval(move.eval) : ''}
+          {evalChange != null ? formatDelta(evalChange) : ''}
         </span>
       </button>
     )
@@ -167,7 +179,11 @@ const MoveList = ({
           <p className="move-list-empty">No moves yet</p>
         ) : (
           <div className="move-list-grid">
-            <span className="move-list-header" />
+            <span className="move-list-header move-list-header-eval">
+              {effectiveIndex >= 0 && moves[effectiveIndex]?.eval != null
+                ? formatEval(moves[effectiveIndex].eval!)
+                : ''}
+            </span>
             <span className="move-list-header">{playerColor === 'white' ? 'You' : 'Engine'}</span>
             <span className="move-list-header">{playerColor === 'black' ? 'You' : 'Engine'}</span>
             {movePairs.map((pair, pairIndex) => {
