@@ -125,11 +125,24 @@ function parseInfo(line: string): EngineInfo | null {
   return null
 }
 
+let engineConfigured = false
+
 function startEvaluation(request: EvaluatePositionMessage) {
   const pendingEngine = engine
 
   if (!pendingEngine) {
     return
+  }
+
+  // Configure threads/hash on first deep analysis request only
+  if (!engineConfigured && (request.depth || (request.multipv && request.multipv > 1))) {
+    const threads = Math.min(
+      Math.max(1, Math.floor(navigator.hardwareConcurrency / 2)),
+      4,
+    )
+    pendingEngine.postMessage(`setoption name Threads value ${threads}`)
+    pendingEngine.postMessage('setoption name Hash value 64')
+    engineConfigured = true
   }
 
   runningSearch = request
@@ -161,14 +174,6 @@ function handleEngineLine(line: string) {
   }
 
   if (line === 'readyok') {
-    if (!engineReady) {
-      const threads = Math.min(
-        Math.max(1, Math.floor(navigator.hardwareConcurrency / 2)),
-        4,
-      )
-      engine?.postMessage(`setoption name Threads value ${threads}`)
-      engine?.postMessage('setoption name Hash value 64')
-    }
     engineReady = true
     ctx.postMessage({ type: 'ready' })
     flushQueuedOperations()
