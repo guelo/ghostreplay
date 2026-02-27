@@ -3,6 +3,24 @@ import { fireEvent, render, screen } from '../test/utils'
 import AnalysisBoard from './AnalysisBoard'
 import type { AnalysisMove } from '../utils/api'
 
+vi.mock('../hooks/useMoveAnalysis', () => ({
+  useMoveAnalysis: () => ({
+    analyzeMove: vi.fn(),
+    analysisMap: new Map(),
+    lastAnalysis: null,
+    clearAnalysis: vi.fn(),
+  }),
+}))
+
+vi.mock('../hooks/useStockfishEngine', () => ({
+  useStockfishEngine: () => ({
+    info: [],
+    isThinking: false,
+    evaluatePosition: vi.fn(async () => {}),
+    stopSearch: vi.fn(),
+  }),
+}))
+
 vi.mock('react-chessboard', () => ({
   Chessboard: () => <div data-testid="chessboard" />,
 }))
@@ -19,11 +37,14 @@ vi.mock('./MoveList', () => ({
   default: ({
     moves,
     onNavigate,
+    playerColor,
   }: {
     moves: Array<{ san: string }>
     onNavigate: (index: number | null) => void
+    playerColor?: 'white' | 'black'
   }) => (
     <div>
+      <div data-testid="move-list-player-color">{playerColor ?? 'unset'}</div>
       {moves.map((move, index) => (
         <button
           key={`${move.san}-${index}`}
@@ -99,5 +120,11 @@ describe('AnalysisBoard position info', () => {
     expect(screen.getByText('c5')).toBeInTheDocument()
     expect(screen.getByText('+100 cp')).toBeInTheDocument()
     expect(screen.getByText('inaccuracy')).toBeInTheDocument()
+  })
+
+  it('passes player color to MoveList from board orientation', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="black" />)
+
+    expect(screen.getByTestId('move-list-player-color')).toHaveTextContent('black')
   })
 })

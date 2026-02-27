@@ -582,6 +582,7 @@ const AnalysisBoard = ({
             moves={moveListMoves}
             currentIndex={moveListIndex}
             onNavigate={handleNavigate}
+            playerColor={boardOrientation}
           />
         </div>
       </div>
