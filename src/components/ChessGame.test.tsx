@@ -171,6 +171,83 @@ describe("ChessGame start flow", () => {
   });
 });
 
+describe("ChessGame eval bar behavior", () => {
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    startGameMock.mockReset();
+    endGameMock.mockReset();
+    uploadSessionMovesMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    recordBlunderMock.mockReset();
+    recordManualBlunderMock.mockReset();
+    reviewSrsBlunderMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    evaluatePositionMock.mockReset();
+    lookupOpeningByFenMock.mockReset();
+    mockLastAnalysis = null;
+    mockAnalysisMap = new Map();
+    capturedPieceDrop = null;
+
+    startGameMock.mockResolvedValue({
+      session_id: "session-eval",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "engine",
+      move: { uci: "d7d5", san: "d5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    lookupOpeningByFenMock.mockResolvedValue(null);
+  });
+
+  it("keeps prior eval displayed while latest move analysis is pending", async () => {
+    const { rerender } = render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    // Only the earlier move has analysis so far.
+    mockAnalysisMap = new Map([
+      [
+        0,
+        {
+          id: "analysis-0",
+          move: "e2e4",
+          bestMove: "e2e4",
+          bestEval: 80,
+          playedEval: 80,
+          currentPositionEval: 80,
+          moveIndex: 0,
+          delta: 0,
+          blunder: false,
+        },
+      ],
+    ]);
+
+    rerender(<ChessGame />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("img", { name: "Evaluation +0.8" }),
+      ).toBeInTheDocument();
+    });
+  });
+});
+
 describe("ChessGame blunder recording", () => {
   beforeEach(() => {
     // jsdom doesn't implement scrollIntoView

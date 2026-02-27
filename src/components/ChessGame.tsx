@@ -454,11 +454,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (selectedMoveIndex === null || selectedMoveIndex < 0) {
       return null;
     }
-    const selectedAnalysis = analysisMap.get(selectedMoveIndex);
-    return toWhitePerspective(
-      selectedAnalysis?.playedEval ?? null,
-      selectedMoveIndex,
-    );
+
+    // Keep showing the most recent known eval while the latest move's
+    // analysis is still in flight.
+    for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
+      const analysis = analysisMap.get(idx);
+      if (analysis?.playedEval == null) {
+        continue;
+      }
+      return toWhitePerspective(analysis.playedEval, idx);
+    }
+
+    return null;
   }, [analysisMap, selectedMoveIndex]);
 
   const canAddSelectedMove = useMemo(() => {
