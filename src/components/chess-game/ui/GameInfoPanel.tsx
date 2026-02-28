@@ -137,7 +137,7 @@ const GameInfoPanel = ({
         </span>
       </p>
       {isGameActive && (
-        <p
+        <div
           className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}
         >
           Opponent:{" "}
@@ -213,7 +213,7 @@ const GameInfoPanel = ({
           ) : (
             <span className="chess-meta-strong">{opponentName}</span>
           )}
-        </p>
+        </div>
       )}
       {isGameActive && (
         <p className="chess-meta">
