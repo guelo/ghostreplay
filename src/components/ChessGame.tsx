@@ -5,6 +5,7 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useMoveAnalysis, type AnalysisResult } from "../hooks/useMoveAnalysis";
+import { useChessGameController } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
@@ -732,125 +733,56 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const opponentColor = playerColor === "white" ? "black" : "white";
 
-  const applyEngineMove = useCallback(async () => {
-    try {
-      const fenBeforeMove = chess.fen();
-      const legalMoveCount = chess.moves().length;
-      const result = await evaluatePosition(fenBeforeMove);
-
-      if (result.move === "(none)") {
-        setEngineMessage("Stockfish has no legal moves.");
-        return;
-      }
-
-      const from = result.move.slice(0, 2);
-      const to = result.move.slice(2, 4);
-      const promotion = result.move.slice(4) || undefined;
-      const appliedMove = chess.move({ from, to, promotion });
-
-      if (!appliedMove) {
-        throw new Error(`Engine returned illegal move: ${result.move}`);
-      }
-
-      const newFen = chess.fen();
-      const moveIndex = moveCountRef.current++;
-      const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
-      const nextMove = { san: appliedMove.san, fen: newFen, uci: uciMove };
-      const nextMoveHistory = [...moveHistoryRef.current, nextMove];
-      moveHistoryRef.current = nextMoveHistory;
-      setFen(newFen);
-      setMoveHistory(nextMoveHistory);
-      setViewIndex(null); // Ensure we're viewing the live position
-      setEngineMessage(null);
-      analyzeMove(
-        fenBeforeMove,
-        uciMove,
-        opponentColor,
-        moveIndex,
-        legalMoveCount,
-      );
-
-      // Check if the engine's move ended the game
-      if (chess.isGameOver()) {
-        await handleGameEnd();
-      }
-    } catch (error) {
-      const message =
-        error instanceof Error
-          ? error.message
-          : "Unable to apply Stockfish move.";
-      setEngineMessage(message);
-    }
-  }, [chess, evaluatePosition, handleGameEnd, analyzeMove, opponentColor]);
-
-  const applyGhostMove = useCallback(
-    async (
-      sanMove: string,
-      targetBlunderId: number | null,
-      targetBlunderSrs: TargetBlunderSrs | null,
-      targetFen: string | null,
-    ) => {
-      try {
-        const fenBeforeMove = chess.fen();
-        const legalMoveCount = chess.moves().length;
-        const appliedMove = chess.move(sanMove);
-
-        if (!appliedMove) {
-          throw new Error(`Ghost returned illegal move: ${sanMove}`);
-        }
-
-        const newFen = chess.fen();
-        const moveIndex = moveCountRef.current++;
-        const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
-        const nextMove = { san: appliedMove.san, fen: newFen, uci: uciMove };
-        const nextMoveHistory = [...moveHistoryRef.current, nextMove];
-        moveHistoryRef.current = nextMoveHistory;
-        setFen(newFen);
-        setMoveHistory(nextMoveHistory);
-        setViewIndex(null);
-        setEngineMessage(null);
-
-        // Mark position as under review if ghost-move targets a blunder
-        // and it's now the player's turn (side-to-move matches playerColor)
-        const sideToMove = chess.turn() === "w" ? "white" : "black";
-        if (targetBlunderId !== null && sideToMove === playerColor) {
-          setBlunderReviewId(targetBlunderId);
-          setBlunderReviewSrs(targetBlunderSrs);
-          setBlunderTargetFen(targetFen);
-        } else {
-          setBlunderReviewId(null);
-          setBlunderReviewSrs(null);
-          setBlunderTargetFen(null);
-          setShowGhostInfo(false);
-        }
-
-        analyzeMove(
-          fenBeforeMove,
-          uciMove,
-          opponentColor,
-          moveIndex,
-          legalMoveCount,
-        );
-
-        if (chess.isGameOver()) {
-          await handleGameEnd();
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Unable to apply ghost move.";
-        setEngineMessage(message);
-      }
-    },
-    [chess, handleGameEnd, analyzeMove, opponentColor, playerColor],
-  );
+  const { applyPlayerMove, handleDrop, applyEngineMove, applyGhostMove } =
+    useChessGameController({
+      chess,
+      playerColor,
+      opponentColor,
+      isPlayersTurn,
+      isViewingLive,
+      blunderReviewId,
+      moveCountRef,
+      moveHistoryRef,
+      pendingAnalysisContextRef,
+      pendingSrsReviewRef,
+      setFen,
+      setMoveHistory,
+      setViewIndex,
+      setEngineMessage,
+      setBlunderAlert,
+      setBlunderReviewId,
+      setBlunderReviewSrs,
+      setBlunderTargetFen,
+      setShowGhostInfo,
+      analyzeMove,
+      evaluatePosition,
+      handleGameEnd,
+      clearMoveHighlights,
+    });
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
     sessionId,
     onApplyBackendMove: applyGhostMove,
     onApplyLocalFallback: applyEngineMove,
   });
+
+  const applyPlayerMoveAndAdvance = useCallback(
+    (sourceSquare: string, targetSquare: string): boolean => {
+      const result = applyPlayerMove(sourceSquare, targetSquare);
+      if (!result.applied) {
+        return false;
+      }
+
+      if (result.gameOver) {
+        void handleGameEnd();
+      } else {
+        void applyOpponentMove(result.fenAfter, result.uciHistory);
+      }
+
+      return true;
+    },
+    [applyOpponentMove, applyPlayerMove, handleGameEnd],
+  );
 
   useEffect(() => {
     if (!isGameActive) {
@@ -877,67 +809,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       // If a square is already selected, try to make a move to the clicked square
       if (selectedSquare) {
-        let move = null;
-        try {
-          const fenBeforeMove = chess.fen();
-          const legalMoveCount = chess.moves().length;
-          move = chess.move({
-            from: selectedSquare,
-            to: square,
-            promotion: "q",
-          });
-
-          if (move) {
-            clearMoveHighlights();
-            setBlunderAlert(null);
-
-            const newFen = chess.fen();
-            const moveIndex = moveCountRef.current++;
-            const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
-            const nextMove = { san: move.san, fen: newFen, uci: uciMove };
-            const nextMoveHistory = [...moveHistoryRef.current, nextMove];
-            moveHistoryRef.current = nextMoveHistory;
-            setFen(newFen);
-            setMoveHistory(nextMoveHistory);
-            setViewIndex(null);
-
-            if (blunderReviewId !== null) {
-              pendingSrsReviewRef.current = {
-                blunderId: blunderReviewId,
-                moveIndex,
-                userMoveSan: move.san,
-              };
-              setBlunderReviewId(null);
-              setBlunderReviewSrs(null);
-            }
-
-            pendingAnalysisContextRef.current = {
-              fen: fenBeforeMove,
-              pgn: chess.pgn(),
-              moveSan: move.san,
-              moveUci: uciMove,
-              moveIndex,
-            };
-            analyzeMove(
-              fenBeforeMove,
-              uciMove,
-              playerColor,
-              moveIndex,
-              legalMoveCount,
-            );
-
-            if (chess.isGameOver()) {
-              void handleGameEnd();
-            } else {
-              void applyOpponentMove(
-                newFen,
-                moveHistoryRef.current.map((m) => m.uci),
-              );
-            }
-            return;
-          }
-        } catch {
-          // Invalid move (e.g. clicking a friendly piece) — fall through
+        if (applyPlayerMoveAndAdvance(selectedSquare, square)) {
+          return;
         }
 
         // Move was illegal — fall through to try selecting the new square
@@ -959,17 +832,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
     },
     [
-      blunderReviewId,
       chess,
       isGameActive,
       isViewingLive,
       selectedSquare,
       playerColor,
-      analyzeMove,
-      applyOpponentMove,
+      applyPlayerMoveAndAdvance,
       clearMoveHighlights,
       getMoveOptions,
-      handleGameEnd,
     ],
   );
 
@@ -1252,71 +1122,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => document.removeEventListener("mousedown", handler);
   }, [showGhostInfo]);
 
-  const handleDrop = ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
-    if (!targetSquare) {
+  const handleDropPiece = ({
+    sourceSquare,
+    targetSquare,
+  }: PieceDropHandlerArgs) => {
+    const result = handleDrop(sourceSquare, targetSquare);
+    if (!result.applied) {
       return false;
     }
 
-    if (!isPlayersTurn || !isViewingLive) {
-      return false;
-    }
-
-    if (sourceSquare === targetSquare) {
-      return false;
-    }
-
-    const fenBeforeMove = chess.fen();
-    const legalMoveCount = chess.moves().length;
-    const move = chess.move({
-      from: sourceSquare,
-      to: targetSquare,
-      promotion: "q",
-    });
-
-    if (!move) {
-      return false;
-    }
-
-    clearMoveHighlights();
-    setBlunderAlert(null);
-
-    const newFen = chess.fen();
-    const moveIndex = moveCountRef.current++;
-    const uciMove = `${move.from}${move.to}${move.promotion ?? ""}`;
-    const nextMove = { san: move.san, fen: newFen, uci: uciMove };
-    const nextMoveHistory = [...moveHistoryRef.current, nextMove];
-    moveHistoryRef.current = nextMoveHistory;
-    setFen(newFen);
-    setMoveHistory(nextMoveHistory);
-    setViewIndex(null); // Ensure we're viewing the live position
-
-    if (blunderReviewId !== null) {
-      pendingSrsReviewRef.current = {
-        blunderId: blunderReviewId,
-        moveIndex,
-        userMoveSan: move.san,
-      };
-      setBlunderReviewId(null);
-      setBlunderReviewSrs(null);
-    }
-
-    // Store context for blunder detection before engine moves
-    pendingAnalysisContextRef.current = {
-      fen: fenBeforeMove,
-      pgn: chess.pgn(),
-      moveSan: move.san,
-      moveUci: uciMove,
-      moveIndex,
-    };
-    analyzeMove(fenBeforeMove, uciMove, playerColor, moveIndex, legalMoveCount);
-
-    if (chess.isGameOver()) {
+    if (result.gameOver) {
       void handleGameEnd();
     } else {
-      void applyOpponentMove(
-        newFen,
-        moveHistoryRef.current.map((m) => m.uci),
-      );
+      void applyOpponentMove(result.fenAfter, result.uciHistory);
     }
 
     return true;
@@ -1873,7 +1691,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               <Chessboard
                 options={{
                   position: displayedFen,
-                  onPieceDrop: handleDrop,
+                  onPieceDrop: handleDropPiece,
                   onSquareClick: handleSquareClick,
                   boardOrientation,
                   animationDurationInMs: 200,
