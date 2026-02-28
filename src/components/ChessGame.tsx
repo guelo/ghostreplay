@@ -1635,7 +1635,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowRehookToast(false);
     setReviewFailModal(null);
     setShowPostGamePrompt(false);
-    setShowStartOverlay(false);
+    setShowStartOverlay(true);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
     setIsRated(true);
