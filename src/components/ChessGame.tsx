@@ -229,7 +229,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [gameResult, setGameResult] = useState<GameResult | null>(null);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  const [showStartOverlay, setShowStartOverlay] = useState(false);
+  const [showStartOverlay, setShowStartOverlay] = useState(true);
   const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
