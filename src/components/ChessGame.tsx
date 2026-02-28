@@ -3,19 +3,16 @@ import { Chess } from "chess.js";
 import type { Square } from "chess.js";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
+import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
 import { useMoveAnalysis, type AnalysisResult } from "../hooks/useMoveAnalysis";
 import { useChessGameController } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
 import {
-  startGame,
-  endGame,
-  fetchCurrentRating,
   recordBlunder,
   recordManualBlunder,
   reviewSrsBlunder,
-  uploadSessionMoves,
   type RatingChange,
   type TargetBlunderSrs,
 } from "../utils/api";
@@ -34,12 +31,20 @@ import {
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
 import { deriveDisplayedOpening } from "./chess-game/domain/opening";
-import { buildSessionMoveUploads } from "./chess-game/domain/sessionUpload";
 import {
   deriveGameStatusBadge,
   deriveStatusText,
   type GameResult,
 } from "./chess-game/domain/status";
+import {
+  BLUNDER_AUDIO_CLIPS,
+  MAIA_BOT_NAMES,
+  MAIA_ELO_BINS,
+  SRS_REVIEW_FAIL_THRESHOLD_CP,
+  STARTING_FEN,
+} from "./chess-game/config";
+import { eloStakes } from "./chess-game/elo";
+import type { BoardOrientation, OpenHistoryOptions } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
@@ -47,88 +52,11 @@ import MaterialDisplay from "./MaterialDisplay";
 import MoveList from "./MoveList";
 import type { MoveListBubble } from "./MoveList";
 
-/** Maia3 ELO bins – must match backend/app/maia3_client.py:ELO_BINS */
-const MAIA_ELO_BINS = [
-  600, 800, 1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900, 2000,
-  2200, 2400, 2600,
-] as const;
-
-/** Compute expected Elo stakes (win/loss deltas) for the difficulty selector. */
-function eloStakes(
-  playerRating: number,
-  opponentRating: number,
-  isProvisional: boolean,
-): { winDelta: number; lossDelta: number } {
-  const k = isProvisional ? 40 : 20;
-  const expected =
-    1.0 / (1.0 + 10.0 ** ((opponentRating - playerRating) / 400.0));
-  return {
-    winDelta: Math.round(k * (1 - expected)),
-    lossDelta: Math.round(k * (0 - expected)),
-  };
-}
-
-/** Gaussian-sample a difficulty bin near the user's Elo (σ controls spread). */
-function sampleEloBin(
-  userElo: number,
-  sigma = 125,
-): (typeof MAIA_ELO_BINS)[number] {
-  const weights = MAIA_ELO_BINS.map((bin) =>
-    Math.exp(-((userElo - bin) ** 2) / (2 * sigma ** 2)),
-  );
-  const total = weights.reduce((a, b) => a + b, 0);
-  let r = Math.random() * total;
-  for (let i = 0; i < weights.length; i++) {
-    r -= weights[i];
-    if (r <= 0) return MAIA_ELO_BINS[i];
-  }
-  return MAIA_ELO_BINS[MAIA_ELO_BINS.length - 1];
-}
-
-const MAIA_BOT_NAMES: Record<(typeof MAIA_ELO_BINS)[number], string> = {
-  600: "Boo Bud 600",
-  800: "Wisp Cub 800",
-  1000: "Phantom Puff 1000",
-  1100: "Misty Paws 1100",
-  1200: "Specter Scout 1200",
-  1300: "Boo Bishop 1300",
-  1400: "Wisp Gambit 1400",
-  1500: "Phantom Tempo 1500",
-  1600: "Misty Sharp 1600",
-  1700: "Specter Prep 1700",
-  1800: "Boo Tactician 1800",
-  1900: "Wraith Endgame 1900",
-  2000: "Ghost Master 2000",
-  2200: "Phantom Engine 2200",
-  2400: "Specter Legend 2400",
-  2600: "Wraith Nova 2600",
-};
-
-type BoardOrientation = "white" | "black";
-
-type OpenHistoryOptions = {
-  select: "latest";
-  source: "post_game_view_analysis" | "post_game_history";
-};
-
 type ChessGameProps = {
   onOpenHistory?: (options: OpenHistoryOptions) => void;
 };
 
-const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
-const SRS_REVIEW_FAIL_THRESHOLD_CP = 50;
-const BLUNDER_AUDIO_CLIPS = Array.from(
-  { length: 10 },
-  (_, index) => `/audio/blunder${index + 1}.m4a`,
-);
-
 const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
-
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
 
 const playRandomBlunderAudio = () => {
   if (typeof Audio === "undefined" || BLUNDER_AUDIO_CLIPS.length === 0) {
@@ -234,16 +162,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const isAnalyzingRef = useRef(isAnalyzing);
   const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
-
-  useEffect(() => {
-    fetchCurrentRating()
-      .then((data) => {
-        setPlayerRating(data.current_rating);
-        setIsProvisional(data.is_provisional);
-        setEngineElo(sampleEloBin(data.current_rating));
-      })
-      .catch(() => {});
-  }, []);
+  const handleGameEndRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     analysisMapRef.current = analysisMap;
@@ -424,77 +343,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [chess],
   );
 
-  const waitForQueuedAnalyses = useCallback(async (expectedMoves: number) => {
-    const analysisHasErrored = () => analysisStatusRef.current === "error";
-
-    if (expectedMoves <= 0) {
-      return;
-    }
-
-    if (analysisHasErrored() || analysisMapRef.current.size >= expectedMoves) {
-      return;
-    }
-
-    const initialSize = analysisMapRef.current.size;
-    await sleep(150);
-    if (analysisHasErrored() || analysisMapRef.current.size >= expectedMoves) {
-      return;
-    }
-
-    if (
-      !isAnalyzingRef.current &&
-      analysisMapRef.current.size === initialSize
-    ) {
-      return;
-    }
-
-    const deadline = Date.now() + ANALYSIS_UPLOAD_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      if (
-        analysisHasErrored() ||
-        analysisMapRef.current.size >= expectedMoves
-      ) {
-        return;
-      }
-
-      if (!isAnalyzingRef.current) {
-        const sizeBeforeIdleCheck = analysisMapRef.current.size;
-        await sleep(100);
-        if (analysisMapRef.current.size === sizeBeforeIdleCheck) {
-          return;
-        }
-      } else {
-        await sleep(50);
-      }
-    }
-  }, []);
-
-  const uploadSessionAnalysisBatch = useCallback(
-    async (targetSessionId: string, expectedMoveCount: number) => {
-      if (uploadedAnalysisSessionsRef.current.has(targetSessionId)) {
-        return;
-      }
-
-      await waitForQueuedAnalyses(expectedMoveCount);
-
-      const historySnapshot = [...moveHistoryRef.current];
-      if (historySnapshot.length === 0) {
-        uploadedAnalysisSessionsRef.current.add(targetSessionId);
-        return;
-      }
-
-      const analysesSnapshot = new Map(analysisMapRef.current);
-      const payload = buildSessionMoveUploads(
-        historySnapshot,
-        analysesSnapshot,
-        STARTING_FEN,
-      );
-      await uploadSessionMoves(targetSessionId, payload);
-      uploadedAnalysisSessionsRef.current.add(targetSessionId);
-    },
-    [waitForQueuedAnalyses],
-  );
-
   const buildManualCapturePayload = useCallback(
     (moveIndex: number) => {
       if (moveIndex < 0 || moveIndex >= moveHistory.length) {
@@ -567,66 +415,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     [buildManualCapturePayload, isPlayerMoveIndex, sessionId],
   );
-
-  const handleGameEnd = useCallback(async () => {
-    if (!sessionId || !isGameActive) return;
-
-    let result: GameResult | null = null;
-
-    if (chess.isCheckmate()) {
-      const loser = chess.turn() === "w" ? "white" : "black";
-      const playerWon = playerColor !== loser;
-      result = playerWon
-        ? { type: "checkmate_win", message: "Checkmate! You won!" }
-        : { type: "checkmate_loss", message: "Checkmate! You lost." };
-    } else if (chess.isStalemate()) {
-      result = { type: "draw", message: "Stalemate! The game is a draw." };
-    } else if (chess.isThreefoldRepetition()) {
-      result = { type: "draw", message: "Draw by threefold repetition." };
-    } else if (chess.isInsufficientMaterial()) {
-      result = { type: "draw", message: "Draw by insufficient material." };
-    } else if (chess.isDraw()) {
-      result = { type: "draw", message: "The game is a draw." };
-    }
-
-    if (result) {
-      try {
-        try {
-          await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
-        } catch (uploadError) {
-          console.error(
-            "[SessionMoves] Failed to upload session moves:",
-            uploadError,
-          );
-        }
-        const endResponse = await endGame(
-          sessionId,
-          result.type,
-          chess.pgn(),
-          isRated,
-        );
-        if (endResponse.rating) {
-          setRatingChange(endResponse.rating);
-          setPlayerRating(endResponse.rating.rating_after);
-          setIsProvisional(endResponse.rating.is_provisional);
-        }
-        setIsGameActive(false);
-        setGameResult(result);
-        setShowPostGamePrompt(true);
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to end game.";
-        setEngineMessage(message);
-      }
-    }
-  }, [
-    chess,
-    isGameActive,
-    isRated,
-    playerColor,
-    sessionId,
-    uploadSessionAnalysisBatch,
-  ]);
 
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
@@ -722,7 +510,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setShowGhostInfo,
       analyzeMove,
       evaluatePosition,
-      handleGameEnd,
+      handleGameEnd: () => handleGameEndRef.current(),
       clearMoveHighlights,
     });
 
@@ -731,6 +519,77 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     onApplyBackendMove: applyGhostMove,
     onApplyLocalFallback: applyEngineMove,
   });
+
+  const {
+    handleGameEnd,
+    executeRevert,
+    handleRevertClick,
+    cancelRevert,
+    handleNewGame,
+    handleResign,
+    handleReset,
+    handleShowStartOverlay,
+    handleViewAnalysis,
+    handleViewHistory,
+  } = useChessGameLifecycle({
+    chess,
+    sessionId,
+    isGameActive,
+    isRated,
+    playerColor,
+    playerColorChoice,
+    engineElo,
+    playerRating,
+    moveHistory,
+    moveCountRef,
+    moveHistoryRef,
+    analysisMapRef,
+    analysisStatusRef,
+    isAnalyzingRef,
+    uploadedAnalysisSessionsRef,
+    openingHistoryRef,
+    blunderRecordedRef,
+    pendingAnalysisContextRef,
+    pendingSrsReviewRef,
+    clearMoveHighlights,
+    resetMode,
+    resetEngine,
+    clearAnalysis,
+    onOpenHistory,
+    setEngineMessage,
+    setPlayerRating,
+    setIsProvisional,
+    setEngineElo,
+    setIsStartingGame,
+    setStartError,
+    setPlayerColor,
+    setPlayerColorChoice,
+    setBoardOrientation,
+    setSessionId,
+    setIsGameActive,
+    setShowStartOverlay,
+    setFen,
+    setGameResult,
+    setRatingChange,
+    setMoveHistory,
+    setViewIndex,
+    setLiveOpening,
+    setBlunderAlert,
+    setShowFlash,
+    setBlunderReviewId,
+    setBlunderReviewSrs,
+    setShowPassToast,
+    setShowRehookToast,
+    setReviewFailModal,
+    setShowPostGamePrompt,
+    setIsRated,
+    showRevertWarning,
+    setShowRevertWarning,
+  });
+
+  useEffect(() => {
+    handleGameEndRef.current = handleGameEnd;
+  }, [handleGameEnd]);
 
   const applyPlayerMoveAndAdvance = useCallback(
     (sourceSquare: string, targetSquare: string): boolean => {
@@ -1111,208 +970,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setViewIndex(null);
   }, []);
 
-  const handleNewGame = async (colorOverride?: BoardOrientation | "random") => {
-    try {
-      setIsStartingGame(true);
-      setStartError(null);
-      // End current session if active
-      if (sessionId && isGameActive) {
-        try {
-          await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
-        } catch (uploadError) {
-          console.error(
-            "[SessionMoves] Failed to upload session moves:",
-            uploadError,
-          );
-        }
-        await endGame(sessionId, "abandon", chess.pgn(), isRated);
-      }
-
-      // Start new game session
-      const effectiveChoice = colorOverride ?? playerColorChoice;
-      const resolvedPlayerColor =
-        effectiveChoice === "random"
-          ? Math.random() < 0.5
-            ? "white"
-            : "black"
-          : effectiveChoice;
-      setPlayerColor(resolvedPlayerColor);
-      setBoardOrientation(resolvedPlayerColor);
-
-      const response = await startGame(engineElo, resolvedPlayerColor);
-      setSessionId(response.session_id);
-      setIsGameActive(true);
-      setIsStartingGame(false);
-      setShowStartOverlay(false);
-
-      // Reset the board
-      chess.reset();
-      setFen(chess.fen());
-      setEngineMessage(null);
-      setGameResult(null);
-      setRatingChange(null);
-      setMoveHistory([]);
-      moveCountRef.current = 0;
-      setViewIndex(null);
-      setLiveOpening(null);
-      openingHistoryRef.current = [];
-      resetEngine();
-      clearAnalysis();
-      moveHistoryRef.current = [];
-      uploadedAnalysisSessionsRef.current.clear();
-      setBlunderAlert(null);
-      setShowFlash(false);
-      setBlunderReviewId(null);
-      setBlunderReviewSrs(null);
-      setShowPassToast(false);
-      setReviewFailModal(null);
-      setShowPostGamePrompt(false);
-      setIsRated(true);
-      setShowRevertWarning(false);
-      clearMoveHighlights();
-      blunderRecordedRef.current = false;
-      pendingAnalysisContextRef.current = null;
-      pendingSrsReviewRef.current = null;
-      resetMode();
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to start new game.";
-      setEngineMessage(message);
-      setStartError(message);
-      setIsStartingGame(false);
-    }
-  };
-
-  const handleResign = async () => {
-    if (!sessionId || !isGameActive) {
-      return;
-    }
-
-    try {
-      try {
-        await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
-      } catch (uploadError) {
-        console.error(
-          "[SessionMoves] Failed to upload session moves:",
-          uploadError,
-        );
-      }
-      const endResponse = await endGame(
-        sessionId,
-        "resign",
-        chess.pgn(),
-        isRated,
-      );
-      if (endResponse.rating) {
-        setRatingChange(endResponse.rating);
-        setPlayerRating(endResponse.rating.rating_after);
-        setIsProvisional(endResponse.rating.is_provisional);
-      }
-      setIsGameActive(false);
-      setGameResult({ type: "resign", message: "You resigned." });
-      setShowPostGamePrompt(true);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Failed to resign game.";
-      setEngineMessage(message);
-    }
-  };
-
-  const executeRevert = useCallback(() => {
-    if (!isGameActive || moveHistory.length === 0 || chess.isGameOver()) return;
-
-    setIsRated(false);
-    setShowRevertWarning(false);
-
-    // Determine how many half-moves to undo:
-    // If it's the player's turn, opponent already replied → undo 2 (opponent + player)
-    // If it's the opponent's turn, player just moved → undo 1 (player only)
-    const isPlayerTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
-    const undoCount = isPlayerTurn && moveHistory.length >= 2 ? 2 : 1;
-
-    for (let i = 0; i < undoCount; i++) {
-      chess.undo();
-    }
-
-    const newHistory = moveHistory.slice(0, -undoCount);
-    moveHistoryRef.current = newHistory;
-    moveCountRef.current = newHistory.length;
-    setMoveHistory(newHistory);
-    setFen(chess.fen());
-    setViewIndex(null);
-    setBlunderReviewId(null);
-    setBlunderReviewSrs(null);
-    setBlunderAlert(null);
-    pendingSrsReviewRef.current = null;
-    pendingAnalysisContextRef.current = null;
-  }, [chess, isGameActive, moveHistory, playerColor]);
-
-  const handleRevertClick = useCallback(() => {
-    if (isRated) {
-      setShowRevertWarning(true);
-    } else {
-      executeRevert();
-    }
-  }, [isRated, executeRevert]);
-
-  const cancelRevert = useCallback(() => {
-    setShowRevertWarning(false);
-  }, []);
-
-  const handleReset = () => {
-    chess.reset();
-    setFen(chess.fen());
-    setBoardOrientation(playerColor);
-    setEngineMessage(null);
-    setSessionId(null);
-    setIsGameActive(false);
-    setGameResult(null);
-    setMoveHistory([]);
-    moveCountRef.current = 0;
-    setViewIndex(null);
-    setLiveOpening(null);
-    openingHistoryRef.current = [];
-    resetEngine();
-    clearAnalysis();
-    moveHistoryRef.current = [];
-    uploadedAnalysisSessionsRef.current.clear();
-    setBlunderAlert(null);
-    setShowFlash(false);
-    setShowPassToast(false);
-    setShowRehookToast(false);
-    setReviewFailModal(null);
-    setShowPostGamePrompt(false);
-    setShowStartOverlay(true);
-    setBlunderReviewId(null);
-    setBlunderReviewSrs(null);
-    setIsRated(true);
-    setShowRevertWarning(false);
-    clearMoveHighlights();
-    blunderRecordedRef.current = false;
-    pendingAnalysisContextRef.current = null;
-    pendingSrsReviewRef.current = null;
-    resetMode();
-  };
-
   const flipBoard = () => {
     setBoardOrientation((current) => (current === "white" ? "black" : "white"));
-  };
-
-  const handleShowStartOverlay = () => {
-    setPlayerColorChoice("random");
-    setEngineElo(sampleEloBin(playerRating));
-    setShowPostGamePrompt(false);
-    setShowStartOverlay(true);
-  };
-
-  const handleViewAnalysis = () => {
-    setShowPostGamePrompt(false);
-    onOpenHistory?.({ select: "latest", source: "post_game_view_analysis" });
-  };
-
-  const handleViewHistory = () => {
-    setShowPostGamePrompt(false);
-    onOpenHistory?.({ select: "latest", source: "post_game_history" });
   };
 
   const gameStatusBadge = deriveGameStatusBadge(isGameActive, gameResult);

@@ -42,7 +42,7 @@ const makeProps = () => {
     blunderTargetFen: null,
     boardOrientation: "white" as const,
     blunderReviewSrs: null as TargetBlunderSrs | null,
-    displayedOpening: { eco: "C20", name: "King's Pawn Game" },
+    displayedOpening: { eco: "C20", name: "King's Pawn Game", source: "eco" },
     isReviewMomentActive: false,
     reviewFailModal: null,
     onDismissReviewFail,
