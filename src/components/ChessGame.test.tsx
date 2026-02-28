@@ -171,6 +171,175 @@ describe("ChessGame start flow", () => {
   });
 });
 
+describe("ChessGame characterization safeguards", () => {
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    startGameMock.mockReset();
+    endGameMock.mockReset();
+    uploadSessionMovesMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    recordBlunderMock.mockReset();
+    recordManualBlunderMock.mockReset();
+    reviewSrsBlunderMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    evaluatePositionMock.mockReset();
+    lookupOpeningByFenMock.mockReset();
+    mockLastAnalysis = null;
+    mockAnalysisMap = new Map();
+    capturedPieceDrop = null;
+
+    endGameMock.mockResolvedValue({});
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "engine",
+      move: { uci: "d7d5", san: "d5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    lookupOpeningByFenMock.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const startGameAsWhite = async (
+    onOpenHistory?: (options: {
+      select: "latest";
+      source: "post_game_view_analysis" | "post_game_history";
+    }) => void,
+  ) => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+
+    render(<ChessGame onOpenHistory={onOpenHistory} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+  };
+
+  it("shows a warning before revert and only marks game unrated after confirm", async () => {
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^revert$/i }));
+    expect(
+      screen.getByText("This game will not be rated"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(
+      screen.queryByText("This game will not be rated"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/^unrated$/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^revert$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+
+    expect(
+      screen.queryByText("This game will not be rated"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/^unrated$/i)).toBeInTheDocument();
+    expect(screen.getByText(/no moves yet/i)).toBeInTheDocument();
+  });
+
+  it("closes ghost info when clicking outside the popover anchor", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce({
+      mode: "ghost",
+      move: { uci: "e7e5", san: "e5" },
+      target_blunder_id: 42,
+      target_blunder_srs: {
+        blunder_id: 42,
+        pass_count: 2,
+        fail_count: 1,
+        pass_streak: 1,
+        last_reviewed_at: "2026-02-01T12:00:00Z",
+      },
+      target_fen:
+        "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+      decision_source: "ghost_path",
+    });
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Ghost")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /toggle ghost info/i }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /toggle ghost info/i }));
+    expect(
+      screen.getByText("Ghost Target Blunder Position"),
+    ).toBeInTheDocument();
+
+    fireEvent.mouseDown(document.body);
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText("Ghost Target Blunder Position"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  it("routes post-game View Analysis action to history callback", async () => {
+    const onOpenHistory = vi.fn();
+    await startGameAsWhite(onOpenHistory);
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /view analysis/i }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /view analysis/i }));
+
+    expect(onOpenHistory).toHaveBeenCalledWith({
+      select: "latest",
+      source: "post_game_view_analysis",
+    });
+  });
+
+  it("routes post-game History action to history callback", async () => {
+    const onOpenHistory = vi.fn();
+    await startGameAsWhite(onOpenHistory);
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^history$/i })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
+
+    expect(onOpenHistory).toHaveBeenCalledWith({
+      select: "latest",
+      source: "post_game_history",
+    });
+  });
+});
+
 describe("ChessGame eval bar behavior", () => {
   beforeEach(() => {
     window.HTMLElement.prototype.scrollIntoView = vi.fn();

@@ -17,17 +17,29 @@ import {
   reviewSrsBlunder,
   uploadSessionMoves,
   type RatingChange,
-  type SessionMoveUpload,
   type TargetBlunderSrs,
 } from "../utils/api";
 import { shouldRecordBlunder } from "../utils/blunder";
 import { normalize_fen } from "../utils/fen";
 import {
-  classifyMove,
-  classifySessionMove,
   isWithinRecordingMoveCap,
   toWhitePerspective,
 } from "../workers/analysisUtils";
+import {
+  deriveAnnotatedMoves,
+  deriveBlunderArrows,
+  deriveLastMoveSquares,
+  type BlunderAlert,
+  type MoveRecord,
+  type ReviewFailInfo,
+} from "./chess-game/domain/movePresentation";
+import { deriveDisplayedOpening } from "./chess-game/domain/opening";
+import { buildSessionMoveUploads } from "./chess-game/domain/sessionUpload";
+import {
+  deriveGameStatusBadge,
+  deriveStatusText,
+  type GameResult,
+} from "./chess-game/domain/status";
 import EvalBar from "./EvalBar";
 import MaterialDisplay from "./MaterialDisplay";
 import MoveList from "./MoveList";
@@ -126,34 +138,6 @@ function formatLastSeen(isoDate: string): string {
 }
 
 type BoardOrientation = "white" | "black";
-
-type MoveRecord = {
-  san: string;
-  fen: string; // Position after this move
-  uci: string;
-};
-
-type GameResult = {
-  type: "checkmate_win" | "checkmate_loss" | "draw" | "resign";
-  message: string;
-};
-
-type BlunderAlert = {
-  moveSan: string;
-  moveUci: string;
-  bestMoveUci: string;
-  bestMoveSan: string;
-  delta: number;
-};
-
-type ReviewFailInfo = {
-  userMoveSan: string;
-  bestMoveSan: string;
-  userMoveUci: string;
-  bestMoveUci: string;
-  evalLoss: number;
-  moveIndex: number;
-};
 
 type OpenHistoryOptions = {
   select: "latest";
@@ -322,76 +306,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [viewIndex, fen, moveHistory]);
 
   const lastMoveSquares = useMemo((): Record<string, React.CSSProperties> => {
-    const idx = viewIndex === null ? moveHistory.length - 1 : viewIndex;
-    if (idx < 0 || idx >= moveHistory.length) return {};
-    const uci = moveHistory[idx].uci;
-    const from = uci.slice(0, 2);
-    const to = uci.slice(2, 4);
-    const style: React.CSSProperties = { background: "rgba(255, 255, 0, 0.4)" };
-    return { [from]: style, [to]: style };
+    return deriveLastMoveSquares(moveHistory, viewIndex);
   }, [viewIndex, moveHistory]);
 
   // Enrich moves with analysis data for MoveList annotations
   const annotatedMoves = useMemo(() => {
-    return moveHistory.map((m, i) => {
-      const analysis = analysisMap.get(i);
-      return {
-        san: m.san,
-        classification: analysis ? classifyMove(analysis.delta) : undefined,
-        eval:
-          analysis?.playedEval != null
-            ? toWhitePerspective(analysis.playedEval, i)
-            : undefined,
-      };
-    });
+    return deriveAnnotatedMoves(moveHistory, analysisMap);
   }, [moveHistory, analysisMap]);
 
   // Compute arrows from review fail modal or blunder alert
   const blunderArrows = useMemo(() => {
-    if (reviewFailModal) {
-      return [
-        {
-          startSquare: reviewFailModal.userMoveUci.slice(0, 2),
-          endSquare: reviewFailModal.userMoveUci.slice(2, 4),
-          color: "rgba(248, 113, 113, 0.8)",
-        },
-        {
-          startSquare: reviewFailModal.bestMoveUci.slice(0, 2),
-          endSquare: reviewFailModal.bestMoveUci.slice(2, 4),
-          color: "rgba(52, 211, 153, 0.8)",
-        },
-      ];
-    }
-    if (!blunderAlert) return [];
-    return [
-      {
-        startSquare: blunderAlert.moveUci.slice(0, 2),
-        endSquare: blunderAlert.moveUci.slice(2, 4),
-        color: "rgba(248, 113, 113, 0.8)",
-      },
-      {
-        startSquare: blunderAlert.bestMoveUci.slice(0, 2),
-        endSquare: blunderAlert.bestMoveUci.slice(2, 4),
-        color: "rgba(52, 211, 153, 0.8)",
-      },
-    ];
+    return deriveBlunderArrows(reviewFailModal, blunderAlert);
   }, [reviewFailModal, blunderAlert]);
 
   // Opening label that tracks with move navigation
   const displayedOpening = useMemo(() => {
-    const history = openingHistoryRef.current;
-    // history[0] = starting position, history[N] = after move N
-    // viewIndex null = live, viewIndex -1 = starting position, viewIndex N = after move N
-    const idx = viewIndex === null
-      ? history.length - 1
-      : viewIndex === -1
-        ? 0
-        : viewIndex + 1;
-    // Walk backwards to find the last known opening at or before this index
-    for (let i = Math.min(idx, history.length - 1); i >= 0; i--) {
-      if (history[i]) return history[i];
-    }
-    return null;
+    return deriveDisplayedOpening(openingHistoryRef.current, viewIndex);
   }, [viewIndex, liveOpening]); // liveOpening dependency triggers recalc when history updates
 
   // Whether the user can make moves (must be viewing live position)
@@ -485,26 +415,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return isPlayerMoveIndex(selectedMoveIndex);
   }, [sessionId, selectedMoveIndex, isPlayerMoveIndex]);
 
-  const parseUciToSan = useCallback(
-    (fenBeforeMove: string, uciMove: string) => {
-      if (!uciMove || uciMove === "(none)" || uciMove.length < 4) {
-        return null;
-      }
-
-      try {
-        const replay = new Chess(fenBeforeMove);
-        const from = uciMove.slice(0, 2);
-        const to = uciMove.slice(2, 4);
-        const promotion = uciMove.slice(4) || undefined;
-        const result = replay.move({ from, to, promotion });
-        return result?.san ?? null;
-      } catch {
-        return null;
-      }
-    },
-    [],
-  );
-
   const clearMoveHighlights = useCallback(() => {
     setSelectedSquare(null);
     setOptionSquares({});
@@ -545,37 +455,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return true;
     },
     [chess],
-  );
-
-  const buildSessionMoveUploads = useCallback(
-    (
-      history: MoveRecord[],
-      analysesByIndex: Map<number, AnalysisResult>,
-    ): SessionMoveUpload[] => {
-      return history.map((move, index) => {
-        const analysis = analysesByIndex.get(index);
-        const fenBeforeMove =
-          index === 0
-            ? STARTING_FEN
-            : (history[index - 1]?.fen ?? STARTING_FEN);
-
-        return {
-          move_number: Math.floor(index / 2) + 1,
-          color: index % 2 === 0 ? "white" : "black",
-          move_san: move.san,
-          fen_after: move.fen,
-          eval_cp: analysis?.playedEval ?? null,
-          eval_mate: null,
-          best_move_san: analysis
-            ? parseUciToSan(fenBeforeMove, analysis.bestMove)
-            : null,
-          best_move_eval_cp: analysis?.bestEval ?? null,
-          eval_delta: analysis?.delta ?? null,
-          classification: classifySessionMove(analysis?.delta ?? null),
-        };
-      });
-    },
-    [parseUciToSan],
   );
 
   const waitForQueuedAnalyses = useCallback(async (expectedMoves: number) => {
@@ -641,11 +520,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const payload = buildSessionMoveUploads(
         historySnapshot,
         analysesSnapshot,
+        STARTING_FEN,
       );
       await uploadSessionMoves(targetSessionId, payload);
       uploadedAnalysisSessionsRef.current.add(targetSessionId);
     },
-    [buildSessionMoveUploads, waitForQueuedAnalyses],
+    [waitForQueuedAnalyses],
   );
 
   const buildManualCapturePayload = useCallback(
@@ -792,24 +672,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isViewingLive &&
     !chess.isGameOver();
 
-  const statusText = (() => {
-    if (chess.isCheckmate()) {
-      const winningColor = chess.turn() === "w" ? "Black" : "White";
-      return `${winningColor} wins by checkmate`;
-    }
-
-    if (chess.isDraw()) {
-      return "Drawn position";
-    }
-
-    if (chess.isGameOver()) {
-      return "Game over";
-    }
-
-    const active = chess.turn() === "w" ? "White" : "Black";
-    const suffix = chess.inCheck() ? " (check)" : "";
-    return `${active} to move${suffix}`;
-  })();
+  const statusText = deriveStatusText(chess);
 
   const moveBubble = useMemo((): MoveListBubble | null => {
     if (isAnalyzing && analyzingMove) {
@@ -1668,30 +1531,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     onOpenHistory?.({ select: "latest", source: "post_game_history" });
   };
 
-  const gameStatusBadge = (() => {
-    if (isGameActive) {
-      return { label: "Live", className: "game-status-badge--live" };
-    }
-    if (!gameResult) return null;
-    switch (gameResult.type) {
-      case "checkmate_win":
-        return {
-          label: "Win — Checkmate",
-          className: "game-status-badge--win",
-        };
-      case "checkmate_loss":
-        return {
-          label: "Loss — Checkmate",
-          className: "game-status-badge--loss",
-        };
-      case "draw":
-        return { label: "Draw", className: "game-status-badge--other" };
-      case "resign":
-        return { label: "Resigned", className: "game-status-badge--other" };
-      default:
-        return null;
-    }
-  })();
+  const gameStatusBadge = deriveGameStatusBadge(isGameActive, gameResult);
 
   return (
     <section className="chess-section">
