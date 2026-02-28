@@ -72,10 +72,12 @@ vi.mock("../hooks/useMoveAnalysis", () => ({
 let capturedPieceDrop:
   | ((args: { sourceSquare: string; targetSquare: string }) => boolean)
   | null = null;
+let capturedSquareClick: ((args: { square: string }) => void) | null = null;
 
 vi.mock("react-chessboard", () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => {
     capturedPieceDrop = options.onPieceDrop as typeof capturedPieceDrop;
+    capturedSquareClick = options.onSquareClick as typeof capturedSquareClick;
     return (
       <div
         data-testid="chessboard"
@@ -187,6 +189,7 @@ describe("ChessGame characterization safeguards", () => {
     mockLastAnalysis = null;
     mockAnalysisMap = new Map();
     capturedPieceDrop = null;
+    capturedSquareClick = null;
 
     endGameMock.mockResolvedValue({});
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
@@ -255,6 +258,27 @@ describe("ChessGame characterization safeguards", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText(/^unrated$/i)).toBeInTheDocument();
     expect(screen.getByText(/no moves yet/i)).toBeInTheDocument();
+  });
+
+  it("applies player move through square-click flow and requests opponent reply", async () => {
+    await startGameAsWhite();
+    expect(capturedSquareClick).not.toBeNull();
+
+    await act(async () => {
+      capturedSquareClick?.({ square: "e2" });
+    });
+
+    await act(async () => {
+      capturedSquareClick?.({ square: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
+        "session-characterization",
+        expect.any(String),
+        ["e2e4"],
+      );
+    });
   });
 
   it("closes ghost info when clicking outside the popover anchor", async () => {
