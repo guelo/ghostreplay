@@ -209,7 +209,14 @@ export const useChessGameController = ({
   );
 
   const handleDrop = useCallback(
-    (sourceSquare: string, targetSquare: string | undefined): PlayerMoveApplyResult => {
+    (
+      sourceSquare: string | null,
+      targetSquare: string | null | undefined,
+    ): PlayerMoveApplyResult => {
+      if (!sourceSquare) {
+        return { applied: false };
+      }
+
       if (!targetSquare) {
         return { applied: false };
       }

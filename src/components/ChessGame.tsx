@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import type { Square } from "chess.js";
-import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useMoveAnalysis, type AnalysisResult } from "../hooks/useMoveAnalysis";
@@ -41,7 +40,9 @@ import {
   deriveStatusText,
   type GameResult,
 } from "./chess-game/domain/status";
-import EvalBar from "./EvalBar";
+import BoardStage from "./chess-game/ui/BoardStage";
+import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
+import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import MaterialDisplay from "./MaterialDisplay";
 import MoveList from "./MoveList";
 import type { MoveListBubble } from "./MoveList";
@@ -102,41 +103,6 @@ const MAIA_BOT_NAMES: Record<(typeof MAIA_ELO_BINS)[number], string> = {
   2400: "Specter Legend 2400",
   2600: "Wraith Nova 2600",
 };
-
-const GhostIcon = () => (
-  <svg
-    className="ghost-icon"
-    width="24"
-    height="24"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M12 2C7.58 2 4 5.58 4 10v10.5c0 .83 1 1.25 1.59.66l1.41-1.41 1.41 1.41a.996.996 0 0 0 1.41 0L11.24 19.75l1.41 1.41a.996.996 0 0 0 1.41 0l1.41-1.41 1.41 1.41c.59.59 1.59.17 1.59-.66V10c0-4.42-3.58-8-8-8Zm-2 11a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm4 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Z" />
-  </svg>
-);
-
-const WarningTriangleIcon = () => (
-  <svg
-    className="review-warning-toast__icon"
-    width="48"
-    height="48"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" />
-  </svg>
-);
-
-function formatLastSeen(isoDate: string): string {
-  const ms = Date.now() - new Date(isoDate).getTime();
-  if (ms < 0) return "just now";
-  const hours = ms / 3_600_000;
-  if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))}m ago`;
-  if (hours < 24) return `${Math.round(hours)}h ago`;
-  return new Date(isoDate).toLocaleDateString();
-}
 
 type BoardOrientation = "white" | "black";
 
@@ -1350,6 +1316,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   };
 
   const gameStatusBadge = deriveGameStatusBadge(isGameActive, gameResult);
+  const { winDelta, lossDelta } = eloStakes(
+    playerRating,
+    engineElo,
+    isProvisional,
+  );
+  const allowDragging =
+    isGameActive &&
+    engineStatus === "ready" &&
+    isPlayersTurn &&
+    !isThinking &&
+    isViewingLive;
+  const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
 
   return (
     <section className="chess-section">
@@ -1358,466 +1336,90 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       </header>
 
       <div className="chess-layout">
-        <div className="chess-panel" aria-live="polite">
-          <p className="chess-status">{statusText}</p>
-          {gameStatusBadge && (
-            <span className={`game-status-badge ${gameStatusBadge.className}`}>
-              {gameStatusBadge.label}
-            </span>
-          )}
-          {!isRated && isGameActive && (
-            <span className="unrated-badge">Unrated</span>
-          )}
-          <p className="chess-meta">
-            Playing as:{" "}
-            <span className="chess-meta-strong">
-              {playerColorChoice === "random" && !isGameActive
-                ? "Random"
-                : playerColor === "white"
-                  ? "White"
-                  : "Black"}
-            </span>
-          </p>
-          <p className="chess-meta">
-            Rating:{" "}
-            <span className="chess-meta-strong">
-              {playerRating}
-              {isProvisional ? "?" : ""}
-            </span>
-          </p>
-          <p className="chess-meta">
-            Session:{" "}
-            <span className={isGameActive ? "chess-meta-strong" : ""}>
-              {isGameActive ? "Active" : "None (click New game to start)"}
-            </span>
-          </p>
-          {isGameActive && (
-            <p
-              className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}
-            >
-              Opponent:{" "}
-              {opponentMode === "ghost" ? (
-                <>
-                  <GhostIcon />{" "}
-                  <span className="chess-meta-strong ghost-mode-label">
-                    Ghost
-                  </span>
-                  {blunderReviewId !== null && (
-                    <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
-                      <button
-                        className="ghost-info-btn"
-                        onClick={() => setShowGhostInfo((v) => !v)}
-                        aria-label="Toggle ghost info"
-                        title="Ghost target info"
-                      >
-                        <svg
-                          width="16"
-                          height="16"
-                          viewBox="0 0 24 24"
-                          fill="currentColor"
-                          aria-hidden="true"
-                        >
-                          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm1 15h-2v-6h2v6Zm0-8h-2V7h2v2Z" />
-                        </svg>
-                      </button>
-                      {showGhostInfo && (
-                        <div className="ghost-info-box">
-                          <div className="ghost-info-box__header">
-                            <span className="ghost-info-box__title">
-                              Ghost Target Blunder Position
-                            </span>
-                            <button
-                              className="ghost-info-box__close"
-                              onClick={() => setShowGhostInfo(false)}
-                              aria-label="Close ghost info"
-                            >
-                              &times;
-                            </button>
-                          </div>
-                          {blunderTargetFen && (
-                            <div className="ghost-info-box__board">
-                              <Chessboard
-                                options={{
-                                  position: blunderTargetFen,
-                                  boardOrientation: boardOrientation,
-                                  allowDragging: false,
-                                  animationDurationInMs: 0,
-                                  boardStyle: { borderRadius: "4px" },
-                                }}
-                              />
-                            </div>
-                          )}
-                          {blunderReviewSrs && (
-                            <div className="ghost-info-box__srs">
-                              <span>
-                                Last seen:{" "}
-                                {blunderReviewSrs.last_reviewed_at
-                                  ? formatLastSeen(
-                                      blunderReviewSrs.last_reviewed_at,
-                                    )
-                                  : "never"}
-                              </span>
-                              <span>
-                                Pass/Fail: {blunderReviewSrs.pass_count}/
-                                {blunderReviewSrs.fail_count}
-                              </span>
-                              <span>
-                                Streak: {blunderReviewSrs.pass_streak}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </span>
-                  )}
-                </>
-              ) : (
-                <span className="chess-meta-strong">
-                  {MAIA_BOT_NAMES[engineElo]}
-                </span>
-              )}
-            </p>
-          )}
-          {isGameActive && (
-            <p className="chess-meta">
-              Opening:{" "}
-              <span className="chess-meta-strong">
-                {displayedOpening
-                  ? `${displayedOpening.eco} ${displayedOpening.name}`
-                  : "Unknown"}
-              </span>
-            </p>
-          )}
-          {isReviewMomentActive && (
-            <div className="review-warning-toast" role="alert">
-              <div className="review-warning-toast__header">
-                <WarningTriangleIcon />
-                <span className="review-warning-toast__label">
-                  Review Position
-                </span>
-              </div>
-              <p className="review-warning-toast__detail">
-                Be careful. You've messed this position up before.
-              </p>
-            </div>
-          )}
-          {reviewFailModal && (
-            <div className="review-fail-panel" role="alert">
-              <span className="review-fail-panel__label">
-                You made this mistake again!
-              </span>
-              <p className="review-fail-panel__detail">
-                You played:{" "}
-                <strong className="review-fail-panel__bad">
-                  {reviewFailModal.userMoveSan}
-                </strong>
-              </p>
-              <p className="review-fail-panel__detail">
-                Best was:{" "}
-                <span className="review-fail-panel__best">
-                  {reviewFailModal.bestMoveSan}
-                </span>
-              </p>
-              <button
-                className="chess-button primary"
-                type="button"
-                onClick={handleDismissReviewFail}
-              >
-                Continue
-              </button>
-            </div>
-          )}
-          <div className="chess-controls">
-            <button
-              className="chess-button danger"
-              type="button"
-              onClick={handleResign}
-              disabled={!isGameActive || chess.isGameOver()}
-            >
-              Resign
-            </button>
-            {isGameActive && (
-              <button
-                className="chess-button"
-                type="button"
-                onClick={handleRevertClick}
-                disabled={moveHistory.length === 0 || chess.isGameOver()}
-              >
-                Revert
-              </button>
-            )}
-            <button className="chess-button" type="button" onClick={flipBoard}>
-              Flip board
-            </button>
-            <button
-              className="chess-button"
-              type="button"
-              onClick={handleReset}
-            >
-              Reset
-            </button>
-          </div>
-        </div>
+        <GameInfoPanel
+          statusText={statusText}
+          gameStatusBadge={gameStatusBadge}
+          isRated={isRated}
+          isGameActive={isGameActive}
+          playerColorChoice={playerColorChoice}
+          playerColor={playerColor}
+          playerRating={playerRating}
+          isProvisional={isProvisional}
+          opponentMode={opponentMode}
+          opponentName={MAIA_BOT_NAMES[engineElo]}
+          blunderReviewId={blunderReviewId}
+          showGhostInfo={showGhostInfo}
+          onToggleGhostInfo={() => setShowGhostInfo((v) => !v)}
+          onCloseGhostInfo={() => setShowGhostInfo(false)}
+          ghostInfoAnchorRef={ghostInfoAnchorRef}
+          blunderTargetFen={blunderTargetFen}
+          boardOrientation={boardOrientation}
+          blunderReviewSrs={blunderReviewSrs}
+          displayedOpening={displayedOpening}
+          isReviewMomentActive={isReviewMomentActive}
+          reviewFailModal={reviewFailModal}
+          onDismissReviewFail={handleDismissReviewFail}
+          onResign={handleResign}
+          onRevert={handleRevertClick}
+          isResignDisabled={!isGameActive || chess.isGameOver()}
+          isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
+          onFlipBoard={flipBoard}
+          onReset={handleReset}
+        />
 
         <div className="chessboard-wrapper">
-          <div className="chessboard-board-with-eval">
-            <EvalBar
-              whitePerspectiveCp={selectedEvalCp}
-              whiteOnBottom={boardOrientation === "white"}
-            />
-            <div className="chessboard-board-area">
-              {showStartOverlay && !isGameActive && (
-                <div className="chessboard-overlay">
-                  <div className="chess-start-panel">
-                    <button
-                      className="chess-start-close"
-                      type="button"
-                      onClick={() => setShowStartOverlay(false)}
-                      disabled={isStartingGame}
-                      aria-label="Close"
-                    >
-                      ×
-                    </button>
-                    <p className="chess-start-title">Difficulty</p>
-                    <div className="chess-elo-selector">
-                      <input
-                        type="range"
-                        min={0}
-                        max={MAIA_ELO_BINS.length - 1}
-                        step={1}
-                        value={MAIA_ELO_BINS.indexOf(engineElo)}
-                        onChange={(e) =>
-                          setEngineElo(MAIA_ELO_BINS[Number(e.target.value)])
-                        }
-                        disabled={isStartingGame}
-                        className="chess-elo-slider"
-                      />
-                      <span className="chess-elo-label">
-                        {MAIA_BOT_NAMES[engineElo]}
-                      </span>
-                    </div>
-                    {(() => {
-                      const { winDelta, lossDelta } = eloStakes(
-                        playerRating,
-                        engineElo,
-                        isProvisional,
-                      );
-                      return (
-                        <p className="elo-stakes">
-                          <span className="elo-stakes__win">
-                            Win +{winDelta}
-                          </span>
-                          {" / "}
-                          <span className="elo-stakes__loss">
-                            Loss {lossDelta}
-                          </span>
-                        </p>
-                      );
-                    })()}
-                    <p className="chess-start-title">Side</p>
-                    <div className="chess-start-options">
-                      <button
-                        className="chess-button primary"
-                        type="button"
-                        onClick={() => handleNewGame("white")}
-                        disabled={isStartingGame}
-                      >
-                        Play White
-                      </button>
-                      <button
-                        className="chess-button primary"
-                        type="button"
-                        onClick={() => handleNewGame("random")}
-                        disabled={isStartingGame}
-                      >
-                        Play Random
-                      </button>
-                      <button
-                        className="chess-button primary"
-                        type="button"
-                        onClick={() => handleNewGame("black")}
-                        disabled={isStartingGame}
-                      >
-                        Play Black
-                      </button>
-                    </div>
-                    {startError && (
-                      <p className="chess-start-error">{startError}</p>
-                    )}
-                  </div>
-                </div>
-              )}
-              {showRevertWarning && (
-                <div className="chessboard-overlay">
-                  <div
-                    className="revert-warning-dialog"
-                    role="alertdialog"
-                    aria-labelledby="revert-warning-title"
-                  >
-                    <WarningTriangleIcon />
-                    <p
-                      id="revert-warning-title"
-                      className="revert-warning-dialog__title"
-                    >
-                      This game will not be rated
-                    </p>
-                    <p className="revert-warning-dialog__body">
-                      Reverting a move removes this game from your rating
-                      history. This cannot be undone.
-                    </p>
-                    <div className="revert-warning-dialog__actions">
-                      <button
-                        className="chess-button danger"
-                        type="button"
-                        onClick={executeRevert}
-                      >
-                        Revert anyway
-                      </button>
-                      <button
-                        className="chess-button"
-                        type="button"
-                        onClick={cancelRevert}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-              {!isGameActive && gameResult && !showStartOverlay && (
-                <div className="chessboard-ended-scrim" />
-              )}
-              {showFlash && <div className="blunder-flash" />}
-              <Chessboard
-                options={{
-                  position: displayedFen,
-                  onPieceDrop: handleDropPiece,
-                  onSquareClick: handleSquareClick,
-                  boardOrientation,
-                  animationDurationInMs: 200,
-                  allowDragging:
-                    isGameActive &&
-                    engineStatus === "ready" &&
-                    isPlayersTurn &&
-                    !isThinking &&
-                    isViewingLive,
-                  squareStyles: { ...lastMoveSquares, ...optionSquares },
-                  arrows: blunderArrows.length > 0 ? blunderArrows : undefined,
-                  boardStyle: {
-                    borderRadius: "0",
-                    boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
-                  },
-                }}
-              />
-              {blunderAlert && (
-                <div
-                  className="blunder-toast"
-                  onClick={() => setBlunderAlert(null)}
-                  role="alert"
-                >
-                  <div className="blunder-toast__header">
-                    <span>Blunder</span>
-                    <span className="blunder-toast__delta">
-                      &minus;{(blunderAlert.delta / 100).toFixed(1)}
-                    </span>
-                  </div>
-                  <p className="blunder-toast__detail">
-                    You played: <strong>{blunderAlert.moveSan}</strong>
-                  </p>
-                  <p className="blunder-toast__detail">
-                    Best was:{" "}
-                    <span className="blunder-toast__best">
-                      {blunderAlert.bestMoveSan}
-                    </span>
-                  </p>
-                </div>
-              )}
-              {showPassToast && (
-                <div
-                  className="review-pass-toast"
-                  onClick={() => setShowPassToast(false)}
-                  role="status"
-                >
-                  <span className="review-pass-toast__label">Correct!</span>
-                  <p className="review-pass-toast__detail">
-                    You avoided your past mistake.
-                  </p>
-                </div>
-              )}
-              {showRehookToast && (
-                <div
-                  className="rehook-toast"
-                  onClick={() => setShowRehookToast(false)}
-                  role="status"
-                >
-                  <span className="rehook-toast__label">Ghost reactivated</span>
-                  <p className="rehook-toast__detail">
-                    Ghost reactivated: steering to past mistake
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-          {showPostGamePrompt && gameResult && (
-            <div
-              className="game-end-banner"
-              role="region"
-              aria-label="Post-game options"
-            >
-              <p className="game-end-banner-message">{gameResult.message}</p>
-              {ratingChange && (
-                <p
-                  className={`rating-delta ${ratingChange.rating_after >= ratingChange.rating_before ? "rating-delta--up" : "rating-delta--down"}`}
-                >
-                  {ratingChange.rating_after >= ratingChange.rating_before
-                    ? "+"
-                    : ""}
-                  {ratingChange.rating_after - ratingChange.rating_before}{" "}
-                  <span className="rating-delta__value">
-                    ({ratingChange.rating_before} → {ratingChange.rating_after}
-                    {ratingChange.is_provisional ? "?" : ""})
-                  </span>
-                </p>
-              )}
-              <div className="chess-post-game-actions">
-                <button
-                  className="chess-button primary"
-                  type="button"
-                  onClick={handleViewAnalysis}
-                >
-                  View Analysis
-                </button>
-                <button
-                  className="chess-button"
-                  type="button"
-                  onClick={handleShowStartOverlay}
-                >
-                  New Game
-                </button>
-                <button
-                  className="chess-button"
-                  type="button"
-                  onClick={handleViewHistory}
-                >
-                  History
-                </button>
-              </div>
-            </div>
-          )}
-          {!isGameActive && !showPostGamePrompt && (
-            <div className="game-end-banner">
-              <p className="game-end-banner-message">
-                {gameResult ? gameResult.message : "Ready for a new game?"}
-              </p>
-              <button
-                className="chess-button primary"
-                type="button"
-                onClick={handleShowStartOverlay}
-              >
-                New game
-              </button>
-            </div>
-          )}
+          <BoardStage
+            selectedEvalCp={selectedEvalCp}
+            boardOrientation={boardOrientation}
+            displayedFen={displayedFen}
+            onPieceDrop={handleDropPiece}
+            onSquareClick={handleSquareClick}
+            allowDragging={allowDragging}
+            squareStyles={{ ...lastMoveSquares, ...optionSquares }}
+            arrows={blunderArrows}
+            showStartOverlay={showStartOverlay}
+            isGameActive={isGameActive}
+            isStartingGame={isStartingGame}
+            onCloseStartOverlay={() => setShowStartOverlay(false)}
+            maiaEloBins={MAIA_ELO_BINS}
+            engineElo={engineElo}
+            onEngineEloChange={(elo) => {
+              setEngineElo(elo as (typeof MAIA_ELO_BINS)[number]);
+            }}
+            botLabel={MAIA_BOT_NAMES[engineElo]}
+            winDelta={winDelta}
+            lossDelta={lossDelta}
+            onPlayWhite={() => {
+              void handleNewGame("white");
+            }}
+            onPlayRandom={() => {
+              void handleNewGame("random");
+            }}
+            onPlayBlack={() => {
+              void handleNewGame("black");
+            }}
+            startError={startError}
+            showRevertWarning={showRevertWarning}
+            onRevertAnyway={executeRevert}
+            onCancelRevert={cancelRevert}
+            showEndedScrim={showEndedScrim}
+            showFlash={showFlash}
+            blunderAlert={blunderAlert}
+            onDismissBlunderAlert={() => setBlunderAlert(null)}
+            showPassToast={showPassToast}
+            onDismissPassToast={() => setShowPassToast(false)}
+            showRehookToast={showRehookToast}
+            onDismissRehookToast={() => setShowRehookToast(false)}
+          />
+          <PostGameBanner
+            isGameActive={isGameActive}
+            showPostGamePrompt={showPostGamePrompt}
+            gameResult={gameResult}
+            ratingChange={ratingChange}
+            onViewAnalysis={handleViewAnalysis}
+            onShowStartOverlay={handleShowStartOverlay}
+            onViewHistory={handleViewHistory}
+          />
         </div>
 
         <div className="moves-column">

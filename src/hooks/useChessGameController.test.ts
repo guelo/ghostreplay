@@ -7,6 +7,7 @@ import type { MoveRecord } from "../components/chess-game/domain/movePresentatio
 import {
   useChessGameController,
   type PendingAnalysisContext,
+  type PlayerMoveApplyResult,
   type PendingSrsReview,
 } from "./useChessGameController";
 
@@ -121,7 +122,7 @@ describe("useChessGameController", () => {
     } = createSetup();
     const startingFen = chess.fen();
 
-    let moveResult: ReturnType<typeof result.current.applyPlayerMove> = {
+    let moveResult: PlayerMoveApplyResult = {
       applied: false,
     };
     act(() => {
@@ -129,15 +130,12 @@ describe("useChessGameController", () => {
     });
 
     expect(moveResult.applied).toBe(true);
-    if (!moveResult.applied) {
-      throw new Error("Expected a legal player move");
-    }
 
     expect(clearMoveHighlights).toHaveBeenCalledTimes(1);
     expect(setBlunderAlert).toHaveBeenCalledWith(null);
     expect(moveCountRef.current).toBe(1);
     expect(moveHistoryRef.current[0]?.uci).toBe("e2e4");
-    expect(moveResult.uciHistory).toEqual(["e2e4"]);
+    expect(moveHistoryRef.current.map((move) => move.uci)).toEqual(["e2e4"]);
     expect(analyzeMove).toHaveBeenCalledWith(
       startingFen,
       "e2e4",
@@ -156,7 +154,7 @@ describe("useChessGameController", () => {
       setBlunderReviewSrs,
     } = createSetup({ blunderReviewId: 42 });
 
-    let moveResult: ReturnType<typeof result.current.applyPlayerMove> = {
+    let moveResult: PlayerMoveApplyResult = {
       applied: false,
     };
     act(() => {
@@ -179,7 +177,7 @@ describe("useChessGameController", () => {
       isViewingLive: true,
     });
 
-    let dropResult: ReturnType<typeof result.current.handleDrop> = {
+    let dropResult: PlayerMoveApplyResult = {
       applied: false,
     };
     act(() => {
