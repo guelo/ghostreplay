@@ -163,6 +163,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
   const handleGameEndRef = useRef<() => Promise<void>>(async () => {});
+  const handleGameEndStable = useCallback(
+    () => handleGameEndRef.current(),
+    [],
+  );
 
   useEffect(() => {
     analysisMapRef.current = analysisMap;
@@ -510,7 +514,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setShowGhostInfo,
       analyzeMove,
       evaluatePosition,
-      handleGameEnd: () => handleGameEndRef.current(),
+      handleGameEnd: handleGameEndStable,
       clearMoveHighlights,
     });
 
