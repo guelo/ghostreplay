@@ -177,3 +177,25 @@ class SessionMove(Base):
     best_move_eval_cp: Mapped[int | None] = mapped_column(Integer)
     eval_delta: Mapped[int | None] = mapped_column(Integer)
     classification: Mapped[str | None] = mapped_column(String(20))
+
+
+class AnalysisCache(Base):
+    __tablename__ = "analysis_cache"
+    __table_args__ = (
+        UniqueConstraint("fen_before", "move_uci", name="uq_analysis_cache_fen_move"),
+        Index("idx_analysis_cache_fen", "fen_before"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    fen_before: Mapped[str] = mapped_column(Text, nullable=False)
+    move_uci: Mapped[str] = mapped_column(String(5), nullable=False)
+    move_san: Mapped[str] = mapped_column(String(10), nullable=False)
+    best_move_uci: Mapped[str | None] = mapped_column(String(5))
+    best_move_san: Mapped[str | None] = mapped_column(String(10))
+    played_eval: Mapped[int | None] = mapped_column(Integer)
+    best_eval: Mapped[int | None] = mapped_column(Integer)
+    eval_delta: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, server_default="game")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

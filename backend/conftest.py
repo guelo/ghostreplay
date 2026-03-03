@@ -118,6 +118,22 @@ def _create_test_schema(conn) -> None:
         )
     """))
     conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS analysis_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fen_before TEXT NOT NULL,
+            move_uci VARCHAR(5) NOT NULL,
+            move_san VARCHAR(10) NOT NULL,
+            best_move_uci VARCHAR(5),
+            best_move_san VARCHAR(10),
+            played_eval INTEGER,
+            best_eval INTEGER,
+            eval_delta INTEGER,
+            source VARCHAR(20) NOT NULL DEFAULT 'game',
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(fen_before, move_uci)
+        )
+    """))
+    conn.execute(text("""
         CREATE TABLE IF NOT EXISTS blunder_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             blunder_id INTEGER NOT NULL,
@@ -135,6 +151,7 @@ def _create_test_schema(conn) -> None:
 
 def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
+    conn.execute(text("DROP TABLE IF EXISTS analysis_cache"))
     conn.execute(text("DROP TABLE IF EXISTS rating_history"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))

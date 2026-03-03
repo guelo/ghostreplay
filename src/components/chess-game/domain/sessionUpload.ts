@@ -49,6 +49,9 @@ export const buildSessionMoveUploads = (
       best_move_eval_cp: analysis?.bestEval ?? null,
       eval_delta: analysis?.delta ?? null,
       classification: classifySessionMove(analysis?.delta ?? null),
+      fen_before: fenBeforeMove,
+      move_uci: move.uci,
+      best_move_uci: analysis?.bestMove ?? null,
     };
   });
 };

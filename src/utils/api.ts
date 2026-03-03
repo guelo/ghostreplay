@@ -199,6 +199,9 @@ export interface SessionMoveUpload {
   best_move_eval_cp: number | null
   eval_delta: number | null
   classification: SessionMoveClassification | null
+  fen_before: string | null
+  move_uci: string | null
+  best_move_uci: string | null
 }
 
 interface SessionMovesRequest {
@@ -339,6 +342,51 @@ export const uploadSessionMoves = async (
     },
     { fallbackMessage: 'Failed to upload session moves' },
   )
+}
+
+/**
+ * Cached analysis result from the backend analysis cache.
+ * Evals are white-relative centipawns.
+ */
+export interface CachedAnalysis {
+  move_san: string
+  best_move_uci: string | null
+  best_move_san: string | null
+  played_eval: number | null
+  best_eval: number | null
+  eval_delta: number | null
+}
+
+interface AnalysisLookupRequest {
+  positions: { fen: string; move_uci: string }[]
+}
+
+interface AnalysisLookupResponse {
+  results: Record<string, CachedAnalysis>
+}
+
+/**
+ * Batch-lookup cached analysis results for position+move pairs.
+ * Returns a Map keyed by "fen::move_uci" with only cache hits.
+ */
+export const lookupAnalysisCache = async (
+  positions: { fen: string; move_uci: string }[],
+): Promise<Map<string, CachedAnalysis>> => {
+  if (positions.length === 0) {
+    return new Map()
+  }
+
+  const data = await requestJson<AnalysisLookupResponse>(
+    `${API_BASE_URL}/api/analysis/lookup`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ positions } satisfies AnalysisLookupRequest),
+    },
+    { fallbackMessage: 'Failed to lookup analysis cache' },
+  )
+
+  return new Map(Object.entries(data.results))
 }
 
 /**

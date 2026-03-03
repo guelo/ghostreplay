@@ -11,7 +11,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import GameSession, SessionMove
+from app.models import AnalysisCache, GameSession, SessionMove
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/session", tags=["session"])
@@ -42,6 +42,9 @@ class SessionMoveInput(BaseModel):
     best_move_eval_cp: int | None = None
     eval_delta: int | None = None
     classification: MoveClassification | None = None
+    fen_before: str | None = Field(None, min_length=1)
+    move_uci: str | None = Field(None, min_length=2, max_length=5)
+    best_move_uci: str | None = Field(None, max_length=5)
 
 
 class SessionMovesRequest(BaseModel):
@@ -107,6 +110,77 @@ def _validate_unique_move_keys(moves: list[SessionMoveInput]) -> None:
         seen.add(key)
 
 
+def _upsert_analysis_cache(
+    db: Session,
+    moves: list[SessionMoveInput],
+) -> None:
+    """Upsert analysis results into the global cache for moves that include
+    the new fen_before/move_uci fields.  Evals are converted from
+    player-relative (as uploaded) to white-relative for storage."""
+    cache_values = []
+    for move in moves:
+        if not move.fen_before or not move.move_uci:
+            continue
+        if move.eval_cp is None and move.best_move_eval_cp is None:
+            continue
+
+        is_black = move.color == MoveColor.BLACK
+        sign = -1 if is_black else 1
+        played_eval = move.eval_cp * sign if move.eval_cp is not None else None
+        best_eval = move.best_move_eval_cp * sign if move.best_move_eval_cp is not None else None
+        eval_delta = move.eval_delta  # already unsigned (best - played >= 0)
+
+        cache_values.append({
+            "fen_before": move.fen_before,
+            "move_uci": move.move_uci,
+            "move_san": move.move_san,
+            "best_move_uci": move.best_move_uci,
+            "best_move_san": move.best_move_san,
+            "played_eval": played_eval,
+            "best_eval": best_eval,
+            "eval_delta": eval_delta,
+            "source": "game",
+        })
+
+    if not cache_values:
+        return
+
+    dialect_name = db.bind.dialect.name if db.bind else ""
+    if dialect_name == "sqlite":
+        stmt = sqlite_insert(AnalysisCache).values(cache_values)
+    elif dialect_name == "postgresql":
+        stmt = postgresql_insert(AnalysisCache).values(cache_values)
+    else:
+        for val in cache_values:
+            existing = db.query(AnalysisCache).filter(
+                AnalysisCache.fen_before == val["fen_before"],
+                AnalysisCache.move_uci == val["move_uci"],
+            ).first()
+            if existing:
+                for k, v in val.items():
+                    if k not in ("fen_before", "move_uci"):
+                        setattr(existing, k, v)
+            else:
+                db.add(AnalysisCache(**val))
+        db.commit()
+        return
+
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci],
+        set_={
+            "move_san": stmt.excluded.move_san,
+            "best_move_uci": stmt.excluded.best_move_uci,
+            "best_move_san": stmt.excluded.best_move_san,
+            "played_eval": stmt.excluded.played_eval,
+            "best_eval": stmt.excluded.best_eval,
+            "eval_delta": stmt.excluded.eval_delta,
+            "source": stmt.excluded.source,
+        },
+    )
+    db.execute(stmt)
+    db.commit()
+
+
 @router.post("/{session_id}/moves", response_model=SessionMovesResponse)
 def upsert_session_moves(
     session_id: uuid.UUID,
@@ -163,6 +237,7 @@ def upsert_session_moves(
                 db.add(SessionMove(**value))
 
         db.commit()
+        _upsert_analysis_cache(db, request.moves)
         return SessionMovesResponse(moves_inserted=len(values))
 
     statement = statement.on_conflict_do_update(
@@ -184,6 +259,8 @@ def upsert_session_moves(
     )
     db.execute(statement)
     db.commit()
+
+    _upsert_analysis_cache(db, request.moves)
 
     return SessionMovesResponse(moves_inserted=len(values))
 

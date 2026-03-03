@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette import status
 from sqlalchemy import text
 
+from app.api.analysis import router as analysis_router
 from app.api.auth import router as auth_router
 from app.api.blunder import router as blunder_router
 from app.api.health import router as health_router
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(analysis_router)
     app.include_router(auth_router)
     app.include_router(blunder_router)
     app.include_router(health_router)

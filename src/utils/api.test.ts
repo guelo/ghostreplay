@@ -200,6 +200,9 @@ describe('uploadSessionMoves', () => {
         best_move_eval_cp: 20,
         eval_delta: 0,
         classification: 'best',
+        fen_before: 'fen-0',
+        move_uci: 'e2e4',
+        best_move_uci: 'e2e4',
       },
       {
         move_number: 1,
@@ -212,6 +215,9 @@ describe('uploadSessionMoves', () => {
         best_move_eval_cp: 12,
         eval_delta: 2,
         classification: 'excellent',
+        fen_before: 'fen-1',
+        move_uci: 'e7e5',
+        best_move_uci: 'e7e5',
       },
     ])
 
@@ -232,6 +238,9 @@ describe('uploadSessionMoves', () => {
               best_move_eval_cp: 20,
               eval_delta: 0,
               classification: 'best',
+              fen_before: 'fen-0',
+              move_uci: 'e2e4',
+              best_move_uci: 'e2e4',
             },
             {
               move_number: 1,
@@ -244,6 +253,9 @@ describe('uploadSessionMoves', () => {
               best_move_eval_cp: 12,
               eval_delta: 2,
               classification: 'excellent',
+              fen_before: 'fen-1',
+              move_uci: 'e7e5',
+              best_move_uci: 'e7e5',
             },
           ],
         }),
