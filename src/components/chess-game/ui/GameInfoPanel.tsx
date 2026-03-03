@@ -2,7 +2,6 @@ import { Chessboard } from "react-chessboard";
 import type { RefObject } from "react";
 import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { TargetBlunderSrs } from "../../../utils/api";
-import type { ReviewFailInfo } from "../domain/movePresentation";
 
 type BoardOrientation = "white" | "black";
 
@@ -27,8 +26,6 @@ type GameInfoPanelProps = {
   blunderReviewSrs: TargetBlunderSrs | null;
   displayedOpening: OpeningLookupResult | null;
   isReviewMomentActive: boolean;
-  reviewFailModal: ReviewFailInfo | null;
-  onDismissReviewFail: () => void;
   onResign: () => void;
   onRevert: () => void;
   isResignDisabled: boolean;
@@ -93,8 +90,6 @@ const GameInfoPanel = ({
   blunderReviewSrs,
   displayedOpening,
   isReviewMomentActive,
-  reviewFailModal,
-  onDismissReviewFail,
   onResign,
   onRevert,
   isResignDisabled,
@@ -234,32 +229,6 @@ const GameInfoPanel = ({
           <p className="review-warning-toast__detail">
             Be careful. You've messed this position up before.
           </p>
-        </div>
-      )}
-      {reviewFailModal && (
-        <div className="review-fail-panel" role="alert">
-          <span className="review-fail-panel__label">
-            You made this mistake again!
-          </span>
-          <p className="review-fail-panel__detail">
-            You played:{" "}
-            <strong className="review-fail-panel__bad">
-              {reviewFailModal.userMoveSan}
-            </strong>
-          </p>
-          <p className="review-fail-panel__detail">
-            Best was:{" "}
-            <span className="review-fail-panel__best">
-              {reviewFailModal.bestMoveSan}
-            </span>
-          </p>
-          <button
-            className="chess-button primary"
-            type="button"
-            onClick={onDismissReviewFail}
-          >
-            Continue
-          </button>
         </div>
       )}
       <div className="chess-controls">

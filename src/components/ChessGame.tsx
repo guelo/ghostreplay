@@ -50,7 +50,7 @@ import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import MaterialDisplay from "./MaterialDisplay";
 import MoveList from "./MoveList";
-import type { MoveListBubble } from "./MoveList";
+import type { MoveMessage, SrsFailDetail } from "./MoveList";
 
 type ChessGameProps = {
   onOpenHistory?: (options: OpenHistoryOptions) => void;
@@ -96,7 +96,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     analysisMap,
     status: analysisStatus,
     isAnalyzing,
-    analyzingMove,
     clearAnalysis,
   } = useMoveAnalysis();
   const [, setEngineMessage] = useState<string | null>(null);
@@ -118,7 +117,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [blunderTargetFen, setBlunderTargetFen] = useState<string | null>(null);
   const [showGhostInfo, setShowGhostInfo] = useState(false);
   const ghostInfoAnchorRef = useRef<HTMLSpanElement>(null);
-  const [showPassToast, setShowPassToast] = useState(false);
+  const [, setShowPassToast] = useState(false);
   const [showRehookToast, setShowRehookToast] = useState(false);
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(
     null,
@@ -152,11 +151,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     blunderId: number;
     moveIndex: number;
     userMoveSan: string;
+    srs: TargetBlunderSrs | null;
   } | null>(null);
   const openingLookupRequestIdRef = useRef(0);
   // Index 0 = starting position (before any move), index N = after move N
   const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);
   const analysisMapRef = useRef<Map<number, AnalysisResult>>(new Map());
+  const moveMessagesRef = useRef<Map<number, MoveMessage[]>>(new Map());
+  const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
   const moveHistoryRef = useRef<MoveRecord[]>([]);
   const analysisStatusRef = useRef(analysisStatus);
   const isAnalyzingRef = useRef(isAnalyzing);
@@ -433,61 +435,71 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const statusText = deriveStatusText(chess);
 
-  const moveBubble = useMemo((): MoveListBubble | null => {
-    if (isAnalyzing && analyzingMove) {
-      const idx = moveHistory.length - 1;
-      if (idx < 0) return null;
-      return {
-        moveIndex: idx,
-        text: `Analyzing ${analyzingMove}\u2026`,
-        variant: "analyzing",
-      };
-    }
+  const appendMoveMessage = useCallback(
+    (moveIndex: number, msg: MoveMessage) => {
+      const map = moveMessagesRef.current;
+      const existing = map.get(moveIndex);
+      if (existing) {
+        existing.push(msg);
+      } else {
+        map.set(moveIndex, [msg]);
+      }
+      setMoveMessagesVersion((v) => v + 1);
+    },
+    [],
+  );
 
-    if (!lastAnalysis || lastAnalysis.moveIndex == null) return null;
-    if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) return null;
+  // Build a stable snapshot for passing to MoveList
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const moveMessages = useMemo(() => {
+    void moveMessagesVersion; // depend on version counter
+    return moveMessagesRef.current as ReadonlyMap<number, MoveMessage[]>;
+  }, [moveMessagesVersion]);
+
+  // Append analysis result messages when analysis completes
+  useEffect(() => {
+    if (!lastAnalysis || lastAnalysis.moveIndex == null) return;
+    if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) return;
 
     const idx = lastAnalysis.moveIndex;
     const delta = lastAnalysis.delta;
 
+    // Avoid duplicate messages for the same analysis
+    const existing = moveMessagesRef.current.get(idx);
+    if (existing?.some((m) => m.key === `analysis-${idx}`)) return;
+
     if (lastAnalysis.blunder && delta !== null) {
-      return {
-        moveIndex: idx,
-        text: `Blunder! Lost ${Math.max(delta, 0)}cp. Best: ${lastAnalysis.bestMove}`,
+      appendMoveMessage(idx, {
+        key: `analysis-${idx}`,
+        text: "Blunder",
         variant: "blunder",
-      };
+      });
+    } else if (delta !== null) {
+      let msg: MoveMessage;
+      if (delta === 0) {
+        msg = { key: `analysis-${idx}`, text: "Best move", variant: "best" };
+      } else if (delta < 0) {
+        msg = { key: `analysis-${idx}`, text: "Great move", variant: "great" };
+      } else if (delta < 50) {
+        msg = { key: `analysis-${idx}`, text: "Good", variant: "good" };
+      } else {
+        msg = { key: `analysis-${idx}`, text: "Inaccuracy", variant: "inaccuracy" };
+      }
+      appendMoveMessage(idx, msg);
     }
+  }, [lastAnalysis, isPlayerMoveIndex, appendMoveMessage]);
 
-    if (delta !== null) {
-      if (delta === 0)
-        return { moveIndex: idx, text: "Best move!", variant: "best" };
-      if (delta < 0)
-        return {
-          moveIndex: idx,
-          text: `Great move! Gained ${Math.abs(delta)}cp`,
-          variant: "great",
-        };
-      if (delta < 50)
-        return {
-          moveIndex: idx,
-          text: `Good. Lost ${delta}cp`,
-          variant: "good",
-        };
-      return {
-        moveIndex: idx,
-        text: `Inaccuracy. Lost ${delta}cp. Best: ${lastAnalysis.bestMove}`,
-        variant: "inaccuracy",
-      };
+  // Show spinner on every move that hasn't received an analysis result yet
+  const analyzingIndices = useMemo(() => {
+    if (!isGameActive) return new Set<number>();
+    const pending = new Set<number>();
+    for (let i = 0; i < moveHistory.length; i++) {
+      if (!analysisMap.has(i)) {
+        pending.add(i);
+      }
     }
-
-    return null;
-  }, [
-    isAnalyzing,
-    analyzingMove,
-    lastAnalysis,
-    moveHistory.length,
-    isPlayerMoveIndex,
-  ]);
+    return pending;
+  }, [isGameActive, moveHistory.length, analysisMap]);
 
   const opponentColor = playerColor === "white" ? "black" : "white";
 
@@ -499,6 +511,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       isPlayersTurn,
       isViewingLive,
       blunderReviewId,
+      blunderReviewSrs,
       moveCountRef,
       moveHistoryRef,
       pendingAnalysisContextRef,
@@ -612,6 +625,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     [applyOpponentMove, applyPlayerMove, handleGameEnd],
   );
+
+  // Clear move messages when a new game starts
+  useEffect(() => {
+    if (moveHistory.length === 0) {
+      moveMessagesRef.current = new Map();
+      setMoveMessagesVersion((v) => v + 1);
+    }
+  }, [moveHistory.length]);
 
   useEffect(() => {
     if (!isGameActive) {
@@ -807,7 +828,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     const passed = evalLossCp < SRS_REVIEW_FAIL_THRESHOLD_CP;
 
     if (passed) {
-      setShowPassToast(true);
+      const srs = pendingReview.srs;
+      appendMoveMessage(lastAnalysis.moveIndex, {
+        key: `srs-${lastAnalysis.moveIndex}`,
+        text: "Correct! You avoided your past mistake.",
+        variant: "srs-pass",
+        srsStats: srs
+          ? {
+              passCount: srs.pass_count + 1,
+              failCount: srs.fail_count,
+              streak: srs.pass_streak + 1,
+            }
+          : undefined,
+      });
     }
 
     if (!passed) {
@@ -831,15 +864,25 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         }
       }
 
-      setReviewFailModal({
-        userMoveSan: pendingReview.userMoveSan,
-        bestMoveSan,
-        userMoveUci: lastAnalysis.move,
-        bestMoveUci: lastAnalysis.bestMove,
-        evalLoss: evalLossCp,
-        moveIndex: lastAnalysis.moveIndex,
+      const srs = pendingReview.srs;
+      appendMoveMessage(lastAnalysis.moveIndex, {
+        key: `srs-${lastAnalysis.moveIndex}`,
+        text: "You made this mistake again!",
+        variant: "srs-fail",
+        srsFailDetail: {
+          userMoveSan: pendingReview.userMoveSan,
+          bestMoveSan,
+          userMoveUci: lastAnalysis.move,
+          bestMoveUci: lastAnalysis.bestMove,
+        },
+        srsStats: srs
+          ? {
+              passCount: srs.pass_count,
+              failCount: srs.fail_count + 1,
+              streak: 0,
+            }
+          : undefined,
       });
-      setViewIndex(lastAnalysis.moveIndex - 1);
     }
 
     const postReview = async () => {
@@ -925,13 +968,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => clearTimeout(timer);
   }, [blunderAlert]);
 
-  // Auto-dismiss pass toast after 3 seconds
-  useEffect(() => {
-    if (!showPassToast) return;
-    const timer = setTimeout(() => setShowPassToast(false), 3000);
-    return () => clearTimeout(timer);
-  }, [showPassToast]);
-
   // Auto-dismiss re-hook toast after 3 seconds
   useEffect(() => {
     if (!showRehookToast) return;
@@ -968,6 +1004,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
     return true;
   };
+
+  const handleRevealSrsFail = useCallback(
+    (detail: SrsFailDetail, moveIndex: number) => {
+      setReviewFailModal({
+        userMoveSan: detail.userMoveSan,
+        bestMoveSan: detail.bestMoveSan,
+        userMoveUci: detail.userMoveUci,
+        bestMoveUci: detail.bestMoveUci,
+        evalLoss: 0,
+        moveIndex,
+      });
+      setViewIndex(moveIndex - 1);
+    },
+    [],
+  );
 
   const handleDismissReviewFail = useCallback(() => {
     setReviewFailModal(null);
@@ -1020,8 +1071,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           blunderReviewSrs={blunderReviewSrs}
           displayedOpening={displayedOpening}
           isReviewMomentActive={isReviewMomentActive}
-          reviewFailModal={reviewFailModal}
-          onDismissReviewFail={handleDismissReviewFail}
           onResign={handleResign}
           onRevert={handleRevertClick}
           isResignDisabled={!isGameActive || chess.isGameOver()}
@@ -1067,10 +1116,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             onCancelRevert={cancelRevert}
             showEndedScrim={showEndedScrim}
             showFlash={showFlash}
-            blunderAlert={blunderAlert}
-            onDismissBlunderAlert={() => setBlunderAlert(null)}
-            showPassToast={showPassToast}
-            onDismissPassToast={() => setShowPassToast(false)}
             showRehookToast={showRehookToast}
             onDismissRehookToast={() => setShowRehookToast(false)}
           />
@@ -1094,8 +1139,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             canAddSelectedMove={canAddSelectedMove}
             isAddingSelectedMove={isAddingToLibrary}
             onAddSelectedMove={handleAddSelectedMove}
-            bubble={moveBubble}
+            messages={moveMessages}
+            analyzingIndices={analyzingIndices}
             playerColor={playerColor}
+            onRevealSrsFail={handleRevealSrsFail}
+            revealedSrsFailIndex={reviewFailModal?.moveIndex ?? null}
           />
           <MaterialDisplay fen={displayedFen} perspective={playerColor} />
         </div>

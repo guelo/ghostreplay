@@ -17,7 +17,6 @@ vi.mock("react-chessboard", () => ({
 const makeProps = () => {
   const onToggleGhostInfo = vi.fn();
   const onCloseGhostInfo = vi.fn();
-  const onDismissReviewFail = vi.fn();
   const onResign = vi.fn();
   const onRevert = vi.fn();
   const onFlipBoard = vi.fn();
@@ -44,8 +43,6 @@ const makeProps = () => {
     blunderReviewSrs: null as TargetBlunderSrs | null,
     displayedOpening: { eco: "C20", name: "King's Pawn Game", source: "eco" },
     isReviewMomentActive: false,
-    reviewFailModal: null,
-    onDismissReviewFail,
     onResign,
     onRevert,
     isResignDisabled: false,
@@ -108,24 +105,4 @@ describe("GameInfoPanel", () => {
     );
   });
 
-  it("shows review fail panel and dismisses it through callback", () => {
-    const props = makeProps();
-
-    render(
-      <GameInfoPanel
-        {...props}
-        reviewFailModal={{
-          userMoveSan: "Qh5",
-          bestMoveSan: "Nf3",
-          userMoveUci: "d1h5",
-          bestMoveUci: "g1f3",
-          evalLoss: 180,
-          moveIndex: 2,
-        }}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: /continue/i }));
-    expect(props.onDismissReviewFail).toHaveBeenCalledTimes(1);
-  });
 });

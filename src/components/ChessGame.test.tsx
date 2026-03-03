@@ -994,7 +994,7 @@ describe("ChessGame blunder recording", () => {
       );
     });
     expect(
-      screen.getByText("You avoided your past mistake."),
+      screen.getByText("Correct! You avoided your past mistake."),
     ).toBeInTheDocument();
   });
 
@@ -1114,7 +1114,7 @@ describe("ChessGame blunder recording", () => {
       );
     });
     expect(
-      screen.getByText("You avoided your past mistake."),
+      screen.getByText("Correct! You avoided your past mistake."),
     ).toBeInTheDocument();
   });
 });

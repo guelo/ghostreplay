@@ -2,7 +2,6 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import type React from "react";
 import EvalBar from "../../EvalBar";
-import type { BlunderAlert } from "../domain/movePresentation";
 
 type BoardOrientation = "white" | "black";
 
@@ -34,10 +33,6 @@ type BoardStageProps = {
   onCancelRevert: () => void;
   showEndedScrim: boolean;
   showFlash: boolean;
-  blunderAlert: BlunderAlert | null;
-  onDismissBlunderAlert: () => void;
-  showPassToast: boolean;
-  onDismissPassToast: () => void;
   showRehookToast: boolean;
   onDismissRehookToast: () => void;
 };
@@ -83,10 +78,6 @@ const BoardStage = ({
   onCancelRevert,
   showEndedScrim,
   showFlash,
-  blunderAlert,
-  onDismissBlunderAlert,
-  showPassToast,
-  onDismissPassToast,
   showRehookToast,
   onDismissRehookToast,
 }: BoardStageProps) => {
@@ -219,41 +210,6 @@ const BoardStage = ({
               },
             }}
           />
-          {blunderAlert && (
-            <div
-              className="blunder-toast"
-              onClick={onDismissBlunderAlert}
-              role="alert"
-            >
-              <div className="blunder-toast__header">
-                <span>Blunder</span>
-                <span className="blunder-toast__delta">
-                  &minus;{(blunderAlert.delta / 100).toFixed(1)}
-                </span>
-              </div>
-              <p className="blunder-toast__detail">
-                You played: <strong>{blunderAlert.moveSan}</strong>
-              </p>
-              <p className="blunder-toast__detail">
-                Best was:{" "}
-                <span className="blunder-toast__best">
-                  {blunderAlert.bestMoveSan}
-                </span>
-              </p>
-            </div>
-          )}
-          {showPassToast && (
-            <div
-              className="review-pass-toast"
-              onClick={onDismissPassToast}
-              role="status"
-            >
-              <span className="review-pass-toast__label">Correct!</span>
-              <p className="review-pass-toast__detail">
-                You avoided your past mistake.
-              </p>
-            </div>
-          )}
           {showRehookToast && (
             <div
               className="rehook-toast"

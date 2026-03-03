@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
-import type { BlunderAlert } from "../domain/movePresentation";
 import BoardStage from "./BoardStage";
 
 vi.mock("../../EvalBar", () => ({
@@ -63,8 +62,6 @@ const makeProps = () => {
   const onPlayBlack = vi.fn();
   const onRevertAnyway = vi.fn();
   const onCancelRevert = vi.fn();
-  const onDismissBlunderAlert = vi.fn();
-  const onDismissPassToast = vi.fn();
   const onDismissRehookToast = vi.fn();
 
   return {
@@ -95,10 +92,6 @@ const makeProps = () => {
     onCancelRevert,
     showEndedScrim: false,
     showFlash: false,
-    blunderAlert: null as BlunderAlert | null,
-    onDismissBlunderAlert,
-    showPassToast: false,
-    onDismissPassToast,
     showRehookToast: false,
     onDismissRehookToast,
   };
@@ -152,28 +145,16 @@ describe("BoardStage", () => {
       <BoardStage
         {...props}
         showRevertWarning
-        blunderAlert={{
-          moveSan: "Qh5",
-          moveUci: "d1h5",
-          bestMoveSan: "Nf3",
-          bestMoveUci: "g1f3",
-          delta: 220,
-        }}
-        showPassToast
         showRehookToast
       />,
     );
 
     fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
-    fireEvent.click(screen.getByRole("alert"));
-    fireEvent.click(screen.getByText(/correct!/i));
     fireEvent.click(screen.getByText(/steering to past mistake/i));
 
     expect(props.onRevertAnyway).toHaveBeenCalledTimes(1);
     expect(props.onCancelRevert).toHaveBeenCalledTimes(1);
-    expect(props.onDismissBlunderAlert).toHaveBeenCalledTimes(1);
-    expect(props.onDismissPassToast).toHaveBeenCalledTimes(1);
     expect(props.onDismissRehookToast).toHaveBeenCalledTimes(1);
   });
 });

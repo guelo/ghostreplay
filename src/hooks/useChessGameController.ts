@@ -16,6 +16,7 @@ export type PendingSrsReview = {
   blunderId: number;
   moveIndex: number;
   userMoveSan: string;
+  srs: TargetBlunderSrs | null;
 };
 
 export type PlayerMoveApplyResult =
@@ -46,6 +47,7 @@ type UseChessGameControllerOptions = {
   isPlayersTurn: boolean;
   isViewingLive: boolean;
   blunderReviewId: number | null;
+  blunderReviewSrs: TargetBlunderSrs | null;
   moveCountRef: MutableRefObject<number>;
   moveHistoryRef: MutableRefObject<MoveRecord[]>;
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
@@ -82,6 +84,7 @@ export const useChessGameController = ({
   isPlayersTurn,
   isViewingLive,
   blunderReviewId,
+  blunderReviewSrs,
   moveCountRef,
   moveHistoryRef,
   pendingAnalysisContextRef,
@@ -172,6 +175,7 @@ export const useChessGameController = ({
           blunderId: blunderReviewId,
           moveIndex: committed.moveIndex,
           userMoveSan: committed.moveSan,
+          srs: blunderReviewSrs,
         };
         setBlunderReviewId(null);
         setBlunderReviewSrs(null);
