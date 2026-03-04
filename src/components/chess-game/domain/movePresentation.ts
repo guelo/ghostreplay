@@ -51,9 +51,11 @@ export const deriveAnnotatedMoves = (
 ) => {
   return moveHistory.map((m, i) => {
     const analysis = analysisMap.get(i);
+    const prevAnalysis = analysisMap.get(i - 1);
+    const preEval = prevAnalysis?.playedEval ?? null;
     return {
       san: m.san,
-      classification: analysis ? classifyMove(analysis.delta) : undefined,
+      classification: analysis ? classifyMove(analysis.delta, preEval) : undefined,
       eval:
         analysis?.playedEval != null
           ? toWhitePerspective(analysis.playedEval, i)

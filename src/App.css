@@ -1265,15 +1265,16 @@
 /* Analysis evaluation graph */
 .analysis-graph {
     cursor: crosshair;
+    border-radius: 0.5rem;
+    border: 1px solid var(--bg-tertiary);
 }
 
-.analysis-graph svg {
+.analysis-graph > svg {
     width: 100%;
     height: auto;
     display: block;
     border-radius: 0.5rem;
-    border: 1px solid var(--border-color);
-    background: var(--bg-tertiary);
+    background: #fff;
 }
 
 .analysis-graph__zero-line {
@@ -1299,6 +1300,54 @@
 .analysis-graph__indicator {
     stroke: var(--error);
     stroke-width: 2;
+}
+
+.analysis-graph--with-axis {
+    display: flex;
+    align-items: stretch;
+}
+
+.analysis-graph--with-axis > svg {
+    flex: 1;
+    min-width: 0;
+    border-radius: 0 0.5rem 0.5rem 0;
+}
+
+.analysis-graph__y-axis {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 0.35rem 0.4rem;
+    background: #fff;
+    border-radius: 0.5rem 0 0 0.5rem;
+    border-right: 1px solid var(--border-color);
+}
+
+.analysis-graph__y-label {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.1rem;
+    font-size: 0.6rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.analysis-graph__y-eval {
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    text-align: center;
+    line-height: 1;
+}
+
+.analysis-graph__y-arrow {
+    width: 0.5rem;
+    height: 2.5rem;
+    color: var(--text-tertiary);
 }
 
 .analysis-board__whatif-bar {
@@ -1445,12 +1494,13 @@
     left: auto;
     right: 0.8rem;
 }
-/* Inline move quality icons */
+
+/* Inline move quality icons (pills) */
 .move-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    margin-left: 0.4em;
+    margin-right: 0.4em;
     font-size: 1.05em;
     line-height: 1;
     vertical-align: middle;
@@ -1461,9 +1511,11 @@
 }
 
 .move-icon--best {
-    color: var(--brand-primary);
-    background: color-mix(in srgb, var(--brand-primary) 15%, transparent);
-    border-color: var(--brand-primary);
+    color: #b8860b;
+    background: color-mix(in srgb, #daa520 18%, transparent);
+    border-color: #daa520;
+    font-size: 1.15em;
+    font-weight: 900;
 }
 
 .move-icon--great {

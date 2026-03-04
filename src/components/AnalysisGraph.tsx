@@ -1,9 +1,11 @@
-import { useCallback, useRef, useMemo } from 'react'
+import { useCallback, useId, useRef, useMemo } from 'react'
 
 type AnalysisGraphProps = {
   evals: (number | null)[]
   currentIndex: number | null
   onSelectMove: (index: number) => void
+  playerColor?: 'white' | 'black'
+  evalCp?: number | null
 }
 
 const CLAMP = 500 // ±5 pawns in centipawns
@@ -14,12 +16,20 @@ const PAD_Y = 4
 
 const clamp = (v: number) => Math.max(-CLAMP, Math.min(CLAMP, v))
 
+const formatEval = (cp: number) => {
+  const sign = cp > 0 ? '+' : ''
+  return `${sign}${(cp / 100).toFixed(1)}`
+}
+
 const AnalysisGraph = ({
   evals,
   currentIndex,
   onSelectMove,
+  playerColor,
+  evalCp,
 }: AnalysisGraphProps) => {
   const svgRef = useRef<SVGSVGElement>(null)
+  const clipId = useId()
 
   const n = evals.length
   const chartW = SVG_WIDTH - PAD_X * 2
@@ -83,10 +93,35 @@ const AnalysisGraph = ({
     [n, chartW, onSelectMove],
   )
 
+  // Evals are white-perspective: positive = white winning (up)
+  const topLabel = playerColor === 'black' ? 'Ghost' : 'You'
+  const bottomLabel = playerColor === 'black' ? 'You' : 'Ghost'
+
   if (n === 0) return null
 
   return (
-    <div className="analysis-graph">
+    <div className={`analysis-graph${playerColor ? ' analysis-graph--with-axis' : ''}`}>
+      {playerColor && (
+        <div className="analysis-graph__y-axis">
+          <div className="analysis-graph__y-label">
+            <span>{topLabel}</span>
+            <svg className="analysis-graph__y-arrow" viewBox="0 0 10 40">
+              <line x1="5" y1="38" x2="5" y2="4" stroke="currentColor" strokeWidth="1.5" />
+              <polyline points="1,8 5,2 9,8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+            </svg>
+          </div>
+          {evalCp != null && (
+            <div className="analysis-graph__y-eval">{formatEval(evalCp)}</div>
+          )}
+          <div className="analysis-graph__y-label">
+            <svg className="analysis-graph__y-arrow" viewBox="0 0 10 40">
+              <line x1="5" y1="2" x2="5" y2="36" stroke="currentColor" strokeWidth="1.5" />
+              <polyline points="1,32 5,38 9,32" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+            </svg>
+            <span>{bottomLabel}</span>
+          </div>
+        </div>
+      )}
       <svg
         ref={svgRef}
         viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
@@ -95,11 +130,11 @@ const AnalysisGraph = ({
       >
         <defs>
           {/* Clip to positive region (above zero line) */}
-          <clipPath id="clip-positive">
+          <clipPath id={`${clipId}-pos`}>
             <rect x={0} y={0} width={SVG_WIDTH} height={midY} />
           </clipPath>
           {/* Clip to negative region (below zero line) */}
-          <clipPath id="clip-negative">
+          <clipPath id={`${clipId}-neg`}>
             <rect x={0} y={midY} width={SVG_WIDTH} height={midY} />
           </clipPath>
         </defs>
@@ -116,14 +151,14 @@ const AnalysisGraph = ({
         {/* White (positive) area */}
         <path
           d={areaPath}
-          clipPath="url(#clip-positive)"
+          clipPath={`url(#${clipId}-pos)`}
           className="analysis-graph__area-white"
         />
 
         {/* Black (negative) area */}
         <path
           d={areaPath}
-          clipPath="url(#clip-negative)"
+          clipPath={`url(#${clipId}-neg)`}
           className="analysis-graph__area-black"
         />
 

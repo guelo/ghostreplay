@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { ANNOTATION_SYMBOL } from '../workers/analysisUtils'
 
@@ -23,21 +23,18 @@ export type SrsStats = {
 
 export type MoveMessage = {
   key: string
-  variant: 'blunder' | 'inaccuracy' | 'good' | 'great' | 'best' | 'srs-pass' | 'srs-fail'
+  variant: 'srs-pass' | 'srs-fail'
   text: string
   srsFailDetail?: SrsFailDetail
   srsStats?: SrsStats
 }
 
-/** Variants rendered as inline icons next to the move SAN */
-const ICON_VARIANTS = new Set(['blunder', 'inaccuracy', 'good', 'great', 'best'])
-
-const VARIANT_ICON: Record<string, string> = {
-  best: '★',
-  great: '!',
-  good: '✓',
-  inaccuracy: '?',
-  blunder: '??',
+const CLASSIFICATION_ICON: Partial<Record<MoveClassification, { icon: string; title: string }>> = {
+  best: { icon: '1', title: 'Best move' },
+  great: { icon: '!', title: 'Great move' },
+  good: { icon: '✓', title: 'Good move' },
+  inaccuracy: { icon: '?', title: 'Inaccuracy' },
+  blunder: { icon: '??', title: 'Blunder' },
 }
 
 type MoveListProps = {
@@ -93,6 +90,7 @@ const MoveList = ({
   const moveListRef = useRef<HTMLDivElement>(null)
   const selectedMoveRef = useRef<HTMLButtonElement>(null)
   const lastMessageRef = useRef<HTMLDivElement>(null)
+  const [tappedIconIndex, setTappedIconIndex] = useState<number | null>(null)
 
   // Effective index for display purposes (null means at the end)
   const effectiveIndex = currentIndex ?? moves.length - 1
@@ -113,6 +111,7 @@ const MoveList = ({
   }, [canGoForward, effectiveIndex, moves.length, onNavigate])
 
   const handleMoveClick = (index: number) => {
+    setTappedIconIndex(null)
     // If clicking on the last move, set to null (live position)
     onNavigate(index === moves.length - 1 ? null : index)
   }
@@ -185,26 +184,17 @@ const MoveList = ({
     effectiveIndex >= 0 &&
     canAddSelectedMove
 
-  // Track the last bubble message ref target for auto-scroll
+  // Track the last message ref target for auto-scroll
   let lastBubbleMsgIndex = -1
-  for (const [idx, msgs] of messages) {
-    if (msgs.some((m) => !ICON_VARIANTS.has(m.variant)) && idx > lastBubbleMsgIndex) {
+  for (const [idx] of messages) {
+    if (idx > lastBubbleMsgIndex) {
       lastBubbleMsgIndex = idx
     }
   }
 
-  /** Get the icon-variant messages for a move (rendered inline in the cell) */
-  const getIconMessages = (index: number): MoveMessage[] => {
-    const msgs = messages.get(index)
-    if (!msgs) return []
-    return msgs.filter((m) => ICON_VARIANTS.has(m.variant))
-  }
-
-  /** Get the bubble-variant messages for a move (rendered as full-width rows) */
+  /** Get the messages for a move (rendered as full-width rows) */
   const getBubbleMessages = (index: number): MoveMessage[] => {
-    const msgs = messages.get(index)
-    if (!msgs) return []
-    return msgs.filter((m) => !ICON_VARIANTS.has(m.variant))
+    return messages.get(index) ?? []
   }
 
   const renderMoveCell = (move: Move, index: number, side: 'white' | 'black') => {
@@ -212,10 +202,10 @@ const MoveList = ({
     const isAnalyzing = analyzingIndices?.has(index) ?? false
     const annotation = move.classification ? ANNOTATION_SYMBOL[move.classification] : ''
     const colorClass = classificationClass(move.classification)
+    const iconInfo = move.classification ? CLASSIFICATION_ICON[move.classification] : undefined
     // Compute eval change from white's perspective (first move uses 0 as baseline)
     const prevEval = index > 0 ? moves[index - 1].eval : 0
     const evalChange = move.eval != null && prevEval != null ? move.eval - prevEval : null
-    const iconMsgs = getIconMessages(index)
 
     return (
       <button
@@ -225,17 +215,20 @@ const MoveList = ({
         onClick={() => handleMoveClick(index)}
       >
         <span className="move-san">
+          {iconInfo && (
+            <span
+              className={`move-icon move-icon--${move.classification}`}
+              title={iconInfo.title}
+              onClick={(e) => {
+                e.stopPropagation()
+                setTappedIconIndex(tappedIconIndex === index ? null : index)
+              }}
+            >
+              {tappedIconIndex === index ? iconInfo.title : iconInfo.icon}
+            </span>
+          )}
           {annotation}{move.san}
           {isAnalyzing && <span className="move-analyzing-spinner" />}
-          {iconMsgs.map((msg) => (
-            <span
-              key={msg.key}
-              className={`move-icon move-icon--${msg.variant}`}
-              title={msg.text}
-            >
-              {VARIANT_ICON[msg.variant]}
-            </span>
-          ))}
         </span>
         <span className="move-eval">
           {evalChange != null ? formatDelta(evalChange) : ''}

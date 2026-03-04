@@ -128,6 +128,7 @@ const AnalysisBoard = ({
     useMoveAnalysis();
   const { info: engineLines, isThinking: engineThinking, evaluatePosition, stopSearch } = useStockfishEngine();
   const [showEngineArrows, setShowEngineArrows] = useState(true);
+  const engineFenRef = useRef<string | null>(null);
 
   const isInWhatIf = whatIfMoves.length > 0;
   const effectiveIndex = currentIndex ?? moves.length - 1;
@@ -156,9 +157,11 @@ const AnalysisBoard = ({
     const branch = whatIfMoves.map((m, i) => {
       const absIndex = whatIfBranchPoint + 1 + i;
       const analysis = analysisMap.get(absIndex);
+      const prevAnalysis = analysisMap.get(absIndex - 1);
+      const preEval = prevAnalysis?.playedEval ?? null;
       return {
         san: m.san,
-        classification: analysis ? classifyMove(analysis.delta) : undefined,
+        classification: analysis ? classifyMove(analysis.delta, preEval) : undefined,
         eval:
           analysis?.playedEval != null
             ? toWhitePerspective(analysis.playedEval, absIndex)
@@ -562,20 +565,25 @@ const AnalysisBoard = ({
           </div>
           {showEngineArrows && engineLinesDisplay.length > 0 && (
             <div className="analysis-board__engine-lines">
-              {engineLinesDisplay.map((line, i) => (
-                <div
-                  key={i}
-                  className="analysis-board__engine-line"
-                  style={{ opacity: i === 0 ? 1 : 0.6 }}
-                >
-                  <span className="analysis-board__engine-eval">
-                    {line.evalText}
+              {[0, 1, 2].map((i) => {
+                const line = engineLinesDisplay[i];
+                return (
+                  <span
+                    key={i}
+                    className="analysis-board__engine-line"
+                    style={{
+                      opacity: line ? (i === 0 ? 1 : 0.6) : 0,
+                    }}
+                  >
+                    <span className="analysis-board__engine-eval">
+                      {line?.evalText ?? "+0.0"}
+                    </span>{" "}
+                    <span className="analysis-board__engine-pv">
+                      {line?.sanMoves[0] ?? "---"}
+                    </span>
                   </span>
-                  <span className="analysis-board__engine-pv">
-                    {line.sanMoves.slice(0, 6).join(" ")}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
           <MoveList

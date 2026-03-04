@@ -7,6 +7,7 @@ import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
 import { useMoveAnalysis, type AnalysisResult } from "../hooks/useMoveAnalysis";
 import { useChessGameController } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
+import AnalysisGraph from "./AnalysisGraph";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
 import {
@@ -300,6 +301,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return null;
   }, [analysisMap, selectedMoveIndex]);
 
+  const evals = useMemo(
+    () =>
+      moveHistory.map((_, i) => {
+        const a = analysisMap.get(i);
+        return a?.playedEval != null ? toWhitePerspective(a.playedEval, i) : null;
+      }),
+    [moveHistory, analysisMap],
+  );
+
   const canAddSelectedMove = useMemo(() => {
     if (!sessionId || selectedMoveIndex === null) {
       return false;
@@ -456,38 +466,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return moveMessagesRef.current as ReadonlyMap<number, MoveMessage[]>;
   }, [moveMessagesVersion]);
 
-  // Append analysis result messages when analysis completes
-  useEffect(() => {
-    if (!lastAnalysis || lastAnalysis.moveIndex == null) return;
-    if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) return;
-
-    const idx = lastAnalysis.moveIndex;
-    const delta = lastAnalysis.delta;
-
-    // Avoid duplicate messages for the same analysis
-    const existing = moveMessagesRef.current.get(idx);
-    if (existing?.some((m) => m.key === `analysis-${idx}`)) return;
-
-    if (lastAnalysis.blunder && delta !== null) {
-      appendMoveMessage(idx, {
-        key: `analysis-${idx}`,
-        text: "Blunder",
-        variant: "blunder",
-      });
-    } else if (delta !== null) {
-      let msg: MoveMessage;
-      if (delta === 0) {
-        msg = { key: `analysis-${idx}`, text: "Best move", variant: "best" };
-      } else if (delta < 0) {
-        msg = { key: `analysis-${idx}`, text: "Great move", variant: "great" };
-      } else if (delta < 50) {
-        msg = { key: `analysis-${idx}`, text: "Good", variant: "good" };
-      } else {
-        msg = { key: `analysis-${idx}`, text: "Inaccuracy", variant: "inaccuracy" };
-      }
-      appendMoveMessage(idx, msg);
-    }
-  }, [lastAnalysis, isPlayerMoveIndex, appendMoveMessage]);
 
   // Show spinner on every move that hasn't received an analysis result yet
   const analyzingIndices = useMemo(() => {
@@ -1128,6 +1106,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             onShowStartOverlay={handleShowStartOverlay}
             onViewHistory={handleViewHistory}
           />
+          {evals.length > 0 && evals.some((e) => e !== null) && (
+            <AnalysisGraph
+              evals={evals}
+              currentIndex={selectedMoveIndex}
+              onSelectMove={handleNavigate}
+              playerColor={playerColor}
+              evalCp={selectedEvalCp}
+            />
+          )}
         </div>
 
         <div className="moves-column">

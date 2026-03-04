@@ -13,7 +13,6 @@ import {
   classifySessionMove,
   ANNOTATION_SYMBOL,
   BLUNDER_THRESHOLD,
-  MOVE_LIST_BLUNDER_THRESHOLD,
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
 
@@ -442,18 +441,18 @@ describe('classifyMove', () => {
     expect(classifyMove(null)).toBeNull()
   })
 
-  it('classifies blunder at threshold', () => {
-    expect(classifyMove(MOVE_LIST_BLUNDER_THRESHOLD)).toBe('blunder')
-  })
-
-  it('classifies blunder above threshold', () => {
+  it('classifies blunder at base threshold without preEval', () => {
+    expect(classifyMove(BLUNDER_THRESHOLD)).toBe('blunder')
     expect(classifyMove(300)).toBe('blunder')
   })
 
-  it('classifies inaccuracy between 50 and threshold', () => {
-    expect(classifyMove(50)).toBe('inaccuracy')
-    expect(classifyMove(100)).toBe('inaccuracy')
-    expect(classifyMove(149)).toBe('inaccuracy')
+  it('classifies inaccuracy between good and blunder thresholds', () => {
+    // Without preEval, blunder threshold is 50 (BLUNDER_THRESHOLD)
+    // so only values in the range [50, 50) would be inaccuracy — which is empty.
+    // With preEval context, the blunder threshold rises, creating an inaccuracy range.
+    // At preEval -500: threshold = 100, so delta 50-99 is inaccuracy.
+    expect(classifyMove(50, -500)).toBe('inaccuracy')
+    expect(classifyMove(99, -500)).toBe('inaccuracy')
   })
 
   it('classifies best move at zero delta', () => {
@@ -470,6 +469,26 @@ describe('classifyMove', () => {
     expect(classifyMove(-1)).toBe('great')
     expect(classifyMove(-50)).toBe('great')
     expect(classifyMove(-200)).toBe('great')
+  })
+
+  describe('context-aware with preEval', () => {
+    it('uses base threshold in equal positions', () => {
+      expect(classifyMove(50, 0)).toBe('blunder')
+      expect(classifyMove(49, 0)).toBe('good')
+    })
+
+    it('raises blunder threshold when already losing', () => {
+      // At preEval -500: threshold = 50 + 500*0.1 = 100
+      expect(classifyMove(99, -500)).toBe('inaccuracy')
+      expect(classifyMove(100, -500)).toBe('blunder')
+    })
+
+    it('classifies large delta as inaccuracy when deeply losing', () => {
+      // At preEval -1000: threshold = 50 + 100 = 150
+      // delta 120 is below scaled threshold → inaccuracy, not blunder
+      expect(classifyMove(120, -1000)).toBe('inaccuracy')
+      expect(classifyMove(150, -1000)).toBe('blunder')
+    })
   })
 })
 
