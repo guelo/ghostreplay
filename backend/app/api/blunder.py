@@ -256,6 +256,16 @@ def _record_target(
 ) -> BlunderResponse:
     replay_data = _replay_pgn(pgn, fen, max_full_moves=max_full_moves)
 
+    # Skip the very first move of the game — ghost mode can never steer
+    # back to the starting position, so recording it is pointless.
+    if len(replay_data.moves_data) == 1:
+        return BlunderResponse(
+            blunder_id=None,
+            position_id=0,
+            positions_created=0,
+            is_new=False,
+        )
+
     if replay_data.pre_move_color != session.player_color:
         raise HTTPException(
             status_code=400,
@@ -491,6 +501,9 @@ def list_blunders(
             )
         )
 
-    # Sort by priority descending (most urgent first)
-    items.sort(key=lambda x: x.srs_priority, reverse=True)
+    # Sort by most recently played first (nulls last)
+    items.sort(
+        key=lambda x: (x.last_played_at is not None, x.last_played_at),
+        reverse=True,
+    )
     return items

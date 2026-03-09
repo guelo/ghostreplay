@@ -66,6 +66,12 @@ export const shouldRecordBlunder = (
     return null
   }
 
+  // Skip the very first move — ghost mode can never steer back to the
+  // starting position, so recording it is pointless.
+  if (context.moveIndex === 0) {
+    return null
+  }
+
   // Only record automatic blunders in the first 10 full moves.
   if (!isWithinRecordingMoveCap(context.moveIndex)) {
     return null

@@ -890,6 +890,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
+    // Skip the very first move of the game (not reachable by ghost mode)
+    if (lastAnalysis.moveIndex === 0) {
+      return;
+    }
+
     if (!isWithinRecordingMoveCap(lastAnalysis.moveIndex)) {
       return;
     }
