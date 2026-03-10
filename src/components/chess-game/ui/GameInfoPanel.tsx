@@ -109,28 +109,17 @@ const GameInfoPanel = ({
         <span className="unrated-badge">Unrated</span>
       )}
       <p className="chess-meta">
-        Playing as:{" "}
-        <span className="chess-meta-strong">
-          {playerColorChoice === "random" && !isGameActive
-            ? "Random"
-            : playerColor === "white"
-              ? "White"
-              : "Black"}
-        </span>
-      </p>
-      <p className="chess-meta">
-        Rating:{" "}
+        Your Elo:{" "}
         <span className="chess-meta-strong">
           {playerRating}
           {isProvisional ? "?" : ""}
         </span>
       </p>
-      <p className="chess-meta">
-        Session:{" "}
-        <span className={isGameActive ? "chess-meta-strong" : ""}>
-          {isGameActive ? "Active" : "None (click New game to start)"}
-        </span>
-      </p>
+      {!isGameActive && (
+        <p className="chess-meta">
+          Click New game to start
+        </p>
+      )}
       {isGameActive && (
         <div
           className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}
