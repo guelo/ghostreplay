@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 
 type MaterialDisplayProps = {
   fen: string;
@@ -96,4 +96,4 @@ const MaterialDisplay = ({ fen, perspective }: MaterialDisplayProps) => {
   );
 };
 
-export default MaterialDisplay;
+export default memo(MaterialDisplay);

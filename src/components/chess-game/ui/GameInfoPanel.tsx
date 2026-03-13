@@ -1,5 +1,5 @@
 import { Chessboard } from "react-chessboard";
-import type { RefObject } from "react";
+import { memo, type RefObject } from "react";
 import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { TargetBlunderSrs } from "../../../utils/api";
 
@@ -250,4 +250,4 @@ const GameInfoPanel = ({
   );
 };
 
-export default GameInfoPanel;
+export default memo(GameInfoPanel);

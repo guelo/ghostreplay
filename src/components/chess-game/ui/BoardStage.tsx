@@ -1,6 +1,6 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
-import type React from "react";
+import React, { memo } from "react";
 import EvalBar from "../../EvalBar";
 
 type BoardOrientation = "white" | "black";
@@ -227,4 +227,4 @@ const BoardStage = ({
   );
 };
 
-export default BoardStage;
+export default memo(BoardStage);

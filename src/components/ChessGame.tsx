@@ -971,23 +971,26 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => document.removeEventListener("mousedown", handler);
   }, [showGhostInfo]);
 
-  const handleDropPiece = ({
-    sourceSquare,
-    targetSquare,
-  }: PieceDropHandlerArgs) => {
-    const result = handleDrop(sourceSquare, targetSquare);
-    if (!result.applied) {
-      return false;
-    }
+  const handleDropPiece = useCallback(
+    ({
+      sourceSquare,
+      targetSquare,
+    }: PieceDropHandlerArgs) => {
+      const result = handleDrop(sourceSquare, targetSquare);
+      if (!result.applied) {
+        return false;
+      }
 
-    if (result.gameOver) {
-      void handleGameEnd();
-    } else {
-      void applyOpponentMove(result.fenAfter, result.uciHistory);
-    }
+      if (result.gameOver) {
+        void handleGameEnd();
+      } else {
+        void applyOpponentMove(result.fenAfter, result.uciHistory);
+      }
 
-    return true;
-  };
+      return true;
+    },
+    [applyOpponentMove, handleDrop, handleGameEnd],
+  );
 
   const handleRevealSrsFail = useCallback(
     (detail: SrsFailDetail, moveIndex: number) => {
@@ -1019,6 +1022,44 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     engineElo,
     isProvisional,
   );
+  const squareStyles = useMemo(
+    () => ({ ...lastMoveSquares, ...optionSquares }),
+    [lastMoveSquares, optionSquares],
+  );
+
+  const handleCloseStartOverlay = useCallback(
+    () => setShowStartOverlay(false),
+    [],
+  );
+  const handleEngineEloChange = useCallback(
+    (elo: number) => setEngineElo(elo as (typeof MAIA_ELO_BINS)[number]),
+    [],
+  );
+  const handlePlayWhite = useCallback(
+    () => void handleNewGame("white"),
+    [handleNewGame],
+  );
+  const handlePlayRandom = useCallback(
+    () => void handleNewGame("random"),
+    [handleNewGame],
+  );
+  const handlePlayBlack = useCallback(
+    () => void handleNewGame("black"),
+    [handleNewGame],
+  );
+  const handleToggleGhostInfo = useCallback(
+    () => setShowGhostInfo((v) => !v),
+    [],
+  );
+  const handleCloseGhostInfo = useCallback(
+    () => setShowGhostInfo(false),
+    [],
+  );
+  const handleDismissRehookToast = useCallback(
+    () => setShowRehookToast(false),
+    [],
+  );
+
   const allowDragging =
     isGameActive &&
     engineStatus === "ready" &&
@@ -1047,8 +1088,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           opponentName={MAIA_BOT_NAMES[engineElo]}
           blunderReviewId={blunderReviewId}
           showGhostInfo={showGhostInfo}
-          onToggleGhostInfo={() => setShowGhostInfo((v) => !v)}
-          onCloseGhostInfo={() => setShowGhostInfo(false)}
+          onToggleGhostInfo={handleToggleGhostInfo}
+          onCloseGhostInfo={handleCloseGhostInfo}
           ghostInfoAnchorRef={ghostInfoAnchorRef}
           blunderTargetFen={blunderTargetFen}
           boardOrientation={boardOrientation}
@@ -1071,29 +1112,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             onPieceDrop={handleDropPiece}
             onSquareClick={handleSquareClick}
             allowDragging={allowDragging}
-            squareStyles={{ ...lastMoveSquares, ...optionSquares }}
+            squareStyles={squareStyles}
             arrows={blunderArrows}
             showStartOverlay={showStartOverlay}
             isGameActive={isGameActive}
             isStartingGame={isStartingGame}
-            onCloseStartOverlay={() => setShowStartOverlay(false)}
+            onCloseStartOverlay={handleCloseStartOverlay}
             maiaEloBins={MAIA_ELO_BINS}
             engineElo={engineElo}
-            onEngineEloChange={(elo) => {
-              setEngineElo(elo as (typeof MAIA_ELO_BINS)[number]);
-            }}
+            onEngineEloChange={handleEngineEloChange}
             botLabel={MAIA_BOT_NAMES[engineElo]}
             winDelta={winDelta}
             lossDelta={lossDelta}
-            onPlayWhite={() => {
-              void handleNewGame("white");
-            }}
-            onPlayRandom={() => {
-              void handleNewGame("random");
-            }}
-            onPlayBlack={() => {
-              void handleNewGame("black");
-            }}
+            onPlayWhite={handlePlayWhite}
+            onPlayRandom={handlePlayRandom}
+            onPlayBlack={handlePlayBlack}
             startError={startError}
             showRevertWarning={showRevertWarning}
             onRevertAnyway={executeRevert}
@@ -1101,7 +1134,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             showEndedScrim={showEndedScrim}
             showFlash={showFlash}
             showRehookToast={showRehookToast}
-            onDismissRehookToast={() => setShowRehookToast(false)}
+            onDismissRehookToast={handleDismissRehookToast}
           />
           <PostGameBanner
             isGameActive={isGameActive}

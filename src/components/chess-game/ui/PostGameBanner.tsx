@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { RatingChange } from "../../../utils/api";
 import type { GameResult } from "../domain/status";
 
@@ -83,4 +84,4 @@ const PostGameBanner = ({
   return null;
 };
 
-export default PostGameBanner;
+export default memo(PostGameBanner);

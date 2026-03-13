@@ -477,4 +477,4 @@ const MoveList = ({
   );
 };
 
-export default MoveList;
+export default React.memo(MoveList);

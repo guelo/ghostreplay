@@ -1,4 +1,4 @@
-import { useCallback, useId, useRef, useMemo } from "react";
+import { memo, useCallback, useId, useRef, useMemo } from "react";
 
 type AnalysisGraphProps = {
   evals: (number | null)[];
@@ -225,4 +225,4 @@ const AnalysisGraph = ({
   );
 };
 
-export default AnalysisGraph;
+export default memo(AnalysisGraph);
