@@ -232,6 +232,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const handleNavigate = useCallback(
     (index: number | null) => {
       setViewIndex(index);
+      setReviewFailModal(null);
 
       // Re-show blunder alert when clicking on a player's blunder move
       if (index !== null && index >= 0) {
