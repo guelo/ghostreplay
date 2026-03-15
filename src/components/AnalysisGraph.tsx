@@ -6,6 +6,8 @@ type AnalysisGraphProps = {
   onSelectMove: (index: number) => void;
   playerColor?: "white" | "black";
   evalCp?: number | null;
+  streamingEval?: { index: number; cp: number } | null;
+  pendingIndices?: number[];
 };
 
 const SVG_WIDTH = 600;
@@ -36,35 +38,60 @@ const AnalysisGraph = ({
   onSelectMove,
   playerColor,
   evalCp,
+  streamingEval,
+  pendingIndices,
 }: AnalysisGraphProps) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = useId();
 
   const n = evals.length;
+  // Total moves includes pending ones for x-axis spacing
+  const totalMoves = useMemo(() => {
+    if (!pendingIndices || pendingIndices.length === 0) return n;
+    const maxPending = Math.max(...pendingIndices);
+    return Math.max(n, maxPending + 1);
+  }, [n, pendingIndices]);
+
   const chartW = SVG_WIDTH - PAD_X * 2;
   const chartH = SVG_HEIGHT - PAD_Y * 2;
   const midY = PAD_Y + chartH / 2;
 
-  // Build points array using log scale
-  const points = useMemo(() => {
-    if (n === 0) return [];
-    // Find the max log-scaled value to normalize the y-axis
-    let maxLog = logScale(200); // minimum range ≈ ±2 pawns
+  // Compute maxLog across confirmed evals AND streaming eval for consistent y-axis
+  const maxLog = useMemo(() => {
+    let ml = logScale(200); // minimum range ≈ ±2 pawns
     for (const ev of evals) {
       if (ev != null) {
         const v = Math.abs(logScale(ev));
-        if (v > maxLog) maxLog = v;
+        if (v > ml) ml = v;
       }
     }
-    const stepX = n > 1 ? chartW / (n - 1) : 0;
+    if (streamingEval) {
+      const v = Math.abs(logScale(streamingEval.cp));
+      if (v > ml) ml = v;
+    }
+    return ml;
+  }, [evals, streamingEval]);
+
+  const stepX = totalMoves > 1 ? chartW / (totalMoves - 1) : 0;
+
+  const cpToY = useCallback(
+    (cp: number) => {
+      const scaled = logScale(cp);
+      return midY - (scaled / maxLog) * (chartH / 2);
+    },
+    [maxLog, chartH, midY],
+  );
+
+  // Build points array using log scale
+  const points = useMemo(() => {
+    if (n === 0) return [];
     return evals.map((ev, i) => {
       const x = PAD_X + i * stepX;
       const scaled = ev != null ? logScale(ev) : 0;
-      // positive eval → above center (lower y), negative → below center
       const y = midY - (scaled / maxLog) * (chartH / 2);
       return [x, y] as [number, number];
     });
-  }, [evals, n, chartW, chartH, midY]);
+  }, [evals, n, stepX, chartH, midY, maxLog]);
 
   // Area path: trace points then close to zero line
   const areaPath = useMemo(() => {
@@ -85,14 +112,39 @@ const AnalysisGraph = ({
       .join(" ");
   }, [points]);
 
+  // Streaming eval: dashed line from last confirmed point to streaming point
+  const streamingPoint = useMemo(() => {
+    if (!streamingEval || n === 0) return null;
+    const x = PAD_X + streamingEval.index * stepX;
+    const y = cpToY(streamingEval.cp);
+    return [x, y] as [number, number];
+  }, [streamingEval, n, stepX, cpToY]);
+
+  const dashedPath = useMemo(() => {
+    if (!streamingPoint || points.length === 0) return "";
+    const lastPoint = points[points.length - 1];
+    return `M${lastPoint[0]},${lastPoint[1]} L${streamingPoint[0]},${streamingPoint[1]}`;
+  }, [streamingPoint, points]);
+
+  // Hollow circles for pending moves (excluding the one being streamed)
+  const pendingCircles = useMemo(() => {
+    if (!pendingIndices || pendingIndices.length === 0) return [];
+    const streamingIdx = streamingEval?.index ?? -1;
+    return pendingIndices
+      .filter((i) => i !== streamingIdx)
+      .map((i) => ({
+        cx: PAD_X + i * stepX,
+        cy: midY,
+      }));
+  }, [pendingIndices, streamingEval, stepX, midY]);
+
   // X position of the current-move indicator
   const indicatorX = useMemo(() => {
-    if (n === 0) return null;
+    if (totalMoves === 0) return null;
     const idx = currentIndex ?? n - 1;
-    if (idx < 0 || idx >= n) return null;
-    const stepX = n > 1 ? chartW / (n - 1) : 0;
+    if (idx < 0 || idx >= totalMoves) return null;
     return PAD_X + idx * stepX;
-  }, [currentIndex, n, chartW]);
+  }, [currentIndex, n, totalMoves, stepX]);
 
   // Click handler: map clientX → move index
   const handleClick = useCallback(
@@ -102,19 +154,18 @@ const AnalysisGraph = ({
       if (!svg) return;
       const rect = svg.getBoundingClientRect();
       const relX = ((e.clientX - rect.left) / rect.width) * SVG_WIDTH;
-      const stepX = n > 1 ? chartW / (n - 1) : 0;
       const idx = stepX > 0 ? Math.round((relX - PAD_X) / stepX) : 0;
       const clamped = Math.max(0, Math.min(n - 1, idx));
       onSelectMove(clamped);
     },
-    [n, chartW, onSelectMove],
+    [n, stepX, onSelectMove],
   );
 
   // Evals are white-perspective: positive = white winning (up)
   const topLabel = playerColor === "black" ? "Ghost" : "You";
   const bottomLabel = playerColor === "black" ? "You" : "Ghost";
 
-  if (n === 0) return null;
+  if (n === 0 && (!pendingIndices || pendingIndices.length === 0)) return null;
 
   return (
     <div
@@ -209,6 +260,37 @@ const AnalysisGraph = ({
 
         {/* Eval curve line */}
         <path d={linePath} className="analysis-graph__line" />
+
+        {/* Dashed line to streaming eval */}
+        {dashedPath && (
+          <path
+            d={dashedPath}
+            className="analysis-graph__line analysis-graph__line--streaming"
+            strokeDasharray="4 3"
+            opacity={0.7}
+          />
+        )}
+
+        {/* Streaming eval point */}
+        {streamingPoint && (
+          <circle
+            cx={streamingPoint[0]}
+            cy={streamingPoint[1]}
+            r={3}
+            className="analysis-graph__streaming-dot"
+          />
+        )}
+
+        {/* Hollow circles for pending (queued) moves */}
+        {pendingCircles.map((c) => (
+          <circle
+            key={c.cx}
+            cx={c.cx}
+            cy={c.cy}
+            r={2.5}
+            className="analysis-graph__pending-dot"
+          />
+        ))}
 
         {/* Current move indicator */}
         {indicatorX != null && (

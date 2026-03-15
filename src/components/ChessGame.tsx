@@ -97,6 +97,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     analysisMap,
     status: analysisStatus,
     isAnalyzing,
+    streamingEval,
     clearAnalysis,
   } = useMoveAnalysis();
   const [, setEngineMessage] = useState<string | null>(null);
@@ -302,14 +303,32 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return null;
   }, [analysisMap, selectedMoveIndex]);
 
-  const evals = useMemo(
-    () =>
-      moveHistory.map((_, i) => {
-        const a = analysisMap.get(i);
-        return a?.playedEval != null ? toWhitePerspective(a.playedEval, i) : null;
-      }),
-    [moveHistory, analysisMap],
-  );
+  const evals = useMemo(() => {
+    const raw = moveHistory.map((_, i) => {
+      const a = analysisMap.get(i);
+      return a?.playedEval != null ? toWhitePerspective(a.playedEval, i) : null;
+    });
+    // Trim trailing nulls so pending analysis doesn't plot as 0
+    let end = raw.length;
+    while (end > 0 && raw[end - 1] === null) end--;
+    return raw.slice(0, end);
+  }, [moveHistory, analysisMap]);
+
+  const pendingIndices = useMemo(() => {
+    const pending: number[] = [];
+    for (let i = 0; i < moveHistory.length; i++) {
+      if (!analysisMap.has(i)) pending.push(i);
+    }
+    return pending;
+  }, [moveHistory, analysisMap]);
+
+  const graphStreamingEval = useMemo(() => {
+    if (!streamingEval) return null;
+    return {
+      index: streamingEval.moveIndex,
+      cp: toWhitePerspective(streamingEval.cp, streamingEval.moveIndex) ?? 0,
+    };
+  }, [streamingEval]);
 
   const canAddSelectedMove = useMemo(() => {
     if (!sessionId || selectedMoveIndex === null) {
@@ -1145,13 +1164,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             onShowStartOverlay={handleShowStartOverlay}
             onViewHistory={handleViewHistory}
           />
-          {evals.length > 0 && evals.some((e) => e !== null) && (
+          {(evals.some((e) => e !== null) || pendingIndices.length > 0) && (
             <AnalysisGraph
               evals={evals}
               currentIndex={selectedMoveIndex}
               onSelectMove={handleNavigate}
               playerColor={playerColor}
               evalCp={selectedEvalCp}
+              streamingEval={graphStreamingEval}
+              pendingIndices={pendingIndices}
             />
           )}
         </div>

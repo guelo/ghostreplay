@@ -14,6 +14,7 @@ import {
   parseInfo,
   getSideToMove,
   computeAnalysisResult,
+  scoreForPlayer,
   isBlunder,
   isWithinRecordingMoveCap,
 } from './analysisUtils'
@@ -27,6 +28,7 @@ let activeSearch:
       resolve: (value: { bestmove: string; score: EngineScore | null }) => void
       reject: (error: Error) => void
       lastScore: EngineScore | null
+      onInfo?: (score: EngineScore, depth: number) => void
     }
   | null = null
 
@@ -66,7 +68,11 @@ const ensureEngine = async () => {
 }
 
 
-const runSearch = async (fen: string, moves: string[]) => {
+const runSearch = async (
+  fen: string,
+  moves: string[],
+  onInfo?: (score: EngineScore, depth: number) => void,
+) => {
   const pendingEngine = await ensureEngine()
 
   if (!pendingEngine) {
@@ -79,7 +85,7 @@ const runSearch = async (fen: string, moves: string[]) => {
 
   return new Promise<{ bestmove: string; score: EngineScore | null }>(
     (resolve, reject) => {
-      activeSearch = { resolve, reject, lastScore: null }
+      activeSearch = { resolve, reject, lastScore: null, onInfo }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(' ')}` : ''
       pendingEngine.postMessage(`position fen ${fen}${movesSegment}`)
       pendingEngine.postMessage('go depth 20 movetime 3000')
@@ -121,6 +127,12 @@ const handleEngineLine = (line: string) => {
   const info = parseInfo(line)
   if (info?.score && activeSearch) {
     activeSearch.lastScore = info.score
+    if (activeSearch.onInfo) {
+      const tokens = line.split(' ')
+      const depthIdx = tokens.indexOf('depth')
+      const depth = depthIdx >= 0 ? Number(tokens[depthIdx + 1]) : 0
+      activeSearch.onInfo(info.score, depth)
+    }
   }
 }
 
@@ -183,8 +195,19 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     return
   }
 
-  // Evaluate the position after the played move
-  const playedEvalSearch = await runSearch(request.fen, [request.move])
+  // Evaluate the position after the played move, streaming intermediate evals
+  const opponentToMove = sideToMove === 'w' ? 'b' : 'w'
+  const playedEvalSearch = await runSearch(request.fen, [request.move], (score, depth) => {
+    const cp = scoreForPlayer(score, opponentToMove, request.playerColor)
+    if (cp !== null) {
+      ctx.postMessage({
+        type: 'analysis-streaming',
+        id: request.id,
+        cp,
+        depth,
+      } satisfies AnalysisWorkerResponse)
+    }
+  })
 
   // When best != played, search after the best move too for an apples-to-apples
   // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because

@@ -15,6 +15,7 @@ export type AnalysisWorkerRequest =
 export type AnalysisWorkerResponse =
   | { type: 'ready' }
   | { type: 'analysis-started'; id: string; move: string }
+  | { type: 'analysis-streaming'; id: string; cp: number; depth: number }
   | {
       type: 'analysis'
       id: string
