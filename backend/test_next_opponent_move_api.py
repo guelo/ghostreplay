@@ -6,6 +6,7 @@ Full implementation tested in g-29c.2.2 (ghost decision) and g-29c.2.3 (Maia run
 Decision branch smoke tests for g-29c.2.6.
 """
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from sqlalchemy import text
@@ -266,13 +267,13 @@ def test_next_opponent_move_ghost_branch_happy_path(
         {"from_id": pos_a_id, "to_id": pos_b_id},
     )
 
-    # Insert blunder on position B for this user
+    # Insert blunder on position B for this user, backdated so it's due for SRS review
     db_session.execute(
         text("""
-            INSERT INTO blunders (user_id, position_id, bad_move_san, best_move_san, eval_loss_cp)
-            VALUES (:uid, :pid, 'Nf6', 'd5', 150)
+            INSERT INTO blunders (user_id, position_id, bad_move_san, best_move_san, eval_loss_cp, created_at)
+            VALUES (:uid, :pid, 'Nf6', 'd5', 150, :created_at)
         """),
-        {"uid": user_id, "pid": pos_b_id},
+        {"uid": user_id, "pid": pos_b_id, "created_at": datetime.now(timezone.utc) - timedelta(hours=5)},
     )
     db_session.commit()
 

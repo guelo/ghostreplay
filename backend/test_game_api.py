@@ -4,8 +4,9 @@ Simple test for POST /api/game/start endpoint.
 Run with: pytest test_game_api.py -v
 """
 import uuid
+from datetime import datetime, timedelta, timezone
 
-from app.models import GameSession
+from app.models import Blunder, GameSession
 
 
 def test_start_game_success(client, auth_headers):
@@ -371,7 +372,7 @@ def _post_next_opponent_move(client, auth_headers, session_id, fen, user_id: int
     )
 
 
-def test_next_opponent_move_returns_opponent_move_to_blunder(client, auth_headers, create_game_session):
+def test_next_opponent_move_returns_opponent_move_to_blunder(client, auth_headers, create_game_session, db_session):
     """Test next-opponent-move returns opponent's move leading to a blunder position."""
     user_id = 123
 
@@ -397,6 +398,12 @@ def test_next_opponent_move_returns_opponent_move_to_blunder(client, auth_header
     )
     assert blunder_response.status_code == 201
 
+    # Backdate blunder so it's due for SRS review (priority >= 1.0)
+    blunder_id = blunder_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
+
     # Now start a NEW game and query next-opponent-move
     new_session_id = create_game_session(user_id=user_id, player_color="white")
 
@@ -416,7 +423,7 @@ def test_next_opponent_move_returns_opponent_move_to_blunder(client, auth_header
     assert data["decision_source"] == "ghost_path"
 
 
-def test_next_opponent_move_returns_move_to_manual_library_target(client, auth_headers, create_game_session):
+def test_next_opponent_move_returns_move_to_manual_library_target(client, auth_headers, create_game_session, db_session):
     """Manual /api/blunder/manual targets should be reachable by next-opponent-move traversal."""
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
@@ -437,6 +444,12 @@ def test_next_opponent_move_returns_move_to_manual_library_target(client, auth_h
     )
     assert manual_response.status_code == 201
     assert manual_response.json()["is_new"] is True
+
+    # Backdate blunder so it's due for SRS review (priority >= 1.0)
+    blunder_id = manual_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
 
     new_session_id = create_game_session(user_id=user_id, player_color="white")
     fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
@@ -513,7 +526,7 @@ def test_next_opponent_move_users_turn_returns_error(client, auth_headers, creat
     assert "player's turn" in response.json()["detail"].lower()
 
 
-def test_next_opponent_move_black_player(client, auth_headers, create_game_session):
+def test_next_opponent_move_black_player(client, auth_headers, create_game_session, db_session):
     """Test next-opponent-move works for black player."""
     user_id = 123
 
@@ -538,6 +551,12 @@ def test_next_opponent_move_black_player(client, auth_headers, create_game_sessi
         headers=auth_headers(user_id=user_id),
     )
     assert blunder_response.status_code == 201
+
+    # Backdate blunder so it's due for SRS review (priority >= 1.0)
+    blunder_id = blunder_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
 
     # Start new game as black
     new_session_id = create_game_session(user_id=user_id, player_color="black")
@@ -601,7 +620,7 @@ def test_next_opponent_move_missing_auth(client):
     assert response.status_code == 401
 
 
-def test_next_opponent_move_finds_blunder_multiple_moves_downstream(client, auth_headers, create_game_session):
+def test_next_opponent_move_finds_blunder_multiple_moves_downstream(client, auth_headers, create_game_session, db_session):
     """Test next-opponent-move finds a blunder 3 moves downstream via recursive CTE."""
     user_id = 123
 
@@ -627,6 +646,12 @@ def test_next_opponent_move_finds_blunder_multiple_moves_downstream(client, auth
         headers=auth_headers(user_id=user_id),
     )
     assert blunder_response.status_code == 201
+
+    # Backdate blunder so it's due for SRS review (priority >= 1.0)
+    blunder_id = blunder_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
 
     # Now start a NEW game and query next-opponent-move from earlier in the game
     new_session_id = create_game_session(user_id=user_id, player_color="white")
@@ -702,12 +727,14 @@ def test_find_ghost_move_finds_blunder_at_max_depth(db_session):
 
     # Create a blunder at position 6 (depth 5 from position 1)
     # Position 6 has active_color="white" (6 % 2 == 0)
+    # Backdate so it's due for SRS review (priority >= 1.0)
     blunder = Blunder(
         user_id=user_id,
         position_id=positions[6].id,
         bad_move_san="bad",
         best_move_san="good",
         eval_loss_cp=200,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=5),
     )
     db_session.add(blunder)
     db_session.commit()
@@ -807,7 +834,7 @@ def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session)
             bad_move_san="bad",
             best_move_san="good",
             eval_loss_cp=50,
-            last_reviewed_at=now - timedelta(hours=2),
+            last_reviewed_at=now - timedelta(hours=5),
         ),
         Blunder(
             user_id=user_id,
@@ -815,7 +842,7 @@ def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session)
             bad_move_san="bad",
             best_move_san="good",
             eval_loss_cp=200,
-            last_reviewed_at=now - timedelta(hours=2),
+            last_reviewed_at=now - timedelta(hours=5),
         ),
     ])
     db_session.commit()
@@ -879,7 +906,7 @@ def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
             best_move_san="good",
             eval_loss_cp=100,
             pass_streak=0,
-            last_reviewed_at=now - timedelta(minutes=15),
+            last_reviewed_at=now - timedelta(hours=5),
         ),
         Blunder(
             user_id=user_id,
@@ -888,7 +915,7 @@ def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
             best_move_san="good",
             eval_loss_cp=100,
             pass_streak=0,
-            last_reviewed_at=now - timedelta(hours=6),
+            last_reviewed_at=now - timedelta(hours=12),
         ),
     ])
     db_session.commit()
@@ -957,13 +984,14 @@ def test_find_ghost_move_handles_cycles(db_session):
 
     db_session.add_all([move_ab, move_bc, move_ca, move_bd])
 
-    # Create blunder at position D
+    # Create blunder at position D, backdated so it's due for SRS review
     blunder = Blunder(
         user_id=user_id,
         position_id=pos_d.id,
         bad_move_san="bad",
         best_move_san="good",
         eval_loss_cp=200,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=5),
     )
     db_session.add(blunder)
     db_session.commit()
@@ -980,10 +1008,126 @@ def test_find_ghost_move_handles_cycles(db_session):
     assert target_blunder_id is not None
 
 
+def test_find_ghost_move_skips_not_yet_due_blunder(db_session):
+    """find_ghost_move ignores blunders whose SRS priority is below 1.0."""
+    from app.api.game import find_ghost_move
+    from app.models import Blunder, Move, Position
+    from app.fen import fen_hash
+
+    user_id = 123
+
+    fen_start = "8/8/8/8/8/8/K7/7k b - - 0 1"
+    fen_blunder = "8/8/8/8/8/8/1K6/7k w - - 0 2"
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_blunder = Position(user_id=user_id, fen_hash=fen_hash(fen_blunder), fen_raw=fen_blunder, active_color="white")
+    db_session.add_all([pos_start, pos_blunder])
+    db_session.flush()
+
+    db_session.add(Move(from_position_id=pos_start.id, move_san="m1", to_position_id=pos_blunder.id))
+
+    # Blunder reviewed 1 hour ago with pass_streak=0 → interval=4h → priority=0.25 (not due)
+    now = datetime.now(timezone.utc)
+    db_session.add(Blunder(
+        user_id=user_id,
+        position_id=pos_blunder.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        last_reviewed_at=now - timedelta(hours=1),
+    ))
+    db_session.commit()
+
+    move_san, target_blunder_id, _ = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+    )
+
+    assert move_san is None
+    assert target_blunder_id is None
+
+
+def test_find_ghost_move_selects_just_due_blunder(db_session):
+    """find_ghost_move selects a blunder whose SRS priority just crossed 1.0."""
+    from app.api.game import find_ghost_move
+    from app.models import Blunder, Move, Position
+    from app.fen import fen_hash
+
+    user_id = 123
+
+    fen_start = "8/8/8/8/8/8/K7/6k1 b - - 0 1"
+    fen_blunder = "8/8/8/8/8/8/1K6/6k1 w - - 0 2"
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_blunder = Position(user_id=user_id, fen_hash=fen_hash(fen_blunder), fen_raw=fen_blunder, active_color="white")
+    db_session.add_all([pos_start, pos_blunder])
+    db_session.flush()
+
+    db_session.add(Move(from_position_id=pos_start.id, move_san="m1", to_position_id=pos_blunder.id))
+
+    # Blunder reviewed 5 hours ago with pass_streak=0 → interval=4h → priority=1.25 (due)
+    now = datetime.now(timezone.utc)
+    db_session.add(Blunder(
+        user_id=user_id,
+        position_id=pos_blunder.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        last_reviewed_at=now - timedelta(hours=5),
+    ))
+    db_session.commit()
+
+    move_san, target_blunder_id, _ = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+    )
+
+    assert move_san == "m1"
+    assert target_blunder_id is not None
+
+
+def test_find_ghost_move_skips_mastered_blunder_high_pass_streak(db_session):
+    """find_ghost_move skips a blunder with high pass_streak whose interval hasn't elapsed."""
+    from app.api.game import find_ghost_move
+    from app.models import Blunder, Move, Position
+    from app.fen import fen_hash
+
+    user_id = 123
+
+    fen_start = "8/8/8/8/8/K7/8/7k b - - 0 1"
+    fen_blunder = "8/8/8/8/8/1K6/8/7k w - - 0 2"
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_blunder = Position(user_id=user_id, fen_hash=fen_hash(fen_blunder), fen_raw=fen_blunder, active_color="white")
+    db_session.add_all([pos_start, pos_blunder])
+    db_session.flush()
+
+    db_session.add(Move(from_position_id=pos_start.id, move_san="m1", to_position_id=pos_blunder.id))
+
+    # pass_streak=5 → interval=4*2^5=128h. Reviewed 40h ago → priority=40/128≈0.31 (not due)
+    now = datetime.now(timezone.utc)
+    db_session.add(Blunder(
+        user_id=user_id,
+        position_id=pos_blunder.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        pass_streak=5,
+        last_reviewed_at=now - timedelta(hours=40),
+    ))
+    db_session.commit()
+
+    move_san, target_blunder_id, _ = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+    )
+
+    # pass_streak=5 with only 40h elapsed should NOT be targeted
+    assert move_san is None
+    assert target_blunder_id is None
+
+
 # === Next Opponent Move Endpoint Tests ===
 
 
-def test_next_opponent_move_ghost_path(client, auth_headers, create_game_session):
+def test_next_opponent_move_ghost_path(client, auth_headers, create_game_session, db_session):
     """Test next-opponent-move returns ghost move with UCI and SAN when path exists."""
     user_id = 123
 
@@ -1007,6 +1151,12 @@ def test_next_opponent_move_ghost_path(client, auth_headers, create_game_session
         headers=auth_headers(user_id=user_id),
     )
     assert blunder_response.status_code == 201
+
+    # Backdate blunder so it's due for SRS review (priority >= 1.0)
+    blunder_id = blunder_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
 
     # Start a NEW game and query next-opponent-move
     new_session_id = create_game_session(user_id=user_id, player_color="white")

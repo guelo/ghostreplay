@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -66,6 +66,12 @@ const uciToSquares = (uci: string) => ({
   startSquare: uci.slice(0, 2),
   endSquare: uci.slice(2, 4),
 });
+
+/** Extract side-to-move from a FEN string without constructing a Chess instance. */
+const fenSideToMove = (fen: string): "w" | "b" => {
+  const idx = fen.indexOf(" ");
+  return (idx >= 0 ? fen[idx + 1] : "w") as "w" | "b";
+};
 
 const ENGINE_ARROW_COLORS = [
   "rgba(59, 130, 246, 0.85)",
@@ -211,11 +217,12 @@ const AnalysisBoard = ({
     });
   }, [displayedFen, evaluatePosition, showEngineArrows]);
 
+  // Side-to-move derived from FEN (avoids constructing Chess just for turn())
+  const sideToMove = useMemo(() => fenSideToMove(displayedFen), [displayedFen]);
+
   // Engine lines with SAN moves and formatted evals for display
   const engineLinesDisplay = useMemo(() => {
     if (engineLines.length === 0) return [];
-    const chess = new Chess(displayedFen);
-    const sideToMove = chess.turn();
     return engineLines
       .filter((line) => line?.pv?.length)
       .map((line) => {
@@ -279,7 +286,7 @@ const AnalysisBoard = ({
       });
     }
     return result;
-  }, [isInWhatIf, engineLines]);
+  }, [engineLines]);
 
   // Arrows for the current position
   const arrows = useMemo(() => {
@@ -342,18 +349,15 @@ const AnalysisBoard = ({
     if (!topLine?.score) return null;
     const raw = topLine.score.type === "cp" ? topLine.score.value : null;
     if (raw === null) return null;
-    // Engine score is from side-to-move perspective; convert to white perspective
-    const chess = new Chess(displayedFen);
-    return chess.turn() === "w" ? raw : -raw;
-  }, [engineLines, displayedFen]);
+    return sideToMove === "w" ? raw : -raw;
+  }, [engineLines, sideToMove]);
 
   const liveEngineEvalMate = useMemo(() => {
     const topLine = engineLines[0];
     if (!topLine?.score) return null;
     if (topLine.score.type !== "mate") return null;
-    const chess = new Chess(displayedFen);
-    return chess.turn() === "w" ? topLine.score.value : -topLine.score.value;
-  }, [engineLines, displayedFen]);
+    return sideToMove === "w" ? topLine.score.value : -topLine.score.value;
+  }, [engineLines, sideToMove]);
 
   const currentEvalCp = useMemo(() => {
     if (isInWhatIf || effectiveIndex < 0) return null;
@@ -495,6 +499,12 @@ const AnalysisBoard = ({
     ],
   );
 
+  const handleToggleEngineArrows = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) =>
+      setShowEngineArrows(e.target.checked),
+    [],
+  );
+
   // Exit what-if mode
   const handleExitWhatIf = useCallback(() => {
     const branchIdx = whatIfBranchPoint;
@@ -550,7 +560,7 @@ const AnalysisBoard = ({
               <input
                 type="checkbox"
                 checked={showEngineArrows}
-                onChange={(e) => setShowEngineArrows(e.target.checked)}
+                onChange={handleToggleEngineArrows}
               />
               Engine lines
             </label>
@@ -676,4 +686,4 @@ const AnalysisBoard = ({
   );
 };
 
-export default AnalysisBoard;
+export default memo(AnalysisBoard);

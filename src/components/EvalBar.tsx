@@ -1,3 +1,5 @@
+import { memo } from "react"
+
 type EvalBarProps = {
   whitePerspectiveCp: number | null
   whitePerspectiveMate?: number | null
@@ -79,4 +81,4 @@ const EvalBar = ({
   )
 }
 
-export default EvalBar
+export default memo(EvalBar)

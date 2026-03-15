@@ -146,6 +146,14 @@ def find_ghost_move(
             last_reviewed_at=row[5],
             created_at=row[6],
         )
+        priority = calculate_priority(
+            pass_streak=candidate.pass_streak,
+            last_reviewed_at=candidate.last_reviewed_at,
+            created_at=candidate.created_at,
+            now=now,
+        )
+        if priority < 1.0:
+            continue
         score = candidate.score(now)
 
         # Tie-breakers keep behavior deterministic in tests and production.
