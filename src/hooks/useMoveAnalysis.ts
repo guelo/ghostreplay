@@ -97,6 +97,8 @@ export const useMoveAnalysis = () => {
   const [streamingEval, setStreamingEval] = useState<{ moveIndex: number; cp: number } | null>(null)
   // Maps request IDs to move indices so we can file results into analysisMap
   const pendingMoveIndices = useRef<Map<string, number>>(new Map())
+  // Throttle streaming eval updates to avoid excessive rerenders
+  const lastStreamingUpdateMs = useRef(0)
 
   // Race tracking: which moveIndices have been resolved (by either source)
   const resolvedIndices = useRef<Set<number>>(new Set())
@@ -199,7 +201,11 @@ export const useMoveAnalysis = () => {
         case 'analysis-streaming': {
           const streamIdx = pendingMoveIndices.current.get(message.id)
           if (streamIdx !== undefined && !resolvedIndices.current.has(streamIdx)) {
-            setStreamingEval({ moveIndex: streamIdx, cp: message.cp })
+            const now = performance.now()
+            if (now - lastStreamingUpdateMs.current >= 250) {
+              lastStreamingUpdateMs.current = now
+              setStreamingEval({ moveIndex: streamIdx, cp: message.cp })
+            }
           }
           break
         }
@@ -207,6 +213,7 @@ export const useMoveAnalysis = () => {
           setIsAnalyzing(false)
           setAnalyzingMove(null)
           setStreamingEval(null)
+          lastStreamingUpdateMs.current = 0
           const moveIndex = pendingMoveIndices.current.get(message.id)
           if (moveIndex !== undefined) {
             pendingMoveIndices.current.delete(message.id)
@@ -312,6 +319,7 @@ export const useMoveAnalysis = () => {
     setLastAnalysis(null)
     setAnalysisMap(new Map())
     setStreamingEval(null)
+    lastStreamingUpdateMs.current = 0
     pendingMoveIndices.current.clear()
     resolvedIndices.current.clear()
     pendingCacheLookups.current.length = 0

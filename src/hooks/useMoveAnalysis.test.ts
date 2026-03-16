@@ -45,6 +45,10 @@ describe('useMoveAnalysis', () => {
     errorHandler = null
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('initializes with booting status', () => {
     const { result } = renderHook(() => useMoveAnalysis())
 
@@ -388,6 +392,247 @@ describe('useMoveAnalysis', () => {
 
     expect(result.current.analysisMap.size).toBe(0)
     expect(result.current.lastAnalysis).toBeNull()
+  })
+
+  // ── analysis-streaming & throttle ────────────────────────────────
+
+  it('sets streamingEval on first analysis-streaming message', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 3)
+    })
+
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 42, depth: 5 })
+    })
+
+    expect(result.current.streamingEval).toEqual({ moveIndex: 3, cp: 42 })
+  })
+
+  it('throttles rapid streaming updates to ~250ms intervals', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    // First message goes through immediately
+    const now = vi.spyOn(performance, 'now')
+    now.mockReturnValue(1000)
+
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 10, depth: 1 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 10 })
+
+    // Second message 100ms later — should be throttled
+    now.mockReturnValue(1100)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 20, depth: 2 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 10 })
+
+    // Third message 249ms after first — still throttled
+    now.mockReturnValue(1249)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 30, depth: 3 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 10 })
+
+    // Fourth message 250ms after first — goes through
+    now.mockReturnValue(1250)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 40, depth: 4 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 40 })
+
+  })
+
+  it('resets throttle timer when analysis completes, allowing immediate update for next move', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    const now = vi.spyOn(performance, 'now')
+
+    // Analyze first move
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+    const id1 = postMessageMock.mock.calls[0][0].id
+
+    // Stream at t=1000
+    now.mockReturnValue(1000)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: id1, cp: 50, depth: 10 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 50 })
+
+    // Complete analysis (resets throttle timer)
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: id1,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 50,
+        delta: 0,
+        blunder: false,
+      })
+    })
+    expect(result.current.streamingEval).toBeNull()
+
+    // Analyze second move — first streaming message should go through immediately
+    // even though only 10ms has passed since previous stream update
+    act(() => {
+      result.current.analyzeMove('fen-2', 'd2d4', 'white', 1)
+    })
+    const id2 = postMessageMock.mock.calls[1][0].id
+
+    now.mockReturnValue(1010)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: id2, cp: 30, depth: 1 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 1, cp: 30 })
+
+  })
+
+  it('resets throttle timer on clearAnalysis', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    const now = vi.spyOn(performance, 'now')
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    now.mockReturnValue(1000)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 50, depth: 5 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 50 })
+
+    // Clear all analysis state
+    act(() => {
+      result.current.clearAnalysis()
+    })
+    expect(result.current.streamingEval).toBeNull()
+
+    // New analysis — first stream should go through immediately
+    act(() => {
+      result.current.analyzeMove('fen-2', 'd2d4', 'white', 0)
+    })
+    const id2 = postMessageMock.mock.calls[1][0].id
+
+    now.mockReturnValue(1010)
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: id2, cp: 25, depth: 1 })
+    })
+    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 25 })
+
+  })
+
+  it('does not update streamingEval for already-resolved move indices', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    // Resolve the analysis first
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 50,
+        delta: 0,
+        blunder: false,
+      })
+    })
+    expect(result.current.streamingEval).toBeNull()
+
+    // Late streaming message for the same request — should be ignored
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 99, depth: 15 })
+    })
+    expect(result.current.streamingEval).toBeNull()
+  })
+
+  it('ignores streaming messages with unknown request IDs', () => {
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: 'unknown-id', cp: 50, depth: 5 })
+    })
+
+    expect(result.current.streamingEval).toBeNull()
+  })
+
+  it('clears streamingEval when analysis completes', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    const { result } = renderHook(() => useMoveAnalysis())
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 42, depth: 5 })
+    })
+    expect(result.current.streamingEval).not.toBeNull()
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 50,
+        playedEval: 50,
+        delta: 0,
+        blunder: false,
+      })
+    })
+    expect(result.current.streamingEval).toBeNull()
   })
 
   it('handles analysis with null eval values', () => {
