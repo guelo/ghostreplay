@@ -483,7 +483,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const moveMessages = useMemo(() => {
     void moveMessagesVersion; // depend on version counter
-    return moveMessagesRef.current as ReadonlyMap<number, MoveMessage[]>;
+    return new Map(
+      Array.from(moveMessagesRef.current, ([moveIndex, messages]) => [
+        moveIndex,
+        [...messages],
+      ]),
+    ) as ReadonlyMap<number, MoveMessage[]>;
   }, [moveMessagesVersion]);
 
 

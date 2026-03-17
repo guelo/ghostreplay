@@ -40,60 +40,53 @@ function renderAndGetHeaderEval(
   return header?.textContent ?? ''
 }
 
-describe('MoveList delta arrows', () => {
-  it('shows ↑ when eval improves for white after a white move', () => {
-    // 1. e4: eval goes from 0 (start) to +0.3
+describe('MoveList eval formulas', () => {
+  it('shows the full eval formula when white improves after a white move', () => {
     const deltas = renderAndGetDeltas([
       { san: 'e4', eval: 30 },
     ])
-    expect(deltas[0]).toContain('↑')
-    expect(deltas[0]).toContain('0.3')
+    expect(deltas[0]).toBe('0 +0.3 = +0.3')
   })
 
-  it('shows ↑ when eval improves for white after a bad black move', () => {
-    // 1. d4 h5: eval goes from +0.3 to +1.6
-    // From white's perspective eval went up by 1.3 → ↑1.3
+  it('shows the full eval formula when white improves after a bad black move', () => {
     const deltas = renderAndGetDeltas([
       { san: 'd4', eval: 30 },
       { san: 'h5', eval: 160 },
     ])
-    expect(deltas[1]).toContain('↑')
-    expect(deltas[1]).toContain('1.3')
+    expect(deltas[1]).toBe('+0.3 +1.3 = +1.6')
   })
 
-  it('shows ↓ when eval drops for white', () => {
-    // White blunders: eval goes from +1.0 to -0.5
+  it('shows the full eval formula when eval drops for white', () => {
     const deltas = renderAndGetDeltas([
       { san: 'e4', eval: 100 },
       { san: 'e5', eval: 50 },
       { san: 'Qh5', eval: -100 },
     ])
-    expect(deltas[2]).toContain('↓')
-    expect(deltas[2]).toContain('1.5')
+    expect(deltas[2]).toBe('+0.5 −1.5 = −1')
   })
 
-  it('shows =0 when eval does not change', () => {
+  it('shows the full eval formula when eval does not change', () => {
     const deltas = renderAndGetDeltas([
       { san: 'e4', eval: 30 },
       { san: 'e5', eval: 30 },
     ])
-    expect(deltas[1]).toBe('=0')
+    expect(deltas[1]).toBe('+0.3 +0 = +0.3')
   })
 
-  it('rounds values less than 5cp to 0', () => {
+  it('rounds values less than 5cp to 0 in the displayed formula', () => {
     const deltas = renderAndGetDeltas([
       { san: 'e4', eval: 0 },
       { san: 'e5', eval: 4 },
     ])
-    expect(deltas[1]).toBe('=0')
+    expect(deltas[1]).toBe('0 +0.0 = +0.0')
   })
 
-  it('shows arrow for 5cp or more', () => {
+  it('shows the rounded delta for 5cp or more', () => {
     const deltas = renderAndGetDeltas([
       { san: 'e4', eval: 0 },
       { san: 'e5', eval: 50 },
     ])
-    expect(deltas[1]).toContain('0.5')
+    expect(deltas[1]).toBe('0 +0.5 = +0.5')
   })
 
   it('shows nothing when eval is not available', () => {
@@ -112,12 +105,10 @@ describe('MoveList delta arrows', () => {
   })
 
   it('first move uses 0 as baseline (starting position)', () => {
-    // First move: eval goes from 0 (implicit start) to +0.5
     const deltas = renderAndGetDeltas([
       { san: 'e4', eval: 50 },
     ])
-    expect(deltas[0]).toContain('↑')
-    expect(deltas[0]).toContain('0.5')
+    expect(deltas[0]).toBe('0 +0.5 = +0.5')
   })
 })
 

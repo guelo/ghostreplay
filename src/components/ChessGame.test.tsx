@@ -145,7 +145,10 @@ describe("ChessGame start flow", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("Black")).toBeInTheDocument();
+      expect(screen.getByTestId("chessboard")).toHaveAttribute(
+        "data-orientation",
+        "black",
+      );
     });
   });
 
@@ -305,7 +308,6 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("Ghost")).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: /toggle ghost info/i }),
       ).toBeInTheDocument();
@@ -527,70 +529,84 @@ describe("ChessGame blunder recording", () => {
   };
 
   it("calls recordBlunder when analysis detects a blunder after user move", async () => {
-    // When analyzeMove is called (during handleDrop), set up a blunder result
-    // for the next render cycle
-    mockAnalyzeMove.mockImplementation(() => {
-      mockLastAnalysis = {
-        id: "test-blunder",
-        move: "e2e4",
-        bestMove: "d2d4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        delta: 200,
-        blunder: true,
-      };
-    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex !== 2) {
+          return;
+        }
+        mockLastAnalysis = {
+          id: "test-blunder",
+          move,
+          bestMove: "c2c4",
+          bestEval: 50,
+          playedEval: -150,
+          currentPositionEval: -150,
+          moveIndex,
+          delta: 200,
+          blunder: true,
+        };
+      },
+    );
 
     const { rerender } = await startGameAsWhite();
 
-    // Simulate user making a move (e2 to e4)
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
 
-    // Wait for analyzeMove to be called
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
     await waitFor(() => {
       expect(mockAnalyzeMove).toHaveBeenCalledWith(
-        expect.stringContaining("rnbqkbnr"), // FEN before move
-        "e2e4",
+        expect.any(String),
+        "g1f3",
         "white",
-        0, // move index
+        2,
         expect.any(Number),
       );
     });
 
-    // Re-render to pick up the new lastAnalysis from the mock
     rerender(<ChessGame />);
 
     await waitFor(() => {
       expect(recordBlunderMock).toHaveBeenCalledWith(
         "session-blunder",
-        expect.any(String), // PGN
-        expect.stringContaining("rnbqkbnr"), // FEN before move
-        "e4", // SAN format
-        "d2d4", // best move
-        50, // eval before
-        -150, // eval after
+        expect.any(String),
+        expect.any(String),
+        "Nf3",
+        "c2c4",
+        50,
+        -150,
       );
     });
   });
 
   it("plays a random bundled blunder audio clip when player blunders", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
-    mockAnalyzeMove.mockImplementation(() => {
-      mockLastAnalysis = {
-        id: "blunder-audio",
-        move: "e2e4",
-        bestMove: "d2d4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        moveIndex: 0,
-        delta: 200,
-        blunder: true,
-      };
-    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex !== 2) {
+          return;
+        }
+        mockLastAnalysis = {
+          id: "blunder-audio",
+          move,
+          bestMove: "c2c4",
+          bestEval: 50,
+          playedEval: -150,
+          currentPositionEval: -150,
+          moveIndex,
+          delta: 200,
+          blunder: true,
+        };
+      },
+    );
 
     const { rerender } = await startGameAsWhite();
 
@@ -599,7 +615,21 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
-      expect(mockAnalyzeMove).toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        "g1f3",
+        "white",
+        2,
+        expect.any(Number),
+      );
     });
 
     rerender(<ChessGame />);
@@ -643,28 +673,47 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("records only the first blunder per session (first-only rule)", async () => {
-    mockAnalyzeMove.mockImplementation(() => {
-      mockLastAnalysis = {
-        id: "blunder-1",
-        move: "e2e4",
-        bestMove: "d2d4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        delta: 200,
-        blunder: true,
-      };
-    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex !== 2) {
+          return;
+        }
+        mockLastAnalysis = {
+          id: "blunder-1",
+          move,
+          bestMove: "c2c4",
+          bestEval: 50,
+          playedEval: -150,
+          currentPositionEval: -150,
+          moveIndex,
+          delta: 200,
+          blunder: true,
+        };
+      },
+    );
 
     const { rerender } = await startGameAsWhite();
 
-    // First move triggers first blunder
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
 
     await waitFor(() => {
-      expect(mockAnalyzeMove).toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        "g1f3",
+        "white",
+        2,
+        expect.any(Number),
+      );
     });
 
     rerender(<ChessGame />);
@@ -676,11 +725,12 @@ describe("ChessGame blunder recording", () => {
     // Simulate a second blunder (different analysis object to trigger useEffect)
     mockLastAnalysis = {
       id: "blunder-2",
-      move: "e2e4",
-      bestMove: "g1f3",
+      move: "g1f3",
+      bestMove: "c2c4",
       bestEval: 100,
       playedEval: -200,
       currentPositionEval: -200,
+      moveIndex: 2,
       delta: 300,
       blunder: true,
     };
@@ -750,18 +800,24 @@ describe("ChessGame blunder recording", () => {
   it("does not retry recordBlunder on API failure", async () => {
     recordBlunderMock.mockRejectedValueOnce(new Error("Network error"));
 
-    mockAnalyzeMove.mockImplementation(() => {
-      mockLastAnalysis = {
-        id: "fail-test",
-        move: "e2e4",
-        bestMove: "d2d4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        delta: 200,
-        blunder: true,
-      };
-    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex !== 2) {
+          return;
+        }
+        mockLastAnalysis = {
+          id: "fail-test",
+          move,
+          bestMove: "c2c4",
+          bestEval: 50,
+          playedEval: -150,
+          currentPositionEval: -150,
+          moveIndex,
+          delta: 200,
+          blunder: true,
+        };
+      },
+    );
 
     const { rerender } = await startGameAsWhite();
 
@@ -770,7 +826,21 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
-      expect(mockAnalyzeMove).toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      expect(mockAnalyzeMove).toHaveBeenCalledWith(
+        expect.any(String),
+        "g1f3",
+        "white",
+        2,
+        expect.any(Number),
+      );
     });
 
     rerender(<ChessGame />);
@@ -782,11 +852,12 @@ describe("ChessGame blunder recording", () => {
     // Even after a second analysis result, no retry since blunderRecordedRef is true
     mockLastAnalysis = {
       id: "fail-test-2",
-      move: "e2e4",
-      bestMove: "d2d4",
+      move: "g1f3",
+      bestMove: "c2c4",
       bestEval: 50,
       playedEval: -150,
       currentPositionEval: -150,
+      moveIndex: 2,
       delta: 200,
       blunder: true,
     };
@@ -926,7 +997,9 @@ describe("ChessGame blunder recording", () => {
       ).toBeInTheDocument();
     });
 
-    expect(screen.getByText("Ghost")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /toggle ghost info/i }),
+    ).toBeInTheDocument();
   });
 
   it("records SRS pass for review target when eval delta is below 50cp", async () => {
@@ -993,9 +1066,11 @@ describe("ChessGame blunder recording", () => {
         20,
       );
     });
-    expect(
-      screen.getByText("Correct! You avoided your past mistake."),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText("Correct! You avoided your past mistake."),
+      ).toBeInTheDocument();
+    });
   });
 
   it("records SRS fail for review target when eval delta is 50cp or higher", async () => {
@@ -1113,9 +1188,11 @@ describe("ChessGame blunder recording", () => {
         20,
       );
     });
-    expect(
-      screen.getByText("Correct! You avoided your past mistake."),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByText("Correct! You avoided your past mistake."),
+      ).toBeInTheDocument();
+    });
   });
 });
 

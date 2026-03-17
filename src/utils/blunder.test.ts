@@ -22,10 +22,10 @@ describe('shouldRecordBlunder', () => {
     overrides: Partial<BlunderContext> = {},
   ): BlunderContext => ({
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
-    pgn: '1. e4',
+    pgn: '1. d4 d5 2. e4',
     moveSan: 'e4', // SAN format (for API)
     moveUci: 'e2e4', // UCI format (for matching with analysis)
-    moveIndex: 0,
+    moveIndex: 2,
     ...overrides,
   })
 
@@ -40,7 +40,7 @@ describe('shouldRecordBlunder', () => {
 
     expect(result).toEqual({
       sessionId: 'session-123',
-      pgn: '1. e4',
+      pgn: '1. d4 d5 2. e4',
       fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
       userMove: 'e4', // SAN format for API
       bestMove: 'd2d4',
@@ -113,6 +113,18 @@ describe('shouldRecordBlunder', () => {
     const result = shouldRecordBlunder({
       analysis: makeAnalysis(),
       context: null,
+      sessionId: 'session-123',
+      isGameActive: true,
+      alreadyRecorded: false,
+    })
+
+    expect(result).toBeNull()
+  })
+
+  it('returns null for the very first move', () => {
+    const result = shouldRecordBlunder({
+      analysis: makeAnalysis(),
+      context: makeContext({ moveIndex: 0 }),
       sessionId: 'session-123',
       isGameActive: true,
       alreadyRecorded: false,
