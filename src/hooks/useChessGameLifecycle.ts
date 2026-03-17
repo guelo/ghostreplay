@@ -5,9 +5,8 @@ import type {
   SetStateAction,
 } from "react";
 import { Chess } from "chess.js";
-import type { AnalysisResult } from "./useMoveAnalysis";
 import type { OpeningLookupResult } from "../openings/openingBook";
-import type { TargetBlunderSrs, RatingChange } from "../utils/api";
+import type { TargetBlunderSrs } from "../utils/api";
 import { endGame, fetchCurrentRating, startGame, uploadSessionMoves } from "../utils/api";
 import type {
   BlunderAlert,
@@ -18,11 +17,12 @@ import { buildSessionMoveUploads } from "../components/chess-game/domain/session
 import type { GameResult } from "../components/chess-game/domain/status";
 import {
   ANALYSIS_UPLOAD_TIMEOUT_MS,
-  MAIA_ELO_BINS,
   STARTING_FEN,
 } from "../components/chess-game/config";
 import { sampleEloBin } from "../components/chess-game/elo";
 import type { BoardOrientation, OpenHistoryOptions } from "../components/chess-game/types";
+import { useGameStore } from "../stores/useGameStore";
+import type { AnalysisStore } from "../stores/createAnalysisStore";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -40,19 +40,7 @@ type PendingSrsReview = {
 
 type UseChessGameLifecycleArgs = {
   chess: Chess;
-  sessionId: string | null;
-  isGameActive: boolean;
-  isRated: boolean;
-  playerColor: BoardOrientation;
-  playerColorChoice: BoardOrientation | "random";
-  engineElo: (typeof MAIA_ELO_BINS)[number];
-  playerRating: number;
-  moveHistory: MoveRecord[];
-  moveCountRef: MutableRefObject<number>;
-  moveHistoryRef: MutableRefObject<MoveRecord[]>;
-  analysisMapRef: MutableRefObject<Map<number, AnalysisResult>>;
-  analysisStatusRef: MutableRefObject<string>;
-  isAnalyzingRef: MutableRefObject<boolean>;
+  analysisStore: AnalysisStore;
   uploadedAnalysisSessionsRef: MutableRefObject<Set<string>>;
   openingHistoryRef: MutableRefObject<(OpeningLookupResult | null)[]>;
   blunderRecordedRef: MutableRefObject<boolean>;
@@ -64,24 +52,9 @@ type UseChessGameLifecycleArgs = {
   clearAnalysis: () => void;
   onOpenHistory?: (options: OpenHistoryOptions) => void;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
-  setPlayerRating: Dispatch<SetStateAction<number>>;
-  setIsProvisional: Dispatch<SetStateAction<boolean>>;
-  setEngineElo: Dispatch<SetStateAction<(typeof MAIA_ELO_BINS)[number]>>;
   setIsStartingGame: Dispatch<SetStateAction<boolean>>;
   setStartError: Dispatch<SetStateAction<string | null>>;
-  setPlayerColor: Dispatch<SetStateAction<BoardOrientation>>;
-  setPlayerColorChoice: Dispatch<
-    SetStateAction<BoardOrientation | "random">
-  >;
-  setBoardOrientation: Dispatch<SetStateAction<BoardOrientation>>;
-  setSessionId: Dispatch<SetStateAction<string | null>>;
-  setIsGameActive: Dispatch<SetStateAction<boolean>>;
   setShowStartOverlay: Dispatch<SetStateAction<boolean>>;
-  setFen: Dispatch<SetStateAction<string>>;
-  setGameResult: Dispatch<SetStateAction<GameResult | null>>;
-  setRatingChange: Dispatch<SetStateAction<RatingChange | null>>;
-  setMoveHistory: Dispatch<SetStateAction<MoveRecord[]>>;
-  setViewIndex: Dispatch<SetStateAction<number | null>>;
   setLiveOpening: Dispatch<SetStateAction<OpeningLookupResult | null>>;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
@@ -91,7 +64,6 @@ type UseChessGameLifecycleArgs = {
   setShowRehookToast: Dispatch<SetStateAction<boolean>>;
   setReviewFailModal: Dispatch<SetStateAction<ReviewFailInfo | null>>;
   setShowPostGamePrompt: Dispatch<SetStateAction<boolean>>;
-  setIsRated: Dispatch<SetStateAction<boolean>>;
   showRevertWarning: boolean;
   setShowRevertWarning: Dispatch<SetStateAction<boolean>>;
 };
@@ -103,19 +75,7 @@ const sleep = (ms: number) =>
 
 export const useChessGameLifecycle = ({
   chess,
-  sessionId,
-  isGameActive,
-  isRated,
-  playerColor,
-  playerColorChoice,
-  engineElo,
-  playerRating,
-  moveHistory,
-  moveCountRef,
-  moveHistoryRef,
-  analysisMapRef,
-  analysisStatusRef,
-  isAnalyzingRef,
+  analysisStore,
   uploadedAnalysisSessionsRef,
   openingHistoryRef,
   blunderRecordedRef,
@@ -127,22 +87,9 @@ export const useChessGameLifecycle = ({
   clearAnalysis,
   onOpenHistory,
   setEngineMessage,
-  setPlayerRating,
-  setIsProvisional,
-  setEngineElo,
   setIsStartingGame,
   setStartError,
-  setPlayerColor,
-  setPlayerColorChoice,
-  setBoardOrientation,
-  setSessionId,
-  setIsGameActive,
   setShowStartOverlay,
-  setFen,
-  setGameResult,
-  setRatingChange,
-  setMoveHistory,
-  setViewIndex,
   setLiveOpening,
   setBlunderAlert,
   setShowFlash,
@@ -152,23 +99,28 @@ export const useChessGameLifecycle = ({
   setShowRehookToast,
   setReviewFailModal,
   setShowPostGamePrompt,
-  setIsRated,
   showRevertWarning,
   setShowRevertWarning,
 }: UseChessGameLifecycleArgs) => {
   useEffect(() => {
     fetchCurrentRating()
       .then((data) => {
-        setPlayerRating(data.current_rating);
-        setIsProvisional(data.is_provisional);
-        setEngineElo(sampleEloBin(data.current_rating));
+        const s = useGameStore.getState();
+        s.setPlayerRating(data.current_rating);
+        s.setIsProvisional(data.is_provisional);
+        // Only resample engine ELO if no active game — otherwise the
+        // displayed Maia name and stake would diverge from the backend session.
+        if (!s.isGameActive) {
+          s.setEngineElo(sampleEloBin(data.current_rating));
+        }
       })
       .catch(() => {});
-  }, [setEngineElo, setIsProvisional, setPlayerRating]);
+  }, []);
 
   const waitForQueuedAnalyses = useCallback(
     async (expectedMoves: number) => {
-      const analysisHasErrored = () => analysisStatusRef.current === "error";
+      const snap = () => analysisStore.getState();
+      const analysisHasErrored = () => snap().status === "error";
 
       if (expectedMoves <= 0) {
         return;
@@ -176,23 +128,23 @@ export const useChessGameLifecycle = ({
 
       if (
         analysisHasErrored() ||
-        analysisMapRef.current.size >= expectedMoves
+        snap().analysisMap.size >= expectedMoves
       ) {
         return;
       }
 
-      const initialSize = analysisMapRef.current.size;
+      const initialSize = snap().analysisMap.size;
       await sleep(150);
       if (
         analysisHasErrored() ||
-        analysisMapRef.current.size >= expectedMoves
+        snap().analysisMap.size >= expectedMoves
       ) {
         return;
       }
 
       if (
-        !isAnalyzingRef.current &&
-        analysisMapRef.current.size === initialSize
+        !snap().isAnalyzing &&
+        snap().analysisMap.size === initialSize
       ) {
         return;
       }
@@ -201,15 +153,15 @@ export const useChessGameLifecycle = ({
       while (Date.now() < deadline) {
         if (
           analysisHasErrored() ||
-          analysisMapRef.current.size >= expectedMoves
+          snap().analysisMap.size >= expectedMoves
         ) {
           return;
         }
 
-        if (!isAnalyzingRef.current) {
-          const sizeBeforeIdleCheck = analysisMapRef.current.size;
+        if (!snap().isAnalyzing) {
+          const sizeBeforeIdleCheck = snap().analysisMap.size;
           await sleep(100);
-          if (analysisMapRef.current.size === sizeBeforeIdleCheck) {
+          if (snap().analysisMap.size === sizeBeforeIdleCheck) {
             return;
           }
         } else {
@@ -217,7 +169,7 @@ export const useChessGameLifecycle = ({
         }
       }
     },
-    [analysisMapRef, analysisStatusRef, isAnalyzingRef],
+    [analysisStore],
   );
 
   const uploadSessionAnalysisBatch = useCallback(
@@ -228,13 +180,13 @@ export const useChessGameLifecycle = ({
 
       await waitForQueuedAnalyses(expectedMoveCount);
 
-      const historySnapshot = [...moveHistoryRef.current];
+      const historySnapshot = [...useGameStore.getState().moveHistory];
       if (historySnapshot.length === 0) {
         uploadedAnalysisSessionsRef.current.add(targetSessionId);
         return;
       }
 
-      const analysesSnapshot = new Map(analysisMapRef.current);
+      const analysesSnapshot = new Map(analysisStore.getState().analysisMap);
       const payload = buildSessionMoveUploads(
         historySnapshot,
         analysesSnapshot,
@@ -244,21 +196,21 @@ export const useChessGameLifecycle = ({
       uploadedAnalysisSessionsRef.current.add(targetSessionId);
     },
     [
-      analysisMapRef,
-      moveHistoryRef,
+      analysisStore,
       uploadedAnalysisSessionsRef,
       waitForQueuedAnalyses,
     ],
   );
 
   const handleGameEnd = useCallback(async () => {
-    if (!sessionId || !isGameActive) return;
+    const store = useGameStore.getState();
+    if (!store.sessionId || !store.isGameActive) return;
 
     let result: GameResult | null = null;
 
     if (chess.isCheckmate()) {
       const loser = chess.turn() === "w" ? "white" : "black";
-      const playerWon = playerColor !== loser;
+      const playerWon = store.playerColor !== loser;
       result = playerWon
         ? { type: "checkmate_win", message: "Checkmate! You won!" }
         : { type: "checkmate_loss", message: "Checkmate! You lost." };
@@ -275,7 +227,10 @@ export const useChessGameLifecycle = ({
     if (result) {
       try {
         try {
-          await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
+          await uploadSessionAnalysisBatch(
+            store.sessionId,
+            store.moveHistory.length,
+          );
         } catch (uploadError) {
           console.error(
             "[SessionMoves] Failed to upload session moves:",
@@ -283,18 +238,19 @@ export const useChessGameLifecycle = ({
           );
         }
         const endResponse = await endGame(
-          sessionId,
+          store.sessionId,
           result.type,
           chess.pgn(),
-          isRated,
+          store.isRated,
         );
         if (endResponse.rating) {
-          setRatingChange(endResponse.rating);
-          setPlayerRating(endResponse.rating.rating_after);
-          setIsProvisional(endResponse.rating.is_provisional);
+          const s = useGameStore.getState();
+          s.setRatingChange(endResponse.rating);
+          s.setPlayerRating(endResponse.rating.rating_after);
+          s.setIsProvisional(endResponse.rating.is_provisional);
         }
-        setIsGameActive(false);
-        setGameResult(result);
+        useGameStore.getState().setIsGameActive(false);
+        useGameStore.getState().setGameResult(result);
         setShowPostGamePrompt(true);
       } catch (error) {
         const message =
@@ -304,40 +260,29 @@ export const useChessGameLifecycle = ({
     }
   }, [
     chess,
-    isGameActive,
-    isRated,
-    moveCountRef,
-    playerColor,
-    sessionId,
     setEngineMessage,
-    setGameResult,
-    setIsGameActive,
-    setIsProvisional,
-    setPlayerRating,
-    setRatingChange,
     setShowPostGamePrompt,
     uploadSessionAnalysisBatch,
   ]);
 
   const executeRevert = useCallback(() => {
-    if (!isGameActive || moveHistory.length === 0 || chess.isGameOver()) return;
+    const store = useGameStore.getState();
+    if (!store.isGameActive || store.moveHistory.length === 0 || chess.isGameOver()) return;
 
-    setIsRated(false);
+    store.setIsRated(false);
     setShowRevertWarning(false);
 
-    const isPlayerTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
-    const undoCount = isPlayerTurn && moveHistory.length >= 2 ? 2 : 1;
+    const isPlayerTurn = chess.turn() === (store.playerColor === "white" ? "w" : "b");
+    const undoCount = isPlayerTurn && store.moveHistory.length >= 2 ? 2 : 1;
 
     for (let i = 0; i < undoCount; i++) {
       chess.undo();
     }
 
-    const newHistory = moveHistory.slice(0, -undoCount);
-    moveHistoryRef.current = newHistory;
-    moveCountRef.current = newHistory.length;
-    setMoveHistory(newHistory);
-    setFen(chess.fen());
-    setViewIndex(null);
+    const newHistory = store.moveHistory.slice(0, -undoCount);
+    store.setMoveHistory(newHistory);
+    store.setLiveFen(chess.fen());
+    store.setViewIndex(null);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
     setBlunderAlert(null);
@@ -345,30 +290,21 @@ export const useChessGameLifecycle = ({
     pendingAnalysisContextRef.current = null;
   }, [
     chess,
-    isGameActive,
-    moveCountRef,
-    moveHistory,
-    moveHistoryRef,
     pendingAnalysisContextRef,
     pendingSrsReviewRef,
-    playerColor,
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
-    setFen,
-    setIsRated,
-    setMoveHistory,
     setShowRevertWarning,
-    setViewIndex,
   ]);
 
   const handleRevertClick = useCallback(() => {
-    if (isRated) {
+    if (useGameStore.getState().isRated) {
       setShowRevertWarning(true);
     } else {
       executeRevert();
     }
-  }, [executeRevert, isRated, setShowRevertWarning]);
+  }, [executeRevert, setShowRevertWarning]);
 
   const cancelRevert = useCallback(() => {
     setShowRevertWarning(false);
@@ -379,47 +315,53 @@ export const useChessGameLifecycle = ({
       try {
         setIsStartingGame(true);
         setStartError(null);
-        if (sessionId && isGameActive) {
+
+        const store = useGameStore.getState();
+        if (store.sessionId && store.isGameActive) {
           try {
-            await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
+            await uploadSessionAnalysisBatch(
+              store.sessionId,
+              store.moveHistory.length,
+            );
           } catch (uploadError) {
             console.error(
               "[SessionMoves] Failed to upload session moves:",
               uploadError,
             );
           }
-          await endGame(sessionId, "abandon", chess.pgn(), isRated);
+          await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
         }
 
-        const effectiveChoice = colorOverride ?? playerColorChoice;
+        const effectiveChoice = colorOverride ?? store.playerColorChoice;
         const resolvedPlayerColor =
           effectiveChoice === "random"
             ? Math.random() < 0.5
               ? "white"
               : "black"
             : effectiveChoice;
-        setPlayerColor(resolvedPlayerColor);
-        setBoardOrientation(resolvedPlayerColor);
 
-        const response = await startGame(engineElo, resolvedPlayerColor);
-        setSessionId(response.session_id);
-        setIsGameActive(true);
+        const s = useGameStore.getState();
+        s.setPlayerColor(resolvedPlayerColor);
+        s.setBoardOrientation(resolvedPlayerColor);
+
+        const response = await startGame(store.engineElo, resolvedPlayerColor);
+        const s2 = useGameStore.getState();
+        s2.setSessionId(response.session_id);
+        s2.setIsGameActive(true);
         setIsStartingGame(false);
         setShowStartOverlay(false);
 
         chess.reset();
-        setFen(chess.fen());
+        s2.setLiveFen(chess.fen());
         setEngineMessage(null);
-        setGameResult(null);
-        setRatingChange(null);
-        setMoveHistory([]);
-        moveCountRef.current = 0;
-        setViewIndex(null);
+        s2.setGameResult(null);
+        s2.setRatingChange(null);
+        s2.setMoveHistory([]);
+        s2.setViewIndex(null);
         setLiveOpening(null);
         openingHistoryRef.current = [];
         resetEngine();
         clearAnalysis();
-        moveHistoryRef.current = [];
         uploadedAnalysisSessionsRef.current.clear();
         setBlunderAlert(null);
         setShowFlash(false);
@@ -428,7 +370,7 @@ export const useChessGameLifecycle = ({
         setShowPassToast(false);
         setReviewFailModal(null);
         setShowPostGamePrompt(false);
-        setIsRated(true);
+        s2.setIsRated(true);
         setShowRevertWarning(false);
         clearMoveHighlights();
         blunderRecordedRef.current = false;
@@ -448,68 +390,62 @@ export const useChessGameLifecycle = ({
       chess,
       clearAnalysis,
       clearMoveHighlights,
-      engineElo,
-      isGameActive,
-      isRated,
-      moveCountRef,
-      moveHistoryRef,
       openingHistoryRef,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
-      playerColorChoice,
       resetEngine,
       resetMode,
-      sessionId,
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
-      setBoardOrientation,
       setEngineMessage,
-      setFen,
-      setGameResult,
-      setIsGameActive,
-      setIsRated,
       setIsStartingGame,
       setLiveOpening,
-      setMoveHistory,
-      setPlayerColor,
-      setRatingChange,
       setReviewFailModal,
-      setSessionId,
       setShowFlash,
       setShowPassToast,
       setShowPostGamePrompt,
       setShowRevertWarning,
       setShowStartOverlay,
       setStartError,
-      setViewIndex,
       uploadSessionAnalysisBatch,
       uploadedAnalysisSessionsRef,
     ],
   );
 
   const handleResign = useCallback(async () => {
-    if (!sessionId || !isGameActive) {
+    const store = useGameStore.getState();
+    if (!store.sessionId || !store.isGameActive) {
       return;
     }
 
     try {
       try {
-        await uploadSessionAnalysisBatch(sessionId, moveCountRef.current);
+        await uploadSessionAnalysisBatch(
+          store.sessionId,
+          store.moveHistory.length,
+        );
       } catch (uploadError) {
         console.error(
           "[SessionMoves] Failed to upload session moves:",
           uploadError,
         );
       }
-      const endResponse = await endGame(sessionId, "resign", chess.pgn(), isRated);
+      const endResponse = await endGame(
+        store.sessionId,
+        "resign",
+        chess.pgn(),
+        store.isRated,
+      );
       if (endResponse.rating) {
-        setRatingChange(endResponse.rating);
-        setPlayerRating(endResponse.rating.rating_after);
-        setIsProvisional(endResponse.rating.is_provisional);
+        const s = useGameStore.getState();
+        s.setRatingChange(endResponse.rating);
+        s.setPlayerRating(endResponse.rating.rating_after);
+        s.setIsProvisional(endResponse.rating.is_provisional);
       }
-      setIsGameActive(false);
-      setGameResult({ type: "resign", message: "You resigned." });
+      const s = useGameStore.getState();
+      s.setIsGameActive(false);
+      s.setGameResult({ type: "resign", message: "You resigned." });
       setShowPostGamePrompt(true);
     } catch (error) {
       const message =
@@ -518,36 +454,26 @@ export const useChessGameLifecycle = ({
     }
   }, [
     chess,
-    isGameActive,
-    isRated,
-    moveCountRef,
-    sessionId,
     setEngineMessage,
-    setGameResult,
-    setIsGameActive,
-    setIsProvisional,
-    setPlayerRating,
-    setRatingChange,
     setShowPostGamePrompt,
     uploadSessionAnalysisBatch,
   ]);
 
   const handleReset = useCallback(() => {
+    const store = useGameStore.getState();
     chess.reset();
-    setFen(chess.fen());
-    setBoardOrientation(playerColor);
+    store.setLiveFen(chess.fen());
+    store.setBoardOrientation(store.playerColor);
     setEngineMessage(null);
-    setSessionId(null);
-    setIsGameActive(false);
-    setGameResult(null);
-    setMoveHistory([]);
-    moveCountRef.current = 0;
-    setViewIndex(null);
+    store.setSessionId(null);
+    store.setIsGameActive(false);
+    store.setGameResult(null);
+    store.setMoveHistory([]);
+    store.setViewIndex(null);
     setLiveOpening(null);
     openingHistoryRef.current = [];
     resetEngine();
     clearAnalysis();
-    moveHistoryRef.current = [];
     uploadedAnalysisSessionsRef.current.clear();
     setBlunderAlert(null);
     setShowFlash(false);
@@ -558,7 +484,7 @@ export const useChessGameLifecycle = ({
     setShowStartOverlay(true);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
-    setIsRated(true);
+    store.setIsRated(true);
     setShowRevertWarning(false);
     clearMoveHighlights();
     blunderRecordedRef.current = false;
@@ -570,46 +496,33 @@ export const useChessGameLifecycle = ({
     chess,
     clearAnalysis,
     clearMoveHighlights,
-    moveCountRef,
-    moveHistoryRef,
     openingHistoryRef,
     pendingAnalysisContextRef,
     pendingSrsReviewRef,
-    playerColor,
     resetEngine,
     resetMode,
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
-    setBoardOrientation,
     setEngineMessage,
-    setFen,
-    setGameResult,
-    setIsGameActive,
-    setIsRated,
     setLiveOpening,
-    setMoveHistory,
     setReviewFailModal,
-    setSessionId,
     setShowFlash,
     setShowPassToast,
     setShowPostGamePrompt,
     setShowRehookToast,
     setShowRevertWarning,
     setShowStartOverlay,
-    setViewIndex,
     uploadedAnalysisSessionsRef,
   ]);
 
   const handleShowStartOverlay = useCallback(() => {
-    setPlayerColorChoice("random");
+    const store = useGameStore.getState();
+    store.setPlayerColorChoice("random");
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
-    setEngineElo(sampleEloBin(playerRating));
+    store.setEngineElo(sampleEloBin(store.playerRating));
   }, [
-    playerRating,
-    setEngineElo,
-    setPlayerColorChoice,
     setShowPostGamePrompt,
     setShowStartOverlay,
   ]);

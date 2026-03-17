@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "../test/utils";
 import ChessGame from "./ChessGame";
+import { useGameStore } from "../stores/useGameStore";
 
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
@@ -42,30 +43,22 @@ vi.mock("../openings/openingBook", () => ({
   lookupOpeningByFen: (...args: unknown[]) => lookupOpeningByFenMock(...args),
 }));
 
-let mockLastAnalysis: {
-  id: string;
-  move: string;
-  bestMove: string;
-  bestEval: number | null;
-  playedEval: number | null;
-  currentPositionEval: number | null;
-  moveIndex?: number | null;
-  delta: number | null;
-  blunder: boolean;
-} | null = null;
-let mockAnalysisMap = new Map<number, unknown>();
+import type { AnalysisStore } from "../stores/createAnalysisStore";
+import { gameAnalysisStore } from "../stores/createAnalysisStore";
+
+let capturedAnalysisStore: AnalysisStore | null = null;
 const mockAnalyzeMove = vi.fn();
+const mockClearAnalysis = vi.fn();
 
 vi.mock("../hooks/useMoveAnalysis", () => ({
-  useMoveAnalysis: () => ({
-    analyzeMove: mockAnalyzeMove,
-    lastAnalysis: mockLastAnalysis,
-    analysisMap: mockAnalysisMap,
-    status: "ready",
-    isAnalyzing: false,
-    analyzingMove: null,
-    clearAnalysis: vi.fn(),
-  }),
+  useMoveAnalysis: (store: AnalysisStore) => {
+    capturedAnalysisStore = store;
+    store.getState().setStatus("ready");
+    return {
+      analyzeMove: mockAnalyzeMove,
+      clearAnalysis: mockClearAnalysis,
+    };
+  },
 }));
 
 // Capture onPieceDrop from the Chessboard mock so tests can simulate moves
@@ -87,7 +80,11 @@ vi.mock("react-chessboard", () => ({
   },
 }));
 
+const initialGameStoreState = useGameStore.getInitialState();
+
 beforeEach(() => {
+  useGameStore.setState(initialGameStoreState, true);
+  gameAnalysisStore.getState().clearAll();
   fetchCurrentRatingMock.mockReset();
   fetchCurrentRatingMock.mockResolvedValue({
     current_rating: 1200,
@@ -105,7 +102,7 @@ describe("ChessGame start flow", () => {
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
     lookupOpeningByFenMock.mockReset();
-    mockAnalysisMap = new Map();
+    capturedAnalysisStore = null;
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
     // Default: backend returns engine-mode move
     getNextOpponentMoveMock.mockResolvedValue({
@@ -189,8 +186,7 @@ describe("ChessGame characterization safeguards", () => {
     mockAnalyzeMove.mockReset();
     evaluatePositionMock.mockReset();
     lookupOpeningByFenMock.mockReset();
-    mockLastAnalysis = null;
-    mockAnalysisMap = new Map();
+    capturedAnalysisStore = null;
     capturedPieceDrop = null;
     capturedSquareClick = null;
 
@@ -379,8 +375,7 @@ describe("ChessGame eval bar behavior", () => {
     mockAnalyzeMove.mockReset();
     evaluatePositionMock.mockReset();
     lookupOpeningByFenMock.mockReset();
-    mockLastAnalysis = null;
-    mockAnalysisMap = new Map();
+    capturedAnalysisStore = null;
     capturedPieceDrop = null;
 
     startGameMock.mockResolvedValue({
@@ -416,24 +411,19 @@ describe("ChessGame eval bar behavior", () => {
     });
 
     // Only the earlier move has analysis so far.
-    mockAnalysisMap = new Map([
-      [
-        0,
-        {
-          id: "analysis-0",
-          move: "e2e4",
-          bestMove: "e2e4",
-          bestEval: 80,
-          playedEval: 80,
-          currentPositionEval: 80,
-          moveIndex: 0,
-          delta: 0,
-          blunder: false,
-        },
-      ],
-    ]);
-
-    rerender(<ChessGame />);
+    act(() => {
+      capturedAnalysisStore?.getState().resolveAnalysis(0, {
+        id: "analysis-0",
+        move: "e2e4",
+        bestMove: "e2e4",
+        bestEval: 80,
+        playedEval: 80,
+        currentPositionEval: 80,
+        moveIndex: 0,
+        delta: 0,
+        blunder: false,
+      });
+    });
 
     await waitFor(() => {
       expect(
@@ -458,8 +448,7 @@ describe("ChessGame blunder recording", () => {
     mockAnalyzeMove.mockReset();
     evaluatePositionMock.mockReset();
     lookupOpeningByFenMock.mockReset();
-    mockLastAnalysis = null;
-    mockAnalysisMap = new Map();
+    capturedAnalysisStore = null;
     capturedPieceDrop = null;
 
     getNextOpponentMoveMock.mockResolvedValue({
@@ -504,7 +493,6 @@ describe("ChessGame blunder recording", () => {
   });
 
   afterEach(() => {
-    mockLastAnalysis = null;
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -534,7 +522,7 @@ describe("ChessGame blunder recording", () => {
         if (moveIndex !== 2) {
           return;
         }
-        mockLastAnalysis = {
+        capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
           id: "test-blunder",
           move,
           bestMove: "c2c4",
@@ -544,11 +532,11 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
-        };
+        });
       },
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -571,8 +559,6 @@ describe("ChessGame blunder recording", () => {
         expect.any(Number),
       );
     });
-
-    rerender(<ChessGame />);
 
     await waitFor(() => {
       expect(recordBlunderMock).toHaveBeenCalledWith(
@@ -594,7 +580,7 @@ describe("ChessGame blunder recording", () => {
         if (moveIndex !== 2) {
           return;
         }
-        mockLastAnalysis = {
+        capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
           id: "blunder-audio",
           move,
           bestMove: "c2c4",
@@ -604,11 +590,11 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
-        };
+        });
       },
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -632,8 +618,6 @@ describe("ChessGame blunder recording", () => {
       );
     });
 
-    rerender(<ChessGame />);
-
     await waitFor(() => {
       expect(audioCtorSpy).toHaveBeenCalledWith("/audio/blunder1.m4a");
       expect(audioPlayMock).toHaveBeenCalled();
@@ -641,20 +625,23 @@ describe("ChessGame blunder recording", () => {
   });
 
   it("does not call recordBlunder for non-blunder analysis", async () => {
-    mockAnalyzeMove.mockImplementation(() => {
-      mockLastAnalysis = {
-        id: "test-ok",
-        move: "e2e4",
-        bestMove: "e2e4",
-        bestEval: 50,
-        playedEval: 40,
-        currentPositionEval: 40,
-        delta: 10,
-        blunder: false,
-      };
-    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        capturedAnalysisStore?.getState().setLastAnalysis({
+          id: "test-ok",
+          move,
+          bestMove: move,
+          bestEval: 50,
+          playedEval: 40,
+          currentPositionEval: 40,
+          moveIndex,
+          delta: 10,
+          blunder: false,
+        });
+      },
+    );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -663,8 +650,6 @@ describe("ChessGame blunder recording", () => {
     await waitFor(() => {
       expect(mockAnalyzeMove).toHaveBeenCalled();
     });
-
-    rerender(<ChessGame />);
 
     // Give effects time to run
     await new Promise((r) => setTimeout(r, 50));
@@ -678,7 +663,7 @@ describe("ChessGame blunder recording", () => {
         if (moveIndex !== 2) {
           return;
         }
-        mockLastAnalysis = {
+        capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
           id: "blunder-1",
           move,
           bestMove: "c2c4",
@@ -688,11 +673,11 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
-        };
+        });
       },
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -716,26 +701,24 @@ describe("ChessGame blunder recording", () => {
       );
     });
 
-    rerender(<ChessGame />);
-
     await waitFor(() => {
       expect(recordBlunderMock).toHaveBeenCalledTimes(1);
     });
 
     // Simulate a second blunder (different analysis object to trigger useEffect)
-    mockLastAnalysis = {
-      id: "blunder-2",
-      move: "g1f3",
-      bestMove: "c2c4",
-      bestEval: 100,
-      playedEval: -200,
-      currentPositionEval: -200,
-      moveIndex: 2,
-      delta: 300,
-      blunder: true,
-    };
-
-    rerender(<ChessGame />);
+    act(() => {
+      capturedAnalysisStore?.getState().setLastAnalysis({
+        id: "blunder-2",
+        move: "g1f3",
+        bestMove: "c2c4",
+        bestEval: 100,
+        playedEval: -200,
+        currentPositionEval: -200,
+        moveIndex: 2,
+        delta: 300,
+        blunder: true,
+      });
+    });
 
     // Wait for any effects
     await new Promise((r) => setTimeout(r, 50));
@@ -746,20 +729,23 @@ describe("ChessGame blunder recording", () => {
 
   it("does not call recordBlunder when move UCI does not match analysis", async () => {
     // Analysis is for a different move than what was played
-    mockAnalyzeMove.mockImplementation(() => {
-      mockLastAnalysis = {
-        id: "test-mismatch",
-        move: "g1f3", // Analysis is for Nf3, not e4
-        bestMove: "d2d4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        delta: 200,
-        blunder: true,
-      };
-    });
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, _move: string, _color: string, moveIndex: number) => {
+        capturedAnalysisStore?.getState().setLastAnalysis({
+          id: "test-mismatch",
+          move: "g1f3", // Analysis is for Nf3, not e4
+          bestMove: "d2d4",
+          bestEval: 50,
+          playedEval: -150,
+          currentPositionEval: -150,
+          moveIndex,
+          delta: 200,
+          blunder: true,
+        });
+      },
+    );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     // User plays e2e4, but analysis will claim it's for g1f3
     await act(async () => {
@@ -770,8 +756,6 @@ describe("ChessGame blunder recording", () => {
       expect(mockAnalyzeMove).toHaveBeenCalled();
     });
 
-    rerender(<ChessGame />);
-
     await new Promise((r) => setTimeout(r, 50));
 
     expect(recordBlunderMock).not.toHaveBeenCalled();
@@ -779,18 +763,22 @@ describe("ChessGame blunder recording", () => {
 
   it("does not call recordBlunder when no session is active", async () => {
     // Don't start a game - just render with no session
-    mockLastAnalysis = {
-      id: "no-session",
-      move: "e2e4",
-      bestMove: "d2d4",
-      bestEval: 50,
-      playedEval: -150,
-      currentPositionEval: -150,
-      delta: 200,
-      blunder: true,
-    };
-
     render(<ChessGame />);
+
+    // Set lastAnalysis after render so the store exists
+    act(() => {
+      capturedAnalysisStore?.getState().setLastAnalysis({
+        id: "no-session",
+        move: "e2e4",
+        bestMove: "d2d4",
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        moveIndex: null,
+        delta: 200,
+        blunder: true,
+      });
+    });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -805,7 +793,7 @@ describe("ChessGame blunder recording", () => {
         if (moveIndex !== 2) {
           return;
         }
-        mockLastAnalysis = {
+        capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
           id: "fail-test",
           move,
           bestMove: "c2c4",
@@ -815,11 +803,11 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
-        };
+        });
       },
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -843,26 +831,24 @@ describe("ChessGame blunder recording", () => {
       );
     });
 
-    rerender(<ChessGame />);
-
     await waitFor(() => {
       expect(recordBlunderMock).toHaveBeenCalledTimes(1);
     });
 
     // Even after a second analysis result, no retry since blunderRecordedRef is true
-    mockLastAnalysis = {
-      id: "fail-test-2",
-      move: "g1f3",
-      bestMove: "c2c4",
-      bestEval: 50,
-      playedEval: -150,
-      currentPositionEval: -150,
-      moveIndex: 2,
-      delta: 200,
-      blunder: true,
-    };
-
-    rerender(<ChessGame />);
+    act(() => {
+      capturedAnalysisStore?.getState().setLastAnalysis({
+        id: "fail-test-2",
+        move: "g1f3",
+        bestMove: "c2c4",
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        moveIndex: 2,
+        delta: 200,
+        blunder: true,
+      });
+    });
 
     await new Promise((r) => setTimeout(r, 50));
 
@@ -1021,7 +1007,7 @@ describe("ChessGame blunder recording", () => {
     mockAnalyzeMove.mockImplementation(
       (_fen: string, move: string, _color: string, moveIndex: number) => {
         if (moveIndex === 2) {
-          mockLastAnalysis = {
+          capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
             id: "review-pass",
             move,
             bestMove: "g1f3",
@@ -1031,12 +1017,12 @@ describe("ChessGame blunder recording", () => {
             moveIndex: 2,
             delta: 20,
             blunder: false,
-          };
+          });
         }
       },
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -1055,7 +1041,6 @@ describe("ChessGame blunder recording", () => {
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
     });
-    rerender(<ChessGame />);
 
     await waitFor(() => {
       expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
@@ -1092,7 +1077,7 @@ describe("ChessGame blunder recording", () => {
     mockAnalyzeMove.mockImplementation(
       (_fen: string, move: string, _color: string, moveIndex: number) => {
         if (moveIndex === 2) {
-          mockLastAnalysis = {
+          capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
             id: "review-fail",
             move,
             bestMove: "g1f3",
@@ -1102,12 +1087,12 @@ describe("ChessGame blunder recording", () => {
             moveIndex: 2,
             delta: 50,
             blunder: false,
-          };
+          });
         }
       },
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -1115,7 +1100,6 @@ describe("ChessGame blunder recording", () => {
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
     });
-    rerender(<ChessGame />);
 
     await waitFor(() => {
       expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
@@ -1150,7 +1134,7 @@ describe("ChessGame blunder recording", () => {
     mockAnalyzeMove.mockImplementation(
       (_fen: string, move: string, _color: string, moveIndex: number) => {
         if (moveIndex === 2) {
-          mockLastAnalysis = {
+          capturedAnalysisStore?.getState().resolveAnalysis(moveIndex, {
             id: "review-pass-api-error",
             move,
             bestMove: "g1f3",
@@ -1160,7 +1144,7 @@ describe("ChessGame blunder recording", () => {
             moveIndex: 2,
             delta: 20,
             blunder: false,
-          };
+          });
         }
       },
     );
@@ -1169,7 +1153,7 @@ describe("ChessGame blunder recording", () => {
       new Error("Failed to record SRS review"),
     );
 
-    const { rerender } = await startGameAsWhite();
+    await startGameAsWhite();
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
@@ -1177,7 +1161,6 @@ describe("ChessGame blunder recording", () => {
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
     });
-    rerender(<ChessGame />);
 
     await waitFor(() => {
       expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
@@ -1209,8 +1192,7 @@ describe("ChessGame move analysis", () => {
     mockAnalyzeMove.mockReset();
     evaluatePositionMock.mockReset();
     lookupOpeningByFenMock.mockReset();
-    mockLastAnalysis = null;
-    mockAnalysisMap = new Map();
+    capturedAnalysisStore = null;
     capturedPieceDrop = null;
 
     getNextOpponentMoveMock.mockResolvedValue({
@@ -1230,7 +1212,6 @@ describe("ChessGame move analysis", () => {
   });
 
   afterEach(() => {
-    mockLastAnalysis = null;
     vi.restoreAllMocks();
   });
 
@@ -1343,27 +1324,29 @@ describe("ChessGame move analysis", () => {
       );
     });
 
-    mockAnalysisMap.set(0, {
-      id: "analysis-0",
-      move: "e2e4",
-      bestMove: "e2e4",
-      bestEval: 25,
-      playedEval: 25,
-      currentPositionEval: 25,
-      moveIndex: 0,
-      delta: 0,
-      blunder: false,
-    });
-    mockAnalysisMap.set(1, {
-      id: "analysis-1",
-      move: "d7d5",
-      bestMove: "d7d5",
-      bestEval: 16,
-      playedEval: 8,
-      currentPositionEval: 8,
-      moveIndex: 1,
-      delta: 8,
-      blunder: false,
+    act(() => {
+      capturedAnalysisStore?.getState().resolveAnalysis(0, {
+        id: "analysis-0",
+        move: "e2e4",
+        bestMove: "e2e4",
+        bestEval: 25,
+        playedEval: 25,
+        currentPositionEval: 25,
+        moveIndex: 0,
+        delta: 0,
+        blunder: false,
+      });
+      capturedAnalysisStore?.getState().resolveAnalysis(1, {
+        id: "analysis-1",
+        move: "d7d5",
+        bestMove: "d7d5",
+        bestEval: 16,
+        playedEval: 8,
+        currentPositionEval: 8,
+        moveIndex: 1,
+        delta: 8,
+        blunder: false,
+      });
     });
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
@@ -1418,7 +1401,7 @@ describe("ChessGame opening display", () => {
     getNextOpponentMoveMock.mockReset();
     evaluatePositionMock.mockReset();
     lookupOpeningByFenMock.mockReset();
-    mockAnalysisMap = new Map();
+    capturedAnalysisStore = null;
     capturedPieceDrop = null;
 
     getNextOpponentMoveMock.mockResolvedValue({
@@ -1535,5 +1518,162 @@ describe("ChessGame opening display", () => {
     // Should retain the last known opening, not show "Unknown"
     expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
     expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+  });
+});
+
+describe("ChessGame remount persistence", () => {
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    startGameMock.mockReset();
+    endGameMock.mockReset();
+    endGameMock.mockResolvedValue({});
+    uploadSessionMovesMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    recordBlunderMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    evaluatePositionMock.mockReset();
+    lookupOpeningByFenMock.mockReset();
+    capturedAnalysisStore = null;
+    capturedPieceDrop = null;
+
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "engine",
+      move: { uci: "d7d5", san: "d5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    lookupOpeningByFenMock.mockResolvedValue(null);
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("preserves analysis data across unmount/remount and includes it in session upload on resign", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-remount",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+
+    const { unmount } = render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    // Populate analysis for both moves
+    act(() => {
+      capturedAnalysisStore?.getState().resolveAnalysis(0, {
+        id: "analysis-0",
+        move: "e2e4",
+        bestMove: "e2e4",
+        bestEval: 30,
+        playedEval: 30,
+        currentPositionEval: 30,
+        moveIndex: 0,
+        delta: 0,
+        blunder: false,
+      });
+      capturedAnalysisStore?.getState().resolveAnalysis(1, {
+        id: "analysis-1",
+        move: "d7d5",
+        bestMove: "d7d5",
+        bestEval: 20,
+        playedEval: 20,
+        currentPositionEval: 20,
+        moveIndex: 1,
+        delta: 0,
+        blunder: false,
+      });
+    });
+
+    // Verify analysis data is present before unmount
+    expect(gameAnalysisStore.getState().analysisMap.size).toBe(2);
+
+    // Unmount (simulates navigating away from /game)
+    unmount();
+
+    // Analysis data survives in the singleton store
+    expect(gameAnalysisStore.getState().analysisMap.size).toBe(2);
+
+    // Remount (simulates navigating back to /game)
+    render(<ChessGame />);
+
+    // Move list should still show both moves (game store persists moveHistory)
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /e4/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    // Resign — session upload should include the persisted analysis
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+
+    await waitFor(() => {
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1);
+    });
+
+    // The upload should contain 2 moves with analysis data
+    const uploadedMoves = uploadSessionMovesMock.mock.calls[0][1];
+    expect(uploadedMoves).toHaveLength(2);
+    expect(uploadedMoves[0]).toEqual(
+      expect.objectContaining({ move_san: "e4", eval_cp: 30 }),
+    );
+    expect(uploadedMoves[1]).toEqual(
+      expect.objectContaining({ move_san: "d5", eval_cp: 20 }),
+    );
+  });
+
+  it("does not overwrite engine ELO on remount when a game is active", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-elo",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+
+    const { unmount } = render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+
+    const eloAfterStart = useGameStore.getState().engineElo;
+
+    // Unmount + remount while game is active
+    unmount();
+
+    // fetchCurrentRating returns a different rating on remount
+    fetchCurrentRatingMock.mockResolvedValue({
+      current_rating: 1800,
+      is_provisional: false,
+      games_played: 50,
+    });
+
+    render(<ChessGame />);
+
+    // Wait for the fetchCurrentRating effect to complete
+    await waitFor(() => {
+      expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(2);
+    });
+
+    // Engine ELO should NOT have been resampled
+    expect(useGameStore.getState().engineElo).toBe(eloAfterStart);
+    // But player rating should still be updated
+    expect(useGameStore.getState().playerRating).toBe(1800);
   });
 });

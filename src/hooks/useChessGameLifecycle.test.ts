@@ -2,9 +2,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { Chess } from "chess.js";
 import type { MutableRefObject } from "react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import type { AnalysisResult } from "./useMoveAnalysis";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import { useChessGameLifecycle } from "./useChessGameLifecycle";
+import { useGameStore } from "../stores/useGameStore";
+import { createAnalysisStore } from "../stores/createAnalysisStore";
 
 const fetchCurrentRatingMock = vi.fn();
 const startGameMock = vi.fn();
@@ -17,6 +18,8 @@ vi.mock("../utils/api", () => ({
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
 }));
+
+const initialStoreState = useGameStore.getInitialState();
 
 type SetupOptions = {
   chess?: Chess;
@@ -37,15 +40,23 @@ const setup = ({
   playerColorChoice = "random",
   playerRating = 1200,
 }: SetupOptions = {}) => {
-  const moveCountRef: MutableRefObject<number> = { current: moveHistory.length };
-  const moveHistoryRef: MutableRefObject<MoveRecord[]> = {
-    current: [...moveHistory],
-  };
-  const analysisMapRef: MutableRefObject<Map<number, AnalysisResult>> = {
-    current: new Map(),
-  };
-  const analysisStatusRef: MutableRefObject<string> = { current: "ready" };
-  const isAnalyzingRef: MutableRefObject<boolean> = { current: false };
+  // Set up store state
+  useGameStore.setState({
+    ...initialStoreState,
+    sessionId: "session-123",
+    isGameActive,
+    isRated,
+    playerColor,
+    playerColorChoice,
+    engineElo: 1000,
+    playerRating,
+    moveHistory: [...moveHistory],
+    liveFen: chess.fen(),
+  });
+
+  const analysisStore = createAnalysisStore();
+  // Set initial status to ready for tests
+  analysisStore.getState().setStatus("ready");
   const uploadedAnalysisSessionsRef: MutableRefObject<Set<string>> = {
     current: new Set(),
   };
@@ -70,22 +81,9 @@ const setup = ({
   const clearAnalysis = vi.fn();
   const onOpenHistory = vi.fn();
   const setEngineMessage = vi.fn();
-  const setPlayerRating = vi.fn();
-  const setIsProvisional = vi.fn();
-  const setEngineElo = vi.fn();
   const setIsStartingGame = vi.fn();
   const setStartError = vi.fn();
-  const setPlayerColor = vi.fn();
-  const setPlayerColorChoice = vi.fn();
-  const setBoardOrientation = vi.fn();
-  const setSessionId = vi.fn();
-  const setIsGameActive = vi.fn();
   const setShowStartOverlay = vi.fn();
-  const setFen = vi.fn();
-  const setGameResult = vi.fn();
-  const setRatingChange = vi.fn();
-  const setMoveHistory = vi.fn();
-  const setViewIndex = vi.fn();
   const setLiveOpening = vi.fn();
   const setBlunderAlert = vi.fn();
   const setShowFlash = vi.fn();
@@ -95,25 +93,12 @@ const setup = ({
   const setShowRehookToast = vi.fn();
   const setReviewFailModal = vi.fn();
   const setShowPostGamePrompt = vi.fn();
-  const setIsRated = vi.fn();
   const setShowRevertWarning = vi.fn();
 
   const { result } = renderHook(() =>
     useChessGameLifecycle({
       chess,
-      sessionId: "session-123",
-      isGameActive,
-      isRated,
-      playerColor,
-      playerColorChoice,
-      engineElo: 1000,
-      playerRating,
-      moveHistory,
-      moveCountRef,
-      moveHistoryRef,
-      analysisMapRef,
-      analysisStatusRef,
-      isAnalyzingRef,
+      analysisStore,
       uploadedAnalysisSessionsRef,
       openingHistoryRef,
       blunderRecordedRef,
@@ -125,22 +110,9 @@ const setup = ({
       clearAnalysis,
       onOpenHistory,
       setEngineMessage,
-      setPlayerRating,
-      setIsProvisional,
-      setEngineElo,
       setIsStartingGame,
       setStartError,
-      setPlayerColor,
-      setPlayerColorChoice,
-      setBoardOrientation,
-      setSessionId,
-      setIsGameActive,
       setShowStartOverlay,
-      setFen,
-      setGameResult,
-      setRatingChange,
-      setMoveHistory,
-      setViewIndex,
       setLiveOpening,
       setBlunderAlert,
       setShowFlash,
@@ -150,7 +122,6 @@ const setup = ({
       setShowRehookToast,
       setReviewFailModal,
       setShowPostGamePrompt,
-      setIsRated,
       showRevertWarning: false,
       setShowRevertWarning,
     }),
@@ -158,20 +129,15 @@ const setup = ({
 
   return {
     result,
-    moveCountRef,
-    moveHistoryRef,
     onOpenHistory,
-    setMoveHistory,
-    setFen,
-    setIsRated,
     setShowRevertWarning,
-    setPlayerColorChoice,
     setShowPostGamePrompt,
     setShowStartOverlay,
   };
 };
 
 beforeEach(() => {
+  useGameStore.setState(initialStoreState, true);
   fetchCurrentRatingMock.mockReset();
   fetchCurrentRatingMock.mockResolvedValue({
     current_rating: 1200,
@@ -213,14 +179,13 @@ describe("useChessGameLifecycle", () => {
       { san: moveTwo.san, fen: fenAfterMoveTwo, uci: "e7e5" },
     ];
 
-    const { result, moveCountRef, moveHistoryRef, setMoveHistory, setIsRated, setFen } =
-      setup({
-        chess,
-        moveHistory,
-        isGameActive: true,
-        isRated: false,
-        playerColor: "white",
-      });
+    const { result } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
 
     await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
 
@@ -228,11 +193,10 @@ describe("useChessGameLifecycle", () => {
       result.current.executeRevert();
     });
 
-    expect(setIsRated).toHaveBeenCalledWith(false);
-    expect(setMoveHistory).toHaveBeenCalledWith([]);
-    expect(moveHistoryRef.current).toEqual([]);
-    expect(moveCountRef.current).toBe(0);
-    expect(setFen).toHaveBeenCalledWith(chess.fen());
+    const store = useGameStore.getState();
+    expect(store.isRated).toBe(false);
+    expect(store.moveHistory).toEqual([]);
+    expect(store.viewIndex).toBeNull();
   });
 
   it("routes view-analysis action through history callback and hides prompt", async () => {
@@ -252,7 +216,7 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("shows start overlay and resets side choice to random", async () => {
-    const { result, setPlayerColorChoice, setShowPostGamePrompt, setShowStartOverlay } =
+    const { result, setShowPostGamePrompt, setShowStartOverlay } =
       setup({ playerRating: 1350 });
 
     await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
@@ -261,7 +225,7 @@ describe("useChessGameLifecycle", () => {
       result.current.handleShowStartOverlay();
     });
 
-    expect(setPlayerColorChoice).toHaveBeenCalledWith("random");
+    expect(useGameStore.getState().playerColorChoice).toBe("random");
     expect(setShowPostGamePrompt).toHaveBeenCalledWith(false);
     expect(setShowStartOverlay).toHaveBeenCalledWith(true);
   });

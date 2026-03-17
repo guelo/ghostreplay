@@ -1,12 +1,10 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo } from "react";
-import EvalBar from "../../EvalBar";
 
 type BoardOrientation = "white" | "black";
 
 type BoardStageProps = {
-  selectedEvalCp: number | null;
   boardOrientation: BoardOrientation;
   displayedFen: string;
   onPieceDrop: (args: PieceDropHandlerArgs) => boolean;
@@ -51,7 +49,6 @@ const WarningTriangleIcon = () => (
 );
 
 const BoardStage = ({
-  selectedEvalCp,
   boardOrientation,
   displayedFen,
   onPieceDrop,
@@ -82,11 +79,6 @@ const BoardStage = ({
   onDismissRehookToast,
 }: BoardStageProps) => {
   return (
-    <div className="chessboard-board-with-eval">
-      <EvalBar
-        whitePerspectiveCp={selectedEvalCp}
-        whiteOnBottom={boardOrientation === "white"}
-      />
       <div className="chessboard-board-area">
           {showStartOverlay && !isGameActive && (
             <div className="chessboard-overlay">
@@ -223,7 +215,6 @@ const BoardStage = ({
             </div>
           )}
       </div>
-    </div>
   );
 };
 

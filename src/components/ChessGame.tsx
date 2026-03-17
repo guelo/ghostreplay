@@ -4,54 +4,47 @@ import type { Square } from "chess.js";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
-import { useMoveAnalysis, type AnalysisResult } from "../hooks/useMoveAnalysis";
+import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useChessGameController } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
-import AnalysisGraph from "./AnalysisGraph";
+import { useGameStore } from "../stores/useGameStore";
+import {
+  gameAnalysisStore,
+  AnalysisStoreProvider,
+} from "../stores/createAnalysisStore";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
-import {
-  recordBlunder,
-  recordManualBlunder,
-  reviewSrsBlunder,
-  type RatingChange,
-  type TargetBlunderSrs,
-} from "../utils/api";
-import { shouldRecordBlunder } from "../utils/blunder";
+import type { TargetBlunderSrs } from "../utils/api";
 import { normalize_fen } from "../utils/fen";
 import {
-  isWithinRecordingMoveCap,
-  toWhitePerspective,
-} from "../workers/analysisUtils";
-import {
-  deriveAnnotatedMoves,
   deriveBlunderArrows,
   deriveLastMoveSquares,
   type BlunderAlert,
-  type MoveRecord,
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
 import { deriveDisplayedOpening } from "./chess-game/domain/opening";
 import {
   deriveGameStatusBadge,
   deriveStatusText,
-  type GameResult,
 } from "./chess-game/domain/status";
 import {
-  BLUNDER_AUDIO_CLIPS,
   MAIA_BOT_NAMES,
   MAIA_ELO_BINS,
-  SRS_REVIEW_FAIL_THRESHOLD_CP,
   STARTING_FEN,
 } from "./chess-game/config";
 import { eloStakes } from "./chess-game/elo";
-import type { BoardOrientation, OpenHistoryOptions } from "./chess-game/types";
+import type { OpenHistoryOptions } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import MaterialDisplay from "./MaterialDisplay";
-import MoveList from "./MoveList";
 import type { MoveMessage, SrsFailDetail } from "./MoveList";
+import {
+  ConnectedEvalBar,
+  ConnectedAnalysisGraph,
+  ConnectedMoveList,
+} from "./chess-game/AnalysisConnectors";
+import AnalysisEffects from "./chess-game/AnalysisEffects";
 
 type ChessGameProps = {
   onOpenHistory?: (options: OpenHistoryOptions) => void;
@@ -59,58 +52,65 @@ type ChessGameProps = {
 
 const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
 
-const playRandomBlunderAudio = () => {
-  if (typeof Audio === "undefined" || BLUNDER_AUDIO_CLIPS.length === 0) {
-    return;
-  }
-
-  const randomIndex = Math.floor(Math.random() * BLUNDER_AUDIO_CLIPS.length);
-  const clip = BLUNDER_AUDIO_CLIPS[randomIndex];
-  const audio = new Audio(clip);
-  void audio.play().catch(() => {
-    // Ignore playback failures (missing file, browser policy, etc.).
-  });
-};
-
 const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
-  const chess = useMemo(() => new Chess(), []);
-  const [fen, setFen] = useState(chess.fen());
-  const [boardOrientation, setBoardOrientation] =
-    useState<BoardOrientation>("white");
-  const [playerColor, setPlayerColor] = useState<BoardOrientation>("white");
-  const [playerColorChoice, setPlayerColorChoice] = useState<
-    BoardOrientation | "random"
-  >("random");
-  const [engineElo, setEngineElo] =
-    useState<(typeof MAIA_ELO_BINS)[number]>(800);
-  const [moveHistory, setMoveHistory] = useState<MoveRecord[]>([]);
-  const [viewIndex, setViewIndex] = useState<number | null>(null); // null = viewing live position
+  // Reconstruct Chess from store state so it stays in sync after remounts.
+  // liveFen is authoritative; moveHistory is replayed only when consistent
+  // (to preserve PGN). Falls back to liveFen if history diverges.
+  const chess = useMemo(() => {
+    const { liveFen, moveHistory } = useGameStore.getState();
+    const replayed = new Chess();
+    let historyValid = true;
+    for (const move of moveHistory) {
+      try {
+        if (!replayed.move(move.san)) {
+          historyValid = false;
+          break;
+        }
+      } catch {
+        historyValid = false;
+        break;
+      }
+    }
+    if (historyValid && replayed.fen() === liveFen) {
+      return replayed;
+    }
+    return new Chess(liveFen);
+  }, []);
+
+  // Singleton analysis store — persists across remounts like the game store.
+  const analysisStore = gameAnalysisStore;
+
+  // --- Cross-boundary state from zustand store ---
+  const fen = useGameStore((s) => s.liveFen);
+  const boardOrientation = useGameStore((s) => s.boardOrientation);
+  const setBoardOrientation = useGameStore((s) => s.setBoardOrientation);
+  const playerColor = useGameStore((s) => s.playerColor);
+  const playerColorChoice = useGameStore((s) => s.playerColorChoice);
+  const engineElo = useGameStore((s) => s.engineElo);
+  const setEngineElo = useGameStore((s) => s.setEngineElo);
+  const moveHistory = useGameStore((s) => s.moveHistory);
+  const viewIndex = useGameStore((s) => s.viewIndex); // null = viewing live position
+  const setViewIndex = useGameStore((s) => s.setViewIndex);
   const {
     status: engineStatus,
     isThinking,
     evaluatePosition,
     resetEngine,
   } = useStockfishEngine();
-  const {
-    analyzeMove,
-    lastAnalysis,
-    analysisMap,
-    status: analysisStatus,
-    isAnalyzing,
-    streamingEval,
-    clearAnalysis,
-  } = useMoveAnalysis();
+
+  // Imperative-only — ChessGame does NOT subscribe to analysis state.
+  const { analyzeMove, clearAnalysis } = useMoveAnalysis(analysisStore);
+
   const [, setEngineMessage] = useState<string | null>(null);
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isGameActive, setIsGameActive] = useState(false);
+  const sessionId = useGameStore((s) => s.sessionId);
+  const isGameActive = useGameStore((s) => s.isGameActive);
   const [liveOpening, setLiveOpening] = useState<OpeningLookupResult | null>(
     null,
   );
-  const [gameResult, setGameResult] = useState<GameResult | null>(null);
+  const gameResult = useGameStore((s) => s.gameResult);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [showStartOverlay, setShowStartOverlay] = useState(true);
-  const [isAddingToLibrary, setIsAddingToLibrary] = useState(false);
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
@@ -125,19 +125,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     null,
   );
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
-  const [isRated, setIsRated] = useState(true);
+  const isRated = useGameStore((s) => s.isRated);
   const [showRevertWarning, setShowRevertWarning] = useState(false);
-  const [playerRating, setPlayerRating] = useState<number>(1200);
-  const [isProvisional, setIsProvisional] = useState(true);
-  const [ratingChange, setRatingChange] = useState<RatingChange | null>(null);
+  const playerRating = useGameStore((s) => s.playerRating);
+  const isProvisional = useGameStore((s) => s.isProvisional);
+  const ratingChange = useGameStore((s) => s.ratingChange);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
   >({});
-
-  // Tracks next move index synchronously so async callbacks (engine/ghost)
-  // don't read stale moveHistory.length from closures.
-  const moveCountRef = useRef(0);
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -158,12 +154,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const openingLookupRequestIdRef = useRef(0);
   // Index 0 = starting position (before any move), index N = after move N
   const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);
-  const analysisMapRef = useRef<Map<number, AnalysisResult>>(new Map());
   const moveMessagesRef = useRef<Map<number, MoveMessage[]>>(new Map());
   const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
-  const moveHistoryRef = useRef<MoveRecord[]>([]);
-  const analysisStatusRef = useRef(analysisStatus);
-  const isAnalyzingRef = useRef(isAnalyzing);
   const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
   const handleGameEndRef = useRef<() => Promise<void>>(async () => {});
@@ -171,22 +163,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     () => handleGameEndRef.current(),
     [],
   );
-
-  useEffect(() => {
-    analysisMapRef.current = analysisMap;
-  }, [analysisMap]);
-
-  useEffect(() => {
-    moveHistoryRef.current = moveHistory;
-  }, [moveHistory]);
-
-  useEffect(() => {
-    analysisStatusRef.current = analysisStatus;
-  }, [analysisStatus]);
-
-  useEffect(() => {
-    isAnalyzingRef.current = isAnalyzing;
-  }, [isAnalyzing]);
 
   // Get the FEN to display on the board (accounts for viewing past positions)
   const displayedFen = useMemo(() => {
@@ -202,11 +178,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const lastMoveSquares = useMemo((): Record<string, React.CSSProperties> => {
     return deriveLastMoveSquares(moveHistory, viewIndex);
   }, [viewIndex, moveHistory]);
-
-  // Enrich moves with analysis data for MoveList annotations
-  const annotatedMoves = useMemo(() => {
-    return deriveAnnotatedMoves(moveHistory, analysisMap);
-  }, [moveHistory, analysisMap]);
 
   // Compute arrows from review fail modal or blunder alert
   const blunderArrows = useMemo(() => {
@@ -237,17 +208,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       // Re-show blunder alert when clicking on a player's blunder move
       if (index !== null && index >= 0) {
+        const { analysisMap } = analysisStore.getState();
+        const history = useGameStore.getState().moveHistory;
         const analysis = analysisMap.get(index);
         if (
           analysis?.blunder &&
           analysis.delta !== null &&
           isPlayerMoveIndex(index)
         ) {
-          const moveSan = moveHistory[index]?.san ?? analysis.move;
+          const moveSan = history[index]?.san ?? analysis.move;
           let bestMoveSan = analysis.bestMove;
           try {
             const fenBeforeMove =
-              index === 0 ? STARTING_FEN : moveHistory[index - 1]?.fen;
+              index === 0 ? STARTING_FEN : history[index - 1]?.fen;
             if (fenBeforeMove) {
               const tempChess = new Chess(fenBeforeMove);
               const from = analysis.bestMove.slice(0, 2);
@@ -275,67 +248,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // Clear blunder alert when navigating to a non-blunder move
       setBlunderAlert(null);
     },
-    [analysisMap, isPlayerMoveIndex, moveHistory],
+    [analysisStore, isPlayerMoveIndex],
   );
-
-  const selectedMoveIndex = useMemo(() => {
-    if (moveHistory.length === 0) {
-      return null;
-    }
-    return viewIndex ?? moveHistory.length - 1;
-  }, [moveHistory.length, viewIndex]);
-
-  const selectedEvalCp = useMemo(() => {
-    if (selectedMoveIndex === null || selectedMoveIndex < 0) {
-      return null;
-    }
-
-    // Keep showing the most recent known eval while the latest move's
-    // analysis is still in flight.
-    for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
-      const analysis = analysisMap.get(idx);
-      if (analysis?.playedEval == null) {
-        continue;
-      }
-      return toWhitePerspective(analysis.playedEval, idx);
-    }
-
-    return null;
-  }, [analysisMap, selectedMoveIndex]);
-
-  const evals = useMemo(() => {
-    const raw = moveHistory.map((_, i) => {
-      const a = analysisMap.get(i);
-      return a?.playedEval != null ? toWhitePerspective(a.playedEval, i) : null;
-    });
-    // Trim trailing nulls so pending analysis doesn't plot as 0
-    let end = raw.length;
-    while (end > 0 && raw[end - 1] === null) end--;
-    return raw.slice(0, end);
-  }, [moveHistory, analysisMap]);
-
-  const pendingIndices = useMemo(() => {
-    const pending: number[] = [];
-    for (let i = 0; i < moveHistory.length; i++) {
-      if (!analysisMap.has(i)) pending.push(i);
-    }
-    return pending;
-  }, [moveHistory, analysisMap]);
-
-  const graphStreamingEval = useMemo(() => {
-    if (!streamingEval) return null;
-    return {
-      index: streamingEval.moveIndex,
-      cp: toWhitePerspective(streamingEval.cp, streamingEval.moveIndex) ?? 0,
-    };
-  }, [streamingEval]);
-
-  const canAddSelectedMove = useMemo(() => {
-    if (!sessionId || selectedMoveIndex === null) {
-      return false;
-    }
-    return isPlayerMoveIndex(selectedMoveIndex);
-  }, [sessionId, selectedMoveIndex, isPlayerMoveIndex]);
 
   const clearMoveHighlights = useCallback(() => {
     setSelectedSquare(null);
@@ -379,79 +293,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [chess],
   );
 
-  const buildManualCapturePayload = useCallback(
-    (moveIndex: number) => {
-      if (moveIndex < 0 || moveIndex >= moveHistory.length) {
-        return null;
-      }
-
-      const preMoveFen =
-        moveIndex === 0 ? STARTING_FEN : moveHistory[moveIndex - 1]?.fen;
-      if (!preMoveFen) {
-        return null;
-      }
-
-      const replay = new Chess();
-      for (let i = 0; i <= moveIndex; i += 1) {
-        const applied = replay.move(moveHistory[i].san);
-        if (!applied) {
-          return null;
-        }
-      }
-
-      const analysis = analysisMap.get(moveIndex);
-      const userMove = moveHistory[moveIndex].san;
-
-      return {
-        pgn: replay.pgn(),
-        fen: preMoveFen,
-        userMove,
-        bestMove: analysis?.bestMove ?? userMove,
-        evalBefore: analysis?.bestEval ?? 0,
-        evalAfter: analysis?.playedEval ?? analysis?.bestEval ?? 0,
-      };
-    },
-    [analysisMap, moveHistory],
-  );
-
-  const handleAddSelectedMove = useCallback(
-    async (moveIndex: number) => {
-      if (!sessionId) {
-        return;
-      }
-
-      if (!isPlayerMoveIndex(moveIndex)) {
-        return;
-      }
-
-      const payload = buildManualCapturePayload(moveIndex);
-      if (!payload) {
-        return;
-      }
-
-      setIsAddingToLibrary(true);
-      try {
-        await recordManualBlunder(
-          sessionId,
-          payload.pgn,
-          payload.fen,
-          payload.userMove,
-          payload.bestMove,
-          payload.evalBefore,
-          payload.evalAfter,
-        );
-      } catch (error) {
-        console.error(
-          "[BlunderLibrary] Failed to record manual blunder:",
-          error,
-        );
-      } finally {
-        setIsAddingToLibrary(false);
-      }
-    },
-    [buildManualCapturePayload, isPlayerMoveIndex, sessionId],
-  );
-
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
   const isReviewMomentActive =
@@ -479,7 +320,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [],
   );
 
-  // Build a stable snapshot for passing to MoveList
+  // Build a stable snapshot for passing to ConnectedMoveList
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const moveMessages = useMemo(() => {
     void moveMessagesVersion; // depend on version counter
@@ -491,37 +332,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     ) as ReadonlyMap<number, MoveMessage[]>;
   }, [moveMessagesVersion]);
 
-
-  // Show spinner on every move that hasn't received an analysis result yet
-  const analyzingIndices = useMemo(() => {
-    if (!isGameActive) return new Set<number>();
-    const pending = new Set<number>();
-    for (let i = 0; i < moveHistory.length; i++) {
-      if (!analysisMap.has(i)) {
-        pending.add(i);
-      }
-    }
-    return pending;
-  }, [isGameActive, moveHistory.length, analysisMap]);
-
   const opponentColor = playerColor === "white" ? "black" : "white";
 
   const { applyPlayerMove, handleDrop, applyEngineMove, applyGhostMove } =
     useChessGameController({
       chess,
-      playerColor,
-      opponentColor,
-      isPlayersTurn,
-      isViewingLive,
       blunderReviewId,
       blunderReviewSrs,
-      moveCountRef,
-      moveHistoryRef,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
-      setFen,
-      setMoveHistory,
-      setViewIndex,
       setEngineMessage,
       setBlunderAlert,
       setBlunderReviewId,
@@ -553,19 +372,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleViewHistory,
   } = useChessGameLifecycle({
     chess,
-    sessionId,
-    isGameActive,
-    isRated,
-    playerColor,
-    playerColorChoice,
-    engineElo,
-    playerRating,
-    moveHistory,
-    moveCountRef,
-    moveHistoryRef,
-    analysisMapRef,
-    analysisStatusRef,
-    isAnalyzingRef,
+    analysisStore,
     uploadedAnalysisSessionsRef,
     openingHistoryRef,
     blunderRecordedRef,
@@ -577,22 +384,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     clearAnalysis,
     onOpenHistory,
     setEngineMessage,
-    setPlayerRating,
-    setIsProvisional,
-    setEngineElo,
     setIsStartingGame,
     setStartError,
-    setPlayerColor,
-    setPlayerColorChoice,
-    setBoardOrientation,
-    setSessionId,
-    setIsGameActive,
     setShowStartOverlay,
-    setFen,
-    setGameResult,
-    setRatingChange,
-    setMoveHistory,
-    setViewIndex,
     setLiveOpening,
     setBlunderAlert,
     setShowFlash,
@@ -602,7 +396,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowRehookToast,
     setReviewFailModal,
     setShowPostGamePrompt,
-    setIsRated,
     showRevertWarning,
     setShowRevertWarning,
   });
@@ -754,7 +547,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
     void applyOpponentMove(
       chess.fen(),
-      moveHistoryRef.current.map((m) => m.uci),
+      useGameStore.getState().moveHistory.map((m) => m.uci),
     );
   }, [
     applyOpponentMove,
@@ -766,201 +559,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveCount,
     playerColor,
   ]);
-
-  // Blunder detection: POST /api/blunder on first blunder this session
-  useEffect(() => {
-    const blunderData = shouldRecordBlunder({
-      analysis: lastAnalysis,
-      context: pendingAnalysisContextRef.current,
-      sessionId,
-      isGameActive,
-      alreadyRecorded: blunderRecordedRef.current,
-    });
-
-    if (!blunderData) {
-      return;
-    }
-
-    // Mark as recorded before the async call to prevent duplicates
-    blunderRecordedRef.current = true;
-
-    const postBlunder = async () => {
-      try {
-        await recordBlunder(
-          blunderData.sessionId,
-          blunderData.pgn,
-          blunderData.fen,
-          blunderData.userMove,
-          blunderData.bestMove,
-          blunderData.evalBefore,
-          blunderData.evalAfter,
-        );
-        console.log("[Blunder] Recorded blunder to backend");
-      } catch (error) {
-        console.error("[Blunder] Failed to record blunder:", error);
-        // Don't reset blunderRecordedRef - backend may have received it
-      }
-    };
-
-    void postBlunder();
-  }, [lastAnalysis, sessionId, isGameActive]);
-
-  // SRS review grading: evaluate user move from a targeted blunder position.
-  useEffect(() => {
-    if (
-      !sessionId ||
-      !isGameActive ||
-      !lastAnalysis ||
-      lastAnalysis.moveIndex === null
-    ) {
-      return;
-    }
-
-    const pendingReview = pendingSrsReviewRef.current;
-    if (!pendingReview || pendingReview.moveIndex !== lastAnalysis.moveIndex) {
-      return;
-    }
-
-    pendingSrsReviewRef.current = null;
-
-    if (lastAnalysis.delta === null) {
-      return;
-    }
-
-    const evalLossCp = Math.max(lastAnalysis.delta, 0);
-    const passed = evalLossCp < SRS_REVIEW_FAIL_THRESHOLD_CP;
-
-    if (passed) {
-      const srs = pendingReview.srs;
-      appendMoveMessage(lastAnalysis.moveIndex, {
-        key: `srs-${lastAnalysis.moveIndex}`,
-        text: "Correct! You avoided your past mistake.",
-        variant: "srs-pass",
-        srsStats: srs
-          ? {
-              passCount: srs.pass_count + 1,
-              failCount: srs.fail_count,
-              streak: srs.pass_streak + 1,
-            }
-          : undefined,
-      });
-    }
-
-    if (!passed) {
-      let bestMoveSan = lastAnalysis.bestMove;
-      const fenBeforeMove =
-        lastAnalysis.moveIndex === 0
-          ? STARTING_FEN
-          : moveHistoryRef.current[lastAnalysis.moveIndex - 1]?.fen;
-      if (fenBeforeMove) {
-        try {
-          const tempChess = new Chess(fenBeforeMove);
-          const from = lastAnalysis.bestMove.slice(0, 2);
-          const to = lastAnalysis.bestMove.slice(2, 4);
-          const promotion = lastAnalysis.bestMove.slice(4) || undefined;
-          const bestMoveResult = tempChess.move({ from, to, promotion });
-          if (bestMoveResult) {
-            bestMoveSan = bestMoveResult.san;
-          }
-        } catch {
-          // Fall back to UCI notation
-        }
-      }
-
-      const srs = pendingReview.srs;
-      appendMoveMessage(lastAnalysis.moveIndex, {
-        key: `srs-${lastAnalysis.moveIndex}`,
-        text: "You made this mistake again!",
-        variant: "srs-fail",
-        srsFailDetail: {
-          userMoveSan: pendingReview.userMoveSan,
-          bestMoveSan,
-          userMoveUci: lastAnalysis.move,
-          bestMoveUci: lastAnalysis.bestMove,
-        },
-        srsStats: srs
-          ? {
-              passCount: srs.pass_count,
-              failCount: srs.fail_count + 1,
-              streak: 0,
-            }
-          : undefined,
-      });
-    }
-
-    const postReview = async () => {
-      try {
-        await reviewSrsBlunder(
-          sessionId,
-          pendingReview.blunderId,
-          passed,
-          pendingReview.userMoveSan,
-          evalLossCp,
-        );
-      } catch (error) {
-        console.error("[SRS] Failed to record review:", error);
-      }
-    };
-
-    void postReview();
-  }, [isGameActive, lastAnalysis, sessionId]);
-
-  // Blunder alert: show flash + toast + arrows for player blunders
-  useEffect(() => {
-    if (
-      !lastAnalysis?.blunder ||
-      lastAnalysis.delta === null ||
-      lastAnalysis.moveIndex === null
-    ) {
-      return;
-    }
-
-    // Skip the very first move of the game (not reachable by ghost mode)
-    if (lastAnalysis.moveIndex === 0) {
-      return;
-    }
-
-    if (!isWithinRecordingMoveCap(lastAnalysis.moveIndex)) {
-      return;
-    }
-
-    if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) {
-      return;
-    }
-
-    const moveSan =
-      moveHistory[lastAnalysis.moveIndex]?.san ?? lastAnalysis.move;
-
-    let bestMoveSan = lastAnalysis.bestMove;
-    try {
-      const fenBeforeMove =
-        lastAnalysis.moveIndex === 0
-          ? STARTING_FEN
-          : moveHistory[lastAnalysis.moveIndex - 1]?.fen;
-      if (fenBeforeMove) {
-        const tempChess = new Chess(fenBeforeMove);
-        const from = lastAnalysis.bestMove.slice(0, 2);
-        const to = lastAnalysis.bestMove.slice(2, 4);
-        const promotion = lastAnalysis.bestMove.slice(4) || undefined;
-        const bestMoveResult = tempChess.move({ from, to, promotion });
-        if (bestMoveResult) {
-          bestMoveSan = bestMoveResult.san;
-        }
-      }
-    } catch {
-      // Fall back to UCI notation
-    }
-
-    setBlunderAlert({
-      moveSan,
-      moveUci: lastAnalysis.move,
-      bestMoveUci: lastAnalysis.bestMove,
-      bestMoveSan,
-      delta: lastAnalysis.delta,
-    });
-    setShowFlash(true);
-    playRandomBlunderAudio();
-  }, [lastAnalysis, isPlayerMoveIndex, moveHistory]);
 
   // Auto-dismiss flash after animation
   useEffect(() => {
@@ -1031,11 +629,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [],
   );
 
-  const handleDismissReviewFail = useCallback(() => {
-    setReviewFailModal(null);
-    setViewIndex(null);
-  }, []);
-
   const flipBoard = () => {
     setBoardOrientation((current) => (current === "white" ? "black" : "white"));
   };
@@ -1093,114 +686,110 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
 
   return (
-    <section className="chess-section">
-      <header className="chess-header">
-        <p className="eyebrow">SRS Chess</p>
-      </header>
+    <AnalysisStoreProvider value={analysisStore}>
+      <section className="chess-section">
+        <header className="chess-header">
+          <p className="eyebrow">SRS Chess</p>
+        </header>
 
-      <div className="chess-layout">
-        <GameInfoPanel
-          statusText={statusText}
-          gameStatusBadge={gameStatusBadge}
-          isRated={isRated}
-          isGameActive={isGameActive}
-          playerColorChoice={playerColorChoice}
-          playerColor={playerColor}
-          playerRating={playerRating}
-          isProvisional={isProvisional}
-          opponentMode={opponentMode}
-          opponentName={MAIA_BOT_NAMES[engineElo]}
-          blunderReviewId={blunderReviewId}
-          showGhostInfo={showGhostInfo}
-          onToggleGhostInfo={handleToggleGhostInfo}
-          onCloseGhostInfo={handleCloseGhostInfo}
-          ghostInfoAnchorRef={ghostInfoAnchorRef}
-          blunderTargetFen={blunderTargetFen}
-          boardOrientation={boardOrientation}
-          blunderReviewSrs={blunderReviewSrs}
-          displayedOpening={displayedOpening}
-          isReviewMomentActive={isReviewMomentActive}
-          onResign={handleResign}
-          onRevert={handleRevertClick}
-          isResignDisabled={!isGameActive || chess.isGameOver()}
-          isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
-          onFlipBoard={flipBoard}
-          onReset={handleReset}
-        />
-
-        <div className="chessboard-wrapper">
-          <BoardStage
-            selectedEvalCp={selectedEvalCp}
-            boardOrientation={boardOrientation}
-            displayedFen={displayedFen}
-            onPieceDrop={handleDropPiece}
-            onSquareClick={handleSquareClick}
-            allowDragging={allowDragging}
-            squareStyles={squareStyles}
-            arrows={blunderArrows}
-            showStartOverlay={showStartOverlay}
+        <div className="chess-layout">
+          <GameInfoPanel
+            statusText={statusText}
+            gameStatusBadge={gameStatusBadge}
+            isRated={isRated}
             isGameActive={isGameActive}
-            isStartingGame={isStartingGame}
-            onCloseStartOverlay={handleCloseStartOverlay}
-            maiaEloBins={MAIA_ELO_BINS}
-            engineElo={engineElo}
-            onEngineEloChange={handleEngineEloChange}
-            botLabel={MAIA_BOT_NAMES[engineElo]}
-            winDelta={winDelta}
-            lossDelta={lossDelta}
-            onPlayWhite={handlePlayWhite}
-            onPlayRandom={handlePlayRandom}
-            onPlayBlack={handlePlayBlack}
-            startError={startError}
-            showRevertWarning={showRevertWarning}
-            onRevertAnyway={executeRevert}
-            onCancelRevert={cancelRevert}
-            showEndedScrim={showEndedScrim}
-            showFlash={showFlash}
-            showRehookToast={showRehookToast}
-            onDismissRehookToast={handleDismissRehookToast}
-          />
-          <PostGameBanner
-            isGameActive={isGameActive}
-            showPostGamePrompt={showPostGamePrompt}
-            gameResult={gameResult}
-            ratingChange={ratingChange}
-            onViewAnalysis={handleViewAnalysis}
-            onShowStartOverlay={handleShowStartOverlay}
-            onViewHistory={handleViewHistory}
-          />
-          {(evals.some((e) => e !== null) || pendingIndices.length > 0) && (
-            <AnalysisGraph
-              evals={evals}
-              currentIndex={selectedMoveIndex}
-              onSelectMove={handleNavigate}
-              playerColor={playerColor}
-              evalCp={selectedEvalCp}
-              streamingEval={graphStreamingEval}
-              pendingIndices={pendingIndices}
-            />
-          )}
-        </div>
-
-        <div className="moves-column">
-          <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
-          <MoveList
-            moves={annotatedMoves}
-            currentIndex={viewIndex}
-            onNavigate={handleNavigate}
-            canAddSelectedMove={canAddSelectedMove}
-            isAddingSelectedMove={isAddingToLibrary}
-            onAddSelectedMove={handleAddSelectedMove}
-            messages={moveMessages}
-            analyzingIndices={analyzingIndices}
+            playerColorChoice={playerColorChoice}
             playerColor={playerColor}
-            onRevealSrsFail={handleRevealSrsFail}
-            revealedSrsFailIndex={reviewFailModal?.moveIndex ?? null}
+            playerRating={playerRating}
+            isProvisional={isProvisional}
+            opponentMode={opponentMode}
+            opponentName={MAIA_BOT_NAMES[engineElo]}
+            blunderReviewId={blunderReviewId}
+            showGhostInfo={showGhostInfo}
+            onToggleGhostInfo={handleToggleGhostInfo}
+            onCloseGhostInfo={handleCloseGhostInfo}
+            ghostInfoAnchorRef={ghostInfoAnchorRef}
+            blunderTargetFen={blunderTargetFen}
+            boardOrientation={boardOrientation}
+            blunderReviewSrs={blunderReviewSrs}
+            displayedOpening={displayedOpening}
+            isReviewMomentActive={isReviewMomentActive}
+            onResign={handleResign}
+            onRevert={handleRevertClick}
+            isResignDisabled={!isGameActive || chess.isGameOver()}
+            isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
+            onFlipBoard={flipBoard}
+            onReset={handleReset}
           />
-          <MaterialDisplay fen={displayedFen} perspective={playerColor} />
+
+          <div className="chessboard-wrapper">
+            <div className="chessboard-board-with-eval">
+              <ConnectedEvalBar />
+              <BoardStage
+                boardOrientation={boardOrientation}
+                displayedFen={displayedFen}
+                onPieceDrop={handleDropPiece}
+                onSquareClick={handleSquareClick}
+                allowDragging={allowDragging}
+                squareStyles={squareStyles}
+                arrows={blunderArrows}
+                showStartOverlay={showStartOverlay}
+                isGameActive={isGameActive}
+                isStartingGame={isStartingGame}
+                onCloseStartOverlay={handleCloseStartOverlay}
+                maiaEloBins={MAIA_ELO_BINS}
+                engineElo={engineElo}
+                onEngineEloChange={handleEngineEloChange}
+                botLabel={MAIA_BOT_NAMES[engineElo]}
+                winDelta={winDelta}
+                lossDelta={lossDelta}
+                onPlayWhite={handlePlayWhite}
+                onPlayRandom={handlePlayRandom}
+                onPlayBlack={handlePlayBlack}
+                startError={startError}
+                showRevertWarning={showRevertWarning}
+                onRevertAnyway={executeRevert}
+                onCancelRevert={cancelRevert}
+                showEndedScrim={showEndedScrim}
+                showFlash={showFlash}
+                showRehookToast={showRehookToast}
+                onDismissRehookToast={handleDismissRehookToast}
+              />
+            </div>
+            <PostGameBanner
+              isGameActive={isGameActive}
+              showPostGamePrompt={showPostGamePrompt}
+              gameResult={gameResult}
+              ratingChange={ratingChange}
+              onViewAnalysis={handleViewAnalysis}
+              onShowStartOverlay={handleShowStartOverlay}
+              onViewHistory={handleViewHistory}
+            />
+            <ConnectedAnalysisGraph onSelectMove={handleNavigate} />
+          </div>
+
+          <div className="moves-column">
+            <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
+            <ConnectedMoveList
+              onNavigate={handleNavigate}
+              messages={moveMessages}
+              onRevealSrsFail={handleRevealSrsFail}
+              revealedSrsFailIndex={reviewFailModal?.moveIndex ?? null}
+            />
+            <MaterialDisplay fen={displayedFen} perspective={playerColor} />
+          </div>
         </div>
-      </div>
-    </section>
+
+        <AnalysisEffects
+          pendingAnalysisContextRef={pendingAnalysisContextRef}
+          blunderRecordedRef={blunderRecordedRef}
+          pendingSrsReviewRef={pendingSrsReviewRef}
+          appendMoveMessage={appendMoveMessage}
+          setBlunderAlert={setBlunderAlert}
+          setShowFlash={setShowFlash}
+        />
+      </section>
+    </AnalysisStoreProvider>
   );
 };
 

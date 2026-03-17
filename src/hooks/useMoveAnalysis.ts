@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
@@ -6,6 +6,7 @@ import type {
 import { isBlunder, isWithinRecordingMoveCap } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
+import type { AnalysisStore } from '../stores/createAnalysisStore'
 
 const createRequestId = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -14,8 +15,6 @@ const createRequestId = () => {
 
   return Math.random().toString(36).slice(2)
 }
-
-type AnalysisStatus = 'booting' | 'ready' | 'error'
 
 export type AnalysisResult = {
   id: string
@@ -86,15 +85,8 @@ const fromCachedAnalysis = (
   }
 }
 
-export const useMoveAnalysis = () => {
+export const useMoveAnalysis = (store: AnalysisStore) => {
   const workerRef = useRef<Worker | null>(null)
-  const [status, setStatus] = useState<AnalysisStatus>('booting')
-  const [error, setError] = useState<string | null>(null)
-  const [lastAnalysis, setLastAnalysis] = useState<AnalysisResult | null>(null)
-  const [isAnalyzing, setIsAnalyzing] = useState(false)
-  const [analyzingMove, setAnalyzingMove] = useState<string | null>(null)
-  const [analysisMap, setAnalysisMap] = useState<Map<number, AnalysisResult>>(new Map())
-  const [streamingEval, setStreamingEval] = useState<{ moveIndex: number; cp: number } | null>(null)
   // Maps request IDs to move indices so we can file results into analysisMap
   const pendingMoveIndices = useRef<Map<string, number>>(new Map())
   // Throttle streaming eval updates to avoid excessive rerenders
@@ -113,15 +105,10 @@ export const useMoveAnalysis = () => {
         return false
       }
       resolvedIndices.current.add(moveIndex)
-      setLastAnalysis(result)
-      setAnalysisMap(prev => {
-        const next = new Map(prev)
-        next.set(moveIndex, result)
-        return next
-      })
+      store.getState().resolveAnalysis(moveIndex, result)
       return true
     },
-    [],
+    [store],
   )
 
   const flushCacheLookups = useCallback(() => {
@@ -181,6 +168,10 @@ export const useMoveAnalysis = () => {
   )
 
   useEffect(() => {
+    // Reset worker-lifecycle state for this mount (preserves analysisMap
+    // so that a singleton store survives remount without data loss).
+    store.getState().resetTransient()
+
     const worker = new Worker(
       new URL('../workers/analysisWorker.ts', import.meta.url),
       { type: 'module' },
@@ -189,14 +180,15 @@ export const useMoveAnalysis = () => {
 
     const handleMessage = (event: MessageEvent<AnalysisWorkerResponse>) => {
       const message = event.data
+      const s = store.getState()
 
       switch (message.type) {
         case 'ready':
-          setStatus('ready')
+          s.setStatus('ready')
           break
         case 'analysis-started':
-          setIsAnalyzing(true)
-          setAnalyzingMove(message.move)
+          s.setIsAnalyzing(true)
+          s.setAnalyzingMove(message.move)
           break
         case 'analysis-streaming': {
           const streamIdx = pendingMoveIndices.current.get(message.id)
@@ -204,15 +196,15 @@ export const useMoveAnalysis = () => {
             const now = performance.now()
             if (now - lastStreamingUpdateMs.current >= 250) {
               lastStreamingUpdateMs.current = now
-              setStreamingEval({ moveIndex: streamIdx, cp: message.cp })
+              store.getState().setStreamingEval({ moveIndex: streamIdx, cp: message.cp })
             }
           }
           break
         }
         case 'analysis': {
-          setIsAnalyzing(false)
-          setAnalyzingMove(null)
-          setStreamingEval(null)
+          s.setIsAnalyzing(false)
+          s.setAnalyzingMove(null)
+          s.setStreamingEval(null)
           lastStreamingUpdateMs.current = 0
           const moveIndex = pendingMoveIndices.current.get(message.id)
           if (moveIndex !== undefined) {
@@ -239,7 +231,7 @@ export const useMoveAnalysis = () => {
           if (moveIndex !== undefined) {
             resolveAnalysis(moveIndex, result)
           } else {
-            setLastAnalysis(result)
+            store.getState().setLastAnalysis(result)
           }
 
           if (message.blunder && message.delta !== null) {
@@ -250,10 +242,10 @@ export const useMoveAnalysis = () => {
           break
         }
         case 'error':
-          setStatus('error')
-          setError(message.error)
-          setIsAnalyzing(false)
-          setAnalyzingMove(null)
+          s.setStatus('error')
+          s.setError(message.error)
+          s.setIsAnalyzing(false)
+          s.setAnalyzingMove(null)
           break
         case 'log':
           console.log(`[Analyst] ${message.message}`)
@@ -264,8 +256,9 @@ export const useMoveAnalysis = () => {
     }
 
     const handleError = (event: ErrorEvent) => {
-      setStatus('error')
-      setError(event.message)
+      const s = store.getState()
+      s.setStatus('error')
+      s.setError(event.message)
     }
 
     worker.addEventListener('message', handleMessage)
@@ -282,7 +275,7 @@ export const useMoveAnalysis = () => {
 
   const analyzeMove = useCallback(
     (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number) => {
-      if (status === 'error') {
+      if (store.getState().status === 'error') {
         return
       }
 
@@ -312,13 +305,11 @@ export const useMoveAnalysis = () => {
         scheduleCacheLookup({ fen, move, moveIndex, playerColor, legalMoveCount })
       }
     },
-    [status, scheduleCacheLookup],
+    [store, scheduleCacheLookup],
   )
 
   const clearAnalysis = useCallback(() => {
-    setLastAnalysis(null)
-    setAnalysisMap(new Map())
-    setStreamingEval(null)
+    store.getState().clearAll()
     lastStreamingUpdateMs.current = 0
     pendingMoveIndices.current.clear()
     resolvedIndices.current.clear()
@@ -327,17 +318,7 @@ export const useMoveAnalysis = () => {
       clearTimeout(cacheFlushTimer.current)
       cacheFlushTimer.current = null
     }
-  }, [])
+  }, [store])
 
-  return {
-    status,
-    error,
-    lastAnalysis,
-    analysisMap,
-    isAnalyzing,
-    analyzingMove,
-    streamingEval,
-    analyzeMove,
-    clearAnalysis,
-  }
+  return { analyzeMove, clearAnalysis }
 }

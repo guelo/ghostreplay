@@ -5,6 +5,8 @@ import type { PieceDropHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, SessionMoveClassification } from "../utils/api";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
+import { createAnalysisStore } from "../stores/createAnalysisStore";
+import { useStore } from "zustand";
 import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
 import type { MoveClassification } from "../workers/analysisUtils";
 import AnalysisGraph from "./AnalysisGraph";
@@ -130,8 +132,10 @@ const AnalysisBoard = ({
   );
   const [whatIfMoves, setWhatIfMoves] = useState<WhatIfMove[]>([]);
   const [whatIfBranchPoint, setWhatIfBranchPoint] = useState(-1);
-  const { analyzeMove, analysisMap, lastAnalysis, clearAnalysis } =
-    useMoveAnalysis();
+  const [analysisStore] = useState(() => createAnalysisStore());
+  const { analyzeMove, clearAnalysis } = useMoveAnalysis(analysisStore);
+  const analysisMap = useStore(analysisStore, (s) => s.analysisMap);
+  const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
   const { info: engineLines, isThinking: engineThinking, evaluatePosition, stopSearch } = useStockfishEngine();
   const [showEngineArrows, setShowEngineArrows] = useState(true);
   const engineFenRef = useRef<string | null>(null);

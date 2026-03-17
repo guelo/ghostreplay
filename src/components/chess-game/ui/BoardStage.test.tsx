@@ -2,22 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
 import BoardStage from "./BoardStage";
 
-vi.mock("../../EvalBar", () => ({
-  default: ({
-    whitePerspectiveCp,
-    whiteOnBottom,
-  }: {
-    whitePerspectiveCp: number | null;
-    whiteOnBottom: boolean;
-  }) => (
-    <div
-      data-testid="eval-bar"
-      data-cp={whitePerspectiveCp == null ? "null" : String(whitePerspectiveCp)}
-      data-white-bottom={whiteOnBottom ? "yes" : "no"}
-    />
-  ),
-}));
-
 vi.mock("react-chessboard", () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => (
     <div
@@ -65,7 +49,6 @@ const makeProps = () => {
   const onDismissRehookToast = vi.fn();
 
   return {
-    selectedEvalCp: 38,
     boardOrientation: "black" as const,
     displayedFen: "fen-value",
     onPieceDrop,
@@ -98,15 +81,10 @@ const makeProps = () => {
 };
 
 describe("BoardStage", () => {
-  it("wires chessboard and eval contract props", () => {
+  it("wires chessboard contract props", () => {
     const props = makeProps();
     render(<BoardStage {...props} />);
 
-    expect(screen.getByTestId("eval-bar")).toHaveAttribute("data-cp", "38");
-    expect(screen.getByTestId("eval-bar")).toHaveAttribute(
-      "data-white-bottom",
-      "no",
-    );
     expect(screen.getByTestId("board")).toHaveAttribute(
       "data-orientation",
       "black",

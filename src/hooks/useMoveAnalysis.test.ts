@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useMoveAnalysis } from './useMoveAnalysis'
+import { createAnalysisStore, type AnalysisStore } from '../stores/createAnalysisStore'
 
 type MessageHandler = (event: MessageEvent) => void
 type ErrorHandler = (event: ErrorEvent) => void
@@ -38,11 +39,14 @@ const simulateError = (message: string) => {
 }
 
 describe('useMoveAnalysis', () => {
+  let store: AnalysisStore
+
   beforeEach(() => {
     postMessageMock.mockClear()
     terminateMock.mockClear()
     messageHandler = null
     errorHandler = null
+    store = createAnalysisStore()
   })
 
   afterEach(() => {
@@ -50,51 +54,54 @@ describe('useMoveAnalysis', () => {
   })
 
   it('initializes with booting status', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
-    expect(result.current.status).toBe('booting')
-    expect(result.current.error).toBeNull()
-    expect(result.current.lastAnalysis).toBeNull()
-    expect(result.current.isAnalyzing).toBe(false)
-    expect(result.current.analyzingMove).toBeNull()
+    const s = store.getState()
+    expect(s.status).toBe('booting')
+    expect(s.error).toBeNull()
+    expect(s.lastAnalysis).toBeNull()
+    expect(s.isAnalyzing).toBe(false)
+    expect(s.analyzingMove).toBeNull()
   })
 
   it('transitions to ready when worker sends ready message', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
     })
 
-    expect(result.current.status).toBe('ready')
+    expect(store.getState().status).toBe('ready')
   })
 
   it('transitions to error on worker error message', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'error', error: 'Engine failed to load' })
     })
 
-    expect(result.current.status).toBe('error')
-    expect(result.current.error).toBe('Engine failed to load')
-    expect(result.current.isAnalyzing).toBe(false)
-    expect(result.current.analyzingMove).toBeNull()
+    const s = store.getState()
+    expect(s.status).toBe('error')
+    expect(s.error).toBe('Engine failed to load')
+    expect(s.isAnalyzing).toBe(false)
+    expect(s.analyzingMove).toBeNull()
   })
 
   it('transitions to error on worker ErrorEvent', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateError('Worker script failed')
     })
 
-    expect(result.current.status).toBe('error')
-    expect(result.current.error).toBe('Worker script failed')
+    const s = store.getState()
+    expect(s.status).toBe('error')
+    expect(s.error).toBe('Worker script failed')
   })
 
   it('sets analyzing state on analysis-started message', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -104,12 +111,13 @@ describe('useMoveAnalysis', () => {
       simulateMessage({ type: 'analysis-started', id: 'req-1', move: 'e2e4' })
     })
 
-    expect(result.current.isAnalyzing).toBe(true)
-    expect(result.current.analyzingMove).toBe('e2e4')
+    const s = store.getState()
+    expect(s.isAnalyzing).toBe(true)
+    expect(s.analyzingMove).toBe('e2e4')
   })
 
   it('populates lastAnalysis on analysis result', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -128,9 +136,10 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.isAnalyzing).toBe(false)
-    expect(result.current.analyzingMove).toBeNull()
-    expect(result.current.lastAnalysis).toEqual({
+    const s = store.getState()
+    expect(s.isAnalyzing).toBe(false)
+    expect(s.analyzingMove).toBeNull()
+    expect(s.lastAnalysis).toEqual({
       id: 'req-1',
       move: 'e2e4',
       bestMove: 'd2d4',
@@ -144,7 +153,7 @@ describe('useMoveAnalysis', () => {
   })
 
   it('sets blunder flag correctly for non-blunder analysis', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -163,12 +172,13 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.lastAnalysis?.blunder).toBe(false)
-    expect(result.current.lastAnalysis?.delta).toBe(10)
+    const s = store.getState()
+    expect(s.lastAnalysis?.blunder).toBe(false)
+    expect(s.lastAnalysis?.delta).toBe(10)
   })
 
   it('posts correct message to worker on analyzeMove', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -192,7 +202,7 @@ describe('useMoveAnalysis', () => {
   })
 
   it('does not post to worker when status is error', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'error', error: 'broken' })
@@ -206,7 +216,7 @@ describe('useMoveAnalysis', () => {
   })
 
   it('terminates worker on unmount', () => {
-    const { unmount } = renderHook(() => useMoveAnalysis())
+    const { unmount } = renderHook(() => useMoveAnalysis(store))
 
     unmount()
 
@@ -214,7 +224,7 @@ describe('useMoveAnalysis', () => {
   })
 
   it('clears analyzing state when error occurs during analysis', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -224,18 +234,19 @@ describe('useMoveAnalysis', () => {
       simulateMessage({ type: 'analysis-started', id: 'req-1', move: 'e2e4' })
     })
 
-    expect(result.current.isAnalyzing).toBe(true)
+    expect(store.getState().isAnalyzing).toBe(true)
 
     act(() => {
       simulateMessage({ type: 'error', error: 'Analysis failed' })
     })
 
-    expect(result.current.isAnalyzing).toBe(false)
-    expect(result.current.analyzingMove).toBeNull()
+    const s = store.getState()
+    expect(s.isAnalyzing).toBe(false)
+    expect(s.analyzingMove).toBeNull()
   })
 
   it('stores result in analysisMap when moveIndex is provided', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -268,15 +279,16 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.analysisMap.size).toBe(1)
-    expect(result.current.analysisMap.get(0)).toEqual(
+    const s = store.getState()
+    expect(s.analysisMap.size).toBe(1)
+    expect(s.analysisMap.get(0)).toEqual(
       expect.objectContaining({ move: 'e2e4', delta: 20, moveIndex: 0 }),
     )
-    expect(result.current.lastAnalysis?.moveIndex).toBe(0)
+    expect(s.lastAnalysis?.moveIndex).toBe(0)
   })
 
   it('accumulates multiple results in analysisMap at different indices', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -320,13 +332,14 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.analysisMap.size).toBe(2)
-    expect(result.current.analysisMap.get(0)?.move).toBe('e2e4')
-    expect(result.current.analysisMap.get(2)?.move).toBe('d2d4')
+    const s = store.getState()
+    expect(s.analysisMap.size).toBe(2)
+    expect(s.analysisMap.get(0)?.move).toBe('e2e4')
+    expect(s.analysisMap.get(2)?.move).toBe('d2d4')
   })
 
   it('does not store in analysisMap when moveIndex is omitted', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -352,13 +365,14 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.analysisMap.size).toBe(0)
+    const s = store.getState()
+    expect(s.analysisMap.size).toBe(0)
     // But lastAnalysis should still be set
-    expect(result.current.lastAnalysis).not.toBeNull()
+    expect(s.lastAnalysis).not.toBeNull()
   })
 
   it('clears all state on clearAnalysis', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -383,22 +397,23 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.analysisMap.size).toBe(1)
-    expect(result.current.lastAnalysis).not.toBeNull()
+    expect(store.getState().analysisMap.size).toBe(1)
+    expect(store.getState().lastAnalysis).not.toBeNull()
 
     act(() => {
       result.current.clearAnalysis()
     })
 
-    expect(result.current.analysisMap.size).toBe(0)
-    expect(result.current.lastAnalysis).toBeNull()
+    const s = store.getState()
+    expect(s.analysisMap.size).toBe(0)
+    expect(s.lastAnalysis).toBeNull()
   })
 
   // ── analysis-streaming & throttle ────────────────────────────────
 
   it('sets streamingEval on first analysis-streaming message', () => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -414,11 +429,11 @@ describe('useMoveAnalysis', () => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 42, depth: 5 })
     })
 
-    expect(result.current.streamingEval).toEqual({ moveIndex: 3, cp: 42 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 3, cp: 42 })
   })
 
   it('throttles rapid streaming updates to ~250ms intervals', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -437,33 +452,33 @@ describe('useMoveAnalysis', () => {
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 10, depth: 1 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 10 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 10 })
 
     // Second message 100ms later — should be throttled
     now.mockReturnValue(1100)
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 20, depth: 2 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 10 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 10 })
 
     // Third message 249ms after first — still throttled
     now.mockReturnValue(1249)
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 30, depth: 3 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 10 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 10 })
 
     // Fourth message 250ms after first — goes through
     now.mockReturnValue(1250)
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 40, depth: 4 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 40 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 40 })
 
   })
 
   it('resets throttle timer when analysis completes, allowing immediate update for next move', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -482,7 +497,7 @@ describe('useMoveAnalysis', () => {
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: id1, cp: 50, depth: 10 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 50 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 50 })
 
     // Complete analysis (resets throttle timer)
     act(() => {
@@ -497,7 +512,7 @@ describe('useMoveAnalysis', () => {
         blunder: false,
       })
     })
-    expect(result.current.streamingEval).toBeNull()
+    expect(store.getState().streamingEval).toBeNull()
 
     // Analyze second move — first streaming message should go through immediately
     // even though only 10ms has passed since previous stream update
@@ -510,12 +525,12 @@ describe('useMoveAnalysis', () => {
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: id2, cp: 30, depth: 1 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 1, cp: 30 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 1, cp: 30 })
 
   })
 
   it('resets throttle timer on clearAnalysis', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -532,13 +547,13 @@ describe('useMoveAnalysis', () => {
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 50, depth: 5 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 50 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 50 })
 
     // Clear all analysis state
     act(() => {
       result.current.clearAnalysis()
     })
-    expect(result.current.streamingEval).toBeNull()
+    expect(store.getState().streamingEval).toBeNull()
 
     // New analysis — first stream should go through immediately
     act(() => {
@@ -550,12 +565,12 @@ describe('useMoveAnalysis', () => {
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: id2, cp: 25, depth: 1 })
     })
-    expect(result.current.streamingEval).toEqual({ moveIndex: 0, cp: 25 })
+    expect(store.getState().streamingEval).toEqual({ moveIndex: 0, cp: 25 })
 
   })
 
   it('does not update streamingEval for already-resolved move indices', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -579,17 +594,17 @@ describe('useMoveAnalysis', () => {
         blunder: false,
       })
     })
-    expect(result.current.streamingEval).toBeNull()
+    expect(store.getState().streamingEval).toBeNull()
 
     // Late streaming message for the same request — should be ignored
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 99, depth: 15 })
     })
-    expect(result.current.streamingEval).toBeNull()
+    expect(store.getState().streamingEval).toBeNull()
   })
 
   it('ignores streaming messages with unknown request IDs', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -599,12 +614,12 @@ describe('useMoveAnalysis', () => {
       simulateMessage({ type: 'analysis-streaming', id: 'unknown-id', cp: 50, depth: 5 })
     })
 
-    expect(result.current.streamingEval).toBeNull()
+    expect(store.getState().streamingEval).toBeNull()
   })
 
   it('clears streamingEval when analysis completes', () => {
     vi.spyOn(performance, 'now').mockReturnValue(1000)
-    const { result } = renderHook(() => useMoveAnalysis())
+    const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -618,7 +633,7 @@ describe('useMoveAnalysis', () => {
     act(() => {
       simulateMessage({ type: 'analysis-streaming', id: requestId, cp: 42, depth: 5 })
     })
-    expect(result.current.streamingEval).not.toBeNull()
+    expect(store.getState().streamingEval).not.toBeNull()
 
     act(() => {
       simulateMessage({
@@ -632,11 +647,11 @@ describe('useMoveAnalysis', () => {
         blunder: false,
       })
     })
-    expect(result.current.streamingEval).toBeNull()
+    expect(store.getState().streamingEval).toBeNull()
   })
 
   it('handles analysis with null eval values', () => {
-    const { result } = renderHook(() => useMoveAnalysis())
+    renderHook(() => useMoveAnalysis(store))
 
     act(() => {
       simulateMessage({ type: 'ready' })
@@ -655,7 +670,7 @@ describe('useMoveAnalysis', () => {
       })
     })
 
-    expect(result.current.lastAnalysis).toEqual({
+    expect(store.getState().lastAnalysis).toEqual({
       id: 'req-3',
       move: 'e2e4',
       bestMove: '(none)',

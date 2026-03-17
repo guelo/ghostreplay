@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Chess } from "chess.js";
 import { renderHook, act } from "@testing-library/react";
 import type { MutableRefObject } from "react";
 import type { TargetBlunderSrs } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
+import { useGameStore } from "../stores/useGameStore";
 import {
   useChessGameController,
   type PendingAnalysisContext,
@@ -11,31 +12,31 @@ import {
   type PendingSrsReview,
 } from "./useChessGameController";
 
+const initialStoreState = useGameStore.getInitialState();
+
 type SetupOptions = {
   chess?: Chess;
   playerColor?: "white" | "black";
-  opponentColor?: "white" | "black";
-  isPlayersTurn?: boolean;
-  isViewingLive?: boolean;
   blunderReviewId?: number | null;
+  blunderReviewSrs?: TargetBlunderSrs | null;
   moveHistory?: MoveRecord[];
-  moveCount?: number;
 };
 
 const createSetup = ({
   chess = new Chess(),
   playerColor = "white",
-  opponentColor = "black",
-  isPlayersTurn = true,
-  isViewingLive = true,
   blunderReviewId = null,
+  blunderReviewSrs = null,
   moveHistory = [],
-  moveCount = 0,
 }: SetupOptions = {}) => {
-  const moveCountRef: MutableRefObject<number> = { current: moveCount };
-  const moveHistoryRef: MutableRefObject<MoveRecord[]> = {
-    current: [...moveHistory],
-  };
+  // Set up store state
+  useGameStore.setState({
+    ...initialStoreState,
+    playerColor,
+    liveFen: chess.fen(),
+    moveHistory: [...moveHistory],
+  });
+
   const pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null> = {
     current: null,
   };
@@ -43,9 +44,6 @@ const createSetup = ({
     current: null,
   };
 
-  const setFen = vi.fn();
-  const setMoveHistory = vi.fn();
-  const setViewIndex = vi.fn();
   const setEngineMessage = vi.fn();
   const setBlunderAlert = vi.fn();
   const setBlunderReviewId = vi.fn();
@@ -60,18 +58,10 @@ const createSetup = ({
   const { result } = renderHook(() =>
     useChessGameController({
       chess,
-      playerColor,
-      opponentColor,
-      isPlayersTurn,
-      isViewingLive,
       blunderReviewId,
-      moveCountRef,
-      moveHistoryRef,
+      blunderReviewSrs,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
-      setFen,
-      setMoveHistory,
-      setViewIndex,
       setEngineMessage,
       setBlunderAlert,
       setBlunderReviewId,
@@ -88,13 +78,8 @@ const createSetup = ({
   return {
     result,
     chess,
-    moveCountRef,
-    moveHistoryRef,
     pendingAnalysisContextRef,
     pendingSrsReviewRef,
-    setFen,
-    setMoveHistory,
-    setViewIndex,
     setEngineMessage,
     setBlunderAlert,
     setBlunderReviewId,
@@ -108,13 +93,15 @@ const createSetup = ({
   };
 };
 
+beforeEach(() => {
+  useGameStore.setState(initialStoreState, true);
+});
+
 describe("useChessGameController", () => {
   it("applies a player move and records analysis context", () => {
     const {
       result,
       chess,
-      moveCountRef,
-      moveHistoryRef,
       pendingAnalysisContextRef,
       analyzeMove,
       clearMoveHighlights,
@@ -133,9 +120,12 @@ describe("useChessGameController", () => {
 
     expect(clearMoveHighlights).toHaveBeenCalledTimes(1);
     expect(setBlunderAlert).toHaveBeenCalledWith(null);
-    expect(moveCountRef.current).toBe(1);
-    expect(moveHistoryRef.current[0]?.uci).toBe("e2e4");
-    expect(moveHistoryRef.current.map((move) => move.uci)).toEqual(["e2e4"]);
+
+    const store = useGameStore.getState();
+    expect(store.moveHistory.length).toBe(1);
+    expect(store.moveHistory[0]?.uci).toBe("e2e4");
+    expect(store.viewIndex).toBeNull();
+
     expect(analyzeMove).toHaveBeenCalledWith(
       startingFen,
       "e2e4",
@@ -166,16 +156,16 @@ describe("useChessGameController", () => {
       blunderId: 42,
       moveIndex: 0,
       userMoveSan: "e4",
+      srs: null,
     });
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
   });
 
   it("rejects drop moves when interaction preconditions fail", () => {
-    const { result, analyzeMove } = createSetup({
-      isPlayersTurn: false,
-      isViewingLive: true,
-    });
+    // Set viewIndex to non-null so isViewingLive is false
+    const { result, analyzeMove } = createSetup();
+    useGameStore.setState({ viewIndex: 0 });
 
     let dropResult: PlayerMoveApplyResult = {
       applied: false,
@@ -203,8 +193,6 @@ describe("useChessGameController", () => {
 
     const {
       result,
-      moveCountRef,
-      moveHistoryRef,
       evaluatePosition,
       analyzeMove,
       setEngineMessage,
@@ -212,7 +200,6 @@ describe("useChessGameController", () => {
     } = createSetup({
       chess,
       moveHistory: [previousMove],
-      moveCount: 1,
     });
 
     evaluatePosition.mockResolvedValueOnce({ move: "d7d5", raw: "bestmove d7d5" });
@@ -222,8 +209,11 @@ describe("useChessGameController", () => {
     });
 
     expect(evaluatePosition).toHaveBeenCalledWith(fenBeforeEngineMove);
-    expect(moveCountRef.current).toBe(2);
-    expect(moveHistoryRef.current[1]?.uci).toBe("d7d5");
+
+    const store = useGameStore.getState();
+    expect(store.moveHistory.length).toBe(2);
+    expect(store.moveHistory[1]?.uci).toBe("d7d5");
+
     expect(analyzeMove).toHaveBeenCalledWith(
       fenBeforeEngineMove,
       "d7d5",
@@ -263,7 +253,6 @@ describe("useChessGameController", () => {
     } = createSetup({
       chess,
       moveHistory: [previousMove],
-      moveCount: 1,
     });
 
     await act(async () => {

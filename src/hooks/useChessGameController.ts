@@ -2,7 +2,8 @@ import { useCallback } from "react";
 import type { Chess } from "chess.js";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { TargetBlunderSrs } from "../utils/api";
-import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
+import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
+import { useGameStore } from "../stores/useGameStore";
 
 export type PendingAnalysisContext = {
   fen: string;
@@ -42,29 +43,12 @@ type EvaluatePositionFn = (fen: string) => Promise<{ move: string; raw: string }
 
 type UseChessGameControllerOptions = {
   chess: Chess;
-  playerColor: "white" | "black";
-  opponentColor: "white" | "black";
-  isPlayersTurn: boolean;
-  isViewingLive: boolean;
   blunderReviewId: number | null;
   blunderReviewSrs: TargetBlunderSrs | null;
-  moveCountRef: MutableRefObject<number>;
-  moveHistoryRef: MutableRefObject<MoveRecord[]>;
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
   pendingSrsReviewRef: MutableRefObject<PendingSrsReview | null>;
-  setFen: Dispatch<SetStateAction<string>>;
-  setMoveHistory: Dispatch<SetStateAction<MoveRecord[]>>;
-  setViewIndex: Dispatch<SetStateAction<number | null>>;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
-  setBlunderAlert: Dispatch<
-    SetStateAction<{
-      moveSan: string;
-      moveUci: string;
-      bestMoveUci: string;
-      bestMoveSan: string;
-      delta: number;
-    } | null>
-  >;
+  setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setBlunderReviewId: Dispatch<SetStateAction<number | null>>;
   setBlunderReviewSrs: Dispatch<SetStateAction<TargetBlunderSrs | null>>;
   setBlunderTargetFen: Dispatch<SetStateAction<string | null>>;
@@ -79,19 +63,10 @@ type AppliedMove = NonNullable<ReturnType<Chess["move"]>>;
 
 export const useChessGameController = ({
   chess,
-  playerColor,
-  opponentColor,
-  isPlayersTurn,
-  isViewingLive,
   blunderReviewId,
   blunderReviewSrs,
-  moveCountRef,
-  moveHistoryRef,
   pendingAnalysisContextRef,
   pendingSrsReviewRef,
-  setFen,
-  setMoveHistory,
-  setViewIndex,
   setEngineMessage,
   setBlunderAlert,
   setBlunderReviewId,
@@ -110,16 +85,16 @@ export const useChessGameController = ({
       legalMoveCount: number,
       analysisColor: "white" | "black",
     ) => {
+      const store = useGameStore.getState();
       const newFen = chess.fen();
-      const moveIndex = moveCountRef.current++;
+      const moveIndex = store.moveHistory.length;
       const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
       const nextMove = { san: appliedMove.san, fen: newFen, uci: uciMove };
-      const nextMoveHistory = [...moveHistoryRef.current, nextMove];
+      const nextMoveHistory = [...store.moveHistory, nextMove];
 
-      moveHistoryRef.current = nextMoveHistory;
-      setFen(newFen);
-      setMoveHistory(nextMoveHistory);
-      setViewIndex(null);
+      store.setLiveFen(newFen);
+      store.setMoveHistory(nextMoveHistory);
+      store.setViewIndex(null);
 
       analyzeMove(
         fenBeforeMove,
@@ -137,7 +112,7 @@ export const useChessGameController = ({
         uciHistory: nextMoveHistory.map((m) => m.uci),
       };
     },
-    [analyzeMove, chess, moveCountRef, moveHistoryRef, setFen, setMoveHistory, setViewIndex],
+    [analyzeMove, chess],
   );
 
   const applyPlayerMove = useCallback(
@@ -163,6 +138,7 @@ export const useChessGameController = ({
       clearMoveHighlights();
       setBlunderAlert(null);
 
+      const playerColor = useGameStore.getState().playerColor;
       const committed = commitAppliedMove(
         move,
         fenBeforeMove,
@@ -200,12 +176,12 @@ export const useChessGameController = ({
     },
     [
       blunderReviewId,
+      blunderReviewSrs,
       chess,
       clearMoveHighlights,
       commitAppliedMove,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
-      playerColor,
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
@@ -225,6 +201,11 @@ export const useChessGameController = ({
         return { applied: false };
       }
 
+      const store = useGameStore.getState();
+      const isViewingLive = store.viewIndex === null;
+      const isPlayersTurn =
+        chess.turn() === (store.playerColor === "white" ? "w" : "b");
+
       if (!isPlayersTurn || !isViewingLive) {
         return { applied: false };
       }
@@ -235,7 +216,7 @@ export const useChessGameController = ({
 
       return applyPlayerMove(sourceSquare, targetSquare);
     },
-    [applyPlayerMove, isPlayersTurn, isViewingLive],
+    [applyPlayerMove, chess],
   );
 
   const applyEngineMove = useCallback(async () => {
@@ -258,6 +239,8 @@ export const useChessGameController = ({
         throw new Error(`Engine returned illegal move: ${result.move}`);
       }
 
+      const opponentColor =
+        useGameStore.getState().playerColor === "white" ? "black" : "white";
       commitAppliedMove(
         appliedMove,
         fenBeforeMove,
@@ -281,7 +264,6 @@ export const useChessGameController = ({
     commitAppliedMove,
     evaluatePosition,
     handleGameEnd,
-    opponentColor,
     setEngineMessage,
   ]);
 
@@ -301,6 +283,9 @@ export const useChessGameController = ({
           throw new Error(`Ghost returned illegal move: ${sanMove}`);
         }
 
+        const playerColor = useGameStore.getState().playerColor;
+        const opponentColor =
+          playerColor === "white" ? "black" : "white";
         commitAppliedMove(
           appliedMove,
           fenBeforeMove,
@@ -338,8 +323,6 @@ export const useChessGameController = ({
       chess,
       commitAppliedMove,
       handleGameEnd,
-      opponentColor,
-      playerColor,
       setBlunderReviewId,
       setBlunderReviewSrs,
       setBlunderTargetFen,
