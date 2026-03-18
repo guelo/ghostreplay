@@ -80,6 +80,20 @@ describe("buildEngineArrows", () => {
     });
   });
 
+  it("live line scoring higher than cached best stays at max grey opacity", () => {
+    const lines: EngineInfo[] = [
+      line("e2e4", { type: "cp", value: 30 }),  // cached best
+      line("d2d4", { type: "cp", value: 50 }),  // live line evaluates higher
+    ];
+    const arrows = buildEngineArrows(lines);
+
+    expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
+    // Negative cpLoss must be clamped — grey arrow should not exceed 0.70
+    const opacity = parseFloat(arrows[1].color.match(/[\d.]+\)$/)![0]);
+    expect(opacity).toBeLessThanOrEqual(0.7);
+    expect(arrows[1].color).toBe("rgba(150, 150, 150, 0.70)");
+  });
+
   describe("missing-score fallback", () => {
     it("scoreless first line is blue, scored later lines are grey", () => {
       const lines: EngineInfo[] = [
@@ -144,5 +158,12 @@ describe("engineArrowColor", () => {
     const opacity = parseFloat(color.match(/[\d.]+\)$/)![0]);
     expect(opacity).toBeGreaterThan(0.2);
     expect(opacity).toBeLessThan(0.7);
+  });
+
+  it("clamps negative cpLoss so opacity never exceeds 0.70", () => {
+    const color = engineArrowColor(-50);
+    const opacity = parseFloat(color.match(/[\d.]+\)$/)![0]);
+    expect(opacity).toBeLessThanOrEqual(0.7);
+    expect(engineArrowColor(-50)).toBe("rgba(150, 150, 150, 0.70)");
   });
 });

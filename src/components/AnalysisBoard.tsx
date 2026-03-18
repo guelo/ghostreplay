@@ -59,7 +59,8 @@ const BEST_MOVE_ARROW_COLOR = "rgba(59, 130, 246, 0.85)";
 
 /** Grey arrow whose opacity fades as centipawn loss grows. */
 export const engineArrowColor = (cpLoss: number): string => {
-  const opacity = Math.max(0.2, 0.7 - cpLoss / 300);
+  const clamped = Math.max(0, cpLoss);
+  const opacity = Math.max(0.2, Math.min(0.7, 0.7 - clamped / 300));
   return `rgba(150, 150, 150, ${opacity.toFixed(2)})`;
 };
 
