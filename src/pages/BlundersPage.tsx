@@ -287,6 +287,7 @@ function BlundersPage() {
                           moves={analysis.moves}
                           boardOrientation={boardOrientation}
                           initialMoveIndex={blunderMoveIndex}
+                          positionAnalysis={analysis.position_analysis}
                         />
                       ) : !analysisLoading ? (
                         <Chessboard

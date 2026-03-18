@@ -102,6 +102,8 @@ def _create_test_schema(conn) -> None:
             best_move_eval_cp INTEGER,
             eval_delta INTEGER,
             classification VARCHAR(20),
+            fen_before TEXT,
+            best_move_uci VARCHAR(5),
             UNIQUE(session_id, move_number, color),
             FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
         )

@@ -494,12 +494,19 @@ export interface AnalysisMove {
   classification: MoveClassification | null
 }
 
+export interface PositionAnalysis {
+  best_move_uci: string
+  best_move_san: string | null
+  best_move_eval_cp: number | null  // side-to-move-relative
+}
+
 export interface SessionAnalysis {
   session_id: string
   pgn: string | null
   result: string | null
   moves: AnalysisMove[]
   summary: GameSummary
+  position_analysis?: Record<string, PositionAnalysis>
 }
 
 /**

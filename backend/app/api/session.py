@@ -75,12 +75,19 @@ class SessionAnalysisSummary(BaseModel):
     average_centipawn_loss: int
 
 
+class PositionAnalysis(BaseModel):
+    best_move_uci: str
+    best_move_san: str | None = None
+    best_move_eval_cp: int | None = None  # side-to-move-relative
+
+
 class SessionAnalysisResponse(BaseModel):
     session_id: uuid.UUID
     pgn: str | None
     result: str | None
     moves: list[SessionAnalysisMove]
     summary: SessionAnalysisSummary
+    position_analysis: dict[str, PositionAnalysis] = {}
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -208,6 +215,8 @@ def upsert_session_moves(
             "best_move_eval_cp": move.best_move_eval_cp,
             "eval_delta": move.eval_delta,
             "classification": move.classification.value if move.classification else None,
+            "fen_before": move.fen_before,
+            "best_move_uci": move.best_move_uci,
         }
         for move in request.moves
     ]
@@ -233,6 +242,8 @@ def upsert_session_moves(
                 existing_row.best_move_eval_cp = value["best_move_eval_cp"]
                 existing_row.eval_delta = value["eval_delta"]
                 existing_row.classification = value["classification"]
+                existing_row.fen_before = value["fen_before"]
+                existing_row.best_move_uci = value["best_move_uci"]
             else:
                 db.add(SessionMove(**value))
 
@@ -255,6 +266,8 @@ def upsert_session_moves(
             "best_move_eval_cp": statement.excluded.best_move_eval_cp,
             "eval_delta": statement.excluded.eval_delta,
             "classification": statement.excluded.classification,
+            "fen_before": statement.excluded.fen_before,
+            "best_move_uci": statement.excluded.best_move_uci,
         },
     )
     db.execute(statement)
@@ -305,6 +318,15 @@ def get_session_analysis(
         else 0
     )
 
+    position_analysis: dict[str, PositionAnalysis] = {}
+    for move in session_moves:
+        if move.fen_before and move.best_move_uci and move.fen_before not in position_analysis:
+            position_analysis[move.fen_before] = PositionAnalysis(
+                best_move_uci=move.best_move_uci,
+                best_move_san=move.best_move_san,
+                best_move_eval_cp=move.best_move_eval_cp,
+            )
+
     return SessionAnalysisResponse(
         session_id=game_session.id,
         pgn=game_session.pgn,
@@ -330,4 +352,5 @@ def get_session_analysis(
             inaccuracies=int(summary_row.inaccuracies or 0),
             average_centipawn_loss=average_centipawn_loss,
         ),
+        position_analysis=position_analysis,
     )

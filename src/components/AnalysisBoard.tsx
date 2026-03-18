@@ -2,7 +2,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
-import type { AnalysisMove } from "../utils/api";
+import type { AnalysisMove, PositionAnalysis } from "../utils/api";
+import type { EngineInfo } from "../workers/stockfishMessages";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
@@ -20,6 +21,7 @@ type AnalysisBoardProps = {
   startingFen?: string;
   initialMoveIndex?: number;
   footer?: React.ReactNode;
+  positionAnalysis?: Record<string, PositionAnalysis>;
 };
 
 type WhatIfMove = {
@@ -104,6 +106,7 @@ const AnalysisBoard = ({
   startingFen = STARTING_FEN,
   initialMoveIndex,
   footer,
+  positionAnalysis,
 }: AnalysisBoardProps) => {
   const [currentIndex, setCurrentIndex] = useState<number | null>(
     initialMoveIndex ?? null,
@@ -194,22 +197,65 @@ const AnalysisBoard = ({
     stopSearch();
   }
 
+  // Side-to-move derived from FEN (avoids constructing Chess just for turn())
+  const sideToMove = useMemo(() => fenSideToMove(displayedFen), [displayedFen]);
+
+  // Cached best move for the displayed position (from pre-existing game analysis)
+  const cachedBest = positionAnalysis?.[displayedFen] ?? null;
+
+  // Legal moves excluding cached best move (for restricted engine search)
+  const searchmoves = useMemo(() => {
+    if (!cachedBest) return undefined;
+    try {
+      const chess = new Chess(displayedFen);
+      const allMoves = chess.moves({ verbose: true });
+      const filtered = allMoves
+        .map((m) => m.from + m.to + (m.promotion ?? ""))
+        .filter((uci) => uci !== cachedBest.best_move_uci);
+      return filtered.length > 0 ? filtered : undefined;
+    } catch {
+      return undefined;
+    }
+  }, [displayedFen, cachedBest]);
+
   // Start new evaluation after render
   useEffect(() => {
     if (!displayedFen || !showEngineArrows) return;
     engineStaleRef.current = false;
-    evaluatePosition(displayedFen, { depth: 21, multipv: 3 }).catch(() => {
-      // Evaluation cancelled or engine unavailable — ignore
-    });
-  }, [displayedFen, evaluatePosition, showEngineArrows]);
+    if (cachedBest && searchmoves && searchmoves.length > 0) {
+      evaluatePosition(displayedFen, { depth: 21, multipv: 2, searchmoves }).catch(() => {});
+    } else {
+      evaluatePosition(displayedFen, { depth: 21, multipv: 3 }).catch(() => {});
+    }
+  }, [displayedFen, evaluatePosition, showEngineArrows, cachedBest, searchmoves]);
 
-  // Side-to-move derived from FEN (avoids constructing Chess just for turn())
-  const sideToMove = useMemo(() => fenSideToMove(displayedFen), [displayedFen]);
+  // Whether the restricted search path is active (same condition as the engine request)
+  const useRestrictedSearch = !!(cachedBest && searchmoves && searchmoves.length > 0);
+
+  // Merge cached best move into engine lines so arrows and panel stay in sync.
+  // Only merge when the restricted search was actually used — otherwise the
+  // engine already searched for the full top-line set including the best move.
+  // EngineInfo.score.value is side-to-move-relative; best_move_eval_cp is also
+  // side-to-move-relative, so we pass it through without sign conversion.
+  const mergedEngineLines: EngineInfo[] = useMemo(() => {
+    if (!useRestrictedSearch || !cachedBest) return engineLines;
+
+    const cachedLine: EngineInfo = {
+      pv: [cachedBest.best_move_uci],
+      score:
+        cachedBest.best_move_eval_cp != null
+          ? { type: "cp" as const, value: cachedBest.best_move_eval_cp }
+          : undefined,
+      depth: undefined,
+    };
+
+    return [cachedLine, ...engineLines];
+  }, [useRestrictedSearch, cachedBest, engineLines]);
 
   // Engine lines with SAN moves and formatted evals for display
   const engineLinesDisplay = useMemo(() => {
-    if (engineLines.length === 0) return [];
-    return engineLines
+    if (mergedEngineLines.length === 0) return [];
+    return mergedEngineLines
       .filter((line) => line?.pv?.length)
       .map((line) => {
         // Convert PV moves from UCI to SAN
@@ -249,16 +295,16 @@ const AnalysisBoard = ({
           depth: line!.depth ?? 0,
         };
       });
-  }, [engineLines, displayedFen]);
+  }, [mergedEngineLines, displayedFen]);
 
   // Engine-recommended move arrows
   const engineArrows = useMemo(() => {
-    if (engineLines.length === 0) return [];
+    if (mergedEngineLines.length === 0) return [];
     const seen = new Set<string>();
     const result: { startSquare: string; endSquare: string; color: string }[] =
       [];
-    for (let i = 0; i < engineLines.length; i++) {
-      const line = engineLines[i];
+    for (let i = 0; i < mergedEngineLines.length; i++) {
+      const line = mergedEngineLines[i];
       if (!line?.pv?.[0]) continue;
       const squares = uciToSquares(line.pv[0]);
       const key = `${squares.startSquare}-${squares.endSquare}`;
@@ -272,7 +318,7 @@ const AnalysisBoard = ({
       });
     }
     return result;
-  }, [engineLines]);
+  }, [mergedEngineLines]);
 
   // Arrows for the current position
   const arrows = useMemo(() => {
@@ -332,20 +378,20 @@ const AnalysisBoard = ({
   // Live engine eval from top PV line (white perspective)
   const liveEngineEvalCp = useMemo(() => {
     if (engineStaleRef.current) return null;
-    const topLine = engineLines[0];
+    const topLine = mergedEngineLines[0];
     if (!topLine?.score) return null;
     const raw = topLine.score.type === "cp" ? topLine.score.value : null;
     if (raw === null) return null;
     return sideToMove === "w" ? raw : -raw;
-  }, [engineLines, sideToMove]);
+  }, [mergedEngineLines, sideToMove]);
 
   const liveEngineEvalMate = useMemo(() => {
     if (engineStaleRef.current) return null;
-    const topLine = engineLines[0];
+    const topLine = mergedEngineLines[0];
     if (!topLine?.score) return null;
     if (topLine.score.type !== "mate") return null;
     return sideToMove === "w" ? topLine.score.value : -topLine.score.value;
-  }, [engineLines, sideToMove]);
+  }, [mergedEngineLines, sideToMove]);
 
   const currentEvalCp = useMemo(() => {
     if (isInWhatIf || effectiveIndex < 0) return null;
@@ -554,12 +600,12 @@ const AnalysisBoard = ({
               />
               Engine lines
             </label>
-            {showEngineArrows && engineLinesDisplay[0]?.depth > 0 && (
+            {showEngineArrows && engineLines[0]?.depth != null && engineLines[0].depth > 0 && (
               <span className="analysis-board__engine-depth">
                 {engineThinking && (
                   <span className="analysis-board__engine-spinner" />
                 )}
-                d{engineLinesDisplay[0].depth}
+                d{engineLines[0].depth}
               </span>
             )}
           </div>

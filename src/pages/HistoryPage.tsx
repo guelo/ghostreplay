@@ -157,6 +157,7 @@ function HistoryPage() {
                     boardOrientation={
                       selectedGame.player_color as "white" | "black"
                     }
+                    positionAnalysis={analysis.position_analysis}
                     footer={
                       <div className="analysis-pane__summary">
                         <div className="analysis-stat">

@@ -10,6 +10,12 @@ type EvaluationOptions = {
   movetime?: number
   depth?: number
   multipv?: number
+  searchmoves?: string[]
+}
+
+const evalCacheKey = (fen: string, searchmoves?: string[]): string => {
+  if (!searchmoves?.length) return fen
+  return fen + '|' + [...searchmoves].sort().join(',')
 }
 
 type EvaluationResult = {
@@ -47,7 +53,7 @@ export const useStockfishEngine = () => {
   const [info, setInfo] = useState<EngineInfo[]>([])
   const [isThinking, setIsThinking] = useState(false)
   const evalCache = useRef<Map<string, EngineInfo[]>>(new Map())
-  const activeFen = useRef<string | null>(null)
+  const activeCacheKey = useRef<string | null>(null)
 
   useEffect(() => {
     if (!sharedArrayBufferAvailable) {
@@ -96,9 +102,9 @@ export const useStockfishEngine = () => {
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
             setIsThinking(false)
-            // Cache completed result by FEN — capture the FEN now so the
+            // Cache completed result — capture the key now so the
             // updater doesn't read a stale/mutated ref later.
-            const fenToCache = activeFen.current
+            const fenToCache = activeCacheKey.current
             if (fenToCache) {
               setInfo((current) => {
                 evalCache.current.set(fenToCache, current)
@@ -163,16 +169,17 @@ export const useStockfishEngine = () => {
       }
 
       // Return cached result if available
-      const cached = evalCache.current.get(fen)
+      const cacheKey = evalCacheKey(fen, options?.searchmoves)
+      const cached = evalCache.current.get(cacheKey)
       if (cached) {
         setInfo(cached)
         setIsThinking(false)
-        activeFen.current = fen
+        activeCacheKey.current = cacheKey
         return Promise.resolve({ move: cached[0]?.pv?.[0] ?? '', raw: '' })
       }
 
       setInfo([])
-      activeFen.current = fen
+      activeCacheKey.current = cacheKey
       const requestId = createRequestId()
       const payload = {
         type: 'evaluate-position' as const,
@@ -181,6 +188,7 @@ export const useStockfishEngine = () => {
         movetime: options?.movetime ?? 1200,
         depth: options?.depth,
         multipv: options?.multipv,
+        searchmoves: options?.searchmoves,
       }
 
       const result = new Promise<EvaluationResult>((resolve, reject) => {

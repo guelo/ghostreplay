@@ -177,6 +177,8 @@ class SessionMove(Base):
     best_move_eval_cp: Mapped[int | None] = mapped_column(Integer)
     eval_delta: Mapped[int | None] = mapped_column(Integer)
     classification: Mapped[str | None] = mapped_column(String(20))
+    fen_before: Mapped[str | None] = mapped_column(Text)
+    best_move_uci: Mapped[str | None] = mapped_column(String(5))
 
 
 class AnalysisCache(Base):

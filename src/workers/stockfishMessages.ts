@@ -6,6 +6,7 @@ export type EvaluatePositionMessage = {
   movetime?: number
   depth?: number
   multipv?: number
+  searchmoves?: string[]
 }
 
 export type WorkerRequest =
