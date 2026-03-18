@@ -7,7 +7,7 @@ Covers:
 - Severity weighting (200cp scores 4x vs 50cp)
 - Distance tiebreaker (closer blunders preferred)
 - Edge cases: pass_streak=0, last_reviewed_at=NULL, MAX_INTERVAL cap
-- Constants: BASE_INTERVAL=1hr, BACKOFF_FACTOR=2.0, MAX_INTERVAL=4320hrs
+- Constants: BASE_INTERVAL=4hr, BACKOFF_FACTOR=2.0, MAX_INTERVAL=4320hrs
 """
 
 from datetime import datetime, timedelta, timezone
@@ -38,8 +38,8 @@ NOW = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
 # ---------------------------------------------------------------------------
 
 class TestConstants:
-    def test_base_interval_is_one_hour(self):
-        assert BASE_INTERVAL_HOURS == 1.0
+    def test_base_interval_is_four_hours(self):
+        assert BASE_INTERVAL_HOURS == 4.0
 
     def test_backoff_factor_is_two(self):
         assert BACKOFF_FACTOR == 2.0
@@ -63,31 +63,31 @@ class TestConstants:
 
 class TestExpectedInterval:
     def test_pass_streak_zero(self):
-        # 1 * 2^0 = 1 hour
-        assert expected_interval_hours(0) == 1.0
+        # 4 * 2^0 = 4 hours
+        assert expected_interval_hours(0) == 4.0
 
     def test_pass_streak_one(self):
-        # 1 * 2^1 = 2 hours
-        assert expected_interval_hours(1) == 2.0
+        # 4 * 2^1 = 8 hours
+        assert expected_interval_hours(1) == 8.0
 
     def test_pass_streak_three(self):
-        # 1 * 2^3 = 8 hours
-        assert expected_interval_hours(3) == 8.0
+        # 4 * 2^3 = 32 hours
+        assert expected_interval_hours(3) == 32.0
 
     def test_pass_streak_ten(self):
-        # 1 * 2^10 = 1024 hours
-        assert expected_interval_hours(10) == 1024.0
+        # 4 * 2^10 = 4096 hours
+        assert expected_interval_hours(10) == 4096.0
 
     def test_max_interval_cap(self):
-        # 1 * 2^13 = 8192, capped at 4320
-        assert expected_interval_hours(13) == MAX_INTERVAL_HOURS
+        # 4 * 2^11 = 8192, capped at 4320
+        assert expected_interval_hours(11) == MAX_INTERVAL_HOURS
 
     def test_very_high_pass_streak_stays_capped(self):
         assert expected_interval_hours(100) == MAX_INTERVAL_HOURS
 
     def test_negative_pass_streak_treated_as_zero(self):
-        # max(-5, 0) = 0 → 1 * 2^0 = 1 hour
-        assert expected_interval_hours(-5) == 1.0
+        # max(-5, 0) = 0 → 4 * 2^0 = 4 hours
+        assert expected_interval_hours(-5) == 4.0
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +96,8 @@ class TestExpectedInterval:
 
 class TestCalculatePriority:
     def test_exactly_one_interval_elapsed(self):
-        # pass_streak=0, interval=1h, 1h elapsed → priority=1.0
-        reviewed_at = NOW - timedelta(hours=1)
+        # pass_streak=0, interval=4h, 4h elapsed → priority=1.0
+        reviewed_at = NOW - timedelta(hours=4)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -105,8 +105,8 @@ class TestCalculatePriority:
         assert priority == pytest.approx(1.0)
 
     def test_two_intervals_elapsed(self):
-        # pass_streak=0, interval=1h, 2h elapsed → priority=2.0
-        reviewed_at = NOW - timedelta(hours=2)
+        # pass_streak=0, interval=4h, 8h elapsed → priority=2.0
+        reviewed_at = NOW - timedelta(hours=8)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -114,8 +114,8 @@ class TestCalculatePriority:
         assert priority == pytest.approx(2.0)
 
     def test_half_interval_elapsed(self):
-        # pass_streak=0, interval=1h, 30min elapsed → priority=0.5
-        reviewed_at = NOW - timedelta(minutes=30)
+        # pass_streak=0, interval=4h, 2h elapsed → priority=0.5
+        reviewed_at = NOW - timedelta(hours=2)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -123,17 +123,17 @@ class TestCalculatePriority:
         assert priority == pytest.approx(0.5)
 
     def test_pass_streak_increases_interval(self):
-        # pass_streak=3, interval=8h, 8h elapsed → priority=1.0
-        reviewed_at = NOW - timedelta(hours=8)
+        # pass_streak=3, interval=32h, 32h elapsed → priority=1.0
+        reviewed_at = NOW - timedelta(hours=32)
         priority = calculate_priority(
             pass_streak=3, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
         )
         assert priority == pytest.approx(1.0)
 
-    def test_pass_streak_3_four_hours_is_half_due(self):
-        # pass_streak=3, interval=8h, 4h elapsed → priority=0.5
-        reviewed_at = NOW - timedelta(hours=4)
+    def test_pass_streak_3_sixteen_hours_is_half_due(self):
+        # pass_streak=3, interval=32h, 16h elapsed → priority=0.5
+        reviewed_at = NOW - timedelta(hours=16)
         priority = calculate_priority(
             pass_streak=3, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -142,7 +142,7 @@ class TestCalculatePriority:
 
     def test_new_blunder_uses_created_at(self):
         # last_reviewed_at=None falls back to created_at
-        created = NOW - timedelta(hours=3)
+        created = NOW - timedelta(hours=12)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=None,
             created_at=created, now=NOW,
@@ -151,7 +151,7 @@ class TestCalculatePriority:
 
     def test_last_reviewed_at_takes_precedence_over_created_at(self):
         created = NOW - timedelta(hours=10)
-        reviewed = NOW - timedelta(hours=2)
+        reviewed = NOW - timedelta(hours=8)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed,
             created_at=created, now=NOW,
@@ -175,7 +175,7 @@ class TestCalculatePriority:
         assert priority == 0.0
 
     def test_max_interval_cap_affects_priority(self):
-        # pass_streak=13 → 2^13=8192 capped at 4320
+        # pass_streak=13 → 4*2^13=32768 capped at 4320
         # 4320h elapsed → priority=1.0 (exactly due)
         reviewed_at = NOW - timedelta(hours=4320)
         priority = calculate_priority(
@@ -191,7 +191,7 @@ class TestCalculatePriority:
 
 class TestDueThreshold:
     def test_exactly_due_at_one(self):
-        reviewed_at = NOW - timedelta(hours=1)
+        reviewed_at = NOW - timedelta(hours=4)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -201,7 +201,7 @@ class TestDueThreshold:
         assert not (priority > 1.0)
 
     def test_overdue(self):
-        reviewed_at = NOW - timedelta(hours=1, minutes=1)
+        reviewed_at = NOW - timedelta(hours=4, minutes=1)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -209,7 +209,7 @@ class TestDueThreshold:
         assert priority > 1.0
 
     def test_not_yet_due(self):
-        reviewed_at = NOW - timedelta(minutes=59)
+        reviewed_at = NOW - timedelta(hours=3, minutes=59)
         priority = calculate_priority(
             pass_streak=0, last_reviewed_at=reviewed_at,
             created_at=None, now=NOW,
@@ -225,7 +225,7 @@ def _candidate(
     eval_loss_cp: int = 100,
     pass_streak: int = 0,
     depth: int = 1,
-    hours_ago: float = 2.0,
+    hours_ago: float = 8.0,
 ) -> GhostMoveCandidate:
     return GhostMoveCandidate(
         first_move="e4",
@@ -240,37 +240,37 @@ def _candidate(
 
 class TestSelectionScore:
     def test_score_formula_manual_check(self):
-        # eval_loss_cp=100, pass_streak=0, depth=1, 2h ago
-        # priority = 2 / 1 = 2.0
+        # eval_loss_cp=100, pass_streak=0, depth=1, 8h ago
+        # priority = 8 / 4 = 2.0
         # severity = 100 / 50 = 2.0
         # distance = 1 / (1 + 0.1*1) = 1/1.1 ≈ 0.9091
         # score = 2.0 * 2.0 * 0.9091 ≈ 3.6364
-        c = _candidate(eval_loss_cp=100, pass_streak=0, depth=1, hours_ago=2.0)
+        c = _candidate(eval_loss_cp=100, pass_streak=0, depth=1, hours_ago=8.0)
         expected = 2.0 * 2.0 * (1.0 / 1.1)
         assert c.score(NOW) == pytest.approx(expected)
 
     def test_severity_weighting_200cp_vs_50cp(self):
         # 200cp blunder should score 4x vs 50cp at same priority/distance
-        c200 = _candidate(eval_loss_cp=200, depth=1, hours_ago=2.0)
-        c50 = _candidate(eval_loss_cp=50, depth=1, hours_ago=2.0)
+        c200 = _candidate(eval_loss_cp=200, depth=1, hours_ago=8.0)
+        c50 = _candidate(eval_loss_cp=50, depth=1, hours_ago=8.0)
         assert c200.score(NOW) == pytest.approx(4.0 * c50.score(NOW))
 
     def test_distance_tiebreaker_closer_preferred(self):
         # Same eval_loss and priority, closer depth scores higher
-        c_close = _candidate(eval_loss_cp=100, depth=1, hours_ago=2.0)
-        c_far = _candidate(eval_loss_cp=100, depth=5, hours_ago=2.0)
+        c_close = _candidate(eval_loss_cp=100, depth=1, hours_ago=8.0)
+        c_far = _candidate(eval_loss_cp=100, depth=5, hours_ago=8.0)
         assert c_close.score(NOW) > c_far.score(NOW)
 
     def test_distance_weight_at_depth_zero(self):
         # depth=0 → distance_weight = 1/(1+0) = 1.0
-        c = _candidate(eval_loss_cp=100, depth=0, hours_ago=2.0)
-        priority = 2.0  # 2h / 1h
+        c = _candidate(eval_loss_cp=100, depth=0, hours_ago=8.0)
+        priority = 2.0  # 8h / 4h
         severity = 100 / 50.0
         assert c.score(NOW) == pytest.approx(priority * severity * 1.0)
 
     def test_distance_weight_at_max_steering_radius(self):
         # depth=5 → distance_weight = 1/(1+0.5) = 1/1.5
-        c = _candidate(eval_loss_cp=100, depth=5, hours_ago=2.0)
+        c = _candidate(eval_loss_cp=100, depth=5, hours_ago=8.0)
         priority = 2.0
         severity = 2.0
         distance = 1.0 / 1.5
@@ -286,14 +286,14 @@ class TestSelectionScore:
 
     def test_higher_priority_wins_when_severity_equal(self):
         # More overdue blunder ranks higher
-        c_overdue = _candidate(eval_loss_cp=100, depth=1, hours_ago=10.0)
-        c_recent = _candidate(eval_loss_cp=100, depth=1, hours_ago=1.0)
+        c_overdue = _candidate(eval_loss_cp=100, depth=1, hours_ago=40.0)
+        c_recent = _candidate(eval_loss_cp=100, depth=1, hours_ago=4.0)
         assert c_overdue.score(NOW) > c_recent.score(NOW)
 
     def test_pass_streak_reduces_priority_and_score(self):
         # Same time elapsed, higher streak → lower score
-        c_low = _candidate(eval_loss_cp=100, pass_streak=0, depth=1, hours_ago=2.0)
-        c_high = _candidate(eval_loss_cp=100, pass_streak=3, depth=1, hours_ago=2.0)
+        c_low = _candidate(eval_loss_cp=100, pass_streak=0, depth=1, hours_ago=8.0)
+        c_high = _candidate(eval_loss_cp=100, pass_streak=3, depth=1, hours_ago=8.0)
         assert c_low.score(NOW) > c_high.score(NOW)
 
     def test_new_blunder_no_review_uses_created_at(self):
@@ -304,9 +304,9 @@ class TestSelectionScore:
             eval_loss_cp=100,
             pass_streak=0,
             last_reviewed_at=None,
-            created_at=NOW - timedelta(hours=5),
+            created_at=NOW - timedelta(hours=20),
         )
-        # priority = 5 / 1 = 5.0
+        # priority = 20 / 4 = 5.0
         # severity = 100/50 = 2.0
         # distance = 1/1.1
         expected = 5.0 * 2.0 * (1.0 / 1.1)

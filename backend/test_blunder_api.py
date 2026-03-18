@@ -464,9 +464,9 @@ def test_record_manual_blunder_success(client, auth_headers, create_game_session
         "/api/blunder/manual",
         json={
             "session_id": session_id,
-            "pgn": "1. e4",
-            "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            "user_move": "e4",
+            "pgn": "1. e4 e5 2. d4",
+            "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "user_move": "d4",
             "best_move": None,
             "eval_before": None,
             "eval_after": None,
@@ -485,10 +485,10 @@ def test_record_manual_blunder_duplicate_returns_not_new(client, auth_headers, c
     session_id = create_game_session(user_id=123, player_color="white")
     payload = {
         "session_id": session_id,
-        "pgn": "1. e4",
-        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-        "user_move": "e4",
-        "best_move": "d4",
+        "pgn": "1. e4 e5 2. d4",
+        "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "user_move": "d4",
+        "best_move": "Nf3",
         "eval_before": 20,
         "eval_after": 15,
     }

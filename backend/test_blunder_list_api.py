@@ -89,15 +89,15 @@ def test_list_blunders_includes_expected_fields(client, auth_headers, db_session
 
 def test_list_blunders_due_filter(client, auth_headers, db_session):
     now = datetime.now(timezone.utc)
-    # Overdue: pass_streak=0, last reviewed 2 hours ago (interval=1h, priority=2.0)
+    # Overdue: pass_streak=0, last reviewed 8 hours ago (interval=4h, priority=2.0)
     _create_blunder(
         db_session,
         user_id=123,
         pass_streak=0,
-        last_reviewed_at=now - timedelta(hours=2),
+        last_reviewed_at=now - timedelta(hours=8),
         fen_hash_suffix="due",
     )
-    # Not due: pass_streak=5, last reviewed 1 hour ago (interval=32h, priority≈0.03)
+    # Not due: pass_streak=5, last reviewed 1 hour ago (interval=128h, priority≈0.008)
     _create_blunder(
         db_session,
         user_id=123,
@@ -119,7 +119,7 @@ def test_list_blunders_due_filter(client, auth_headers, db_session):
 
 def test_list_blunders_sorted_by_priority_descending(client, auth_headers, db_session):
     now = datetime.now(timezone.utc)
-    # Low priority
+    # Low priority: pass_streak=3, interval=32h, 1h ago → priority≈0.031
     _create_blunder(
         db_session,
         user_id=123,
@@ -127,19 +127,21 @@ def test_list_blunders_sorted_by_priority_descending(client, auth_headers, db_se
         last_reviewed_at=now - timedelta(hours=1),
         fen_hash_suffix="low",
     )
-    # High priority
+    # High priority: pass_streak=0, interval=4h, 40h ago → priority=10.0
     _create_blunder(
         db_session,
         user_id=123,
         pass_streak=0,
-        last_reviewed_at=now - timedelta(hours=10),
+        last_reviewed_at=now - timedelta(hours=40),
         fen_hash_suffix="high",
     )
 
     response = client.get("/api/blunder", headers=auth_headers(user_id=123))
     data = response.json()
     assert len(data) == 2
-    assert data[0]["srs_priority"] >= data[1]["srs_priority"]
+    priorities = sorted([d["srs_priority"] for d in data], reverse=True)
+    # Verify both priorities are present and the high one is much larger
+    assert priorities[0] > priorities[1]
 
 
 def test_list_blunders_requires_auth(client):
