@@ -96,10 +96,12 @@ export const useStockfishEngine = () => {
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
             setIsThinking(false)
-            // Cache completed result by FEN
-            if (activeFen.current) {
+            // Cache completed result by FEN — capture the FEN now so the
+            // updater doesn't read a stale/mutated ref later.
+            const fenToCache = activeFen.current
+            if (fenToCache) {
               setInfo((current) => {
-                evalCache.current.set(activeFen.current!, current)
+                evalCache.current.set(fenToCache, current)
                 return current
               })
             }

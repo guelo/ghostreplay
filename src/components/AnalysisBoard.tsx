@@ -7,7 +7,7 @@ import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
+import { classifyMove, playerToWhite, toWhitePerspective } from "../workers/analysisUtils";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
@@ -148,14 +148,15 @@ const AnalysisBoard = ({
       return {
         san: m.san,
         classification: analysis ? classifyMove(analysis.delta) : undefined,
+        // playedEval is player-perspective; convert to white perspective
         eval:
           analysis?.playedEval != null
-            ? toWhitePerspective(analysis.playedEval, absIndex)
+            ? playerToWhite(analysis.playedEval, boardOrientation) ?? undefined
             : undefined,
       };
     });
     return [...base, ...branch];
-  }, [isInWhatIf, mappedMoves, whatIfBranchPoint, whatIfMoves, analysisMap]);
+  }, [isInWhatIf, mappedMoves, whatIfBranchPoint, whatIfMoves, analysisMap, boardOrientation]);
 
   // Current move list index accounting for what-if
   const moveListIndex = useMemo(() => {
@@ -182,16 +183,21 @@ const AnalysisBoard = ({
     return moves[effectiveIndex]?.fen_after ?? startingFen;
   }, [isInWhatIf, whatIfMoves, effectiveIndex, moves, startingFen]);
 
-  // Stop engine and clear lines synchronously when position changes
+  // Stop engine and clear lines synchronously when position changes.
+  // engineStaleRef prevents using leftover engine data with the new
+  // sideToMove for one frame (setInfo is async, but the ref is instant).
   const prevFenRef = useRef(displayedFen);
+  const engineStaleRef = useRef(false);
   if (prevFenRef.current !== displayedFen) {
     prevFenRef.current = displayedFen;
+    engineStaleRef.current = true;
     stopSearch();
   }
 
   // Start new evaluation after render
   useEffect(() => {
     if (!displayedFen || !showEngineArrows) return;
+    engineStaleRef.current = false;
     evaluatePosition(displayedFen, { depth: 21, multipv: 3 }).catch(() => {
       // Evaluation cancelled or engine unavailable — ignore
     });
@@ -325,6 +331,7 @@ const AnalysisBoard = ({
 
   // Live engine eval from top PV line (white perspective)
   const liveEngineEvalCp = useMemo(() => {
+    if (engineStaleRef.current) return null;
     const topLine = engineLines[0];
     if (!topLine?.score) return null;
     const raw = topLine.score.type === "cp" ? topLine.score.value : null;
@@ -333,6 +340,7 @@ const AnalysisBoard = ({
   }, [engineLines, sideToMove]);
 
   const liveEngineEvalMate = useMemo(() => {
+    if (engineStaleRef.current) return null;
     const topLine = engineLines[0];
     if (!topLine?.score) return null;
     if (topLine.score.type !== "mate") return null;
@@ -364,8 +372,9 @@ const AnalysisBoard = ({
   const whatIfEvalCp = useMemo(() => {
     if (!isInWhatIf || !lastAnalysis || lastAnalysis.moveIndex === null)
       return null;
-    return toWhitePerspective(lastAnalysis.playedEval, lastAnalysis.moveIndex);
-  }, [isInWhatIf, lastAnalysis]);
+    // playedEval is player-perspective; convert to white perspective
+    return playerToWhite(lastAnalysis.playedEval, boardOrientation);
+  }, [isInWhatIf, lastAnalysis, boardOrientation]);
 
   const playedEvalText = useMemo(
     () => formatEvalValue(currentEvalCp, currentEvalMate),
@@ -461,7 +470,8 @@ const AnalysisBoard = ({
           ...prev,
           { san: result.san, fen: tempChess.fen() },
         ]);
-        analyzeMove(baseFen, result.san, boardOrientation, moveIndex);
+        const uciMove = `${sourceSquare}${targetSquare}${result.promotion ?? ""}`;
+        analyzeMove(baseFen, uciMove, boardOrientation, moveIndex);
         return true;
       } catch {
         return false;

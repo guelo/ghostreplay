@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import type { Dispatch, SetStateAction } from "react";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
-import { toWhitePerspective } from "../../workers/analysisUtils";
+import { playerToWhite } from "../../workers/analysisUtils";
 import {
   deriveAnnotatedMoves,
   type BlunderAlert,
@@ -25,6 +25,7 @@ export const ConnectedEvalBar = memo(() => {
   const moveHistory = useGameStore((s) => s.moveHistory);
   const viewIndex = useGameStore((s) => s.viewIndex);
   const boardOrientation = useGameStore((s) => s.boardOrientation);
+  const playerColor = useGameStore((s) => s.playerColor);
 
   const selectedMoveIndex =
     moveHistory.length === 0 ? null : (viewIndex ?? moveHistory.length - 1);
@@ -36,10 +37,10 @@ export const ConnectedEvalBar = memo(() => {
     for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
       const analysis = analysisMap.get(idx);
       if (analysis?.playedEval == null) continue;
-      return toWhitePerspective(analysis.playedEval, idx);
+      return playerToWhite(analysis.playedEval, playerColor);
     }
     return null;
-  }, [analysisMap, selectedMoveIndex]);
+  }, [analysisMap, selectedMoveIndex, playerColor]);
 
   return (
     <EvalBar
@@ -73,13 +74,13 @@ export const ConnectedAnalysisGraph = memo(
       const raw = moveHistory.map((_, i) => {
         const a = analysisMap.get(i);
         return a?.playedEval != null
-          ? toWhitePerspective(a.playedEval, i)
+          ? playerToWhite(a.playedEval, playerColor)
           : null;
       });
       let end = raw.length;
       while (end > 0 && raw[end - 1] === null) end--;
       return raw.slice(0, end);
-    }, [moveHistory, analysisMap]);
+    }, [moveHistory, analysisMap, playerColor]);
 
     const pendingIndices = useMemo(() => {
       const pending: number[] = [];
@@ -96,7 +97,7 @@ export const ConnectedAnalysisGraph = memo(
       for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
         const analysis = analysisMap.get(idx);
         if (analysis?.playedEval == null) continue;
-        return toWhitePerspective(analysis.playedEval, idx);
+        return playerToWhite(analysis.playedEval, playerColor);
       }
       return null;
     }, [analysisMap, selectedMoveIndex]);
@@ -106,9 +107,9 @@ export const ConnectedAnalysisGraph = memo(
       return {
         index: streamingEval.moveIndex,
         cp:
-          toWhitePerspective(streamingEval.cp, streamingEval.moveIndex) ?? 0,
+          playerToWhite(streamingEval.cp, playerColor) ?? 0,
       };
-    }, [streamingEval]);
+    }, [streamingEval, playerColor]);
 
     if (!evals.some((e) => e !== null) && pendingIndices.length === 0) {
       return null;

@@ -70,6 +70,15 @@ export const toWhitePerspective = (
   return moveIndex % 2 === 0 ? moverPerspectiveEval : -moverPerspectiveEval
 }
 
+/** Convert a player-perspective eval to white perspective. */
+export const playerToWhite = (
+  playerPerspectiveEval: number | null,
+  playerColor: 'white' | 'black',
+): number | null => {
+  if (playerPerspectiveEval === null) return null
+  return playerColor === 'white' ? playerPerspectiveEval : -playerPerspectiveEval
+}
+
 export const scoreForPlayer = (
   score: EngineScore | null,
   sideToMove: 'w' | 'b',
