@@ -27,7 +27,6 @@ export const STARTING_FEN =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 export const ANALYSIS_UPLOAD_TIMEOUT_MS = 6000;
-export const SRS_REVIEW_FAIL_THRESHOLD_CP = 50;
 
 export const BLUNDER_AUDIO_CLIPS = Array.from(
   { length: 10 },

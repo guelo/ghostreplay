@@ -7,12 +7,10 @@ import {
   scoreForPlayer,
   getSideToMove,
   computeAnalysisResult,
-  isBlunder,
+  isRecordableFailure,
   isWithinRecordingMoveCap,
   classifyMove,
-  classifySessionMove,
-  ANNOTATION_SYMBOL,
-  BLUNDER_THRESHOLD,
+  RECORDABLE_FAILURE_THRESHOLD_CP,
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
 
@@ -118,9 +116,9 @@ describe('mateToCp', () => {
     expect(mateToCp(5)).toBe(-mateToCp(-5))
   })
 
-  it('always exceeds blunder threshold for any mate', () => {
+  it('always exceeds recordable failure threshold for any mate', () => {
     // Even mate in 100: 10000 - 100*10 = 9000 >> 50
-    expect(Math.abs(mateToCp(100))).toBeGreaterThan(BLUNDER_THRESHOLD)
+    expect(Math.abs(mateToCp(100))).toBeGreaterThan(RECORDABLE_FAILURE_THRESHOLD_CP)
   })
 })
 
@@ -264,13 +262,6 @@ describe('getSideToMove', () => {
 
 describe('computeAnalysisResult', () => {
   it('returns delta zero when played move is the best move despite eval disagreement', () => {
-    // Reproduces the 1.e4 false-blunder bug: the pre-move minimax search
-    // returned +97cp but the post-move search returned cp:-29 from black's
-    // POV (= +29 for white). The old code compared these two independent
-    // search results directly: 97 - 29 = 68 >= 50 threshold → false blunder.
-    //
-    // The fix: when bestMove === playedMove, postBestScore IS postPlayedScore
-    // (same search), so delta is always 0.
     const postPlayedScore: EngineScore = { type: 'cp', value: -29 }
 
     const result = computeAnalysisResult({
@@ -288,14 +279,6 @@ describe('computeAnalysisResult', () => {
   })
 
   it('computes delta from post-move evals, not pre-move minimax', () => {
-    // White played e4, but best move was d4.
-    // Old code used the pre-move minimax eval (+90cp) as bestEval — a search
-    // artifact from depth/timing variance in WASM. The post-d4 search returns
-    // cp:-30 from black's POV (= +30 for white), and the post-e4 search
-    // returns cp:-20 (= +20 for white).
-    //
-    // Old (buggy): delta = 90 - 20 = 70 → false blunder
-    // New (fixed): delta = 30 - 20 = 10 → correct small inaccuracy
     const postBestScore: EngineScore = { type: 'cp', value: -30 }
     const postPlayedScore: EngineScore = { type: 'cp', value: -20 }
 
@@ -314,8 +297,6 @@ describe('computeAnalysisResult', () => {
   })
 
   it('converts scores from opponent perspective for black player', () => {
-    // Black played e5, best was d5. After d5 white to move: cp:10.
-    // After e5 white to move: cp:40.
     const postBestScore: EngineScore = { type: 'cp', value: 10 }
     const postPlayedScore: EngineScore = { type: 'cp', value: 40 }
 
@@ -328,9 +309,6 @@ describe('computeAnalysisResult', () => {
       playerColor: 'black',
     })
 
-    // normalizeScore(10, 'w') = 10, black player → -10
-    // normalizeScore(40, 'w') = 40, black player → -40
-    // delta = -10 - (-40) = 30
     expect(result.bestEval).toBe(-10)
     expect(result.playedEval).toBe(-40)
     expect(result.delta).toBe(30)
@@ -350,73 +328,37 @@ describe('computeAnalysisResult', () => {
   })
 })
 
-describe('isBlunder', () => {
-  it('returns true when delta equals threshold', () => {
-    expect(isBlunder(50)).toBe(true)
+describe('isRecordableFailure', () => {
+  it('threshold constant is 50', () => {
+    expect(RECORDABLE_FAILURE_THRESHOLD_CP).toBe(50)
+  })
+
+  it('returns true when delta equals threshold (50cp fails)', () => {
+    expect(isRecordableFailure(50)).toBe(true)
   })
 
   it('returns true when delta exceeds threshold', () => {
-    expect(isBlunder(51)).toBe(true)
-    expect(isBlunder(500)).toBe(true)
-    expect(isBlunder(9990)).toBe(true)
+    expect(isRecordableFailure(51)).toBe(true)
+    expect(isRecordableFailure(500)).toBe(true)
+    expect(isRecordableFailure(9990)).toBe(true)
   })
 
-  it('returns false when delta is below threshold', () => {
-    expect(isBlunder(49)).toBe(false)
-    expect(isBlunder(10)).toBe(false)
-    expect(isBlunder(0)).toBe(false)
+  it('returns false when delta is below threshold (49cp passes)', () => {
+    expect(isRecordableFailure(49)).toBe(false)
+  })
+
+  it('returns false for small deltas', () => {
+    expect(isRecordableFailure(10)).toBe(false)
+    expect(isRecordableFailure(0)).toBe(false)
   })
 
   it('returns false for negative delta', () => {
-    expect(isBlunder(-50)).toBe(false)
-    expect(isBlunder(-200)).toBe(false)
+    expect(isRecordableFailure(-50)).toBe(false)
+    expect(isRecordableFailure(-200)).toBe(false)
   })
 
   it('returns false for null delta', () => {
-    expect(isBlunder(null)).toBe(false)
-  })
-
-  it('threshold constant is 50', () => {
-    expect(BLUNDER_THRESHOLD).toBe(50)
-  })
-
-  describe('context-aware with preEval', () => {
-    it('uses base threshold in equal positions', () => {
-      expect(isBlunder(50, 0)).toBe(true)
-      expect(isBlunder(49, 0)).toBe(false)
-    })
-
-    it('uses base threshold when player is winning', () => {
-      expect(isBlunder(50, 300)).toBe(true)
-      expect(isBlunder(49, 300)).toBe(false)
-    })
-
-    it('raises threshold when player is losing', () => {
-      // At preEval -500: threshold = 50 + 500*0.1 = 100
-      expect(isBlunder(99, -500)).toBe(false)
-      expect(isBlunder(100, -500)).toBe(true)
-    })
-
-    it('raises threshold further when deeply losing', () => {
-      // At preEval -1000: threshold = 50 + 1000*0.1 = 150
-      expect(isBlunder(149, -1000)).toBe(false)
-      expect(isBlunder(150, -1000)).toBe(true)
-    })
-
-    it('still rejects deltas below base threshold regardless of preEval', () => {
-      expect(isBlunder(30, 0)).toBe(false)
-      expect(isBlunder(30, -1000)).toBe(false)
-    })
-
-    it('falls back to base threshold when preEval is null', () => {
-      expect(isBlunder(50, null)).toBe(true)
-      expect(isBlunder(49, null)).toBe(false)
-    })
-
-    it('falls back to base threshold when preEval is undefined', () => {
-      expect(isBlunder(50, undefined)).toBe(true)
-      expect(isBlunder(49, undefined)).toBe(false)
-    })
+    expect(isRecordableFailure(null)).toBe(false)
   })
 })
 
@@ -441,112 +383,34 @@ describe('classifyMove', () => {
     expect(classifyMove(null)).toBeNull()
   })
 
-  it('classifies blunder at base threshold without preEval', () => {
-    expect(classifyMove(BLUNDER_THRESHOLD)).toBe('blunder')
-    expect(classifyMove(300)).toBe('blunder')
-  })
-
-  it('classifies inaccuracy between good and blunder thresholds', () => {
-    // Without preEval, blunder threshold is 50 (BLUNDER_THRESHOLD)
-    // so only values in the range [50, 50) would be inaccuracy — which is empty.
-    // With preEval context, the blunder threshold rises, creating an inaccuracy range.
-    // At preEval -500: threshold = 100, so delta 50-99 is inaccuracy.
-    expect(classifyMove(50, -500)).toBe('inaccuracy')
-    expect(classifyMove(99, -500)).toBe('inaccuracy')
-  })
-
-  it('classifies best move at zero delta', () => {
-    expect(classifyMove(0)).toBe('best')
-  })
-
-  it('classifies good move between 0 and 50', () => {
-    expect(classifyMove(1)).toBe('good')
-    expect(classifyMove(25)).toBe('good')
-    expect(classifyMove(49)).toBe('good')
-  })
-
-  it('classifies great move for negative delta', () => {
-    expect(classifyMove(-1)).toBe('great')
-    expect(classifyMove(-50)).toBe('great')
-    expect(classifyMove(-200)).toBe('great')
-  })
-
-  describe('context-aware with preEval', () => {
-    it('uses base threshold in equal positions', () => {
-      expect(classifyMove(50, 0)).toBe('blunder')
-      expect(classifyMove(49, 0)).toBe('good')
-    })
-
-    it('raises blunder threshold when already losing', () => {
-      // At preEval -500: threshold = 50 + 500*0.1 = 100
-      expect(classifyMove(99, -500)).toBe('inaccuracy')
-      expect(classifyMove(100, -500)).toBe('blunder')
-    })
-
-    it('classifies large delta as inaccuracy when deeply losing', () => {
-      // At preEval -1000: threshold = 50 + 100 = 150
-      // delta 120 is below scaled threshold → inaccuracy, not blunder
-      expect(classifyMove(120, -1000)).toBe('inaccuracy')
-      expect(classifyMove(150, -1000)).toBe('blunder')
-    })
-  })
-})
-
-describe('ANNOTATION_SYMBOL', () => {
-  it('maps blunder to ??', () => {
-    expect(ANNOTATION_SYMBOL.blunder).toBe('??')
-  })
-
-  it('maps inaccuracy to ?!', () => {
-    expect(ANNOTATION_SYMBOL.inaccuracy).toBe('?!')
-  })
-
-  it('maps good to empty string', () => {
-    expect(ANNOTATION_SYMBOL.good).toBe('')
-  })
-
-  it('maps great to !', () => {
-    expect(ANNOTATION_SYMBOL.great).toBe('!')
-  })
-
-  it('maps best to !', () => {
-    expect(ANNOTATION_SYMBOL.best).toBe('!')
-  })
-})
-
-describe('classifySessionMove', () => {
-  it('returns null for null delta', () => {
-    expect(classifySessionMove(null)).toBeNull()
-  })
-
   it('classifies best at zero and negative deltas', () => {
-    expect(classifySessionMove(0)).toBe('best')
-    expect(classifySessionMove(-1)).toBe('best')
-    expect(classifySessionMove(-250)).toBe('best')
+    expect(classifyMove(0)).toBe('best')
+    expect(classifyMove(-1)).toBe('best')
+    expect(classifyMove(-250)).toBe('best')
   })
 
   it('classifies excellent between 1 and 10', () => {
-    expect(classifySessionMove(1)).toBe('excellent')
-    expect(classifySessionMove(10)).toBe('excellent')
+    expect(classifyMove(1)).toBe('excellent')
+    expect(classifyMove(10)).toBe('excellent')
   })
 
   it('classifies good between 11 and 50', () => {
-    expect(classifySessionMove(11)).toBe('good')
-    expect(classifySessionMove(50)).toBe('good')
+    expect(classifyMove(11)).toBe('good')
+    expect(classifyMove(50)).toBe('good')
   })
 
   it('classifies inaccuracy between 51 and 100', () => {
-    expect(classifySessionMove(51)).toBe('inaccuracy')
-    expect(classifySessionMove(100)).toBe('inaccuracy')
+    expect(classifyMove(51)).toBe('inaccuracy')
+    expect(classifyMove(100)).toBe('inaccuracy')
   })
 
   it('classifies mistake between 101 and 149', () => {
-    expect(classifySessionMove(101)).toBe('mistake')
-    expect(classifySessionMove(149)).toBe('mistake')
+    expect(classifyMove(101)).toBe('mistake')
+    expect(classifyMove(149)).toBe('mistake')
   })
 
   it('classifies blunder at and above 150', () => {
-    expect(classifySessionMove(150)).toBe('blunder')
-    expect(classifySessionMove(400)).toBe('blunder')
+    expect(classifyMove(150)).toBe('blunder')
+    expect(classifyMove(400)).toBe('blunder')
   })
 })

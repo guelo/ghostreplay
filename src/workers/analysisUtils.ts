@@ -5,7 +5,7 @@
 
 import type { EngineScore } from './stockfishMessages'
 
-export const BLUNDER_THRESHOLD = 50
+export const RECORDABLE_FAILURE_THRESHOLD_CP = 50
 export const RECORDING_MOVE_CAP_FULL_MOVES = 10
 const RECORDING_MOVE_CAP_PLY = RECORDING_MOVE_CAP_FULL_MOVES * 2
 
@@ -119,26 +119,12 @@ export const computeAnalysisResult = (input: {
 }
 
 /**
- * Determines if a move is a blunder based on eval drop and position context.
- * The threshold scales with how lost the position already is:
- * - In equal positions (±200cp): base threshold of 50cp
- * - When already losing badly: threshold increases (losing 50cp more when down 500 is less meaningful)
- * - preEval is from the player's perspective (positive = advantage)
+ * Determines if a move is a recordable failure (for blunder recording and SRS
+ * review pass/fail). Uses a simple fixed threshold — no context-aware scaling.
  */
-export const isBlunder = (delta: number | null, preEval?: number | null): boolean => {
-  if (delta === null || delta < BLUNDER_THRESHOLD) {
-    return false
-  }
-
-  if (preEval === null || preEval === undefined) {
-    return delta >= BLUNDER_THRESHOLD
-  }
-
-  // Scale threshold: when already losing, require a bigger drop to flag as blunder.
-  // At eval 0: threshold = 50. At eval -500: threshold = 100. At eval -1000: threshold = 150.
-  const disadvantage = Math.max(-preEval, 0)
-  const scaledThreshold = BLUNDER_THRESHOLD + disadvantage * 0.1
-  return delta >= scaledThreshold
+export const isRecordableFailure = (delta: number | null): boolean => {
+  if (delta === null) return false
+  return delta >= RECORDABLE_FAILURE_THRESHOLD_CP
 }
 
 export const isWithinRecordingMoveCap = (
@@ -150,9 +136,7 @@ export const isWithinRecordingMoveCap = (
   return moveIndex < RECORDING_MOVE_CAP_PLY
 }
 
-export type MoveClassification = 'blunder' | 'inaccuracy' | 'good' | 'great' | 'best'
-
-export type SessionMoveClassification =
+export type MoveClassification =
   | 'best'
   | 'excellent'
   | 'good'
@@ -160,18 +144,9 @@ export type SessionMoveClassification =
   | 'mistake'
   | 'blunder'
 
-export const classifyMove = (delta: number | null, preEval?: number | null): MoveClassification | null => {
-  if (delta === null) return null
-  if (isBlunder(delta, preEval)) return 'blunder'
-  if (delta >= 50) return 'inaccuracy'
-  if (delta < 0) return 'great'
-  if (delta === 0) return 'best'
-  return 'good'
-}
-
-export const classifySessionMove = (
+export const classifyMove = (
   delta: number | null,
-): SessionMoveClassification | null => {
+): MoveClassification | null => {
   if (delta === null) return null
 
   const normalizedDelta = Math.max(delta, 0)
@@ -181,12 +156,4 @@ export const classifySessionMove = (
   if (normalizedDelta <= 100) return 'inaccuracy'
   if (normalizedDelta <= 149) return 'mistake'
   return 'blunder'
-}
-
-export const ANNOTATION_SYMBOL: Record<MoveClassification, string> = {
-  blunder: '??',
-  inaccuracy: '?!',
-  good: '',
-  great: '!',
-  best: '!',
 }

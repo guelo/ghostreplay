@@ -3,7 +3,7 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isBlunder, isWithinRecordingMoveCap } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
@@ -69,7 +69,7 @@ const fromCachedAnalysis = (
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
   const blunder =
     !forced &&
-    isBlunder(delta, bestEval) &&
+    isRecordableFailure(delta) &&
     isWithinRecordingMoveCap(moveIndex)
 
   return {

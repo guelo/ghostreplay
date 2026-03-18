@@ -15,7 +15,7 @@ import {
   getSideToMove,
   computeAnalysisResult,
   scoreForPlayer,
-  isBlunder,
+  isRecordableFailure,
   isWithinRecordingMoveCap,
 } from './analysisUtils'
 
@@ -228,7 +228,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   const forced = request.legalMoveCount !== undefined && request.legalMoveCount <= 2
   const blunder =
     !forced &&
-    isBlunder(delta, bestEval) &&
+    isRecordableFailure(delta) &&
     (request.moveIndex === undefined || isWithinRecordingMoveCap(request.moveIndex))
 
   ctx.postMessage({

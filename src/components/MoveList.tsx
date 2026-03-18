@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import type { MoveClassification } from "../workers/analysisUtils";
-import { ANNOTATION_SYMBOL } from "../workers/analysisUtils";
 
 type Move = {
   san: string;
@@ -33,9 +32,10 @@ const CLASSIFICATION_ICON: Partial<
   Record<MoveClassification, { icon: string; title: string }>
 > = {
   best: { icon: "⭐", title: "Best move" },
-  great: { icon: "!", title: "Great move" },
+  excellent: { icon: "!", title: "Excellent move" },
   good: { icon: "✓", title: "Good move" },
-  inaccuracy: { icon: "?", title: "Inaccuracy" },
+  inaccuracy: { icon: "?!", title: "Inaccuracy" },
+  mistake: { icon: "?", title: "Mistake" },
   blunder: { icon: "??", title: "Blunder" },
 };
 
@@ -228,9 +228,6 @@ const MoveList = ({
   ) => {
     const isSelected = index === effectiveIndex;
     const isAnalyzing = analyzingIndices?.has(index) ?? false;
-    const annotation = move.classification
-      ? ANNOTATION_SYMBOL[move.classification]
-      : "";
     const colorClass = classificationClass(move.classification);
     const iconInfo = move.classification
       ? CLASSIFICATION_ICON[move.classification]
@@ -258,7 +255,6 @@ const MoveList = ({
               {tappedIconIndex === index ? iconInfo.title : iconInfo.icon}
             </span>
           )}
-          {annotation}
           {move.san}
           {isAnalyzing && <span className="move-analyzing-spinner" />}
         </span>

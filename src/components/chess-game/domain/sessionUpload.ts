@@ -1,7 +1,7 @@
 import { Chess } from "chess.js";
 import type { AnalysisResult } from "../../../hooks/useMoveAnalysis";
 import type { SessionMoveUpload } from "../../../utils/api";
-import { classifySessionMove } from "../../../workers/analysisUtils";
+import { classifyMove } from "../../../workers/analysisUtils";
 import type { MoveRecord } from "./movePresentation";
 
 export const parseUciToSan = (
@@ -48,7 +48,7 @@ export const buildSessionMoveUploads = (
         : null,
       best_move_eval_cp: analysis?.bestEval ?? null,
       eval_delta: analysis?.delta ?? null,
-      classification: classifySessionMove(analysis?.delta ?? null),
+      classification: classifyMove(analysis?.delta ?? null),
       fen_before: fenBeforeMove,
       move_uci: move.uci,
       best_move_uci: analysis?.bestMove ?? null,

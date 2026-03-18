@@ -2,13 +2,12 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
-import type { AnalysisMove, SessionMoveClassification } from "../utils/api";
+import type { AnalysisMove } from "../utils/api";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
 import { classifyMove, toWhitePerspective } from "../workers/analysisUtils";
-import type { MoveClassification } from "../workers/analysisUtils";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
@@ -26,27 +25,6 @@ type AnalysisBoardProps = {
 type WhatIfMove = {
   san: string;
   fen: string;
-};
-
-// Map API classification to MoveList's classification type
-const mapClassification = (
-  c: SessionMoveClassification | null,
-): MoveClassification | null => {
-  if (!c) return null;
-  switch (c) {
-    case "best":
-      return "best";
-    case "excellent":
-      return "great";
-    case "good":
-      return "good";
-    case "inaccuracy":
-      return "inaccuracy";
-    case "mistake":
-      return "inaccuracy";
-    case "blunder":
-      return "blunder";
-  }
 };
 
 // Convert SAN move to start/end squares using chess.js
@@ -148,7 +126,7 @@ const AnalysisBoard = ({
     () =>
       moves.map((m, i) => ({
         san: m.move_san,
-        classification: mapClassification(m.classification),
+        classification: m.classification,
         eval: toWhitePerspective(m.eval_cp, i),
       })),
     [moves],
@@ -167,11 +145,9 @@ const AnalysisBoard = ({
     const branch = whatIfMoves.map((m, i) => {
       const absIndex = whatIfBranchPoint + 1 + i;
       const analysis = analysisMap.get(absIndex);
-      const prevAnalysis = analysisMap.get(absIndex - 1);
-      const preEval = prevAnalysis?.playedEval ?? null;
       return {
         san: m.san,
-        classification: analysis ? classifyMove(analysis.delta, preEval) : undefined,
+        classification: analysis ? classifyMove(analysis.delta) : undefined,
         eval:
           analysis?.playedEval != null
             ? toWhitePerspective(analysis.playedEval, absIndex)

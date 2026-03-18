@@ -108,7 +108,7 @@ describe("chess-game domain helpers", () => {
     const annotatedMoves = deriveAnnotatedMoves(moveHistory, analysisMap);
     expect(annotatedMoves).toEqual([
       { san: "e4", classification: "best", eval: 34 },
-      { san: "d5", classification: "good", eval: -12 },
+      { san: "d5", classification: "excellent", eval: -12 },
     ]);
   });
 

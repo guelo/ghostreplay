@@ -180,13 +180,8 @@ export interface RatingHistoryResponse {
 
 export type SessionMoveColor = 'white' | 'black'
 
-export type SessionMoveClassification =
-  | 'best'
-  | 'excellent'
-  | 'good'
-  | 'inaccuracy'
-  | 'mistake'
-  | 'blunder'
+// Re-export MoveClassification so existing imports from api.ts keep working
+export type { MoveClassification } from '../workers/analysisUtils'
 
 export interface SessionMoveUpload {
   move_number: number
@@ -198,7 +193,7 @@ export interface SessionMoveUpload {
   best_move_san: string | null
   best_move_eval_cp: number | null
   eval_delta: number | null
-  classification: SessionMoveClassification | null
+  classification: MoveClassification | null
   fen_before: string | null
   move_uci: string | null
   best_move_uci: string | null
@@ -496,7 +491,7 @@ export interface AnalysisMove {
   best_move_san: string | null
   best_move_eval_cp: number | null
   eval_delta: number | null
-  classification: SessionMoveClassification | null
+  classification: MoveClassification | null
 }
 
 export interface SessionAnalysis {

@@ -6,13 +6,12 @@ import {
   reviewSrsBlunder,
 } from "../../utils/api";
 import { shouldRecordBlunder } from "../../utils/blunder";
-import { isWithinRecordingMoveCap } from "../../workers/analysisUtils";
+import { isRecordableFailure, isWithinRecordingMoveCap } from "../../workers/analysisUtils";
 import type { BlunderAlert } from "./domain/movePresentation";
 import type { MoveMessage } from "../MoveList";
 import {
   BLUNDER_AUDIO_CLIPS,
   STARTING_FEN,
-  SRS_REVIEW_FAIL_THRESHOLD_CP,
 } from "./config";
 import { useAnalysisStore } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
@@ -129,7 +128,7 @@ const AnalysisEffects = ({
     }
 
     const evalLossCp = Math.max(lastAnalysis.delta, 0);
-    const passed = evalLossCp < SRS_REVIEW_FAIL_THRESHOLD_CP;
+    const passed = !isRecordableFailure(evalLossCp);
 
     if (passed) {
       const srs = pendingReview.srs;
