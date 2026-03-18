@@ -320,16 +320,29 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [],
   );
 
-  // Build a stable snapshot for passing to ConnectedMoveList
+  // Build a stable snapshot for passing to ConnectedMoveList.
+  // Preserves per-index array references when that index's messages haven't changed,
+  // so MoveRow memoization can skip unchanged rows.
+  // Invariant: appendMoveMessage only pushes (never edits in place at constant length).
+  // A future "replace message" path would need to invalidate differently.
+  const prevMoveMessagesSnapshotRef = useRef<ReadonlyMap<number, MoveMessage[]>>(new Map());
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const moveMessages = useMemo(() => {
     void moveMessagesVersion; // depend on version counter
-    return new Map(
-      Array.from(moveMessagesRef.current, ([moveIndex, messages]) => [
-        moveIndex,
-        [...messages],
-      ]),
-    ) as ReadonlyMap<number, MoveMessage[]>;
+    const prev = prevMoveMessagesSnapshotRef.current;
+    const next = new Map<number, MoveMessage[]>();
+    for (const [moveIndex, messages] of moveMessagesRef.current) {
+      const prevArr = prev.get(moveIndex);
+      if (prevArr && prevArr.length === messages.length) {
+        // No new messages appended — reuse previous array reference
+        next.set(moveIndex, prevArr);
+      } else {
+        next.set(moveIndex, [...messages]);
+      }
+    }
+    const result = next as ReadonlyMap<number, MoveMessage[]>;
+    prevMoveMessagesSnapshotRef.current = result;
+    return result;
   }, [moveMessagesVersion]);
 
   const opponentColor = playerColor === "white" ? "black" : "white";

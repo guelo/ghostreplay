@@ -1,42 +1,15 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MoveClassification } from "../workers/analysisUtils";
+import MoveRow, { formatEval } from "./MoveRow";
+import type { MoveMessage, SrsFailDetail } from "./MoveRow";
+
+// Re-export types that other modules import from MoveList
+export type { SrsFailDetail, SrsStats, MoveMessage } from "./MoveRow";
 
 type Move = {
   san: string;
   classification?: MoveClassification | null;
   eval?: number | null; // centipawns, white perspective
-};
-
-export type SrsFailDetail = {
-  userMoveSan: string;
-  bestMoveSan: string;
-  userMoveUci: string;
-  bestMoveUci: string;
-};
-
-export type SrsStats = {
-  passCount: number;
-  failCount: number;
-  streak: number;
-};
-
-export type MoveMessage = {
-  key: string;
-  variant: "srs-pass" | "srs-fail";
-  text: string;
-  srsFailDetail?: SrsFailDetail;
-  srsStats?: SrsStats;
-};
-
-const CLASSIFICATION_ICON: Partial<
-  Record<MoveClassification, { icon: string; title: string }>
-> = {
-  best: { icon: "⭐", title: "Best move" },
-  excellent: { icon: "!", title: "Excellent move" },
-  good: { icon: "✓", title: "Good move" },
-  inaccuracy: { icon: "?!", title: "Inaccuracy" },
-  mistake: { icon: "?", title: "Mistake" },
-  blunder: { icon: "??", title: "Blunder" },
 };
 
 type MoveListProps = {
@@ -55,48 +28,8 @@ type MoveListProps = {
   revealedSrsFailIndex?: number | null;
 };
 
-/** Format centipawns as compact string: "+1.2", "−3", "0" */
-const formatEval = (cp: number): string => {
-  const value = cp / 100;
-  const abs = Math.abs(value);
-  const num = abs % 1 === 0 ? abs.toFixed(0) : abs.toFixed(1);
-  if (value === 0) return "0";
-  return `${value > 0 ? "+" : "\u2212"}${num}`;
-};
-
-/** Format the full eval formula: prevEval ±delta = newEval.
- *  Color reflects advantage for the player (not the side that moved):
- *  green = good for player, red = bad for player. */
-const formatEvalFormula = (
-  prevCp: number,
-  currentCp: number,
-  playerColor: "white" | "black",
-): React.ReactNode => {
-  const deltaCp = currentCp - prevCp;
-  const absDelta = Math.abs(deltaCp / 100);
-  const deltaStr = absDelta % 1 === 0 ? absDelta.toFixed(0) : absDelta.toFixed(1);
-  const sign = deltaCp >= 0 ? "+" : "\u2212";
-  // Eval is from white's perspective, so positive delta is good for white player, bad for black player
-  const goodForPlayer = playerColor === "white" ? deltaCp >= 0 : deltaCp <= 0;
-  return (
-    <>
-      {formatEval(prevCp)}
-      {" "}
-      <span className={`eval-delta ${goodForPlayer ? "eval-delta--pos" : "eval-delta--neg"}`}>
-        {sign}{deltaStr}
-      </span>
-      {" = "}
-      {formatEval(currentCp)}
-    </>
-  );
-};
-
-const classificationClass = (c?: MoveClassification | null): string => {
-  if (!c) return "";
-  return `move-${c}`;
-};
-
 const EMPTY_MESSAGES: ReadonlyMap<number, MoveMessage[]> = new Map();
+const EMPTY_BUBBLES: MoveMessage[] = [];
 
 const MoveList = ({
   moves,
@@ -134,11 +67,21 @@ const MoveList = ({
     onNavigate(newIndex >= moves.length - 1 ? null : newIndex);
   }, [canGoForward, effectiveIndex, moves.length, onNavigate]);
 
-  const handleMoveClick = (index: number) => {
-    setTappedIconIndex(null);
-    // If clicking on the last move, set to null (live position)
-    onNavigate(index === moves.length - 1 ? null : index);
-  };
+  const handleMoveClick = useCallback(
+    (index: number) => {
+      setTappedIconIndex(null);
+      // If clicking on the last move, set to null (live position)
+      onNavigate(index === moves.length - 1 ? null : index);
+    },
+    [moves.length, onNavigate],
+  );
+
+  const handleIconTap = useCallback(
+    (index: number) => {
+      setTappedIconIndex((prev) => (prev === index ? null : index));
+    },
+    [],
+  );
 
   const handleStartPosition = () => {
     if (moves.length > 0) {
@@ -172,33 +115,59 @@ const MoveList = ({
 
   // Auto-scroll to selected move
   useEffect(() => {
-    if (selectedMoveRef.current && moveListRef.current) {
-      selectedMoveRef.current.scrollIntoView({
+    if (!selectedMoveRef.current || !moveListRef.current) return;
+    const id = requestAnimationFrame(() => {
+      selectedMoveRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "nearest",
       });
-    }
+    });
+    return () => cancelAnimationFrame(id);
   }, [effectiveIndex]);
 
-  // Auto-scroll latest message into view
+  // Auto-scroll latest message into view.
+  // Diff is computed inside the effect (after commit) to avoid mutating a ref
+  // during render, which is unsafe under StrictMode double-render.
+  const prevMessagesRef = useRef<ReadonlyMap<number, MoveMessage[]>>(EMPTY_MESSAGES);
   useEffect(() => {
-    if (lastMessageRef.current && moveListRef.current) {
-      lastMessageRef.current.scrollIntoView({
+    const prev = prevMessagesRef.current;
+    let hasChange = false;
+    for (const [idx, arr] of messages) {
+      if (arr !== prev.get(idx)) {
+        hasChange = true;
+        break;
+      }
+    }
+    prevMessagesRef.current = messages;
+    if (!hasChange) return;
+    if (!lastMessageRef.current || !moveListRef.current) return;
+    const id = requestAnimationFrame(() => {
+      lastMessageRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "nearest",
       });
-    }
+    });
+    return () => cancelAnimationFrame(id);
   }, [messages]);
 
-  // Group moves into pairs (white move, black move)
-  const movePairs: { number: number; white: Move; black?: Move }[] = [];
-  for (let i = 0; i < moves.length; i += 2) {
-    movePairs.push({
-      number: Math.floor(i / 2) + 1,
-      white: moves[i],
-      black: moves[i + 1],
-    });
+  // Highest message-bearing move index — drives lastMessageRef attachment
+  let lastBubbleMsgIndex = -1;
+  for (const [idx] of messages) {
+    if (idx > lastBubbleMsgIndex) lastBubbleMsgIndex = idx;
   }
+
+  // Group moves into pairs (white move, black move)
+  const movePairs = useMemo(() => {
+    const pairs: { number: number; white: Move; black?: Move }[] = [];
+    for (let i = 0; i < moves.length; i += 2) {
+      pairs.push({
+        number: Math.floor(i / 2) + 1,
+        white: moves[i],
+        black: moves[i + 1],
+      });
+    }
+    return pairs;
+  }, [moves]);
 
   const isAtStart = effectiveIndex === -1;
   const isAtLatest = currentIndex === null;
@@ -207,142 +176,6 @@ const MoveList = ({
     moves.length > 0 &&
     effectiveIndex >= 0 &&
     canAddSelectedMove;
-
-  // Track the last message ref target for auto-scroll
-  let lastBubbleMsgIndex = -1;
-  for (const [idx] of messages) {
-    if (idx > lastBubbleMsgIndex) {
-      lastBubbleMsgIndex = idx;
-    }
-  }
-
-  /** Get the messages for a move (rendered as full-width rows) */
-  const getBubbleMessages = (index: number): MoveMessage[] => {
-    return messages.get(index) ?? [];
-  };
-
-  const renderMoveCell = (
-    move: Move,
-    index: number,
-    side: "white" | "black",
-  ) => {
-    const isSelected = index === effectiveIndex;
-    const isAnalyzing = analyzingIndices?.has(index) ?? false;
-    const colorClass = classificationClass(move.classification);
-    const iconInfo = move.classification
-      ? CLASSIFICATION_ICON[move.classification]
-      : undefined;
-    // Previous eval from white's perspective (first move uses 0 as baseline)
-    const prevEval = index > 0 ? moves[index - 1].eval : 0;
-
-    return (
-      <button
-        ref={isSelected ? selectedMoveRef : null}
-        className={`move-button move-col-${side} ${colorClass} ${isSelected ? "selected" : ""}`}
-        type="button"
-        onClick={() => handleMoveClick(index)}
-      >
-        <span className="move-san">
-          {iconInfo && (
-            <span
-              className={`move-icon move-icon--${move.classification}`}
-              title={iconInfo.title}
-              onClick={(e) => {
-                e.stopPropagation();
-                setTappedIconIndex(tappedIconIndex === index ? null : index);
-              }}
-            >
-              {tappedIconIndex === index ? iconInfo.title : iconInfo.icon}
-            </span>
-          )}
-          {move.san}
-          {isAnalyzing && <span className="move-analyzing-spinner" />}
-        </span>
-        <span className="move-eval">
-          {move.eval != null && prevEval != null
-            ? formatEvalFormula(prevEval, move.eval, playerColor)
-            : ""}
-        </span>
-      </button>
-    );
-  };
-
-  const renderBubbleMessages = (
-    msgs: MoveMessage[],
-    moveIndex: number,
-    side: "white" | "black",
-  ) => {
-    const arrowClass = side === "black" ? "move-bubble--arrow-right" : "";
-    return msgs.map((msg) => {
-      const isLast = moveIndex === lastBubbleMsgIndex;
-
-      if (msg.variant === "srs-fail" && msg.srsFailDetail) {
-        const isRevealed = revealedSrsFailIndex === moveIndex;
-        return (
-          <div
-            ref={isLast ? lastMessageRef : null}
-            key={msg.key}
-            className={`move-bubble move-bubble--srs-fail ${arrowClass}`}
-          >
-            <button
-              type="button"
-              className={`srs-fail-icon ${isRevealed ? "srs-fail-icon--revealed" : ""}`}
-              onClick={() => {
-                if (!isRevealed && onRevealSrsFail && msg.srsFailDetail) {
-                  onRevealSrsFail(msg.srsFailDetail, moveIndex);
-                }
-              }}
-              title="Click to see what you should have played"
-            >
-              <span className="srs-fail-icon__symbol">!</span>
-            </button>
-            <div className="srs-fail-body">
-              <span className="srs-fail-body__label">{msg.text}</span>
-              {msg.srsStats && (
-                <span className="srs-stats">
-                  pass/fail: {msg.srsStats.passCount}/{msg.srsStats.failCount} ·
-                  streak {msg.srsStats.streak}
-                </span>
-              )}
-              {isRevealed && msg.srsFailDetail && (
-                <div className="srs-fail-body__detail">
-                  <p>
-                    You played:{" "}
-                    <strong className="srs-fail-body__bad">
-                      {msg.srsFailDetail.userMoveSan}
-                    </strong>
-                  </p>
-                  <p>
-                    Best was:{" "}
-                    <span className="srs-fail-body__best">
-                      {msg.srsFailDetail.bestMoveSan}
-                    </span>
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      }
-
-      return (
-        <div
-          ref={isLast ? lastMessageRef : null}
-          key={msg.key}
-          className={`move-bubble move-bubble--${msg.variant} ${arrowClass}`}
-        >
-          <span>{msg.text}</span>
-          {msg.srsStats && (
-            <span className="srs-stats">
-              pass/fail: {msg.srsStats.passCount}/{msg.srsStats.failCount}
-              <br />
-              streak {msg.srsStats.streak}
-            </span>
-          )}
-        </div>
-      );
-    });
-  };
 
   return (
     <div className="move-list-container">
@@ -365,50 +198,44 @@ const MoveList = ({
             {movePairs.map((pair, pairIndex) => {
               const whiteIdx = pairIndex * 2;
               const blackIdx = pairIndex * 2 + 1;
-              const whiteBubbles = getBubbleMessages(whiteIdx);
-              const blackBubbles = pair.black
-                ? getBubbleMessages(blackIdx)
-                : [];
+              const whiteBubbles = messages.get(whiteIdx) ?? EMPTY_BUBBLES;
+              const blackBubbles = (pair.black ? messages.get(blackIdx) : undefined) ?? EMPTY_BUBBLES;
 
-              // Case 1: White has bubble messages — split the row
-              if (whiteBubbles.length > 0) {
-                return (
-                  <React.Fragment key={pair.number}>
-                    {/* White move with "..." placeholder for black */}
-                    <span className="move-number">{pair.number}</span>
-                    {renderMoveCell(pair.white, whiteIdx, "white")}
-                    <span className="move-button-placeholder move-placeholder-dots">
-                      …
-                    </span>
-                    {renderBubbleMessages(whiteBubbles, whiteIdx, "white")}
+              // Pre-compute previous evals to avoid cross-row dependency in MoveRow
+              const prevWhiteEval = whiteIdx > 0 ? moves[whiteIdx - 1].eval : 0;
+              const prevBlackEval = pair.black && whiteIdx >= 0 ? moves[whiteIdx].eval : undefined;
 
-                    {/* Black move shifted to its own row */}
-                    {pair.black && (
-                      <>
-                        <span className="move-number" />
-                        <span className="move-button-placeholder" />
-                        {renderMoveCell(pair.black, blackIdx, "black")}
-                        {blackBubbles.length > 0 &&
-                          renderBubbleMessages(blackBubbles, blackIdx, "black")}
-                      </>
-                    )}
-                  </React.Fragment>
-                );
-              }
+              // Is this row the target for message auto-scroll?
+              const isLastBubbleRow =
+                lastBubbleMsgIndex === whiteIdx ||
+                lastBubbleMsgIndex === blackIdx;
 
-              // Case 2: Only black has bubble messages (or no bubbles) — keep pair together
               return (
-                <React.Fragment key={pair.number}>
-                  <span className="move-number">{pair.number}</span>
-                  {renderMoveCell(pair.white, whiteIdx, "white")}
-                  {pair.black ? (
-                    renderMoveCell(pair.black, blackIdx, "black")
-                  ) : (
-                    <span className="move-button-placeholder" />
-                  )}
-                  {blackBubbles.length > 0 &&
-                    renderBubbleMessages(blackBubbles, blackIdx, "black")}
-                </React.Fragment>
+                <MoveRow
+                  key={pair.number}
+                  pairNumber={pair.number}
+                  white={pair.white}
+                  black={pair.black}
+                  whiteIdx={whiteIdx}
+                  blackIdx={blackIdx}
+                  prevWhiteEval={prevWhiteEval}
+                  prevBlackEval={prevBlackEval}
+                  isWhiteSelected={whiteIdx === effectiveIndex}
+                  isBlackSelected={blackIdx === effectiveIndex}
+                  whiteBubbles={whiteBubbles}
+                  blackBubbles={blackBubbles}
+                  isLastBubbleRow={isLastBubbleRow}
+                  analyzingWhite={analyzingIndices?.has(whiteIdx) ?? false}
+                  analyzingBlack={analyzingIndices?.has(blackIdx) ?? false}
+                  playerColor={playerColor}
+                  tappedIconIndex={tappedIconIndex}
+                  revealedSrsFailIndex={revealedSrsFailIndex}
+                  onMoveClick={handleMoveClick}
+                  onIconTap={handleIconTap}
+                  onRevealSrsFail={onRevealSrsFail}
+                  selectedMoveRef={selectedMoveRef}
+                  lastMessageRef={lastMessageRef}
+                />
               );
             })}
           </div>

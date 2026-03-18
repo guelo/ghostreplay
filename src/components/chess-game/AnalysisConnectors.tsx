@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import type { Dispatch, SetStateAction } from "react";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
@@ -167,10 +167,28 @@ export const ConnectedMoveList = memo(
       [playerColor],
     );
 
-    const annotatedMoves = useMemo(
-      () => deriveAnnotatedMoves(moveHistory, analysisMap),
-      [moveHistory, analysisMap],
-    );
+    const prevAnnotatedRef = useRef<
+      { san: string; classification?: string | null; eval?: number | null }[]
+    >([]);
+
+    const annotatedMoves = useMemo(() => {
+      const fresh = deriveAnnotatedMoves(moveHistory, analysisMap);
+      const prev = prevAnnotatedRef.current;
+      const stable = fresh.map((item, i) => {
+        const old = prev[i];
+        if (
+          old &&
+          old.san === item.san &&
+          old.classification === item.classification &&
+          old.eval === item.eval
+        ) {
+          return old;
+        }
+        return item;
+      });
+      prevAnnotatedRef.current = stable;
+      return stable;
+    }, [moveHistory, analysisMap]);
 
     const analyzingIndices = useMemo(() => {
       if (!isGameActive) return new Set<number>();
