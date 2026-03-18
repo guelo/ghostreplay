@@ -56,7 +56,8 @@ const AnalysisGraph = ({
   const chartH = SVG_HEIGHT - PAD_Y * 2;
   const midY = PAD_Y + chartH / 2;
 
-  // Compute maxLog across confirmed evals AND streaming eval for consistent y-axis
+  // Compute maxLog from confirmed evals only — streaming eval is excluded so
+  // confirmed geometry (points, paths) stays frozen across streaming ticks.
   const maxLog = useMemo(() => {
     let ml = logScale(200); // minimum range ≈ ±2 pawns
     for (const ev of evals) {
@@ -65,19 +66,18 @@ const AnalysisGraph = ({
         if (v > ml) ml = v;
       }
     }
-    if (streamingEval) {
-      const v = Math.abs(logScale(streamingEval.cp));
-      if (v > ml) ml = v;
-    }
     return ml;
-  }, [evals, streamingEval]);
+  }, [evals]);
 
   const stepX = totalMoves > 1 ? chartW / (totalMoves - 1) : 0;
 
   const cpToY = useCallback(
     (cp: number) => {
       const scaled = logScale(cp);
-      return midY - (scaled / maxLog) * (chartH / 2);
+      const raw = midY - (scaled / maxLog) * (chartH / 2);
+      // Clamp to chart bounds so streaming dots can't escape when their
+      // value exceeds the confirmed scale.
+      return Math.max(PAD_Y, Math.min(PAD_Y + chartH, raw));
     },
     [maxLog, chartH, midY],
   );
