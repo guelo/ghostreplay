@@ -8,7 +8,7 @@ import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { classifyMove, playerToWhite, toWhitePerspective } from "../workers/analysisUtils";
+import { classifyMove, mateToCp, playerToWhite, toWhitePerspective } from "../workers/analysisUtils";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
@@ -55,11 +55,55 @@ const fenSideToMove = (fen: string): "w" | "b" => {
   return (idx >= 0 ? fen[idx + 1] : "w") as "w" | "b";
 };
 
-const ENGINE_ARROW_COLORS = [
-  "rgba(59, 130, 246, 0.85)",
-  "rgba(59, 130, 246, 0.5)",
-  "rgba(59, 130, 246, 0.3)",
-];
+const BEST_MOVE_ARROW_COLOR = "rgba(59, 130, 246, 0.85)";
+
+/** Grey arrow whose opacity fades as centipawn loss grows. */
+export const engineArrowColor = (cpLoss: number): string => {
+  const opacity = Math.max(0.2, 0.7 - cpLoss / 300);
+  return `rgba(150, 150, 150, ${opacity.toFixed(2)})`;
+};
+
+const DEFAULT_GREY_ARROW = "rgba(150, 150, 150, 0.45)";
+
+type MoveArrow = { startSquare: string; endSquare: string; color: string };
+
+/** Convert an EngineScore to a single number (side-to-move relative). */
+const scoreToNum = (s: EngineInfo["score"]): number | null => {
+  if (!s) return null;
+  return s.type === "cp" ? s.value : mateToCp(s.value);
+};
+
+/** Pure function: build engine line arrows with strength-based styling. */
+export function buildEngineArrows(
+  lines: EngineInfo[],
+): MoveArrow[] {
+  if (lines.length === 0) return [];
+  const scores = lines.map((l) => scoreToNum(l?.score));
+  const bestScore = scores.find((s) => s !== null) ?? null;
+
+  const seen = new Set<string>();
+  const result: MoveArrow[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line?.pv?.[0]) continue;
+    const squares = uciToSquares(line.pv[0]);
+    const key = `${squares.startSquare}-${squares.endSquare}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    let color: string;
+    if (i === 0) {
+      color = BEST_MOVE_ARROW_COLOR;
+    } else if (bestScore !== null && scores[i] !== null) {
+      color = engineArrowColor(bestScore - scores[i]!);
+    } else {
+      color = DEFAULT_GREY_ARROW;
+    }
+
+    result.push({ ...squares, color });
+  }
+  return result;
+}
 
 const formatEvalCp = (cp: number): string => {
   const value = cp / 100;
@@ -297,28 +341,12 @@ const AnalysisBoard = ({
       });
   }, [mergedEngineLines, displayedFen]);
 
-  // Engine-recommended move arrows
-  const engineArrows = useMemo(() => {
-    if (mergedEngineLines.length === 0) return [];
-    const seen = new Set<string>();
-    const result: { startSquare: string; endSquare: string; color: string }[] =
-      [];
-    for (let i = 0; i < mergedEngineLines.length; i++) {
-      const line = mergedEngineLines[i];
-      if (!line?.pv?.[0]) continue;
-      const squares = uciToSquares(line.pv[0]);
-      const key = `${squares.startSquare}-${squares.endSquare}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      result.push({
-        ...squares,
-        color:
-          ENGINE_ARROW_COLORS[i] ??
-          ENGINE_ARROW_COLORS[ENGINE_ARROW_COLORS.length - 1],
-      });
-    }
-    return result;
-  }, [mergedEngineLines]);
+  // Engine-recommended move arrows — best move is blue, others grey with
+  // opacity proportional to their centipawn loss relative to the best move.
+  const engineArrows = useMemo(
+    () => buildEngineArrows(mergedEngineLines),
+    [mergedEngineLines],
+  );
 
   // Arrows for the current position
   const arrows = useMemo(() => {
