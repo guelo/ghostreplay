@@ -1320,24 +1320,27 @@
 }
 
 .analysis-graph--with-axis {
-    display: flex;
-    align-items: stretch;
+    position: relative;
+    align-self: flex-start;
 }
 
 .analysis-graph--with-axis > svg {
-    flex: 1;
-    min-width: 0;
-    border-radius: 0 0.5rem 0.5rem 0;
+    border-radius: 0.5rem 0 0 0.5rem;
 }
 
 .analysis-graph__y-axis {
+    position: absolute;
+    top: 0;
+    left: 100%;
+    bottom: 0;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    padding: 0.35rem 0.4rem;
+    padding: 0.35rem 0.4rem 0.35rem 0;
     background: #fff;
-    border-radius: 0.5rem 0 0 0.5rem;
-    border-right: 1px solid var(--border-color);
+    border-radius: 0 0.5rem 0.5rem 0;
+    border-left: 1px solid var(--border-color);
+    overflow: hidden;
 }
 
 .analysis-graph__y-label {
@@ -1351,19 +1354,29 @@
     line-height: 1;
     text-transform: uppercase;
     letter-spacing: 0.03em;
+    flex-shrink: 1;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .analysis-graph__y-eval {
+    position: absolute;
+    left: 0;
+    transform: translateY(-50%);
     font-size: 0.7rem;
     font-weight: 700;
     color: var(--text-primary);
-    text-align: center;
     line-height: 1;
+    pointer-events: none;
+    background: rgba(255, 173, 173, 0.39);
+    border-radius: 0.15rem;
+    padding: 0.1rem 0.15rem;
 }
 
 .analysis-graph__y-arrow {
     width: 0.5rem;
-    height: 2.5rem;
+    height: 1.5rem;
+    flex-shrink: 1;
     color: var(--text-tertiary);
 }
 

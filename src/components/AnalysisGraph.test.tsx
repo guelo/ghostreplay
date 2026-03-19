@@ -10,6 +10,100 @@ function getPathD(container: HTMLElement, className: string) {
   return el?.getAttribute('d') ?? null
 }
 
+describe('AnalysisGraph — y-axis', () => {
+  it('renders "#" when isCheckmate is true', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, 9990]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={9990}
+        isCheckmate
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval')
+    expect(evalEl).toBeTruthy()
+    expect(evalEl!.textContent).toBe('#')
+  })
+
+  it('renders "#" at an extreme position for mate-only checkmate (evalCp from mateToCp)', () => {
+    // mateToCp(0) = -10000, white perspective on even index = -10000 (black wins)
+    const mateEvalCp = -10000
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, mateEvalCp]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={mateEvalCp}
+        isCheckmate
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval') as HTMLElement | null
+    expect(evalEl).toBeTruthy()
+    expect(evalEl!.textContent).toBe('#')
+    // Negative eval (black winning) should be near the bottom (> 50%)
+    const top = parseFloat(evalEl!.style.top)
+    expect(top).toBeGreaterThan(50)
+  })
+
+  it('renders numeric eval when isCheckmate is false', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={150}
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval')
+    expect(evalEl).toBeTruthy()
+    expect(evalEl!.textContent).toBe('+1.5')
+  })
+
+  it('positions eval badge dynamically via top style', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 200]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={200}
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval') as HTMLElement | null
+    expect(evalEl).toBeTruthy()
+    const top = evalEl!.style.top
+    expect(top).toMatch(/^\d+(\.\d+)?%$/)
+    // +200cp should be above center (< 50%)
+    expect(parseFloat(top)).toBeLessThan(50)
+  })
+
+  it('y-axis appears after svg (right side)', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={50}
+      />,
+    )
+
+    const graphEl = container.querySelector('.analysis-graph--with-axis')
+    expect(graphEl).toBeTruthy()
+    const children = Array.from(graphEl!.children)
+    expect(children[0].tagName).toBe('svg')
+    expect(children[1].classList.contains('analysis-graph__y-axis')).toBe(true)
+  })
+})
+
 describe('AnalysisGraph — incremental geometry', () => {
   const baseEvals = [0, 50, -30, 120, -80]
 

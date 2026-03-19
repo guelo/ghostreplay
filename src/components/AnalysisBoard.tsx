@@ -180,9 +180,15 @@ const AnalysisBoard = ({
     [moves],
   );
 
-  // Extract eval values for the graph
+  // Extract eval values for the graph, falling back to mateToCp for mate-only moves
   const evals = useMemo(
-    () => moves.map((m, i) => toWhitePerspective(m.eval_cp, i)),
+    () =>
+      moves.map((m, i) => {
+        // eval_cp is mover-perspective. mateToCp gives side-to-move (position)
+        // perspective, so negate it to get mover-perspective before converting.
+        const cp = m.eval_cp ?? (m.eval_mate != null ? -mateToCp(m.eval_mate) : null);
+        return toWhitePerspective(cp, i);
+      }),
     [moves],
   );
 
@@ -676,6 +682,9 @@ const AnalysisBoard = ({
             evals={evals}
             currentIndex={currentIndex}
             onSelectMove={handleNavigate}
+            playerColor={boardOrientation}
+            evalCp={currentEvalCp ?? evals[effectiveIndex] ?? null}
+            isCheckmate={currentEvalMate === 0}
           />
           {footer && (
             <div className="analysis-board__graph-footer">{footer}</div>

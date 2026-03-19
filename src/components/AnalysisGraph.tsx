@@ -6,6 +6,7 @@ type AnalysisGraphProps = {
   onSelectMove: (index: number) => void;
   playerColor?: "white" | "black";
   evalCp?: number | null;
+  isCheckmate?: boolean;
   streamingEval?: { index: number; cp: number } | null;
   pendingIndices?: number[];
 };
@@ -13,6 +14,7 @@ type AnalysisGraphProps = {
 const SVG_WIDTH = 600;
 const SVG_HEIGHT = 120;
 const PAD_X = 8;
+const PAD_X_RIGHT = 0;
 const PAD_Y = 4;
 
 /**
@@ -38,6 +40,7 @@ const AnalysisGraph = ({
   onSelectMove,
   playerColor,
   evalCp,
+  isCheckmate,
   streamingEval,
   pendingIndices,
 }: AnalysisGraphProps) => {
@@ -52,7 +55,7 @@ const AnalysisGraph = ({
     return Math.max(n, maxPending + 1);
   }, [n, pendingIndices]);
 
-  const chartW = SVG_WIDTH - PAD_X * 2;
+  const chartW = SVG_WIDTH - PAD_X - PAD_X_RIGHT;
   const chartH = SVG_HEIGHT - PAD_Y * 2;
   const midY = PAD_Y + chartH / 2;
 
@@ -167,57 +170,20 @@ const AnalysisGraph = ({
 
   if (n === 0 && (!pendingIndices || pendingIndices.length === 0)) return null;
 
+  // Dynamic vertical position for the eval badge within the y-axis.
+  // The y-axis stretches to match the SVG height, so we use the full
+  // SVG coordinate space (0 → SVG_HEIGHT) for percentage positioning.
+  const evalYPercent = useMemo(() => {
+    if (evalCp == null) return null;
+    const y = cpToY(evalCp);
+    const pct = (y / SVG_HEIGHT) * 100;
+    return Math.max(5, Math.min(95, pct));
+  }, [evalCp, cpToY]);
+
   return (
     <div
       className={`analysis-graph${playerColor ? " analysis-graph--with-axis" : ""}`}
     >
-      {playerColor && (
-        <div className="analysis-graph__y-axis">
-          <div className="analysis-graph__y-label">
-            <span>{topLabel}</span>
-            <svg className="analysis-graph__y-arrow" viewBox="0 0 10 40">
-              <line
-                x1="5"
-                y1="38"
-                x2="5"
-                y2="4"
-                stroke="currentColor"
-                strokeWidth="1.5"
-              />
-              <polyline
-                points="1,8 5,2 9,8"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          {evalCp != null && (
-            <div className="analysis-graph__y-eval">{formatEval(evalCp)}</div>
-          )}
-          <div className="analysis-graph__y-label">
-            <svg className="analysis-graph__y-arrow" viewBox="0 0 10 40">
-              <line
-                x1="5"
-                y1="2"
-                x2="5"
-                y2="36"
-                stroke="currentColor"
-                strokeWidth="1.5"
-              />
-              <polyline
-                points="1,32 5,38 9,32"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              />
-            </svg>
-            <span>{bottomLabel}</span>
-          </div>
-        </div>
-      )}
       <svg
         ref={svgRef}
         viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
@@ -303,6 +269,58 @@ const AnalysisGraph = ({
           />
         )}
       </svg>
+      {playerColor && (
+        <div className="analysis-graph__y-axis">
+          <div className="analysis-graph__y-label">
+            <span>{topLabel}</span>
+            <svg className="analysis-graph__y-arrow" viewBox="0 0 10 40">
+              <line
+                x1="5"
+                y1="38"
+                x2="5"
+                y2="4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              />
+              <polyline
+                points="1,8 5,2 9,8"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </div>
+          {evalYPercent != null && (
+            <div
+              className="analysis-graph__y-eval"
+              style={{ top: `${evalYPercent}%` }}
+            >
+              {isCheckmate ? "#" : formatEval(evalCp!)}
+            </div>
+          )}
+          <div className="analysis-graph__y-label">
+            <svg className="analysis-graph__y-arrow" viewBox="0 0 10 40">
+              <line
+                x1="5"
+                y1="2"
+                x2="5"
+                y2="36"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              />
+              <polyline
+                points="1,32 5,38 9,32"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              />
+            </svg>
+            <span>{bottomLabel}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

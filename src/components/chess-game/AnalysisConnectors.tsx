@@ -109,6 +109,14 @@ export const ConnectedAnalysisGraph = memo(
       };
     }, [streamingEval]);
 
+    const isCheckmate = useMemo(() => {
+      if (selectedMoveIndex === null) return false;
+      const fen = moveHistory[selectedMoveIndex]?.fen;
+      if (!fen) return false;
+      const chess = new Chess(fen);
+      return chess.isCheckmate();
+    }, [moveHistory, selectedMoveIndex]);
+
     if (!evals.some((e) => e !== null) && pendingIndices.length === 0) {
       return null;
     }
@@ -120,6 +128,7 @@ export const ConnectedAnalysisGraph = memo(
         onSelectMove={onSelectMove}
         playerColor={playerColor}
         evalCp={selectedEvalCp}
+        isCheckmate={isCheckmate}
         streamingEval={graphStreamingEval}
         pendingIndices={pendingIndices}
       />
