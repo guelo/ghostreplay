@@ -701,10 +701,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   return (
     <AnalysisStoreProvider value={analysisStore}>
       <section className="chess-section">
-        <header className="chess-header">
-          <p className="eyebrow">SRS Chess</p>
-        </header>
-
         <div className="chess-layout">
           <GameInfoPanel
             statusText={statusText}

@@ -144,10 +144,9 @@
     background: var(--surface-elevated);
     border: 1px solid var(--border-color-strong);
     border-radius: 1.5rem;
-    padding: clamp(1.5rem, 5vw, 2.5rem);
+    padding: clamp(0.75rem, 2vw, 1.25rem);
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
 }
 
 .game-page__intro {
@@ -169,17 +168,6 @@
 .game-page__hero p {
     margin: 0;
     color: var(--text-tertiary);
-}
-
-.chess-header h2 {
-    margin: 0.35rem 0;
-    font-size: clamp(1.75rem, 4vw, 2.25rem);
-    color: var(--text-primary);
-}
-
-.chess-header p {
-    margin: 0;
-    color: var(--text-secondary);
 }
 
 .chess-layout {
@@ -2881,7 +2869,7 @@
     }
 
     .chess-section {
-        padding: clamp(1rem, 3vw, 1.5rem);
+        padding: clamp(0.5rem, 2vw, 1rem);
     }
 
     .chess-layout {

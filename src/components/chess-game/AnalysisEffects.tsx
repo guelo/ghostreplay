@@ -6,7 +6,7 @@ import {
   reviewSrsBlunder,
 } from "../../utils/api";
 import { shouldRecordBlunder } from "../../utils/blunder";
-import { isRecordableFailure, isWithinRecordingMoveCap } from "../../workers/analysisUtils";
+import { isRecordableFailure } from "../../workers/analysisUtils";
 import type { BlunderAlert } from "./domain/movePresentation";
 import type { MoveMessage } from "../MoveList";
 import {
@@ -217,10 +217,6 @@ const AnalysisEffects = ({
     }
 
     if (lastAnalysis.moveIndex === 0) {
-      return;
-    }
-
-    if (!isWithinRecordingMoveCap(lastAnalysis.moveIndex)) {
       return;
     }
 
