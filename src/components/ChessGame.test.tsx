@@ -422,6 +422,7 @@ describe("ChessGame eval bar behavior", () => {
         moveIndex: 0,
         delta: 0,
         blunder: false,
+        recordable: false,
       });
     });
 
@@ -532,6 +533,7 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
+          recordable: true,
         });
       },
     );
@@ -590,6 +592,7 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
+          recordable: true,
         });
       },
     );
@@ -637,6 +640,7 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 10,
           blunder: false,
+        recordable: false,
         });
       },
     );
@@ -673,6 +677,7 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
+          recordable: true,
         });
       },
     );
@@ -741,6 +746,7 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
+          recordable: true,
         });
       },
     );
@@ -803,6 +809,7 @@ describe("ChessGame blunder recording", () => {
           moveIndex,
           delta: 200,
           blunder: true,
+          recordable: true,
         });
       },
     );
@@ -1017,6 +1024,7 @@ describe("ChessGame blunder recording", () => {
             moveIndex: 2,
             delta: 20,
             blunder: false,
+        recordable: false,
           });
         }
       },
@@ -1087,6 +1095,7 @@ describe("ChessGame blunder recording", () => {
             moveIndex: 2,
             delta: 50,
             blunder: false,
+        recordable: false,
           });
         }
       },
@@ -1144,6 +1153,7 @@ describe("ChessGame blunder recording", () => {
             moveIndex: 2,
             delta: 20,
             blunder: false,
+        recordable: false,
           });
         }
       },
@@ -1335,6 +1345,7 @@ describe("ChessGame move analysis", () => {
         moveIndex: 0,
         delta: 0,
         blunder: false,
+        recordable: false,
       });
       capturedAnalysisStore?.getState().resolveAnalysis(1, {
         id: "analysis-1",
@@ -1346,6 +1357,7 @@ describe("ChessGame move analysis", () => {
         moveIndex: 1,
         delta: 8,
         blunder: false,
+        recordable: false,
       });
     });
 
@@ -1586,6 +1598,7 @@ describe("ChessGame remount persistence", () => {
         moveIndex: 0,
         delta: 0,
         blunder: false,
+        recordable: false,
       });
       capturedAnalysisStore?.getState().resolveAnalysis(1, {
         id: "analysis-1",
@@ -1597,6 +1610,7 @@ describe("ChessGame remount persistence", () => {
         moveIndex: 1,
         delta: 0,
         blunder: false,
+        recordable: false,
       });
     });
 

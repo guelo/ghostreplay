@@ -11,6 +11,7 @@ export type AnalysisResult = {
   playedEval: number | null
   delta: number | null
   blunder: boolean
+  recordable: boolean
 }
 
 export type BlunderContext = {
@@ -46,8 +47,8 @@ export const shouldRecordBlunder = (
 } | null => {
   const { analysis, context, sessionId, isGameActive, alreadyRecorded } = params
 
-  // No analysis or not a blunder
-  if (!analysis?.blunder) {
+  // No analysis or not recordable
+  if (!analysis?.recordable) {
     return null
   }
 

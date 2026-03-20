@@ -149,6 +149,7 @@ describe('useMoveAnalysis', () => {
       moveIndex: null,
       delta: 200,
       blunder: true,
+      recordable: false,
     })
   })
 
@@ -680,6 +681,7 @@ describe('useMoveAnalysis', () => {
       moveIndex: null,
       delta: null,
       blunder: false,
+      recordable: false,
     })
   })
 })

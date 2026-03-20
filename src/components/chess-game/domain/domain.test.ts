@@ -78,6 +78,7 @@ describe("chess-game domain helpers", () => {
           moveIndex: 0,
           delta: 0,
           blunder: false,
+          recordable: false,
         },
       ],
       [
@@ -92,6 +93,7 @@ describe("chess-game domain helpers", () => {
           moveIndex: 1,
           delta: 8,
           blunder: false,
+          recordable: false,
         },
       ],
     ]);
@@ -195,6 +197,7 @@ describe("chess-game domain helpers", () => {
           moveIndex: 0,
           delta: 0,
           blunder: false,
+          recordable: false,
         },
       ],
       [
@@ -209,6 +212,7 @@ describe("chess-game domain helpers", () => {
           moveIndex: 1,
           delta: 8,
           blunder: false,
+          recordable: false,
         },
       ],
     ]);

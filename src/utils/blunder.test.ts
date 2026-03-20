@@ -15,6 +15,7 @@ describe('shouldRecordBlunder', () => {
     playedEval: -150,
     delta: 200,
     blunder: true,
+    recordable: true,
     ...overrides,
   })
 
@@ -61,9 +62,9 @@ describe('shouldRecordBlunder', () => {
     expect(result).toBeNull()
   })
 
-  it('returns null when analysis is not a blunder', () => {
+  it('returns null when analysis is not recordable', () => {
     const result = shouldRecordBlunder({
-      analysis: makeAnalysis({ blunder: false, delta: 30 }),
+      analysis: makeAnalysis({ recordable: false, delta: 30 }),
       context: makeContext(),
       sessionId: 'session-123',
       isGameActive: true,
@@ -159,11 +160,10 @@ describe('shouldRecordBlunder', () => {
     expect(result!.evalAfter).toBe(0)
   })
 
-  it('handles edge case: delta exactly at threshold (50cp)', () => {
-    // Note: the blunder flag is set by the analysis worker based on delta >= 50
-    // This test verifies we correctly pass through when blunder=true
+  it('handles edge case: delta exactly at recording threshold (50cp)', () => {
+    // delta=50 is recordable (>=50cp) but not a blunder alert (>=150cp)
     const result = shouldRecordBlunder({
-      analysis: makeAnalysis({ delta: 50, blunder: true }),
+      analysis: makeAnalysis({ delta: 50, blunder: false, recordable: true }),
       context: makeContext(),
       sessionId: 'session-123',
       isGameActive: true,

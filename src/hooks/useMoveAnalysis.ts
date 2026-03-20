@@ -3,7 +3,7 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
@@ -26,6 +26,7 @@ export type AnalysisResult = {
   moveIndex: number | null
   delta: number | null
   blunder: boolean
+  recordable: boolean
 }
 
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
@@ -67,7 +68,8 @@ const fromCachedAnalysis = (
   const delta = cached.eval_delta
 
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
-  const blunder =
+  const blunder = !forced && classifyMove(delta) === 'blunder'
+  const recordable =
     !forced &&
     isRecordableFailure(delta) &&
     isWithinRecordingMoveCap(moveIndex)
@@ -82,6 +84,7 @@ const fromCachedAnalysis = (
     moveIndex,
     delta,
     blunder,
+    recordable,
   }
 }
 
@@ -89,6 +92,8 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
   const workerRef = useRef<Worker | null>(null)
   // Maps request IDs to move indices so we can file results into analysisMap
   const pendingMoveIndices = useRef<Map<string, number>>(new Map())
+  // Maps request IDs to metadata needed for deriving recordable/blunder in the response handler
+  const pendingMeta = useRef<Map<string, { moveIndex: number; legalMoveCount: number | undefined }>>(new Map())
   // Throttle streaming eval updates to avoid excessive rerenders
   const lastStreamingUpdateMs = useRef(0)
 
@@ -210,11 +215,19 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           if (moveIndex !== undefined) {
             pendingMoveIndices.current.delete(message.id)
           }
+          const meta = pendingMeta.current.get(message.id)
+          pendingMeta.current.delete(message.id)
 
           // If cache already resolved this moveIndex, skip the worker result
           if (moveIndex !== undefined && resolvedIndices.current.has(moveIndex)) {
             break
           }
+
+          const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
+          const recordable =
+            !forced &&
+            isRecordableFailure(message.delta) &&
+            (moveIndex !== undefined ? isWithinRecordingMoveCap(moveIndex) : false)
 
           const result: AnalysisResult = {
             id: message.id,
@@ -226,6 +239,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             moveIndex: moveIndex ?? null,
             delta: message.delta,
             blunder: message.blunder,
+            recordable,
           }
 
           if (moveIndex !== undefined) {
@@ -286,6 +300,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       const id = createRequestId()
       if (moveIndex !== undefined) {
         pendingMoveIndices.current.set(id, moveIndex)
+        pendingMeta.current.set(id, { moveIndex, legalMoveCount })
       }
 
       // Fire the worker (existing path)
@@ -312,6 +327,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
     store.getState().clearAll()
     lastStreamingUpdateMs.current = 0
     pendingMoveIndices.current.clear()
+    pendingMeta.current.clear()
     resolvedIndices.current.clear()
     pendingCacheLookups.current.length = 0
     if (cacheFlushTimer.current !== null) {

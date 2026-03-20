@@ -15,8 +15,7 @@ import {
   getSideToMove,
   computeAnalysisResult,
   scoreForPlayer,
-  isRecordableFailure,
-  isWithinRecordingMoveCap,
+  classifyMove,
 } from './analysisUtils'
 
 const ctx = self as DedicatedWorkerGlobalScope
@@ -226,10 +225,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   })
 
   const forced = request.legalMoveCount !== undefined && request.legalMoveCount <= 2
-  const blunder =
-    !forced &&
-    isRecordableFailure(delta) &&
-    (request.moveIndex === undefined || isWithinRecordingMoveCap(request.moveIndex))
+  const blunder = !forced && classifyMove(delta) === 'blunder'
 
   ctx.postMessage({
     type: 'analysis',
