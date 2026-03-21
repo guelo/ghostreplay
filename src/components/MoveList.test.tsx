@@ -607,4 +607,72 @@ describe('MoveList variation integration', () => {
       expect(onNavigate).toHaveBeenCalledWith(3)
     })
   })
+
+  it('starting-position variation renders when moves array is empty', () => {
+    const varNode = makeNode({
+      id: 'v-start',
+      san: 'd4',
+      parentGameIndex: -1,
+    })
+    const tree = makeTree([varNode], new Map([[-1, ['v-start']]]))
+
+    const { container } = render(
+      <MoveList
+        moves={[]}
+        currentIndex={null}
+        onNavigate={noop}
+        variationTree={tree}
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        onVarSelect={noop}
+      />,
+    )
+
+    // Should render the grid with variation, not "No moves yet"
+    expect(container.querySelector('.move-list-empty')).toBeNull()
+    const variationLines = container.querySelectorAll('.variation-line')
+    expect(variationLines.length).toBe(1)
+    expect(variationLines[0].textContent).toContain('d4')
+  })
+
+  it('no variation ply is highlighted when selectedVarNodeId set but not isVariationActive', () => {
+    const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+    const tree = makeTree([varNode], new Map([[4, ['v1']]]))
+
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={2}
+        onNavigate={noop}
+        variationTree={tree}
+        selectedVarNodeId="v1"
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        // Missing onVarSelect, navigateUp, navigateDown → not isVariationActive
+      />,
+    )
+
+    // No variation ply should be highlighted
+    expect(container.querySelector('.variation-ply--selected')).toBeNull()
+    // Main-line selection should still work
+    expect(container.querySelectorAll('.move-button.selected').length).toBeGreaterThan(0)
+  })
+
+  it('renders variation lines without crashing when getAbsolutePly is missing', () => {
+    const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+    const tree = makeTree([varNode], new Map([[4, ['v1']]]))
+
+    // No getAbsolutePly provided — should not crash, just skip variation rendering
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={2}
+        onNavigate={noop}
+        variationTree={tree}
+      />,
+    )
+
+    // Variation lines should not render (missing getAbsolutePly)
+    expect(container.querySelectorAll('.variation-line').length).toBe(0)
+    // But MoveRows should still render
+    expect(container.querySelectorAll('.move-button').length).toBeGreaterThan(0)
+  })
 })

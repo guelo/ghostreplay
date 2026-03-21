@@ -245,9 +245,12 @@ const MoveList = ({
     return pairs;
   }, [moves]);
 
+  // Can we render variation lines? Requires both tree and getAbsolutePly.
+  const canRenderVariations = !!(variationTree && getAbsolutePly && variationTree.rootBranches.size > 0);
+
   // Build display rows: interleave move-row and variation-line items
   const displayRows = useMemo((): DisplayItem[] => {
-    if (!variationTree || variationTree.rootBranches.size === 0) {
+    if (!canRenderVariations) {
       return movePairs.map((_, pairIndex) => ({ type: "move-row" as const, pairIndex }));
     }
 
@@ -286,7 +289,7 @@ const MoveList = ({
     }
 
     return items;
-  }, [movePairs, variationTree]);
+  }, [movePairs, canRenderVariations, variationTree]);
 
   const isAtStart = effectiveIndex === -1 && !isVariationActive;
   const isAtLatest = currentIndex === null && !isVariationActive;
@@ -306,7 +309,7 @@ const MoveList = ({
   return (
     <div className="move-list-container">
       <div className="move-list-scroll" ref={moveListRef}>
-        {moves.length === 0 ? (
+        {moves.length === 0 && !canRenderVariations ? (
           <p className="move-list-empty">No moves yet</p>
         ) : (
           <div className="move-list-grid">
@@ -326,7 +329,7 @@ const MoveList = ({
                     key={`var-${item.rootNodeId}`}
                     rootNodeId={item.rootNodeId}
                     tree={variationTree!}
-                    selectedNodeId={selectedVarNodeId ?? null}
+                    selectedNodeId={isVariationActive ? selectedVarNodeId! : null}
                     onNodeClick={handleVarNodeClick}
                     getAbsolutePly={getAbsolutePly!}
                     showPrefix={false}
