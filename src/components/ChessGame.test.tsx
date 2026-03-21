@@ -421,6 +421,7 @@ describe("ChessGame eval bar behavior", () => {
         currentPositionEval: 80,
         moveIndex: 0,
         delta: 0,
+        classification: "best" as const,
         blunder: false,
         recordable: false,
       });
@@ -532,6 +533,7 @@ describe("ChessGame blunder recording", () => {
           currentPositionEval: -150,
           moveIndex,
           delta: 200,
+          classification: "blunder" as const,
           blunder: true,
           recordable: true,
         });
@@ -591,6 +593,7 @@ describe("ChessGame blunder recording", () => {
           currentPositionEval: -150,
           moveIndex,
           delta: 200,
+          classification: "blunder" as const,
           blunder: true,
           recordable: true,
         });
@@ -639,6 +642,7 @@ describe("ChessGame blunder recording", () => {
           currentPositionEval: 40,
           moveIndex,
           delta: 10,
+          classification: "excellent" as const,
           blunder: false,
         recordable: false,
         });
@@ -676,6 +680,7 @@ describe("ChessGame blunder recording", () => {
           currentPositionEval: -150,
           moveIndex,
           delta: 200,
+          classification: "blunder" as const,
           blunder: true,
           recordable: true,
         });
@@ -721,7 +726,9 @@ describe("ChessGame blunder recording", () => {
         currentPositionEval: -200,
         moveIndex: 2,
         delta: 300,
+        classification: "blunder" as const,
         blunder: true,
+        recordable: true,
       });
     });
 
@@ -745,6 +752,7 @@ describe("ChessGame blunder recording", () => {
           currentPositionEval: -150,
           moveIndex,
           delta: 200,
+          classification: "blunder" as const,
           blunder: true,
           recordable: true,
         });
@@ -782,7 +790,9 @@ describe("ChessGame blunder recording", () => {
         currentPositionEval: -150,
         moveIndex: null,
         delta: 200,
+        classification: "blunder" as const,
         blunder: true,
+        recordable: false,
       });
     });
 
@@ -808,6 +818,7 @@ describe("ChessGame blunder recording", () => {
           currentPositionEval: -150,
           moveIndex,
           delta: 200,
+          classification: "blunder" as const,
           blunder: true,
           recordable: true,
         });
@@ -853,7 +864,9 @@ describe("ChessGame blunder recording", () => {
         currentPositionEval: -150,
         moveIndex: 2,
         delta: 200,
+        classification: "blunder" as const,
         blunder: true,
+        recordable: true,
       });
     });
 
@@ -1023,6 +1036,7 @@ describe("ChessGame blunder recording", () => {
             currentPositionEval: 20,
             moveIndex: 2,
             delta: 20,
+            classification: "good" as const,
             blunder: false,
         recordable: false,
           });
@@ -1094,6 +1108,7 @@ describe("ChessGame blunder recording", () => {
             currentPositionEval: -10,
             moveIndex: 2,
             delta: 50,
+            classification: "good" as const,
             blunder: false,
         recordable: false,
           });
@@ -1152,6 +1167,7 @@ describe("ChessGame blunder recording", () => {
             currentPositionEval: 20,
             moveIndex: 2,
             delta: 20,
+            classification: "good" as const,
             blunder: false,
         recordable: false,
           });
@@ -1344,6 +1360,7 @@ describe("ChessGame move analysis", () => {
         currentPositionEval: 25,
         moveIndex: 0,
         delta: 0,
+        classification: "best" as const,
         blunder: false,
         recordable: false,
       });
@@ -1356,6 +1373,7 @@ describe("ChessGame move analysis", () => {
         currentPositionEval: 8,
         moveIndex: 1,
         delta: 8,
+        classification: "excellent" as const,
         blunder: false,
         recordable: false,
       });
@@ -1597,6 +1615,7 @@ describe("ChessGame remount persistence", () => {
         currentPositionEval: 30,
         moveIndex: 0,
         delta: 0,
+        classification: "best" as const,
         blunder: false,
         recordable: false,
       });
@@ -1609,6 +1628,7 @@ describe("ChessGame remount persistence", () => {
         currentPositionEval: 20,
         moveIndex: 1,
         delta: 0,
+        classification: "best" as const,
         blunder: false,
         recordable: false,
       });

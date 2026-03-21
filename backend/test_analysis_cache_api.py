@@ -42,6 +42,7 @@ def test_lookup_returns_cached_hit(client, auth_headers, db_session):
     assert result["played_eval"] == 20
     assert result["best_eval"] == 20
     assert result["eval_delta"] == 0
+    assert result["classification"] is None  # legacy row without classification
 
 
 def test_lookup_returns_empty_for_miss(client, auth_headers):
@@ -161,6 +162,7 @@ def test_session_moves_with_cache_fields_populates_cache(
     assert cached.played_eval == 20  # white move, no sign flip
     assert cached.best_eval == 20
     assert cached.eval_delta == 0
+    assert cached.classification == "best"
 
 
 def test_session_moves_black_eval_flipped_for_cache(
@@ -202,6 +204,7 @@ def test_session_moves_black_eval_flipped_for_cache(
     assert cached is not None
     assert cached.played_eval == -15  # flipped for white-relative
     assert cached.best_eval == -15
+    assert cached.classification == "best"
 
 
 def test_session_moves_without_cache_fields_skips_cache(
@@ -233,3 +236,30 @@ def test_session_moves_without_cache_fields_skips_cache(
     assert response.status_code == 200
     count = db_session.query(AnalysisCache).count()
     assert count == 0
+
+
+def test_lookup_returns_classification_when_present(client, auth_headers, db_session):
+    _seed_cache(db_session, [
+        {
+            "fen_before": STARTING_FEN,
+            "move_uci": "e2e4",
+            "move_san": "e4",
+            "best_move_uci": "e2e4",
+            "best_move_san": "e4",
+            "played_eval": 20,
+            "best_eval": 20,
+            "eval_delta": 0,
+            "classification": "best",
+        },
+    ])
+
+    response = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    key = f"{STARTING_FEN}::e2e4"
+    result = response.json()["results"][key]
+    assert result["classification"] == "best"

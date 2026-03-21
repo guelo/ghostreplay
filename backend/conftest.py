@@ -130,6 +130,7 @@ def _create_test_schema(conn) -> None:
             played_eval INTEGER,
             best_eval INTEGER,
             eval_delta INTEGER,
+            classification VARCHAR(20),
             source VARCHAR(20) NOT NULL DEFAULT 'game',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fen_before, move_uci)

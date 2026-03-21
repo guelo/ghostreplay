@@ -1,6 +1,6 @@
 import type React from "react";
 import type { AnalysisResult } from "../../../hooks/useMoveAnalysis";
-import { classifyMove, toWhitePerspective } from "../../../workers/analysisUtils";
+import { toWhitePerspective } from "../../../workers/analysisUtils";
 
 export type MoveRecord = {
   san: string;
@@ -53,7 +53,7 @@ export const deriveAnnotatedMoves = (
     const analysis = analysisMap.get(i);
     return {
       san: m.san,
-      classification: analysis ? classifyMove(analysis.delta) : undefined,
+      classification: analysis?.classification ?? undefined,
       eval:
         analysis?.playedEval != null
           ? toWhitePerspective(analysis.playedEval, i)

@@ -8,7 +8,7 @@ import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { classifyMove, mateToCp, playerToWhite, toWhitePerspective } from "../workers/analysisUtils";
+import { mateToCp, playerToWhite, toWhitePerspective } from "../workers/analysisUtils";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
@@ -201,7 +201,7 @@ const AnalysisBoard = ({
       const analysis = analysisMap.get(absIndex);
       return {
         san: m.san,
-        classification: analysis ? classifyMove(analysis.delta) : undefined,
+        classification: analysis?.classification ?? undefined,
         // playedEval is player-perspective; convert to white perspective
         eval:
           analysis?.playedEval != null

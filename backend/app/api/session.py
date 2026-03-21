@@ -146,6 +146,7 @@ def _upsert_analysis_cache(
             "played_eval": played_eval,
             "best_eval": best_eval,
             "eval_delta": eval_delta,
+            "classification": move.classification.value if move.classification else None,
             "source": "game",
         })
 
@@ -181,6 +182,7 @@ def _upsert_analysis_cache(
             "played_eval": stmt.excluded.played_eval,
             "best_eval": stmt.excluded.best_eval,
             "eval_delta": stmt.excluded.eval_delta,
+            "classification": stmt.excluded.classification,
             "source": stmt.excluded.source,
         },
     )

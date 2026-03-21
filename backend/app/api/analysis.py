@@ -31,6 +31,7 @@ class CachedAnalysisResult(BaseModel):
     played_eval: int | None = None
     best_eval: int | None = None
     eval_delta: int | None = None
+    classification: str | None = None
 
 
 class AnalysisLookupResponse(BaseModel):
@@ -71,6 +72,7 @@ def lookup_analysis(
                 played_eval=row.played_eval,
                 best_eval=row.best_eval,
                 eval_delta=row.eval_delta,
+                classification=row.classification,
             )
 
     return AnalysisLookupResponse(results=results)

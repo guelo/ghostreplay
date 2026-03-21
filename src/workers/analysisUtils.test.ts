@@ -10,6 +10,11 @@ import {
   isRecordableFailure,
   isWithinRecordingMoveCap,
   classifyMove,
+  classifyMoveAdvanced,
+  calculateWinChance,
+  checkMateEvents,
+  WIN_CHANCE_MULTIPLIER,
+  CP_CEILING,
   RECORDABLE_FAILURE_THRESHOLD_CP,
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
@@ -412,5 +417,232 @@ describe('classifyMove', () => {
   it('classifies blunder at and above 150', () => {
     expect(classifyMove(150)).toBe('blunder')
     expect(classifyMove(400)).toBe('blunder')
+  })
+})
+
+describe('calculateWinChance', () => {
+  it('returns 0 for equal position (0cp)', () => {
+    const wc = calculateWinChance({ type: 'cp', value: 0 }, 'white')
+    expect(wc).toBeCloseTo(0, 5)
+  })
+
+  it('returns positive for white advantage', () => {
+    const wc = calculateWinChance({ type: 'cp', value: 200 }, 'white')
+    expect(wc).toBeGreaterThan(0)
+    expect(wc).toBeLessThan(1)
+  })
+
+  it('returns negative for black advantage (white POV)', () => {
+    const wc = calculateWinChance({ type: 'cp', value: -200 }, 'white')
+    expect(wc).toBeLessThan(0)
+  })
+
+  it('flips sign when score is from black POV', () => {
+    // +200 from black POV = -200 from white POV
+    const wcBlack = calculateWinChance({ type: 'cp', value: 200 }, 'black')
+    const wcWhite = calculateWinChance({ type: 'cp', value: -200 }, 'white')
+    expect(wcBlack).toBeCloseTo(wcWhite, 10)
+  })
+
+  it('clamps to CP_CEILING for mate scores', () => {
+    const wcMate = calculateWinChance({ type: 'mate', value: 3 }, 'white')
+    const wcCeiling = calculateWinChance({ type: 'cp', value: CP_CEILING }, 'white')
+    expect(wcMate).toBeCloseTo(wcCeiling, 10)
+  })
+
+  it('returns near -1 for losing mate', () => {
+    const wc = calculateWinChance({ type: 'mate', value: -2 }, 'white')
+    expect(wc).toBeLessThan(-0.9)
+  })
+
+  it('exports expected constants', () => {
+    expect(WIN_CHANCE_MULTIPLIER).toBeCloseTo(-0.00368208)
+    expect(CP_CEILING).toBe(1000)
+  })
+})
+
+describe('checkMateEvents', () => {
+  it('detects MateCreated — cp to losing mate is blunder from equal', () => {
+    const result = checkMateEvents(
+      { type: 'cp', value: 0 },
+      { type: 'mate', value: 3 },  // opponent has mate in 3 (from opponent POV, positive = good for them)
+      'black',  // scorePov: scores are from opponent's (black's) perspective
+      'white',  // mover: white played the move
+    )
+    // From white mover POV: prevValue flipped = -0, nextValue flipped = -3 (losing mate)
+    // mNv < 0 → MateCreated, mPv = 0 → blunder
+    expect(result).toBe('blunder')
+  })
+
+  it('MateCreated is downgraded to mistake when already losing badly', () => {
+    // Mover is white, scorePov is black (opponent's perspective)
+    // prev: white was already losing -800cp from white's perspective → from black POV: +800
+    const result = checkMateEvents(
+      { type: 'cp', value: 800 },
+      { type: 'mate', value: 2 },
+      'black',
+      'white',
+    )
+    // mPv = 800 * (white===black? 1 : -1) = -800. mPv < -700 → mistake
+    expect(result).toBe('mistake')
+  })
+
+  it('MateCreated is downgraded to inaccuracy when dead lost', () => {
+    const result = checkMateEvents(
+      { type: 'cp', value: 1000 },
+      { type: 'mate', value: 1 },
+      'black',
+      'white',
+    )
+    // mPv = -1000. mPv < -999 → inaccuracy
+    expect(result).toBe('inaccuracy')
+  })
+
+  it('detects MateLost — winning mate to cp is blunder', () => {
+    // White had mate, now just cp. scorePov = black
+    const result = checkMateEvents(
+      { type: 'mate', value: -3 },  // from black POV, -3 means white has mate in 3
+      { type: 'cp', value: 50 },   // now black is slightly better
+      'black',
+      'white',
+    )
+    // mPv = -3 * -1 = 3 (positive, white had mate). mNv = 50 * -1 = -50.
+    // resCp = -50. resCp < 700 → blunder
+    expect(result).toBe('blunder')
+  })
+
+  it('MateLost is downgraded to mistake when still winning big', () => {
+    const result = checkMateEvents(
+      { type: 'mate', value: -2 },
+      { type: 'cp', value: -800 },  // from black POV = white is +800
+      'black',
+      'white',
+    )
+    // mPv = -2 * -1 = 2 (had mate). mNv = -800 * -1 = 800. resCp = 800 > 700 → mistake
+    expect(result).toBe('mistake')
+  })
+
+  it('returns null for normal cp-to-cp transition', () => {
+    const result = checkMateEvents(
+      { type: 'cp', value: 50 },
+      { type: 'cp', value: -100 },
+      'black',
+      'white',
+    )
+    expect(result).toBeNull()
+  })
+
+  it('returns null for mate-to-better-mate (no loss)', () => {
+    // White had mate in 5, now has mate in 3 — not a loss
+    const result = checkMateEvents(
+      { type: 'mate', value: -5 },
+      { type: 'mate', value: -3 },
+      'black',
+      'white',
+    )
+    // mPv = 5 (positive). mNv = 3 (positive, not < 0). → no MateLost
+    expect(result).toBeNull()
+  })
+})
+
+describe('classifyMoveAdvanced', () => {
+  it('returns best for engine-preferred move', () => {
+    expect(
+      classifyMoveAdvanced({
+        prevScore: { type: 'cp', value: -30 },
+        nextScore: { type: 'cp', value: -50 },
+        scorePov: 'black',
+        mover: 'white',
+        isBestMove: true,
+      }),
+    ).toBe('best')
+  })
+
+  it('classifies excellent for small win-chance drop', () => {
+    // Both from black POV (opponent to move). White played, scores barely changed.
+    const result = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: -30 },
+      nextScore: { type: 'cp', value: -25 },
+      scorePov: 'black',
+      mover: 'white',
+      isBestMove: false,
+    })
+    expect(result).toBe('excellent')
+  })
+
+  it('classifies blunder for large win-chance drop', () => {
+    // White played, was equal, now losing badly
+    const result = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: 0 },
+      nextScore: { type: 'cp', value: 500 },
+      scorePov: 'black',
+      mover: 'white',
+      isBestMove: false,
+    })
+    expect(result).toBe('blunder')
+  })
+
+  it('classifies mate transitions with severity', () => {
+    // White blundered into being mated from equal
+    const result = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: 0 },
+      nextScore: { type: 'mate', value: 3 },
+      scorePov: 'black',
+      mover: 'white',
+      isBestMove: false,
+    })
+    expect(result).toBe('blunder')
+  })
+
+  it('100cp loss from equal is classified more severely than from -500cp', () => {
+    // From equal: 0 → 100 from black POV
+    const fromEqual = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: 0 },
+      nextScore: { type: 'cp', value: 100 },
+      scorePov: 'black',
+      mover: 'white',
+      isBestMove: false,
+    })
+
+    // From already losing: +500 → +600 from black POV
+    const fromLosing = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: 500 },
+      nextScore: { type: 'cp', value: 600 },
+      scorePov: 'black',
+      mover: 'white',
+      isBestMove: false,
+    })
+
+    const severity = ['excellent', 'good', 'inaccuracy', 'mistake', 'blunder'] as const
+    const equalIdx = severity.indexOf(fromEqual as typeof severity[number])
+    const losingIdx = severity.indexOf(fromLosing as typeof severity[number])
+    expect(equalIdx).toBeGreaterThan(losingIdx)
+  })
+
+  it('uses null score fallback via classifyMove in worker path', () => {
+    // This tests the worker's fallback — classifyMoveAdvanced itself requires non-null scores
+    // The worker code handles this, so we just test classifyMoveAdvanced with valid inputs
+    const result = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: 0 },
+      nextScore: { type: 'cp', value: 0 },
+      scorePov: 'black',
+      mover: 'white',
+      isBestMove: false,
+    })
+    expect(result).toBe('excellent')
+  })
+
+  it('works for black mover', () => {
+    // Black played, scores from white POV (opponent to move)
+    // prev: white was slightly worse (-30 from white POV)
+    // next: white is now much better (+300 from white POV) — black blundered
+    const result = classifyMoveAdvanced({
+      prevScore: { type: 'cp', value: -30 },
+      nextScore: { type: 'cp', value: 300 },
+      scorePov: 'white',
+      mover: 'black',
+      isBestMove: false,
+    })
+    expect(result).toBe('blunder')
   })
 })

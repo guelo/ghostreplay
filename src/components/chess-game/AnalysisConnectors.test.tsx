@@ -61,9 +61,9 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
     // Provide evals so the graph renders
     store.setState({
       analysisMap: new Map([
-        [0, { playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, blunder: false }],
-        [1, { playedEval: 50, bestEval: 50, bestMove: "d4", delta: 0, blunder: false }],
-        [2, { playedEval: 9990, bestEval: 9990, bestMove: "Qh4", delta: 0, blunder: false }],
+        [0, { playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false }],
+        [1, { playedEval: 50, bestEval: 50, bestMove: "d4", delta: 0, classification: "best", blunder: false }],
+        [2, { playedEval: 9990, bestEval: 9990, bestMove: "Qh4", delta: 0, classification: "best", blunder: false }],
       ]),
     });
 
@@ -82,7 +82,7 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
 
     store.setState({
       analysisMap: new Map([
-        [0, { playedEval: 30, bestEval: 30, bestMove: "e4", delta: 0, blunder: false }],
+        [0, { playedEval: 30, bestEval: 30, bestMove: "e4", delta: 0, classification: "best", blunder: false }],
       ]),
     });
 

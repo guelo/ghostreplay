@@ -180,8 +180,9 @@ export interface RatingHistoryResponse {
 
 export type SessionMoveColor = 'white' | 'black'
 
+import type { MoveClassification } from '../workers/analysisUtils'
 // Re-export MoveClassification so existing imports from api.ts keep working
-export type { MoveClassification } from '../workers/analysisUtils'
+export type { MoveClassification }
 
 export interface SessionMoveUpload {
   move_number: number
@@ -350,6 +351,7 @@ export interface CachedAnalysis {
   played_eval: number | null
   best_eval: number | null
   eval_delta: number | null
+  classification: MoveClassification | null
 }
 
 interface AnalysisLookupRequest {

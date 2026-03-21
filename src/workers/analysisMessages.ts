@@ -12,6 +12,8 @@ export type AnalysisWorkerRequest =
   | AnalyzeMoveMessage
   | { type: 'terminate' }
 
+import type { MoveClassification } from './analysisUtils'
+
 export type AnalysisWorkerResponse =
   | { type: 'ready' }
   | { type: 'analysis-started'; id: string; move: string }
@@ -24,7 +26,7 @@ export type AnalysisWorkerResponse =
       bestEval: number | null
       playedEval: number | null
       delta: number | null
-      blunder: boolean
+      classification: MoveClassification | null
     }
   | { type: 'error'; error: string }
   | { type: 'log'; message: string }

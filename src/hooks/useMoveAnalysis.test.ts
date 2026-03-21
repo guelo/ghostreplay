@@ -132,7 +132,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: -150,
         delta: 200,
-        blunder: true,
+        classification: 'blunder',
       })
     })
 
@@ -148,6 +148,7 @@ describe('useMoveAnalysis', () => {
       currentPositionEval: -150,
       moveIndex: null,
       delta: 200,
+      classification: 'blunder',
       blunder: true,
       recordable: false,
     })
@@ -169,12 +170,13 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 40,
         delta: 10,
-        blunder: false,
+        classification: 'excellent',
       })
     })
 
     const s = store.getState()
     expect(s.lastAnalysis?.blunder).toBe(false)
+    expect(s.lastAnalysis?.classification).toBe('excellent')
     expect(s.lastAnalysis?.delta).toBe(10)
   })
 
@@ -276,7 +278,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 30,
         delta: 20,
-        blunder: false,
+        classification: 'good',
       })
     })
 
@@ -316,7 +318,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 50,
         delta: 0,
-        blunder: false,
+        classification: 'best',
       })
     })
 
@@ -329,7 +331,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 40,
         playedEval: 30,
         delta: 10,
-        blunder: false,
+        classification: 'excellent',
       })
     })
 
@@ -362,7 +364,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 50,
         delta: 0,
-        blunder: false,
+        classification: 'best',
       })
     })
 
@@ -394,7 +396,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 50,
         delta: 0,
-        blunder: false,
+        classification: 'best',
       })
     })
 
@@ -510,7 +512,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 50,
         delta: 0,
-        blunder: false,
+        classification: 'best',
       })
     })
     expect(store.getState().streamingEval).toBeNull()
@@ -592,7 +594,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 50,
         delta: 0,
-        blunder: false,
+        classification: 'best',
       })
     })
     expect(store.getState().streamingEval).toBeNull()
@@ -645,7 +647,7 @@ describe('useMoveAnalysis', () => {
         bestEval: 50,
         playedEval: 50,
         delta: 0,
-        blunder: false,
+        classification: 'best',
       })
     })
     expect(store.getState().streamingEval).toBeNull()
@@ -667,7 +669,7 @@ describe('useMoveAnalysis', () => {
         bestEval: null,
         playedEval: null,
         delta: null,
-        blunder: false,
+        classification: null,
       })
     })
 
@@ -680,6 +682,7 @@ describe('useMoveAnalysis', () => {
       currentPositionEval: null,
       moveIndex: null,
       delta: null,
+      classification: null,
       blunder: false,
       recordable: false,
     })

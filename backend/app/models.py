@@ -197,6 +197,7 @@ class AnalysisCache(Base):
     played_eval: Mapped[int | None] = mapped_column(Integer)
     best_eval: Mapped[int | None] = mapped_column(Integer)
     eval_delta: Mapped[int | None] = mapped_column(Integer)
+    classification: Mapped[str | None] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20), nullable=False, server_default="game")
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

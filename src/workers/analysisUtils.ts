@@ -153,6 +153,10 @@ export type MoveClassification =
   | 'mistake'
   | 'blunder'
 
+/**
+ * @deprecated Use classifyMoveAdvanced for new code. Kept as fallback for
+ * legacy cache entries that lack a `classification` value.
+ */
 export const classifyMove = (
   delta: number | null,
 ): MoveClassification | null => {
@@ -165,4 +169,100 @@ export const classifyMove = (
   if (normalizedDelta <= 100) return 'inaccuracy'
   if (normalizedDelta <= 149) return 'mistake'
   return 'blunder'
+}
+
+// ── Win-chance classifier (Lichess logistic model) ──────────────────
+
+export const WIN_CHANCE_MULTIPLIER = -0.00368208
+export const CP_CEILING = 1000
+
+/**
+ * Converts an engine score to a win chance between -1.0 and 1.0,
+ * normalized to white's perspective.
+ */
+export const calculateWinChance = (
+  score: EngineScore,
+  pov: 'white' | 'black',
+): number => {
+  const whiteValue = pov === 'white' ? score.value : -score.value
+
+  const cp =
+    score.type === 'mate'
+      ? (whiteValue >= 0 ? CP_CEILING : -CP_CEILING)
+      : Math.max(-CP_CEILING, Math.min(CP_CEILING, whiteValue))
+
+  return 2 / (1 + Math.exp(WIN_CHANCE_MULTIPLIER * cp)) - 1
+}
+
+/**
+ * Detects mate transitions: blundering into being mated (MateCreated)
+ * or throwing away a winning mate (MateLost). Returns a severity-adjusted
+ * classification or null if no mate event occurred.
+ *
+ * Both scores share the same `scorePov` (the perspective they were reported from).
+ * `mover` is the color that played the move being classified.
+ */
+export const checkMateEvents = (
+  prevScore: EngineScore,
+  nextScore: EngineScore,
+  scorePov: 'white' | 'black',
+  mover: 'white' | 'black',
+): MoveClassification | null => {
+  // Convert to mover POV
+  const flipPrev = mover === scorePov ? 1 : -1
+  const mPv = prevScore.value * flipPrev
+  const mNv = nextScore.value * flipPrev
+
+  // MateCreated: cp → losing mate (blundered into being mated)
+  if (prevScore.type === 'cp' && nextScore.type === 'mate' && mNv < 0) {
+    if (mPv < -999) return 'inaccuracy'
+    if (mPv < -700) return 'mistake'
+    return 'blunder'
+  }
+
+  // MateLost: winning mate → cp or losing mate
+  if (
+    prevScore.type === 'mate' &&
+    mPv > 0 &&
+    (nextScore.type === 'cp' || (nextScore.type === 'mate' && mNv < 0))
+  ) {
+    const resCp = nextScore.type === 'cp' ? mNv : -1000
+    if (resCp > 999) return 'inaccuracy'
+    if (resCp > 700) return 'mistake'
+    return 'blunder'
+  }
+
+  return null
+}
+
+/**
+ * Advanced move classifier using the Lichess logistic win-chance model.
+ *
+ * Both `prevScore` and `nextScore` are from post-move positions where the
+ * opponent is to move, sharing the same `scorePov`.
+ */
+export const classifyMoveAdvanced = (input: {
+  prevScore: EngineScore
+  nextScore: EngineScore
+  scorePov: 'white' | 'black'
+  mover: 'white' | 'black'
+  isBestMove: boolean
+}): MoveClassification => {
+  const { prevScore, nextScore, scorePov, mover, isBestMove } = input
+
+  if (isBestMove) return 'best'
+
+  const mateResult = checkMateEvents(prevScore, nextScore, scorePov, mover)
+  if (mateResult) return mateResult
+
+  const prevWc = calculateWinChance(prevScore, scorePov)
+  const nextWc = calculateWinChance(nextScore, scorePov)
+
+  const drop = mover === 'white' ? -(nextWc - prevWc) : (nextWc - prevWc)
+
+  if (drop >= 0.30) return 'blunder'
+  if (drop >= 0.20) return 'mistake'
+  if (drop >= 0.10) return 'inaccuracy'
+  if (drop >= 0.02) return 'good'
+  return 'excellent'
 }

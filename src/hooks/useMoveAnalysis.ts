@@ -4,6 +4,7 @@ import type {
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
 import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove } from '../workers/analysisUtils'
+import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
@@ -25,6 +26,7 @@ export type AnalysisResult = {
   currentPositionEval: number | null
   moveIndex: number | null
   delta: number | null
+  classification: MoveClassification | null
   blunder: boolean
   recordable: boolean
 }
@@ -67,8 +69,10 @@ const fromCachedAnalysis = (
   const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
   const delta = cached.eval_delta
 
+  // Use classification from cache if available, fall back to legacy delta-based
+  const classification = (cached.classification as MoveClassification | null) ?? classifyMove(delta)
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
-  const blunder = !forced && classifyMove(delta) === 'blunder'
+  const blunder = !forced && classification === 'blunder'
   const recordable =
     !forced &&
     isRecordableFailure(delta) &&
@@ -83,6 +87,7 @@ const fromCachedAnalysis = (
     currentPositionEval: playedEval,
     moveIndex,
     delta,
+    classification,
     blunder,
     recordable,
   }
@@ -224,6 +229,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           }
 
           const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
+          const blunder = !forced && message.classification === 'blunder'
           const recordable =
             !forced &&
             isRecordableFailure(message.delta) &&
@@ -238,7 +244,8 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             currentPositionEval: message.playedEval,
             moveIndex: moveIndex ?? null,
             delta: message.delta,
-            blunder: message.blunder,
+            classification: message.classification,
+            blunder,
             recordable,
           }
 
@@ -248,7 +255,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             store.getState().setLastAnalysis(result)
           }
 
-          if (message.blunder && message.delta !== null) {
+          if (blunder && message.delta !== null) {
             console.log(
               `[Analyst] Blunder detected: Δ${message.delta}cp (best ${message.bestMove}).`,
             )

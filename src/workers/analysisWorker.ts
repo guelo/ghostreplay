@@ -16,7 +16,9 @@ import {
   computeAnalysisResult,
   scoreForPlayer,
   classifyMove,
+  classifyMoveAdvanced,
 } from './analysisUtils'
+import type { MoveClassification } from './analysisUtils'
 
 const ctx = self as DedicatedWorkerGlobalScope
 
@@ -189,7 +191,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       bestEval: null,
       playedEval: null,
       delta: null,
-      blunder: false,
+      classification: null,
     } satisfies AnalysisWorkerResponse)
     return
   }
@@ -224,8 +226,22 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     playerColor: request.playerColor,
   })
 
-  const forced = request.legalMoveCount !== undefined && request.legalMoveCount <= 2
-  const blunder = !forced && classifyMove(delta) === 'blunder'
+  const isBestMove = bestMove === request.move
+  const mover: 'white' | 'black' = sideToMove === 'w' ? 'white' : 'black'
+  const scorePov: 'white' | 'black' = sideToMove === 'w' ? 'black' : 'white'
+
+  let classification: MoveClassification | null = null
+  if (postBestScore && playedEvalSearch.score) {
+    classification = classifyMoveAdvanced({
+      prevScore: postBestScore,
+      nextScore: playedEvalSearch.score,
+      scorePov,
+      mover,
+      isBestMove,
+    })
+  } else {
+    classification = classifyMove(delta)
+  }
 
   ctx.postMessage({
     type: 'analysis',
@@ -235,7 +251,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     bestEval,
     playedEval,
     delta,
-    blunder,
+    classification,
   } satisfies AnalysisWorkerResponse)
 }
 
