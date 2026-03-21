@@ -2124,6 +2124,8 @@
 .variation-line {
     grid-column: 1 / -1;
     min-width: 0;
+    display: flex;
+    flex-wrap: wrap;
     font-family: "JetBrains Mono", monospace;
     font-size: 0.82rem;
     color: var(--text-secondary);
