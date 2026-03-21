@@ -393,7 +393,7 @@ describe("ChessGame eval bar behavior", () => {
   });
 
   it("keeps prior eval displayed while latest move analysis is pending", async () => {
-    const { rerender } = render(<ChessGame />);
+    const { rerender: _rerender } = render(<ChessGame />);
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));

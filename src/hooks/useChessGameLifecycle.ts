@@ -10,7 +10,6 @@ import type { TargetBlunderSrs } from "../utils/api";
 import { endGame, fetchCurrentRating, startGame, uploadSessionMoves } from "../utils/api";
 import type {
   BlunderAlert,
-  MoveRecord,
   ReviewFailInfo,
 } from "../components/chess-game/domain/movePresentation";
 import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";

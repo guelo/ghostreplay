@@ -3,7 +3,7 @@ import { renderHook, act } from '@testing-library/react'
 import { useVariationTree } from './useVariationTree'
 import type { AnalysisResult } from './useMoveAnalysis'
 
-const makeResult = (id: string, fen: string): AnalysisResult => ({
+const makeResult = (id: string, _fen: string): AnalysisResult => ({
   id,
   move: 'e2e4',
   bestMove: 'e2e4',
@@ -22,7 +22,7 @@ describe('useVariationTree', () => {
     it('adds a root branch from a game move', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'c5',
@@ -51,7 +51,7 @@ describe('useVariationTree', () => {
     it('deduplicates root branches with same SAN at same moveIndex', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let id1: string, id2: string
+      let id1: string | null, id2: string | null
       act(() => {
         id1 = result.current.addMove({
           san: 'c5',
@@ -78,7 +78,7 @@ describe('useVariationTree', () => {
     it('allows different SANs at same moveIndex', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let id1: string, id2: string
+      let id1: string | null, id2: string | null
       act(() => {
         id1 = result.current.addMove({
           san: 'c5',
@@ -105,7 +105,7 @@ describe('useVariationTree', () => {
     it('adds continuation as first child of variation node', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, childId: string
+      let rootId: string | null, childId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -137,7 +137,7 @@ describe('useVariationTree', () => {
     it('adds sub-branch as additional child with incremented nesting', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, contId: string, branchId: string
+      let rootId: string | null, contId: string | null, branchId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -178,7 +178,7 @@ describe('useVariationTree', () => {
     it('deduplicates children of variation nodes', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string
+      let rootId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -189,7 +189,7 @@ describe('useVariationTree', () => {
         })
       })
 
-      let id1: string, id2: string
+      let id1: string | null, id2: string | null
       act(() => {
         id1 = result.current.addMove({
           san: 'Nf3',
@@ -234,7 +234,7 @@ describe('useVariationTree', () => {
     it('handles branch from starting position (moveIndex -1)', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'd4',
@@ -255,7 +255,7 @@ describe('useVariationTree', () => {
     it('returns game move for root branch node', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'c5',
@@ -273,7 +273,7 @@ describe('useVariationTree', () => {
     it('returns parent variation node for nested node', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, childId: string
+      let rootId: string | null, childId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -308,7 +308,7 @@ describe('useVariationTree', () => {
     it('returns first child nodeId', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, childId: string
+      let rootId: string | null, childId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -334,7 +334,7 @@ describe('useVariationTree', () => {
     it('returns null at leaf node', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'c5',
@@ -353,7 +353,7 @@ describe('useVariationTree', () => {
     it('returns parentGameIndex + 1 for root node', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'c5',
@@ -371,7 +371,7 @@ describe('useVariationTree', () => {
     it('increments ply for each level of depth', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, child1Id: string, child2Id: string
+      let rootId: string | null, child1Id: string | null, child2Id: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -411,7 +411,7 @@ describe('useVariationTree', () => {
     it('handles starting position branches (moveIndex -1)', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'd4',
@@ -431,7 +431,7 @@ describe('useVariationTree', () => {
     it('collects nodes following children[0] chain', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, child1Id: string, child2Id: string
+      let rootId: string | null, child1Id: string | null, child2Id: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -467,7 +467,7 @@ describe('useVariationTree', () => {
     it('does not follow sub-branches (children[1+])', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string, contId: string
+      let rootId: string | null, contId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -629,7 +629,7 @@ describe('useVariationTree', () => {
     it('old snapshot nodes are not mutated by later addMove', () => {
       const { result } = renderHook(() => useVariationTree())
 
-      let rootId: string
+      let rootId: string | null
       act(() => {
         rootId = result.current.addMove({
           san: 'c5',
@@ -732,7 +732,7 @@ describe('useVariationTree', () => {
       const { result } = renderHook(() => useVariationTree())
       expect(result.current.selectedVarNodeId).toBeNull()
 
-      let nodeId: string
+      let nodeId: string | null
       act(() => {
         nodeId = result.current.addMove({
           san: 'c5',

@@ -164,7 +164,6 @@ const AnalysisBoard = ({
   const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
   const { info: engineLines, isThinking: engineThinking, evaluatePosition, stopSearch } = useStockfishEngine();
   const [showEngineArrows, setShowEngineArrows] = useState(true);
-  const engineFenRef = useRef<string | null>(null);
 
   const isInWhatIf = whatIfMoves.length > 0;
   const effectiveIndex = currentIndex ?? moves.length - 1;

@@ -1,13 +1,10 @@
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
-import type { Dispatch, SetStateAction } from "react";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
 import { toWhitePerspective } from "../../workers/analysisUtils";
 import {
   deriveAnnotatedMoves,
-  type BlunderAlert,
-  type ReviewFailInfo,
 } from "./domain/movePresentation";
 import { recordManualBlunder } from "../../utils/api";
 import { STARTING_FEN } from "./config";
@@ -176,7 +173,7 @@ export const ConnectedMoveList = memo(
     );
 
     const prevAnnotatedRef = useRef<
-      { san: string; classification?: string | null; eval?: number | null }[]
+      ReturnType<typeof deriveAnnotatedMoves>
     >([]);
 
     const annotatedMoves = useMemo(() => {

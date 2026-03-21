@@ -712,7 +712,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             playerRating={playerRating}
             isProvisional={isProvisional}
             opponentMode={opponentMode}
-            opponentName={MAIA_BOT_NAMES[engineElo]}
+            opponentName={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
             blunderReviewId={blunderReviewId}
             showGhostInfo={showGhostInfo}
             onToggleGhostInfo={handleToggleGhostInfo}
@@ -749,7 +749,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 maiaEloBins={MAIA_ELO_BINS}
                 engineElo={engineElo}
                 onEngineEloChange={handleEngineEloChange}
-                botLabel={MAIA_BOT_NAMES[engineElo]}
+                botLabel={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
                 winDelta={winDelta}
                 lossDelta={lossDelta}
                 onPlayWhite={handlePlayWhite}
