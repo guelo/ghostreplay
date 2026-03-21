@@ -214,6 +214,23 @@ describe('useVariationTree', () => {
       expect(root.children.length).toBe(1)
     })
 
+    it('returns null when parent variation node is missing', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      let nodeId: ReturnType<typeof result.current.addMove>
+      act(() => {
+        nodeId = result.current.addMove({
+          san: 'Nf3',
+          fen: 'fen-nf3',
+          fenBefore: 'fen-before',
+          uci: 'g1f3',
+          parentContext: { type: 'variation', nodeId: 'nonexistent-id' },
+        })
+      })
+
+      expect(nodeId!).toBeNull()
+    })
+
     it('handles branch from starting position (moveIndex -1)', () => {
       const { result } = renderHook(() => useVariationTree())
 
@@ -555,6 +572,119 @@ describe('useVariationTree', () => {
       expect(result.current.tree.nodes.size).toBe(0)
       expect(result.current.tree.rootBranches.size).toBe(0)
       expect(result.current.selectedVarNodeId).toBeNull()
+    })
+  })
+
+  describe('tree snapshot identity', () => {
+    it('produces a new tree object identity after addMove', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      const treeBefore = result.current.tree
+
+      act(() => {
+        result.current.addMove({
+          san: 'c5',
+          fen: 'fen-c5',
+          fenBefore: 'fen-before',
+          uci: 'c7c5',
+          parentContext: { type: 'game', moveIndex: 4 },
+        })
+      })
+
+      const treeAfter = result.current.tree
+      expect(treeAfter).not.toBe(treeBefore)
+      expect(treeAfter.nodes).not.toBe(treeBefore.nodes)
+      expect(treeAfter.rootBranches).not.toBe(treeBefore.rootBranches)
+    })
+
+    it('does not change identity on dedup (no mutation)', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      act(() => {
+        result.current.addMove({
+          san: 'c5',
+          fen: 'fen-c5',
+          fenBefore: 'fen-before',
+          uci: 'c7c5',
+          parentContext: { type: 'game', moveIndex: 4 },
+        })
+      })
+
+      const treeBefore = result.current.tree
+
+      act(() => {
+        result.current.addMove({
+          san: 'c5',
+          fen: 'fen-c5',
+          fenBefore: 'fen-before',
+          uci: 'c7c5',
+          parentContext: { type: 'game', moveIndex: 4 },
+        })
+      })
+
+      // Dedup path doesn't mutate, so tree identity should be stable
+      expect(result.current.tree).toBe(treeBefore)
+    })
+
+    it('produces a new tree identity after clearTree', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      act(() => {
+        result.current.addMove({
+          san: 'c5',
+          fen: 'fen-c5',
+          fenBefore: 'fen-before',
+          uci: 'c7c5',
+          parentContext: { type: 'game', moveIndex: 4 },
+        })
+      })
+
+      const treeBefore = result.current.tree
+
+      act(() => {
+        result.current.clearTree()
+      })
+
+      expect(result.current.tree).not.toBe(treeBefore)
+    })
+  })
+
+  describe('analysis cache render signal', () => {
+    it('triggers a re-render when resolvePending caches a result', () => {
+      const renderCount = { value: 0 }
+      const { result } = renderHook(() => {
+        renderCount.value++
+        return useVariationTree()
+      })
+
+      act(() => {
+        result.current.registerPending('req-1', 'fen-A')
+      })
+
+      const countBefore = renderCount.value
+
+      act(() => {
+        result.current.resolvePending('req-1', makeResult('req-1', 'fen-A'))
+      })
+
+      expect(renderCount.value).toBeGreaterThan(countBefore)
+      expect(result.current.getVarAnalysis('fen-A')).toBeDefined()
+    })
+
+    it('does not trigger re-render for unknown request IDs', () => {
+      const renderCount = { value: 0 }
+      const { result } = renderHook(() => {
+        renderCount.value++
+        return useVariationTree()
+      })
+
+      const countBefore = renderCount.value
+
+      act(() => {
+        result.current.resolvePending('unknown', makeResult('unknown', 'some-fen'))
+      })
+
+      expect(renderCount.value).toBe(countBefore)
     })
   })
 

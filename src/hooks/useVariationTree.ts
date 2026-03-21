@@ -15,6 +15,12 @@ const createNodeId = (): VariationNodeId => {
   return Math.random().toString(36).slice(2)
 }
 
+/** Create an immutable snapshot of the tree for render consumers. */
+const snapshotTree = (tree: VariationTree): VariationTree => ({
+  nodes: new Map(tree.nodes),
+  rootBranches: new Map(tree.rootBranches),
+})
+
 export type AddMoveParams = {
   san: string
   fen: string
@@ -31,9 +37,9 @@ export type NavigateUpResult =
   | { type: 'game'; moveIndex: number }
 
 export const useVariationTree = () => {
-  // Use ref as source of truth for synchronous reads + a version counter for re-renders
+  // Mutable ref for synchronous reads within addMove; state snapshot for render consumers
   const treeRef = useRef<VariationTree>(createEmptyTree())
-  const [, setVersion] = useState(0)
+  const [tree, setTree] = useState<VariationTree>(() => snapshotTree(treeRef.current))
   const [selectedVarNodeId, setSelectedVarNodeId] = useState<VariationNodeId | null>(null)
 
   // FEN-keyed analysis cache for variation positions
@@ -41,22 +47,28 @@ export const useVariationTree = () => {
   // Request ID → FEN mapping for in-flight analysis
   const pendingRequestsRef = useRef<Map<string, string>>(new Map())
 
-  const triggerRender = useCallback(() => setVersion(v => v + 1), [])
+  // Analysis cache version — incremented to trigger re-render when cache changes
+  const [, setAnalysisCacheVersion] = useState(0)
+
+  const publishTree = useCallback(() => {
+    setTree(snapshotTree(treeRef.current))
+  }, [])
 
   /**
-   * Add a move to the variation tree. Returns the node ID of the added (or existing) node.
+   * Add a move to the variation tree. Returns the node ID of the added (or existing) node,
+   * or null if the parent variation node was not found.
    * Deduplication: if a child with the same SAN already exists, returns that child's ID.
    */
-  const addMove = useCallback(({ san, fen, fenBefore, uci, parentContext }: AddMoveParams): VariationNodeId => {
-    const tree = treeRef.current
+  const addMove = useCallback(({ san, fen, fenBefore, uci, parentContext }: AddMoveParams): VariationNodeId | null => {
+    const t = treeRef.current
 
     if (parentContext.type === 'game') {
       const { moveIndex } = parentContext
 
       // Check for dedup among existing root branches at this moveIndex
-      const existing = tree.rootBranches.get(moveIndex) ?? []
+      const existing = t.rootBranches.get(moveIndex) ?? []
       for (const rootId of existing) {
-        const rootNode = tree.nodes.get(rootId)
+        const rootNode = t.nodes.get(rootId)
         if (rootNode && rootNode.san === san) {
           return rootId // dedup — no mutation
         }
@@ -76,20 +88,20 @@ export const useVariationTree = () => {
         children: [],
         nestingLevel: 0,
       }
-      tree.nodes.set(id, node)
-      tree.rootBranches.set(moveIndex, [...existing, id])
-      triggerRender()
+      t.nodes.set(id, node)
+      t.rootBranches.set(moveIndex, [...existing, id])
+      publishTree()
       return id
     }
 
     // parentContext.type === 'variation'
     const { nodeId: parentNodeId } = parentContext
-    const parentNode = tree.nodes.get(parentNodeId)
-    if (!parentNode) return ''
+    const parentNode = t.nodes.get(parentNodeId)
+    if (!parentNode) return null
 
     // Check for dedup among all children
     for (const childId of parentNode.children) {
-      const child = tree.nodes.get(childId)
+      const child = t.nodes.get(childId)
       if (child && child.san === san) {
         return childId // dedup — no mutation
       }
@@ -110,14 +122,14 @@ export const useVariationTree = () => {
       children: [],
       nestingLevel: isFirstChild ? parentNode.nestingLevel : parentNode.nestingLevel + 1,
     }
-    tree.nodes.set(id, node)
+    t.nodes.set(id, node)
 
     // Update parent's children (mutate in place since we own the ref)
     parentNode.children = [...parentNode.children, id]
 
-    triggerRender()
+    publishTree()
     return id
-  }, [triggerRender])
+  }, [publishTree])
 
   /**
    * Navigate up from a node: returns parent variation node or game move.
@@ -146,15 +158,15 @@ export const useVariationTree = () => {
    * Absolute ply = parentGameIndex + 1 + depth from variation root.
    */
   const getAbsolutePly = useCallback((nodeId: VariationNodeId): number => {
-    const tree = treeRef.current
-    const node = tree.nodes.get(nodeId)
+    const t = treeRef.current
+    const node = t.nodes.get(nodeId)
     if (!node) return 0
 
     let depth = 0
     let current: VarNode | undefined = node
     while (current && current.parentId) {
       depth++
-      current = tree.nodes.get(current.parentId)
+      current = t.nodes.get(current.parentId)
     }
     // current is now the root of this branch
     const gameIndex = current?.parentGameIndex ?? node.parentGameIndex
@@ -165,11 +177,11 @@ export const useVariationTree = () => {
    * Collect all nodes in a branch following children[0] continuation.
    */
   const collectBranchNodes = useCallback((rootNodeId: VariationNodeId): VarNode[] => {
-    const tree = treeRef.current
+    const t = treeRef.current
     const result: VarNode[] = []
     let currentId: VariationNodeId | null = rootNodeId
     while (currentId) {
-      const node = tree.nodes.get(currentId)
+      const node = t.nodes.get(currentId)
       if (!node) break
       result.push(node)
       currentId = node.children.length > 0 ? node.children[0] : null
@@ -187,6 +199,7 @@ export const useVariationTree = () => {
     if (fen) {
       varAnalysisCacheRef.current.set(fen, result)
       pendingRequestsRef.current.delete(requestId)
+      setAnalysisCacheVersion(v => v + 1)
     }
   }, [])
 
@@ -196,14 +209,14 @@ export const useVariationTree = () => {
 
   const clearTree = useCallback(() => {
     treeRef.current = createEmptyTree()
+    setTree(snapshotTree(treeRef.current))
     setSelectedVarNodeId(null)
     varAnalysisCacheRef.current.clear()
     pendingRequestsRef.current.clear()
-    triggerRender()
-  }, [triggerRender])
+  }, [])
 
   return {
-    tree: treeRef.current,
+    tree,
     selectedVarNodeId,
     setSelectedVarNode: setSelectedVarNodeId,
     addMove,
