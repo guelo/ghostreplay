@@ -295,7 +295,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
   }, [])
 
   const analyzeMove = useCallback(
-    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number) => {
+    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number): string | undefined => {
       if (store.getState().status === 'error') {
         return
       }
@@ -326,6 +326,8 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       if (moveIndex !== undefined) {
         scheduleCacheLookup({ fen, move, moveIndex, playerColor, legalMoveCount })
       }
+
+      return id
     },
     [store, scheduleCacheLookup],
   )
