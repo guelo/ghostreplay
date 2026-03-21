@@ -4,7 +4,9 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, PositionAnalysis } from "../utils/api";
 import type { EngineInfo } from "../workers/stockfishMessages";
+import type { VariationNodeId } from "../types/variationTree";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
+import { useVariationTree } from "../hooks/useVariationTree";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
@@ -12,6 +14,7 @@ import { mateToCp, playerToWhite, toWhitePerspective } from "../workers/analysis
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
+import { formatEval } from "./MoveRow";
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -22,11 +25,6 @@ type AnalysisBoardProps = {
   initialMoveIndex?: number;
   footer?: React.ReactNode;
   positionAnalysis?: Record<string, PositionAnalysis>;
-};
-
-type WhatIfMove = {
-  san: string;
-  fen: string;
 };
 
 // Convert SAN move to start/end squares using chess.js
@@ -145,6 +143,14 @@ const toWhitePerspectiveMate = (
   return moveIndex % 2 === 0 ? moverPerspectiveMate : -moverPerspectiveMate;
 };
 
+/** Check whether a FEN already has a pending analysis request in flight. */
+const hasPendingForFen = (pending: Map<string, string>, fen: string): boolean => {
+  for (const v of pending.values()) {
+    if (v === fen) return true;
+  }
+  return false;
+};
+
 const AnalysisBoard = ({
   moves,
   boardOrientation,
@@ -156,16 +162,33 @@ const AnalysisBoard = ({
   const [currentIndex, setCurrentIndex] = useState<number | null>(
     initialMoveIndex ?? null,
   );
-  const [whatIfMoves, setWhatIfMoves] = useState<WhatIfMove[]>([]);
-  const [whatIfBranchPoint, setWhatIfBranchPoint] = useState(-1);
   const [analysisStore] = useState(() => createAnalysisStore());
-  const { analyzeMove, clearAnalysis } = useMoveAnalysis(analysisStore);
-  const analysisMap = useStore(analysisStore, (s) => s.analysisMap);
+  const { analyzeMove } = useMoveAnalysis(analysisStore);
   const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
   const { info: engineLines, isThinking: engineThinking, evaluatePosition, stopSearch } = useStockfishEngine();
   const [showEngineArrows, setShowEngineArrows] = useState(true);
 
-  const isInWhatIf = whatIfMoves.length > 0;
+  // Variation tree hook
+  const {
+    tree,
+    selectedVarNodeId,
+    setSelectedVarNode,
+    addMove,
+    navigateUp,
+    navigateDown,
+    getAbsolutePly,
+    getVarAnalysis,
+    registerPending,
+    resolvePending,
+    pendingRequestsRef,
+  } = useVariationTree();
+
+  const isInVariation = selectedVarNodeId != null;
+  const selectedVarNode = useMemo(() => {
+    if (!selectedVarNodeId) return null;
+    return tree.nodes.get(selectedVarNodeId) ?? null;
+  }, [selectedVarNodeId, tree]);
+
   const effectiveIndex = currentIndex ?? moves.length - 1;
 
   // Map AnalysisMove[] to Move[] for MoveList
@@ -191,50 +214,20 @@ const AnalysisBoard = ({
     [moves],
   );
 
-  // Combined moves for MoveList when in what-if mode
-  const moveListMoves = useMemo(() => {
-    if (!isInWhatIf) return mappedMoves;
-    const base = mappedMoves.slice(0, whatIfBranchPoint + 1);
-    const branch = whatIfMoves.map((m, i) => {
-      const absIndex = whatIfBranchPoint + 1 + i;
-      const analysis = analysisMap.get(absIndex);
-      return {
-        san: m.san,
-        classification: analysis?.classification ?? undefined,
-        // playedEval is player-perspective; convert to white perspective
-        eval:
-          analysis?.playedEval != null
-            ? playerToWhite(analysis.playedEval, boardOrientation) ?? undefined
-            : undefined,
-      };
-    });
-    return [...base, ...branch];
-  }, [isInWhatIf, mappedMoves, whatIfBranchPoint, whatIfMoves, analysisMap, boardOrientation]);
-
-  // Current move list index accounting for what-if
-  const moveListIndex = useMemo(() => {
-    if (!isInWhatIf) return currentIndex;
-    // In what-if mode, navigate within the combined array
-    return null; // viewing latest (end of what-if line)
-  }, [isInWhatIf, currentIndex]);
-
   // FEN at the position before the current move (needed for arrow SAN→UCI)
   const fenBeforeCurrentMove = useMemo(() => {
-    if (isInWhatIf) return null; // no arrows in what-if
+    if (isInVariation) return null; // no cached best arrows in variations
     if (effectiveIndex < 0) return null;
     if (effectiveIndex === 0) return startingFen;
     return moves[effectiveIndex - 1]?.fen_after ?? startingFen;
-  }, [isInWhatIf, effectiveIndex, moves, startingFen]);
+  }, [isInVariation, effectiveIndex, moves, startingFen]);
 
   // Displayed FEN
   const displayedFen = useMemo(() => {
-    if (isInWhatIf) {
-      if (whatIfMoves.length === 0) return startingFen;
-      return whatIfMoves[whatIfMoves.length - 1].fen;
-    }
+    if (isInVariation && selectedVarNode) return selectedVarNode.fen;
     if (effectiveIndex === -1) return startingFen;
     return moves[effectiveIndex]?.fen_after ?? startingFen;
-  }, [isInWhatIf, whatIfMoves, effectiveIndex, moves, startingFen]);
+  }, [isInVariation, selectedVarNode, effectiveIndex, moves, startingFen]);
 
   // Stop engine and clear lines synchronously when position changes.
   // engineStaleRef prevents using leftover engine data with the new
@@ -356,7 +349,7 @@ const AnalysisBoard = ({
 
   // Arrows for the current position
   const arrows = useMemo(() => {
-    if (isInWhatIf) return [];
+    if (isInVariation) return [];
     if (effectiveIndex < 0 || !fenBeforeCurrentMove) return [];
 
     const move = moves[effectiveIndex];
@@ -390,7 +383,7 @@ const AnalysisBoard = ({
     }
 
     return result;
-  }, [isInWhatIf, effectiveIndex, fenBeforeCurrentMove, moves]);
+  }, [isInVariation, effectiveIndex, fenBeforeCurrentMove, moves]);
 
   // Merge: played/best arrows take priority over engine arrows on same squares
   const allArrows = useMemo(() => {
@@ -405,9 +398,9 @@ const AnalysisBoard = ({
 
   // Current move data for position info panel
   const currentMove = useMemo(() => {
-    if (isInWhatIf || effectiveIndex < 0) return null;
+    if (isInVariation || effectiveIndex < 0) return null;
     return moves[effectiveIndex] ?? null;
-  }, [isInWhatIf, effectiveIndex, moves]);
+  }, [isInVariation, effectiveIndex, moves]);
 
   // Live engine eval from top PV line (white perspective)
   const liveEngineEvalCp = useMemo(() => {
@@ -428,33 +421,43 @@ const AnalysisBoard = ({
   }, [mergedEngineLines, sideToMove]);
 
   const currentEvalCp = useMemo(() => {
-    if (isInWhatIf || effectiveIndex < 0) return null;
+    if (isInVariation || effectiveIndex < 0) return null;
     return toWhitePerspective(currentMove?.eval_cp ?? null, effectiveIndex);
-  }, [isInWhatIf, effectiveIndex, currentMove]);
+  }, [isInVariation, effectiveIndex, currentMove]);
 
   const currentEvalMate = useMemo(() => {
-    if (isInWhatIf || effectiveIndex < 0) return null;
+    if (isInVariation || effectiveIndex < 0) return null;
     return toWhitePerspectiveMate(
       currentMove?.eval_mate ?? null,
       effectiveIndex,
     );
-  }, [isInWhatIf, effectiveIndex, currentMove]);
+  }, [isInVariation, effectiveIndex, currentMove]);
 
   const currentBestEvalCp = useMemo(() => {
-    if (isInWhatIf || effectiveIndex < 0) return null;
+    if (isInVariation || effectiveIndex < 0) return null;
     return toWhitePerspective(
       currentMove?.best_move_eval_cp ?? null,
       effectiveIndex,
     );
-  }, [isInWhatIf, effectiveIndex, currentMove]);
+  }, [isInVariation, effectiveIndex, currentMove]);
 
-  // Eval for the EvalBar during what-if mode (white perspective)
-  const whatIfEvalCp = useMemo(() => {
-    if (!isInWhatIf || !lastAnalysis || lastAnalysis.moveIndex === null)
-      return null;
-    // playedEval is player-perspective; convert to white perspective
-    return playerToWhite(lastAnalysis.playedEval, boardOrientation);
-  }, [isInWhatIf, lastAnalysis, boardOrientation]);
+  // Variation eval for eval bar (white perspective)
+  const varEvalCp = useMemo(() => {
+    if (!isInVariation || !selectedVarNode) return null;
+    const cached = getVarAnalysis(selectedVarNode.fen);
+    if (!cached || cached.playedEval == null) return null;
+    return playerToWhite(cached.playedEval, boardOrientation);
+  }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation]);
+
+  // Variation header eval for MoveList
+  const varHeaderEval = useMemo((): string | null => {
+    if (!isInVariation || !selectedVarNode) return null;
+    const cached = getVarAnalysis(selectedVarNode.fen);
+    if (!cached || cached.playedEval == null) return null;
+    const wp = playerToWhite(cached.playedEval, boardOrientation);
+    if (wp == null) return null;
+    return formatEval(wp);
+  }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation]);
 
   const playedEvalText = useMemo(
     () => formatEvalValue(currentEvalCp, currentEvalMate),
@@ -474,15 +477,8 @@ const AnalysisBoard = ({
   // Highlight from/to squares of the last move
   const lastMoveSquares = useMemo((): Record<string, React.CSSProperties> => {
     const style: React.CSSProperties = { background: "rgba(255, 255, 0, 0.4)" };
-    if (isInWhatIf && whatIfMoves.length > 0) {
-      const last = whatIfMoves[whatIfMoves.length - 1];
-      const prevFen =
-        whatIfMoves.length > 1
-          ? whatIfMoves[whatIfMoves.length - 2].fen
-          : effectiveIndex >= 0
-            ? (moves[effectiveIndex]?.fen_after ?? startingFen)
-            : startingFen;
-      const sq = sanToSquares(prevFen, last.san);
+    if (isInVariation && selectedVarNode) {
+      const sq = sanToSquares(selectedVarNode.fenBefore, selectedVarNode.san);
       if (!sq) return {};
       return { [sq.from]: style, [sq.to]: style };
     }
@@ -493,41 +489,43 @@ const AnalysisBoard = ({
     if (!sq) return {};
     return { [sq.from]: style, [sq.to]: style };
   }, [
-    isInWhatIf,
-    whatIfMoves,
+    isInVariation,
+    selectedVarNode,
     effectiveIndex,
     fenBeforeCurrentMove,
     moves,
-    startingFen,
   ]);
+
+  // Resolve pending variation analysis when lastAnalysis fires
+  useEffect(() => {
+    if (!lastAnalysis) return;
+    resolvePending(lastAnalysis.id, lastAnalysis);
+  }, [lastAnalysis, resolvePending]);
 
   // Handle MoveList navigation
   const handleNavigate = useCallback(
     (index: number | null) => {
-      if (isInWhatIf) {
-        // Clicking a main-line move exits what-if
-        setWhatIfMoves([]);
-        setWhatIfBranchPoint(-1);
-        clearAnalysis();
-      }
+      setSelectedVarNode(null);
       setCurrentIndex(index);
     },
-    [isInWhatIf, clearAnalysis],
+    [setSelectedVarNode],
+  );
+
+  // Handle variation node selection from MoveList
+  const handleVarSelect = useCallback(
+    (nodeId: VariationNodeId | null) => {
+      setSelectedVarNode(nodeId);
+    },
+    [setSelectedVarNode],
   );
 
   // Handle piece drop for what-if exploration
   const handleDrop = useCallback(
     ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
       // Determine the FEN to play from
-      let baseFen: string;
-      if (isInWhatIf) {
-        baseFen =
-          whatIfMoves.length > 0
-            ? whatIfMoves[whatIfMoves.length - 1].fen
-            : startingFen;
-      } else {
-        baseFen = displayedFen;
-      }
+      const baseFen = isInVariation && selectedVarNode
+        ? selectedVarNode.fen
+        : displayedFen;
 
       try {
         const tempChess = new Chess(baseFen);
@@ -539,33 +537,63 @@ const AnalysisBoard = ({
         });
         if (!result) return false;
 
-        const branchPt = isInWhatIf ? whatIfBranchPoint : effectiveIndex;
-        if (!isInWhatIf) {
-          // Entering what-if mode
-          setWhatIfBranchPoint(effectiveIndex);
+        // Main-line continuation check: if the next game move matches, just advance
+        if (!isInVariation) {
+          const nextIdx = effectiveIndex + 1;
+          if (nextIdx < moves.length && moves[nextIdx].move_san === result.san) {
+            setCurrentIndex(nextIdx >= moves.length - 1 ? null : nextIdx);
+            return true;
+          }
         }
 
-        const moveIndex = branchPt + 1 + whatIfMoves.length;
-        setWhatIfMoves((prev) => [
-          ...prev,
-          { san: result.san, fen: tempChess.fen() },
-        ]);
+        // Determine parent context for variation tree
+        const parentContext = isInVariation && selectedVarNodeId
+          ? { type: 'variation' as const, nodeId: selectedVarNodeId }
+          : { type: 'game' as const, moveIndex: effectiveIndex };
+
+        const resultFen = tempChess.fen();
         const uciMove = `${sourceSquare}${targetSquare}${result.promotion ?? ""}`;
-        analyzeMove(baseFen, uciMove, boardOrientation, moveIndex);
+
+        const nodeId = addMove({
+          san: result.san,
+          fen: resultFen,
+          fenBefore: baseFen,
+          uci: uciMove,
+          parentContext,
+        });
+        if (!nodeId) return false;
+
+        setSelectedVarNode(nodeId);
+
+        // Dedup-aware analysis: skip if already cached or pending
+        const alreadyCached = !!getVarAnalysis(resultFen);
+        const alreadyPending = hasPendingForFen(pendingRequestsRef.current, resultFen);
+        if (!alreadyCached && !alreadyPending) {
+          const reqId = analyzeMove(baseFen, uciMove, boardOrientation);
+          if (reqId) {
+            registerPending(reqId, resultFen);
+          }
+        }
+
         return true;
       } catch {
         return false;
       }
     },
     [
-      isInWhatIf,
-      whatIfMoves,
-      whatIfBranchPoint,
-      startingFen,
+      isInVariation,
+      selectedVarNode,
+      selectedVarNodeId,
       displayedFen,
       effectiveIndex,
+      moves,
+      addMove,
+      setSelectedVarNode,
+      getVarAnalysis,
+      pendingRequestsRef,
       analyzeMove,
       boardOrientation,
+      registerPending,
     ],
   );
 
@@ -575,15 +603,6 @@ const AnalysisBoard = ({
     [],
   );
 
-  // Exit what-if mode
-  const handleExitWhatIf = useCallback(() => {
-    const branchIdx = whatIfBranchPoint;
-    setWhatIfMoves([]);
-    setWhatIfBranchPoint(-1);
-    clearAnalysis();
-    setCurrentIndex(branchIdx >= moves.length - 1 ? null : branchIdx);
-  }, [whatIfBranchPoint, moves.length, clearAnalysis]);
-
   return (
     <div className="analysis-board">
       <div className="analysis-board__layout">
@@ -591,13 +610,13 @@ const AnalysisBoard = ({
           <div className="analysis-board__board-with-eval">
             <EvalBar
               whitePerspectiveCp={
-                isInWhatIf
+                isInVariation
                   ? ((showEngineArrows ? liveEngineEvalCp : null) ??
-                    whatIfEvalCp)
+                    varEvalCp)
                   : currentEvalCp
               }
               whitePerspectiveMate={
-                isInWhatIf
+                isInVariation
                   ? showEngineArrows
                     ? liveEngineEvalMate
                     : null
@@ -667,15 +686,22 @@ const AnalysisBoard = ({
             </div>
           )}
           <MoveList
-            moves={moveListMoves}
-            currentIndex={moveListIndex}
+            moves={mappedMoves}
+            currentIndex={currentIndex}
             onNavigate={handleNavigate}
             playerColor={boardOrientation}
+            variationTree={tree}
+            selectedVarNodeId={selectedVarNodeId}
+            onVarSelect={handleVarSelect}
+            getAbsolutePly={getAbsolutePly}
+            navigateUp={navigateUp}
+            navigateDown={navigateDown}
+            headerEvalOverride={varHeaderEval}
           />
         </div>
       </div>
 
-      {!isInWhatIf && evals.length > 0 && (
+      {!isInVariation && evals.length > 0 && (
         <div className="analysis-board__graph-row">
           <AnalysisGraph
             evals={evals}
@@ -691,16 +717,7 @@ const AnalysisBoard = ({
         </div>
       )}
 
-      {isInWhatIf && (
-        <div className="analysis-board__whatif-bar">
-          <span>Exploring alternate line</span>
-          <button type="button" onClick={handleExitWhatIf}>
-            Exit
-          </button>
-        </div>
-      )}
-
-      {currentMove && !isInWhatIf && (
+      {currentMove && !isInVariation && (
         <div className="analysis-board__position-info">
           <div className="analysis-board__position-info-row">
             <span className="analysis-board__played-label">

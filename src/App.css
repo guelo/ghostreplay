@@ -1368,29 +1368,6 @@
     color: var(--text-tertiary);
 }
 
-.analysis-board__whatif-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--warning-light);
-    background: var(--warning-light-bg);
-    color: var(--status-other);
-    font-size: 0.85rem;
-    font-weight: 500;
-}
-
-.analysis-board__whatif-bar button {
-    border: 1px solid var(--warning-light);
-    background: var(--warning-light-bg-alt);
-    color: var(--status-other);
-    padding: 0.3rem 0.65rem;
-    border-radius: 0.35rem;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-}
 
 .analysis-board__position-info {
     display: flex;
