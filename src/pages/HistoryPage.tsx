@@ -153,7 +153,7 @@ function HistoryPage() {
 
                 {!analysisLoading && analysis && (
                   <AnalysisBoard
-                    key={selectedGame.id}
+                    key={selectedGame.session_id}
                     moves={analysis.moves}
                     boardOrientation={
                       selectedGame.player_color as "white" | "black"

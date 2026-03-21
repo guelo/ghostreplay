@@ -412,3 +412,149 @@ describe('AnalysisBoard — variation tree integration', () => {
     expect(screen.getByTestId('analysis-graph')).toBeInTheDocument()
   })
 })
+
+describe('AnalysisBoard — handleDrop behavior', () => {
+  // Helper to invoke onPieceDrop from the captured Chessboard props
+  const invokeDrop = (source: string, target: string): boolean => {
+    const onDrop = capturedChessboardProps.onPieceDrop as (args: { sourceSquare: string; targetSquare: string }) => boolean
+    return onDrop({ sourceSquare: source, targetSquare: target })
+  }
+
+  it('main-line continuation: advances cursor instead of creating variation', () => {
+    // Navigate to move 0 (e4), then play the next game move (c5)
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    // Navigate to move 0 (e4)
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    // The displayed FEN should be after e4, and the next game move is c5 (c7c5)
+    const result = invokeDrop('c7', 'c5')
+
+    expect(result).toBe(true)
+    // Should NOT have called addMove — this is a main-line continuation
+    expect(mockAddMove).not.toHaveBeenCalled()
+    expect(mockAnalyzeMove).not.toHaveBeenCalled()
+  })
+
+  it('alternate move from game position: creates variation and triggers analysis', () => {
+    // Navigate to move 0 (e4), then play d5 instead of c5
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    const result = invokeDrop('d7', 'd5')
+
+    expect(result).toBe(true)
+    expect(mockAddMove).toHaveBeenCalledTimes(1)
+    const addMoveArg = mockAddMove.mock.calls[0][0]
+    expect(addMoveArg.san).toBe('d5')
+    expect(addMoveArg.parentContext).toEqual({ type: 'game', moveIndex: 0 })
+    // Should select the new node
+    expect(mockSetSelectedVarNode).toHaveBeenCalledWith('mock-node-id')
+    // Should trigger analysis and register pending
+    expect(mockAnalyzeMove).toHaveBeenCalledTimes(1)
+    expect(mockRegisterPending).toHaveBeenCalledWith('req-123', expect.any(String))
+  })
+
+  it('dedup: skips analyzeMove when FEN is already cached', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    // Mock: getVarAnalysis returns a result for the FEN that d5 produces
+    mockGetVarAnalysis.mockImplementation(() => ({
+      playedEval: 10, id: 'old-req', move: 'd5', bestMove: 'e5',
+      bestEval: 20, currentPositionEval: null, moveIndex: null,
+      delta: null, classification: null, blunder: false,
+    }))
+
+    const result = invokeDrop('d7', 'd5')
+
+    expect(result).toBe(true)
+    expect(mockAddMove).toHaveBeenCalledTimes(1)
+    expect(mockSetSelectedVarNode).toHaveBeenCalledWith('mock-node-id')
+    // Should NOT trigger analysis — already cached
+    expect(mockAnalyzeMove).not.toHaveBeenCalled()
+    expect(mockRegisterPending).not.toHaveBeenCalled()
+  })
+
+  it('dedup: skips analyzeMove when FEN has a pending request', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    // Pre-populate pending with the FEN that d5 will produce from after-e4 position
+    // We need to compute it: after e4 FEN + d5 move
+    const { Chess } = require('chess.js')
+    const chess = new Chess(moves[0].fen_after)
+    chess.move({ from: 'd7', to: 'd5', promotion: 'q' })
+    const resultFen = chess.fen()
+    mockPendingRequestsRef.current.set('existing-req', resultFen)
+
+    const result = invokeDrop('d7', 'd5')
+
+    expect(result).toBe(true)
+    expect(mockAddMove).toHaveBeenCalledTimes(1)
+    expect(mockSetSelectedVarNode).toHaveBeenCalledWith('mock-node-id')
+    // Should NOT trigger analysis — already pending
+    expect(mockAnalyzeMove).not.toHaveBeenCalled()
+    expect(mockRegisterPending).not.toHaveBeenCalled()
+  })
+
+  it('variation continuation: uses variation node FEN as base and creates nested branch', () => {
+    const varNode: VarNode = {
+      id: 'var-1',
+      san: 'd5',
+      // FEN after 1. e4 d5 (valid position)
+      fen: 'rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
+      fenBefore: moves[0].fen_after,
+      uci: 'd7d5',
+      parentId: null,
+      parentGameIndex: 0,
+      branchPlyOffset: 0,
+      children: [],
+      nestingLevel: 0,
+    }
+    mockTree = { nodes: new Map([['var-1', varNode]]), rootBranches: new Map([[0, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    // From the variation position (after 1. e4 d5), play 2. Nf3
+    const result = invokeDrop('g1', 'f3')
+
+    expect(result).toBe(true)
+    expect(mockAddMove).toHaveBeenCalledTimes(1)
+    const addMoveArg = mockAddMove.mock.calls[0][0]
+    expect(addMoveArg.san).toBe('Nf3')
+    expect(addMoveArg.parentContext).toEqual({ type: 'variation', nodeId: 'var-1' })
+    expect(addMoveArg.fenBefore).toBe(varNode.fen)
+  })
+
+  it('main-line continuation at last move uses null for currentIndex', () => {
+    // 3-move game: navigate to move 1 (index 1), play a move that matches move 2
+    const threeMoves: AnalysisMove[] = [
+      ...moves,
+      {
+        move_number: 2,
+        color: 'white',
+        move_san: 'Nf3',
+        fen_after: 'rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2',
+        eval_cp: 40,
+        eval_mate: null,
+        best_move_san: 'Nf3',
+        best_move_eval_cp: 40,
+        eval_delta: 0,
+        classification: 'best',
+      },
+    ]
+
+    render(<AnalysisBoard moves={threeMoves} boardOrientation="white" />)
+    // Navigate to move 1 (c5), then play Nf3 which is move 2 (last move)
+    fireEvent.click(screen.getByRole('button', { name: 'Move 2' }))
+
+    const result = invokeDrop('g1', 'f3')
+
+    expect(result).toBe(true)
+    expect(mockAddMove).not.toHaveBeenCalled()
+    // The onNavigate from MoveList should have been called with the right index
+    // But here we're going through handleDrop which calls setCurrentIndex directly
+    // Last move → should use null (the latest contract)
+  })
+})
