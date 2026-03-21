@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen } from '../test/utils'
+import { act, fireEvent, render, screen } from '../test/utils'
 import AnalysisBoard from './AnalysisBoard'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
@@ -427,9 +427,12 @@ describe('AnalysisBoard — handleDrop behavior', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
 
     // The displayed FEN should be after e4, and the next game move is c5 (c7c5)
-    const result = invokeDrop('c7', 'c5')
+    let result: boolean
+    act(() => {
+      result = invokeDrop('c7', 'c5')
+    })
 
-    expect(result).toBe(true)
+    expect(result!).toBe(true)
     // Should NOT have called addMove — this is a main-line continuation
     expect(mockAddMove).not.toHaveBeenCalled()
     expect(mockAnalyzeMove).not.toHaveBeenCalled()
@@ -549,12 +552,14 @@ describe('AnalysisBoard — handleDrop behavior', () => {
     // Navigate to move 1 (c5), then play Nf3 which is move 2 (last move)
     fireEvent.click(screen.getByRole('button', { name: 'Move 2' }))
 
-    const result = invokeDrop('g1', 'f3')
+    let result: boolean
+    act(() => {
+      result = invokeDrop('g1', 'f3')
+    })
 
-    expect(result).toBe(true)
+    expect(result!).toBe(true)
     expect(mockAddMove).not.toHaveBeenCalled()
-    // The onNavigate from MoveList should have been called with the right index
-    // But here we're going through handleDrop which calls setCurrentIndex directly
-    // Last move → should use null (the latest contract)
+    // handleDrop calls setCurrentIndex(null) for last move — verify via MoveList prop
+    expect(capturedMoveListProps.currentIndex).toBeNull()
   })
 })
