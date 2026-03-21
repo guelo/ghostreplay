@@ -2143,6 +2143,45 @@
     color: var(--brand-primary);
 }
 
+/* Variation lines (what-if branches in MoveList) */
+.variation-line {
+    grid-column: 1 / -1;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    padding: 0.1rem 0.5rem 0.1rem 2.5rem;
+}
+
+.variation-prefix {
+    color: var(--text-tertiary);
+    user-select: none;
+}
+
+.variation-ply {
+    cursor: pointer;
+    padding: 0.05em 0.2em;
+    border-radius: 3px;
+    white-space: nowrap;
+}
+
+.variation-ply:hover {
+    background: var(--hover-overlay);
+}
+
+.variation-ply--selected {
+    background: rgba(59, 130, 246, 0.7);
+    color: white;
+}
+
+.variation-move-number {
+    color: var(--text-tertiary);
+}
+
+.variation-ply--selected .variation-move-number {
+    color: white;
+}
+
 /* Nav Bar */
 .nav-bar {
     display: flex;

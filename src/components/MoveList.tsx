@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MoveClassification } from "../workers/analysisUtils";
+import type { VariationTree, VariationNodeId } from "../types/variationTree";
+import type { NavigateUpResult } from "../hooks/useVariationTree";
 import MoveRow, { formatEval } from "./MoveRow";
 import type { MoveMessage, SrsFailDetail } from "./MoveRow";
+import VariationLine from "./VariationLine";
 
 // Re-export types that other modules import from MoveList
 export type { SrsFailDetail, SrsStats, MoveMessage } from "./MoveRow";
@@ -26,7 +29,19 @@ type MoveListProps = {
   onRevealSrsFail?: (detail: SrsFailDetail, moveIndex: number) => void;
   /** Move index of the currently revealed srs-fail (icon stops animating) */
   revealedSrsFailIndex?: number | null;
+  // Variation props (all optional for ChessGame path compatibility)
+  variationTree?: VariationTree;
+  selectedVarNodeId?: VariationNodeId | null;
+  onVarSelect?: (nodeId: VariationNodeId | null) => void;
+  getAbsolutePly?: (nodeId: VariationNodeId) => number;
+  navigateUp?: (nodeId: VariationNodeId) => NavigateUpResult | null;
+  navigateDown?: (nodeId: VariationNodeId) => VariationNodeId | null;
+  headerEvalOverride?: string | null;
 };
+
+type DisplayItem =
+  | { type: "move-row"; pairIndex: number }
+  | { type: "variation-line"; rootNodeId: VariationNodeId; parentGameIndex: number };
 
 const EMPTY_MESSAGES: ReadonlyMap<number, MoveMessage[]> = new Map();
 const EMPTY_BUBBLES: MoveMessage[] = [];
@@ -43,37 +58,77 @@ const MoveList = ({
   playerColor = "white",
   onRevealSrsFail,
   revealedSrsFailIndex = null,
+  variationTree,
+  selectedVarNodeId,
+  onVarSelect,
+  getAbsolutePly,
+  navigateUp,
+  navigateDown,
+  headerEvalOverride,
 }: MoveListProps) => {
   const moveListRef = useRef<HTMLDivElement>(null);
   const selectedMoveRef = useRef<HTMLButtonElement>(null);
   const lastMessageRef = useRef<HTMLDivElement>(null);
   const [tappedIconIndex, setTappedIconIndex] = useState<number | null>(null);
 
+  // Variation mode is active only when the full prop set is present
+  const isVariationActive = !!(selectedVarNodeId && onVarSelect && navigateUp && navigateDown);
+
   // Effective index for display purposes (null means at the end)
   const effectiveIndex = currentIndex ?? moves.length - 1;
 
-  const canGoBack = moves.length > 0 && effectiveIndex > -1;
-  const canGoForward = moves.length > 0 && effectiveIndex < moves.length - 1;
+  const canGoBack = isVariationActive
+    ? true
+    : moves.length > 0 && effectiveIndex > -1;
+  const canGoForward = isVariationActive
+    ? navigateDown!(selectedVarNodeId!) != null
+    : moves.length > 0 && effectiveIndex < moves.length - 1;
 
   const handlePrev = useCallback(() => {
+    if (isVariationActive) {
+      const result = navigateUp!(selectedVarNodeId!);
+      if (result?.type === "game") {
+        onVarSelect!(null);
+        onNavigate(result.moveIndex);
+      } else if (result?.type === "variation") {
+        onVarSelect!(result.nodeId);
+      }
+      return;
+    }
     if (!canGoBack) return;
     onNavigate(effectiveIndex - 1); // -1 is valid (starting position)
-  }, [canGoBack, effectiveIndex, onNavigate]);
+  }, [isVariationActive, canGoBack, effectiveIndex, onNavigate, selectedVarNodeId, navigateUp, onVarSelect]);
 
   const handleNext = useCallback(() => {
+    if (isVariationActive) {
+      const nextId = navigateDown!(selectedVarNodeId!);
+      if (nextId) onVarSelect!(nextId);
+      return;
+    }
     if (!canGoForward) return;
     const newIndex = effectiveIndex + 1;
     // If we've reached the end, use null to indicate "live" position
     onNavigate(newIndex >= moves.length - 1 ? null : newIndex);
-  }, [canGoForward, effectiveIndex, moves.length, onNavigate]);
+  }, [isVariationActive, canGoForward, effectiveIndex, moves.length, onNavigate, selectedVarNodeId, navigateDown, onVarSelect]);
 
   const handleMoveClick = useCallback(
     (index: number) => {
       setTappedIconIndex(null);
+      // Clear variation selection when clicking a main-line move
+      if (isVariationActive) {
+        onVarSelect!(null);
+      }
       // If clicking on the last move, set to null (live position)
       onNavigate(index === moves.length - 1 ? null : index);
     },
-    [moves.length, onNavigate],
+    [moves.length, onNavigate, isVariationActive, onVarSelect],
+  );
+
+  const handleVarNodeClick = useCallback(
+    (nodeId: VariationNodeId) => {
+      onVarSelect?.(nodeId);
+    },
+    [onVarSelect],
   );
 
   const handleIconTap = useCallback(
@@ -84,9 +139,19 @@ const MoveList = ({
   );
 
   const handleStartPosition = () => {
+    if (isVariationActive) {
+      onVarSelect!(null);
+    }
     if (moves.length > 0) {
       onNavigate(-1); // -1 indicates starting position (before any moves)
     }
+  };
+
+  const handleLatest = () => {
+    if (isVariationActive) {
+      onVarSelect!(null);
+    }
+    onNavigate(null);
   };
 
   // Keyboard navigation
@@ -124,6 +189,17 @@ const MoveList = ({
     });
     return () => cancelAnimationFrame(id);
   }, [effectiveIndex]);
+
+  // Auto-scroll to selected variation ply
+  useEffect(() => {
+    if (!isVariationActive || !moveListRef.current) return;
+    const el = moveListRef.current.querySelector(".variation-ply--selected");
+    if (!el) return;
+    const id = requestAnimationFrame(() => {
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [isVariationActive, selectedVarNodeId]);
 
   // Auto-scroll latest message into view.
   // Diff is computed inside the effect (after commit) to avoid mutating a ref
@@ -169,13 +245,63 @@ const MoveList = ({
     return pairs;
   }, [moves]);
 
-  const isAtStart = effectiveIndex === -1;
-  const isAtLatest = currentIndex === null;
+  // Build display rows: interleave move-row and variation-line items
+  const displayRows = useMemo((): DisplayItem[] => {
+    if (!variationTree || variationTree.rootBranches.size === 0) {
+      return movePairs.map((_, pairIndex) => ({ type: "move-row" as const, pairIndex }));
+    }
+
+    const items: DisplayItem[] = [];
+
+    // Starting-position branches (parentGameIndex = -1)
+    const startBranches = variationTree.rootBranches.get(-1);
+    if (startBranches) {
+      for (const rootNodeId of startBranches) {
+        items.push({ type: "variation-line", rootNodeId, parentGameIndex: -1 });
+      }
+    }
+
+    for (let pairIndex = 0; pairIndex < movePairs.length; pairIndex++) {
+      const whiteIdx = pairIndex * 2;
+      const blackIdx = pairIndex * 2 + 1;
+
+      // Emit the move row
+      items.push({ type: "move-row", pairIndex });
+
+      // Branches from white's position (first variation ply is black)
+      const whiteBranches = variationTree.rootBranches.get(whiteIdx);
+      if (whiteBranches) {
+        for (const rootNodeId of whiteBranches) {
+          items.push({ type: "variation-line", rootNodeId, parentGameIndex: whiteIdx });
+        }
+      }
+
+      // Branches from black's position (first variation ply is white)
+      const blackBranches = variationTree.rootBranches.get(blackIdx);
+      if (blackBranches) {
+        for (const rootNodeId of blackBranches) {
+          items.push({ type: "variation-line", rootNodeId, parentGameIndex: blackIdx });
+        }
+      }
+    }
+
+    return items;
+  }, [movePairs, variationTree]);
+
+  const isAtStart = effectiveIndex === -1 && !isVariationActive;
+  const isAtLatest = currentIndex === null && !isVariationActive;
   const showAddButton =
     Boolean(onAddSelectedMove) &&
     moves.length > 0 &&
     effectiveIndex >= 0 &&
     canAddSelectedMove;
+
+  // Header eval: use override when variation active, otherwise main-line eval
+  const headerEval = isVariationActive
+    ? (headerEvalOverride ?? "")
+    : (effectiveIndex >= 0 && moves[effectiveIndex]?.eval != null
+        ? formatEval(moves[effectiveIndex].eval!)
+        : "");
 
   return (
     <div className="move-list-container">
@@ -185,9 +311,7 @@ const MoveList = ({
         ) : (
           <div className="move-list-grid">
             <span className="move-list-header move-list-header-eval">
-              {effectiveIndex >= 0 && moves[effectiveIndex]?.eval != null
-                ? formatEval(moves[effectiveIndex].eval!)
-                : ""}
+              {headerEval}
             </span>
             <span className="move-list-header">
               {playerColor === "white" ? "You" : "Engine"}
@@ -195,9 +319,24 @@ const MoveList = ({
             <span className="move-list-header">
               {playerColor === "black" ? "You" : "Engine"}
             </span>
-            {movePairs.map((pair, pairIndex) => {
-              const whiteIdx = pairIndex * 2;
-              const blackIdx = pairIndex * 2 + 1;
+            {displayRows.map((item, i) => {
+              if (item.type === "variation-line") {
+                return (
+                  <VariationLine
+                    key={`var-${item.rootNodeId}`}
+                    rootNodeId={item.rootNodeId}
+                    tree={variationTree!}
+                    selectedNodeId={selectedVarNodeId ?? null}
+                    onNodeClick={handleVarNodeClick}
+                    getAbsolutePly={getAbsolutePly!}
+                    showPrefix={false}
+                  />
+                );
+              }
+
+              const pair = movePairs[item.pairIndex];
+              const whiteIdx = item.pairIndex * 2;
+              const blackIdx = item.pairIndex * 2 + 1;
               const whiteBubbles = messages.get(whiteIdx) ?? EMPTY_BUBBLES;
               const blackBubbles = (pair.black ? messages.get(blackIdx) : undefined) ?? EMPTY_BUBBLES;
 
@@ -220,8 +359,8 @@ const MoveList = ({
                   blackIdx={blackIdx}
                   prevWhiteEval={prevWhiteEval}
                   prevBlackEval={prevBlackEval}
-                  isWhiteSelected={whiteIdx === effectiveIndex}
-                  isBlackSelected={blackIdx === effectiveIndex}
+                  isWhiteSelected={!isVariationActive && whiteIdx === effectiveIndex}
+                  isBlackSelected={!isVariationActive && blackIdx === effectiveIndex}
                   whiteBubbles={whiteBubbles}
                   blackBubbles={blackBubbles}
                   isLastBubbleRow={isLastBubbleRow}
@@ -289,7 +428,7 @@ const MoveList = ({
         <button
           className="move-nav-button"
           type="button"
-          onClick={() => onNavigate(null)}
+          onClick={handleLatest}
           disabled={isAtLatest}
           title="Go to current position"
         >
