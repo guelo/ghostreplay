@@ -626,6 +626,45 @@ describe('useVariationTree', () => {
       expect(result.current.tree).toBe(treeBefore)
     })
 
+    it('old snapshot nodes are not mutated by later addMove', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      let rootId: string
+      act(() => {
+        rootId = result.current.addMove({
+          san: 'c5',
+          fen: 'fen-c5',
+          fenBefore: 'fen-before',
+          uci: 'c7c5',
+          parentContext: { type: 'game', moveIndex: 4 },
+        })!
+      })
+
+      // Capture the snapshot and the root node from it
+      const snapshotBefore = result.current.tree
+      const rootNodeBefore = snapshotBefore.nodes.get(rootId!)!
+      expect(rootNodeBefore.children).toEqual([])
+
+      // Add a child — this should clone the parent in the ref, not mutate the old one
+      act(() => {
+        result.current.addMove({
+          san: 'Nf3',
+          fen: 'fen-nf3',
+          fenBefore: 'fen-c5',
+          uci: 'g1f3',
+          parentContext: { type: 'variation', nodeId: rootId! },
+        })
+      })
+
+      // The old snapshot's node must still have empty children
+      expect(rootNodeBefore.children).toEqual([])
+
+      // The new snapshot's node should have the child
+      const rootNodeAfter = result.current.tree.nodes.get(rootId!)!
+      expect(rootNodeAfter.children.length).toBe(1)
+      expect(rootNodeAfter).not.toBe(rootNodeBefore)
+    })
+
     it('produces a new tree identity after clearTree', () => {
       const { result } = renderHook(() => useVariationTree())
 

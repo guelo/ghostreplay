@@ -124,8 +124,9 @@ export const useVariationTree = () => {
     }
     t.nodes.set(id, node)
 
-    // Update parent's children (mutate in place since we own the ref)
-    parentNode.children = [...parentNode.children, id]
+    // Clone parent with updated children so old snapshots keep the old VarNode
+    const updatedParent: VarNode = { ...parentNode, children: [...parentNode.children, id] }
+    t.nodes.set(parentNodeId, updatedParent)
 
     publishTree()
     return id
