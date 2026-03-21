@@ -656,6 +656,207 @@ describe('MoveList variation integration', () => {
     expect(container.querySelectorAll('.move-button.selected').length).toBeGreaterThan(0)
   })
 
+  describe('whiteIdx branch split layout', () => {
+    it('variation line appears between white and black cells for whiteIdx branch', () => {
+      // Branch at whiteIdx=4 → split row: white cell, dots, variation, then black cell
+      const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+      const tree = makeTree([varNode], new Map([[4, ['v1']]]))
+
+      const { container } = render(
+        <MoveList
+          moves={GAME_MOVES}
+          currentIndex={0}
+          onNavigate={noop}
+          variationTree={tree}
+          getAbsolutePly={makeGetAbsolutePly(tree)}
+          onVarSelect={noop}
+        />,
+      )
+
+      const grid = container.querySelector('.move-list-grid')!
+      const children = Array.from(grid.children)
+
+      // Find the variation line, and the move buttons for white (Bb5, idx=4) and black (a6, idx=5)
+      const varLineIdx = children.findIndex(el => el.classList.contains('variation-line'))
+      const allButtons = children.filter(el => el.classList.contains('move-button'))
+      // Bb5 is the 5th move button (0-indexed: e4, e5, Nf3, Nc6, Bb5)
+      const whiteBtnIdx = children.indexOf(allButtons[4])
+      // a6 is the 6th move button (after the split, in black-only row)
+      const blackBtnIdx = children.indexOf(allButtons[5])
+
+      expect(varLineIdx).toBeGreaterThan(whiteBtnIdx)
+      expect(varLineIdx).toBeLessThan(blackBtnIdx)
+    })
+
+    it('whiteIdx branch shows placeholder dots after white cell', () => {
+      const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+      const tree = makeTree([varNode], new Map([[4, ['v1']]]))
+
+      const { container } = render(
+        <MoveList
+          moves={GAME_MOVES}
+          currentIndex={0}
+          onNavigate={noop}
+          variationTree={tree}
+          getAbsolutePly={makeGetAbsolutePly(tree)}
+          onVarSelect={noop}
+        />,
+      )
+
+      const dots = container.querySelectorAll('.move-placeholder-dots')
+      expect(dots.length).toBeGreaterThan(0)
+    })
+
+    it('same pair with both whiteIdx and blackIdx branches orders correctly', () => {
+      // whiteIdx=4 branch (black-first var) and blackIdx=5 branch (white-first var)
+      const v1 = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+      const v2 = makeNode({ id: 'v2', san: 'Ba4', parentGameIndex: 5 })
+      const tree = makeTree([v1, v2], new Map([[4, ['v1']], [5, ['v2']]]))
+
+      const { container } = render(
+        <MoveList
+          moves={GAME_MOVES}
+          currentIndex={0}
+          onNavigate={noop}
+          variationTree={tree}
+          getAbsolutePly={makeGetAbsolutePly(tree)}
+          onVarSelect={noop}
+        />,
+      )
+
+      const grid = container.querySelector('.move-list-grid')!
+      const children = Array.from(grid.children)
+      const varLines = children.filter(el => el.classList.contains('variation-line'))
+
+      // Should have 2 variation lines
+      expect(varLines.length).toBe(2)
+
+      // v1 (whiteIdx branch, Nf6) should come before v2 (blackIdx branch, Ba4)
+      const v1Idx = children.indexOf(varLines[0])
+      const v2Idx = children.indexOf(varLines[1])
+      expect(varLines[0].textContent).toContain('Nf6')
+      expect(varLines[1].textContent).toContain('Ba4')
+      expect(v1Idx).toBeLessThan(v2Idx)
+
+      // Black cell (a6) should be between the two variation lines
+      const allButtons = children.filter(el => el.classList.contains('move-button'))
+      const blackBtnIdx = children.indexOf(allButtons[5]) // a6
+      expect(blackBtnIdx).toBeGreaterThan(v1Idx)
+      expect(blackBtnIdx).toBeLessThan(v2Idx)
+    })
+
+    it('no trailing black-only row when branching from final white move with no black', () => {
+      // 7 moves: last pair has white only (no black)
+      const moves = [
+        ...GAME_MOVES,
+        { san: 'Re1', eval: 60 },
+      ]
+      // Branch at whiteIdx=6 (Re1, the final white-only move)
+      const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 6 })
+      const tree = makeTree([varNode], new Map([[6, ['v1']]]))
+
+      const { container } = render(
+        <MoveList
+          moves={moves}
+          currentIndex={0}
+          onNavigate={noop}
+          variationTree={tree}
+          getAbsolutePly={makeGetAbsolutePly(tree)}
+          onVarSelect={noop}
+        />,
+      )
+
+      // Should have variation line but no empty placeholder row after it
+      const grid = container.querySelector('.move-list-grid')!
+      const children = Array.from(grid.children)
+      const varLineIdx = children.findIndex(el => el.classList.contains('variation-line'))
+      expect(varLineIdx).toBeGreaterThan(-1)
+
+      // After the variation line, there should be no move-button-placeholder pair
+      // (i.e., no black-only split row with empty cells)
+      const afterVar = children.slice(varLineIdx + 1)
+      const emptyPlaceholders = afterVar.filter(
+        el => el.classList.contains('move-button-placeholder') && !el.classList.contains('move-placeholder-dots'),
+      )
+      // There should be 0 trailing placeholders from a black-only row
+      // (Other pairs may have placeholders, but we just check no empty row right after the var line)
+      const firstAfterVar = afterVar[0]
+      // The first element after the variation line should NOT be an empty move-number span
+      // that would indicate a black-only split row
+      if (firstAfterVar) {
+        const isEmptyMoveNumber = firstAfterVar.classList.contains('move-number') && !firstAfterVar.textContent
+        expect(isEmptyMoveNumber).toBe(false)
+      }
+    })
+
+    it('click on split black cell fires onNavigate with correct index', () => {
+      // Branch at whiteIdx=2 (Nf3) so black cell Nc6 (blackIdx=3) is in split row
+      // Nc6 is NOT the last move, so onNavigate gets the raw index (not null)
+      const varNode = makeNode({ id: 'v1', san: 'Bc5', parentGameIndex: 2 })
+      const tree = makeTree([varNode], new Map([[2, ['v1']]]))
+      const onNavigate = vi.fn()
+
+      const { container } = render(
+        <MoveList
+          moves={GAME_MOVES}
+          currentIndex={0}
+          onNavigate={onNavigate}
+          variationTree={tree}
+          getAbsolutePly={makeGetAbsolutePly(tree)}
+          onVarSelect={noop}
+        />,
+      )
+
+      // Find the black cell for Nc6 (blackIdx=3) — it's in the split black-only row
+      const allButtons = container.querySelectorAll('.move-button')
+      // Nc6 is the 4th button (index 3)
+      const blackBtn = allButtons[3] as HTMLButtonElement
+      expect(blackBtn.textContent).toContain('Nc6')
+      blackBtn.click()
+
+      expect(onNavigate).toHaveBeenCalledWith(3)
+    })
+  })
+
+  it('bubble messages and whiteIdx variation coexist with correct split layout', () => {
+    const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+    const tree = makeTree([varNode], new Map([[4, ['v1']]]))
+
+    // Bubble on white move at index 4 (Bb5)
+    const messages = new Map([
+      [4, [{ key: 'msg1', variant: 'srs-pass' as const, text: 'Nice!' }]],
+    ])
+
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={4}
+        onNavigate={noop}
+        variationTree={tree}
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        onVarSelect={noop}
+        messages={messages}
+      />,
+    )
+
+    const grid = container.querySelector('.move-list-grid')!
+    const children = Array.from(grid.children)
+
+    // All three should render
+    const bubbles = container.querySelectorAll('.move-bubble')
+    const variationLines = container.querySelectorAll('.variation-line')
+    expect(bubbles.length).toBeGreaterThan(0)
+    expect(variationLines.length).toBe(1)
+
+    // Order: bubble before variation, variation before black cell
+    const bubbleIdx = children.findIndex(el => el.classList.contains('move-bubble'))
+    const varLineIdx = children.findIndex(el => el.classList.contains('variation-line'))
+    const allButtons = children.filter(el => el.classList.contains('move-button'))
+    const blackBtnIdx = children.indexOf(allButtons[5]) // a6
+    expect(bubbleIdx).toBeLessThan(varLineIdx)
+    expect(varLineIdx).toBeLessThan(blackBtnIdx)
+  })
+
   it('renders variation lines without crashing when getAbsolutePly is missing', () => {
     const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
     const tree = makeTree([varNode], new Map([[4, ['v1']]]))

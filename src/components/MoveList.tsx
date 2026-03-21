@@ -40,7 +40,7 @@ type MoveListProps = {
 };
 
 type DisplayItem =
-  | { type: "move-row"; pairIndex: number }
+  | { type: "move-row"; pairIndex: number; splitMode?: "white-only" | "black-only" }
   | { type: "variation-line"; rootNodeId: VariationNodeId; parentGameIndex: number };
 
 const EMPTY_MESSAGES: ReadonlyMap<number, MoveMessage[]> = new Map();
@@ -268,15 +268,20 @@ const MoveList = ({
       const whiteIdx = pairIndex * 2;
       const blackIdx = pairIndex * 2 + 1;
 
-      // Emit the move row
-      items.push({ type: "move-row", pairIndex });
-
       // Branches from white's position (first variation ply is black)
       const whiteBranches = variationTree.rootBranches.get(whiteIdx);
-      if (whiteBranches) {
+      if (whiteBranches && whiteBranches.length > 0) {
+        // Split: white cell, then variations, then black cell (only if black exists)
+        items.push({ type: "move-row", pairIndex, splitMode: "white-only" });
         for (const rootNodeId of whiteBranches) {
           items.push({ type: "variation-line", rootNodeId, parentGameIndex: whiteIdx });
         }
+        if (movePairs[pairIndex].black) {
+          items.push({ type: "move-row", pairIndex, splitMode: "black-only" });
+        }
+      } else {
+        // No whiteIdx branches — emit full pair
+        items.push({ type: "move-row", pairIndex });
       }
 
       // Branches from black's position (first variation ply is white)
@@ -354,8 +359,9 @@ const MoveList = ({
 
               return (
                 <MoveRow
-                  key={pair.number}
+                  key={item.splitMode ? `${pair.number}-${item.splitMode}` : pair.number}
                   pairNumber={pair.number}
+                  splitMode={item.splitMode}
                   white={pair.white}
                   black={pair.black}
                   whiteIdx={whiteIdx}

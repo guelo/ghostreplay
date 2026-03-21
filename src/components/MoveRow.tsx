@@ -114,6 +114,7 @@ export type MoveRowProps = {
   onRevealSrsFail?: (detail: SrsFailDetail, moveIndex: number) => void;
   selectedMoveRef: RefObject<HTMLButtonElement | null>;
   lastMessageRef: RefObject<HTMLDivElement | null>;
+  splitMode?: "white-only" | "black-only";
 };
 
 const MoveRowInner = ({
@@ -139,6 +140,7 @@ const MoveRowInner = ({
   onRevealSrsFail,
   selectedMoveRef,
   lastMessageRef,
+  splitMode,
 }: MoveRowProps) => {
   const renderMoveCell = (
     move: Move,
@@ -261,6 +263,33 @@ const MoveRowInner = ({
     });
   };
 
+  // Case 0: Variation split — only render one side
+  if (splitMode === "white-only") {
+    return (
+      <React.Fragment key={pairNumber}>
+        <span className="move-number">{pairNumber}</span>
+        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval)}
+        <span className="move-button-placeholder move-placeholder-dots">…</span>
+        {whiteBubbles.length > 0 && renderBubbleMessages(whiteBubbles, whiteIdx, "white")}
+      </React.Fragment>
+    );
+  }
+  if (splitMode === "black-only") {
+    return (
+      <React.Fragment key={pairNumber}>
+        <span className="move-number" />
+        <span className="move-button-placeholder" />
+        {black ? (
+          renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval)
+        ) : (
+          <span className="move-button-placeholder" />
+        )}
+        {blackBubbles.length > 0 &&
+          renderBubbleMessages(blackBubbles, blackIdx, "black")}
+      </React.Fragment>
+    );
+  }
+
   // Case 1: White has bubble messages — split the row
   if (whiteBubbles.length > 0) {
     return (
@@ -306,6 +335,9 @@ const MoveRowInner = ({
 // ---------------------------------------------------------------------------
 
 function areEqual(prev: MoveRowProps, next: MoveRowProps): boolean {
+  // Split mode
+  if (prev.splitMode !== next.splitMode) return false;
+
   // Referential checks on move objects (stable if Step 2a works)
   if (prev.white !== next.white) return false;
   if (prev.black !== next.black) return false;
