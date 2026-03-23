@@ -82,7 +82,13 @@ export const useStockfishEngine = () => {
           setInfo([])
           break
         case 'info':
-          if (message.id === activeRequestId.current) {
+          // Only update PV lines for info messages that contain an actual
+          // principal variation.  Stockfish emits status-only info lines
+          // (e.g. "info depth 15 currmove e2e4 currmovenumber 1") that
+          // lack both multipv and pv.  Without this guard the default
+          // multipv→0 mapping overwrites slot 0 with a pv-less object,
+          // causing the blue "best move" arrow to vanish mid-search.
+          if (message.id === activeRequestId.current && message.info.pv) {
             setInfo((prev) => {
               const idx = (message.info.multipv ?? 1) - 1
               const next = [...prev]

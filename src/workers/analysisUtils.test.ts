@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  parseInfo,
+  parseScoreInfo,
   mateToCp,
   normalizeScore,
   toWhitePerspective,
@@ -19,63 +19,63 @@ import {
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
 
-describe('parseInfo', () => {
+describe('parseScoreInfo', () => {
   it('parses centipawn score from info line', () => {
-    const result = parseInfo('info depth 18 score cp 45 nodes 123456 pv e2e4')
+    const result = parseScoreInfo('info depth 18 score cp 45 nodes 123456 pv e2e4')
 
     expect(result).toEqual({ score: { type: 'cp', value: 45 } })
   })
 
   it('parses mate score from info line', () => {
-    const result = parseInfo('info depth 20 score mate 3 pv e1g1')
+    const result = parseScoreInfo('info depth 20 score mate 3 pv e1g1')
 
     expect(result).toEqual({ score: { type: 'mate', value: 3 } })
   })
 
   it('parses negative centipawn score', () => {
-    const result = parseInfo('info depth 15 score cp -120 nodes 50000')
+    const result = parseScoreInfo('info depth 15 score cp -120 nodes 50000')
 
     expect(result).toEqual({ score: { type: 'cp', value: -120 } })
   })
 
   it('parses negative mate score', () => {
-    const result = parseInfo('info depth 20 score mate -2 pv e8d8')
+    const result = parseScoreInfo('info depth 20 score mate -2 pv e8d8')
 
     expect(result).toEqual({ score: { type: 'mate', value: -2 } })
   })
 
   it('returns null for non-info lines', () => {
-    expect(parseInfo('bestmove e2e4')).toBeNull()
-    expect(parseInfo('readyok')).toBeNull()
-    expect(parseInfo('uciok')).toBeNull()
+    expect(parseScoreInfo('bestmove e2e4')).toBeNull()
+    expect(parseScoreInfo('readyok')).toBeNull()
+    expect(parseScoreInfo('uciok')).toBeNull()
   })
 
   it('returns null when score keyword is missing', () => {
-    const result = parseInfo('info depth 18 nodes 123456 pv e2e4')
+    const result = parseScoreInfo('info depth 18 nodes 123456 pv e2e4')
 
     expect(result).toBeNull()
   })
 
   it('returns null for invalid score type', () => {
-    const result = parseInfo('info depth 18 score invalid 45')
+    const result = parseScoreInfo('info depth 18 score invalid 45')
 
     expect(result).toBeNull()
   })
 
   it('returns null for non-numeric score value', () => {
-    const result = parseInfo('info depth 18 score cp abc')
+    const result = parseScoreInfo('info depth 18 score cp abc')
 
     expect(result).toBeNull()
   })
 
   it('parses zero centipawn score', () => {
-    const result = parseInfo('info depth 10 score cp 0 pv d2d4')
+    const result = parseScoreInfo('info depth 10 score cp 0 pv d2d4')
 
     expect(result).toEqual({ score: { type: 'cp', value: 0 } })
   })
 
   it('parses mate in 1', () => {
-    const result = parseInfo('info depth 25 score mate 1 pv d1h5')
+    const result = parseScoreInfo('info depth 25 score mate 1 pv d1h5')
 
     expect(result).toEqual({ score: { type: 'mate', value: 1 } })
   })

@@ -4,6 +4,7 @@
  */
 
 import type { EngineScore } from './stockfishMessages'
+import { parseUciInfoLine } from './parseInfo'
 
 export const RECORDABLE_FAILURE_THRESHOLD_CP = 50
 export const RECORDING_MOVE_CAP_FULL_MOVES = 10
@@ -13,31 +14,11 @@ export type ParsedInfo = {
   score: EngineScore
 }
 
-export const parseInfo = (line: string): ParsedInfo | null => {
-  if (!line.startsWith('info')) {
-    return null
-  }
-
-  const tokens = line.split(' ')
-  const scoreIndex = tokens.indexOf('score')
-
-  if (scoreIndex === -1) {
-    return null
-  }
-
-  const scoreType = tokens[scoreIndex + 1]
-  const scoreValue = Number(tokens[scoreIndex + 2])
-
-  if (Number.isNaN(scoreValue) || (scoreType !== 'cp' && scoreType !== 'mate')) {
-    return null
-  }
-
-  return {
-    score: {
-      type: scoreType,
-      value: scoreValue,
-    },
-  }
+/** Thin wrapper: only returns info lines that carry a score. */
+export const parseScoreInfo = (line: string): ParsedInfo | null => {
+  const info = parseUciInfoLine(line)
+  if (!info?.score) return null
+  return { score: info.score }
 }
 
 export const mateToCp = (movesToMate: number) => {

@@ -11,7 +11,7 @@ import type {
 } from './analysisMessages'
 import type { EngineScore } from './stockfishMessages'
 import {
-  parseInfo,
+  parseScoreInfo,
   getSideToMove,
   computeAnalysisResult,
   scoreForPlayer,
@@ -125,7 +125,7 @@ const handleEngineLine = (line: string) => {
     return
   }
 
-  const info = parseInfo(line)
+  const info = parseScoreInfo(line)
   if (info?.score && activeSearch) {
     activeSearch.lastScore = info.score
     if (activeSearch.onInfo) {
