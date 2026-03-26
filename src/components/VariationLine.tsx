@@ -7,6 +7,8 @@ export type VariationLineProps = {
   onNodeClick: (nodeId: VariationNodeId) => void
   getAbsolutePly: (nodeId: VariationNodeId) => number
   showPrefix: boolean
+  /** Number of "|  " segments before "|- " in the prefix. Default 0. */
+  depth?: number
 }
 
 /**
@@ -59,6 +61,7 @@ function VariationLine({
   onNodeClick,
   getAbsolutePly,
   showPrefix,
+  depth = 0,
 }: VariationLineProps): JSX.Element {
   // 1. Collect inline plies following children[0] until branch or dead end
   const inlinePlies: VarNode[] = []
@@ -79,6 +82,8 @@ function VariationLine({
   // 2. Child lines from branch point (all children rendered, continuation first)
   const childLines: JSX.Element[] = []
   if (lastNode.children.length > 1) {
+    // All siblings share the same depth; increment only if the current line already has a prefix
+    const childDepth = showPrefix ? depth + 1 : depth
     for (const childId of lastNode.children) {
       childLines.push(
         <VariationLine
@@ -89,6 +94,7 @@ function VariationLine({
           onNodeClick={onNodeClick}
           getAbsolutePly={getAbsolutePly}
           showPrefix={true}
+          depth={childDepth}
         />,
       )
     }
@@ -99,9 +105,8 @@ function VariationLine({
     <>
       <div
         className="variation-line"
-        style={{ paddingLeft: `calc(${rootNode.nestingLevel} * 1.2em + 2.5rem)` }}
       >
-        {showPrefix && <span className="variation-prefix">{'|- '}</span>}
+        {showPrefix && <span className="variation-prefix">{'|  '.repeat(depth)}|- </span>}
         {inlinePlies.map((node, i) =>
           renderPly(node, i === 0, selectedNodeId, onNodeClick, getAbsolutePly),
         )}

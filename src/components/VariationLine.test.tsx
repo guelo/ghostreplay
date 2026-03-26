@@ -149,7 +149,7 @@ describe('VariationLine', () => {
     expect(container.querySelector('.variation-prefix')).toBeNull()
   })
 
-  it('showPrefix=true renders "|- " prefix', () => {
+  it('showPrefix=true renders "|- " prefix at depth 0', () => {
     const { nodes, tree } = makeChain(['Nf3'])
     const { container } = render(
       <VariationLine
@@ -164,6 +164,42 @@ describe('VariationLine', () => {
     const prefix = container.querySelector('.variation-prefix')
     expect(prefix).not.toBeNull()
     expect(prefix!.textContent).toBe('|- ')
+  })
+
+  it('showPrefix=true at depth=1 renders "|  |- " prefix', () => {
+    const { nodes, tree } = makeChain(['Nf3'])
+    const { container } = render(
+      <VariationLine
+        rootNodeId={nodes[0].id}
+        tree={tree}
+        selectedNodeId={null}
+        onNodeClick={() => {}}
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        showPrefix={true}
+        depth={1}
+      />,
+    )
+    const prefix = container.querySelector('.variation-prefix')
+    expect(prefix).not.toBeNull()
+    expect(prefix!.textContent).toBe('|  |- ')
+  })
+
+  it('showPrefix=true at depth=2 renders "|  |  |- " prefix', () => {
+    const { nodes, tree } = makeChain(['Nf3'])
+    const { container } = render(
+      <VariationLine
+        rootNodeId={nodes[0].id}
+        tree={tree}
+        selectedNodeId={null}
+        onNodeClick={() => {}}
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        showPrefix={true}
+        depth={2}
+      />,
+    )
+    const prefix = container.querySelector('.variation-prefix')
+    expect(prefix).not.toBeNull()
+    expect(prefix!.textContent).toBe('|  |  |- ')
   })
 
   it('fires onNodeClick with correct nodeId on ply click', () => {
@@ -331,6 +367,79 @@ describe('VariationLine', () => {
     expect(lines[1].querySelector('.variation-prefix')).not.toBeNull()
     // Third line (sub-branch C): has prefix
     expect(lines[2].querySelector('.variation-prefix')).not.toBeNull()
+  })
+
+  it('all siblings at a branch point render with the same prefix depth', () => {
+    // Root line (no prefix) branches into 3 children — all should get "|- " (depth 0)
+    const aId = makeId()
+    const bId = makeId()
+    const cId = makeId()
+    const dId = makeId()
+
+    const a = makeNode({ id: aId, san: 'c5', parentGameIndex: 4, children: [bId, cId, dId] })
+    const b = makeNode({ id: bId, san: 'Nf3', parentId: aId, parentGameIndex: 4, branchPlyOffset: 1, nestingLevel: 0 })
+    const c = makeNode({ id: cId, san: 'Nc3', parentId: aId, parentGameIndex: 4, branchPlyOffset: 0, nestingLevel: 1 })
+    const d = makeNode({ id: dId, san: 'e3', parentId: aId, parentGameIndex: 4, branchPlyOffset: 0, nestingLevel: 1 })
+
+    const tree = makeTree([a, b, c, d])
+
+    const { container } = render(
+      <VariationLine
+        rootNodeId={aId}
+        tree={tree}
+        selectedNodeId={null}
+        onNodeClick={() => {}}
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        showPrefix={false}
+      />,
+    )
+
+    const prefixes = container.querySelectorAll('.variation-prefix')
+    // All 3 child lines should have the same prefix text: "|- "
+    expect(prefixes.length).toBe(3)
+    for (const prefix of prefixes) {
+      expect(prefix.textContent).toBe('|- ')
+    }
+  })
+
+  it('nested branches get deeper prefix than their parent branches', () => {
+    // Root (no prefix) → A branches into [B, C]
+    // B (depth 0 prefix) → B continues to B2 → B2 branches into [B3, B4]
+    // B3 and B4 should get depth 1 prefix: "|  |- "
+    const rootId = makeId()
+    const bId = makeId()
+    const cId = makeId()
+    const b2Id = makeId()
+    const b3Id = makeId()
+    const b4Id = makeId()
+
+    const root = makeNode({ id: rootId, san: 'c5', parentGameIndex: 4, children: [bId, cId] })
+    const b = makeNode({ id: bId, san: 'Nf3', parentId: rootId, parentGameIndex: 4, branchPlyOffset: 1, nestingLevel: 0, children: [b2Id] })
+    const c = makeNode({ id: cId, san: 'Nc3', parentId: rootId, parentGameIndex: 4, branchPlyOffset: 0, nestingLevel: 1 })
+    const b2 = makeNode({ id: b2Id, san: 'e5', parentId: bId, parentGameIndex: 4, branchPlyOffset: 2, nestingLevel: 0, children: [b3Id, b4Id] })
+    const b3 = makeNode({ id: b3Id, san: 'Bc4', parentId: b2Id, parentGameIndex: 4, branchPlyOffset: 3, nestingLevel: 0 })
+    const b4 = makeNode({ id: b4Id, san: 'd4', parentId: b2Id, parentGameIndex: 4, branchPlyOffset: 0, nestingLevel: 1 })
+
+    const tree = makeTree([root, b, c, b2, b3, b4])
+
+    const { container } = render(
+      <VariationLine
+        rootNodeId={rootId}
+        tree={tree}
+        selectedNodeId={null}
+        onNodeClick={() => {}}
+        getAbsolutePly={makeGetAbsolutePly(tree)}
+        showPrefix={false}
+      />,
+    )
+
+    const prefixes = container.querySelectorAll('.variation-prefix')
+    // B and C get "|- " (depth 0), B3 and B4 get "|  |- " (depth 1)
+    expect(prefixes.length).toBe(4)
+    expect(prefixes[0].textContent).toBe('|- ')  // B
+    expect(prefixes[1].textContent).toBe('|  |- ')  // B3
+    expect(prefixes[2].textContent).toBe('|  |- ')  // B4
+    expect(prefixes[3].textContent).toBe('|- ')  // C
   })
 
   it('subsequent black plies do not get move numbers', () => {

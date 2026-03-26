@@ -1,4 +1,4 @@
-Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
+This was the initial **SPEC** for the "Ghost Replay" Chess Application. It will become increasingly outdated as development continues. But it is still useful for describing the ideas and architecture. 
 
 ---
 
@@ -7,82 +7,17 @@ Here is the **SPEC.md** for your "Ghost Replay" Chess Application.
 ## Table of Contents
 
 1. Product Description
-   - The Core Loop
 2. User Stories & Features
-   - 2.1 Gameplay & Ghost Mode
-   - 2.2 Analysis & Blunder Detection
-   - 2.3 Spaced Repetition System (SRS)
 3. High-Level Architecture (MVP)
-   - 3.1 Frontend (The Smart Client)
-   - 3.2 Backend (The Coordinator)
-   - 3.3 Database (The Memory)
 4. Tech Stack
 5. Database Schema
-   - 5.1 `positions` (Nodes)
-     - 5.1.1 FEN Normalization
-   - 5.2 `blunders` (Ghost Move Library Targets)
-     - 5.2.1 `blunder_reviews` (Review Events)
-   - 5.3 `moves` (Edges)
-   - 5.4 `users` (Identity)
-   - 5.5 Authentication
 6. Data & Logic Flow
-   - 6.1 The "Scent" Logic (Next Move Selection)
-     - 6.1.1 Re-Hooking Logic (Transposition Detection)
-   - 6.2 Ghost Move Library Capture Logic
-   - 6.3 The SRS Update Logic
-     - 6.3.1 Replay Priority Score
-     - 6.3.2 Update Rules
-     - 6.3.3 Evaluation Thresholds
-   - 6.4 Engine Evaluation Protocol
-     - 6.4.1 Search Parameters
-     - 6.4.2 Evaluation Perspective (Sign Convention)
-     - 6.4.3 Mate Score Conversion
-     - 6.4.4 Evaluation Stability
-     - 6.4.5 Edge Cases
-     - 6.4.6 Frontend Implementation Notes
 7. Game Sessions & Lifecycle
-   - 7.1 Session Definition
-   - 7.2 Game States
-   - 7.3 Session Schema
-   - 7.4 Move Analysis Storage
-   - 7.5 First-Blunder Rule Enforcement
-   - 7.6 Game Termination
-   - 7.7 Session Persistence
 8. MVP Constraints & Scope
 9. API Specification
-   - 9.1 Base URL
-   - 9.2 Authentication
-   - 9.3 Game Flow
-   - 9.4 Blunders / Ghost Move Library Targets
-   - 9.5 SRS (Spaced Repetition)
-   - 9.6 Error Responses
-   - 9.7 Design Decisions
 10. After-Game Analysis Display
-    - 10.1 Screen Layout
-    - 10.2 Components
-      - 10.2.1 Chessboard
-      - 10.2.2 Evaluation Graph
-      - 10.2.3 Evaluation Bar
-      - 10.2.4 Navigation Controls
-      - 10.2.5 Move List
-      - 10.2.6 Position Analysis Panel
-    - 10.3 Data Source
-    - 10.4 API Endpoint
-    - 10.5 Entry Points
-    - 10.6 MVP Constraints
 11. Game History View
-    - 11.1 Entry Points
-    - 11.2 Screen Layout
-    - 11.3 Game Card Data
-    - 11.4 Interaction Flow
-    - 11.5 API Endpoint
-    - 11.6 Empty State
-    - 11.7 MVP Constraints
 12. Testing Strategy
-    - 12.1 Tooling
-    - 12.2 Coverage Priorities (MVP)
-    - 12.3 Key Test Cases
-    - 12.4 Test Data & Determinism
 
 ---
 
@@ -701,7 +636,7 @@ Worker B (the Analyst) produces all engine evaluations used for blunder detectio
 | MultiPV | 1 | Only the best move needed for delta calculation |
 | Threads | 1 | Web Worker constraint; WASM single-threaded |
 
-**Stopping condition:** Search terminates when EITHER depth 18 is reached OR 2000ms elapsed, whichever comes first. The evaluation from the final `info` line before `bestmove` is used.
+**Stopping condition:** Search terminates when EITHER depth 18 is reached OR 2000ms elapsed, whichever comes first. The evaluation from the final `info` line before `o` is used.
 
 **Implementation (JavaScript):**
 ```javascript
