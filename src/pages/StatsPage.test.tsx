@@ -222,4 +222,28 @@ describe("StatsPage", () => {
 
     expect(screen.getAllByRole("button", { name: "90d" })[0]).toHaveAttribute("aria-pressed", "true");
   });
+
+  it("does not re-enter loading when clicking the already-active window button", async () => {
+    const user = userEvent.setup();
+    getStatsSummaryMock.mockResolvedValue(baseSummary);
+
+    renderPage();
+
+    // Wait for initial load to complete (default is 30d)
+    await waitFor(() => {
+      expect(screen.getByText("Games")).toBeInTheDocument();
+    });
+
+    const fetchCountBefore = getStatsSummaryMock.mock.calls.length;
+
+    // Click the already-active 30d button
+    await user.click(screen.getAllByRole("button", { name: "30d" })[0]);
+
+    // Summary should NOT have been re-fetched
+    expect(getStatsSummaryMock).toHaveBeenCalledTimes(fetchCountBefore);
+
+    // Page should NOT be in loading state — stats content still visible
+    expect(screen.getByText("Games")).toBeInTheDocument();
+    expect(screen.queryByText("Loading stats...")).not.toBeInTheDocument();
+  });
 });

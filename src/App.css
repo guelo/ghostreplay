@@ -248,7 +248,7 @@
     grid-area: board;
     position: relative;
     width: 100%;
-    max-width: calc(100dvh - 14rem);
+    max-width: calc((100dvh - 14rem) * 5 / 6);
 }
 
 .chessboard-board-with-eval {
@@ -863,7 +863,7 @@
 }
 
 .history-page .analysis-board {
-    --chrome: 15rem;
+    --chrome: 24rem;
     --board-size: calc(100dvh - var(--chrome));
 }
 
@@ -884,9 +884,6 @@
     overflow: hidden;
 }
 
-.history-page .analysis-graph svg {
-    height: 6rem;
-}
 
 /* Graph row: graph + summary side by side, matching board/moves widths */
 .analysis-board__graph-row {
@@ -908,6 +905,10 @@
     flex: 0 0 auto;
     width: var(--board-size);
     max-width: min(var(--board-size), calc(100% - 250px));
+}
+
+.history-page .analysis-board__graph-row .analysis-graph > svg {
+    height: 8rem;
 }
 
 .history-page .analysis-board__graph-footer {
@@ -1255,6 +1256,7 @@
     cursor: crosshair;
     border-radius: 0.5rem;
     border: 1px solid var(--bg-tertiary);
+    margin-top: 0.5rem;
 }
 
 .analysis-graph > svg {
@@ -2814,11 +2816,6 @@
     accent-color: var(--accent, #7c6fe0);
 }
 
-.rating-graph__range-picker {
-    display: flex;
-    gap: 0.35rem;
-}
-
 .rating-graph__container {
     border: 1px solid var(--border-color);
     border-radius: 0.75rem;
@@ -2860,6 +2857,62 @@
     color: var(--text-secondary);
     font-size: 0.9rem;
     text-align: center;
+}
+
+/* Time Range Slider */
+.time-slider {
+    touch-action: none;
+    user-select: none;
+}
+
+.time-slider__track {
+    position: relative;
+    height: 28px;
+    margin-top: 4px;
+}
+
+.time-slider__inactive {
+    position: absolute;
+    top: 10px;
+    height: 8px;
+    background: var(--bg-secondary);
+    border-radius: 4px;
+}
+
+.time-slider__active {
+    position: absolute;
+    top: 10px;
+    height: 8px;
+    background: var(--accent, #7c6fe0);
+    opacity: 0.35;
+    border-radius: 4px;
+    cursor: grab;
+}
+
+.time-slider__active--dragging {
+    cursor: grabbing;
+}
+
+.time-slider__handle {
+    position: absolute;
+    top: 4px;
+    width: 20px;
+    height: 20px;
+    margin-left: -10px;
+    border-radius: 50%;
+    background: var(--accent, #7c6fe0);
+    border: 2px solid var(--card-bg);
+    cursor: ew-resize;
+    z-index: 1;
+}
+
+.time-slider__handle::before {
+    content: '';
+    position: absolute;
+    top: -12px;
+    left: -12px;
+    width: 44px;
+    height: 44px;
 }
 
 @media (max-width: 720px) {

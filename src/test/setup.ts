@@ -8,3 +8,16 @@ expect.extend(matchers)
 afterEach(() => {
   cleanup()
 })
+
+// ResizeObserver stub for JSDOM
+if (typeof global.ResizeObserver === 'undefined') {
+  global.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver
+}
+
+// Pointer capture stubs for JSDOM
+HTMLElement.prototype.setPointerCapture ??= () => {}
+HTMLElement.prototype.releasePointerCapture ??= () => {}

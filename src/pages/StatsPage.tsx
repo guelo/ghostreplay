@@ -68,6 +68,7 @@ function isEmptySummary(data: StatsSummaryResponse): boolean {
 
 function StatsPage() {
   const [windowDays, setWindowDays] = useState<StatsWindowDays>(30);
+  const [presetKey, setPresetKey] = useState(0);
   const [summary, setSummary] = useState<StatsSummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -127,9 +128,12 @@ function StatsPage() {
                 className={`stats-window-picker__button${windowDays === option.value ? " stats-window-picker__button--active" : ""}`}
                 aria-pressed={windowDays === option.value}
                 onClick={() => {
-                  setLoading(true);
-                  setError(null);
-                  setWindowDays(option.value);
+                  if (windowDays !== option.value) {
+                    setLoading(true);
+                    setError(null);
+                    setWindowDays(option.value);
+                  }
+                  setPresetKey((k) => k + 1);
                 }}
               >
                 {option.label}
@@ -158,7 +162,7 @@ function StatsPage() {
             </div>
           )}
 
-          <RatingGraph />
+          <RatingGraph windowDays={windowDays} presetKey={presetKey} />
 
           {!loading && !error && summary && (
             <>
