@@ -1312,6 +1312,7 @@
 .analysis-graph--with-axis {
     position: relative;
     align-self: flex-start;
+    margin-right: 1.6rem;
 }
 
 .analysis-graph--with-axis > svg {
