@@ -143,6 +143,13 @@ type ConnectedMoveListProps = {
   messages: ReadonlyMap<number, MoveMessage[]>;
   onRevealSrsFail: (detail: SrsFailDetail, moveIndex: number) => void;
   revealedSrsFailIndex: number | null;
+  onResign?: () => void;
+  isResignDisabled?: boolean;
+  onRevert?: () => void;
+  isRevertDisabled?: boolean;
+  onFlipBoard?: () => void;
+  onReset?: () => void;
+  isGameActive?: boolean;
 };
 
 export const ConnectedMoveList = memo(
@@ -151,13 +158,19 @@ export const ConnectedMoveList = memo(
     messages,
     onRevealSrsFail,
     revealedSrsFailIndex,
+    onResign,
+    isResignDisabled,
+    onRevert,
+    isRevertDisabled,
+    onFlipBoard,
+    onReset,
+    isGameActive,
   }: ConnectedMoveListProps) => {
     const analysisStoreApi = useAnalysisStoreApi();
     const analysisMap = useAnalysisStore((s) => s.analysisMap);
     const moveHistory = useGameStore((s) => s.moveHistory);
     const viewIndex = useGameStore((s) => s.viewIndex);
     const playerColor = useGameStore((s) => s.playerColor);
-    const isGameActive = useGameStore((s) => s.isGameActive);
     const sessionId = useGameStore((s) => s.sessionId);
 
     const selectedMoveIndex =
@@ -269,6 +282,13 @@ export const ConnectedMoveList = memo(
         playerColor={playerColor}
         onRevealSrsFail={onRevealSrsFail}
         revealedSrsFailIndex={revealedSrsFailIndex}
+        onResign={onResign}
+        isResignDisabled={isResignDisabled}
+        onRevert={onRevert}
+        isRevertDisabled={isRevertDisabled}
+        onFlipBoard={onFlipBoard}
+        onReset={onReset}
+        isGameActive={isGameActive}
       />
     );
   },

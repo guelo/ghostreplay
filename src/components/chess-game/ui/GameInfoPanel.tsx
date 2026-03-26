@@ -26,12 +26,6 @@ type GameInfoPanelProps = {
   blunderReviewSrs: TargetBlunderSrs | null;
   displayedOpening: OpeningLookupResult | null;
   isReviewMomentActive: boolean;
-  onResign: () => void;
-  onRevert: () => void;
-  isResignDisabled: boolean;
-  isRevertDisabled: boolean;
-  onFlipBoard: () => void;
-  onReset: () => void;
 };
 
 const GhostIcon = () => (
@@ -90,12 +84,6 @@ const GameInfoPanel = ({
   blunderReviewSrs,
   displayedOpening,
   isReviewMomentActive,
-  onResign,
-  onRevert,
-  isResignDisabled,
-  isRevertDisabled,
-  onFlipBoard,
-  onReset,
 }: GameInfoPanelProps) => {
   return (
     <div className="chess-panel" aria-live="polite">
@@ -220,32 +208,6 @@ const GameInfoPanel = ({
           </p>
         </div>
       )}
-      <div className="chess-controls">
-        <button
-          className="chess-button danger"
-          type="button"
-          onClick={onResign}
-          disabled={isResignDisabled}
-        >
-          Resign
-        </button>
-        {isGameActive && (
-          <button
-            className="chess-button"
-            type="button"
-            onClick={onRevert}
-            disabled={isRevertDisabled}
-          >
-            Revert
-          </button>
-        )}
-        <button className="chess-button" type="button" onClick={onFlipBoard}>
-          Flip board
-        </button>
-        <button className="chess-button" type="button" onClick={onReset}>
-          Reset
-        </button>
-      </div>
     </div>
   );
 };

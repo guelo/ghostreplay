@@ -17,11 +17,6 @@ vi.mock("react-chessboard", () => ({
 const makeProps = () => {
   const onToggleGhostInfo = vi.fn();
   const onCloseGhostInfo = vi.fn();
-  const onResign = vi.fn();
-  const onRevert = vi.fn();
-  const onFlipBoard = vi.fn();
-  const onReset = vi.fn();
-
   return {
     statusText: "White to move",
     gameStatusBadge: { label: "Active", className: "active" },
@@ -43,32 +38,16 @@ const makeProps = () => {
     blunderReviewSrs: null as TargetBlunderSrs | null,
     displayedOpening: { eco: "C20", name: "King's Pawn Game", source: "eco" },
     isReviewMomentActive: false,
-    onResign,
-    onRevert,
-    isResignDisabled: false,
-    isRevertDisabled: false,
-    onFlipBoard,
-    onReset,
   };
 };
 
 describe("GameInfoPanel", () => {
-  it("renders engine-mode details and wires action buttons", () => {
+  it("renders engine-mode details", () => {
     const props = makeProps();
     render(<GameInfoPanel {...props} />);
 
     expect(screen.getByText("Ghost Master 2000")).toBeInTheDocument();
     expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
-    fireEvent.click(screen.getByRole("button", { name: /revert/i }));
-    fireEvent.click(screen.getByRole("button", { name: /flip board/i }));
-    fireEvent.click(screen.getByRole("button", { name: /reset/i }));
-
-    expect(props.onResign).toHaveBeenCalledTimes(1);
-    expect(props.onRevert).toHaveBeenCalledTimes(1);
-    expect(props.onFlipBoard).toHaveBeenCalledTimes(1);
-    expect(props.onReset).toHaveBeenCalledTimes(1);
   });
 
   it("renders ghost target info and forwards ghost-info callbacks", () => {

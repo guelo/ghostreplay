@@ -1913,29 +1913,46 @@
 
 .move-list-actions {
     display: flex;
-    align-items: center;
-    gap: 0.5rem;
+    gap: 0.35rem;
+    justify-content: center;
 }
 
-.move-list-add-button {
+.move-action-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
     border: 1px solid var(--border-color);
     background: var(--bg-secondary);
     color: var(--text-secondary);
-    border-radius: 0.35rem;
-    padding: 0.25rem 0.45rem;
-    font-size: 0.72rem;
-    font-weight: 600;
+    border-radius: 0.5rem;
     cursor: pointer;
+    transition:
+        border-color 150ms ease,
+        background 150ms ease,
+        color 150ms ease;
 }
 
-.move-list-add-button:hover:not(:disabled) {
+.move-action-button:hover:not(:disabled) {
     border-color: var(--border-color-strong);
     background: var(--bg-tertiary);
+    color: var(--text-primary);
 }
 
-.move-list-add-button:disabled {
-    opacity: 0.5;
+.move-action-button:disabled {
+    color: var(--text-tertiary);
+    opacity: 0.4;
     cursor: not-allowed;
+}
+
+.move-action-button.danger {
+    color: var(--text-secondary);
+}
+
+.move-action-button.danger:hover:not(:disabled) {
+    color: var(--error);
+    border-color: var(--error);
 }
 
 .move-list-nav {

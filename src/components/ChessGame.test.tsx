@@ -238,7 +238,7 @@ describe("ChessGame characterization safeguards", () => {
       expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /^revert$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
     expect(
       screen.getByText("This game will not be rated"),
     ).toBeInTheDocument();
@@ -249,7 +249,7 @@ describe("ChessGame characterization safeguards", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/^unrated$/i)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /^revert$/i }));
+    fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
     fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
 
     expect(
@@ -884,7 +884,7 @@ describe("ChessGame blunder recording", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /e4/i }));
     fireEvent.click(
-      screen.getByRole("button", { name: /add to ghost library/i }),
+      screen.getByRole("button", { name: /add selected move to ghost library/i }),
     );
 
     await waitFor(() => {
@@ -916,7 +916,7 @@ describe("ChessGame blunder recording", () => {
     // Select player move (opponent d5 is now auto-selected as last move)
     fireEvent.click(screen.getByRole("button", { name: /e4/i }));
     fireEvent.click(
-      screen.getByRole("button", { name: /add to ghost library/i }),
+      screen.getByRole("button", { name: /add selected move to ghost library/i }),
     );
 
     await waitFor(() => {
@@ -945,7 +945,7 @@ describe("ChessGame blunder recording", () => {
     // Select player move (opponent d5 is auto-selected as last move)
     fireEvent.click(screen.getByRole("button", { name: /e4/i }));
     fireEvent.click(
-      screen.getByRole("button", { name: /add to ghost library/i }),
+      screen.getByRole("button", { name: /add selected move to ghost library/i }),
     );
 
     await waitFor(() => {
@@ -953,7 +953,7 @@ describe("ChessGame blunder recording", () => {
     });
   });
 
-  it("hides add button when selected move is not a player move", async () => {
+  it("disables add button when selected move is not a player move", async () => {
     await startGameAsWhite();
 
     await act(async () => {
@@ -963,8 +963,8 @@ describe("ChessGame blunder recording", () => {
     fireEvent.click(screen.getByRole("button", { name: /d5/i }));
 
     expect(
-      screen.queryByRole("button", { name: /add to ghost library/i }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: /add selected move to ghost library/i }),
+    ).toBeDisabled();
   });
 
   it("shows re-hook notification when opponent mode switches from engine to ghost", async () => {

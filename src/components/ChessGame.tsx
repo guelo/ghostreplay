@@ -723,12 +723,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             blunderReviewSrs={blunderReviewSrs}
             displayedOpening={displayedOpening}
             isReviewMomentActive={isReviewMomentActive}
-            onResign={handleResign}
-            onRevert={handleRevertClick}
-            isResignDisabled={!isGameActive || chess.isGameOver()}
-            isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
-            onFlipBoard={flipBoard}
-            onReset={handleReset}
           />
 
           <div className="chessboard-wrapper">
@@ -784,6 +778,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               messages={moveMessages}
               onRevealSrsFail={handleRevealSrsFail}
               revealedSrsFailIndex={reviewFailModal?.moveIndex ?? null}
+              onResign={handleResign}
+              isResignDisabled={!isGameActive || chess.isGameOver()}
+              onRevert={handleRevertClick}
+              isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}
+              onFlipBoard={flipBoard}
+              onReset={handleReset}
+              isGameActive={isGameActive}
             />
             <MaterialDisplay fen={displayedFen} perspective={playerColor} />
           </div>
