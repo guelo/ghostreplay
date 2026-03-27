@@ -1,15 +1,17 @@
-"""Unit tests for SRS priority calculation and selection scoring.
+"""Unit tests for SRS priority calculation, urgency scoring, and selection scoring.
 
 Covers:
 - srs_priority = hours_since_review / (BASE_INTERVAL * 2^pass_streak)
-- selection_score = srs_priority * (eval_loss_cp / 50) / (1 + 0.1 * distance)
-- Due threshold (srs_priority > 1.0)
-- Severity weighting (200cp scores 4x vs 50cp)
-- Distance tiebreaker (closer blunders preferred)
+- urgency = 1 + log2(1 + overdue)  (bounded/saturating)
+- selection_score = urgency * log1p(eval_loss_cp/50) * exp(-0.35 * depth)
+- Due threshold (srs_priority > 1.0) stays on linear priority
+- Severity weighting with log scaling
+- Exponential distance decay
 - Edge cases: pass_streak=0, last_reviewed_at=NULL, MAX_INTERVAL cap
 - Constants: BASE_INTERVAL=4hr, BACKOFF_FACTOR=2.0, MAX_INTERVAL=4320hrs
 """
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -19,14 +21,16 @@ from app.srs_math import (
     BACKOFF_FACTOR,
     MAX_INTERVAL_HOURS,
     calculate_priority,
+    calculate_urgency,
     expected_interval_hours,
 )
 
 # Import scoring components from the game module
 from app.api.game import (
-    DISTANCE_WEIGHT_SLOPE,
+    DISTANCE_DECAY_RATE,
     SEVERITY_NORMALIZER_CP,
     STEERING_RADIUS,
+    TOP_K,
     GhostMoveCandidate,
 )
 
@@ -53,8 +57,11 @@ class TestConstants:
     def test_severity_normalizer_is_50(self):
         assert SEVERITY_NORMALIZER_CP == 50.0
 
-    def test_distance_weight_slope_is_point_one(self):
-        assert DISTANCE_WEIGHT_SLOPE == 0.1
+    def test_distance_decay_rate_is_point_35(self):
+        assert DISTANCE_DECAY_RATE == 0.35
+
+    def test_top_k_is_five(self):
+        assert TOP_K == 5
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +98,7 @@ class TestExpectedInterval:
 
 
 # ---------------------------------------------------------------------------
-# calculate_priority
+# calculate_priority (linear, used for due-threshold gate)
 # ---------------------------------------------------------------------------
 
 class TestCalculatePriority:
@@ -218,7 +225,130 @@ class TestDueThreshold:
 
 
 # ---------------------------------------------------------------------------
-# GhostMoveCandidate.score() – selection scoring
+# calculate_urgency (bounded log2, used for scoring only)
+# ---------------------------------------------------------------------------
+
+class TestCalculateUrgency:
+    def test_urgency_at_zero_overdue(self):
+        # Just reviewed: overdue=0 → 1 + log2(1) = 1.0
+        reviewed_at = NOW
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=reviewed_at,
+            created_at=None, now=NOW,
+        )
+        assert urgency == pytest.approx(1.0)
+
+    def test_urgency_at_one_interval(self):
+        # Exactly due: overdue=1 → 1 + log2(2) = 2.0
+        reviewed_at = NOW - timedelta(hours=4)
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=reviewed_at,
+            created_at=None, now=NOW,
+        )
+        assert urgency == pytest.approx(2.0)
+
+    def test_urgency_at_three_intervals(self):
+        # 3x overdue → 1 + log2(4) = 3.0
+        reviewed_at = NOW - timedelta(hours=12)
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=reviewed_at,
+            created_at=None, now=NOW,
+        )
+        assert urgency == pytest.approx(3.0)
+
+    def test_urgency_saturates(self):
+        # 100x overdue → 1 + log2(101) ≈ 7.66, not 100
+        reviewed_at = NOW - timedelta(hours=400)
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=reviewed_at,
+            created_at=None, now=NOW,
+        )
+        expected = 1.0 + math.log2(101.0)
+        assert urgency == pytest.approx(expected)
+        assert urgency < 8.0
+
+    def test_urgency_no_timestamps(self):
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=None,
+            created_at=None, now=NOW,
+        )
+        assert urgency == 0.0
+
+    def test_urgency_future_reference(self):
+        # Future reference → hours_since=0, overdue=0 → urgency=1.0
+        future_review = NOW + timedelta(hours=1)
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=future_review,
+            created_at=None, now=NOW,
+        )
+        assert urgency == pytest.approx(1.0)
+
+    def test_urgency_uses_created_at_fallback(self):
+        created = NOW - timedelta(hours=8)
+        urgency = calculate_urgency(
+            pass_streak=0, last_reviewed_at=None,
+            created_at=created, now=NOW,
+        )
+        # overdue = 8/4 = 2 → 1 + log2(3) ≈ 2.585
+        assert urgency == pytest.approx(1.0 + math.log2(3.0))
+
+    def test_urgency_monotonically_increases(self):
+        # More overdue → higher urgency
+        u1 = calculate_urgency(
+            pass_streak=0, last_reviewed_at=NOW - timedelta(hours=5),
+            created_at=None, now=NOW,
+        )
+        u2 = calculate_urgency(
+            pass_streak=0, last_reviewed_at=NOW - timedelta(hours=20),
+            created_at=None, now=NOW,
+        )
+        assert u2 > u1
+
+
+# ---------------------------------------------------------------------------
+# Severity log scaling
+# ---------------------------------------------------------------------------
+
+class TestSeverityLogScaling:
+    def test_severity_50cp(self):
+        # log1p(50/50) = log1p(1) ≈ 0.693
+        assert math.log1p(50.0 / 50.0) == pytest.approx(math.log(2.0))
+
+    def test_severity_200cp(self):
+        # log1p(200/50) = log1p(4) ≈ 1.609
+        assert math.log1p(200.0 / 50.0) == pytest.approx(math.log(5.0))
+
+    def test_severity_ratio_sublinear(self):
+        # 200cp/50cp ratio is log1p(4)/log1p(1) ≈ 2.32, not 4.0
+        ratio = math.log1p(4.0) / math.log1p(1.0)
+        assert ratio == pytest.approx(2.3219, abs=0.001)
+        assert ratio < 4.0
+
+
+# ---------------------------------------------------------------------------
+# Exponential distance decay
+# ---------------------------------------------------------------------------
+
+class TestExponentialDistanceDecay:
+    def test_decay_depth_0(self):
+        assert math.exp(-0.35 * 0) == 1.0
+
+    def test_decay_depth_1(self):
+        assert math.exp(-0.35 * 1) == pytest.approx(0.7047, abs=0.001)
+
+    def test_decay_depth_5(self):
+        assert math.exp(-0.35 * 5) == pytest.approx(0.1738, abs=0.001)
+
+    def test_decay_steeper_than_old_hyperbolic(self):
+        # Old formula at depth 5: 1/(1+0.5) = 0.667
+        # New formula at depth 5: exp(-1.75) ≈ 0.174
+        old = 1.0 / (1.0 + 0.1 * 5)
+        new = math.exp(-0.35 * 5)
+        assert new < old
+
+
+# ---------------------------------------------------------------------------
+# GhostMoveCandidate.score() – selection scoring (v2)
 # ---------------------------------------------------------------------------
 
 def _candidate(
@@ -241,19 +371,22 @@ def _candidate(
 class TestSelectionScore:
     def test_score_formula_manual_check(self):
         # eval_loss_cp=100, pass_streak=0, depth=1, 8h ago
-        # priority = 8 / 4 = 2.0
-        # severity = 100 / 50 = 2.0
-        # distance = 1 / (1 + 0.1*1) = 1/1.1 ≈ 0.9091
-        # score = 2.0 * 2.0 * 0.9091 ≈ 3.6364
+        # overdue = 8/4 = 2.0 → urgency = 1 + log2(3) ≈ 2.585
+        # severity = log1p(100/50) = log1p(2) ≈ 1.099
+        # distance = exp(-0.35*1) ≈ 0.7047
         c = _candidate(eval_loss_cp=100, pass_streak=0, depth=1, hours_ago=8.0)
-        expected = 2.0 * 2.0 * (1.0 / 1.1)
+        urgency = 1.0 + math.log2(3.0)
+        severity = math.log1p(2.0)
+        distance = math.exp(-0.35)
+        expected = urgency * severity * distance
         assert c.score(NOW) == pytest.approx(expected)
 
     def test_severity_weighting_200cp_vs_50cp(self):
-        # 200cp blunder should score 4x vs 50cp at same priority/distance
+        # 200cp vs 50cp ratio is now sublinear: log1p(4)/log1p(1) ≈ 2.32
         c200 = _candidate(eval_loss_cp=200, depth=1, hours_ago=8.0)
         c50 = _candidate(eval_loss_cp=50, depth=1, hours_ago=8.0)
-        assert c200.score(NOW) == pytest.approx(4.0 * c50.score(NOW))
+        ratio = c200.score(NOW) / c50.score(NOW)
+        assert ratio == pytest.approx(math.log1p(4.0) / math.log1p(1.0), abs=0.001)
 
     def test_distance_tiebreaker_closer_preferred(self):
         # Same eval_loss and priority, closer depth scores higher
@@ -262,19 +395,19 @@ class TestSelectionScore:
         assert c_close.score(NOW) > c_far.score(NOW)
 
     def test_distance_weight_at_depth_zero(self):
-        # depth=0 → distance_weight = 1/(1+0) = 1.0
+        # depth=0 → distance_weight = exp(0) = 1.0
         c = _candidate(eval_loss_cp=100, depth=0, hours_ago=8.0)
-        priority = 2.0  # 8h / 4h
-        severity = 100 / 50.0
-        assert c.score(NOW) == pytest.approx(priority * severity * 1.0)
+        urgency = 1.0 + math.log2(3.0)
+        severity = math.log1p(2.0)
+        assert c.score(NOW) == pytest.approx(urgency * severity * 1.0)
 
     def test_distance_weight_at_max_steering_radius(self):
-        # depth=5 → distance_weight = 1/(1+0.5) = 1/1.5
+        # depth=5 → distance_weight = exp(-1.75) ≈ 0.1738
         c = _candidate(eval_loss_cp=100, depth=5, hours_ago=8.0)
-        priority = 2.0
-        severity = 2.0
-        distance = 1.0 / 1.5
-        assert c.score(NOW) == pytest.approx(priority * severity * distance)
+        urgency = 1.0 + math.log2(3.0)
+        severity = math.log1p(2.0)
+        distance = math.exp(-0.35 * 5)
+        assert c.score(NOW) == pytest.approx(urgency * severity * distance)
 
     def test_zero_eval_loss_gives_zero_score(self):
         c = _candidate(eval_loss_cp=0)
@@ -306,10 +439,13 @@ class TestSelectionScore:
             last_reviewed_at=None,
             created_at=NOW - timedelta(hours=20),
         )
-        # priority = 20 / 4 = 5.0
-        # severity = 100/50 = 2.0
-        # distance = 1/1.1
-        expected = 5.0 * 2.0 * (1.0 / 1.1)
+        # overdue = 20/4 = 5 → urgency = 1 + log2(6) ≈ 3.585
+        # severity = log1p(2) ≈ 1.099
+        # distance = exp(-0.35) ≈ 0.705
+        urgency = 1.0 + math.log2(6.0)
+        severity = math.log1p(2.0)
+        distance = math.exp(-0.35)
+        expected = urgency * severity * distance
         assert c.score(NOW) == pytest.approx(expected)
 
     def test_no_timestamps_gives_zero_score(self):

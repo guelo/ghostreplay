@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 
 BASE_INTERVAL_HOURS = 4.0
@@ -43,3 +44,29 @@ def calculate_priority(
         0.0,
     )
     return hours_since_review / expected_interval_hours(pass_streak)
+
+
+def calculate_urgency(
+    *,
+    pass_streak: int,
+    last_reviewed_at: datetime | None,
+    created_at: datetime | None,
+    now: datetime,
+) -> float:
+    """Bounded/saturating urgency for ghost move scoring.
+
+    urgency = 1 + log2(1 + overdue)
+    where overdue = hours_since / expected_interval
+
+    Returns 0.0 when no reference timestamp exists.
+    """
+    reference_time = last_reviewed_at or created_at
+    if not reference_time:
+        return 0.0
+
+    hours_since = max(
+        (as_utc(now) - as_utc(reference_time)).total_seconds() / 3600.0,
+        0.0,
+    )
+    overdue = hours_since / expected_interval_hours(pass_streak)
+    return 1.0 + math.log2(1.0 + overdue)

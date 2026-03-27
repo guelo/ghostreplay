@@ -847,11 +847,13 @@ def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session)
     ])
     db_session.commit()
 
+    # Use _rng_seed=1 for deterministic top-k sampling (seed 1 picks higher-weight candidate)
     move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
         player_color="white",
+        _rng_seed=1,
     )
 
     assert move_san == "mHigh"
@@ -920,11 +922,13 @@ def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
     ])
     db_session.commit()
 
+    # Use _rng_seed=1 for deterministic top-k sampling (seed 1 picks higher-weight candidate)
     move_san, target_blunder_id, _ = find_ghost_move(
         db=db_session,
         user_id=user_id,
         fen=fen_start,
         player_color="white",
+        _rng_seed=1,
     )
 
     assert move_san == "mOverdue"
@@ -1122,6 +1126,298 @@ def test_find_ghost_move_skips_mastered_blunder_high_pass_streak(db_session):
     # pass_streak=5 with only 40h elapsed should NOT be targeted
     assert move_san is None
     assert target_blunder_id is None
+
+
+def test_find_ghost_move_not_due_excluded_despite_urgency(db_session):
+    """A not-yet-due candidate is excluded by the linear priority gate even though
+    the bounded urgency formula would give it a non-trivial urgency value."""
+    from app.api.game import find_ghost_move
+    from app.models import Blunder, Move, Position
+    from app.fen import fen_hash
+
+    user_id = 123
+
+    fen_start = "8/8/8/8/8/8/K7/6k1 b - - 0 1"
+    fen_blunder = "8/8/8/8/8/8/1K6/6k1 w - - 0 2"
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_blunder = Position(user_id=user_id, fen_hash=fen_hash(fen_blunder), fen_raw=fen_blunder, active_color="white")
+    db_session.add_all([pos_start, pos_blunder])
+    db_session.flush()
+
+    db_session.add(Move(from_position_id=pos_start.id, move_san="m1", to_position_id=pos_blunder.id))
+
+    # Reviewed 2h ago with pass_streak=0 → interval=4h → linear priority=0.5 (not due)
+    # But bounded urgency = 1 + log2(1+0.5) = 1.585 — non-trivial
+    now = datetime.now(timezone.utc)
+    db_session.add(Blunder(
+        user_id=user_id,
+        position_id=pos_blunder.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        last_reviewed_at=now - timedelta(hours=2),
+    ))
+    db_session.commit()
+
+    move_san, target_blunder_id, _ = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+    )
+
+    # Must be excluded by the linear priority < 1.0 gate
+    assert move_san is None
+    assert target_blunder_id is None
+
+
+def test_find_ghost_move_topk_samples_from_candidates(db_session):
+    """With multiple due candidates, top-k sampling returns one from the valid set."""
+    from app.api.game import find_ghost_move
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+
+    fen_start = "8/8/8/8/8/K7/8/7k b - - 0 1"
+    fens = [
+        "8/8/8/8/8/1K6/8/7k w - - 0 2",
+        "8/8/8/8/8/2K5/8/7k w - - 0 2",
+        "8/8/8/8/8/3K4/8/7k w - - 0 2",
+    ]
+    moves = ["mA", "mB", "mC"]
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    db_session.add(pos_start)
+    db_session.flush()
+
+    for fen, move_san in zip(fens, moves):
+        pos = Position(user_id=user_id, fen_hash=fen_hash(fen), fen_raw=fen, active_color="white")
+        db_session.add(pos)
+        db_session.flush()
+        db_session.add(Move(from_position_id=pos_start.id, move_san=move_san, to_position_id=pos.id))
+        db_session.add(Blunder(
+            user_id=user_id,
+            position_id=pos.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=150,
+            last_reviewed_at=now - timedelta(hours=10),
+        ))
+    db_session.commit()
+
+    move_san, target_blunder_id, _ = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+        _rng_seed=42,
+    )
+
+    assert move_san in moves
+    assert target_blunder_id is not None
+
+
+def test_find_ghost_move_deterministic_with_same_seed(db_session):
+    """Same _rng_seed produces the same result."""
+    from app.api.game import find_ghost_move
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+
+    fen_start = "8/8/8/8/K7/8/8/7k b - - 0 1"
+    fens = [
+        "8/8/8/8/1K6/8/8/7k w - - 0 2",
+        "8/8/8/8/2K5/8/8/7k w - - 0 2",
+        "8/8/8/8/3K4/8/8/7k w - - 0 2",
+    ]
+    moves = ["mX", "mY", "mZ"]
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    db_session.add(pos_start)
+    db_session.flush()
+
+    for fen, move_san in zip(fens, moves):
+        pos = Position(user_id=user_id, fen_hash=fen_hash(fen), fen_raw=fen, active_color="white")
+        db_session.add(pos)
+        db_session.flush()
+        db_session.add(Move(from_position_id=pos_start.id, move_san=move_san, to_position_id=pos.id))
+        db_session.add(Blunder(
+            user_id=user_id,
+            position_id=pos.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=100,
+            last_reviewed_at=now - timedelta(hours=8),
+        ))
+    db_session.commit()
+
+    result1 = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+        _rng_seed=99,
+    )
+    result2 = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+        _rng_seed=99,
+    )
+
+    assert result1 == result2
+
+
+def test_find_ghost_move_different_seed_can_differ(db_session):
+    """Different seeds can produce different results with equal-score candidates."""
+    from app.api.game import find_ghost_move
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+
+    fen_start = "8/8/8/K7/8/8/8/7k b - - 0 1"
+    fens = [
+        "8/8/8/1K6/8/8/8/7k w - - 0 2",
+        "8/8/8/2K5/8/8/8/7k w - - 0 2",
+        "8/8/8/3K4/8/8/8/7k w - - 0 2",
+        "8/8/8/4K3/8/8/8/7k w - - 0 2",
+        "8/8/8/5K2/8/8/8/7k w - - 0 2",
+    ]
+    moves = [f"m{i}" for i in range(5)]
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    db_session.add(pos_start)
+    db_session.flush()
+
+    for fen, move_san in zip(fens, moves):
+        pos = Position(user_id=user_id, fen_hash=fen_hash(fen), fen_raw=fen, active_color="white")
+        db_session.add(pos)
+        db_session.flush()
+        db_session.add(Move(from_position_id=pos_start.id, move_san=move_san, to_position_id=pos.id))
+        db_session.add(Blunder(
+            user_id=user_id,
+            position_id=pos.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=100,
+            last_reviewed_at=now - timedelta(hours=8),
+        ))
+    db_session.commit()
+
+    # Try many seeds; with 5 equal-score candidates, different seeds should
+    # eventually pick different candidates.
+    results = set()
+    for seed in range(50):
+        move_san, _, _ = find_ghost_move(
+            db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+            _rng_seed=seed,
+        )
+        results.add(move_san)
+
+    assert len(results) > 1, "50 different seeds all picked the same candidate"
+
+
+def test_find_ghost_move_session_id_seed_is_stable(db_session):
+    """Calling find_ghost_move with the same session_id produces the same result,
+    exercising the default _stable_seed path (no _rng_seed override)."""
+    import uuid
+    from app.api.game import find_ghost_move
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    sid = uuid.uuid4()
+
+    fen_start = "8/8/8/8/K7/8/8/7k b - - 0 1"
+    fens = [
+        "8/8/8/8/1K6/8/8/7k w - - 0 2",
+        "8/8/8/8/2K5/8/8/7k w - - 0 2",
+        "8/8/8/8/3K4/8/8/7k w - - 0 2",
+    ]
+    moves = ["mP", "mQ", "mR"]
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    db_session.add(pos_start)
+    db_session.flush()
+
+    for fen, move_san in zip(fens, moves):
+        pos = Position(user_id=user_id, fen_hash=fen_hash(fen), fen_raw=fen, active_color="white")
+        db_session.add(pos)
+        db_session.flush()
+        db_session.add(Move(from_position_id=pos_start.id, move_san=move_san, to_position_id=pos.id))
+        db_session.add(Blunder(
+            user_id=user_id,
+            position_id=pos.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=100,
+            last_reviewed_at=now - timedelta(hours=8),
+        ))
+    db_session.commit()
+
+    result1 = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+        session_id=sid,
+    )
+    result2 = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+        session_id=sid,
+    )
+
+    assert result1[0] is not None
+    assert result1 == result2
+
+
+def test_find_ghost_move_session_id_seed_normalized_fen(db_session):
+    """FENs that differ only in halfmove/fullmove produce the same seed
+    because _stable_seed uses fen_hash (normalized position identity)."""
+    import uuid
+    from app.api.game import find_ghost_move
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    sid = uuid.uuid4()
+
+    # Two FENs identical except halfmove/fullmove counters
+    fen_a = "8/8/8/8/K7/8/8/7k b - - 0 1"
+    fen_b = "8/8/8/8/K7/8/8/7k b - - 5 20"
+    assert fen_hash(fen_a) == fen_hash(fen_b)
+
+    fens_dest = [
+        "8/8/8/8/1K6/8/8/7k w - - 0 2",
+        "8/8/8/8/2K5/8/8/7k w - - 0 2",
+    ]
+    move_names = ["mAlpha", "mBeta"]
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_a), fen_raw=fen_a, active_color="black")
+    db_session.add(pos_start)
+    db_session.flush()
+
+    for fen, move_san in zip(fens_dest, move_names):
+        pos = Position(user_id=user_id, fen_hash=fen_hash(fen), fen_raw=fen, active_color="white")
+        db_session.add(pos)
+        db_session.flush()
+        db_session.add(Move(from_position_id=pos_start.id, move_san=move_san, to_position_id=pos.id))
+        db_session.add(Blunder(
+            user_id=user_id,
+            position_id=pos.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=100,
+            last_reviewed_at=now - timedelta(hours=8),
+        ))
+    db_session.commit()
+
+    result_a = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_a, player_color="white",
+        session_id=sid,
+    )
+    result_b = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_b, player_color="white",
+        session_id=sid,
+    )
+
+    assert result_a[0] is not None
+    assert result_a == result_b
 
 
 # === Next Opponent Move Endpoint Tests ===

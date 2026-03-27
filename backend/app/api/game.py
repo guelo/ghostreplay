@@ -1,3 +1,6 @@
+import hashlib
+import math
+import random
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -13,13 +16,14 @@ from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory
 from app.rating import DEFAULT_RATING, RESULT_SCORES, compute_new_rating
 from app.security import TokenPayload, get_current_user
-from app.srs_math import calculate_priority
+from app.srs_math import calculate_priority, calculate_urgency
 
 router = APIRouter(prefix="/api/game", tags=["game"])
 
 STEERING_RADIUS = 5
 SEVERITY_NORMALIZER_CP = 50.0
-DISTANCE_WEIGHT_SLOPE = 0.1
+DISTANCE_DECAY_RATE = 0.35
+TOP_K = 5
 
 
 @dataclass(frozen=True)
@@ -33,15 +37,25 @@ class GhostMoveCandidate:
     created_at: datetime | None
 
     def score(self, now: datetime) -> float:
-        priority = calculate_priority(
+        urgency = calculate_urgency(
             pass_streak=self.pass_streak,
             last_reviewed_at=self.last_reviewed_at,
             created_at=self.created_at,
             now=now,
         )
-        severity_weight = max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP
-        distance_weight = 1.0 / (1.0 + DISTANCE_WEIGHT_SLOPE * self.depth)
-        return priority * severity_weight * distance_weight
+        severity = math.log1p(max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
+        distance_weight = math.exp(-DISTANCE_DECAY_RATE * self.depth)
+        return urgency * severity * distance_weight
+
+
+def _stable_seed(user_id: int, fen: str, session_id: uuid.UUID) -> int:
+    """Deterministic seed stable across Python restarts.
+
+    Uses fen_hash (normalized position identity) so equivalent FENs that
+    differ only in halfmove/fullmove counters produce the same seed.
+    """
+    raw = f"{user_id}|{fen_hash(fen)}|{session_id}".encode()
+    return int.from_bytes(hashlib.sha256(raw).digest()[:8], byteorder="big")
 
 
 def find_ghost_move(
@@ -49,6 +63,9 @@ def find_ghost_move(
     user_id: int,
     fen: str,
     player_color: str,
+    *,
+    session_id: uuid.UUID | None = None,
+    _rng_seed: int | None = None,
 ) -> tuple[str | None, int | None]:
     """
     Find a move that steers toward a position where the user previously blundered.
@@ -133,8 +150,7 @@ def find_ghost_move(
         return (None, None, None)
 
     now = datetime.now(timezone.utc)
-    best_candidate: GhostMoveCandidate | None = None
-    best_key: tuple[float, float, int, int, str] | None = None
+    scored: list[tuple[GhostMoveCandidate, float]] = []
 
     for row in candidate_rows:
         candidate = GhostMoveCandidate(
@@ -154,24 +170,38 @@ def find_ghost_move(
         )
         if priority < 1.0:
             continue
-        score = candidate.score(now)
+        scored.append((candidate, candidate.score(now)))
 
-        # Tie-breakers keep behavior deterministic in tests and production.
-        rank_key = (
-            score,
-            -float(candidate.depth),
-            candidate.eval_loss_cp,
-            -candidate.blunder_id,
-            candidate.first_move,
-        )
-        if best_key is None or rank_key > best_key:
-            best_key = rank_key
-            best_candidate = candidate
-
-    if best_candidate is None:
+    if not scored:
         return (None, None, None)
 
-    return (best_candidate.first_move, best_candidate.blunder_id, best_candidate.last_reviewed_at)
+    # Stable sort: primary by score desc, then deterministic tie-break keys
+    scored.sort(key=lambda x: (
+        -x[1],
+        -float(x[0].depth),
+        -x[0].eval_loss_cp,
+        -x[0].blunder_id,
+        x[0].first_move,
+    ))
+    top_k = scored[:TOP_K]
+
+    # Weighted random selection from top-k
+    weights = [s for _, s in top_k]
+    if any(w > 0 for w in weights):
+        if _rng_seed is not None:
+            seed = _rng_seed
+        elif session_id is not None:
+            seed = _stable_seed(user_id, fen, session_id)
+        else:
+            seed = 0
+        rng = random.Random(seed)
+        chosen_candidate, _ = rng.choices(top_k, weights=weights, k=1)[0]
+    else:
+        # All zero scores (e.g. manual library entries with eval_loss_cp=0);
+        # fall back to first by stable sort order.
+        chosen_candidate, _ = top_k[0]
+
+    return (chosen_candidate.first_move, chosen_candidate.blunder_id, chosen_candidate.last_reviewed_at)
 
 
 class GameResult(str, Enum):
@@ -441,6 +471,7 @@ def get_next_opponent_move(
         user_id=user.user_id,
         fen=request.fen,
         player_color=session.player_color,
+        session_id=request.session_id,
     )
 
     # If ghost path exists, convert SAN to both UCI and SAN formats
