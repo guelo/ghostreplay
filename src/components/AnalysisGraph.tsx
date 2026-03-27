@@ -29,6 +29,34 @@ const PAD_Y = 4;
 const logScale = (cp: number) =>
   Math.sign(cp) * Math.log1p(Math.abs(cp) / 100);
 
+const EVAL_COLOR_LOSING: [number, number, number] = [255, 59, 48]; // #FF3B30
+const EVAL_COLOR_EQUAL: [number, number, number] = [158, 158, 158]; // #9E9E9E
+const EVAL_COLOR_WINNING: [number, number, number] = [0, 200, 83]; // #00C853
+
+function evalToColor(
+  evalCp: number,
+  playerColor: "white" | "black",
+): string {
+  const userCp = playerColor === "white" ? evalCp : -evalCp;
+  const clamped = Math.max(-500, Math.min(500, userCp));
+  const t = (clamped + 500) / 1000; // 0 = losing, 1 = winning
+
+  let r: number, g: number, b: number;
+  if (t < 0.5) {
+    const s = t * 2;
+    r = EVAL_COLOR_LOSING[0] + (EVAL_COLOR_EQUAL[0] - EVAL_COLOR_LOSING[0]) * s;
+    g = EVAL_COLOR_LOSING[1] + (EVAL_COLOR_EQUAL[1] - EVAL_COLOR_LOSING[1]) * s;
+    b = EVAL_COLOR_LOSING[2] + (EVAL_COLOR_EQUAL[2] - EVAL_COLOR_LOSING[2]) * s;
+  } else {
+    const s = (t - 0.5) * 2;
+    r = EVAL_COLOR_EQUAL[0] + (EVAL_COLOR_WINNING[0] - EVAL_COLOR_EQUAL[0]) * s;
+    g = EVAL_COLOR_EQUAL[1] + (EVAL_COLOR_WINNING[1] - EVAL_COLOR_EQUAL[1]) * s;
+    b = EVAL_COLOR_EQUAL[2] + (EVAL_COLOR_WINNING[2] - EVAL_COLOR_EQUAL[2]) * s;
+  }
+
+  return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, 0.39)`;
+}
+
 const formatEval = (cp: number) => {
   const sign = cp > 0 ? "+" : "";
   return `${sign}${(cp / 100).toFixed(1)}`;
@@ -180,6 +208,11 @@ const AnalysisGraph = ({
     return Math.max(5, Math.min(95, pct));
   }, [evalCp, cpToY]);
 
+  const evalBgColor = useMemo(() => {
+    if (evalCp == null || !playerColor) return undefined;
+    return evalToColor(evalCp, playerColor);
+  }, [evalCp, playerColor]);
+
   return (
     <div
       className={`analysis-graph${playerColor ? " analysis-graph--with-axis" : ""}`}
@@ -294,9 +327,13 @@ const AnalysisGraph = ({
           {evalYPercent != null && (
             <div
               className="analysis-graph__y-eval"
-              style={{ top: `${evalYPercent}%` }}
+              style={{ top: `${evalYPercent}%`, background: evalBgColor }}
             >
-              {isCheckmate ? "#" : formatEval(evalCp!)}
+              {isCheckmate
+              ? "#"
+              : formatEval(
+                  playerColor === "black" ? -evalCp! : evalCp!,
+                )}
             </div>
           )}
           <div className="analysis-graph__y-label">

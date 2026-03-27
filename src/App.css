@@ -1359,7 +1359,6 @@
     color: var(--text-primary);
     line-height: 1;
     pointer-events: none;
-    background: rgba(255, 173, 173, 0.39);
     border-radius: 0.15rem;
     padding: 0.1rem 0.15rem;
 }

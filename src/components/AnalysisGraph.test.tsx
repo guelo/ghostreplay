@@ -104,6 +104,112 @@ describe('AnalysisGraph — y-axis', () => {
   })
 })
 
+describe('AnalysisGraph — eval badge color', () => {
+  function getBadgeBg(container: HTMLElement) {
+    const el = container.querySelector('.analysis-graph__y-eval') as HTMLElement | null
+    return el?.style.backgroundColor ?? null
+  }
+
+  it('shows green when white is winning as white player', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 500]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={500}
+      />,
+    )
+    expect(getBadgeBg(container)).toBe('rgba(0, 200, 83, 0.39)')
+  })
+
+  it('shows red when white is losing as white player', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, -500]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={-500}
+      />,
+    )
+    expect(getBadgeBg(container)).toBe('rgba(255, 59, 48, 0.39)')
+  })
+
+  it('shows gray at equal eval', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 0]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={0}
+      />,
+    )
+    expect(getBadgeBg(container)).toBe('rgba(158, 158, 158, 0.39)')
+  })
+
+  it('inverts color for black player (positive eval = losing)', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 300]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="black"
+        evalCp={300}
+      />,
+    )
+    // +300 white perspective means black is losing → reddish
+    const bg = getBadgeBg(container)!
+    // Extract red channel — should be > 158 (gray midpoint)
+    const r = parseInt(bg.match(/rgba?\((\d+)/)![1])
+    expect(r).toBeGreaterThan(158)
+  })
+
+  it('inverts label sign for black player', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 150]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="black"
+        evalCp={150}
+      />,
+    )
+    const el = container.querySelector('.analysis-graph__y-eval')
+    // White +1.5 shown as -1.5 from black perspective
+    expect(el!.textContent).toBe('-1.5')
+  })
+
+  it('clamps color at eval beyond +5 pawns', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 1500]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={1500}
+      />,
+    )
+    // Should be clamped to pure winning green
+    expect(getBadgeBg(container)).toBe('rgba(0, 200, 83, 0.39)')
+  })
+
+  it('clamps color at eval beyond -5 pawns', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, -1500]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={-1500}
+      />,
+    )
+    // Should be clamped to pure losing red
+    expect(getBadgeBg(container)).toBe('rgba(255, 59, 48, 0.39)')
+  })
+})
+
 describe('AnalysisGraph — incremental geometry', () => {
   const baseEvals = [0, 50, -30, 120, -80]
 
