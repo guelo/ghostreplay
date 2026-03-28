@@ -46,6 +46,8 @@ const makeProps = () => {
   const onPlayBlack = vi.fn();
   const onRevertAnyway = vi.fn();
   const onCancelRevert = vi.fn();
+  const onResignAnyway = vi.fn();
+  const onCancelResign = vi.fn();
   const onDismissRehookToast = vi.fn();
 
   return {
@@ -73,6 +75,9 @@ const makeProps = () => {
     showRevertWarning: false,
     onRevertAnyway,
     onCancelRevert,
+    showResignWarning: false,
+    onResignAnyway,
+    onCancelResign,
     showEndedScrim: false,
     showFlash: false,
     showRehookToast: false,

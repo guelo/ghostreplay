@@ -65,6 +65,7 @@ type UseChessGameLifecycleArgs = {
   setShowPostGamePrompt: Dispatch<SetStateAction<boolean>>;
   showRevertWarning: boolean;
   setShowRevertWarning: Dispatch<SetStateAction<boolean>>;
+  setShowResignWarning: Dispatch<SetStateAction<boolean>>;
 };
 
 const sleep = (ms: number) =>
@@ -100,6 +101,7 @@ export const useChessGameLifecycle = ({
   setShowPostGamePrompt,
   showRevertWarning,
   setShowRevertWarning,
+  setShowResignWarning,
 }: UseChessGameLifecycleArgs) => {
   useEffect(() => {
     fetchCurrentRating()
@@ -270,6 +272,7 @@ export const useChessGameLifecycle = ({
 
     store.setIsRated(false);
     setShowRevertWarning(false);
+    setShowResignWarning(false);
 
     const isPlayerTurn = chess.turn() === (store.playerColor === "white" ? "w" : "b");
     const undoCount = isPlayerTurn && store.moveHistory.length >= 2 ? 2 : 1;
@@ -294,6 +297,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    setShowResignWarning,
     setShowRevertWarning,
   ]);
 
@@ -371,6 +375,7 @@ export const useChessGameLifecycle = ({
         setShowPostGamePrompt(false);
         s2.setIsRated(true);
         setShowRevertWarning(false);
+        setShowResignWarning(false);
         clearMoveHighlights();
         blunderRecordedRef.current = false;
         pendingAnalysisContextRef.current = null;
@@ -404,6 +409,7 @@ export const useChessGameLifecycle = ({
       setShowFlash,
       setShowPassToast,
       setShowPostGamePrompt,
+      setShowResignWarning,
       setShowRevertWarning,
       setShowStartOverlay,
       setStartError,
@@ -458,6 +464,21 @@ export const useChessGameLifecycle = ({
     uploadSessionAnalysisBatch,
   ]);
 
+  const executeResign = useCallback(() => {
+    setShowResignWarning(false);
+    handleResign();
+  }, [handleResign, setShowResignWarning]);
+
+  const handleResignClick = useCallback(() => {
+    const store = useGameStore.getState();
+    if (!store.sessionId || !store.isGameActive) return;
+    setShowResignWarning(true);
+  }, [setShowResignWarning]);
+
+  const cancelResign = useCallback(() => {
+    setShowResignWarning(false);
+  }, [setShowResignWarning]);
+
   const handleReset = useCallback(() => {
     const store = useGameStore.getState();
     chess.reset();
@@ -485,6 +506,7 @@ export const useChessGameLifecycle = ({
     setBlunderReviewSrs(null);
     store.setIsRated(true);
     setShowRevertWarning(false);
+    setShowResignWarning(false);
     clearMoveHighlights();
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
@@ -510,6 +532,7 @@ export const useChessGameLifecycle = ({
     setShowPassToast,
     setShowPostGamePrompt,
     setShowRehookToast,
+    setShowResignWarning,
     setShowRevertWarning,
     setShowStartOverlay,
     uploadedAnalysisSessionsRef,
@@ -542,7 +565,9 @@ export const useChessGameLifecycle = ({
     handleRevertClick,
     cancelRevert,
     handleNewGame,
-    handleResign,
+    handleResignClick,
+    executeResign,
+    cancelResign,
     handleReset,
     handleShowStartOverlay,
     handleViewAnalysis,

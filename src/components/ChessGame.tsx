@@ -127,6 +127,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const isRated = useGameStore((s) => s.isRated);
   const [showRevertWarning, setShowRevertWarning] = useState(false);
+  const [showResignWarning, setShowResignWarning] = useState(false);
   const playerRating = useGameStore((s) => s.playerRating);
   const isProvisional = useGameStore((s) => s.isProvisional);
   const ratingChange = useGameStore((s) => s.ratingChange);
@@ -378,7 +379,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleRevertClick,
     cancelRevert,
     handleNewGame,
-    handleResign,
+    handleResignClick,
+    executeResign,
+    cancelResign,
     handleReset,
     handleShowStartOverlay,
     handleViewAnalysis,
@@ -411,6 +414,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowPostGamePrompt,
     showRevertWarning,
     setShowRevertWarning,
+    setShowResignWarning,
   });
 
   useEffect(() => {
@@ -753,6 +757,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 showRevertWarning={showRevertWarning}
                 onRevertAnyway={executeRevert}
                 onCancelRevert={cancelRevert}
+                showResignWarning={showResignWarning}
+                onResignAnyway={executeResign}
+                onCancelResign={cancelResign}
                 showEndedScrim={showEndedScrim}
                 showFlash={showFlash}
                 showRehookToast={showRehookToast}
@@ -778,7 +785,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               messages={moveMessages}
               onRevealSrsFail={handleRevealSrsFail}
               revealedSrsFailIndex={reviewFailModal?.moveIndex ?? null}
-              onResign={handleResign}
+              onResign={handleResignClick}
               isResignDisabled={!isGameActive || chess.isGameOver()}
               onRevert={handleRevertClick}
               isRevertDisabled={moveHistory.length === 0 || chess.isGameOver()}

@@ -124,6 +124,7 @@ const setup = ({
       setShowPostGamePrompt,
       showRevertWarning: false,
       setShowRevertWarning,
+      setShowResignWarning: vi.fn(),
     }),
   );
 

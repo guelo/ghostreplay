@@ -328,6 +328,10 @@ describe("ChessGame characterization safeguards", () => {
     await startGameAsWhite(onOpenHistory);
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
       expect(
@@ -348,6 +352,10 @@ describe("ChessGame characterization safeguards", () => {
     await startGameAsWhite(onOpenHistory);
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /^history$/i })).toBeInTheDocument();
@@ -937,6 +945,10 @@ describe("ChessGame blunder recording", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
       expect(screen.getByText("You resigned.")).toBeInTheDocument();
@@ -1380,6 +1392,10 @@ describe("ChessGame move analysis", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1);
@@ -1654,6 +1670,10 @@ describe("ChessGame remount persistence", () => {
 
     // Resign — session upload should include the persisted analysis
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1);

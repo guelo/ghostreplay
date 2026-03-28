@@ -29,6 +29,9 @@ type BoardStageProps = {
   showRevertWarning: boolean;
   onRevertAnyway: () => void;
   onCancelRevert: () => void;
+  showResignWarning: boolean;
+  onResignAnyway: () => void;
+  onCancelResign: () => void;
   showEndedScrim: boolean;
   showFlash: boolean;
   showRehookToast: boolean;
@@ -73,6 +76,9 @@ const BoardStage = ({
   showRevertWarning,
   onRevertAnyway,
   onCancelRevert,
+  showResignWarning,
+  onResignAnyway,
+  onCancelResign,
   showEndedScrim,
   showFlash,
   showRehookToast,
@@ -177,6 +183,42 @@ const BoardStage = ({
                     className="chess-button"
                     type="button"
                     onClick={onCancelRevert}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+          {showResignWarning && (
+            <div className="chessboard-overlay">
+              <div
+                className="revert-warning-dialog"
+                role="alertdialog"
+                aria-labelledby="resign-warning-title"
+              >
+                <WarningTriangleIcon />
+                <p
+                  id="resign-warning-title"
+                  className="revert-warning-dialog__title"
+                >
+                  Are you sure?
+                </p>
+                <p className="revert-warning-dialog__body">
+                  Resigning will end the current game and count as a loss.
+                </p>
+                <div className="revert-warning-dialog__actions">
+                  <button
+                    className="chess-button danger"
+                    type="button"
+                    onClick={onResignAnyway}
+                  >
+                    Resign
+                  </button>
+                  <button
+                    className="chess-button"
+                    type="button"
+                    onClick={onCancelResign}
                   >
                     Cancel
                   </button>
