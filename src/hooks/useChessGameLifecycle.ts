@@ -7,21 +7,16 @@ import type {
 import { Chess } from "chess.js";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import type { TargetBlunderSrs } from "../utils/api";
-import { endGame, fetchCurrentRating, startGame, uploadSessionMoves } from "../utils/api";
+import { endGame, fetchCurrentRating, startGame } from "../utils/api";
 import type {
   BlunderAlert,
   ReviewFailInfo,
 } from "../components/chess-game/domain/movePresentation";
-import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
 import type { GameResult } from "../components/chess-game/domain/status";
-import {
-  ANALYSIS_UPLOAD_TIMEOUT_MS,
-  STARTING_FEN,
-} from "../components/chess-game/config";
 import { sampleEloBin } from "../components/chess-game/elo";
 import type { BoardOrientation, OpenHistoryOptions } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
-import type { AnalysisStore } from "../stores/createAnalysisStore";
+import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -39,8 +34,7 @@ type PendingSrsReview = {
 
 type UseChessGameLifecycleArgs = {
   chess: Chess;
-  analysisStore: AnalysisStore;
-  uploadedAnalysisSessionsRef: MutableRefObject<Set<string>>;
+  coordinator: GameAnalysisCoordinator;
   openingHistoryRef: MutableRefObject<(OpeningLookupResult | null)[]>;
   blunderRecordedRef: MutableRefObject<boolean>;
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
@@ -48,7 +42,6 @@ type UseChessGameLifecycleArgs = {
   clearMoveHighlights: () => void;
   resetMode: () => void;
   resetEngine: () => void;
-  clearAnalysis: () => void;
   onOpenHistory?: (options: OpenHistoryOptions) => void;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
   setIsStartingGame: Dispatch<SetStateAction<boolean>>;
@@ -68,15 +61,9 @@ type UseChessGameLifecycleArgs = {
   setShowResignWarning: Dispatch<SetStateAction<boolean>>;
 };
 
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-
 export const useChessGameLifecycle = ({
   chess,
-  analysisStore,
-  uploadedAnalysisSessionsRef,
+  coordinator,
   openingHistoryRef,
   blunderRecordedRef,
   pendingAnalysisContextRef,
@@ -84,7 +71,6 @@ export const useChessGameLifecycle = ({
   clearMoveHighlights,
   resetMode,
   resetEngine,
-  clearAnalysis,
   onOpenHistory,
   setEngineMessage,
   setIsStartingGame,
@@ -118,91 +104,6 @@ export const useChessGameLifecycle = ({
       .catch(() => {});
   }, []);
 
-  const waitForQueuedAnalyses = useCallback(
-    async (expectedMoves: number) => {
-      const snap = () => analysisStore.getState();
-      const analysisHasErrored = () => snap().status === "error";
-
-      if (expectedMoves <= 0) {
-        return;
-      }
-
-      if (
-        analysisHasErrored() ||
-        snap().analysisMap.size >= expectedMoves
-      ) {
-        return;
-      }
-
-      const initialSize = snap().analysisMap.size;
-      await sleep(150);
-      if (
-        analysisHasErrored() ||
-        snap().analysisMap.size >= expectedMoves
-      ) {
-        return;
-      }
-
-      if (
-        !snap().isAnalyzing &&
-        snap().analysisMap.size === initialSize
-      ) {
-        return;
-      }
-
-      const deadline = Date.now() + ANALYSIS_UPLOAD_TIMEOUT_MS;
-      while (Date.now() < deadline) {
-        if (
-          analysisHasErrored() ||
-          snap().analysisMap.size >= expectedMoves
-        ) {
-          return;
-        }
-
-        if (!snap().isAnalyzing) {
-          const sizeBeforeIdleCheck = snap().analysisMap.size;
-          await sleep(100);
-          if (snap().analysisMap.size === sizeBeforeIdleCheck) {
-            return;
-          }
-        } else {
-          await sleep(50);
-        }
-      }
-    },
-    [analysisStore],
-  );
-
-  const uploadSessionAnalysisBatch = useCallback(
-    async (targetSessionId: string, expectedMoveCount: number) => {
-      if (uploadedAnalysisSessionsRef.current.has(targetSessionId)) {
-        return;
-      }
-
-      await waitForQueuedAnalyses(expectedMoveCount);
-
-      const historySnapshot = [...useGameStore.getState().moveHistory];
-      if (historySnapshot.length === 0) {
-        uploadedAnalysisSessionsRef.current.add(targetSessionId);
-        return;
-      }
-
-      const analysesSnapshot = new Map(analysisStore.getState().analysisMap);
-      const payload = buildSessionMoveUploads(
-        historySnapshot,
-        analysesSnapshot,
-        STARTING_FEN,
-      );
-      await uploadSessionMoves(targetSessionId, payload);
-      uploadedAnalysisSessionsRef.current.add(targetSessionId);
-    },
-    [
-      analysisStore,
-      uploadedAnalysisSessionsRef,
-      waitForQueuedAnalyses,
-    ],
-  );
-
   const handleGameEnd = useCallback(async () => {
     const store = useGameStore.getState();
     if (!store.sessionId || !store.isGameActive) return;
@@ -227,17 +128,11 @@ export const useChessGameLifecycle = ({
 
     if (result) {
       try {
-        try {
-          await uploadSessionAnalysisBatch(
-            store.sessionId,
-            store.moveHistory.length,
-          );
-        } catch (uploadError) {
-          console.error(
-            "[SessionMoves] Failed to upload session moves:",
-            uploadError,
-          );
-        }
+        // Best-effort flush of already-resolved analyses — does not block
+        coordinator.flushPendingUploads().catch((err) =>
+          console.error("[SessionMoves] Flush failed:", err),
+        );
+
         const endResponse = await endGame(
           store.sessionId,
           result.type,
@@ -261,9 +156,9 @@ export const useChessGameLifecycle = ({
     }
   }, [
     chess,
+    coordinator,
     setEngineMessage,
     setShowPostGamePrompt,
-    uploadSessionAnalysisBatch,
   ]);
 
   const executeRevert = useCallback(() => {
@@ -321,17 +216,9 @@ export const useChessGameLifecycle = ({
 
         const store = useGameStore.getState();
         if (store.sessionId && store.isGameActive) {
-          try {
-            await uploadSessionAnalysisBatch(
-              store.sessionId,
-              store.moveHistory.length,
-            );
-          } catch (uploadError) {
-            console.error(
-              "[SessionMoves] Failed to upload session moves:",
-              uploadError,
-            );
-          }
+          coordinator.flushPendingUploads().catch((err) =>
+            console.error("[SessionMoves] Flush failed:", err),
+          );
           await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
         }
 
@@ -364,8 +251,7 @@ export const useChessGameLifecycle = ({
         setLiveOpening(null);
         openingHistoryRef.current = [];
         resetEngine();
-        clearAnalysis();
-        uploadedAnalysisSessionsRef.current.clear();
+        coordinator.startSession(response.session_id);
         setBlunderAlert(null);
         setShowFlash(false);
         setBlunderReviewId(null);
@@ -392,7 +278,7 @@ export const useChessGameLifecycle = ({
     [
       blunderRecordedRef,
       chess,
-      clearAnalysis,
+      coordinator,
       clearMoveHighlights,
       openingHistoryRef,
       pendingAnalysisContextRef,
@@ -413,8 +299,6 @@ export const useChessGameLifecycle = ({
       setShowRevertWarning,
       setShowStartOverlay,
       setStartError,
-      uploadSessionAnalysisBatch,
-      uploadedAnalysisSessionsRef,
     ],
   );
 
@@ -425,17 +309,10 @@ export const useChessGameLifecycle = ({
     }
 
     try {
-      try {
-        await uploadSessionAnalysisBatch(
-          store.sessionId,
-          store.moveHistory.length,
-        );
-      } catch (uploadError) {
-        console.error(
-          "[SessionMoves] Failed to upload session moves:",
-          uploadError,
-        );
-      }
+      coordinator.flushPendingUploads().catch((err) =>
+        console.error("[SessionMoves] Flush failed:", err),
+      );
+
       const endResponse = await endGame(
         store.sessionId,
         "resign",
@@ -459,9 +336,9 @@ export const useChessGameLifecycle = ({
     }
   }, [
     chess,
+    coordinator,
     setEngineMessage,
     setShowPostGamePrompt,
-    uploadSessionAnalysisBatch,
   ]);
 
   const executeResign = useCallback(() => {
@@ -493,8 +370,7 @@ export const useChessGameLifecycle = ({
     setLiveOpening(null);
     openingHistoryRef.current = [];
     resetEngine();
-    clearAnalysis();
-    uploadedAnalysisSessionsRef.current.clear();
+    coordinator.clearSession();
     setBlunderAlert(null);
     setShowFlash(false);
     setShowPassToast(false);
@@ -515,7 +391,7 @@ export const useChessGameLifecycle = ({
   }, [
     blunderRecordedRef,
     chess,
-    clearAnalysis,
+    coordinator,
     clearMoveHighlights,
     openingHistoryRef,
     pendingAnalysisContextRef,
@@ -535,7 +411,6 @@ export const useChessGameLifecycle = ({
     setShowResignWarning,
     setShowRevertWarning,
     setShowStartOverlay,
-    uploadedAnalysisSessionsRef,
   ]);
 
   const handleShowStartOverlay = useCallback(() => {
@@ -551,12 +426,14 @@ export const useChessGameLifecycle = ({
 
   const handleViewAnalysis = useCallback(() => {
     setShowPostGamePrompt(false);
-    onOpenHistory?.({ select: "latest", source: "post_game_view_analysis" });
+    const sid = useGameStore.getState().sessionId ?? undefined;
+    onOpenHistory?.({ select: "latest", source: "post_game_view_analysis", sessionId: sid });
   }, [onOpenHistory, setShowPostGamePrompt]);
 
   const handleViewHistory = useCallback(() => {
     setShowPostGamePrompt(false);
-    onOpenHistory?.({ select: "latest", source: "post_game_history" });
+    const sid = useGameStore.getState().sessionId ?? undefined;
+    onOpenHistory?.({ select: "latest", source: "post_game_history", sessionId: sid });
   }, [onOpenHistory, setShowPostGamePrompt]);
 
   return {
@@ -572,7 +449,6 @@ export const useChessGameLifecycle = ({
     handleShowStartOverlay,
     handleViewAnalysis,
     handleViewHistory,
-    uploadSessionAnalysisBatch,
     showRevertWarning,
   };
 };

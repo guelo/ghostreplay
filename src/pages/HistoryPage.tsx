@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
 import {
   fetchHistory,
   fetchAnalysis,
@@ -7,6 +7,7 @@ import {
   type HistoryGame,
   type SessionAnalysis,
 } from "../utils/api";
+import type { OpenHistoryOptions } from "../components/chess-game/types";
 import AnalysisBoard from "../components/AnalysisBoard";
 import AppNav from "../components/AppNav";
 import { useTouchOnly } from "../hooks/useTouchOnly";
@@ -83,13 +84,22 @@ function computeSideStats(
   return { player, opponent };
 }
 
+const POLL_INTERVAL_MS = 2000;
+const POLL_MAX_ATTEMPTS = 60;
+
 function HistoryPage() {
+  const location = useLocation();
+  const navState = location.state as OpenHistoryOptions | null;
+
   const [games, setGames] = useState<HistoryGame[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisProcessing, setAnalysisProcessing] = useState(false);
+  const pollCountRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -98,9 +108,14 @@ function HistoryPage() {
         if (cancelled) return;
         setGames(data);
         if (data.length > 0) {
+          // Honor sessionId from navigation state, or fall back to first game
+          const targetId =
+            navState?.sessionId && data.some((g) => g.session_id === navState.sessionId)
+              ? navState.sessionId
+              : data[0].session_id;
           setAnalysisLoading(true);
           setAnalysis(null);
-          setSelectedId(data[0].session_id);
+          setSelectedId(targetId);
         } else {
           setSelectedId(null);
           setAnalysis(null);
@@ -117,25 +132,65 @@ function HistoryPage() {
     return () => {
       cancelled = true;
     };
+  // navState is only read on initial mount
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Fetch analysis and poll while incomplete
   useEffect(() => {
-    if (!selectedId) {
-      return;
-    }
+    if (!selectedId) return;
+
     let cancelled = false;
-    fetchAnalysis(selectedId)
-      .then((data) => {
-        if (!cancelled) setAnalysis(data);
-      })
-      .catch(() => {
-        // Analysis fetch failed — pane will fall back to summary from history list
-      })
-      .finally(() => {
-        if (!cancelled) setAnalysisLoading(false);
-      });
+    pollCountRef.current = 0;
+    setAnalysisProcessing(false);
+
+    const doFetch = (isInitial: boolean) => {
+      const fetchPromise = fetchAnalysis(selectedId);
+      fetchPromise
+        .then((data) => {
+          if (cancelled) return;
+          setAnalysis(data);
+          if (isInitial) setAnalysisLoading(false);
+
+          if (!data.is_complete && pollCountRef.current < POLL_MAX_ATTEMPTS) {
+            setAnalysisProcessing(true);
+            pollCountRef.current++;
+            pollTimerRef.current = setTimeout(() => {
+              if (!cancelled) doFetch(false);
+            }, POLL_INTERVAL_MS);
+          } else if (data.is_complete) {
+            setAnalysisProcessing(false);
+            // Refetch history summary once complete to sync counts
+            fetchHistory()
+              .then((fresh) => { if (!cancelled) setGames(fresh); })
+              .catch(() => {});
+          } else {
+            // Poll cap reached but still incomplete — keep the banner
+            // so the user knows the data is not final.
+            setAnalysisProcessing(true);
+          }
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (isInitial) setAnalysisLoading(false);
+          // Keep polling after transient errors so we don't get stuck
+          if (pollCountRef.current < POLL_MAX_ATTEMPTS) {
+            pollCountRef.current++;
+            pollTimerRef.current = setTimeout(() => {
+              if (!cancelled) doFetch(false);
+            }, POLL_INTERVAL_MS);
+          }
+        });
+    };
+
+    doFetch(true);
+
     return () => {
       cancelled = true;
+      if (pollTimerRef.current) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
     };
   }, [selectedId]);
 
@@ -245,6 +300,12 @@ function HistoryPage() {
                 {analysisLoading && (
                   <p className="analysis-pane__placeholder">
                     Loading analysis...
+                  </p>
+                )}
+
+                {analysisProcessing && (
+                  <p className="analysis-pane__processing">
+                    Analysis still processing{"\u2026"}
                   </p>
                 )}
 

@@ -88,6 +88,9 @@ class SessionAnalysisResponse(BaseModel):
     moves: list[SessionAnalysisMove]
     summary: SessionAnalysisSummary
     position_analysis: dict[str, PositionAnalysis] = {}
+    expected_total_moves: int | None = None
+    analyzed_moves: int = 0
+    is_complete: bool = False
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -329,6 +332,24 @@ def get_session_analysis(
                 best_move_eval_cp=move.best_move_eval_cp,
             )
 
+    # Completion metadata: derive expected_total_moves from stored PGN
+    expected_total_moves: int | None = None
+    if game_session.pgn:
+        try:
+            import chess.pgn
+            import io
+            pgn_game = chess.pgn.read_game(io.StringIO(game_session.pgn))
+            if pgn_game is not None:
+                expected_total_moves = sum(1 for _ in pgn_game.mainline_moves())
+        except Exception:
+            pass
+
+    analyzed_moves = len(session_moves)
+    is_complete = (
+        expected_total_moves is not None
+        and analyzed_moves >= expected_total_moves
+    )
+
     return SessionAnalysisResponse(
         session_id=game_session.id,
         pgn=game_session.pgn,
@@ -355,4 +376,7 @@ def get_session_analysis(
             average_centipawn_loss=average_centipawn_loss,
         ),
         position_analysis=position_analysis,
+        expected_total_moves=expected_total_moves,
+        analyzed_moves=analyzed_moves,
+        is_complete=is_complete,
     )

@@ -509,6 +509,9 @@ export interface SessionAnalysis {
   moves: AnalysisMove[]
   summary: GameSummary
   position_analysis?: Record<string, PositionAnalysis>
+  expected_total_moves: number | null
+  analyzed_moves: number
+  is_complete: boolean
 }
 
 /**

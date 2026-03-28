@@ -5,21 +5,30 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import { useChessGameLifecycle } from "./useChessGameLifecycle";
 import { useGameStore } from "../stores/useGameStore";
-import { createAnalysisStore } from "../stores/createAnalysisStore";
+import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
 
 const fetchCurrentRatingMock = vi.fn();
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
-const uploadSessionMovesMock = vi.fn();
 
 vi.mock("../utils/api", () => ({
   fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
-  uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
 }));
 
 const initialStoreState = useGameStore.getInitialState();
+
+const createMockCoordinator = (): GameAnalysisCoordinator =>
+  ({
+    startSession: vi.fn(),
+    clearSession: vi.fn(),
+    flushPendingUploads: vi.fn().mockResolvedValue(undefined),
+    analyzeMove: vi.fn(),
+    clearAnalysis: vi.fn(),
+    sessionId: null,
+    store: { getState: vi.fn().mockReturnValue({ analysisMap: new Map() }) },
+  }) as unknown as GameAnalysisCoordinator;
 
 type SetupOptions = {
   chess?: Chess;
@@ -54,12 +63,7 @@ const setup = ({
     liveFen: chess.fen(),
   });
 
-  const analysisStore = createAnalysisStore();
-  // Set initial status to ready for tests
-  analysisStore.getState().setStatus("ready");
-  const uploadedAnalysisSessionsRef: MutableRefObject<Set<string>> = {
-    current: new Set(),
-  };
+  const coordinator = createMockCoordinator();
   const openingHistoryRef: MutableRefObject<Array<null>> = { current: [] };
   const blunderRecordedRef: MutableRefObject<boolean> = { current: false };
   const pendingAnalysisContextRef: MutableRefObject<{
@@ -78,7 +82,6 @@ const setup = ({
   const clearMoveHighlights = vi.fn();
   const resetMode = vi.fn();
   const resetEngine = vi.fn();
-  const clearAnalysis = vi.fn();
   const onOpenHistory = vi.fn();
   const setEngineMessage = vi.fn();
   const setIsStartingGame = vi.fn();
@@ -98,8 +101,7 @@ const setup = ({
   const { result } = renderHook(() =>
     useChessGameLifecycle({
       chess,
-      analysisStore,
-      uploadedAnalysisSessionsRef,
+      coordinator,
       openingHistoryRef,
       blunderRecordedRef,
       pendingAnalysisContextRef,
@@ -107,7 +109,6 @@ const setup = ({
       clearMoveHighlights,
       resetMode,
       resetEngine,
-      clearAnalysis,
       onOpenHistory,
       setEngineMessage,
       setIsStartingGame,
@@ -147,7 +148,6 @@ beforeEach(() => {
   });
   startGameMock.mockReset();
   endGameMock.mockReset();
-  uploadSessionMovesMock.mockReset();
 });
 
 describe("useChessGameLifecycle", () => {
@@ -210,10 +210,12 @@ describe("useChessGameLifecycle", () => {
     });
 
     expect(setShowPostGamePrompt).toHaveBeenCalledWith(false);
-    expect(onOpenHistory).toHaveBeenCalledWith({
-      select: "latest",
-      source: "post_game_view_analysis",
-    });
+    expect(onOpenHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: "latest",
+        source: "post_game_view_analysis",
+      }),
+    );
   });
 
   it("shows start overlay and resets side choice to random", async () => {

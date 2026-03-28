@@ -4,12 +4,15 @@ import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import AppRoutes from './AppRoutes.tsx'
 import { AuthProvider } from './contexts/AuthContext.tsx'
+import { GameAnalysisCoordinatorProvider } from './contexts/GameAnalysisCoordinatorContext.tsx'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <AuthProvider>
       <BrowserRouter>
-        <AppRoutes />
+        <GameAnalysisCoordinatorProvider>
+          <AppRoutes />
+        </GameAnalysisCoordinatorProvider>
       </BrowserRouter>
     </AuthProvider>
   </StrictMode>,

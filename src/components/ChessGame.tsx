@@ -4,7 +4,6 @@ import type { Square } from "chess.js";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
-import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useChessGameController } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useGameStore } from "../stores/useGameStore";
@@ -12,6 +11,7 @@ import {
   gameAnalysisStore,
   AnalysisStoreProvider,
 } from "../stores/createAnalysisStore";
+import { useGameAnalysisCoordinator } from "../contexts/GameAnalysisCoordinatorContext";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
 import type { TargetBlunderSrs } from "../utils/api";
@@ -79,6 +79,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Singleton analysis store — persists across remounts like the game store.
   const analysisStore = gameAnalysisStore;
+  const coordinator = useGameAnalysisCoordinator();
 
   // --- Cross-boundary state from zustand store ---
   const fen = useGameStore((s) => s.liveFen);
@@ -99,7 +100,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   } = useStockfishEngine();
 
   // Imperative-only — ChessGame does NOT subscribe to analysis state.
-  const { analyzeMove, clearAnalysis } = useMoveAnalysis(analysisStore);
+  // Analysis is delegated to the coordinator which survives route navigation.
+  const analyzeMove = useCallback(
+    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number) =>
+      coordinator.analyzeMove(fen, move, playerColor, moveIndex, legalMoveCount),
+    [coordinator],
+  );
 
   const [, setEngineMessage] = useState<string | null>(null);
   const sessionId = useGameStore((s) => s.sessionId);
@@ -157,7 +163,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);
   const moveMessagesRef = useRef<Map<number, MoveMessage[]>>(new Map());
   const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
-  const uploadedAnalysisSessionsRef = useRef<Set<string>>(new Set());
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
   const handleGameEndRef = useRef<() => Promise<void>>(async () => {});
   const handleGameEndStable = useCallback(
@@ -388,8 +393,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleViewHistory,
   } = useChessGameLifecycle({
     chess,
-    analysisStore,
-    uploadedAnalysisSessionsRef,
+    coordinator,
     openingHistoryRef,
     blunderRecordedRef,
     pendingAnalysisContextRef,
@@ -397,7 +401,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     clearMoveHighlights,
     resetMode,
     resetEngine,
-    clearAnalysis,
     onOpenHistory,
     setEngineMessage,
     setIsStartingGame,
@@ -420,6 +423,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   useEffect(() => {
     handleGameEndRef.current = handleGameEnd;
   }, [handleGameEnd]);
+
+  // Sync coordinator with existing active session on mount (e.g., after refresh)
+  useEffect(() => {
+    const { sessionId: sid, isGameActive: active } = useGameStore.getState();
+    if (sid && active && coordinator.sessionId !== sid) {
+      coordinator.startSession(sid);
+    }
+  }, [coordinator]);
 
   const applyPlayerMoveAndAdvance = useCallback(
     (sourceSquare: string, targetSquare: string): boolean => {
