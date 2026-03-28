@@ -333,14 +333,14 @@ const MoveList = ({
         {moves.length === 0 && !canRenderVariations ? (
           <p className="move-list-empty">No moves yet</p>
         ) : (
-          <div className="move-list-grid">
+          <div className="move-list-grid" data-player-col={playerColor}>
             <span className="move-list-header move-list-header-eval">
               {headerEval}
             </span>
-            <span className="move-list-header">
+            <span className={`move-list-header${playerColor === "white" ? " move-list-header--you" : ""}`}>
               {playerColor === "white" ? "You" : "Engine"}
             </span>
-            <span className="move-list-header">
+            <span className={`move-list-header${playerColor === "black" ? " move-list-header--you" : ""}`}>
               {playerColor === "black" ? "You" : "Engine"}
             </span>
             {displayRows.map((item, i) => {

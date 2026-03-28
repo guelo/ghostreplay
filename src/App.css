@@ -172,7 +172,7 @@
 
 .chess-layout {
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr) minmax(200px, 260px);
+    grid-template-columns: 240px minmax(0, 1fr) minmax(220px, 300px);
     grid-template-areas: "panel board moves";
     gap: 1.5rem;
     align-items: start;
@@ -2114,6 +2114,37 @@
     display: grid;
     grid-template-columns: 2.5rem 1fr 1fr;
     align-items: center;
+    position: relative;
+    isolation: isolate;
+}
+
+.move-list-grid[data-player-col="white"] {
+    grid-template-columns: 2.5rem 1.4fr 1fr;
+}
+
+.move-list-grid[data-player-col="black"] {
+    grid-template-columns: 2.5rem 1fr 1.4fr;
+}
+
+/* Continuous tint band behind the player's column */
+.move-list-grid[data-player-col]::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: color-mix(in srgb, var(--brand-secondary) 6%, transparent);
+    pointer-events: none;
+    z-index: -1;
+}
+
+.move-list-grid[data-player-col="white"]::before {
+    left: 2.5rem;
+    width: calc((100% - 2.5rem) * 0.5833);
+}
+
+.move-list-grid[data-player-col="black"]::before {
+    right: 0;
+    width: calc((100% - 2.5rem) * 0.5833);
 }
 
 .move-list-header {
@@ -2128,6 +2159,14 @@
     top: 0;
     background: var(--bg-secondary);
     z-index: 1;
+}
+
+/* "You" header — prominent treatment */
+.move-list-header--you {
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    border-bottom: 2px solid var(--brand-secondary);
+    background: color-mix(in srgb, var(--brand-secondary) 6%, var(--bg-secondary));
 }
 
 .move-list-header-eval {
@@ -2194,6 +2233,12 @@
     color: var(--text-primary);
 }
 
+/* Player column: bigger move text */
+.move-list-grid[data-player-col="white"] .move-col-white.move-button,
+.move-list-grid[data-player-col="black"] .move-col-black.move-button {
+    font-size: 1rem;
+}
+
 /* Eval formula below move */
 .move-eval {
     font-size: 0.6rem;
@@ -2203,6 +2248,12 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+/* Player column: slightly bigger eval */
+.move-list-grid[data-player-col="white"] .move-col-white .move-eval,
+.move-list-grid[data-player-col="black"] .move-col-black .move-eval {
+    font-size: 0.65rem;
 }
 
 .move-eval:empty {
@@ -2261,6 +2312,7 @@
     color: var(--text-secondary);
     line-height: 1.7;
     padding: 0.1rem 0.5rem 0.1rem 2.5rem;
+    background: var(--card-bg);
 }
 
 .variation-prefix {
