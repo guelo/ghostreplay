@@ -1,5 +1,10 @@
 import { memo, useCallback, useId, useRef, useMemo } from "react";
 
+type HighlightedMoves = {
+  indices: number[];
+  classification: 'blunder' | 'mistake' | 'inaccuracy';
+};
+
 type AnalysisGraphProps = {
   evals: (number | null)[];
   currentIndex: number | null;
@@ -9,6 +14,7 @@ type AnalysisGraphProps = {
   isCheckmate?: boolean;
   streamingEval?: { index: number; cp: number } | null;
   pendingIndices?: number[];
+  highlightedMoves?: HighlightedMoves | null;
 };
 
 const SVG_WIDTH = 600;
@@ -71,6 +77,7 @@ const AnalysisGraph = ({
   isCheckmate,
   streamingEval,
   pendingIndices,
+  highlightedMoves,
 }: AnalysisGraphProps) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = useId();
@@ -290,6 +297,21 @@ const AnalysisGraph = ({
             className="analysis-graph__pending-dot"
           />
         ))}
+
+        {/* Classification highlight dots */}
+        {highlightedMoves && highlightedMoves.indices.map((i) => {
+          const pt = points[i];
+          if (!pt) return null;
+          return (
+            <circle
+              key={i}
+              cx={pt[0]}
+              cy={pt[1]}
+              r={6}
+              className={`analysis-graph__highlight-dot analysis-graph__highlight-dot--${highlightedMoves.classification}`}
+            />
+          );
+        })}
 
         {/* Current move indicator */}
         {indicatorX != null && (

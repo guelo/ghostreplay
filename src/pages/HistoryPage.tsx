@@ -1,13 +1,15 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   fetchHistory,
   fetchAnalysis,
+  type AnalysisMove,
   type HistoryGame,
   type SessionAnalysis,
 } from "../utils/api";
 import AnalysisBoard from "../components/AnalysisBoard";
 import AppNav from "../components/AppNav";
+import { useTouchOnly } from "../hooks/useTouchOnly";
 import "../App.css";
 
 function resultLabel(result: string | null): string {
@@ -32,6 +34,53 @@ function formatDate(iso: string): string {
     day: "numeric",
     year: "numeric",
   });
+}
+
+type ClassKey = 'blunder' | 'mistake' | 'inaccuracy';
+type SideStats = Record<ClassKey, { count: number; indices: number[] }> & { avgCpl: number };
+type StatSelection = { side: 'player' | 'opponent'; cls: ClassKey } | null;
+
+const CLASS_KEYS: ClassKey[] = ['blunder', 'mistake', 'inaccuracy'];
+
+function computeSideStats(
+  moves: AnalysisMove[],
+  playerColor: 'white' | 'black',
+): { player: SideStats; opponent: SideStats } {
+  const makeSide = (): SideStats => ({
+    blunder: { count: 0, indices: [] },
+    mistake: { count: 0, indices: [] },
+    inaccuracy: { count: 0, indices: [] },
+    avgCpl: 0,
+  });
+  const player = makeSide();
+  const opponent = makeSide();
+
+  let playerDeltaSum = 0, playerDeltaCount = 0;
+  let opponentDeltaSum = 0, opponentDeltaCount = 0;
+
+  for (let i = 0; i < moves.length; i++) {
+    const m = moves[i];
+    const isPlayer = m.color === playerColor;
+    const side = isPlayer ? player : opponent;
+    const cls = m.classification as ClassKey | null;
+    if (cls && cls in side) {
+      side[cls].count++;
+      side[cls].indices.push(i);
+    }
+    if (m.eval_delta != null) {
+      if (isPlayer) {
+        playerDeltaSum += m.eval_delta;
+        playerDeltaCount++;
+      } else {
+        opponentDeltaSum += m.eval_delta;
+        opponentDeltaCount++;
+      }
+    }
+  }
+  player.avgCpl = playerDeltaCount > 0 ? Math.round(playerDeltaSum / playerDeltaCount) : 0;
+  opponent.avgCpl = opponentDeltaCount > 0 ? Math.round(opponentDeltaSum / opponentDeltaCount) : 0;
+
+  return { player, opponent };
 }
 
 function HistoryPage() {
@@ -90,7 +139,55 @@ function HistoryPage() {
     };
   }, [selectedId]);
 
+  const [statInteraction, setStatInteraction] = useState<{
+    gameId: string | null;
+    pinned: StatSelection;
+    hovered: StatSelection;
+  }>({ gameId: null, pinned: null, hovered: null });
+
+  // Reset interaction state when game changes (derived state pattern)
+  const pinnedStat = statInteraction.gameId === selectedId ? statInteraction.pinned : null;
+  const hoveredStat = statInteraction.gameId === selectedId ? statInteraction.hovered : null;
+
+  const setPinnedStat = useCallback((pinned: StatSelection) => {
+    setStatInteraction(prev => ({ ...prev, gameId: selectedId, pinned }));
+  }, [selectedId]);
+
+  const setHoveredStat = useCallback((hovered: StatSelection) => {
+    setStatInteraction(prev => ({ ...prev, gameId: selectedId, hovered }));
+  }, [selectedId]);
+
+  const isTouchOnly = useTouchOnly();
+
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
+  const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
+
+  const sideStats = useMemo(() => {
+    if (!analysis) return null;
+    return computeSideStats(analysis.moves, playerColor);
+  }, [analysis, playerColor]);
+
+  const activeStat = hoveredStat ?? pinnedStat;
+
+  const highlightedMoves = useMemo(() => {
+    if (!activeStat || !sideStats) return null;
+    const stats = activeStat.side === 'player' ? sideStats.player : sideStats.opponent;
+    return { indices: stats[activeStat.cls].indices, classification: activeStat.cls };
+  }, [activeStat, sideStats]);
+
+  const handleStatHover = useCallback((sel: StatSelection) => {
+    if (isTouchOnly) return;
+    setHoveredStat(sel);
+  }, [isTouchOnly, setHoveredStat]);
+
+  const handleStatClick = useCallback((sel: StatSelection) => {
+    const isToggleOff = pinnedStat?.side === sel?.side && pinnedStat?.cls === sel?.cls;
+    setPinnedStat(isToggleOff ? null : sel);
+  }, [pinnedStat, setPinnedStat]);
+
+  const handleGraphMoveClick = useCallback(() => {
+    setPinnedStat(null);
+  }, [setPinnedStat]);
 
   return (
     <main className="app-shell history-page">
@@ -151,47 +248,73 @@ function HistoryPage() {
                   </p>
                 )}
 
-                {!analysisLoading && analysis && (
+                {!analysisLoading && analysis && sideStats && (
                   <AnalysisBoard
                     key={selectedGame.session_id}
                     moves={analysis.moves}
-                    boardOrientation={
-                      selectedGame.player_color as "white" | "black"
-                    }
+                    boardOrientation={playerColor}
                     positionAnalysis={analysis.position_analysis}
+                    highlightedMoves={highlightedMoves}
+                    onGraphMoveClick={handleGraphMoveClick}
                     footer={
-                      <div className="analysis-pane__summary">
-                        <div className="analysis-stat">
-                          <span className="analysis-stat__value">
-                            {analysis.moves.length}
-                          </span>
-                          <span className="analysis-stat__label">Moves</span>
-                        </div>
-                        <div className="analysis-stat">
-                          <span className="analysis-stat__value">
-                            {analysis.summary.blunders}
-                          </span>
-                          <span className="analysis-stat__label">Blunders</span>
-                        </div>
-                        <div className="analysis-stat">
-                          <span className="analysis-stat__value">
-                            {analysis.summary.mistakes}
-                          </span>
-                          <span className="analysis-stat__label">Mistakes</span>
-                        </div>
-                        <div className="analysis-stat">
-                          <span className="analysis-stat__value">
-                            {analysis.summary.inaccuracies}
-                          </span>
-                          <span className="analysis-stat__label">
-                            Inaccuracies
-                          </span>
-                        </div>
-                        <div className="analysis-stat">
-                          <span className="analysis-stat__value">
-                            {analysis.summary.average_centipawn_loss}
-                          </span>
-                          <span className="analysis-stat__label">Avg CPL</span>
+                      <div className="history-stats-pane">
+                        <div className="history-stats-pane__grid">
+                          {/* Header row */}
+                          <div className="history-stats-pane__header" />
+                          <div className="history-stats-pane__header">You</div>
+                          <div className="history-stats-pane__header">Ghost</div>
+
+                          {/* Classification rows */}
+                          {CLASS_KEYS.map((cls) => {
+                            const label = cls === 'inaccuracy' ? 'Inaccur.' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
+                            const fullLabel = cls === 'inaccuracy' ? 'Inaccuracies' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
+                            const labelSel = { side: 'player' as const, cls };
+                            const isLabelActive = activeStat?.cls === cls;
+                            const isLabelPressed = pinnedStat?.side === 'player' && pinnedStat?.cls === cls;
+                            return [
+                              <button
+                                key={`${cls}-label`}
+                                type="button"
+                                aria-label={`Your ${fullLabel}`}
+                                aria-pressed={isLabelPressed}
+                                className={`history-stats-pane__label history-stats-pane__label--${cls} history-stats-pane__label--interactive${isLabelActive ? ' history-stats-pane__label--active' : ''}`}
+                                onMouseEnter={() => handleStatHover(labelSel)}
+                                onMouseLeave={() => handleStatHover(null)}
+                                onClick={() => handleStatClick(labelSel)}
+                              >
+                                {label}
+                              </button>,
+                              ...(['player', 'opponent'] as const).map((side) => {
+                                const sel = { side, cls };
+                                const isActive = activeStat?.side === side && activeStat?.cls === cls;
+                                const isPressed = pinnedStat?.side === side && pinnedStat?.cls === cls;
+                                const sideLabel = side === 'player' ? 'Your' : 'Ghost';
+                                return (
+                                  <button
+                                    key={`${cls}-${side}`}
+                                    type="button"
+                                    aria-label={`${sideLabel} ${fullLabel}: ${sideStats[side][cls].count}`}
+                                    aria-pressed={isPressed}
+                                    className={`history-stats-pane__value history-stats-pane__value--${cls} history-stats-pane__value--interactive${isActive ? ' history-stats-pane__value--active' : ''}`}
+                                    onMouseEnter={() => handleStatHover(sel)}
+                                    onMouseLeave={() => handleStatHover(null)}
+                                    onClick={() => handleStatClick(sel)}
+                                  >
+                                    {sideStats[side][cls].count}
+                                  </button>
+                                );
+                              }),
+                            ];
+                          })}
+
+                          {/* Avg CPL row */}
+                          <div className="history-stats-pane__label">Avg CPL</div>
+                          <div className="history-stats-pane__value">{sideStats.player.avgCpl}</div>
+                          <div className="history-stats-pane__value">{sideStats.opponent.avgCpl}</div>
+
+                          {/* Moves row */}
+                          <div className="history-stats-pane__label">Moves</div>
+                          <div className="history-stats-pane__value history-stats-pane__value--span">{analysis.moves.length}</div>
                         </div>
                       </div>
                     }
@@ -201,33 +324,23 @@ function HistoryPage() {
                 {!analysisLoading && !analysis && (
                   <div className="analysis-pane__summary">
                     <div className="analysis-stat">
-                      <span className="analysis-stat__value">
-                        {selectedGame.summary.total_moves}
-                      </span>
+                      <span className="analysis-stat__value">{selectedGame.summary.total_moves}</span>
                       <span className="analysis-stat__label">Moves</span>
                     </div>
                     <div className="analysis-stat">
-                      <span className="analysis-stat__value">
-                        {selectedGame.summary.blunders}
-                      </span>
+                      <span className="analysis-stat__value">{selectedGame.summary.blunders}</span>
                       <span className="analysis-stat__label">Blunders</span>
                     </div>
                     <div className="analysis-stat">
-                      <span className="analysis-stat__value">
-                        {selectedGame.summary.mistakes}
-                      </span>
+                      <span className="analysis-stat__value">{selectedGame.summary.mistakes}</span>
                       <span className="analysis-stat__label">Mistakes</span>
                     </div>
                     <div className="analysis-stat">
-                      <span className="analysis-stat__value">
-                        {selectedGame.summary.inaccuracies}
-                      </span>
+                      <span className="analysis-stat__value">{selectedGame.summary.inaccuracies}</span>
                       <span className="analysis-stat__label">Inaccuracies</span>
                     </div>
                     <div className="analysis-stat">
-                      <span className="analysis-stat__value">
-                        {selectedGame.summary.average_centipawn_loss}
-                      </span>
+                      <span className="analysis-stat__value">{selectedGame.summary.average_centipawn_loss}</span>
                       <span className="analysis-stat__label">Avg CPL</span>
                     </div>
                   </div>

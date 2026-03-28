@@ -25,6 +25,8 @@ type AnalysisBoardProps = {
   initialMoveIndex?: number;
   footer?: React.ReactNode;
   positionAnalysis?: Record<string, PositionAnalysis>;
+  highlightedMoves?: { indices: number[]; classification: 'blunder' | 'mistake' | 'inaccuracy' } | null;
+  onGraphMoveClick?: () => void;
 };
 
 // Convert SAN move to start/end squares using chess.js
@@ -158,6 +160,8 @@ const AnalysisBoard = ({
   initialMoveIndex,
   footer,
   positionAnalysis,
+  highlightedMoves,
+  onGraphMoveClick,
 }: AnalysisBoardProps) => {
   const [currentIndex, setCurrentIndex] = useState<number | null>(
     initialMoveIndex ?? null,
@@ -511,6 +515,15 @@ const AnalysisBoard = ({
     [setSelectedVarNode],
   );
 
+  // Graph click: navigate + clear pinned highlights
+  const handleGraphSelect = useCallback(
+    (index: number) => {
+      handleNavigate(index);
+      onGraphMoveClick?.();
+    },
+    [handleNavigate, onGraphMoveClick],
+  );
+
   // Handle variation node selection from MoveList
   const handleVarSelect = useCallback(
     (nodeId: VariationNodeId | null) => {
@@ -706,8 +719,9 @@ const AnalysisBoard = ({
           <AnalysisGraph
             evals={evals}
             currentIndex={currentIndex}
-            onSelectMove={handleNavigate}
+            onSelectMove={handleGraphSelect}
             playerColor={boardOrientation}
+            highlightedMoves={highlightedMoves}
             evalCp={currentEvalCp ?? evals[effectiveIndex] ?? null}
             isCheckmate={currentEvalMate === 0}
           />

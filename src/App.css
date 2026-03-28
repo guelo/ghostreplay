@@ -1043,6 +1043,118 @@
     letter-spacing: 0.05em;
 }
 
+/* History stats pane: two-column (player vs opponent) */
+.history-stats-pane {
+    background: #fff;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+}
+
+.history-stats-pane__grid {
+    display: grid;
+    grid-template-columns: auto 1fr 1fr;
+    gap: 0.15rem 0.75rem;
+    align-items: center;
+}
+
+.history-stats-pane__header {
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+    text-align: center;
+    padding-bottom: 0.2rem;
+}
+
+.history-stats-pane__label {
+    all: unset;
+    font-size: 0.65rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-secondary);
+    text-align: left;
+}
+
+.history-stats-pane__label--blunder { color: var(--eval-blunder); }
+.history-stats-pane__label--mistake { color: var(--eval-mistake); }
+.history-stats-pane__label--inaccuracy { color: var(--eval-inaccuracy); }
+
+.history-stats-pane__label--interactive {
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 0.1rem 0.15rem;
+    transition: background 0.15s, outline-color 0.15s;
+}
+
+.history-stats-pane__label--interactive:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+
+.history-stats-pane__label--interactive:hover {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.history-stats-pane__label--active {
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+
+.history-stats-pane__value {
+    all: unset;
+    font-size: 0.95rem;
+    font-weight: 700;
+    text-align: center;
+    color: var(--text-primary);
+    padding: 0.1rem 0.25rem;
+    border-radius: 4px;
+}
+
+.history-stats-pane__value--blunder { color: var(--eval-blunder); }
+.history-stats-pane__value--mistake { color: var(--eval-mistake); }
+.history-stats-pane__value--inaccuracy { color: var(--eval-inaccuracy); }
+
+.history-stats-pane__value--interactive {
+    cursor: pointer;
+    transition: background 0.15s, outline-color 0.15s;
+}
+
+.history-stats-pane__value--interactive:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+
+.history-stats-pane__value--interactive:hover {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.history-stats-pane__value--active {
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+
+.history-stats-pane__value--span {
+    grid-column: 2 / -1;
+}
+
+/* Analysis graph highlight dots */
+.analysis-graph__highlight-dot {
+    stroke: white;
+    stroke-width: 1.5;
+    pointer-events: none;
+}
+
+.analysis-graph__highlight-dot--blunder { fill: var(--eval-blunder); }
+.analysis-graph__highlight-dot--mistake { fill: var(--eval-mistake); }
+.analysis-graph__highlight-dot--inaccuracy { fill: var(--eval-inaccuracy); }
+
+/* Responsive: narrow viewports — stats above graph (history page only) */
+@media (max-width: 720px) {
+    .history-page .analysis-board__graph-footer {
+        order: -1;
+    }
+}
+
 .analysis-pane__placeholder {
     margin: 0;
     font-size: 0.95rem;
