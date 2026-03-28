@@ -1162,6 +1162,14 @@
     padding: 1rem 0;
 }
 
+.analysis-pane__processing {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-tertiary);
+    padding: 0.25rem 0 0.5rem;
+    opacity: 0.8;
+}
+
 .analysis-pane__board-placeholder {
     margin: 1rem 0;
     padding: 2rem 1rem;
@@ -1482,88 +1490,6 @@
     color: var(--text-tertiary);
 }
 
-
-.analysis-board__position-info {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--border-color);
-    background: var(--bg-tertiary);
-    font-size: 0.85rem;
-    color: var(--text-tertiary);
-}
-
-.analysis-board__position-info-row {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-}
-
-.analysis-board__eval-text {
-    font-size: 0.9rem;
-    font-weight: 600;
-}
-
-.analysis-board__eval-text--positive {
-    color: var(--text-primary);
-}
-.analysis-board__eval-text--negative {
-    color: var(--text-tertiary);
-}
-
-.analysis-board__classification {
-    font-size: 0.75rem;
-    font-weight: 600;
-    text-transform: capitalize;
-    padding: 0.15rem 0.45rem;
-    border-radius: 0.25rem;
-}
-
-.analysis-board__classification--blunder {
-    color: var(--eval-blunder);
-    background: var(--eval-blunder-bg);
-}
-
-.analysis-board__classification--mistake {
-    color: var(--eval-mistake);
-    background: var(--eval-mistake-bg);
-}
-
-.analysis-board__classification--inaccuracy {
-    color: var(--eval-inaccuracy);
-    background: var(--eval-inaccuracy-bg);
-}
-
-.analysis-board__classification--good {
-    color: var(--text-tertiary);
-    background: var(--hover-overlay);
-}
-
-.analysis-board__classification--excellent,
-.analysis-board__classification--best {
-    color: var(--eval-excellent);
-    background: var(--eval-excellent-bg);
-}
-
-.analysis-board__played-label,
-.analysis-board__best-label,
-.analysis-board__delta-label {
-    font-weight: 500;
-}
-
-.analysis-board__delta-value {
-    color: var(--text-primary);
-}
-
-.analysis-board__played-move {
-    color: var(--error-light);
-}
-.analysis-board__best-move {
-    color: var(--success-light);
-}
 
 @media (max-width: 720px) {
     .analysis-board__layout {

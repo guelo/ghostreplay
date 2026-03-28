@@ -157,40 +157,7 @@ beforeEach(() => {
   vi.clearAllMocks()
 })
 
-describe('AnalysisBoard position info', () => {
-  it('shows played move eval, best move eval, eval delta, and classification', () => {
-    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
-
-    expect(screen.getByText('Played:')).toBeInTheDocument()
-    expect(screen.getByText('c5')).toBeInTheDocument()
-    expect(screen.getByText('(+1.2)')).toBeInTheDocument()
-
-    expect(screen.getByText('Best:')).toBeInTheDocument()
-    expect(screen.getByText('e5')).toBeInTheDocument()
-    expect(screen.getByText('(+0.2)')).toBeInTheDocument()
-
-    expect(screen.getByText('Delta:')).toBeInTheDocument()
-    expect(screen.getByText('+100 cp')).toBeInTheDocument()
-    expect(screen.getByText('inaccuracy')).toBeInTheDocument()
-  })
-
-  it('updates panel values when navigating to a different move', () => {
-    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
-
-    expect(screen.getAllByText('e4').length).toBeGreaterThan(0)
-    expect(screen.getAllByText('(+0.3)').length).toBeGreaterThan(0)
-    expect(screen.getByText('+0 cp')).toBeInTheDocument()
-    expect(screen.getByText('best')).toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
-
-    expect(screen.getByText('c5')).toBeInTheDocument()
-    expect(screen.getByText('+100 cp')).toBeInTheDocument()
-    expect(screen.getByText('inaccuracy')).toBeInTheDocument()
-  })
-
+describe('AnalysisBoard MoveList', () => {
   it('passes player color to MoveList from board orientation', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="black" />)
 
@@ -368,16 +335,6 @@ describe('AnalysisBoard — variation tree integration', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="white" />)
 
     expect(screen.queryByTestId('analysis-graph')).not.toBeInTheDocument()
-  })
-
-  it('hides position info panel when in variation', () => {
-    const node = makeVarNode()
-    mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
-    mockSelectedVarNodeId = 'var-node-1'
-
-    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
-
-    expect(screen.queryByText('Played:')).not.toBeInTheDocument()
   })
 
   it('passes variation tree props to MoveList', () => {
