@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "openings:build-index": "node scripts/build-opening-position-index.mjs",
+    "openings:ingest": "node scripts/ingest-eco-data.mjs",
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:run": "vitest run",

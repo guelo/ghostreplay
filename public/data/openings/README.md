@@ -5,15 +5,21 @@ This directory vendors the full ECO opening dataset used by the client.
 - Files:
   - `eco.json`
   - `eco.byPosition.json`
-- Entries: `3641`
-- Indexed positions: `7484`
-- Source repository: `https://github.com/lichess-org/chess-openings`
-- Source commit: `89797fcc13ad1779411d21bdf8436372264f02ad` (HEAD on 2026-02-06)
-- Upstream license: CC0 Public Domain Dedication (`https://creativecommons.org/publicdomain/zero/1.0/`)
+- Entries: `15374`
+- Indexed positions: `15510`
+- Source repository: `https://github.com/JeffML/eco.json`
+- Source commit: `f398993004c7a84701e24691573af3c9bd196ffd`
+- Upstream license: Public domain ECO data
 
 ## Provenance
 
-`eco.json` was generated from upstream files `a.tsv` through `e.tsv` after normalizing with the upstream build script `bin/gen.py` to include:
+`eco.json` was generated from upstream files `ecoA.json` through `ecoE.json` plus `eco_interpolated.json` using:
+
+```bash
+npm run openings:ingest
+```
+
+The ingest script (`scripts/ingest-eco-data.mjs`) downloads, transforms, deduplicates, and writes entries with fields:
 
 - `eco`
 - `name`
@@ -21,7 +27,9 @@ This directory vendors the full ECO opening dataset used by the client.
 - `uci`
 - `epd`
 
-`eco.byPosition.json` is generated from `eco.json` using:
+It also rebuilds `eco.byPosition.json` automatically.
+
+`eco.byPosition.json` can also be regenerated independently from `eco.json` using:
 
 ```bash
 npm run openings:build-index
