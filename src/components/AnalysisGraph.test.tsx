@@ -10,6 +10,14 @@ function getPathD(container: HTMLElement, className: string) {
   return el?.getAttribute('d') ?? null
 }
 
+function getLinePoints(container: HTMLElement) {
+  const d = getPathD(container, 'analysis-graph__line') ?? ''
+  return Array.from(d.matchAll(/[ML]([0-9.]+),([0-9.]+)/g), ([, x, y]) => ({
+    x: Number(x),
+    y: Number(y),
+  }))
+}
+
 describe('AnalysisGraph — y-axis', () => {
   it('renders "#" when isCheckmate is true', () => {
     const { container } = render(
@@ -259,7 +267,7 @@ describe('AnalysisGraph — incremental geometry', () => {
     expect(getPathD(container, 'analysis-graph__area-black')).toBe(areaBlackBefore)
   })
 
-  it('confirmed paths rescale when evals change (analysis resolves)', () => {
+  it('appending a resolved eval still updates the path geometry', () => {
     const { container, rerender } = render(
       <AnalysisGraph
         evals={baseEvals}
@@ -271,7 +279,7 @@ describe('AnalysisGraph — incremental geometry', () => {
 
     const lineBefore = getPathD(container, 'analysis-graph__line')
 
-    // Analysis resolves — new eval added that extends the scale
+    // Analysis resolves with one extra move, so x-spacing changes.
     const updatedEvals = [...baseEvals, 500]
     rerender(
       <AnalysisGraph
@@ -285,6 +293,35 @@ describe('AnalysisGraph — incremental geometry', () => {
     const lineAfter = getPathD(container, 'analysis-graph__line')
     expect(lineAfter).toBeTruthy()
     expect(lineAfter).not.toBe(lineBefore)
+  })
+
+  it('keeps earlier points fixed when a later eval becomes extreme', () => {
+    const { container, rerender } = render(
+      <AnalysisGraph
+        evals={[50, 100, 150]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const before = getLinePoints(container)
+    expect(before).toHaveLength(3)
+
+    rerender(
+      <AnalysisGraph
+        evals={[50, 100, 3000]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const after = getLinePoints(container)
+    expect(after).toHaveLength(3)
+
+    expect(after[0]).toEqual(before[0])
+    expect(after[1]).toEqual(before[1])
+    expect(after[2].x).toBe(before[2].x)
+    expect(after[2].y).not.toBe(before[2].y)
   })
 
   it('streaming dot is clamped within chart bounds', () => {

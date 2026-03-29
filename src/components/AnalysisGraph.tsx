@@ -24,16 +24,10 @@ const PAD_X_RIGHT = 0;
 const PAD_Y = 4;
 
 /**
- * Signed log scale: maps centipawns to a visually compressed value.
- * Uses log(1 + |cp|/100) so that:
- *   - 0cp → 0
- *   - ±100cp (1 pawn) → ±0.69
- *   - ±500cp (5 pawns) → ±1.79
- *   - ±9990cp (~mate)  → ±4.61
- * This keeps early-game detail visible even when late-game evals explode.
+ * Bounded tanh scale: gives more vertical separation to early-game eval swings
+ * while preventing late-game blowouts from flattening the whole chart.
  */
-const logScale = (cp: number) =>
-  Math.sign(cp) * Math.log1p(Math.abs(cp) / 100);
+const scale = (cp: number) => Math.tanh(cp / 300);
 
 const EVAL_COLOR_LOSING: [number, number, number] = [255, 59, 48]; // #FF3B30
 const EVAL_COLOR_EQUAL: [number, number, number] = [158, 158, 158]; // #9E9E9E
@@ -94,42 +88,26 @@ const AnalysisGraph = ({
   const chartH = SVG_HEIGHT - PAD_Y * 2;
   const midY = PAD_Y + chartH / 2;
 
-  // Compute maxLog from confirmed evals only — streaming eval is excluded so
-  // confirmed geometry (points, paths) stays frozen across streaming ticks.
-  const maxLog = useMemo(() => {
-    let ml = logScale(200); // minimum range ≈ ±2 pawns
-    for (const ev of evals) {
-      if (ev != null) {
-        const v = Math.abs(logScale(ev));
-        if (v > ml) ml = v;
-      }
-    }
-    return ml;
-  }, [evals]);
-
   const stepX = totalMoves > 1 ? chartW / (totalMoves - 1) : 0;
 
   const cpToY = useCallback(
     (cp: number) => {
-      const scaled = logScale(cp);
-      const raw = midY - (scaled / maxLog) * (chartH / 2);
-      // Clamp to chart bounds so streaming dots can't escape when their
-      // value exceeds the confirmed scale.
+      const raw = midY - scale(cp) * (chartH / 2);
+      // Keep all points inside the chart bounds even for extreme mate scores.
       return Math.max(PAD_Y, Math.min(PAD_Y + chartH, raw));
     },
-    [maxLog, chartH, midY],
+    [chartH, midY],
   );
 
-  // Build points array using log scale
+  // Build points array using the bounded tanh scale.
   const points = useMemo(() => {
     if (n === 0) return [];
     return evals.map((ev, i) => {
       const x = PAD_X + i * stepX;
-      const scaled = ev != null ? logScale(ev) : 0;
-      const y = midY - (scaled / maxLog) * (chartH / 2);
+      const y = cpToY(ev ?? 0);
       return [x, y] as [number, number];
     });
-  }, [evals, n, stepX, chartH, midY, maxLog]);
+  }, [evals, n, stepX, cpToY]);
 
   // Area path: trace points then close to zero line
   const areaPath = useMemo(() => {
