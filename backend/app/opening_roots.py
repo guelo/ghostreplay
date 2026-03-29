@@ -213,9 +213,10 @@ def _build_root_dag(
         while walk_queue:
             cur = walk_queue.popleft()
             if cur in boundary_fens:
-                # cur is a boundary root — it's an immediate parent root of br_fen
-                cur_node = graph.get_node(cur)
-                if cur_node is not None and cur_node.name != node.name:
+                # cur is a boundary root — it's an immediate parent root
+                # of br_fen. Identity is FEN-based: same-name roots at
+                # different positions are still distinct edges.
+                if cur != br_fen:
                     parent_map[br_fen].add(cur)
                     child_map[cur].add(br_fen)
                 # Stop walking this chain (don't go past boundary roots)
@@ -262,6 +263,13 @@ def _topological_order(graph: OpeningGraph) -> list[str]:
                 in_degree[child_fen] -= 1
                 if in_degree[child_fen] == 0:
                     queue.append(child_fen)
+
+    if len(order) != len(in_degree):
+        unprocessed = len(in_degree) - len(order)
+        raise RuntimeError(
+            f"Opening graph contains a cycle: {unprocessed} nodes "
+            "were not reachable in topological order"
+        )
 
     return order
 

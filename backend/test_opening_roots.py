@@ -141,8 +141,7 @@ class TestFamilyGrouping:
 
 class TestDAGStructure:
     def test_dag_is_acyclic(self, real_roots: OpeningRoots):
-        """The root DAG should have no cycles."""
-        # DFS-based cycle detection
+        """The full root DAG should have no cycles."""
         WHITE, GRAY, BLACK = 0, 1, 2
         color: dict[str, int] = {}
 
@@ -168,9 +167,11 @@ class TestDAGStructure:
                             stack.append((ck, False))
             return False
 
-        for key in [r.opening_key for fam in real_roots.get_families()[:50]
-                     for r in real_roots.get_family(fam)]:
-            assert not has_cycle_from(key), f"Cycle detected from {key}"
+        for fam in real_roots.get_families():
+            for r in real_roots.get_family(fam):
+                assert not has_cycle_from(r.opening_key), (
+                    f"Cycle detected from {r.opening_key}"
+                )
 
     def test_multi_parent_exists(self, real_roots: OpeningRoots):
         """At least one boundary root should have multiple parent_keys."""
@@ -227,6 +228,56 @@ class TestDAGStructure:
                     assert not real_roots.is_descendant_of(
                         sb.opening_key, nr.opening_key
                     )
+
+
+    def test_same_name_parent_edge(self, real_roots: OpeningRoots):
+        """Same-name boundary roots at different FENs should still have
+        parent/child edges. Regression test: the name guard was dropping
+        these edges."""
+        # Find any boundary root whose parent_keys includes a root with
+        # the same opening_name
+        found = False
+        for fam in real_roots.get_families():
+            for root in real_roots.get_family(fam):
+                for pk in root.parent_keys:
+                    parent = real_roots.get_root(pk)
+                    if parent and parent.opening_name == root.opening_name:
+                        found = True
+                        # Also verify is_descendant_of works
+                        assert real_roots.is_descendant_of(
+                            root.opening_key, pk
+                        )
+                        break
+                if found:
+                    break
+            if found:
+                break
+        assert found, "No same-name parent edge found (expected ~120)"
+
+    def test_zukertort_sicilian_invitation_ancestry(
+        self, real_roots: OpeningRoots, real_graph: OpeningGraph,
+    ):
+        """Concrete case: two 'Zukertort Opening: Sicilian Invitation' roots
+        should have a parent-child edge in the root DAG."""
+        zuk_roots = [
+            r for fam in real_roots.get_families()
+            for r in real_roots.get_family(fam)
+            if r.opening_name == "Zukertort Opening: Sicilian Invitation"
+        ]
+        assert len(zuk_roots) >= 2, (
+            f"Expected >=2 Zukertort Sicilian Invitation roots, got {len(zuk_roots)}"
+        )
+        # At least one pair should have a descendant relationship
+        found_pair = False
+        for i, a in enumerate(zuk_roots):
+            for b in zuk_roots[i + 1:]:
+                if (real_roots.is_descendant_of(a.opening_key, b.opening_key)
+                        or real_roots.is_descendant_of(b.opening_key, a.opening_key)):
+                    found_pair = True
+                    break
+            if found_pair:
+                break
+        assert found_pair
 
 
 class TestOwnership:
