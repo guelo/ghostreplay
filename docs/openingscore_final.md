@@ -29,7 +29,7 @@ That avoids the main failure mode in v8's draft weighting: a weak but frequently
 - repertoire-aware aggregation on user turns instead of `max(child)`
 - opening-book-first architecture using `eco.json` and `eco.byPosition.json`
 - confidence based on unified evidence volume plus recency
-- `underexposed_branch` as a first-class dashboard output
+- `underexposed_branch` as a first-class opening-page output
 
 ### Reject from both
 
@@ -71,7 +71,7 @@ Where:
 
 - `opening_key` = normalized FEN of the named subtree root
 - `opening_name` = display label for that root
-- `opening_family` = shallow family label used for dashboard grouping
+- `opening_family` = shallow family label used for top-level opening-page grouping
 
 The active player at a node is determined by comparing the position's side to move with `player_color`:
 
@@ -105,7 +105,7 @@ Every score is computed for a named subtree root from the opening book.
 
 The system should precompute named roots by walking the book graph and identifying positions where the deepest opening label changes. Those roots become:
 
-- dashboard family cards
+- top-level opening-page family cards
 - variation drill-down entries
 - branch summary anchors
 
@@ -424,11 +424,13 @@ That is the right product answer to off-beat lines and uneven engine exposure.
 
 ## Family Cards and Drill-Down
 
-The UI should support two levels.
+The UI should support two levels on a dedicated opening page.
+
+Do not tack this onto the existing Stats page. The opening score surface should live on its own page.
 
 ### Family cards
 
-Main dashboard cards show opening families such as:
+Top-level opening-page cards show opening families such as:
 
 - `Sicilian Defense`
 - `Italian Game`
@@ -528,9 +530,9 @@ Recompute:
 - after SRS review
 - or by a background batch if that proves simpler
 
-### Phase 3: dashboard
+### Phase 3: opening page
 
-Add:
+Add a dedicated opening page with:
 
 - family cards sorted by weakest opportunity
 - drill-down into named descendants
@@ -589,7 +591,7 @@ This version is the best fit for GhostReplay's actual training loop:
 - it treats side-specific identity as a real part of the data model
 - it directly exposes the engine-exposure problem through `Coverage` and `underexposed_branch`
 
-That makes it suitable for the dashboard you want:
+That makes it suitable for the dedicated opening page you want:
 
 - one honest score per opening
 - drill-down into sub-openings like `Queen's Gambit Declined`
