@@ -104,6 +104,39 @@ class TestBoundaryRootCount:
         assert real_roots.root_count == 11274
 
 
+class TestChildrenNavigation:
+    def test_get_children_none(self, real_roots: OpeningRoots):
+        top_level = real_roots.get_children(None)
+        assert len(top_level) > 0
+        assert all(len(root.parent_keys) == 0 for root in top_level)
+        assert top_level == sorted(top_level, key=lambda root: (root.depth, root.opening_key))
+
+    def test_polish_single_top_level(self, real_roots: OpeningRoots):
+        polish = [
+            root for root in real_roots.get_children(None)
+            if root.opening_name == "Polish Opening"
+        ]
+        assert len(polish) == 1
+
+    def test_overlap_invariants(self, real_roots: OpeningRoots):
+        multi_parent = sum(
+            1 for root in real_roots._roots.values() if len(root.parent_keys) > 1
+        )
+        assert multi_parent > 0
+
+        multiple_top_level = 0
+        for root in real_roots._roots.values():
+            top_level_ancestors = {
+                candidate.opening_key
+                for candidate in real_roots.get_children(None)
+                if real_roots.is_descendant_of(root.opening_key, candidate.opening_key)
+            }
+            if len(top_level_ancestors) > 1:
+                multiple_top_level += 1
+
+        assert multiple_top_level > 0
+
+
 class TestFamilyGrouping:
     def test_every_root_has_family(self, real_roots: OpeningRoots):
         for fam in real_roots.get_families():
@@ -460,6 +493,30 @@ class TestSyntheticTree:
         assert len(c_roots) == 1
         assert len(c_roots[0].child_keys) == 0
 
+    def test_get_children_with_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eco_path, bypos_path = _write_synthetic_tree(Path(tmp))
+            graph = build_opening_graph(eco_path, bypos_path)
+            roots = build_opening_roots(graph)
+
+        opening_a = roots.get_family("Opening A")[0]
+        children = roots.get_children(opening_a.opening_key)
+        assert [child.opening_name for child in children] == ["Opening B"]
+
+    def test_get_descendants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eco_path, bypos_path = _write_synthetic_tree(Path(tmp))
+            graph = build_opening_graph(eco_path, bypos_path)
+            roots = build_opening_roots(graph)
+
+        opening_a = roots.get_family("Opening A")[0]
+        opening_c = roots.get_family("Opening C")[0]
+
+        assert [root.opening_name for root in roots.get_descendants(opening_a.opening_key)] == [
+            "Opening B"
+        ]
+        assert roots.get_descendants(opening_c.opening_key) == []
+
 
 def _write_transposition_data(tmp: Path) -> tuple[Path, Path]:
     """Two paths reaching the same position with different opening names."""
@@ -555,6 +612,61 @@ class TestTransposition:
         z_root = z_roots[0]
         owners = roots.owning_root_keys(z_root.opening_key)
         assert z_root.opening_key in owners
+
+    def test_get_descendants_deduplicates_shared_node(self):
+        root_a = OpeningRoot(
+            opening_key="root-a",
+            opening_name="Root A",
+            opening_family="Root A",
+            eco="A00",
+            depth=1,
+            parent_keys=frozenset(),
+            child_keys=frozenset({"root-b", "root-c"}),
+        )
+        root_b = OpeningRoot(
+            opening_key="root-b",
+            opening_name="Root B",
+            opening_family="Root B",
+            eco="A01",
+            depth=2,
+            parent_keys=frozenset({"root-a"}),
+            child_keys=frozenset({"root-d"}),
+        )
+        root_c = OpeningRoot(
+            opening_key="root-c",
+            opening_name="Root C",
+            opening_family="Root C",
+            eco="A02",
+            depth=2,
+            parent_keys=frozenset({"root-a"}),
+            child_keys=frozenset({"root-d"}),
+        )
+        root_d = OpeningRoot(
+            opening_key="root-d",
+            opening_name="Root D",
+            opening_family="Root D",
+            eco="A03",
+            depth=3,
+            parent_keys=frozenset({"root-b", "root-c"}),
+            child_keys=frozenset(),
+        )
+
+        roots = OpeningRoots(
+            {
+                root_a.opening_key: root_a,
+                root_b.opening_key: root_b,
+                root_c.opening_key: root_c,
+                root_d.opening_key: root_d,
+            },
+            {},
+        )
+
+        descendants = roots.get_descendants(root_a.opening_key)
+        assert [root.opening_key for root in descendants] == [
+            "root-b",
+            "root-c",
+            "root-d",
+        ]
 
 
 # ---------------------------------------------------------------------------

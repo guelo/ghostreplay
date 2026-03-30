@@ -6,6 +6,7 @@ from urllib.parse import quote
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import event
 
 from app.models import (
     GameSession,
@@ -17,6 +18,7 @@ from app.models import (
 from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
+from app.opening_rootcalc import BranchSummary, RootScore
 from app.opening_roots import OpeningRoot, OpeningRoots
 from app.fen import active_color
 
@@ -401,6 +403,89 @@ def _roots_for_rows(*rows: UserOpeningScore) -> OpeningRoots:
         )
         ownership[row.opening_key] = frozenset([row.opening_key])
     return OpeningRoots(roots, ownership)
+
+
+CHILD_KEY_POLISH = "child-polish"
+CHILD_KEY_POLISH_E6 = "child-polish-e6"
+CHILD_KEY_POLISH_BB2 = "child-polish-bb2"
+CHILD_KEY_POLISH_ALT = "child-polish-alt"
+CHILD_KEY_SHARED = "child-shared"
+CHILD_KEY_ENGLISH = "child-english"
+CHILD_KEY_BIRD = "child-bird"
+
+
+def _make_children_roots() -> OpeningRoots:
+    roots = {
+        CHILD_KEY_POLISH: OpeningRoot(
+            opening_key=CHILD_KEY_POLISH,
+            opening_name="Polish Opening",
+            opening_family="Polish Opening",
+            eco="A00",
+            depth=1,
+            parent_keys=frozenset(),
+            child_keys=frozenset({CHILD_KEY_POLISH_E6, CHILD_KEY_POLISH_ALT}),
+        ),
+        CHILD_KEY_POLISH_E6: OpeningRoot(
+            opening_key=CHILD_KEY_POLISH_E6,
+            opening_name="Polish Opening, 1...e6",
+            opening_family="Polish Opening",
+            eco="A00",
+            depth=2,
+            parent_keys=frozenset({CHILD_KEY_POLISH}),
+            child_keys=frozenset({CHILD_KEY_POLISH_BB2, CHILD_KEY_SHARED}),
+        ),
+        CHILD_KEY_POLISH_BB2: OpeningRoot(
+            opening_key=CHILD_KEY_POLISH_BB2,
+            opening_name="Polish Opening, 1...e6 2. Bb2",
+            opening_family="Polish Opening",
+            eco="A00",
+            depth=3,
+            parent_keys=frozenset({CHILD_KEY_POLISH_E6}),
+            child_keys=frozenset(),
+        ),
+        CHILD_KEY_POLISH_ALT: OpeningRoot(
+            opening_key=CHILD_KEY_POLISH_ALT,
+            opening_name="Polish",
+            opening_family="Polish",
+            eco="A00",
+            depth=2,
+            parent_keys=frozenset({CHILD_KEY_POLISH}),
+            child_keys=frozenset({CHILD_KEY_SHARED}),
+        ),
+        CHILD_KEY_SHARED: OpeningRoot(
+            opening_key=CHILD_KEY_SHARED,
+            opening_name="Polish Shared Node",
+            opening_family="Polish Shared Node",
+            eco="A00",
+            depth=3,
+            parent_keys=frozenset({CHILD_KEY_POLISH_E6, CHILD_KEY_POLISH_ALT, CHILD_KEY_ENGLISH}),
+            child_keys=frozenset(),
+        ),
+        CHILD_KEY_ENGLISH: OpeningRoot(
+            opening_key=CHILD_KEY_ENGLISH,
+            opening_name="English Opening",
+            opening_family="English Opening",
+            eco="A10",
+            depth=1,
+            parent_keys=frozenset(),
+            child_keys=frozenset({CHILD_KEY_SHARED}),
+        ),
+        CHILD_KEY_BIRD: OpeningRoot(
+            opening_key=CHILD_KEY_BIRD,
+            opening_name="Bird Opening",
+            opening_family="Bird Opening",
+            eco="A02",
+            depth=1,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        ),
+    }
+    ownership = {opening_key: frozenset({opening_key}) for opening_key in roots}
+    return OpeningRoots(roots, ownership)
+
+
+def _children_url() -> str:
+    return "/api/openings/children"
 
 
 # Case 1: auth required
@@ -1250,6 +1335,171 @@ def test_family_drill_unknown_branch_key_triggers_recompute(client, auth_headers
     assert data["roots"][0]["strongest_branch"]["opening_key"] == DRILL_KEY_SICILIAN_NAJDORF
 
 
+def test_family_drill_lazily_enriches_missing_branch_summaries(client, auth_headers):
+    graph = _make_graph()
+    graph.has_position = lambda fen: fen == DRILL_KEY_RUY_BERLIN  # type: ignore[method-assign]
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=55.0,
+        )
+    ]
+    lazy_score = RootScore(
+        opening_key=DRILL_KEY_RUY_BERLIN,
+        opening_name="Ruy Lopez: Berlin Defense",
+        opening_family=DRILL_FAMILY_RUY,
+        player_color="white",
+        opening_score=55.0,
+        confidence=0.8,
+        coverage=0.7,
+        weighted_depth=3.0,
+        sample_size=12,
+        last_practiced_at=None,
+        strongest_branch=BranchSummary(
+            opening_key=DRILL_KEY_RUY_EXCHANGE,
+            opening_name="Ruy Lopez: Exchange Variation",
+            value=61.0,
+        ),
+        weakest_branch=BranchSummary(
+            opening_key=DRILL_KEY_RUY_MORPHY,
+            opening_name="Ruy Lopez: Morphy Defense",
+            value=48.0,
+        ),
+        underexposed_branch=BranchSummary(
+            opening_key=DRILL_KEY_RUY_EXCHANGE,
+            opening_name="Ruy Lopez: Exchange Variation",
+            value=0.35,
+        ),
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        debug_nodes=[],
+    )
+    with (
+        patch(_PATCH_GRAPH, return_value=graph),
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+        patch(_PATCH_OVERLAY, return_value=_empty_overlay()),
+        patch("app.api.openings.compute_root_score", return_value=lazy_score) as score_mock,
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    score_mock.assert_called_once()
+    item = resp.json()["roots"][0]
+    assert item["strongest_branch"]["opening_key"] == DRILL_KEY_RUY_EXCHANGE
+    assert item["weakest_branch"]["opening_key"] == DRILL_KEY_RUY_MORPHY
+    assert item["underexposed_branch"]["opening_key"] == DRILL_KEY_RUY_EXCHANGE
+
+
+def test_family_drill_lazy_enrichment_does_not_reload_expired_cache_rows(
+    client,
+    auth_headers,
+    db_session,
+):
+    roots = _make_drill_roots()
+    graph = _make_graph()
+    graph.has_position = lambda fen: fen == DRILL_KEY_RUY_BERLIN  # type: ignore[method-assign]
+
+    batch_ts = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    row_ts = datetime(2026, 3, 2, tzinfo=timezone.utc)
+    batch = OpeningScoreBatch(
+        user_id=123,
+        player_color="white",
+        generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+        computed_at=batch_ts,
+    )
+    db_session.add(batch)
+    db_session.flush()
+    db_session.add(
+        UserOpeningScore(
+            batch_id=batch.id,
+            user_id=123,
+            player_color="white",
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=55.0,
+            confidence=0.7,
+            coverage=0.6,
+            weighted_depth=2.0,
+            sample_size=12,
+            last_practiced_at=row_ts,
+            computed_at=batch_ts,
+        )
+    )
+    db_session.commit()
+
+    lazy_score = RootScore(
+        opening_key=DRILL_KEY_RUY_BERLIN,
+        opening_name="Ruy Lopez: Berlin Defense",
+        opening_family=DRILL_FAMILY_RUY,
+        player_color="white",
+        opening_score=55.0,
+        confidence=0.8,
+        coverage=0.7,
+        weighted_depth=3.0,
+        sample_size=12,
+        last_practiced_at=None,
+        strongest_branch=BranchSummary(
+            opening_key=DRILL_KEY_RUY_EXCHANGE,
+            opening_name="Ruy Lopez: Exchange Variation",
+            value=61.0,
+        ),
+        weakest_branch=BranchSummary(
+            opening_key=DRILL_KEY_RUY_MORPHY,
+            opening_name="Ruy Lopez: Morphy Defense",
+            value=48.0,
+        ),
+        underexposed_branch=BranchSummary(
+            opening_key=DRILL_KEY_RUY_EXCHANGE,
+            opening_name="Ruy Lopez: Exchange Variation",
+            value=0.35,
+        ),
+        computed_at=datetime(2026, 3, 3, tzinfo=timezone.utc),
+        debug_nodes=[],
+    )
+
+    cache_selects: list[str] = []
+
+    def _capture_cache_selects(_conn, _cursor, statement, _parameters, _context, _executemany):
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("select") and (
+            " from opening_score_batches " in normalized
+            or " from user_opening_scores " in normalized
+        ):
+            cache_selects.append(normalized)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _capture_cache_selects)
+    try:
+        with (
+            patch(_PATCH_GRAPH, return_value=graph),
+            patch(_PATCH_ROOTS, return_value=roots),
+            patch(_PATCH_OVERLAY, return_value=_empty_overlay()),
+            patch("app.api.openings.compute_root_score", return_value=lazy_score),
+        ):
+            resp = client.get(
+                _drill_url(DRILL_FAMILY_RUY),
+                params={"player_color": "white"},
+                headers=auth_headers(),
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture_cache_selects)
+
+    assert resp.status_code == 200
+    assert len(cache_selects) == 2
+    assert any(" from opening_score_batches " in statement for statement in cache_selects)
+    assert any(" from user_opening_scores " in statement for statement in cache_selects)
+
+
 def test_family_drill_underexposed_branch_uses_value_field(client, auth_headers):
     roots = _make_drill_roots()
     batch = _make_batch_for_roots(roots)
@@ -1437,3 +1687,233 @@ def test_family_drill_url_encoded_family_names_work(client, auth_headers):
     assert data["family_name"] == DRILL_FAMILY_QGD
     assert data["total_roots"] == 1
     assert data["roots"][0]["opening_key"] == DRILL_KEY_QGD_ORTHODOX
+
+
+def test_children_top_level_returns_structural_roots_without_scores(client, auth_headers):
+    roots = _make_children_roots()
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(None, [])),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["parent_key"] is None
+    assert data["parent_name"] is None
+    assert data["computed_at"] is None
+    assert data["total_children"] == 3
+    assert [child["opening_key"] for child in data["children"]] == [
+        CHILD_KEY_BIRD,
+        CHILD_KEY_ENGLISH,
+        CHILD_KEY_POLISH,
+    ]
+    assert all(child["subtree_score"] is None for child in data["children"])
+    assert all(child["subtree_root_count"] == 0 for child in data["children"])
+
+
+def test_children_parent_key_returns_404_for_unknown_root(client, auth_headers):
+    with patch(_PATCH_ROOTS, return_value=_make_children_roots()):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white", "parent_key": "missing-root"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 404
+    assert "Unknown opening root" in resp.json()["detail"]
+
+
+def test_children_drill_down_returns_immediate_children(client, auth_headers):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_E6,
+            opening_name="Polish Opening, 1...e6",
+            opening_family="Polish Opening",
+            opening_score=20.0,
+            confidence=0.3,
+            coverage=0.3,
+            sample_size=4,
+            last_practiced_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_BB2,
+            opening_name="Polish Opening, 1...e6 2. Bb2",
+            opening_family="Polish Opening",
+            opening_score=40.0,
+            confidence=0.2,
+            coverage=0.4,
+            sample_size=6,
+            last_practiced_at=datetime(2026, 3, 3, tzinfo=timezone.utc),
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_SHARED,
+            opening_name="Polish Shared Node",
+            opening_family="Polish Shared Node",
+            opening_score=80.0,
+            confidence=0.1,
+            coverage=0.8,
+            sample_size=8,
+            last_practiced_at=datetime(2026, 3, 4, tzinfo=timezone.utc),
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_ALT,
+            opening_name="Polish",
+            opening_family="Polish",
+            opening_score=50.0,
+            confidence=0.2,
+            coverage=0.5,
+            sample_size=2,
+            last_practiced_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        ),
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white", "parent_key": CHILD_KEY_POLISH},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["parent_key"] == CHILD_KEY_POLISH
+    assert data["parent_name"] == "Polish Opening"
+    assert [child["opening_key"] for child in data["children"]] == [
+        CHILD_KEY_POLISH_E6,
+        CHILD_KEY_POLISH_ALT,
+    ]
+
+
+def test_children_subtree_aggregation_deduplicates_shared_descendants(client, auth_headers):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=CHILD_KEY_POLISH,
+            opening_name="Polish Opening",
+            opening_family="Polish Opening",
+            opening_score=60.0,
+            confidence=0.4,
+            coverage=0.6,
+            sample_size=6,
+            last_practiced_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_E6,
+            opening_name="Polish Opening, 1...e6",
+            opening_family="Polish Opening",
+            opening_score=20.0,
+            confidence=0.3,
+            coverage=0.3,
+            sample_size=4,
+            last_practiced_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_ALT,
+            opening_name="Polish",
+            opening_family="Polish",
+            opening_score=40.0,
+            confidence=0.2,
+            coverage=0.4,
+            sample_size=2,
+            last_practiced_at=datetime(2026, 3, 3, tzinfo=timezone.utc),
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_SHARED,
+            opening_name="Polish Shared Node",
+            opening_family="Polish Shared Node",
+            opening_score=80.0,
+            confidence=0.1,
+            coverage=0.8,
+            sample_size=8,
+            last_practiced_at=datetime(2026, 3, 4, tzinfo=timezone.utc),
+        ),
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    polish_item = next(
+        child for child in resp.json()["children"] if child["opening_key"] == CHILD_KEY_POLISH
+    )
+    assert polish_item["child_count"] == 2
+    assert polish_item["subtree_root_count"] == 4
+    assert polish_item["subtree_sample_size"] == 20
+    assert polish_item["subtree_score"] == pytest.approx(46.0)
+    assert polish_item["subtree_confidence"] == pytest.approx(0.25)
+    assert polish_item["subtree_coverage"] == pytest.approx(0.525)
+    assert polish_item["weakest_root_key"] == CHILD_KEY_POLISH_E6
+    assert polish_item["weakest_root_name"] == "Polish Opening, 1...e6"
+    assert polish_item["weakest_root_family"] == "Polish Opening"
+    assert polish_item["weakest_root_score"] == pytest.approx(20.0)
+    assert polish_item["last_practiced_at"].startswith("2026-03-04")
+
+
+def test_children_sorts_scored_before_unscored_with_null_last(client, auth_headers):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=CHILD_KEY_POLISH,
+            opening_name="Polish Opening",
+            opening_family="Polish Opening",
+            opening_score=60.0,
+            confidence=0.4,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_E6,
+            opening_name="Polish Opening, 1...e6",
+            opening_family="Polish Opening",
+            opening_score=20.0,
+            confidence=0.3,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_ALT,
+            opening_name="Polish",
+            opening_family="Polish",
+            opening_score=40.0,
+            confidence=0.2,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_SHARED,
+            opening_name="Polish Shared Node",
+            opening_family="Polish Shared Node",
+            opening_score=80.0,
+            confidence=0.1,
+        ),
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    children = resp.json()["children"]
+    assert [child["opening_key"] for child in children] == [
+        CHILD_KEY_POLISH,
+        CHILD_KEY_ENGLISH,
+        CHILD_KEY_BIRD,
+    ]
+    assert children[-1]["subtree_score"] is None
+    assert children[-1]["opening_key"] == CHILD_KEY_BIRD

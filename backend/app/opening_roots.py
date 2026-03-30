@@ -80,11 +80,22 @@ class OpeningRoots:
 
         # Build secondary indexes
         self._families: dict[str, list[OpeningRoot]] = {}
+        self._children_of: dict[str | None, list[OpeningRoot]] = {None: []}
         for root in roots.values():
             self._families.setdefault(root.opening_family, []).append(root)
+            if not root.parent_keys:
+                self._children_of[None].append(root)
+            for parent_key in root.parent_keys:
+                self._children_of.setdefault(parent_key, []).append(root)
         # Sort each family's roots by depth for stable ordering
         for members in self._families.values():
             members.sort(key=lambda r: (r.depth, r.opening_key))
+        for children in self._children_of.values():
+            children.sort(key=lambda r: (r.depth, r.opening_key))
+
+        # Descendant closures are memoized on demand to avoid eager
+        # materialization of every reachable pair in the DAG.
+        self._descendants: dict[str, list[OpeningRoot]] = {}
         self._fingerprint = _compute_opening_roots_fingerprint(roots, ownership)
 
     # -- Core lookups --
@@ -98,6 +109,33 @@ class OpeningRoots:
     def get_families(self) -> list[str]:
         """Return sorted list of canonical family names."""
         return sorted(self._families.keys())
+
+    def get_children(self, parent_key: str | None) -> list[OpeningRoot]:
+        """Return immediate DAG children for the given root key.
+
+        `None` returns top-level roots with no parent boundary root.
+        """
+        return list(self._children_of.get(parent_key, []))
+
+    def get_descendants(self, root_key: str) -> list[OpeningRoot]:
+        """Return all descendant roots, deduplicated across DAG overlaps."""
+        cached = self._descendants.get(root_key)
+        if cached is not None:
+            return list(cached)
+
+        seen: set[str] = set()
+        ordered: list[OpeningRoot] = []
+        queue: deque[OpeningRoot] = deque(self._children_of.get(root_key, []))
+        while queue:
+            child = queue.popleft()
+            if child.opening_key in seen:
+                continue
+            seen.add(child.opening_key)
+            ordered.append(child)
+            queue.extend(self._children_of.get(child.opening_key, []))
+
+        self._descendants[root_key] = ordered
+        return list(ordered)
 
     def is_descendant_of(self, a_key: str, b_key: str) -> bool:
         """Return True if root *a* is a descendant of root *b* in the DAG."""
