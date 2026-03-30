@@ -15,6 +15,7 @@ from app.opening_graph import (
     build_opening_graph,
 )
 from app.opening_roots import (
+    OpeningRoot,
     OpeningRoots,
     _reset_opening_roots_for_testing,
     build_opening_roots,
@@ -228,6 +229,41 @@ class TestDAGStructure:
                     assert not real_roots.is_descendant_of(
                         sb.opening_key, nr.opening_key
                     )
+
+
+class TestFingerprint:
+    def _roots_with_structure(
+        self,
+        *,
+        parent_keys: frozenset[str] = frozenset(),
+        child_keys: frozenset[str] = frozenset(),
+        ownership: dict[str, frozenset[str]] | None = None,
+    ) -> OpeningRoots:
+        root = OpeningRoot(
+            opening_key="root-a",
+            opening_name="Example Opening",
+            opening_family="Example Family",
+            eco="A00",
+            depth=1,
+            parent_keys=parent_keys,
+            child_keys=child_keys,
+        )
+        return OpeningRoots(
+            {"root-a": root},
+            ownership or {"fen-a": frozenset({"root-a"})},
+        )
+
+    def test_fingerprint_changes_when_ownership_changes(self):
+        roots_a = self._roots_with_structure(ownership={"fen-a": frozenset({"root-a"})})
+        roots_b = self._roots_with_structure(ownership={"fen-a": frozenset({"root-a"}), "fen-b": frozenset({"root-a"})})
+
+        assert roots_a.fingerprint != roots_b.fingerprint
+
+    def test_fingerprint_changes_when_parent_child_links_change(self):
+        roots_a = self._roots_with_structure(child_keys=frozenset({"child-a"}))
+        roots_b = self._roots_with_structure(parent_keys=frozenset({"parent-a"}))
+
+        assert roots_a.fingerprint != roots_b.fingerprint
 
 
     def test_same_name_parent_edge(self, real_roots: OpeningRoots):

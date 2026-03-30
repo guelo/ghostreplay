@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.models import OpeningScoreBatch, OpeningScoreCursor, UserOpeningScore
 from app.opening_evidence import EvidenceOverlay, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
-from app.opening_rootcalc import RootCalcConfig, RootScore, _Calculator
+from app.opening_rootcalc import RootCalcConfig, RootScore, _Calculator, root_calc_config_fingerprint
 from app.opening_roots import OpeningRoots, get_opening_roots
 
 PlayerColor = Literal["white", "black"]
@@ -21,6 +21,13 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 def _validate_player_color(player_color: str) -> None:
     if player_color not in _VALID_PLAYER_COLORS:
         raise ValueError(f"Unsupported player_color: {player_color}")
+
+
+def opening_score_inputs_fingerprint(
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+) -> str:
+    return f"{graph.fingerprint}:{roots.fingerprint}:{root_calc_config_fingerprint()}"
 
 
 def _iter_named_roots(roots: OpeningRoots):
@@ -246,6 +253,7 @@ def recompute_opening_scores(
         user_id=user_id,
         player_color=player_color,
         generation=generation,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
         computed_at=computed_at,
     )
 
@@ -272,15 +280,24 @@ def recompute_opening_scores(
                         strongest_branch_name=(
                             score.strongest_branch.opening_name if score.strongest_branch else None
                         ),
+                        strongest_branch_key=(
+                            score.strongest_branch.opening_key if score.strongest_branch else None
+                        ),
                         strongest_branch_score=(
                             score.strongest_branch.value if score.strongest_branch else None
                         ),
                         weakest_branch_name=(
                             score.weakest_branch.opening_name if score.weakest_branch else None
                         ),
+                        weakest_branch_key=(
+                            score.weakest_branch.opening_key if score.weakest_branch else None
+                        ),
                         weakest_branch_score=score.weakest_branch.value if score.weakest_branch else None,
                         underexposed_branch_name=(
                             score.underexposed_branch.opening_name if score.underexposed_branch else None
+                        ),
+                        underexposed_branch_key=(
+                            score.underexposed_branch.opening_key if score.underexposed_branch else None
                         ),
                         underexposed_branch_value=(
                             score.underexposed_branch.value if score.underexposed_branch else None

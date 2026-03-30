@@ -217,6 +217,7 @@ class OpeningScoreBatch(Base):
     user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
     player_color: Mapped[str] = mapped_column(String(5), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    registry_fingerprint: Mapped[str | None] = mapped_column(Text)
     computed_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -262,10 +263,13 @@ class UserOpeningScore(Base):
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
     last_practiced_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     strongest_branch_name: Mapped[str | None] = mapped_column(Text)
+    strongest_branch_key: Mapped[str | None] = mapped_column(Text)
     strongest_branch_score: Mapped[float | None] = mapped_column(Float)
     weakest_branch_name: Mapped[str | None] = mapped_column(Text)
+    weakest_branch_key: Mapped[str | None] = mapped_column(Text)
     weakest_branch_score: Mapped[float | None] = mapped_column(Float)
     underexposed_branch_name: Mapped[str | None] = mapped_column(Text)
+    underexposed_branch_key: Mapped[str | None] = mapped_column(Text)
     underexposed_branch_value: Mapped[float | None] = mapped_column(Float)
     computed_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),

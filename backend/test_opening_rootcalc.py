@@ -1,6 +1,6 @@
 import pytest
 from datetime import datetime, timezone, timedelta
-from app.opening_rootcalc import compute_root_score, RootCalcConfig
+from app.opening_rootcalc import compute_root_score, RootCalcConfig, root_calc_config_fingerprint
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_roots import OpeningRoots, OpeningRoot
@@ -109,6 +109,13 @@ def test_prepared_children():
     # All three should be prepared.
     debug_u = next(d for d in score.debug_nodes if d.fen == fen_u)
     assert set(debug_u.prepared_children) == {fen_c1, fen_c2, fen_c3}
+
+
+def test_root_calc_config_fingerprint_changes_when_config_changes():
+    default_fp = root_calc_config_fingerprint()
+    tuned_fp = root_calc_config_fingerprint(RootCalcConfig(alpha=1.25))
+
+    assert default_fp != tuned_fp
 
 def test_repertoire_weights():
     # test rho smoothing, single child, equal children

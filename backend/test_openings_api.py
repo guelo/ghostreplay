@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import quote
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +14,7 @@ from app.models import (
     SessionMove,
     UserOpeningScore,
 )
+from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -229,16 +231,20 @@ _FAMILIES_URL = "/api/openings/families/scores"
 
 # Patch targets for cache functions in the openings module namespace
 _PATCH_ENSURE = "app.api.openings.ensure_opening_scores"
+_PATCH_LIST_CACHED = "app.api.openings.list_cached_opening_scores"
+_PATCH_RECOMPUTE = "app.api.openings.recompute_opening_scores"
 
 
 def _make_batch(batch_id: int = 1, user_id: int = 123, player_color: str = "white",
-                generation: int = 1, computed_at: datetime | None = None):
+                generation: int = 1, computed_at: datetime | None = None,
+                registry_fingerprint: str | None = None):
     from app.models import OpeningScoreBatch
     batch = OpeningScoreBatch(
         id=batch_id,
         user_id=user_id,
         player_color=player_color,
         generation=generation,
+        registry_fingerprint=registry_fingerprint,
     )
     if computed_at is not None:
         batch.computed_at = computed_at
@@ -247,12 +253,44 @@ def _make_batch(batch_id: int = 1, user_id: int = 123, player_color: str = "whit
     return batch
 
 
+def _make_batch_for_roots(
+    roots: OpeningRoots,
+    *,
+    graph: OpeningGraph | None = None,
+    batch_id: int = 1,
+    user_id: int = 123,
+    player_color: str = "white",
+    generation: int = 1,
+    computed_at: datetime | None = None,
+):
+    if graph is None:
+        graph = _make_graph()
+    return _make_batch(
+        batch_id=batch_id,
+        user_id=user_id,
+        player_color=player_color,
+        generation=generation,
+        computed_at=computed_at,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+    )
+
+
 def _make_row(batch_id: int = 1, user_id: int = 123, player_color: str = "white",
               opening_key: str = "key-a", opening_name: str = "Root A",
               opening_family: str = "Family A", opening_score: float = 60.0,
               confidence: float = 0.8, coverage: float = 0.5,
               weighted_depth: float = 3.0, sample_size: int = 10,
-              last_practiced_at: datetime | None = None):
+              last_practiced_at: datetime | None = None,
+              strongest_branch_name: str | None = None,
+              strongest_branch_key: str | None = None,
+              strongest_branch_score: float | None = None,
+              weakest_branch_name: str | None = None,
+              weakest_branch_key: str | None = None,
+              weakest_branch_score: float | None = None,
+              underexposed_branch_name: str | None = None,
+              underexposed_branch_key: str | None = None,
+              underexposed_branch_value: float | None = None,
+              computed_at: datetime | None = None):
     from app.models import UserOpeningScore
     row = UserOpeningScore(
         batch_id=batch_id,
@@ -267,8 +305,102 @@ def _make_row(batch_id: int = 1, user_id: int = 123, player_color: str = "white"
         weighted_depth=weighted_depth,
         sample_size=sample_size,
         last_practiced_at=last_practiced_at,
+        strongest_branch_name=strongest_branch_name,
+        strongest_branch_key=strongest_branch_key,
+        strongest_branch_score=strongest_branch_score,
+        weakest_branch_name=weakest_branch_name,
+        weakest_branch_key=weakest_branch_key,
+        weakest_branch_score=weakest_branch_score,
+        underexposed_branch_name=underexposed_branch_name,
+        underexposed_branch_key=underexposed_branch_key,
+        underexposed_branch_value=underexposed_branch_value,
     )
+    if computed_at is not None:
+        row.computed_at = computed_at
     return row
+
+
+DRILL_FAMILY_RUY = "Ruy Lopez"
+DRILL_FAMILY_SICILIAN = "Sicilian Defense"
+DRILL_FAMILY_QGD = "Queen's Gambit Declined"
+
+DRILL_KEY_RUY_MORPHY = "ruy-morphy"
+DRILL_KEY_RUY_BERLIN = "ruy-berlin"
+DRILL_KEY_RUY_EXCHANGE = "ruy-exchange"
+DRILL_KEY_SICILIAN_NAJDORF = "sicilian-najdorf"
+DRILL_KEY_QGD_ORTHODOX = "qgd-orthodox"
+
+
+def _make_drill_roots() -> OpeningRoots:
+    roots = {
+        DRILL_KEY_RUY_MORPHY: OpeningRoot(
+            opening_key=DRILL_KEY_RUY_MORPHY,
+            opening_name="Ruy Lopez: Morphy Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            eco="C60",
+            depth=3,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        ),
+        DRILL_KEY_RUY_BERLIN: OpeningRoot(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            eco="C65",
+            depth=4,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        ),
+        DRILL_KEY_RUY_EXCHANGE: OpeningRoot(
+            opening_key=DRILL_KEY_RUY_EXCHANGE,
+            opening_name="Ruy Lopez: Exchange Variation",
+            opening_family=DRILL_FAMILY_RUY,
+            eco="C68",
+            depth=4,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        ),
+        DRILL_KEY_SICILIAN_NAJDORF: OpeningRoot(
+            opening_key=DRILL_KEY_SICILIAN_NAJDORF,
+            opening_name="Sicilian Defense: Najdorf Variation",
+            opening_family=DRILL_FAMILY_SICILIAN,
+            eco="B90",
+            depth=3,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        ),
+        DRILL_KEY_QGD_ORTHODOX: OpeningRoot(
+            opening_key=DRILL_KEY_QGD_ORTHODOX,
+            opening_name="Queen's Gambit Declined: Orthodox Defense",
+            opening_family=DRILL_FAMILY_QGD,
+            eco="D63",
+            depth=3,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        ),
+    }
+    return OpeningRoots(roots, {})
+
+
+def _drill_url(family_name: str) -> str:
+    return f"/api/openings/families/{quote(family_name, safe='')}/scores"
+
+
+def _roots_for_rows(*rows: UserOpeningScore) -> OpeningRoots:
+    roots: dict[str, OpeningRoot] = {}
+    ownership: dict[str, frozenset[str]] = {}
+    for row in rows:
+        roots[row.opening_key] = OpeningRoot(
+            opening_key=row.opening_key,
+            opening_name=row.opening_name,
+            opening_family=row.opening_family,
+            eco=None,
+            depth=1,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        )
+        ownership[row.opening_key] = frozenset([row.opening_key])
+    return OpeningRoots(roots, ownership)
 
 
 # Case 1: auth required
@@ -346,7 +478,10 @@ def test_family_scores_no_evidence(client, auth_headers):
 
 # Case 5: empty batch returns empty families with non-null computed_at
 def test_family_scores_empty_batch(client, auth_headers):
-    batch = _make_batch(computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
+    batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), _make_roots()),
+    )
     with patch(_PATCH_ENSURE, return_value=(batch, [])):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
@@ -358,15 +493,19 @@ def test_family_scores_empty_batch(client, auth_headers):
 
 # Case 6: weighted aggregation
 def test_family_scores_weighted_aggregation(client, auth_headers):
-    batch = _make_batch()
     rows = [
         _make_row(opening_key="k1", opening_name="Root 1", opening_family="Fam",
                   opening_score=80.0, confidence=0.6, coverage=0.4, sample_size=5),
         _make_row(opening_key="k2", opening_name="Root 2", opening_family="Fam",
                   opening_score=40.0, confidence=0.4, coverage=0.6, sample_size=15),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     data = resp.json()
@@ -378,15 +517,19 @@ def test_family_scores_weighted_aggregation(client, auth_headers):
 
 # Case 7: all-zero confidence falls back to simple average
 def test_family_scores_zero_confidence_fallback(client, auth_headers):
-    batch = _make_batch()
     rows = [
         _make_row(opening_key="k1", opening_name="R1", opening_family="F",
                   opening_score=30.0, confidence=0.0),
         _make_row(opening_key="k2", opening_name="R2", opening_family="F",
                   opening_score=70.0, confidence=0.0),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     fam = resp.json()["families"][0]
@@ -395,15 +538,19 @@ def test_family_scores_zero_confidence_fallback(client, auth_headers):
 
 # Case 8: confidence and coverage are arithmetic means
 def test_family_scores_confidence_coverage_means(client, auth_headers):
-    batch = _make_batch()
     rows = [
         _make_row(opening_key="k1", opening_name="R1", opening_family="F",
                   confidence=0.3, coverage=0.2),
         _make_row(opening_key="k2", opening_name="R2", opening_family="F",
                   confidence=0.9, coverage=0.8),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     fam = resp.json()["families"][0]
@@ -413,13 +560,17 @@ def test_family_scores_confidence_coverage_means(client, auth_headers):
 
 # Case 9: root_sample_size_sum is a straight sum
 def test_family_scores_sample_size_sum(client, auth_headers):
-    batch = _make_batch()
     rows = [
         _make_row(opening_key="k1", opening_name="R1", opening_family="F", sample_size=7),
         _make_row(opening_key="k2", opening_name="R2", opening_family="F", sample_size=13),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     fam = resp.json()["families"][0]
@@ -428,7 +579,6 @@ def test_family_scores_sample_size_sum(client, auth_headers):
 
 # Case 10: last_practiced_at picks most recent non-null
 def test_family_scores_last_practiced_at(client, auth_headers):
-    batch = _make_batch()
     rows = [
         _make_row(opening_key="k1", opening_name="R1", opening_family="F",
                   last_practiced_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
@@ -437,8 +587,13 @@ def test_family_scores_last_practiced_at(client, auth_headers):
         _make_row(opening_key="k3", opening_name="R3", opening_family="F",
                   last_practiced_at=None),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     fam = resp.json()["families"][0]
@@ -448,7 +603,6 @@ def test_family_scores_last_practiced_at(client, auth_headers):
 
 # Case 11: weakest-root tie-break is deterministic
 def test_family_scores_weakest_root_tiebreak(client, auth_headers):
-    batch = _make_batch()
     # Same score, same confidence — tie-break on opening_name ascending
     rows = [
         _make_row(opening_key="k-z", opening_name="Zulu Root", opening_family="F",
@@ -456,8 +610,13 @@ def test_family_scores_weakest_root_tiebreak(client, auth_headers):
         _make_row(opening_key="k-a", opening_name="Alpha Root", opening_family="F",
                   opening_score=50.0, confidence=0.5),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     fam = resp.json()["families"][0]
@@ -467,7 +626,6 @@ def test_family_scores_weakest_root_tiebreak(client, auth_headers):
 
 # Case 12: family ordering matches weakest-root sort
 def test_family_scores_ordering(client, auth_headers):
-    batch = _make_batch()
     rows = [
         _make_row(opening_key="k1", opening_name="Strong Root", opening_family="Strong Family",
                   opening_score=90.0),
@@ -476,8 +634,13 @@ def test_family_scores_ordering(client, auth_headers):
         _make_row(opening_key="k3", opening_name="Mid Root", opening_family="Mid Family",
                   opening_score=50.0),
     ]
+    roots = _roots_for_rows(*rows)
+    batch = _make_batch_for_roots(roots)
 
-    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     names = [f["family_name"] for f in resp.json()["families"]]
@@ -490,10 +653,13 @@ def test_family_scores_single_batch_semantics(client, auth_headers, db_session):
     cursor = OpeningScoreCursor(user_id=123, player_color="white", latest_generation=2)
     db_session.add(cursor)
     db_session.flush()
+    roots = _roots_for_rows(_make_row(opening_key="new-key", opening_name="New Root", opening_family="Fam"))
 
     batch1 = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
+                               registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
                                computed_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
     batch2 = OpeningScoreBatch(user_id=123, player_color="white", generation=2,
+                               registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
                                computed_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
     db_session.add_all([batch1, batch2])
     db_session.flush()
@@ -516,7 +682,8 @@ def test_family_scores_single_batch_semantics(client, auth_headers, db_session):
     ))
     db_session.commit()
 
-    resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+    with patch(_PATCH_ROOTS, return_value=roots):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     assert resp.status_code == 200
     data = resp.json()
@@ -535,7 +702,9 @@ def test_family_scores_cache_only_read_path(client, auth_headers, db_session):
     db_session.add(cursor)
     db_session.flush()
 
+    roots = _roots_for_rows(_make_row(opening_key="cached-key", opening_name="Cached Root", opening_family="Cached Fam"))
     batch = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
+                              registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
                               computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
     db_session.add(batch)
     db_session.flush()
@@ -552,6 +721,7 @@ def test_family_scores_cache_only_read_path(client, auth_headers, db_session):
     # Patch calculator functions in both namespaces — the router imports these symbols,
     # but ensure_opening_scores resolves recompute_opening_scores in its own module.
     with (
+        patch(_PATCH_ROOTS, return_value=roots),
         patch("app.api.openings.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
         patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
         patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
@@ -574,7 +744,9 @@ def test_family_scores_computed_at_from_batch(client, auth_headers, db_session):
     db_session.add(cursor)
     db_session.flush()
 
+    roots = _roots_for_rows(_make_row(opening_key="ts-key", opening_name="TS Root", opening_family="TS Fam"))
     batch = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
+                              registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
                               computed_at=batch_ts)
     db_session.add(batch)
     db_session.flush()
@@ -589,8 +761,679 @@ def test_family_scores_computed_at_from_batch(client, auth_headers, db_session):
     ))
     db_session.commit()
 
-    resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+    with patch(_PATCH_ROOTS, return_value=roots):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     data = resp.json()
     assert "2020-01-01" in data["computed_at"]
     assert "2024" not in data["computed_at"]
+
+
+def test_family_scores_mismatched_fingerprint_triggers_recompute(client, auth_headers):
+    roots = _make_drill_roots()
+    stale_batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint="stale-fingerprint",
+    )
+    fresh_batch = _make_batch_for_roots(
+        roots,
+        batch_id=2,
+        generation=2,
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    stale_rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=48.0,
+        )
+    ]
+    fresh_rows = [
+        _make_row(
+            batch_id=2,
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=48.0,
+        )
+    ]
+
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
+        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
+    ):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    recompute_mock.assert_called_once()
+    data = resp.json()
+    assert "2026-03-02" in data["computed_at"]
+    assert data["families"][0]["family_name"] == DRILL_FAMILY_RUY
+
+
+def test_family_scores_empty_batch_with_evidence_triggers_recompute(client, auth_headers):
+    roots = _make_drill_roots()
+    stale_batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint="stale-fingerprint",
+    )
+    fresh_batch = _make_batch_for_roots(
+        roots,
+        batch_id=2,
+        generation=2,
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    fresh_rows = [
+        _make_row(
+            batch_id=2,
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=61.0,
+        )
+    ]
+
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(stale_batch, [])),
+        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
+    ):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    recompute_mock.assert_called_once()
+    data = resp.json()
+    assert "2026-03-02" in data["computed_at"]
+    assert data["families"][0]["family_name"] == DRILL_FAMILY_RUY
+
+
+def test_family_scores_empty_batch_with_current_registry_fingerprint_is_cache_hit(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
+    )
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, [])),
+        patch(_PATCH_RECOMPUTE, side_effect=AssertionError("should not recompute")),
+    ):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["families"] == []
+    assert "2026-03-01" in data["computed_at"]
+
+
+def test_family_drill_registry_drift_unknown_cached_root_triggers_recompute(client, auth_headers):
+    roots = _make_drill_roots()
+    stale_batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint="stale-fingerprint",
+    )
+    fresh_batch = _make_batch_for_roots(
+        roots,
+        batch_id=2,
+        generation=2,
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    stale_rows = [
+        _make_row(
+            opening_key="stale-ruy-key",
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=55.0,
+        )
+    ]
+    fresh_rows = [
+        _make_row(
+            batch_id=2,
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=55.0,
+        )
+    ]
+
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
+        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    recompute_mock.assert_called_once()
+    data = resp.json()
+    assert "2026-03-02" in data["computed_at"]
+    assert data["scored_roots"] == 1
+    assert data["roots"][0]["opening_key"] == DRILL_KEY_RUY_BERLIN
+
+
+def test_family_drill_empty_batch_with_evidence_triggers_recompute(client, auth_headers):
+    roots = _make_drill_roots()
+    stale_batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint="stale-fingerprint",
+    )
+    fresh_batch = _make_batch_for_roots(
+        roots,
+        batch_id=2,
+        generation=2,
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    fresh_rows = [
+        _make_row(
+            batch_id=2,
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=55.0,
+        )
+    ]
+
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(stale_batch, [])),
+        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    recompute_mock.assert_called_once()
+    data = resp.json()
+    assert "2026-03-02" in data["computed_at"]
+    assert data["scored_roots"] == 1
+    assert data["roots"][0]["opening_key"] == DRILL_KEY_RUY_BERLIN
+
+
+def test_family_drill_empty_batch_with_current_registry_fingerprint_is_cache_hit(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
+    )
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, [])),
+        patch(_PATCH_RECOMPUTE, side_effect=AssertionError("should not recompute")),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["scored_roots"] == 0
+    assert "2026-03-01" in data["computed_at"]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/openings/families/{family_name}/scores
+# ---------------------------------------------------------------------------
+
+
+def test_family_drill_no_auth_returns_401(client):
+    resp = client.get(_drill_url(DRILL_FAMILY_RUY), params={"player_color": "white"})
+    assert resp.status_code == 401
+
+
+def test_family_drill_invalid_color_returns_422(client, auth_headers):
+    with patch(_PATCH_ROOTS, return_value=_make_drill_roots()):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "red"},
+            headers=auth_headers(),
+        )
+    assert resp.status_code == 422
+
+
+def test_family_drill_unknown_family_returns_404(client, auth_headers):
+    with patch(_PATCH_ROOTS, return_value=_make_drill_roots()):
+        resp = client.get(
+            _drill_url("Unknown Family"),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+    assert resp.status_code == 404
+    assert "Unknown opening family" in resp.json()["detail"]
+
+
+def test_family_drill_no_evidence_returns_all_family_roots_with_null_scores(client, auth_headers):
+    with (
+        patch(_PATCH_ROOTS, return_value=_make_drill_roots()),
+        patch(_PATCH_ENSURE, return_value=(None, [])),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["family_name"] == DRILL_FAMILY_RUY
+    assert data["computed_at"] is None
+    assert data["total_roots"] == 3
+    assert data["scored_roots"] == 0
+    assert [root["opening_key"] for root in data["roots"]] == [
+        DRILL_KEY_RUY_BERLIN,
+        DRILL_KEY_RUY_EXCHANGE,
+        DRILL_KEY_RUY_MORPHY,
+    ]
+    assert all(root["opening_score"] is None for root in data["roots"])
+
+
+def test_family_drill_empty_batch_keeps_family_roots_and_batch_timestamp(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
+    )
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_SICILIAN_NAJDORF,
+            opening_name="Sicilian Defense: Najdorf Variation",
+            opening_family=DRILL_FAMILY_SICILIAN,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["scored_roots"] == 0
+    assert "2026-03-01" in data["computed_at"]
+    assert all(root["opening_score"] is None for root in data["roots"])
+
+
+def test_family_drill_single_scored_root_keeps_unscored_roots(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=42.0,
+            confidence=0.7,
+            coverage=0.3,
+            weighted_depth=2.5,
+            sample_size=9,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    data = resp.json()
+    assert data["total_roots"] == 3
+    assert data["scored_roots"] == 1
+    assert data["roots"][0]["opening_key"] == DRILL_KEY_RUY_BERLIN
+    assert data["roots"][0]["opening_name"] == "Ruy Lopez: Berlin Defense"
+    assert data["roots"][0]["opening_family"] == DRILL_FAMILY_RUY
+    assert data["roots"][0]["opening_score"] == pytest.approx(42.0)
+    assert data["roots"][1]["opening_score"] is None
+    assert data["roots"][2]["opening_score"] is None
+
+
+def test_family_drill_sorts_scored_roots_before_unscored(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=30.0,
+        ),
+        _make_row(
+            opening_key=DRILL_KEY_RUY_EXCHANGE,
+            opening_name="Ruy Lopez: Exchange Variation",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=10.0,
+        ),
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    assert [root["opening_key"] for root in resp.json()["roots"]] == [
+        DRILL_KEY_RUY_EXCHANGE,
+        DRILL_KEY_RUY_BERLIN,
+        DRILL_KEY_RUY_MORPHY,
+    ]
+
+
+def test_family_drill_resolves_branch_metadata_from_registry(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            strongest_branch_name="Sicilian Defense: Najdorf Variation",
+            strongest_branch_key=DRILL_KEY_SICILIAN_NAJDORF,
+            strongest_branch_score=18.0,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    branch = resp.json()["roots"][0]["strongest_branch"]
+    assert branch == {
+        "opening_key": DRILL_KEY_SICILIAN_NAJDORF,
+        "opening_name": "Sicilian Defense: Najdorf Variation",
+        "opening_family": DRILL_FAMILY_SICILIAN,
+        "value": 18.0,
+    }
+
+
+def test_family_drill_null_branches_stay_null(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    item = resp.json()["roots"][0]
+    assert item["strongest_branch"] is None
+    assert item["weakest_branch"] is None
+    assert item["underexposed_branch"] is None
+
+
+def test_family_drill_unknown_branch_key_triggers_recompute(client, auth_headers):
+    roots = _make_drill_roots()
+    stale_batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint="stale-fingerprint",
+    )
+    fresh_batch = _make_batch_for_roots(
+        roots,
+        batch_id=2,
+        generation=2,
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    stale_rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            strongest_branch_key="missing-root",
+            strongest_branch_score=11.0,
+        )
+    ]
+    fresh_rows = [
+        _make_row(
+            batch_id=2,
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            strongest_branch_key=DRILL_KEY_SICILIAN_NAJDORF,
+            strongest_branch_score=11.0,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
+        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    recompute_mock.assert_called_once()
+    data = resp.json()
+    assert "2026-03-02" in data["computed_at"]
+    assert data["roots"][0]["strongest_branch"]["opening_key"] == DRILL_KEY_SICILIAN_NAJDORF
+
+
+def test_family_drill_underexposed_branch_uses_value_field(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_MORPHY,
+            opening_name="Ruy Lopez: Morphy Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            underexposed_branch_name="Ruy Lopez: Exchange Variation",
+            underexposed_branch_key=DRILL_KEY_RUY_EXCHANGE,
+            underexposed_branch_value=0.35,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    branch = resp.json()["roots"][0]["underexposed_branch"]
+    assert branch["opening_key"] == DRILL_KEY_RUY_EXCHANGE
+    assert branch["opening_name"] == "Ruy Lopez: Exchange Variation"
+    assert branch["opening_family"] == DRILL_FAMILY_RUY
+    assert branch["value"] == pytest.approx(0.35)
+
+
+def test_family_drill_uses_registry_for_membership_name_depth_and_eco(client, auth_headers):
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_MORPHY,
+            opening_name="Ruy Lopez: Morphy Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=77.0,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    item = next(root for root in resp.json()["roots"] if root["opening_key"] == DRILL_KEY_RUY_MORPHY)
+    assert item["opening_name"] == "Ruy Lopez: Morphy Defense"
+    assert item["opening_family"] == DRILL_FAMILY_RUY
+    assert item["depth"] == 3
+    assert item["eco"] == "C60"
+    assert item["opening_score"] == pytest.approx(77.0)
+
+
+def test_family_drill_stale_batches_trigger_recompute(client, auth_headers):
+    roots = _make_drill_roots()
+    stale_batch = _make_batch(
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
+    )
+    fresh_batch = _make_batch_for_roots(
+        roots,
+        batch_id=2,
+        generation=2,
+        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+    stale_rows = [
+        _make_row(
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            strongest_branch_name="Sicilian Defense: Najdorf Variation",
+            strongest_branch_key=None,
+            strongest_branch_score=21.0,
+        )
+    ]
+    fresh_rows = [
+        _make_row(
+            batch_id=2,
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            strongest_branch_key=DRILL_KEY_SICILIAN_NAJDORF,
+            strongest_branch_score=21.0,
+        )
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
+        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    recompute_mock.assert_called_once()
+    data = resp.json()
+    assert "2026-03-02" in data["computed_at"]
+    assert data["roots"][0]["strongest_branch"]["opening_key"] == DRILL_KEY_SICILIAN_NAJDORF
+
+
+def test_family_drill_cache_only_read_path(client, auth_headers, db_session):
+    cursor = OpeningScoreCursor(user_id=123, player_color="white", latest_generation=1)
+    db_session.add(cursor)
+    db_session.flush()
+    roots = _make_drill_roots()
+
+    batch_ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    row_ts = datetime(2024, 6, 15, tzinfo=timezone.utc)
+    batch = OpeningScoreBatch(
+        user_id=123,
+        player_color="white",
+        generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
+        computed_at=batch_ts,
+    )
+    db_session.add(batch)
+    db_session.flush()
+
+    db_session.add(
+        UserOpeningScore(
+            batch_id=batch.id,
+            user_id=123,
+            player_color="white",
+            opening_key=DRILL_KEY_RUY_BERLIN,
+            opening_name="Ruy Lopez: Berlin Defense",
+            opening_family=DRILL_FAMILY_RUY,
+            opening_score=55.0,
+            confidence=0.7,
+            coverage=0.6,
+            weighted_depth=2.0,
+            sample_size=12,
+            last_practiced_at=row_ts,
+            strongest_branch_key=DRILL_KEY_SICILIAN_NAJDORF,
+            strongest_branch_score=9.0,
+            computed_at=batch_ts,
+        )
+    )
+    db_session.commit()
+
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch("app.api.openings.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
+        patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
+        patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
+        patch("app.opening_cache.overlay_evidence", side_effect=AssertionError("should not overlay via cache")),
+        patch("app.api.openings.compute_root_score", side_effect=AssertionError("should not compute")),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_RUY),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    data = resp.json()
+    assert resp.status_code == 200
+    assert "2020-01-01" in data["computed_at"]
+    assert data["scored_roots"] == 1
+    assert data["roots"][0]["opening_key"] == DRILL_KEY_RUY_BERLIN
+    assert data["roots"][0]["last_practiced_at"].startswith("2024-06-15")
+    assert data["roots"][0]["strongest_branch"]["opening_family"] == DRILL_FAMILY_SICILIAN
+
+
+def test_family_drill_url_encoded_family_names_work(client, auth_headers):
+    with (
+        patch(_PATCH_ROOTS, return_value=_make_drill_roots()),
+        patch(_PATCH_ENSURE, return_value=(None, [])),
+    ):
+        resp = client.get(
+            _drill_url(DRILL_FAMILY_QGD),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["family_name"] == DRILL_FAMILY_QGD
+    assert data["total_roots"] == 1
+    assert data["roots"][0]["opening_key"] == DRILL_KEY_QGD_ORTHODOX

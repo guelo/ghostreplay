@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+import hashlib
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from collections import deque
 from typing import Set, Dict, List, Tuple
@@ -23,6 +24,17 @@ class RootCalcConfig:
     half_life_days: float = 45.0
     coverage_live_threshold: int = 2
     book_exit_extension_user_decisions: int = 2
+
+
+def root_calc_config_fingerprint(config: RootCalcConfig | None = None) -> str:
+    """Return a stable fingerprint for the active root scoring configuration."""
+    if config is None:
+        config = RootCalcConfig()
+    payload = "|".join(
+        f"{config_field.name}={getattr(config, config_field.name)!r}"
+        for config_field in fields(config)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)

@@ -12,6 +12,7 @@ import chess
 import pytest
 
 from app.fen import normalize_fen
+from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_graph import (
     OpeningGraph,
     OpeningGraphNode,
@@ -22,6 +23,7 @@ from app.opening_graph import (
     build_opening_graph,
     get_opening_graph,
 )
+from app.opening_roots import OpeningRoot, OpeningRoots
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ECO_PATH = _PROJECT_ROOT / "public" / "data" / "openings" / "eco.json"
@@ -214,6 +216,39 @@ class TestLabels:
         assert node is not None
         assert node.name is not None
         assert "Italian" in node.name
+
+
+class TestFingerprint:
+    def test_combined_fingerprint_changes_when_graph_changes(self):
+        root_node_a = OpeningGraphNode(ROOT_FEN, "white")
+        child_fen_a = "graph-child-a"
+        root_node_a.children["e2e4"] = child_fen_a
+        child_node_a = OpeningGraphNode(child_fen_a, "black")
+        child_node_a.parents.add((ROOT_FEN, "e2e4"))
+        graph_a = OpeningGraph({ROOT_FEN: root_node_a, child_fen_a: child_node_a}, ROOT_FEN)
+
+        root_node_b = OpeningGraphNode(ROOT_FEN, "white")
+        child_fen_b = "graph-child-b"
+        root_node_b.children["d2d4"] = child_fen_b
+        child_node_b = OpeningGraphNode(child_fen_b, "black")
+        child_node_b.parents.add((ROOT_FEN, "d2d4"))
+        graph_b = OpeningGraph({ROOT_FEN: root_node_b, child_fen_b: child_node_b}, ROOT_FEN)
+
+        root = OpeningRoot(
+            opening_key=ROOT_FEN,
+            opening_name="Example Opening",
+            opening_family="Example Family",
+            eco="A00",
+            depth=1,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        )
+        roots = OpeningRoots(
+            {ROOT_FEN: root},
+            {ROOT_FEN: frozenset({ROOT_FEN})},
+        )
+
+        assert opening_score_inputs_fingerprint(graph_a, roots) != opening_score_inputs_fingerprint(graph_b, roots)
 
 
 # -- Normalization --

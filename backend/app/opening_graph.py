@@ -10,6 +10,7 @@ A pickle-based disk cache avoids the ~27-30s replay cost on subsequent loads.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import pickle
@@ -91,6 +92,7 @@ class OpeningGraph:
         self._nodes = nodes
         self.root_fen = root_fen
         self._frozen = False
+        self._fingerprint: str | None = None
 
     def freeze(self) -> None:
         """Freeze all nodes: immutable containers + attribute writes blocked."""
@@ -137,6 +139,23 @@ class OpeningGraph:
     @property
     def edge_count(self) -> int:
         return sum(len(n.children) for n in self._nodes.values())
+
+    @property
+    def fingerprint(self) -> str:
+        if self._fingerprint is None:
+            self._fingerprint = _compute_opening_graph_fingerprint(self)
+        return self._fingerprint
+
+
+def _compute_opening_graph_fingerprint(graph: OpeningGraph) -> str:
+    payload = "|".join(
+        (
+            f"{fen}\t{node.side_to_move}\t{node.eco or ''}\t{node.name or ''}"
+            f"\t{','.join(f'{uci}:{child_fen}' for uci, child_fen in sorted(node.children.items()))}"
+        )
+        for fen, node in sorted(graph._nodes.items())
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _get_or_create_node(

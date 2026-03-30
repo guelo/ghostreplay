@@ -9,6 +9,7 @@ scoring.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import deque
 from dataclasses import dataclass
@@ -84,6 +85,7 @@ class OpeningRoots:
         # Sort each family's roots by depth for stable ordering
         for members in self._families.values():
             members.sort(key=lambda r: (r.depth, r.opening_key))
+        self._fingerprint = _compute_opening_roots_fingerprint(roots, ownership)
 
     # -- Core lookups --
 
@@ -135,6 +137,40 @@ class OpeningRoots:
     @property
     def family_count(self) -> int:
         return len(self._families)
+
+    @property
+    def fingerprint(self) -> str:
+        return self._fingerprint
+
+
+def _compute_opening_roots_fingerprint(
+    roots: dict[str, OpeningRoot],
+    ownership: dict[str, frozenset[str]],
+) -> str:
+    """Return a stable fingerprint for the scoring-relevant opening registry."""
+    payload = "|".join(
+        [
+            *[
+                (
+                    f"root\t{root.opening_key}\t{root.opening_name}\t{root.opening_family}"
+                    f"\t{root.eco or ''}\t{root.depth}"
+                    f"\t{','.join(sorted(root.parent_keys))}"
+                    f"\t{','.join(sorted(root.child_keys))}"
+                )
+                for root in sorted(roots.values(), key=lambda item: item.opening_key)
+            ],
+            *[
+                f"own\t{fen}\t{','.join(sorted(owner_keys))}"
+                for fen, owner_keys in sorted(ownership.items())
+            ],
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def opening_roots_fingerprint(roots: OpeningRoots) -> str:
+    """Return the stable fingerprint for the current opening-root registry."""
+    return roots.fingerprint
 
 
 # ---------------------------------------------------------------------------

@@ -10,12 +10,17 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import UserOpeningScore
-from app.opening_cache import ensure_opening_scores, recompute_opening_scores
+from app.models import OpeningScoreBatch, UserOpeningScore
+from app.opening_cache import (
+    ensure_opening_scores,
+    list_cached_opening_scores,
+    opening_score_inputs_fingerprint,
+    recompute_opening_scores,
+)
 from app.opening_evidence import overlay_evidence
 from app.opening_graph import get_opening_graph
 from app.opening_rootcalc import RootScore, compute_root_score
-from app.opening_roots import get_opening_roots
+from app.opening_roots import OpeningRoots, get_opening_roots
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/openings", tags=["openings"])
@@ -119,6 +124,39 @@ class FamilyScoresResponse(BaseModel):
     computed_at: datetime | None
 
 
+class DrillDownBranchSummary(BaseModel):
+    opening_key: str
+    opening_name: str
+    opening_family: str
+    value: float
+
+
+class DrillDownRootItem(BaseModel):
+    opening_key: str
+    opening_name: str
+    opening_family: str
+    depth: int
+    eco: str | None
+    opening_score: float | None
+    confidence: float | None
+    coverage: float | None
+    weighted_depth: float | None
+    sample_size: int | None
+    last_practiced_at: datetime | None
+    strongest_branch: DrillDownBranchSummary | None
+    weakest_branch: DrillDownBranchSummary | None
+    underexposed_branch: DrillDownBranchSummary | None
+
+
+class DrillDownResponse(BaseModel):
+    player_color: str
+    family_name: str
+    roots: list[DrillDownRootItem]
+    total_roots: int
+    scored_roots: int
+    computed_at: datetime | None
+
+
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
@@ -169,6 +207,131 @@ def build_family_scores(rows: list[UserOpeningScore]) -> list[FamilyScoreItem]:
     # Sort: weakest_root_score asc, family_score asc, family_name asc
     items.sort(key=lambda f: (f.weakest_root_score, f.family_score, f.family_name))
     return items
+
+
+def _batch_has_stale_branch_keys(rows: list[UserOpeningScore]) -> bool:
+    """Detect cache batches written before branch key columns existed."""
+    return any(
+        (row.strongest_branch_name and not row.strongest_branch_key)
+        or (row.weakest_branch_name and not row.weakest_branch_key)
+        or (row.underexposed_branch_name and not row.underexposed_branch_key)
+        for row in rows
+    )
+
+
+def _refresh_cached_scores_if_stale(
+    db: Session,
+    user_id: int,
+    player_color: Literal["white", "black"],
+    current_fingerprint: str,
+    roots_registry: OpeningRoots,
+    batch: OpeningScoreBatch | None,
+    rows: list[UserOpeningScore],
+) -> tuple[OpeningScoreBatch | None, list[UserOpeningScore]]:
+    should_refresh = (
+        batch is not None
+        and (
+            batch.registry_fingerprint != current_fingerprint
+            or _batch_has_stale_branch_keys(rows)
+        )
+    )
+    if not should_refresh:
+        return batch, rows
+    recompute_opening_scores(db, user_id, player_color)
+    return list_cached_opening_scores(db, user_id, player_color)
+
+
+def _make_drill_branch(
+    key: str | None,
+    value: float | None,
+    roots_registry: OpeningRoots,
+) -> DrillDownBranchSummary | None:
+    if key is None or value is None:
+        return None
+    root = roots_registry.get_root(key)
+    if root is None:
+        return None
+    return DrillDownBranchSummary(
+        opening_key=key,
+        opening_name=root.opening_name,
+        opening_family=root.opening_family,
+        value=value,
+    )
+
+
+def build_drill_down_roots(
+    rows: list[UserOpeningScore],
+    family_name: str,
+    roots_registry: OpeningRoots,
+) -> tuple[list[DrillDownRootItem], int]:
+    rows_by_key = {row.opening_key: row for row in rows}
+    items: list[DrillDownRootItem] = []
+    scored_count = 0
+
+    for root in roots_registry.get_family(family_name):
+        row = rows_by_key.get(root.opening_key)
+        if row is None:
+            items.append(
+                DrillDownRootItem(
+                    opening_key=root.opening_key,
+                    opening_name=root.opening_name,
+                    opening_family=root.opening_family,
+                    depth=root.depth,
+                    eco=root.eco,
+                    opening_score=None,
+                    confidence=None,
+                    coverage=None,
+                    weighted_depth=None,
+                    sample_size=None,
+                    last_practiced_at=None,
+                    strongest_branch=None,
+                    weakest_branch=None,
+                    underexposed_branch=None,
+                )
+            )
+            continue
+
+        scored_count += 1
+        items.append(
+            DrillDownRootItem(
+                opening_key=root.opening_key,
+                opening_name=root.opening_name,
+                opening_family=root.opening_family,
+                depth=root.depth,
+                eco=root.eco,
+                opening_score=row.opening_score,
+                confidence=row.confidence,
+                coverage=row.coverage,
+                weighted_depth=row.weighted_depth,
+                sample_size=row.sample_size,
+                last_practiced_at=row.last_practiced_at,
+                strongest_branch=_make_drill_branch(
+                    row.strongest_branch_key,
+                    row.strongest_branch_score,
+                    roots_registry,
+                ),
+                weakest_branch=_make_drill_branch(
+                    row.weakest_branch_key,
+                    row.weakest_branch_score,
+                    roots_registry,
+                ),
+                underexposed_branch=_make_drill_branch(
+                    row.underexposed_branch_key,
+                    row.underexposed_branch_value,
+                    roots_registry,
+                ),
+            )
+        )
+
+    items.sort(
+        key=lambda item: (
+            item.opening_score is None,
+            item.opening_name if item.opening_score is None else item.opening_score,
+            item.opening_name,
+            item.opening_key,
+        )
+    )
+    return items, scored_count
 
 
 # ---------------------------------------------------------------------------
@@ -279,11 +442,58 @@ def get_family_scores(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> FamilyScoresResponse:
+    graph = get_opening_graph()
+    roots_registry = get_opening_roots()
     batch, rows = ensure_opening_scores(db, user.user_id, player_color)
+    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
+    batch, rows = _refresh_cached_scores_if_stale(
+        db,
+        user.user_id,
+        player_color,
+        current_fingerprint,
+        roots_registry,
+        batch,
+        rows,
+    )
     families = build_family_scores(rows)
     return FamilyScoresResponse(
         player_color=player_color,
         families=families,
         total_families=len(families),
+        computed_at=batch.computed_at if batch is not None else None,
+    )
+
+
+@router.get("/families/{family_name}/scores", response_model=DrillDownResponse)
+def get_family_drill_down(
+    family_name: str,
+    player_color: Literal["white", "black"] = Query(...),
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> DrillDownResponse:
+    graph = get_opening_graph()
+    roots_registry = get_opening_roots()
+    if not roots_registry.get_family(family_name):
+        raise HTTPException(status_code=404, detail="Unknown opening family")
+
+    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
+    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
+    batch, rows = _refresh_cached_scores_if_stale(
+        db,
+        user.user_id,
+        player_color,
+        current_fingerprint,
+        roots_registry,
+        batch,
+        rows,
+    )
+
+    root_items, scored_count = build_drill_down_roots(rows, family_name, roots_registry)
+    return DrillDownResponse(
+        player_color=player_color,
+        family_name=family_name,
+        roots=root_items,
+        total_roots=len(root_items),
+        scored_roots=scored_count,
         computed_at=batch.computed_at if batch is not None else None,
     )

@@ -142,6 +142,7 @@ def _create_test_schema(conn) -> None:
             user_id INTEGER NOT NULL,
             player_color VARCHAR(5) NOT NULL,
             generation INTEGER NOT NULL,
+            registry_fingerprint TEXT,
             computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, player_color, generation)
         )
@@ -170,10 +171,13 @@ def _create_test_schema(conn) -> None:
             sample_size INTEGER NOT NULL,
             last_practiced_at TIMESTAMP,
             strongest_branch_name TEXT,
+            strongest_branch_key TEXT,
             strongest_branch_score FLOAT,
             weakest_branch_name TEXT,
+            weakest_branch_key TEXT,
             weakest_branch_score FLOAT,
             underexposed_branch_name TEXT,
+            underexposed_branch_key TEXT,
             underexposed_branch_value FLOAT,
             computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(batch_id, opening_key),
