@@ -184,7 +184,8 @@ def list_opening_score_candidate_pairs(
     if limit is not None and limit < 0:
         raise ValueError("limit must be >= 0")
 
-    sql = """
+    sql_parts = [
+        """
         SELECT pairs.user_id, pairs.player_color
         FROM (
             SELECT DISTINCT gs.user_id AS user_id, gs.player_color AS player_color
@@ -206,18 +207,24 @@ def list_opening_score_candidate_pairs(
             LEFT JOIN game_sessions gs ON gs.id = b.source_session_id
             WHERE gs.player_color IS NOT NULL
         ) pairs
-        WHERE (:user_id IS NULL OR pairs.user_id = :user_id)
-          AND (:player_color IS NULL OR pairs.player_color = :player_color)
-        ORDER BY pairs.user_id ASC, pairs.player_color ASC
     """
+    ]
+    filters: list[str] = []
+    params: dict[str, int | str] = {}
+    if user_id is not None:
+        filters.append("pairs.user_id = :user_id")
+        params["user_id"] = user_id
+    if player_color is not None:
+        filters.append("pairs.player_color = :player_color")
+        params["player_color"] = player_color
+    if filters:
+        sql_parts.append("        WHERE " + "\n          AND ".join(filters))
+    sql_parts.append("        ORDER BY pairs.user_id ASC, pairs.player_color ASC")
     if limit is not None:
-        sql += "\nLIMIT :limit"
-
-    params = {"user_id": user_id, "player_color": player_color}
-    if limit is not None:
+        sql_parts.append("        LIMIT :limit")
         params["limit"] = limit
 
-    rows = db.execute(text(sql), params).fetchall()
+    rows = db.execute(text("\n".join(sql_parts)), params).fetchall()
     return [(int(row[0]), str(row[1])) for row in rows]
 
 

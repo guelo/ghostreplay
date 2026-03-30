@@ -430,6 +430,57 @@ def test_backfill_candidate_discovery_finds_historical_pairs(db_session):
     assert pairs == [(123, "black"), (234, "white")]
 
 
+def test_backfill_candidate_discovery_applies_optional_filters(db_session):
+    _seed_black_opening_session(db_session, user_id=123)
+
+    white_session = _create_session_row(db_session, user_id=123, player_color="white")
+    db_session.add(
+        SessionMove(
+            session_id=white_session.id,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=START_FULL,
+            fen_after=KINGS_PAWN_FULL,
+            eval_delta=0,
+        )
+    )
+
+    ghost_position = Position(
+        user_id=234,
+        fen_hash="ghost-white-filter",
+        fen_raw=START_FULL,
+        active_color="white",
+    )
+    db_session.add(ghost_position)
+    db_session.flush()
+    db_session.add(
+        Blunder(
+            user_id=234,
+            position_id=ghost_position.id,
+            bad_move_san="Qh5",
+            best_move_san="Nf3",
+            eval_loss_cp=120,
+        )
+    )
+    db_session.commit()
+
+    assert list_opening_score_candidate_pairs(db_session, user_id=123) == [
+        (123, "black"),
+        (123, "white"),
+    ]
+    assert list_opening_score_candidate_pairs(db_session, player_color="white") == [
+        (123, "white"),
+        (234, "white"),
+    ]
+    assert list_opening_score_candidate_pairs(
+        db_session,
+        user_id=123,
+        player_color="white",
+        limit=1,
+    ) == [(123, "white")]
+
+
 def test_session_upload_refreshes_relevant_opening_snapshot(
     client,
     auth_headers,
