@@ -1,18 +1,21 @@
+import { Chess } from 'chess.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '../test/utils'
 import AnalysisBoard from './AnalysisBoard'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
 import { createEmptyTree } from '../types/variationTree'
+import type { AddMoveParams } from '../hooks/useVariationTree'
+import type { AnalysisResult } from '../hooks/useMoveAnalysis'
 
 // --- Mutable mock state for useVariationTree ---
 
-const mockAddMove = vi.fn(() => 'mock-node-id')
+const mockAddMove = vi.fn<(params: AddMoveParams) => string | null>(() => 'mock-node-id')
 const mockSetSelectedVarNode = vi.fn()
 const mockNavigateUp = vi.fn()
 const mockNavigateDown = vi.fn(() => null)
 const mockGetAbsolutePly = vi.fn(() => 0)
-const mockGetVarAnalysis = vi.fn(() => undefined)
+const mockGetVarAnalysis = vi.fn<(fen: string) => AnalysisResult | undefined>(() => undefined)
 const mockRegisterPending = vi.fn()
 const mockResolvePending = vi.fn()
 const mockClearTree = vi.fn()
@@ -310,7 +313,7 @@ describe('AnalysisBoard — variation tree integration', () => {
     mockSelectedVarNodeId = 'var-node-1'
     // Return cached analysis for this variation FEN
     mockGetVarAnalysis.mockImplementation((fen: string) => {
-      if (fen === varNodeFen) return { playedEval: 50, id: 'req-1', move: 'Bc4', bestMove: 'Nf3', bestEval: 30, currentPositionEval: null, moveIndex: null, delta: null, classification: null, blunder: false }
+      if (fen === varNodeFen) return { playedEval: 50, id: 'req-1', move: 'Bc4', bestMove: 'Nf3', bestEval: 30, currentPositionEval: null, moveIndex: null, delta: null, classification: null, blunder: false, recordable: false }
       return undefined
     })
 
@@ -404,7 +407,7 @@ describe('AnalysisBoard — handleDrop behavior', () => {
 
     expect(result).toBe(true)
     expect(mockAddMove).toHaveBeenCalledTimes(1)
-    const addMoveArg = mockAddMove.mock.calls[0][0]
+    const addMoveArg = mockAddMove.mock.calls[0]![0]
     expect(addMoveArg.san).toBe('d5')
     expect(addMoveArg.parentContext).toEqual({ type: 'game', moveIndex: 0 })
     // Should select the new node
@@ -422,7 +425,7 @@ describe('AnalysisBoard — handleDrop behavior', () => {
     mockGetVarAnalysis.mockImplementation(() => ({
       playedEval: 10, id: 'old-req', move: 'd5', bestMove: 'e5',
       bestEval: 20, currentPositionEval: null, moveIndex: null,
-      delta: null, classification: null, blunder: false,
+      delta: null, classification: null, blunder: false, recordable: false,
     }))
 
     const result = invokeDrop('d7', 'd5')
@@ -441,7 +444,6 @@ describe('AnalysisBoard — handleDrop behavior', () => {
 
     // Pre-populate pending with the FEN that d5 will produce from after-e4 position
     // We need to compute it: after e4 FEN + d5 move
-    const { Chess } = require('chess.js')
     const chess = new Chess(moves[0].fen_after)
     chess.move({ from: 'd7', to: 'd5', promotion: 'q' })
     const resultFen = chess.fen()
@@ -481,7 +483,7 @@ describe('AnalysisBoard — handleDrop behavior', () => {
 
     expect(result).toBe(true)
     expect(mockAddMove).toHaveBeenCalledTimes(1)
-    const addMoveArg = mockAddMove.mock.calls[0][0]
+    const addMoveArg = mockAddMove.mock.calls[0]![0]
     expect(addMoveArg.san).toBe('Nf3')
     expect(addMoveArg.parentContext).toEqual({ type: 'variation', nodeId: 'var-1' })
     expect(addMoveArg.fenBefore).toBe(varNode.fen)

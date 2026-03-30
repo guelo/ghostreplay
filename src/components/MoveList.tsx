@@ -343,7 +343,7 @@ const MoveList = ({
             <span className={`move-list-header${playerColor === "black" ? " move-list-header--you" : ""}`}>
               {playerColor === "black" ? "You" : "Engine"}
             </span>
-            {displayRows.map((item, i) => {
+            {displayRows.map(item => {
               if (item.type === "variation-line") {
                 return (
                   <VariationLine

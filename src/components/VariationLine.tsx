@@ -1,3 +1,4 @@
+import type { ReactElement } from 'react'
 import type { VariationNodeId, VarNode, VariationTree } from '../types/variationTree'
 
 export type VariationLineProps = {
@@ -21,7 +22,7 @@ function renderPly(
   selectedNodeId: VariationNodeId | null,
   onNodeClick: (nodeId: VariationNodeId) => void,
   getAbsolutePly: (nodeId: VariationNodeId) => number,
-): JSX.Element {
+): ReactElement {
   const absPly = getAbsolutePly(node.id)
   const fullmove = Math.floor(absPly / 2) + 1
   const isBlack = absPly % 2 === 1
@@ -62,7 +63,7 @@ function VariationLine({
   getAbsolutePly,
   showPrefix,
   depth = 0,
-}: VariationLineProps): JSX.Element {
+}: VariationLineProps): ReactElement {
   // 1. Collect inline plies following children[0] until branch or dead end
   const inlinePlies: VarNode[] = []
   let currentId: VariationNodeId | null = rootNodeId
@@ -76,11 +77,10 @@ function VariationLine({
 
   if (inlinePlies.length === 0) return <></>
 
-  const rootNode = inlinePlies[0]
   const lastNode = inlinePlies[inlinePlies.length - 1]
 
   // 2. Child lines from branch point (all children rendered, continuation first)
-  const childLines: JSX.Element[] = []
+  const childLines: ReactElement[] = []
   if (lastNode.children.length > 1) {
     // All siblings share the same depth; increment only if the current line already has a prefix
     const childDepth = showPrefix ? depth + 1 : depth

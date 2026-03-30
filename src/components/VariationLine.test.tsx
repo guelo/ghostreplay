@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { render } from '../test/utils'
 import VariationLine from './VariationLine'
 import type { VariationTree, VarNode, VariationNodeId } from '../types/variationTree'

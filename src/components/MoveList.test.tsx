@@ -775,9 +775,6 @@ describe('MoveList variation integration', () => {
       // After the variation line, there should be no move-button-placeholder pair
       // (i.e., no black-only split row with empty cells)
       const afterVar = children.slice(varLineIdx + 1)
-      const emptyPlaceholders = afterVar.filter(
-        el => el.classList.contains('move-button-placeholder') && !el.classList.contains('move-placeholder-dots'),
-      )
       // There should be 0 trailing placeholders from a black-only row
       // (Other pairs may have placeholders, but we just check no empty row right after the var line)
       const firstAfterVar = afterVar[0]
