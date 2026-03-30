@@ -16,6 +16,7 @@ from app.api.blunder import router as blunder_router
 from app.api.health import router as health_router
 from app.api.game import router as game_router
 from app.api.history import router as history_router
+from app.api.openings import router as openings_router
 from app.api.stats import router as stats_router
 from app.api.session import router as session_router
 from app.api.srs import router as srs_router
@@ -53,6 +54,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(game_router)
     app.include_router(history_router)
+    app.include_router(openings_router)
     app.include_router(stats_router)
     app.include_router(session_router)
     app.include_router(srs_router)
