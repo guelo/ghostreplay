@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,11 +9,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Blunder, BlunderReview, GameSession
+from app.models import Blunder, BlunderReview, GameSession, Position
+from app.opening_cache import recompute_opening_scores_if_needed
 from app.security import TokenPayload, get_current_user
 from app.srs_math import calculate_priority, expected_interval_hours
 
 router = APIRouter(prefix="/api/srs", tags=["srs"])
+logger = logging.getLogger(__name__)
 
 
 class SrsReviewRequest(BaseModel):
@@ -49,6 +52,28 @@ def _get_blunder_or_404(db: Session, *, blunder_id: int, user_id: int) -> Blunde
     return blunder
 
 
+def _get_blunder_player_color(db: Session, blunder: Blunder) -> str | None:
+    if blunder.source_session_id is not None:
+        source_color = (
+            db.query(GameSession.player_color)
+            .filter(GameSession.id == blunder.source_session_id)
+            .scalar()
+        )
+        if source_color is not None:
+            return source_color
+    return db.query(Position.active_color).filter(Position.id == blunder.position_id).scalar()
+
+
+def _refresh_opening_scores_best_effort(db: Session, user_id: int, player_color: str) -> None:
+    try:
+        recompute_opening_scores_if_needed(db, user_id, player_color)
+    except Exception:
+        logger.exception(
+            "opening score cache refresh failed after SRS review",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
+
+
 @router.post("/review", response_model=SrsReviewResponse, status_code=200)
 def review_blunder(
     request: SrsReviewRequest,
@@ -79,6 +104,10 @@ def review_blunder(
         )
     )
     db.commit()
+
+    player_color = _get_blunder_player_color(db, blunder)
+    if player_color is not None:
+        _refresh_opening_scores_best_effort(db, user.user_id, player_color)
 
     interval_hours = expected_interval_hours(blunder.pass_streak)
     next_expected_review = reviewed_at + timedelta(hours=interval_hours)

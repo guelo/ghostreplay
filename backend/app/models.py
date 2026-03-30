@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -201,4 +202,73 @@ class AnalysisCache(Base):
     source: Mapped[str] = mapped_column(String(20), nullable=False, server_default="game")
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class OpeningScoreBatch(Base):
+    __tablename__ = "opening_score_batches"
+    __table_args__ = (
+        CheckConstraint("player_color in ('white','black')", name="ck_opening_score_batches_player_color"),
+        UniqueConstraint("user_id", "player_color", "generation", name="uq_opening_score_batches_user_color_generation"),
+        Index("idx_opening_score_batches_user_color", "user_id", "player_color", "generation"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    computed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class OpeningScoreCursor(Base):
+    __tablename__ = "opening_score_cursors"
+    __table_args__ = (
+        CheckConstraint("player_color in ('white','black')", name="ck_opening_score_cursors_player_color"),
+    )
+
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True)
+    player_color: Mapped[str] = mapped_column(String(5), primary_key=True)
+    latest_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class UserOpeningScore(Base):
+    __tablename__ = "user_opening_scores"
+    __table_args__ = (
+        CheckConstraint("player_color in ('white','black')", name="ck_user_opening_scores_player_color"),
+        UniqueConstraint("batch_id", "opening_key", name="uq_user_opening_scores_batch_opening"),
+        Index("idx_user_opening_scores_batch", "batch_id"),
+        Index("idx_user_opening_scores_user_color", "user_id", "player_color"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("opening_score_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    opening_key: Mapped[str] = mapped_column(Text, nullable=False)
+    opening_name: Mapped[str] = mapped_column(Text, nullable=False)
+    opening_family: Mapped[str] = mapped_column(Text, nullable=False)
+    opening_score: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    coverage: Mapped[float] = mapped_column(Float, nullable=False)
+    weighted_depth: Mapped[float] = mapped_column(Float, nullable=False)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_practiced_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    strongest_branch_name: Mapped[str | None] = mapped_column(Text)
+    strongest_branch_score: Mapped[float | None] = mapped_column(Float)
+    weakest_branch_name: Mapped[str | None] = mapped_column(Text)
+    weakest_branch_score: Mapped[float | None] = mapped_column(Float)
+    underexposed_branch_name: Mapped[str | None] = mapped_column(Text)
+    underexposed_branch_value: Mapped[float | None] = mapped_column(Float)
+    computed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )

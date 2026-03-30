@@ -137,6 +137,50 @@ def _create_test_schema(conn) -> None:
         )
     """))
     conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opening_score_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            player_color VARCHAR(5) NOT NULL,
+            generation INTEGER NOT NULL,
+            computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, player_color, generation)
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opening_score_cursors (
+            user_id INTEGER NOT NULL,
+            player_color VARCHAR(5) NOT NULL,
+            latest_generation INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, player_color)
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS user_opening_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            player_color VARCHAR(5) NOT NULL,
+            opening_key TEXT NOT NULL,
+            opening_name TEXT NOT NULL,
+            opening_family TEXT NOT NULL,
+            opening_score FLOAT NOT NULL,
+            confidence FLOAT NOT NULL,
+            coverage FLOAT NOT NULL,
+            weighted_depth FLOAT NOT NULL,
+            sample_size INTEGER NOT NULL,
+            last_practiced_at TIMESTAMP,
+            strongest_branch_name TEXT,
+            strongest_branch_score FLOAT,
+            weakest_branch_name TEXT,
+            weakest_branch_score FLOAT,
+            underexposed_branch_name TEXT,
+            underexposed_branch_value FLOAT,
+            computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, opening_key),
+            FOREIGN KEY (batch_id) REFERENCES opening_score_batches(id) ON DELETE CASCADE
+        )
+    """))
+    conn.execute(text("""
         CREATE TABLE IF NOT EXISTS blunder_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             blunder_id INTEGER NOT NULL,
@@ -154,6 +198,9 @@ def _create_test_schema(conn) -> None:
 
 def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
+    conn.execute(text("DROP TABLE IF EXISTS user_opening_scores"))
+    conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
+    conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))
     conn.execute(text("DROP TABLE IF EXISTS analysis_cache"))
     conn.execute(text("DROP TABLE IF EXISTS rating_history"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))

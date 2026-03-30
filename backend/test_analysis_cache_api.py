@@ -1,10 +1,20 @@
 """Tests for analysis cache: lookup endpoint and auto-population from session moves."""
 
+from unittest.mock import patch
+
+import pytest
+
 from app.models import AnalysisCache
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 AFTER_E4_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+
+@pytest.fixture(autouse=True)
+def _stub_opening_cache_refresh():
+    with patch("app.api.session.recompute_opening_scores_if_needed", return_value=None):
+        yield
 
 
 def _seed_cache(db_session, entries: list[dict]) -> None:

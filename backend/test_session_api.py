@@ -1,6 +1,15 @@
 import uuid
+from unittest.mock import patch
+
+import pytest
 
 from app.models import SessionMove
+
+
+@pytest.fixture(autouse=True)
+def _stub_opening_cache_refresh():
+    with patch("app.api.session.recompute_opening_scores_if_needed", return_value=None):
+        yield
 
 
 def test_session_moves_bulk_insert_success(client, auth_headers, create_game_session, db_session):
@@ -199,6 +208,41 @@ def test_session_moves_duplicate_payload_rejected(client, auth_headers, create_g
     )
     assert response.status_code == 422
     assert "duplicate move entry" in response.json()["detail"].lower()
+
+
+def test_session_moves_succeeds_when_opening_cache_refresh_fails(
+    client,
+    auth_headers,
+    create_game_session,
+    db_session,
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    session_uuid = uuid.UUID(session_id)
+
+    with patch("app.api.session.recompute_opening_scores_if_needed", side_effect=RuntimeError("boom")):
+        response = client.post(
+            f"/api/session/{session_id}/moves",
+            json={
+                "moves": [
+                    {
+                        "move_number": 1,
+                        "color": "white",
+                        "move_san": "e4",
+                        "fen_after": "fen-1",
+                    }
+                ]
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"moves_inserted": 1}
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid, SessionMove.move_number == 1, SessionMove.color == "white")
+        .count()
+        == 1
+    )
 
 
 def test_session_analysis_success(client, auth_headers, create_game_session):

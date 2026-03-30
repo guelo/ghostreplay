@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from enum import Enum
 
@@ -11,10 +12,12 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.opening_cache import recompute_opening_scores_if_needed
 from app.models import AnalysisCache, GameSession, SessionMove
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/session", tags=["session"])
+logger = logging.getLogger(__name__)
 
 
 class MoveColor(str, Enum):
@@ -118,6 +121,16 @@ def _validate_unique_move_keys(moves: list[SessionMoveInput]) -> None:
                 ),
             )
         seen.add(key)
+
+
+def _refresh_opening_scores_best_effort(db: Session, user_id: int, player_color: str) -> None:
+    try:
+        recompute_opening_scores_if_needed(db, user_id, player_color)
+    except Exception:
+        logger.exception(
+            "opening score cache refresh failed after session upload",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
 
 
 def _upsert_analysis_cache(
@@ -254,6 +267,7 @@ def upsert_session_moves(
 
         db.commit()
         _upsert_analysis_cache(db, request.moves)
+        _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
         return SessionMovesResponse(moves_inserted=len(values))
 
     statement = statement.on_conflict_do_update(
@@ -279,6 +293,7 @@ def upsert_session_moves(
     db.commit()
 
     _upsert_analysis_cache(db, request.moves)
+    _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
 
     return SessionMovesResponse(moves_inserted=len(values))
 

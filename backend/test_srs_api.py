@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
+import pytest
 from sqlalchemy import text
 
 from app.models import Blunder, Position
+
+
+@pytest.fixture(autouse=True)
+def _stub_opening_cache_refresh():
+    with patch("app.api.srs.recompute_opening_scores_if_needed", return_value=None):
+        yield
 
 
 def _create_blunder(
@@ -112,6 +120,40 @@ def test_srs_review_fail_resets_streak(client, auth_headers, create_game_session
     updated_blunder = db_session.query(Blunder).filter(Blunder.id == blunder.id).first()
     assert updated_blunder is not None
     assert updated_blunder.pass_streak == 0
+
+
+def test_srs_review_succeeds_when_opening_cache_refresh_fails(
+    client,
+    auth_headers,
+    create_game_session,
+    db_session,
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    blunder = _create_blunder(db_session, user_id=123)
+
+    with patch("app.api.srs.recompute_opening_scores_if_needed", side_effect=RuntimeError("boom")):
+        response = client.post(
+            "/api/srs/review",
+            json={
+                "session_id": session_id,
+                "blunder_id": blunder.id,
+                "passed": True,
+                "user_move": "Nf3",
+                "eval_delta": 20,
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert response.status_code == 200
+    db_session.expire_all()
+    updated_blunder = db_session.query(Blunder).filter(Blunder.id == blunder.id).first()
+    assert updated_blunder is not None
+    assert updated_blunder.pass_streak == 1
+    review_count = db_session.execute(
+        text("SELECT COUNT(*) FROM blunder_reviews WHERE blunder_id = :blunder_id"),
+        {"blunder_id": blunder.id},
+    ).scalar_one()
+    assert review_count == 1
 
 
 def test_srs_review_session_not_found(client, auth_headers, db_session):

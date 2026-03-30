@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import NamedTuple
 
 import chess
@@ -31,9 +31,10 @@ def _parse_ts(val: datetime | str | None) -> datetime | None:
     if val is None:
         return None
     if isinstance(val, datetime):
-        return val
+        return val if val.tzinfo is not None else val.replace(tzinfo=timezone.utc)
     try:
-        return datetime.fromisoformat(val)
+        parsed = datetime.fromisoformat(val)
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
 
