@@ -8,6 +8,7 @@ import {
   recordManualBlunder,
   getNextOpponentMove,
   reviewSrsBlunder,
+  getOpeningFamilyScores,
   getStatsSummary,
 } from './api'
 
@@ -722,6 +723,57 @@ describe('getStatsSummary', () => {
 
     await expect(getStatsSummary(30)).rejects.toThrow(
       'Failed to load stats summary: Bad Request',
+    )
+  })
+})
+
+describe('getOpeningFamilyScores', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('requests the family score endpoint with player color query', async () => {
+    mockResponse({
+      player_color: 'white',
+      families: [],
+      total_families: 0,
+      computed_at: null,
+    })
+
+    await getOpeningFamilyScores('white')
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(options.method).toBe('GET')
+    expect(url).toContain('/api/openings/families/scores')
+    expect(url).toContain('player_color=white')
+  })
+
+  it('includes auth headers', async () => {
+    localStorage.setItem('ghost_replay_token', 'opening-token')
+    mockResponse({
+      player_color: 'black',
+      families: [],
+      total_families: 0,
+      computed_at: null,
+    })
+
+    await getOpeningFamilyScores('black')
+
+    const [, options] = fetchMock.mock.calls[0]
+    expect(options.headers).toEqual(
+      expect.objectContaining({
+        Authorization: 'Bearer opening-token',
+        'Content-Type': 'application/json',
+      }),
+    )
+  })
+
+  it('surfaces the fallback error message for non-ok responses', async () => {
+    mockResponse({}, false, 'Bad Request', 400)
+
+    await expect(getOpeningFamilyScores('white')).rejects.toThrow(
+      'Failed to load opening families: Bad Request',
     )
   })
 })

@@ -40,6 +40,9 @@ function AppNav({ showLogo = false }: AppNavProps) {
         <Link to="/blunders" className="nav-bar__link">
           Blunders
         </Link>
+        <Link to="/openings" className="nav-bar__link">
+          Openings
+        </Link>
         <Link to="/stats" className="nav-bar__link">
           Stats
         </Link>

@@ -595,6 +595,44 @@ export const fetchBlunders = async (
   )
 }
 
+export type OpeningPlayerColor = 'white' | 'black'
+
+export interface FamilyScoreItem {
+  family_name: string
+  root_count: number
+  family_score: number
+  family_confidence: number
+  family_coverage: number
+  root_sample_size_sum: number
+  last_practiced_at: string | null
+  weakest_root_name: string
+  weakest_root_score: number
+}
+
+export interface FamilyScoresResponse {
+  player_color: OpeningPlayerColor
+  families: FamilyScoreItem[]
+  total_families: number
+  computed_at: string | null
+}
+
+/**
+ * Fetch opening family scores for one player color.
+ */
+export const getOpeningFamilyScores = async (
+  playerColor: OpeningPlayerColor,
+): Promise<FamilyScoresResponse> => {
+  const params = new URLSearchParams({
+    player_color: playerColor,
+  })
+
+  return requestJson<FamilyScoresResponse>(
+    `${API_BASE_URL}/api/openings/families/scores?${params}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load opening families' },
+  )
+}
+
 export type StatsWindowDays = 0 | 7 | 30 | 90 | 365
 
 export interface StatsGameRecord {

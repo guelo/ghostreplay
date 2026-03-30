@@ -3,8 +3,9 @@ import App from "./App";
 import AuthForm from "./components/AuthForm";
 import BlundersPage from "./pages/BlundersPage";
 import HistoryPage from "./pages/HistoryPage";
-import StatsPage from "./pages/StatsPage";
 import GamePage from "./pages/GamePage";
+import OpeningsPage from "./pages/OpeningsPage";
+import StatsPage from "./pages/StatsPage";
 
 function AppRoutes() {
   return (
@@ -15,6 +16,7 @@ function AppRoutes() {
       <Route path="/register" element={<AuthForm mode="register" />} />
       <Route path="/history" element={<HistoryPage />} />
       <Route path="/blunders" element={<BlundersPage />} />
+      <Route path="/openings" element={<OpeningsPage />} />
       <Route path="/stats" element={<StatsPage />} />
     </Routes>
   );
