@@ -272,10 +272,8 @@ class _Calculator:
                 for c in node.children.values():
                     stack.append(c)
                     
-            for edge_key in self.overlay.edges.keys():
-                p_fen, c_fen = edge_key
-                if p_fen == curr:
-                    stack.append(c_fen)
+            for c_fen in self._overlay_edges_by_parent.get(curr, []):
+                stack.append(c_fen)
                     
         self._memo_global_ghost_target[fen] = res
         return res
@@ -784,4 +782,3 @@ def compute_root_score(
         debug=debug,
     )
     return calc.compute()
-

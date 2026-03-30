@@ -455,27 +455,27 @@ def test_gap_5_importance_ghost_target_boundary():
     assert score.strongest_branch.opening_key == fen_desc1
 
 
-def test_gap_6_unseen_child_root_no_evidence_edge():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_c = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    nodes = {fen_u: _make_node(fen_u), fen_c: _make_node(fen_c)}
-    nodes[fen_u].children = {"1": fen_c}
-    graph = OpeningGraph(nodes, fen_u)
-    
-    # fen_c is a descendant boundary root!
-    root1 = _make_root(fen_u, children={fen_c})
-    root2 = _make_root(fen_c)
-    roots = OpeningRoots({fen_u: root1, fen_c: root2}, {fen_u: frozenset([fen_u]), fen_c: frozenset([fen_c])})
-    
+def test_gap_6_global_ghost_target_overlay_path():
+    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
+    fen_desc = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
+    fen_ext = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
+
+    nodes = {fen_root: _make_node(fen_root), fen_desc: _make_node(fen_desc)}
+    nodes[fen_root].children = {"1": fen_desc}
+    graph = OpeningGraph(nodes, fen_root)
+
+    root1 = _make_root(fen_root, children={fen_desc})
+    root2 = _make_root(fen_desc)
+    roots = OpeningRoots(
+        {fen_root: root1, fen_desc: root2},
+        {fen_root: frozenset([fen_root]), fen_desc: frozenset([fen_desc])},
+    )
+
     overlay = EvidenceOverlay(1, "white")
-    # NO evidence edge -> unseen child root!
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, debug=True)
-    debug_fens = {d.fen for d in score.debug_nodes}
-    
-    # The child root MUST NOT leak into the debug nodes (it's not scored by parent)
-    assert fen_c not in debug_fens
-    
-    # But it MUST appear in the strongest branch summary due to importance
+    overlay.edges[(fen_desc, fen_ext)] = EdgeEvidence(fen_desc, fen_ext, "1")
+    overlay.nodes[fen_ext] = NodeEvidence(fen_ext, is_ghost_target=True)
+
+    score = compute_root_score(fen_root, "white", graph, overlay, roots, debug=True)
+
     assert score.strongest_branch is not None
-    assert score.strongest_branch.opening_key == fen_c
+    assert score.strongest_branch.opening_key == fen_desc
