@@ -102,6 +102,7 @@ class _Calculator:
         config: RootCalcConfig,
         now: datetime,
         debug: bool,
+        include_branch_summaries: bool = True,
     ) -> None:
         self.opening_key = opening_key
         self.player_color = player_color
@@ -111,6 +112,7 @@ class _Calculator:
         self.config = config
         self.now = now
         self.debug = debug
+        self.include_branch_summaries = include_branch_summaries
 
         self.root_node = self.roots.get_root(opening_key)
         
@@ -683,59 +685,79 @@ class _Calculator:
             
         coverage = 100.0 * cov_val
 
-        # Branch Summaries
         strongest_branch = None
         weakest_branch = None
-        max_s = -1.0
-        min_s = float('inf')
-        
-        immediate_children_keys = list(self.root_node.child_keys)
-        for c_key in immediate_children_keys:
-            c_root = self.roots.get_root(c_key)
-            if not c_root: continue
-            imp = self._get_importance(c_key) # FEN is the key
-            if imp > 0:
-                # compute child score
-                child_calc = _Calculator(c_key, self.player_color, self.graph, self.overlay, self.roots, self.config, self.now, False)
-                child_score = child_calc.compute()
-                
-                bs = BranchSummary(c_key, c_root.opening_name, child_score.opening_score)
-                if child_score.opening_score > max_s:
-                    max_s = child_score.opening_score
-                    strongest_branch = bs
-                if child_score.opening_score < min_s:
-                    min_s = child_score.opening_score
-                    weakest_branch = bs
-
         underexposed_branch = None
-        max_gap = -1.0
-        
-        # For all named descendants
-        def get_all_descendants(r_key: str, desc: set[str]):
-            r = self.roots.get_root(r_key)
-            if r:
-                for ck in r.child_keys:
-                    if ck not in desc:
-                        desc.add(ck)
-                        get_all_descendants(ck, desc)
-                        
-        desc_keys: set[str] = set()
-        get_all_descendants(self.opening_key, desc_keys)
-        
-        for d_key in desc_keys:
-            d_root = self.roots.get_root(d_key)
-            if not d_root: continue
-            
-            imp = self._get_importance(d_key)
-            if imp > 0:
-                d_calc = _Calculator(d_key, self.player_color, self.graph, self.overlay, self.roots, self.config, self.now, False)
-                if not d_calc._subtree_is_locally_covered(d_key):
-                    d_res = d_calc.compute()
-                    
-                    gap = imp * (1.0 - d_res.coverage / 100.0)
-                    if gap > max_gap:
-                        max_gap = gap
-                        underexposed_branch = BranchSummary(d_key, d_root.opening_name, gap)
+        if self.include_branch_summaries:
+            max_s = -1.0
+            min_s = float('inf')
+
+            immediate_children_keys = list(self.root_node.child_keys)
+            for c_key in immediate_children_keys:
+                c_root = self.roots.get_root(c_key)
+                if not c_root:
+                    continue
+                imp = self._get_importance(c_key)
+                if imp > 0:
+                    child_calc = _Calculator(
+                        c_key,
+                        self.player_color,
+                        self.graph,
+                        self.overlay,
+                        self.roots,
+                        self.config,
+                        self.now,
+                        False,
+                        include_branch_summaries=False,
+                    )
+                    child_score = child_calc.compute()
+
+                    bs = BranchSummary(c_key, c_root.opening_name, child_score.opening_score)
+                    if child_score.opening_score > max_s:
+                        max_s = child_score.opening_score
+                        strongest_branch = bs
+                    if child_score.opening_score < min_s:
+                        min_s = child_score.opening_score
+                        weakest_branch = bs
+
+            max_gap = -1.0
+
+            def get_all_descendants(r_key: str, desc: set[str]):
+                r = self.roots.get_root(r_key)
+                if r:
+                    for ck in r.child_keys:
+                        if ck not in desc:
+                            desc.add(ck)
+                            get_all_descendants(ck, desc)
+
+            desc_keys: set[str] = set()
+            get_all_descendants(self.opening_key, desc_keys)
+
+            for d_key in desc_keys:
+                d_root = self.roots.get_root(d_key)
+                if not d_root:
+                    continue
+
+                imp = self._get_importance(d_key)
+                if imp > 0:
+                    d_calc = _Calculator(
+                        d_key,
+                        self.player_color,
+                        self.graph,
+                        self.overlay,
+                        self.roots,
+                        self.config,
+                        self.now,
+                        False,
+                        include_branch_summaries=False,
+                    )
+                    if not d_calc._subtree_is_locally_covered(d_key):
+                        d_res = d_calc.compute()
+
+                        gap = imp * (1.0 - d_res.coverage / 100.0)
+                        if gap > max_gap:
+                            max_gap = gap
+                            underexposed_branch = BranchSummary(d_key, d_root.opening_name, gap)
 
         sample_size = 0
         last_practiced_at = None
@@ -777,6 +799,7 @@ def compute_root_score(
     config: RootCalcConfig | None = None,
     now: datetime | None = None,
     debug: bool = False,
+    include_branch_summaries: bool = True,
 ) -> RootScore:
     if config is None:
         config = RootCalcConfig()
@@ -792,5 +815,6 @@ def compute_root_score(
         config=config,
         now=now,
         debug=debug,
+        include_branch_summaries=include_branch_summaries,
     )
     return calc.compute()

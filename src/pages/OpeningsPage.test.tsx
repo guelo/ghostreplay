@@ -164,7 +164,7 @@ describe("OpeningsPage", () => {
     expect(getOpeningFamilyScoresMock).toHaveBeenCalledWith("white");
   });
 
-  it("renders populated family cards in backend order", async () => {
+  it("renders populated family cards strongest-first with normalized percentages", async () => {
     getOpeningFamilyScoresMock.mockResolvedValueOnce(whiteFamiliesResponse);
 
     renderPage();
@@ -177,20 +177,22 @@ describe("OpeningsPage", () => {
       .map((heading) => heading.textContent);
 
     expect(headings).toEqual([
-      "Sicilian Defense",
-      "French Defense",
       "Caro-Kann Defense",
+      "French Defense",
+      "Sicilian Defense",
     ]);
 
     const firstCard = within(grid)
-      .getByRole("heading", { name: "Sicilian Defense" })
+      .getByRole("heading", { name: "Caro-Kann Defense" })
       .closest("article");
 
     expect(firstCard).not.toBeNull();
     expect(within(firstCard!).getByText(/Weakest root:/)).toBeInTheDocument();
-    expect(within(firstCard!).getByText("Dragon Variation")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("Samples")).toBeInTheDocument();
-    expect(within(firstCard!).queryByText("Games")).not.toBeInTheDocument();
+    expect(within(firstCard!).getByText("Advance Variation")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("Games")).toBeInTheDocument();
+    expect(within(firstCard!).queryByText("Samples")).not.toBeInTheDocument();
+    expect(within(firstCard!).getByText("71%")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("44%")).toBeInTheDocument();
   });
 
   it("ignores a stale response that settles during a color switch", async () => {

@@ -22,11 +22,20 @@ function formatScore(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
-function formatPercent(value: number): string {
-  return `${Math.round(value * 100)}%`;
+function normalizePercentValue(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  const normalizedValue = value <= 1 ? value * 100 : value;
+  return Math.min(100, Math.max(0, normalizedValue));
 }
 
-function formatSamples(value: number): string {
+function formatPercent(value: number): string {
+  return `${Math.round(normalizePercentValue(value))}%`;
+}
+
+function formatGames(value: number): string {
   return value.toLocaleString();
 }
 
@@ -57,6 +66,22 @@ function getPriorityLabel(score: number): string {
 
 function formatRootCount(rootCount: number): string {
   return `${rootCount} ${rootCount === 1 ? "root" : "roots"}`;
+}
+
+function sortFamiliesByStrength(
+  families: FamilyScoresResponse["families"],
+): FamilyScoresResponse["families"] {
+  return [...families].sort((left, right) => {
+    if (left.weakest_root_score !== right.weakest_root_score) {
+      return right.weakest_root_score - left.weakest_root_score;
+    }
+
+    if (left.family_score !== right.family_score) {
+      return right.family_score - left.family_score;
+    }
+
+    return left.family_name.localeCompare(right.family_name);
+  });
 }
 
 function OpeningsPage() {
@@ -121,6 +146,7 @@ function OpeningsPage() {
     response !== null &&
     response.computed_at !== null &&
     response.families.length === 0;
+  const sortedFamilies = response ? sortFamiliesByStrength(response.families) : [];
 
   return (
     <main className="app-shell">
@@ -145,9 +171,10 @@ function OpeningsPage() {
             </div>
 
             <aside className="openings-shell__callout">
-              <p className="openings-shell__callout-label">Samples</p>
+              <p className="openings-shell__callout-label">Games</p>
               <p className="openings-shell__callout-text">
-                Summed root evidence, not a deduped game count.
+                Summed root evidence, so one game can contribute to more than
+                one root.
               </p>
             </aside>
           </header>
@@ -182,7 +209,7 @@ function OpeningsPage() {
             </div>
 
             <p className="openings-shell__toolbar-note">
-              Showing the biggest improvement opportunities first.
+              Showing the strongest openings first.
             </p>
           </div>
 
@@ -270,7 +297,7 @@ function OpeningsPage() {
               className="openings-grid"
               aria-label={`${selectedColorLabel} opening families`}
             >
-              {response.families.map((family) => {
+              {sortedFamilies.map((family) => {
                 const tone = getPriorityTone(family.weakest_root_score);
 
                 return (
@@ -311,8 +338,8 @@ function OpeningsPage() {
                         <dd>{formatPercent(family.family_coverage)}</dd>
                       </div>
                       <div className="opening-family-card__metric">
-                        <dt>Samples</dt>
-                        <dd>{formatSamples(family.root_sample_size_sum)}</dd>
+                        <dt>Games</dt>
+                        <dd>{formatGames(family.root_sample_size_sum)}</dd>
                       </div>
                     </dl>
                   </article>

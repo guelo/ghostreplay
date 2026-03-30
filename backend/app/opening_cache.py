@@ -65,6 +65,7 @@ def _build_cached_scores(
             config,
             computed_at,
             False,
+            include_branch_summaries=False,
         )
         if not _calculator_has_evidence(calc, overlay):
             continue
@@ -254,6 +255,10 @@ def recompute_opening_scores(
     graph = get_opening_graph()
     roots = get_opening_roots()
     overlay = overlay_evidence(db, user_id, player_color, graph)
+    # Release the checked-out DB connection before the CPU-heavy scoring pass.
+    # Without this, repeated requests can sit idle in transaction and exhaust
+    # the pool while score computation is still running.
+    db.rollback()
     scores = _build_cached_scores(player_color, graph, overlay, roots, computed_at)
 
     batch = OpeningScoreBatch(

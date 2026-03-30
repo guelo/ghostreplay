@@ -190,6 +190,32 @@ def test_recompute_writes_one_coherent_batch(db_session):
     assert all(row.computed_at == batch.computed_at for row in rows)
 
 
+def test_recompute_releases_db_transaction_before_scoring(db_session):
+    _seed_black_opening_session(db_session)
+    observed_transactions: list[bool] = []
+
+    def fake_build_cached_scores(*args, **kwargs):
+        observed_transactions.append(db_session.in_transaction())
+        return []
+
+    with patch("app.opening_cache._build_cached_scores", side_effect=fake_build_cached_scores):
+        recompute_opening_scores(db_session, 123, "black")
+
+    assert observed_transactions == [False]
+
+
+def test_recompute_skips_cached_branch_summaries(db_session):
+    _seed_black_opening_session(db_session)
+
+    recompute_opening_scores(db_session, 123, "black")
+    _, rows = list_cached_opening_scores(db_session, 123, "black")
+
+    assert rows
+    assert all(row.strongest_branch_key is None for row in rows)
+    assert all(row.weakest_branch_key is None for row in rows)
+    assert all(row.underexposed_branch_key is None for row in rows)
+
+
 def test_latest_batch_read_selects_only_latest_batch(db_session):
     _seed_black_opening_session(db_session)
 
