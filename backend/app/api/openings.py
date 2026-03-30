@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import fields as dc_fields
 from datetime import datetime
 from typing import Literal
@@ -9,6 +10,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.models import UserOpeningScore
+from app.opening_cache import ensure_opening_scores, recompute_opening_scores
 from app.opening_evidence import overlay_evidence
 from app.opening_graph import get_opening_graph
 from app.opening_rootcalc import RootScore, compute_root_score
@@ -95,6 +98,77 @@ class OpeningRootsListResponse(BaseModel):
     families: list[OpeningFamilyItem]
     total_roots: int
     total_families: int
+
+
+class FamilyScoreItem(BaseModel):
+    family_name: str
+    root_count: int
+    family_score: float
+    family_confidence: float
+    family_coverage: float
+    root_sample_size_sum: int
+    last_practiced_at: datetime | None
+    weakest_root_name: str
+    weakest_root_score: float
+
+
+class FamilyScoresResponse(BaseModel):
+    player_color: str
+    families: list[FamilyScoreItem]
+    total_families: int
+    computed_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# Aggregation helpers
+# ---------------------------------------------------------------------------
+
+def _weakest_root(rows: list[UserOpeningScore]) -> UserOpeningScore:
+    """Pick the weakest root with deterministic tie-breaking."""
+    return min(
+        rows,
+        key=lambda r: (r.opening_score, r.confidence, r.opening_name, r.opening_key),
+    )
+
+
+def build_family_scores(rows: list[UserOpeningScore]) -> list[FamilyScoreItem]:
+    """Aggregate per-root cached scores into per-family items."""
+    families_map: dict[str, list[UserOpeningScore]] = defaultdict(list)
+    for row in rows:
+        families_map[row.opening_family].append(row)
+
+    items: list[FamilyScoreItem] = []
+    for family_name, root_rows in families_map.items():
+        total_conf = sum(r.confidence for r in root_rows)
+        if total_conf > 0:
+            family_score = sum(r.opening_score * r.confidence for r in root_rows) / total_conf
+        else:
+            family_score = sum(r.opening_score for r in root_rows) / len(root_rows)
+
+        family_confidence = sum(r.confidence for r in root_rows) / len(root_rows)
+        family_coverage = sum(r.coverage for r in root_rows) / len(root_rows)
+        root_sample_size_sum = sum(r.sample_size for r in root_rows)
+
+        practiced_dates = [r.last_practiced_at for r in root_rows if r.last_practiced_at is not None]
+        last_practiced_at = max(practiced_dates) if practiced_dates else None
+
+        weakest = _weakest_root(root_rows)
+
+        items.append(FamilyScoreItem(
+            family_name=family_name,
+            root_count=len(root_rows),
+            family_score=family_score,
+            family_confidence=family_confidence,
+            family_coverage=family_coverage,
+            root_sample_size_sum=root_sample_size_sum,
+            last_practiced_at=last_practiced_at,
+            weakest_root_name=weakest.opening_name,
+            weakest_root_score=weakest.opening_score,
+        ))
+
+    # Sort: weakest_root_score asc, family_score asc, family_name asc
+    items.sort(key=lambda f: (f.weakest_root_score, f.family_score, f.family_name))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -196,4 +270,20 @@ def list_opening_roots(
         families=families,
         total_roots=total_roots,
         total_families=len(families),
+    )
+
+
+@router.get("/families/scores", response_model=FamilyScoresResponse)
+def get_family_scores(
+    player_color: Literal["white", "black"] = Query(...),
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> FamilyScoresResponse:
+    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
+    families = build_family_scores(rows)
+    return FamilyScoresResponse(
+        player_color=player_color,
+        families=families,
+        total_families=len(families),
+        computed_at=batch.computed_at if batch is not None else None,
     )

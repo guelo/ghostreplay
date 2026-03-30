@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
+from app.models import (
+    GameSession,
+    OpeningScoreBatch,
+    OpeningScoreCursor,
+    SessionMove,
+    UserOpeningScore,
+)
 from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -211,3 +219,378 @@ def test_roots_list_family_filter(client, auth_headers):
 def test_roots_no_auth_returns_401(client):
     resp = client.get("/api/openings/roots")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# GET /api/openings/families/scores
+# ---------------------------------------------------------------------------
+
+_FAMILIES_URL = "/api/openings/families/scores"
+
+# Patch targets for cache functions in the openings module namespace
+_PATCH_ENSURE = "app.api.openings.ensure_opening_scores"
+
+
+def _make_batch(batch_id: int = 1, user_id: int = 123, player_color: str = "white",
+                generation: int = 1, computed_at: datetime | None = None):
+    from app.models import OpeningScoreBatch
+    batch = OpeningScoreBatch(
+        id=batch_id,
+        user_id=user_id,
+        player_color=player_color,
+        generation=generation,
+    )
+    if computed_at is not None:
+        batch.computed_at = computed_at
+    else:
+        batch.computed_at = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    return batch
+
+
+def _make_row(batch_id: int = 1, user_id: int = 123, player_color: str = "white",
+              opening_key: str = "key-a", opening_name: str = "Root A",
+              opening_family: str = "Family A", opening_score: float = 60.0,
+              confidence: float = 0.8, coverage: float = 0.5,
+              weighted_depth: float = 3.0, sample_size: int = 10,
+              last_practiced_at: datetime | None = None):
+    from app.models import UserOpeningScore
+    row = UserOpeningScore(
+        batch_id=batch_id,
+        user_id=user_id,
+        player_color=player_color,
+        opening_key=opening_key,
+        opening_name=opening_name,
+        opening_family=opening_family,
+        opening_score=opening_score,
+        confidence=confidence,
+        coverage=coverage,
+        weighted_depth=weighted_depth,
+        sample_size=sample_size,
+        last_practiced_at=last_practiced_at,
+    )
+    return row
+
+
+# Case 1: auth required
+def test_family_scores_no_auth_returns_401(client):
+    resp = client.get(_FAMILIES_URL, params={"player_color": "white"})
+    assert resp.status_code == 401
+
+
+# Case 2: invalid player_color returns 422
+def test_family_scores_invalid_color_returns_422(client, auth_headers):
+    resp = client.get(_FAMILIES_URL, params={"player_color": "red"}, headers=auth_headers())
+    assert resp.status_code == 422
+
+
+# Case 3: cache miss with historical evidence bootstraps batch
+def test_family_scores_bootstrap_on_cache_miss(client, auth_headers, db_session):
+    # Seed historical evidence: a completed game session with moves for user 123, black
+    session = GameSession(
+        id=uuid.uuid4(),
+        user_id=123,
+        started_at=datetime.now(timezone.utc),
+        status="completed",
+        result="win",
+        engine_elo=1500,
+        player_color="black",
+    )
+    db_session.add(session)
+    db_session.commit()
+    db_session.add_all([
+        SessionMove(
+            session_id=session.id, move_number=1, color="white", move_san="e4",
+            fen_before="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            fen_after="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            eval_delta=0,
+        ),
+        SessionMove(
+            session_id=session.id, move_number=1, color="black", move_san="e5",
+            fen_before="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            fen_after="rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            eval_delta=0,
+        ),
+    ])
+    db_session.commit()
+
+    # No batch exists yet — verify
+    assert db_session.query(OpeningScoreBatch).filter_by(user_id=123, player_color="black").first() is None
+
+    # Patch graph/roots on the cache module so recompute uses our test graph
+    with (
+        patch("app.opening_cache.get_opening_graph", return_value=_make_graph()),
+        patch("app.opening_cache.get_opening_roots", return_value=_make_roots()),
+    ):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "black"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["families"]) >= 1
+    assert data["computed_at"] is not None
+
+    # A batch row should now exist in the database
+    batch = db_session.query(OpeningScoreBatch).filter_by(user_id=123, player_color="black").first()
+    assert batch is not None
+
+
+# Case 4: true no-evidence returns empty
+def test_family_scores_no_evidence(client, auth_headers):
+    with patch(_PATCH_ENSURE, return_value=(None, [])):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["families"] == []
+    assert data["computed_at"] is None
+
+
+# Case 5: empty batch returns empty families with non-null computed_at
+def test_family_scores_empty_batch(client, auth_headers):
+    batch = _make_batch(computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
+    with patch(_PATCH_ENSURE, return_value=(batch, [])):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["families"] == []
+    assert data["computed_at"] is not None
+
+
+# Case 6: weighted aggregation
+def test_family_scores_weighted_aggregation(client, auth_headers):
+    batch = _make_batch()
+    rows = [
+        _make_row(opening_key="k1", opening_name="Root 1", opening_family="Fam",
+                  opening_score=80.0, confidence=0.6, coverage=0.4, sample_size=5),
+        _make_row(opening_key="k2", opening_name="Root 2", opening_family="Fam",
+                  opening_score=40.0, confidence=0.4, coverage=0.6, sample_size=15),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    data = resp.json()
+    fam = data["families"][0]
+    # Weighted: (80*0.6 + 40*0.4) / (0.6+0.4) = (48+16)/1.0 = 64.0
+    assert fam["family_score"] == pytest.approx(64.0)
+    assert fam["root_count"] == 2
+
+
+# Case 7: all-zero confidence falls back to simple average
+def test_family_scores_zero_confidence_fallback(client, auth_headers):
+    batch = _make_batch()
+    rows = [
+        _make_row(opening_key="k1", opening_name="R1", opening_family="F",
+                  opening_score=30.0, confidence=0.0),
+        _make_row(opening_key="k2", opening_name="R2", opening_family="F",
+                  opening_score=70.0, confidence=0.0),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    fam = resp.json()["families"][0]
+    assert fam["family_score"] == pytest.approx(50.0)
+
+
+# Case 8: confidence and coverage are arithmetic means
+def test_family_scores_confidence_coverage_means(client, auth_headers):
+    batch = _make_batch()
+    rows = [
+        _make_row(opening_key="k1", opening_name="R1", opening_family="F",
+                  confidence=0.3, coverage=0.2),
+        _make_row(opening_key="k2", opening_name="R2", opening_family="F",
+                  confidence=0.9, coverage=0.8),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    fam = resp.json()["families"][0]
+    assert fam["family_confidence"] == pytest.approx(0.6)
+    assert fam["family_coverage"] == pytest.approx(0.5)
+
+
+# Case 9: root_sample_size_sum is a straight sum
+def test_family_scores_sample_size_sum(client, auth_headers):
+    batch = _make_batch()
+    rows = [
+        _make_row(opening_key="k1", opening_name="R1", opening_family="F", sample_size=7),
+        _make_row(opening_key="k2", opening_name="R2", opening_family="F", sample_size=13),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    fam = resp.json()["families"][0]
+    assert fam["root_sample_size_sum"] == 20
+
+
+# Case 10: last_practiced_at picks most recent non-null
+def test_family_scores_last_practiced_at(client, auth_headers):
+    batch = _make_batch()
+    rows = [
+        _make_row(opening_key="k1", opening_name="R1", opening_family="F",
+                  last_practiced_at=datetime(2026, 1, 1, tzinfo=timezone.utc)),
+        _make_row(opening_key="k2", opening_name="R2", opening_family="F",
+                  last_practiced_at=datetime(2026, 3, 15, tzinfo=timezone.utc)),
+        _make_row(opening_key="k3", opening_name="R3", opening_family="F",
+                  last_practiced_at=None),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    fam = resp.json()["families"][0]
+    assert fam["last_practiced_at"] is not None
+    assert "2026-03-15" in fam["last_practiced_at"]
+
+
+# Case 11: weakest-root tie-break is deterministic
+def test_family_scores_weakest_root_tiebreak(client, auth_headers):
+    batch = _make_batch()
+    # Same score, same confidence — tie-break on opening_name ascending
+    rows = [
+        _make_row(opening_key="k-z", opening_name="Zulu Root", opening_family="F",
+                  opening_score=50.0, confidence=0.5),
+        _make_row(opening_key="k-a", opening_name="Alpha Root", opening_family="F",
+                  opening_score=50.0, confidence=0.5),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    fam = resp.json()["families"][0]
+    assert fam["weakest_root_name"] == "Alpha Root"
+    assert fam["weakest_root_score"] == pytest.approx(50.0)
+
+
+# Case 12: family ordering matches weakest-root sort
+def test_family_scores_ordering(client, auth_headers):
+    batch = _make_batch()
+    rows = [
+        _make_row(opening_key="k1", opening_name="Strong Root", opening_family="Strong Family",
+                  opening_score=90.0),
+        _make_row(opening_key="k2", opening_name="Weak Root", opening_family="Weak Family",
+                  opening_score=20.0),
+        _make_row(opening_key="k3", opening_name="Mid Root", opening_family="Mid Family",
+                  opening_score=50.0),
+    ]
+
+    with patch(_PATCH_ENSURE, return_value=(batch, rows)):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    names = [f["family_name"] for f in resp.json()["families"]]
+    assert names == ["Weak Family", "Mid Family", "Strong Family"]
+
+
+# Case 13: two batches don't mix — only latest batch rows returned
+def test_family_scores_single_batch_semantics(client, auth_headers, db_session):
+    # Seed two batches for user 123, white — generation 1 and generation 2
+    cursor = OpeningScoreCursor(user_id=123, player_color="white", latest_generation=2)
+    db_session.add(cursor)
+    db_session.flush()
+
+    batch1 = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
+                               computed_at=datetime(2025, 1, 1, tzinfo=timezone.utc))
+    batch2 = OpeningScoreBatch(user_id=123, player_color="white", generation=2,
+                               computed_at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    db_session.add_all([batch1, batch2])
+    db_session.flush()
+
+    # Batch 1 has "Old Root" with score 10
+    db_session.add(UserOpeningScore(
+        batch_id=batch1.id, user_id=123, player_color="white",
+        opening_key="old-key", opening_name="Old Root", opening_family="Fam",
+        opening_score=10.0, confidence=0.5, coverage=0.5,
+        weighted_depth=1.0, sample_size=5,
+        computed_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+    ))
+    # Batch 2 has "New Root" with score 80
+    db_session.add(UserOpeningScore(
+        batch_id=batch2.id, user_id=123, player_color="white",
+        opening_key="new-key", opening_name="New Root", opening_family="Fam",
+        opening_score=80.0, confidence=0.9, coverage=0.7,
+        weighted_depth=2.0, sample_size=20,
+        computed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    ))
+    db_session.commit()
+
+    resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["families"]) == 1
+    fam = data["families"][0]
+    # Only batch 2 rows should appear — "New Root", not "Old Root"
+    assert fam["weakest_root_name"] == "New Root"
+    assert fam["root_count"] == 1
+    assert "2026" in data["computed_at"]
+
+
+# Case 14: cache-only read path — calculator functions must not be called
+def test_family_scores_cache_only_read_path(client, auth_headers, db_session):
+    # Pre-seed a batch so the cache hit path is exercised
+    cursor = OpeningScoreCursor(user_id=123, player_color="white", latest_generation=1)
+    db_session.add(cursor)
+    db_session.flush()
+
+    batch = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
+                              computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc))
+    db_session.add(batch)
+    db_session.flush()
+
+    db_session.add(UserOpeningScore(
+        batch_id=batch.id, user_id=123, player_color="white",
+        opening_key="cached-key", opening_name="Cached Root", opening_family="Cached Fam",
+        opening_score=55.0, confidence=0.7, coverage=0.6,
+        weighted_depth=2.0, sample_size=12,
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+    ))
+    db_session.commit()
+
+    # Patch calculator functions in both namespaces — the router imports these symbols,
+    # but ensure_opening_scores resolves recompute_opening_scores in its own module.
+    with (
+        patch("app.api.openings.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
+        patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
+        patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
+        patch("app.api.openings.compute_root_score", side_effect=AssertionError("should not compute")),
+    ):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["families"][0]["family_name"] == "Cached Fam"
+    assert data["families"][0]["weakest_root_name"] == "Cached Root"
+
+
+# Case 15: computed_at comes from batch, not rows or now()
+def test_family_scores_computed_at_from_batch(client, auth_headers, db_session):
+    batch_ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    row_ts = datetime(2024, 6, 15, tzinfo=timezone.utc)
+
+    cursor = OpeningScoreCursor(user_id=123, player_color="white", latest_generation=1)
+    db_session.add(cursor)
+    db_session.flush()
+
+    batch = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
+                              computed_at=batch_ts)
+    db_session.add(batch)
+    db_session.flush()
+
+    db_session.add(UserOpeningScore(
+        batch_id=batch.id, user_id=123, player_color="white",
+        opening_key="ts-key", opening_name="TS Root", opening_family="TS Fam",
+        opening_score=50.0, confidence=0.5, coverage=0.5,
+        weighted_depth=1.0, sample_size=5,
+        last_practiced_at=row_ts,
+        computed_at=batch_ts,
+    ))
+    db_session.commit()
+
+    resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    data = resp.json()
+    assert "2020-01-01" in data["computed_at"]
+    assert "2024" not in data["computed_at"]
