@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { Chessboard } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import {
-  getOpeningFamilyScores,
-  type FamilyScoresResponse,
+  getOpeningChildren,
+  type ChildrenResponse,
+  type OpeningChildItem,
   type OpeningPlayerColor,
 } from "../utils/api";
 import "../App.css";
@@ -14,12 +16,21 @@ const COLOR_OPTIONS: Array<{ label: string; value: OpeningPlayerColor }> = [
 
 const LOADING_CARD_COUNT = 3;
 
+type NavigationItem = {
+  openingKey: string;
+  openingName: string;
+};
+
 function getColorLabel(playerColor: OpeningPlayerColor): string {
   return playerColor === "white" ? "White" : "Black";
 }
 
-function formatScore(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+function formatScore(value: number | null): string {
+  if (value === null) {
+    return "—";
+  }
+
+  return String(Math.round(value));
 }
 
 function normalizePercentValue(value: number): number {
@@ -31,7 +42,11 @@ function normalizePercentValue(value: number): number {
   return Math.min(100, Math.max(0, normalizedValue));
 }
 
-function formatPercent(value: number): string {
+function formatPercent(value: number | null): string {
+  if (value === null) {
+    return "—";
+  }
+
   return `${Math.round(normalizePercentValue(value))}%`;
 }
 
@@ -39,7 +54,13 @@ function formatGames(value: number): string {
   return value.toLocaleString();
 }
 
-function getPriorityTone(score: number): "alert" | "watch" | "steady" {
+function getPriorityTone(
+  score: number | null,
+): "alert" | "watch" | "steady" | "muted" {
+  if (score === null) {
+    return "muted";
+  }
+
   if (score < 45) {
     return "alert";
   }
@@ -51,46 +72,83 @@ function getPriorityTone(score: number): "alert" | "watch" | "steady" {
   return "steady";
 }
 
-function getPriorityLabel(score: number): string {
-  const tone = getPriorityTone(score);
-
-  switch (tone) {
-    case "alert":
-      return "Fix First";
-    case "watch":
-      return "Study Next";
-    default:
-      return "Holding";
+function getPriorityLabel(score: number | null): string {
+  if (score === null) {
+    return "No Data";
   }
+
+  if (score >= 85) {
+    return "A";
+  }
+
+  if (score >= 70) {
+    return "B";
+  }
+
+  if (score >= 55) {
+    return "C";
+  }
+
+  if (score >= 45) {
+    return "D";
+  }
+
+  return "F";
 }
 
 function formatRootCount(rootCount: number): string {
-  return `${rootCount} ${rootCount === 1 ? "root" : "roots"}`;
+  if (rootCount === 0) {
+    return "No tracked positions";
+  }
+
+  return `${rootCount} tracked ${rootCount === 1 ? "position" : "positions"}`;
 }
 
-function sortFamiliesByStrength(
-  families: FamilyScoresResponse["families"],
-): FamilyScoresResponse["families"] {
-  return [...families].sort((left, right) => {
-    if (left.weakest_root_score !== right.weakest_root_score) {
-      return right.weakest_root_score - left.weakest_root_score;
+function formatChildCount(childCount: number): string {
+  if (childCount === 0) {
+    return "Leaf branch";
+  }
+
+  return `${childCount} ${childCount === 1 ? "child" : "children"}`;
+}
+
+function sortChildrenByStrength(children: OpeningChildItem[]): OpeningChildItem[] {
+  return [...children].sort((left, right) => {
+    if (left.subtree_score === null && right.subtree_score !== null) {
+      return 1;
     }
 
-    if (left.family_score !== right.family_score) {
-      return right.family_score - left.family_score;
+    if (left.subtree_score !== null && right.subtree_score === null) {
+      return -1;
     }
 
-    return left.family_name.localeCompare(right.family_name);
+    if (left.weakest_root_score !== null && right.weakest_root_score !== null) {
+      if (left.weakest_root_score !== right.weakest_root_score) {
+        return right.weakest_root_score - left.weakest_root_score;
+      }
+    }
+
+    if (left.subtree_score !== null && right.subtree_score !== null) {
+      if (left.subtree_score !== right.subtree_score) {
+        return right.subtree_score - left.subtree_score;
+      }
+    }
+
+    return left.opening_name.localeCompare(right.opening_name);
   });
 }
 
 function OpeningsPage() {
   const [playerColor, setPlayerColor] = useState<OpeningPlayerColor>("white");
-  const [response, setResponse] = useState<FamilyScoresResponse | null>(null);
+  const [navStack, setNavStack] = useState<NavigationItem[]>([]);
+  const [response, setResponse] = useState<ChildrenResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
   const requestVersionRef = useRef(0);
+
+  const activeParent = navStack.at(-1) ?? null;
+  const activeParentKey = activeParent?.openingKey;
 
   const invalidatePendingRequests = () => {
     requestVersionRef.current += 1;
@@ -105,7 +163,7 @@ function OpeningsPage() {
     setError(null);
     setResponse(null);
 
-    getOpeningFamilyScores(playerColor)
+    getOpeningChildren(playerColor, activeParentKey)
       .then((data) => {
         if (!active || requestVersionRef.current !== requestVersion) {
           return;
@@ -119,9 +177,7 @@ function OpeningsPage() {
         }
 
         setResponse(null);
-        setError(
-          err instanceof Error ? err.message : "Failed to load opening families",
-        );
+        setError(err instanceof Error ? err.message : "Failed to load openings");
       })
       .finally(() => {
         if (!active || requestVersionRef.current !== requestVersion) {
@@ -134,19 +190,23 @@ function OpeningsPage() {
     return () => {
       active = false;
     };
-  }, [playerColor, retryCount]);
+  }, [activeParentKey, playerColor, retryCount]);
 
   const selectedColorLabel = getColorLabel(playerColor);
-  const hasFamilies = Boolean(response && response.families.length > 0);
+  const currentTitle = activeParent?.openingName ?? response?.parent_name;
+  const allChildrenUnscored =
+    response !== null &&
+    response.children.length > 0 &&
+    response.children.every((child) => child.subtree_root_count === 0);
   const isTrueNoEvidence =
-    response !== null &&
-    response.computed_at === null &&
-    response.families.length === 0;
+    response !== null && response.computed_at === null && allChildrenUnscored;
   const isSnapshotEmpty =
-    response !== null &&
-    response.computed_at !== null &&
-    response.families.length === 0;
-  const sortedFamilies = response ? sortFamiliesByStrength(response.families) : [];
+    response !== null && response.computed_at !== null && allChildrenUnscored;
+  const hasVisibleChildren =
+    response !== null && response.children.some((child) => child.subtree_root_count > 0);
+  const isStructuralLeaf =
+    response !== null && response.children.length === 0 && navStack.length > 0;
+  const sortedChildren = response ? sortChildrenByStrength(response.children) : [];
 
   return (
     <main className="app-shell">
@@ -158,25 +218,20 @@ function OpeningsPage() {
             <div className="openings-shell__copy">
               <p className="openings-shell__eyebrow">Opening Scoreboard</p>
               <div className="openings-shell__title-row">
-                <h1 className="openings-shell__title">Opening Families</h1>
+                <h1 className="openings-shell__title">OPENING SCOREBOARD</h1>
                 <span className="openings-shell__badge">
                   {selectedColorLabel} repertoire
                 </span>
               </div>
+              {currentTitle && (
+                <p className="openings-shell__context">{currentTitle}</p>
+              )}
               <p className="openings-shell__hint">
-                Score is the 0-100 health read, confidence shows evidence
-                strength, and coverage shows how much of the family tree you
-                have actually touched.
+                Score is your 0-100 result in this opening branch. Confidence
+                shows how solid the sample is, and coverage shows how much of
+                that branch you have actually played.
               </p>
             </div>
-
-            <aside className="openings-shell__callout">
-              <p className="openings-shell__callout-label">Games</p>
-              <p className="openings-shell__callout-text">
-                Summed root evidence, so one game can contribute to more than
-                one root.
-              </p>
-            </aside>
           </header>
 
           <div className="openings-shell__toolbar">
@@ -200,6 +255,7 @@ function OpeningsPage() {
                     setLoading(true);
                     setError(null);
                     setResponse(null);
+                    setNavStack([]);
                     setPlayerColor(option.value);
                   }}
                 >
@@ -209,17 +265,41 @@ function OpeningsPage() {
             </div>
 
             <p className="openings-shell__toolbar-note">
-              Showing the strongest openings first.
+              Showing the strongest branches first, with unscored branches at
+              the end.
             </p>
           </div>
+
+          {navStack.length > 0 && (
+            <div className="openings-shell__backbar">
+              <button
+                className="openings-shell__backbutton"
+                type="button"
+                onClick={() => {
+                  invalidatePendingRequests();
+                  setLoading(true);
+                  setError(null);
+                  setResponse(null);
+                  setNavStack((value) => value.slice(0, -1));
+                }}
+              >
+                Back
+              </button>
+              <p className="openings-shell__path">
+                {["OPENING SCOREBOARD", ...navStack.map((item) => item.openingName)].join(
+                  " / ",
+                )}
+              </p>
+            </div>
+          )}
 
           {loading && (
             <section
               className="openings-state openings-state--loading"
               aria-live="polite"
-              aria-label="Loading opening families"
+              aria-label="Loading openings"
             >
-              <p className="openings-state__title">Loading opening families...</p>
+              <p className="openings-state__title">Loading openings...</p>
               <div className="openings-grid openings-grid--loading">
                 {Array.from({ length: LOADING_CARD_COUNT }).map((_, index) => (
                   <article
@@ -248,7 +328,7 @@ function OpeningsPage() {
             <section className="openings-state openings-state--error" role="alert">
               <p className="openings-state__title">{error}</p>
               <p className="openings-state__body">
-                The {selectedColorLabel.toLowerCase()} family snapshot did not
+                The {selectedColorLabel.toLowerCase()} openings snapshot did not
                 load. Retry to fetch the latest cached scores.
               </p>
               <button
@@ -282,66 +362,142 @@ function OpeningsPage() {
           {!loading && !error && isSnapshotEmpty && (
             <section className="openings-state openings-state--empty">
               <p className="openings-state__title">
-                No scored opening families are available for {selectedColorLabel}{" "}
-                yet.
+                No scored openings are available for {selectedColorLabel} yet.
               </p>
               <p className="openings-state__body">
-                A snapshot exists, but there are no family rows to show right
+                A snapshot exists, but this branch has no scored roots right
                 now.
               </p>
             </section>
           )}
 
-          {!loading && !error && hasFamilies && response && (
+          {!loading && !error && isStructuralLeaf && (
+            <section className="openings-state openings-state--empty">
+              <p className="openings-state__title">
+                No deeper named openings under {activeParent?.openingName}.
+              </p>
+              <p className="openings-state__body">
+                This branch is a structural leaf in the named opening tree.
+              </p>
+            </section>
+          )}
+
+          {!loading && !error && hasVisibleChildren && response && (
             <section
               className="openings-grid"
-              aria-label={`${selectedColorLabel} opening families`}
+              aria-label={`${selectedColorLabel} openings`}
             >
-              {sortedFamilies.map((family) => {
-                const tone = getPriorityTone(family.weakest_root_score);
-
-                return (
-                  <article
-                    key={family.family_name}
-                    className={`opening-family-card opening-family-card--${tone}`}
-                  >
+              {sortedChildren.map((child) => {
+                const tone = getPriorityTone(child.subtree_score);
+                const isUnscored = child.subtree_root_count === 0;
+                const canDrillDown = child.child_count > 0;
+                const cardClassName = `opening-family-card opening-family-card--${tone}${canDrillDown ? " opening-family-card--interactive" : ""}`;
+                const headline = (
+                  <>
                     <div className="opening-family-card__topline">
                       <span className="opening-family-card__kicker">
-                        {formatRootCount(family.root_count)}
+                        {formatRootCount(child.subtree_root_count)}
                       </span>
                       <span className="opening-family-card__status">
-                        {getPriorityLabel(family.weakest_root_score)}
+                        {getPriorityLabel(child.subtree_score)}
                       </span>
                     </div>
 
                     <div className="opening-family-card__headline">
                       <h2 className="opening-family-card__title">
-                        {family.family_name}
+                        {child.opening_name}
                       </h2>
                       <p className="opening-family-card__hint">
-                        Weakest root:{" "}
-                        <strong>{family.weakest_root_name}</strong>
+                        {isUnscored ? (
+                          "No scored roots in this subtree yet."
+                        ) : (
+                          <>
+                            Weakest root:{" "}
+                            <strong>{child.weakest_root_name}</strong>
+                          </>
+                        )}
                       </p>
+                    </div>
+
+                    <div className="opening-family-card__overview">
+                      <div className="opening-family-card__board" aria-hidden="true">
+                        <Chessboard
+                          options={{
+                            position: child.opening_key,
+                            boardOrientation: playerColor,
+                            allowDragging: false,
+                            animationDurationInMs: 0,
+                            boardStyle: {
+                              borderRadius: "10px",
+                              pointerEvents: "none",
+                            },
+                          }}
+                        />
+                      </div>
+                      <dl className="opening-family-card__score-panel">
+                        <div className="opening-family-card__score-metric">
+                          <dt>Score</dt>
+                          <dd>{formatScore(child.subtree_score)}</dd>
+                        </div>
+                        <div className="opening-family-card__supporting-metric">
+                          <dt>Confidence</dt>
+                          <dd>{formatPercent(child.subtree_confidence)}</dd>
+                        </div>
+                      </dl>
                     </div>
 
                     <dl className="opening-family-card__metrics">
                       <div className="opening-family-card__metric">
-                        <dt>Score</dt>
-                        <dd>{formatScore(family.family_score)}</dd>
-                      </div>
-                      <div className="opening-family-card__metric">
-                        <dt>Confidence</dt>
-                        <dd>{formatPercent(family.family_confidence)}</dd>
-                      </div>
-                      <div className="opening-family-card__metric">
                         <dt>Coverage</dt>
-                        <dd>{formatPercent(family.family_coverage)}</dd>
+                        <dd>{formatPercent(child.subtree_coverage)}</dd>
                       </div>
                       <div className="opening-family-card__metric">
                         <dt>Games</dt>
-                        <dd>{formatGames(family.root_sample_size_sum)}</dd>
+                        <dd>{formatGames(child.subtree_sample_size)}</dd>
                       </div>
                     </dl>
+
+                    <div className="opening-family-card__footer">
+                      <span className="opening-family-card__footer-note">
+                        {formatChildCount(child.child_count)}
+                      </span>
+                      {canDrillDown && (
+                        <span className="opening-family-card__drilldown">
+                          Drill down
+                        </span>
+                      )}
+                    </div>
+                  </>
+                );
+
+                if (canDrillDown) {
+                  return (
+                    <button
+                      key={child.opening_key}
+                      type="button"
+                      className={cardClassName}
+                      onClick={() => {
+                        invalidatePendingRequests();
+                        setLoading(true);
+                        setError(null);
+                        setResponse(null);
+                        setNavStack((value) => [
+                          ...value,
+                          {
+                            openingKey: child.opening_key,
+                            openingName: child.opening_name,
+                          },
+                        ]);
+                      }}
+                    >
+                      {headline}
+                    </button>
+                  );
+                }
+
+                return (
+                  <article key={child.opening_key} className={cardClassName}>
+                    {headline}
                   </article>
                 );
               })}

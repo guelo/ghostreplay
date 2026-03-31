@@ -2674,8 +2674,7 @@
 .openings-shell__hero {
     position: relative;
     overflow: hidden;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(220px, 280px);
+    display: flex;
     gap: 1rem;
     padding: clamp(1.1rem, 3vw, 1.6rem);
     border: 1px solid var(--border-color-strong);
@@ -2706,13 +2705,9 @@
     opacity: 0.7;
 }
 
-.openings-shell__copy,
-.openings-shell__callout {
+.openings-shell__copy {
     position: relative;
     z-index: 1;
-}
-
-.openings-shell__copy {
     display: flex;
     flex-direction: column;
     gap: 0.55rem;
@@ -2760,31 +2755,11 @@
     font-size: 0.98rem;
 }
 
-.openings-shell__callout {
-    align-self: stretch;
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-    padding: 1rem;
-    border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border-color));
-    border-radius: 1.1rem;
-    background: color-mix(in srgb, var(--warning-light) 16%, var(--card-bg));
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-white) 60%, transparent);
-}
-
-.openings-shell__callout-label {
-    margin: 0;
-    font-size: 0.76rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--warning-dark);
-}
-
-.openings-shell__callout-text {
+.openings-shell__context {
     margin: 0;
     color: var(--text-primary);
-    font-size: 0.95rem;
+    font-size: 1.02rem;
+    font-weight: 700;
 }
 
 .openings-shell__toolbar {
@@ -2841,6 +2816,36 @@
     font-size: 0.9rem;
 }
 
+.openings-shell__backbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--border-color);
+    border-radius: 1rem;
+    background: color-mix(in srgb, var(--color-white) 74%, var(--bg-secondary));
+    box-shadow: var(--shadow-sm);
+}
+
+.openings-shell__backbutton {
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--card-bg);
+    color: var(--text-primary);
+    padding: 0.45rem 0.85rem;
+    font-size: 0.86rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.openings-shell__path {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.92rem;
+    overflow-wrap: anywhere;
+}
+
 .openings-state {
     display: flex;
     flex-direction: column;
@@ -2887,9 +2892,9 @@
     position: relative;
     overflow: hidden;
     display: grid;
-    grid-template-rows: auto auto 1fr;
+    grid-template-rows: auto auto auto 1fr;
     gap: 0.95rem;
-    min-height: 260px;
+    min-height: 320px;
     padding: 1.05rem;
     border: 1px solid var(--border-color);
     border-radius: 1.3rem;
@@ -2900,6 +2905,27 @@
             color-mix(in srgb, var(--bg-secondary) 70%, var(--card-bg))
         );
     box-shadow: var(--shadow-md);
+}
+
+.opening-family-card--interactive {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    transition:
+        transform 180ms ease,
+        box-shadow 180ms ease,
+        border-color 180ms ease;
+}
+
+.opening-family-card--interactive:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+    border-color: color-mix(in srgb, var(--opening-card-accent) 30%, var(--border-color));
+}
+
+.opening-family-card--interactive:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--opening-card-accent) 60%, transparent);
+    outline-offset: 2px;
 }
 
 .opening-family-card::before {
@@ -2937,6 +2963,16 @@
             180deg,
             color-mix(in srgb, var(--success) 9%, var(--card-bg)),
             color-mix(in srgb, var(--color-white) 76%, var(--card-bg))
+        );
+}
+
+.opening-family-card--muted {
+    --opening-card-accent: var(--text-tertiary);
+    background:
+        linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--bg-secondary) 78%, var(--card-bg)),
+            color-mix(in srgb, var(--color-white) 82%, var(--card-bg))
         );
 }
 
@@ -3005,6 +3041,85 @@
     align-self: end;
 }
 
+.opening-family-card__overview {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr);
+    gap: 0.85rem;
+    align-items: stretch;
+}
+
+.opening-family-card__board {
+    width: 160px;
+    height: 160px;
+    justify-self: start;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--opening-card-accent) 24%, var(--border-color));
+    border-radius: 1rem;
+    background: color-mix(in srgb, var(--color-white) 78%, var(--bg-primary));
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-white) 62%, transparent);
+}
+
+.opening-family-card__board > * {
+    width: 100%;
+    height: 100%;
+}
+
+.opening-family-card__score-panel {
+    margin: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 0.7rem;
+    min-width: 0;
+}
+
+.opening-family-card__score-metric,
+.opening-family-card__supporting-metric {
+    min-width: 0;
+    padding: 0.75rem 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
+    border-radius: 1rem;
+    background: color-mix(in srgb, var(--color-white) 72%, var(--bg-primary));
+}
+
+.opening-family-card__score-metric {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    background:
+        linear-gradient(
+            180deg,
+            color-mix(in srgb, var(--opening-card-accent) 16%, var(--card-bg)),
+            color-mix(in srgb, var(--color-white) 78%, var(--bg-primary))
+        );
+}
+
+.opening-family-card__score-metric dt,
+.opening-family-card__supporting-metric dt {
+    margin: 0 0 0.2rem;
+    font-size: 0.73rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+
+.opening-family-card__score-metric dd {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: clamp(1.85rem, 3.4vw, 2.35rem);
+    line-height: 0.95;
+    font-weight: 800;
+    letter-spacing: -0.04em;
+}
+
+.opening-family-card__supporting-metric dd {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1.1rem;
+    line-height: 1.1;
+    font-weight: 700;
+}
+
 .opening-family-card__metric {
     min-width: 0;
     padding: 0.8rem 0.85rem;
@@ -3029,6 +3144,26 @@
     line-height: 1.1;
     font-weight: 700;
     overflow-wrap: anywhere;
+}
+
+.opening-family-card__footer {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.opening-family-card__footer-note {
+    color: var(--text-tertiary);
+    font-size: 0.85rem;
+    font-weight: 600;
+}
+
+.opening-family-card__drilldown {
+    color: color-mix(in srgb, var(--opening-card-accent) 74%, var(--text-primary));
+    font-size: 0.88rem;
+    font-weight: 700;
 }
 
 .opening-family-card--skeleton {
@@ -3504,15 +3639,20 @@
 
 @media (max-width: 767px) {
     .openings-shell__hero {
-        grid-template-columns: 1fr;
-    }
-
-    .openings-shell__callout {
-        max-width: none;
+        display: block;
     }
 
     .openings-grid {
         grid-template-columns: 1fr;
+    }
+
+    .opening-family-card__overview {
+        grid-template-columns: 1fr;
+    }
+
+    .opening-family-card__board {
+        width: 176px;
+        height: 176px;
     }
 
     .chess-layout {

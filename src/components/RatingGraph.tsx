@@ -212,12 +212,7 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
 
   const span = domainMax - dataMin;
   const minFraction = span > DAY_MS ? DAY_MS / span : 1;
-
-  // Track data loaded as state (not ref) so it triggers the snap effect.
-  const [dataLoaded, setDataLoaded] = useState(false);
-  if (allChartData.length > 0 && !dataLoaded) {
-    setDataLoaded(true);
-  }
+  const hasChartData = allChartData.length > 0;
 
   // Refs let the snap effect read current values without depending on them,
   // so the provisional toggle changing dataMin/span won't re-trigger a snap.
@@ -227,17 +222,17 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   spanRef.current = span;
 
   useEffect(() => {
-    if (!dataLoaded || spanRef.current <= 0) return;
+    if (!hasChartData || spanRef.current <= 0) return;
     if (windowDays === 0) {
       setViewRange([0, 1]);
       return;
     }
-    const cutoff = Date.now() - windowDays * DAY_MS;
+    const cutoff = domainMaxRef.current - windowDays * DAY_MS;
     const frac = Math.max(0, (cutoff - dataMinRef.current) / spanRef.current);
     setViewRange([frac, 1]);
     // Triggers: initial data load, preset button click.
     // NOT triggered by dataMin/span changes (provisional toggle).
-  }, [windowDays, presetKey, dataLoaded]);
+  }, [windowDays, presetKey, hasChartData]);
 
   const viewStart = dataMin + viewRange[0] * span;
   const viewEnd = dataMin + viewRange[1] * span;

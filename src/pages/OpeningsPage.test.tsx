@@ -9,9 +9,10 @@ import {
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { flushSync } from "react-dom";
+import type { ChildrenResponse, OpeningChildItem } from "../utils/api";
 
 const mockLogout = vi.fn();
-const getOpeningFamilyScoresMock = vi.fn();
+const getOpeningChildrenMock = vi.fn();
 
 vi.mock("../contexts/useAuth", () => ({
   useAuth: () => ({
@@ -31,74 +32,122 @@ vi.mock("../utils/api", async () => {
 
   return {
     ...actual,
-    getOpeningFamilyScores: (
-      ...args: Parameters<typeof actual.getOpeningFamilyScores>
-    ) => getOpeningFamilyScoresMock(...args),
+    getOpeningChildren: (
+      ...args: Parameters<typeof actual.getOpeningChildren>
+    ) => getOpeningChildrenMock(...args),
   };
 });
+
+vi.mock("react-chessboard", () => ({
+  Chessboard: ({ options }: { options: Record<string, unknown> }) => (
+    <div
+      data-testid="opening-card-board"
+      data-position={options.position as string}
+      data-orientation={options.boardOrientation as string}
+    />
+  ),
+}));
 
 import AppRoutes from "../AppRoutes";
 import OpeningsPage from "./OpeningsPage";
 
-const whiteFamiliesResponse = {
+function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
+  return {
+    opening_key: "root-1",
+    opening_name: "Root 1",
+    opening_family: "Root 1",
+    eco: null,
+    depth: 1,
+    child_count: 0,
+    subtree_score: 50,
+    subtree_confidence: 0.5,
+    subtree_coverage: 0.5,
+    subtree_sample_size: 10,
+    subtree_root_count: 1,
+    last_practiced_at: "2026-03-29T10:00:00Z",
+    weakest_root_key: "root-1",
+    weakest_root_name: "Root 1",
+    weakest_root_family: "Root 1",
+    weakest_root_score: 50,
+    ...overrides,
+  };
+}
+
+function makeResponse(
+  overrides: Partial<ChildrenResponse> & {
+    children?: OpeningChildItem[];
+  },
+): ChildrenResponse {
+  return {
+    player_color: "white",
+    parent_key: null,
+    parent_name: null,
+    children: [],
+    total_children: overrides.children?.length ?? 0,
+    computed_at: "2026-03-30T12:00:00Z",
+    ...overrides,
+  };
+}
+
+const whiteTopLevelResponse = makeResponse({
   player_color: "white",
-  total_families: 3,
-  computed_at: "2026-03-30T12:00:00Z",
-  families: [
-    {
-      family_name: "Sicilian Defense",
-      root_count: 2,
-      family_score: 44,
-      family_confidence: 0.67,
-      family_coverage: 0.36,
-      root_sample_size_sum: 12,
-      last_practiced_at: "2026-03-29T10:00:00Z",
+  children: [
+    makeChild({
+      opening_key: "sicilian",
+      opening_name: "Sicilian Defense",
+      child_count: 1,
+      subtree_score: 44,
+      subtree_confidence: 0.67,
+      subtree_coverage: 0.36,
+      subtree_sample_size: 12,
+      subtree_root_count: 2,
       weakest_root_name: "Dragon Variation",
       weakest_root_score: 33,
-    },
-    {
-      family_name: "French Defense",
-      root_count: 3,
-      family_score: 52,
-      family_confidence: 0.82,
-      family_coverage: 0.58,
-      root_sample_size_sum: 26,
-      last_practiced_at: "2026-03-27T10:00:00Z",
+    }),
+    makeChild({
+      opening_key: "french",
+      opening_name: "French Defense",
+      child_count: 0,
+      subtree_score: 52,
+      subtree_confidence: 0.82,
+      subtree_coverage: 0.58,
+      subtree_sample_size: 26,
+      subtree_root_count: 3,
       weakest_root_name: "Winawer Variation",
       weakest_root_score: 33,
-    },
-    {
-      family_name: "Caro-Kann Defense",
-      root_count: 2,
-      family_score: 49.2,
-      family_confidence: 0.71,
-      family_coverage: 0.44,
-      root_sample_size_sum: 18,
-      last_practiced_at: "2026-03-28T10:00:00Z",
+    }),
+    makeChild({
+      opening_key: "caro",
+      opening_name: "Caro-Kann Defense",
+      child_count: 2,
+      subtree_score: 49.2,
+      subtree_confidence: 0.71,
+      subtree_coverage: 0.44,
+      subtree_sample_size: 18,
+      subtree_root_count: 2,
       weakest_root_name: "Advance Variation",
       weakest_root_score: 41,
-    },
+    }),
   ],
-} as const;
+});
 
-const blackFamiliesResponse = {
+const blackTopLevelResponse = makeResponse({
   player_color: "black",
-  total_families: 1,
-  computed_at: "2026-03-30T12:05:00Z",
-  families: [
-    {
-      family_name: "King's Indian Defense",
-      root_count: 2,
-      family_score: 61,
-      family_confidence: 0.74,
-      family_coverage: 0.52,
-      root_sample_size_sum: 21,
-      last_practiced_at: "2026-03-28T08:00:00Z",
+  children: [
+    makeChild({
+      opening_key: "kings-indian",
+      opening_name: "King's Indian Defense",
+      child_count: 1,
+      subtree_score: 61,
+      subtree_confidence: 0.74,
+      subtree_coverage: 0.52,
+      subtree_sample_size: 21,
+      subtree_root_count: 2,
       weakest_root_name: "Classical Variation",
       weakest_root_score: 47,
-    },
+    }),
   ],
-} as const;
+});
 
 function renderPage() {
   return render(
@@ -130,21 +179,21 @@ function createDeferred<T>() {
 
 describe("OpeningsPage", () => {
   beforeEach(() => {
-    getOpeningFamilyScoresMock.mockReset();
+    getOpeningChildrenMock.mockReset();
     mockLogout.mockReset();
   });
 
   it("registers a dedicated /openings route and nav link", async () => {
-    getOpeningFamilyScoresMock.mockResolvedValueOnce(whiteFamiliesResponse);
+    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
 
     renderRoute("/openings");
 
     await waitFor(() => {
-      expect(getOpeningFamilyScoresMock).toHaveBeenCalledWith("white");
+      expect(getOpeningChildrenMock).toHaveBeenCalledWith("white", undefined);
     });
 
     expect(
-      screen.getByRole("heading", { name: "Opening Families" }),
+      screen.getByRole("heading", { name: "OPENING SCOREBOARD" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Openings" })).toHaveAttribute(
       "href",
@@ -154,23 +203,23 @@ describe("OpeningsPage", () => {
   });
 
   it("shows a loading state before the first response", () => {
-    getOpeningFamilyScoresMock.mockImplementation(
+    getOpeningChildrenMock.mockImplementation(
       () => new Promise(() => undefined),
     );
 
     renderPage();
 
-    expect(screen.getByText("Loading opening families...")).toBeInTheDocument();
-    expect(getOpeningFamilyScoresMock).toHaveBeenCalledWith("white");
+    expect(screen.getByText("Loading openings...")).toBeInTheDocument();
+    expect(getOpeningChildrenMock).toHaveBeenCalledWith("white", undefined);
   });
 
-  it("renders populated family cards strongest-first with normalized percentages", async () => {
-    getOpeningFamilyScoresMock.mockResolvedValueOnce(whiteFamiliesResponse);
+  it("renders populated opening cards strongest-first with normalized percentages", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
 
     renderPage();
 
     const grid = await screen.findByRole("region", {
-      name: "White opening families",
+      name: "White openings",
     });
     const headings = within(grid)
       .getAllByRole("heading", { level: 2 })
@@ -184,27 +233,32 @@ describe("OpeningsPage", () => {
 
     const firstCard = within(grid)
       .getByRole("heading", { name: "Caro-Kann Defense" })
-      .closest("article");
+      .closest("button");
 
     expect(firstCard).not.toBeNull();
     expect(within(firstCard!).getByText(/Weakest root:/)).toBeInTheDocument();
     expect(within(firstCard!).getByText("Advance Variation")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("D")).toBeInTheDocument();
     expect(within(firstCard!).getByText("Games")).toBeInTheDocument();
-    expect(within(firstCard!).queryByText("Samples")).not.toBeInTheDocument();
     expect(within(firstCard!).getByText("71%")).toBeInTheDocument();
     expect(within(firstCard!).getByText("44%")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("2 children")).toBeInTheDocument();
+    expect(within(firstCard!).getByTestId("opening-card-board")).toHaveAttribute(
+      "data-position",
+      "caro",
+    );
   });
 
   it("ignores a stale response that settles during a color switch", async () => {
-    const whiteDeferred = createDeferred<typeof whiteFamiliesResponse>();
-    const blackDeferred = createDeferred<typeof blackFamiliesResponse>();
+    const whiteDeferred = createDeferred<typeof whiteTopLevelResponse>();
+    const blackDeferred = createDeferred<typeof blackTopLevelResponse>();
 
-    getOpeningFamilyScoresMock.mockImplementationOnce(() => whiteDeferred.promise);
-    getOpeningFamilyScoresMock.mockImplementationOnce(() => blackDeferred.promise);
+    getOpeningChildrenMock.mockImplementationOnce(() => whiteDeferred.promise);
+    getOpeningChildrenMock.mockImplementationOnce(() => blackDeferred.promise);
 
     renderPage();
 
-    expect(getOpeningFamilyScoresMock).toHaveBeenCalledWith("white");
+    expect(getOpeningChildrenMock).toHaveBeenCalledWith("white", undefined);
 
     flushSync(() => {
       fireEvent.click(screen.getByRole("button", { name: "Black" }));
@@ -215,28 +269,43 @@ describe("OpeningsPage", () => {
       "true",
     );
 
-    whiteDeferred.resolve(whiteFamiliesResponse);
+    whiteDeferred.resolve(whiteTopLevelResponse);
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(screen.getByText("Loading opening families...")).toBeInTheDocument();
+    expect(screen.getByText("Loading openings...")).toBeInTheDocument();
     expect(screen.queryByText("Sicilian Defense")).not.toBeInTheDocument();
 
-    blackDeferred.resolve(blackFamiliesResponse);
+    blackDeferred.resolve(blackTopLevelResponse);
 
     expect(
-      await screen.findByRole("region", { name: "Black opening families" }),
+      await screen.findByRole("region", { name: "Black openings" }),
     ).toBeInTheDocument();
     expect(screen.getByText("King's Indian Defense")).toBeInTheDocument();
   });
 
-  it("shows the true no-evidence empty state when computed_at is null", async () => {
-    getOpeningFamilyScoresMock.mockResolvedValueOnce({
-      player_color: "white",
-      families: [],
-      total_families: 0,
-      computed_at: null,
-    });
+  it("shows the true no-evidence empty state when computed_at is null and all children are unscored", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        computed_at: null,
+        children: [
+          makeChild({
+            opening_key: "polish",
+            opening_name: "Polish Opening",
+            child_count: 2,
+            subtree_score: null,
+            subtree_confidence: null,
+            subtree_coverage: null,
+            subtree_sample_size: 0,
+            subtree_root_count: 0,
+            weakest_root_key: null,
+            weakest_root_name: null,
+            weakest_root_family: null,
+            weakest_root_score: null,
+          }),
+        ],
+      }),
+    );
 
     renderPage();
 
@@ -247,40 +316,195 @@ describe("OpeningsPage", () => {
     });
   });
 
-  it("shows the computed snapshot empty state when no families are returned", async () => {
-    getOpeningFamilyScoresMock.mockResolvedValueOnce({
-      player_color: "white",
-      families: [],
-      total_families: 0,
-      computed_at: "2026-03-30T12:00:00Z",
-    });
+  it("shows the computed snapshot empty state when all returned children are unscored", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        computed_at: "2026-03-30T12:00:00Z",
+        children: [
+          makeChild({
+            opening_key: "polish",
+            opening_name: "Polish Opening",
+            child_count: 2,
+            subtree_score: null,
+            subtree_confidence: null,
+            subtree_coverage: null,
+            subtree_sample_size: 0,
+            subtree_root_count: 0,
+            weakest_root_key: null,
+            weakest_root_name: null,
+            weakest_root_family: null,
+            weakest_root_score: null,
+          }),
+        ],
+      }),
+    );
 
     renderPage();
 
     await waitFor(() => {
       expect(
-        screen.getByText("No scored opening families are available for White yet."),
+        screen.getByText("No scored openings are available for White yet."),
       ).toBeInTheDocument();
     });
   });
 
-  it("switches colors and refetches for the selected side", async () => {
-    const user = userEvent.setup();
-    getOpeningFamilyScoresMock.mockResolvedValueOnce(whiteFamiliesResponse);
-    getOpeningFamilyScoresMock.mockResolvedValueOnce(blackFamiliesResponse);
+  it("renders mixed scored and unscored children without switching to the empty state", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        children: [
+          makeChild({
+            opening_key: "polish",
+            opening_name: "Polish Opening",
+            child_count: 1,
+            subtree_score: 58,
+            subtree_confidence: 0.64,
+            subtree_coverage: 0.41,
+            subtree_sample_size: 14,
+            subtree_root_count: 3,
+            weakest_root_name: "Polish Opening, 1...e6",
+            weakest_root_score: 42,
+          }),
+          makeChild({
+            opening_key: "bird",
+            opening_name: "Bird Opening",
+            child_count: 0,
+            subtree_score: null,
+            subtree_confidence: null,
+            subtree_coverage: null,
+            subtree_sample_size: 0,
+            subtree_root_count: 0,
+            weakest_root_key: null,
+            weakest_root_name: null,
+            weakest_root_family: null,
+            weakest_root_score: null,
+          }),
+        ],
+      }),
+    );
 
     renderPage();
 
-    await screen.findByRole("region", { name: "White opening families" });
+    const grid = await screen.findByRole("region", { name: "White openings" });
+    const headings = within(grid)
+      .getAllByRole("heading", { level: 2 })
+      .map((heading) => heading.textContent);
+
+    expect(headings).toEqual(["Polish Opening", "Bird Opening"]);
+    expect(screen.queryByText("No opening evidence for White yet.")).not.toBeInTheDocument();
+
+    const unscoredCard = within(grid)
+      .getByRole("heading", { name: "Bird Opening" })
+      .closest("article");
+    expect(unscoredCard).not.toBeNull();
+    expect(within(unscoredCard!).getByText("No Data")).toBeInTheDocument();
+    expect(
+      within(unscoredCard!).getByText("No scored roots in this subtree yet."),
+    ).toBeInTheDocument();
+    expect(within(unscoredCard!).getAllByText("—")).toHaveLength(3);
+  });
+
+  it("drills down by refetching with parent_key and can navigate back", async () => {
+    const user = userEvent.setup();
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        children: [
+          makeChild({
+            opening_key: "polish",
+            opening_name: "Polish Opening",
+            child_count: 2,
+            subtree_score: 58,
+            subtree_confidence: 0.64,
+            subtree_coverage: 0.41,
+            subtree_sample_size: 14,
+            subtree_root_count: 3,
+            weakest_root_name: "Polish Opening, 1...e6",
+            weakest_root_score: 42,
+          }),
+        ],
+      }),
+    );
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        parent_key: "polish",
+        parent_name: "Polish Opening",
+        children: [
+          makeChild({
+            opening_key: "polish-e6",
+            opening_name: "Polish Opening, 1...e6",
+            child_count: 0,
+            subtree_score: 42,
+            subtree_confidence: 0.55,
+            subtree_coverage: 0.33,
+            subtree_sample_size: 8,
+            subtree_root_count: 1,
+            weakest_root_key: "polish-e6",
+            weakest_root_name: "Polish Opening, 1...e6",
+            weakest_root_family: "Polish Opening",
+            weakest_root_score: 42,
+          }),
+        ],
+      }),
+    );
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        children: [
+          makeChild({
+            opening_key: "polish",
+            opening_name: "Polish Opening",
+            child_count: 2,
+            subtree_score: 58,
+            subtree_confidence: 0.64,
+            subtree_coverage: 0.41,
+            subtree_sample_size: 14,
+            subtree_root_count: 3,
+            weakest_root_name: "Polish Opening, 1...e6",
+            weakest_root_score: 42,
+          }),
+        ],
+      }),
+    );
+
+    renderPage();
+
+    await screen.findByRole("region", { name: "White openings" });
+
+    await user.click(screen.getByRole("button", { name: /Polish Opening/ }));
+
+    await waitFor(() => {
+      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, "white", "polish");
+    });
+
+    expect(await screen.findByText("Polish Opening")).toBeInTheDocument();
+    expect(screen.getByText("OPENING SCOREBOARD / Polish Opening")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    await waitFor(() => {
+      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(3, "white", undefined);
+    });
+
+    expect(
+      await screen.findByRole("region", { name: "White openings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("switches colors and refetches for the selected side", async () => {
+    const user = userEvent.setup();
+    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
+    getOpeningChildrenMock.mockResolvedValueOnce(blackTopLevelResponse);
+
+    renderPage();
+
+    await screen.findByRole("region", { name: "White openings" });
 
     await user.click(screen.getByRole("button", { name: "Black" }));
 
     await waitFor(() => {
-      expect(getOpeningFamilyScoresMock).toHaveBeenLastCalledWith("black");
+      expect(getOpeningChildrenMock).toHaveBeenLastCalledWith("black", undefined);
     });
 
     expect(
-      await screen.findByRole("region", { name: "Black opening families" }),
+      await screen.findByRole("region", { name: "Black openings" }),
     ).toBeInTheDocument();
     expect(screen.getByText("King's Indian Defense")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Black" })).toHaveAttribute(
@@ -291,21 +515,21 @@ describe("OpeningsPage", () => {
 
   it("shows fetch failure and retry preserves the active color", async () => {
     const user = userEvent.setup();
-    getOpeningFamilyScoresMock.mockResolvedValueOnce(whiteFamiliesResponse);
-    getOpeningFamilyScoresMock.mockRejectedValueOnce(
-      new Error("Opening family cache unavailable"),
+    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
+    getOpeningChildrenMock.mockRejectedValueOnce(
+      new Error("Opening children cache unavailable"),
     );
-    getOpeningFamilyScoresMock.mockResolvedValueOnce(blackFamiliesResponse);
+    getOpeningChildrenMock.mockResolvedValueOnce(blackTopLevelResponse);
 
     renderPage();
 
-    await screen.findByRole("region", { name: "White opening families" });
+    await screen.findByRole("region", { name: "White openings" });
 
     await user.click(screen.getByRole("button", { name: "Black" }));
 
     await waitFor(() => {
       expect(
-        screen.getByText("Opening family cache unavailable"),
+        screen.getByText("Opening children cache unavailable"),
       ).toBeInTheDocument();
     });
 
@@ -317,10 +541,10 @@ describe("OpeningsPage", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(
-      await screen.findByRole("region", { name: "Black opening families" }),
+      await screen.findByRole("region", { name: "Black openings" }),
     ).toBeInTheDocument();
-    expect(getOpeningFamilyScoresMock).toHaveBeenNthCalledWith(1, "white");
-    expect(getOpeningFamilyScoresMock).toHaveBeenNthCalledWith(2, "black");
-    expect(getOpeningFamilyScoresMock).toHaveBeenNthCalledWith(3, "black");
+    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(1, "white", undefined);
+    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, "black", undefined);
+    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(3, "black", undefined);
   });
 });
