@@ -54,6 +54,7 @@ describe("GameInfoPanel", () => {
     const props = makeProps();
     const srs: TargetBlunderSrs = {
       last_reviewed_at: null,
+      created_at: "2026-03-01T12:00:00Z",
       pass_count: 3,
       fail_count: 1,
       pass_streak: 2,

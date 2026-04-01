@@ -237,6 +237,7 @@ interface BlunderResponse {
 
 export interface TargetBlunderSrs {
   last_reviewed_at: string | null
+  created_at: string | null
   pass_count: number
   fail_count: number
   pass_streak: number
@@ -616,6 +617,34 @@ export interface FamilyScoresResponse {
   computed_at: string | null
 }
 
+export interface OpeningChildItem {
+  opening_key: string
+  opening_name: string
+  opening_family: string
+  eco: string | null
+  depth: number
+  child_count: number
+  subtree_score: number | null
+  subtree_confidence: number | null
+  subtree_coverage: number | null
+  subtree_sample_size: number
+  subtree_root_count: number
+  last_practiced_at: string | null
+  weakest_root_key: string | null
+  weakest_root_name: string | null
+  weakest_root_family: string | null
+  weakest_root_score: number | null
+}
+
+export interface ChildrenResponse {
+  player_color: OpeningPlayerColor
+  parent_key: string | null
+  parent_name: string | null
+  children: OpeningChildItem[]
+  total_children: number
+  computed_at: string | null
+}
+
 /**
  * Fetch opening family scores for one player color.
  */
@@ -630,6 +659,27 @@ export const getOpeningFamilyScores = async (
     `${API_BASE_URL}/api/openings/families/scores?${params}`,
     { method: 'GET', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to load opening families' },
+  )
+}
+
+/**
+ * Fetch structural opening children for one player color and optional parent root.
+ */
+export const getOpeningChildren = async (
+  playerColor: OpeningPlayerColor,
+  parentKey?: string,
+): Promise<ChildrenResponse> => {
+  const params = new URLSearchParams({
+    player_color: playerColor,
+  })
+  if (parentKey) {
+    params.set('parent_key', parentKey)
+  }
+
+  return requestJson<ChildrenResponse>(
+    `${API_BASE_URL}/api/openings/children?${params}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load openings' },
   )
 }
 

@@ -168,7 +168,9 @@ const GameInfoPanel = ({
                             Last seen:{" "}
                             {blunderReviewSrs.last_reviewed_at
                               ? formatLastSeen(blunderReviewSrs.last_reviewed_at)
-                              : "never"}
+                              : blunderReviewSrs.created_at
+                                ? formatLastSeen(blunderReviewSrs.created_at)
+                                : "never"}
                           </span>
                           <span>
                             Pass/Fail: {blunderReviewSrs.pass_count}/

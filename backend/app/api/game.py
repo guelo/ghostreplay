@@ -66,7 +66,7 @@ def find_ghost_move(
     *,
     session_id: uuid.UUID | None = None,
     _rng_seed: int | None = None,
-) -> tuple[str | None, int | None]:
+) -> tuple[str | None, int | None, datetime | None, datetime | None]:
     """
     Find a move that steers toward a position where the user previously blundered.
 
@@ -80,7 +80,8 @@ def find_ghost_move(
         player_color: Player color from game session ('white' or 'black')
 
     Returns:
-        Tuple of (move_san, target_blunder_id, last_reviewed_at) if ghost path exists, else (None, None, None)
+        Tuple of (move_san, target_blunder_id, last_reviewed_at, created_at) if ghost path exists,
+        else (None, None, None, None)
     """
     # Look up current position by FEN hash
     current_position = (
@@ -93,7 +94,7 @@ def find_ghost_move(
     )
 
     if not current_position:
-        return (None, None, None)
+        return (None, None, None, None)
 
     # Recursive CTE to find candidate blunders up to the steering radius.
     # Returns the first move in each path and candidate metadata for scoring.
@@ -147,7 +148,7 @@ def find_ghost_move(
     ).fetchall()
 
     if not candidate_rows:
-        return (None, None, None)
+        return (None, None, None, None)
 
     now = datetime.now(timezone.utc)
     scored: list[tuple[GhostMoveCandidate, float]] = []
@@ -173,7 +174,7 @@ def find_ghost_move(
         scored.append((candidate, candidate.score(now)))
 
     if not scored:
-        return (None, None, None)
+        return (None, None, None, None)
 
     # Stable sort: primary by score desc, then deterministic tie-break keys
     scored.sort(key=lambda x: (
@@ -201,7 +202,7 @@ def find_ghost_move(
         # fall back to first by stable sort order.
         chosen_candidate, _ = top_k[0]
 
-    return (chosen_candidate.first_move, chosen_candidate.blunder_id, chosen_candidate.last_reviewed_at)
+    return (chosen_candidate.first_move, chosen_candidate.blunder_id, chosen_candidate.last_reviewed_at, chosen_candidate.created_at)
 
 
 class GameResult(str, Enum):
@@ -281,6 +282,7 @@ class NextOpponentMoveRequest(BaseModel):
 class TargetBlunderSrs(BaseModel):
     """SRS metadata for the blunder being targeted by a ghost move."""
     last_reviewed_at: str | None = Field(None, description="ISO timestamp of last review")
+    created_at: str | None = Field(None, description="ISO timestamp of when the blunder was first recorded")
     pass_count: int = Field(0, description="Total times passed")
     fail_count: int = Field(0, description="Total times failed")
     pass_streak: int = Field(0, description="Current consecutive pass streak")
@@ -466,7 +468,7 @@ def get_next_opponent_move(
 
     # Step 1: Ghost-first path traversal
     # Use shared ghost path traversal logic to find moves toward due blunders
-    move_san, target_blunder_id, blunder_last_reviewed = find_ghost_move(
+    move_san, target_blunder_id, blunder_last_reviewed, blunder_created_at = find_ghost_move(
         db=db,
         user_id=user.user_id,
         fen=request.fen,
@@ -506,6 +508,7 @@ def get_next_opponent_move(
 
             target_srs = TargetBlunderSrs(
                 last_reviewed_at=blunder_last_reviewed.isoformat() if blunder_last_reviewed else None,
+                created_at=blunder_created_at.isoformat() if isinstance(blunder_created_at, datetime) else blunder_created_at,
                 pass_count=review_counts[0] or 0 if review_counts else 0,
                 fail_count=review_counts[1] or 0 if review_counts else 0,
                 pass_streak=blunder_row[0] if blunder_row else 0,

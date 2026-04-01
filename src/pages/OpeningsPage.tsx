@@ -96,14 +96,6 @@ function getPriorityLabel(score: number | null): string {
   return "F";
 }
 
-function formatRootCount(rootCount: number): string {
-  if (rootCount === 0) {
-    return "No tracked positions";
-  }
-
-  return `${rootCount} tracked ${rootCount === 1 ? "position" : "positions"}`;
-}
-
 function formatChildCount(childCount: number): string {
   if (childCount === 0) {
     return "Leaf branch";
@@ -122,15 +114,15 @@ function sortChildrenByStrength(children: OpeningChildItem[]): OpeningChildItem[
       return -1;
     }
 
-    if (left.weakest_root_score !== null && right.weakest_root_score !== null) {
-      if (left.weakest_root_score !== right.weakest_root_score) {
-        return right.weakest_root_score - left.weakest_root_score;
-      }
-    }
-
     if (left.subtree_score !== null && right.subtree_score !== null) {
       if (left.subtree_score !== right.subtree_score) {
         return right.subtree_score - left.subtree_score;
+      }
+    }
+
+    if (left.weakest_root_score !== null && right.weakest_root_score !== null) {
+      if (left.weakest_root_score !== right.weakest_root_score) {
+        return right.weakest_root_score - left.weakest_root_score;
       }
     }
 
@@ -395,9 +387,6 @@ function OpeningsPage() {
                 const headline = (
                   <>
                     <div className="opening-family-card__topline">
-                      <span className="opening-family-card__kicker">
-                        {formatRootCount(child.subtree_root_count)}
-                      </span>
                       <span className="opening-family-card__status">
                         {getPriorityLabel(child.subtree_score)}
                       </span>

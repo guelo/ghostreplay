@@ -9,6 +9,7 @@ import {
   getNextOpponentMove,
   reviewSrsBlunder,
   getOpeningFamilyScores,
+  getOpeningChildren,
   getStatsSummary,
 } from './api'
 
@@ -774,6 +775,58 @@ describe('getOpeningFamilyScores', () => {
 
     await expect(getOpeningFamilyScores('white')).rejects.toThrow(
       'Failed to load opening families: Bad Request',
+    )
+  })
+})
+
+describe('getOpeningChildren', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('requests the children endpoint with player color query', async () => {
+    mockResponse({
+      player_color: 'white',
+      parent_key: null,
+      parent_name: null,
+      children: [],
+      total_children: 0,
+      computed_at: null,
+    })
+
+    await getOpeningChildren('white')
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(options.method).toBe('GET')
+    expect(url).toContain('/api/openings/children')
+    expect(url).toContain('player_color=white')
+    expect(url).not.toContain('parent_key=')
+  })
+
+  it('includes an encoded parent_key query when provided', async () => {
+    mockResponse({
+      player_color: 'white',
+      parent_key: 'fen value',
+      parent_name: 'Polish Opening',
+      children: [],
+      total_children: 0,
+      computed_at: null,
+    })
+
+    await getOpeningChildren('white', 'fen value')
+
+    const [url] = fetchMock.mock.calls[0]
+    expect(url).toContain('/api/openings/children')
+    expect(url).toContain('player_color=white')
+    expect(url).toContain('parent_key=fen+value')
+  })
+
+  it('surfaces the fallback error message for non-ok responses', async () => {
+    mockResponse({}, false, 'Bad Request', 400)
+
+    await expect(getOpeningChildren('white')).rejects.toThrow(
+      'Failed to load openings: Bad Request',
     )
   })
 })

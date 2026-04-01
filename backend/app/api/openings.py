@@ -569,8 +569,8 @@ def build_opening_children(
     items.sort(
         key=lambda item: (
             item.subtree_score is None,
-            item.weakest_root_score if item.weakest_root_score is not None else math.inf,
-            item.subtree_score if item.subtree_score is not None else math.inf,
+            -item.subtree_score if item.subtree_score is not None else math.inf,
+            -item.weakest_root_score if item.weakest_root_score is not None else math.inf,
             item.opening_name,
             item.opening_key,
         )

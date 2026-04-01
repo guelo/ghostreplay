@@ -20,7 +20,7 @@ const backendResponse = (
   decisionSource: "ghost_path" | "backend_engine" = mode === "ghost"
     ? "ghost_path"
     : "backend_engine",
-  targetBlunderSrs: { last_reviewed_at: string | null; pass_count: number; fail_count: number; pass_streak: number } | null = null,
+  targetBlunderSrs: { last_reviewed_at: string | null; created_at: string | null; pass_count: number; fail_count: number; pass_streak: number } | null = null,
   targetFen: string | null = null,
 ) => ({
   mode,

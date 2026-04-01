@@ -293,6 +293,7 @@ describe("ChessGame characterization safeguards", () => {
         fail_count: 1,
         pass_streak: 1,
         last_reviewed_at: "2026-02-01T12:00:00Z",
+        created_at: "2026-01-15T12:00:00Z",
       },
       target_fen:
         "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",

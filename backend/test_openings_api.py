@@ -1788,8 +1788,8 @@ def test_children_drill_down_returns_immediate_children(client, auth_headers):
     assert data["parent_key"] == CHILD_KEY_POLISH
     assert data["parent_name"] == "Polish Opening"
     assert [child["opening_key"] for child in data["children"]] == [
-        CHILD_KEY_POLISH_E6,
         CHILD_KEY_POLISH_ALT,
+        CHILD_KEY_POLISH_E6,
     ]
 
 
@@ -1911,9 +1911,77 @@ def test_children_sorts_scored_before_unscored_with_null_last(client, auth_heade
     assert resp.status_code == 200
     children = resp.json()["children"]
     assert [child["opening_key"] for child in children] == [
-        CHILD_KEY_POLISH,
         CHILD_KEY_ENGLISH,
+        CHILD_KEY_POLISH,
         CHILD_KEY_BIRD,
     ]
     assert children[-1]["subtree_score"] is None
     assert children[-1]["opening_key"] == CHILD_KEY_BIRD
+
+
+def test_children_sorts_by_subtree_score_descending_before_weakest_root_tiebreak(
+    client, auth_headers
+):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = [
+        _make_row(
+            opening_key=CHILD_KEY_POLISH,
+            opening_name="Polish Opening",
+            opening_family="Polish Opening",
+            opening_score=60.0,
+            confidence=0.4,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_E6,
+            opening_name="Polish Opening, 1...e6",
+            opening_family="Polish Opening",
+            opening_score=20.0,
+            confidence=0.3,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_POLISH_ALT,
+            opening_name="Polish",
+            opening_family="Polish",
+            opening_score=40.0,
+            confidence=0.2,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_SHARED,
+            opening_name="Polish Shared Node",
+            opening_family="Polish Shared Node",
+            opening_score=80.0,
+            confidence=0.1,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_ENGLISH,
+            opening_name="English Opening",
+            opening_family="English Opening",
+            opening_score=52.0,
+            confidence=0.5,
+        ),
+        _make_row(
+            opening_key=CHILD_KEY_BIRD,
+            opening_name="Bird Opening",
+            opening_family="Bird Opening",
+            opening_score=49.0,
+            confidence=0.5,
+        ),
+    ]
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    children = resp.json()["children"]
+    assert [child["opening_key"] for child in children] == [
+        CHILD_KEY_ENGLISH,
+        CHILD_KEY_BIRD,
+        CHILD_KEY_POLISH,
+    ]

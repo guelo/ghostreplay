@@ -238,6 +238,7 @@ describe("useChessGameController", () => {
     };
     const targetSrs: TargetBlunderSrs = {
       last_reviewed_at: "2026-02-01T00:00:00Z",
+      created_at: "2026-01-15T00:00:00Z",
       pass_count: 2,
       fail_count: 1,
       pass_streak: 1,

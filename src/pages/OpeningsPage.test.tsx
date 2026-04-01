@@ -226,26 +226,26 @@ describe("OpeningsPage", () => {
       .map((heading) => heading.textContent);
 
     expect(headings).toEqual([
-      "Caro-Kann Defense",
       "French Defense",
+      "Caro-Kann Defense",
       "Sicilian Defense",
     ]);
 
     const firstCard = within(grid)
-      .getByRole("heading", { name: "Caro-Kann Defense" })
-      .closest("button");
+      .getByRole("heading", { name: "French Defense" })
+      .closest("article");
 
     expect(firstCard).not.toBeNull();
     expect(within(firstCard!).getByText(/Weakest root:/)).toBeInTheDocument();
-    expect(within(firstCard!).getByText("Advance Variation")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("Winawer Variation")).toBeInTheDocument();
     expect(within(firstCard!).getByText("D")).toBeInTheDocument();
     expect(within(firstCard!).getByText("Games")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("71%")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("44%")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("2 children")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("82%")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("58%")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("Leaf branch")).toBeInTheDocument();
     expect(within(firstCard!).getByTestId("opening-card-board")).toHaveAttribute(
       "data-position",
-      "caro",
+      "french",
     );
   });
 
