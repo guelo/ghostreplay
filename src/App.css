@@ -140,6 +140,7 @@
     padding: clamp(0.75rem, 2vw, 1.25rem);
     display: flex;
     flex-direction: column;
+    align-items: center;
 }
 
 .game-page__intro {
@@ -163,13 +164,28 @@
 }
 
 .chess-layout {
+    --game-viewport-chrome: 4.5rem;
+    --game-panel-width: 240px;
+    --game-moves-width: 300px;
+    --game-layout-gap: 1.5rem;
+    --game-board-max-width: calc((100dvh - var(--game-viewport-chrome)) * 5 / 6);
     display: grid;
-    grid-template-columns: 240px minmax(0, 1fr) minmax(220px, 300px);
+    grid-template-columns:
+        var(--game-panel-width)
+        minmax(0, 1fr)
+        minmax(220px, var(--game-moves-width));
     grid-template-areas: "panel board moves";
-    gap: 1.5rem;
+    gap: var(--game-layout-gap);
     align-items: start;
+    width: min(
+        100%,
+        calc(
+            var(--game-panel-width) + var(--game-board-max-width) +
+                var(--game-moves-width) + (var(--game-layout-gap) * 2)
+        )
+    );
     margin: 0 auto;
-    max-width: max-content;
+    max-width: 100%;
 }
 
 .chess-panel {
@@ -241,7 +257,7 @@
     grid-area: board;
     position: relative;
     width: 100%;
-    max-width: calc((100dvh - 14rem) * 5 / 6);
+    max-width: var(--game-board-max-width);
 }
 
 .chessboard-board-with-eval {
@@ -1876,7 +1892,19 @@
     flex-direction: column;
     gap: 0.25rem;
     align-self: stretch;
-    max-height: calc(100dvh - 14rem);
+    max-height: calc(100dvh - var(--game-viewport-chrome));
+}
+
+@media (max-height: 760px) {
+    .chess-layout {
+        --game-viewport-chrome: 6.5rem;
+    }
+}
+
+@media (max-height: 680px) {
+    .chess-layout {
+        --game-viewport-chrome: 8.5rem;
+    }
 }
 
 /* Material Display */
