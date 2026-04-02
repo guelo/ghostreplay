@@ -13,6 +13,7 @@ import type { ChildrenResponse, OpeningChildItem } from "../utils/api";
 
 const mockLogout = vi.fn();
 const getOpeningChildrenMock = vi.fn();
+const getOpeningBookMock = vi.fn();
 
 vi.mock("../contexts/useAuth", () => ({
   useAuth: () => ({
@@ -48,11 +49,15 @@ vi.mock("react-chessboard", () => ({
   ),
 }));
 
+vi.mock("../openings/openingBook", () => ({
+  getOpeningBook: () => getOpeningBookMock(),
+}));
+
 import AppRoutes from "../AppRoutes";
 import OpeningsPage from "./OpeningsPage";
 
 function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
-  return {
+  const merged: OpeningChildItem = {
     opening_key: "root-1",
     opening_name: "Root 1",
     opening_family: "Root 1",
@@ -70,6 +75,13 @@ function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
     weakest_root_family: "Root 1",
     weakest_root_score: 50,
     ...overrides,
+  };
+
+  return {
+    ...merged,
+    weakest_root_key: overrides.weakest_root_key ?? merged.opening_key,
+    weakest_root_name: overrides.weakest_root_name ?? merged.opening_name,
+    weakest_root_family: overrides.weakest_root_family ?? merged.opening_family,
   };
 }
 
@@ -177,10 +189,16 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+function createNeverSettlingPromise<T>() {
+  return new Promise<T>(() => undefined);
+}
+
 describe("OpeningsPage", () => {
   beforeEach(() => {
     getOpeningChildrenMock.mockReset();
     mockLogout.mockReset();
+    getOpeningBookMock.mockReset();
+    getOpeningBookMock.mockImplementation(() => createNeverSettlingPromise());
   });
 
   it("registers a dedicated /openings route and nav link", async () => {
@@ -214,6 +232,13 @@ describe("OpeningsPage", () => {
   });
 
   it("renders populated opening cards strongest-first with normalized percentages", async () => {
+    getOpeningBookMock.mockResolvedValueOnce({
+      entries: [
+        { epd: "french", pgn: "1. e4 e6 2. d4 d5" },
+        { epd: "sicilian", pgn: "1. e4 c5" },
+        { epd: "caro", pgn: "1. e4 c6" },
+      ],
+    });
     getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
 
     renderPage();
@@ -236,13 +261,13 @@ describe("OpeningsPage", () => {
       .closest("article");
 
     expect(firstCard).not.toBeNull();
-    expect(within(firstCard!).getByText(/Weakest root:/)).toBeInTheDocument();
-    expect(within(firstCard!).getByText("Winawer Variation")).toBeInTheDocument();
+    expect(within(firstCard!).getByText(/Moves:/)).toBeInTheDocument();
+    expect(within(firstCard!).getByText("1.e4 e6 2.d4 d5")).toBeInTheDocument();
     expect(within(firstCard!).getByText("D")).toBeInTheDocument();
     expect(within(firstCard!).getByText("Games")).toBeInTheDocument();
     expect(within(firstCard!).getByText("82%")).toBeInTheDocument();
     expect(within(firstCard!).getByText("58%")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("Leaf branch")).toBeInTheDocument();
+    expect(within(firstCard!).getByText("No children")).toBeInTheDocument();
     expect(within(firstCard!).getByTestId("opening-card-board")).toHaveAttribute(
       "data-position",
       "french",
@@ -349,6 +374,12 @@ describe("OpeningsPage", () => {
   });
 
   it("renders mixed scored and unscored children without switching to the empty state", async () => {
+    getOpeningBookMock.mockResolvedValueOnce({
+      entries: [
+        { epd: "polish", pgn: "1. b4" },
+        { epd: "bird", pgn: "1. f4" },
+      ],
+    });
     getOpeningChildrenMock.mockResolvedValueOnce(
       makeResponse({
         children: [
@@ -397,6 +428,7 @@ describe("OpeningsPage", () => {
       .closest("article");
     expect(unscoredCard).not.toBeNull();
     expect(within(unscoredCard!).getByText("No Data")).toBeInTheDocument();
+    expect(within(unscoredCard!).getByText("1.f4")).toBeInTheDocument();
     expect(
       within(unscoredCard!).getByText("No scored roots in this subtree yet."),
     ).toBeInTheDocument();

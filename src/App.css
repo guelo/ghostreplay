@@ -2920,7 +2920,7 @@
 
 .openings-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
     gap: 1rem;
 }
 
@@ -2932,6 +2932,8 @@
     grid-template-rows: auto auto auto 1fr;
     gap: 0.95rem;
     min-height: 320px;
+    min-width: 0;
+    width: 100%;
     padding: 1.05rem;
     border: 1px solid var(--border-color);
     border-radius: 1.3rem;
@@ -3013,38 +3015,6 @@
         );
 }
 
-.opening-family-card__topline {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    gap: 0.5rem;
-    align-items: center;
-}
-
-.opening-family-card__kicker,
-.opening-family-card__status {
-    display: inline-flex;
-    align-items: center;
-    margin: 0;
-    min-width: 0;
-    font-size: 0.74rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-}
-
-.opening-family-card__kicker {
-    color: var(--text-tertiary);
-}
-
-.opening-family-card__status {
-    padding: 0.3rem 0.55rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--opening-card-accent) 32%, var(--border-color));
-    background: color-mix(in srgb, var(--opening-card-accent) 14%, var(--card-bg));
-    color: color-mix(in srgb, var(--opening-card-accent) 72%, var(--text-primary));
-}
-
 .opening-family-card__headline {
     display: flex;
     flex-direction: column;
@@ -3070,24 +3040,32 @@
     color: var(--text-primary);
 }
 
+.opening-family-card__subhint {
+    margin: 0;
+    color: var(--text-tertiary);
+    font-size: 0.88rem;
+    line-height: 1.25;
+}
+
 .opening-family-card__metrics {
     margin: 0;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 0.7rem;
     align-self: end;
+    min-width: 0;
 }
 
 .opening-family-card__overview {
     display: grid;
-    grid-template-columns: 160px minmax(0, 1fr);
+    grid-template-columns: 180px minmax(0, 1fr);
     gap: 0.85rem;
     align-items: stretch;
 }
 
 .opening-family-card__board {
-    width: 160px;
-    height: 160px;
+    width: 180px;
+    height: 180px;
     justify-self: start;
     overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--opening-card-accent) 24%, var(--border-color));
@@ -3104,13 +3082,15 @@
 .opening-family-card__score-panel {
     margin: 0;
     display: grid;
-    grid-template-rows: minmax(0, 1fr) auto;
-    gap: 0.7rem;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+        "score"
+        "grade";
+    gap: 0.2rem;
     min-width: 0;
 }
 
-.opening-family-card__score-metric,
-.opening-family-card__supporting-metric {
+.opening-family-card__score-metric {
     min-width: 0;
     padding: 0.75rem 0.8rem;
     border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
@@ -3119,9 +3099,13 @@
 }
 
 .opening-family-card__score-metric {
+    grid-area: score;
     display: flex;
     flex-direction: column;
-    justify-content: space-between;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    gap: 0.35rem;
     background:
         linear-gradient(
             180deg,
@@ -3131,13 +3115,15 @@
 }
 
 .opening-family-card__score-metric dt,
-.opening-family-card__supporting-metric dt {
-    margin: 0 0 0.2rem;
-    font-size: 0.73rem;
+.opening-family-card__metric dt {
+    margin: 0;
+    font-size: clamp(0.62rem, 1.8vw, 0.72rem);
     font-weight: 700;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.03em;
     text-transform: uppercase;
     color: var(--text-tertiary);
+    line-height: 1.2;
+    white-space: nowrap;
 }
 
 .opening-family-card__score-metric dd {
@@ -3149,12 +3135,16 @@
     letter-spacing: -0.04em;
 }
 
-.opening-family-card__supporting-metric dd {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: 1.1rem;
-    line-height: 1.1;
-    font-weight: 700;
+.opening-family-card__grade {
+    grid-area: grade;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    color: color-mix(in srgb, var(--opening-card-accent) 76%, var(--text-primary));
+    font-size: clamp(1.7rem, 3.1vw, 2.2rem);
+    line-height: 0.95;
+    font-weight: 800;
+    letter-spacing: -0.05em;
 }
 
 .opening-family-card__metric {
@@ -3163,15 +3153,6 @@
     border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
     border-radius: 0.95rem;
     background: color-mix(in srgb, var(--color-white) 72%, var(--bg-primary));
-}
-
-.opening-family-card__metric dt {
-    margin: 0 0 0.2rem;
-    font-size: 0.73rem;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-    color: var(--text-tertiary);
 }
 
 .opening-family-card__metric dd {
@@ -3686,9 +3667,25 @@
         grid-template-columns: 1fr;
     }
 
+    .opening-family-card__score-panel {
+        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-areas: "score grade";
+        align-items: end;
+        gap: 0.65rem;
+    }
+
     .opening-family-card__board {
-        width: 176px;
-        height: 176px;
+        width: 180px;
+        height: 180px;
+    }
+
+    .opening-family-card__metrics {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .opening-family-card__grade {
+        justify-self: center;
+        align-self: center;
     }
 
     .chess-layout {

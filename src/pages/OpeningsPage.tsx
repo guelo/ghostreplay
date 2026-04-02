@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import AppNav from "../components/AppNav";
+import { getOpeningBook } from "../openings/openingBook";
 import {
   getOpeningChildren,
   type ChildrenResponse,
@@ -98,10 +99,26 @@ function getPriorityLabel(score: number | null): string {
 
 function formatChildCount(childCount: number): string {
   if (childCount === 0) {
-    return "Leaf branch";
+    return "No children";
   }
 
   return `${childCount} ${childCount === 1 ? "child" : "children"}`;
+}
+
+function formatOpeningMoveLine(pgn: string): string {
+  return pgn.replace(/(\d+)\.\s+/g, "$1.");
+}
+
+function getOpeningMoveLine(
+  openingKey: string,
+  moveLinesByFen: Map<string, string> | null,
+): string | null {
+  if (!moveLinesByFen) {
+    return null;
+  }
+
+  const line = moveLinesByFen.get(openingKey);
+  return line ? formatOpeningMoveLine(line) : null;
 }
 
 function sortChildrenByStrength(children: OpeningChildItem[]): OpeningChildItem[] {
@@ -137,6 +154,9 @@ function OpeningsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
+  const [moveLinesByFen, setMoveLinesByFen] = useState<Map<string, string> | null>(
+    null,
+  );
   const requestVersionRef = useRef(0);
 
   const activeParent = navStack.at(-1) ?? null;
@@ -145,6 +165,32 @@ function OpeningsPage() {
   const invalidatePendingRequests = () => {
     requestVersionRef.current += 1;
   };
+
+  useEffect(() => {
+    let active = true;
+
+    getOpeningBook()
+      .then((book) => {
+        if (!active) {
+          return;
+        }
+
+        setMoveLinesByFen(
+          new Map(book.entries.map((entry) => [entry.epd, entry.pgn])),
+        );
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+
+        setMoveLinesByFen(new Map());
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -383,29 +429,26 @@ function OpeningsPage() {
                 const tone = getPriorityTone(child.subtree_score);
                 const isUnscored = child.subtree_root_count === 0;
                 const canDrillDown = child.child_count > 0;
+                const openingMoveLine = getOpeningMoveLine(
+                  child.opening_key,
+                  moveLinesByFen,
+                );
+                const statusLabel = getPriorityLabel(child.subtree_score);
                 const cardClassName = `opening-family-card opening-family-card--${tone}${canDrillDown ? " opening-family-card--interactive" : ""}`;
                 const headline = (
                   <>
-                    <div className="opening-family-card__topline">
-                      <span className="opening-family-card__status">
-                        {getPriorityLabel(child.subtree_score)}
-                      </span>
-                    </div>
-
                     <div className="opening-family-card__headline">
                       <h2 className="opening-family-card__title">
                         {child.opening_name}
                       </h2>
                       <p className="opening-family-card__hint">
-                        {isUnscored ? (
-                          "No scored roots in this subtree yet."
-                        ) : (
-                          <>
-                            Weakest root:{" "}
-                            <strong>{child.weakest_root_name}</strong>
-                          </>
-                        )}
+                        Moves: <strong>{openingMoveLine ?? "Line unavailable."}</strong>
                       </p>
+                      {isUnscored && (
+                        <p className="opening-family-card__subhint">
+                          No scored roots in this subtree yet.
+                        </p>
+                      )}
                     </div>
 
                     <div className="opening-family-card__overview">
@@ -428,9 +471,11 @@ function OpeningsPage() {
                           <dt>Score</dt>
                           <dd>{formatScore(child.subtree_score)}</dd>
                         </div>
-                        <div className="opening-family-card__supporting-metric">
-                          <dt>Confidence</dt>
-                          <dd>{formatPercent(child.subtree_confidence)}</dd>
+                        <div
+                          aria-label={`Status ${statusLabel}`}
+                          className="opening-family-card__grade"
+                        >
+                          {statusLabel}
                         </div>
                       </dl>
                     </div>
@@ -443,6 +488,10 @@ function OpeningsPage() {
                       <div className="opening-family-card__metric">
                         <dt>Games</dt>
                         <dd>{formatGames(child.subtree_sample_size)}</dd>
+                      </div>
+                      <div className="opening-family-card__metric">
+                        <dt>Confidence</dt>
+                        <dd>{formatPercent(child.subtree_confidence)}</dd>
                       </div>
                     </dl>
 
