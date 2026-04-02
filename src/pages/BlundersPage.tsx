@@ -205,7 +205,7 @@ function BlundersPage() {
                   ? "All caught up! Play more games to keep learning."
                   : "Play games and your blunders will appear here for review."}
               </p>
-              <Link to="/game" className="chess-button primary">
+              <Link to="/play" className="chess-button primary">
                 Start New Game
               </Link>
             </div>

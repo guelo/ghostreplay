@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   fetchHistory,
   fetchAnalysis,
-  type AnalysisMove,
   type HistoryGame,
   type SessionAnalysis,
 } from "../utils/api";
 import type { OpenHistoryOptions } from "../components/chess-game/types";
 import AnalysisBoard from "../components/AnalysisBoard";
+import GameReviewStats from "../components/GameReviewStats";
 import AppNav from "../components/AppNav";
-import { useTouchOnly } from "../hooks/useTouchOnly";
+import { useGameReviewStats } from "../hooks/useGameReviewStats";
 import "../App.css";
 
 function resultLabel(result: string | null): string {
@@ -37,53 +37,6 @@ function formatDate(iso: string): string {
   });
 }
 
-type ClassKey = 'blunder' | 'mistake' | 'inaccuracy';
-type SideStats = Record<ClassKey, { count: number; indices: number[] }> & { avgCpl: number };
-type StatSelection = { side: 'player' | 'opponent'; cls: ClassKey } | null;
-
-const CLASS_KEYS: ClassKey[] = ['blunder', 'mistake', 'inaccuracy'];
-
-function computeSideStats(
-  moves: AnalysisMove[],
-  playerColor: 'white' | 'black',
-): { player: SideStats; opponent: SideStats } {
-  const makeSide = (): SideStats => ({
-    blunder: { count: 0, indices: [] },
-    mistake: { count: 0, indices: [] },
-    inaccuracy: { count: 0, indices: [] },
-    avgCpl: 0,
-  });
-  const player = makeSide();
-  const opponent = makeSide();
-
-  let playerDeltaSum = 0, playerDeltaCount = 0;
-  let opponentDeltaSum = 0, opponentDeltaCount = 0;
-
-  for (let i = 0; i < moves.length; i++) {
-    const m = moves[i];
-    const isPlayer = m.color === playerColor;
-    const side = isPlayer ? player : opponent;
-    const cls = m.classification as ClassKey | null;
-    if (cls && cls in side) {
-      side[cls].count++;
-      side[cls].indices.push(i);
-    }
-    if (m.eval_delta != null) {
-      if (isPlayer) {
-        playerDeltaSum += m.eval_delta;
-        playerDeltaCount++;
-      } else {
-        opponentDeltaSum += m.eval_delta;
-        opponentDeltaCount++;
-      }
-    }
-  }
-  player.avgCpl = playerDeltaCount > 0 ? Math.round(playerDeltaSum / playerDeltaCount) : 0;
-  opponent.avgCpl = opponentDeltaCount > 0 ? Math.round(opponentDeltaSum / opponentDeltaCount) : 0;
-
-  return { player, opponent };
-}
-
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
 
@@ -108,7 +61,6 @@ function HistoryPage() {
         if (cancelled) return;
         setGames(data);
         if (data.length > 0) {
-          // Honor sessionId from navigation state, or fall back to first game
           const targetId =
             navState?.sessionId && data.some((g) => g.session_id === navState.sessionId)
               ? navState.sessionId
@@ -132,11 +84,9 @@ function HistoryPage() {
     return () => {
       cancelled = true;
     };
-  // navState is only read on initial mount
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Fetch analysis and poll while incomplete
   useEffect(() => {
     if (!selectedId) return;
 
@@ -160,20 +110,16 @@ function HistoryPage() {
             }, POLL_INTERVAL_MS);
           } else if (data.is_complete) {
             setAnalysisProcessing(false);
-            // Refetch history summary once complete to sync counts
             fetchHistory()
               .then((fresh) => { if (!cancelled) setGames(fresh); })
               .catch(() => {});
           } else {
-            // Poll cap reached but still incomplete — keep the banner
-            // so the user knows the data is not final.
             setAnalysisProcessing(true);
           }
         })
         .catch(() => {
           if (cancelled) return;
           if (isInitial) setAnalysisLoading(false);
-          // Keep polling after transient errors so we don't get stuck
           if (pollCountRef.current < POLL_MAX_ATTEMPTS) {
             pollCountRef.current++;
             pollTimerRef.current = setTimeout(() => {
@@ -194,55 +140,15 @@ function HistoryPage() {
     };
   }, [selectedId]);
 
-  const [statInteraction, setStatInteraction] = useState<{
-    gameId: string | null;
-    pinned: StatSelection;
-    hovered: StatSelection;
-  }>({ gameId: null, pinned: null, hovered: null });
-
-  // Reset interaction state when game changes (derived state pattern)
-  const pinnedStat = statInteraction.gameId === selectedId ? statInteraction.pinned : null;
-  const hoveredStat = statInteraction.gameId === selectedId ? statInteraction.hovered : null;
-
-  const setPinnedStat = useCallback((pinned: StatSelection) => {
-    setStatInteraction(prev => ({ ...prev, gameId: selectedId, pinned }));
-  }, [selectedId]);
-
-  const setHoveredStat = useCallback((hovered: StatSelection) => {
-    setStatInteraction(prev => ({ ...prev, gameId: selectedId, hovered }));
-  }, [selectedId]);
-
-  const isTouchOnly = useTouchOnly();
-
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
   const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
 
-  const sideStats = useMemo(() => {
-    if (!analysis) return null;
-    return computeSideStats(analysis.moves, playerColor);
-  }, [analysis, playerColor]);
-
-  const activeStat = hoveredStat ?? pinnedStat;
-
-  const highlightedMoves = useMemo(() => {
-    if (!activeStat || !sideStats) return null;
-    const stats = activeStat.side === 'player' ? sideStats.player : sideStats.opponent;
-    return { indices: stats[activeStat.cls].indices, classification: activeStat.cls };
-  }, [activeStat, sideStats]);
-
-  const handleStatHover = useCallback((sel: StatSelection) => {
-    if (isTouchOnly) return;
-    setHoveredStat(sel);
-  }, [isTouchOnly, setHoveredStat]);
-
-  const handleStatClick = useCallback((sel: StatSelection) => {
-    const isToggleOff = pinnedStat?.side === sel?.side && pinnedStat?.cls === sel?.cls;
-    setPinnedStat(isToggleOff ? null : sel);
-  }, [pinnedStat, setPinnedStat]);
-
-  const handleGraphMoveClick = useCallback(() => {
-    setPinnedStat(null);
-  }, [setPinnedStat]);
+  const { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat } =
+    useGameReviewStats({
+      selectedId,
+      moves: analysis?.moves ?? null,
+      playerColor,
+    });
 
   return (
     <main className="app-shell history-page">
@@ -251,26 +157,33 @@ function HistoryPage() {
       <div className="constrained-content">
         <section className="history-shell">
           {games.length > 0 && (
-            <select
-              className="game-selector"
-              value={selectedId ?? ""}
-              onChange={(e) => {
-                const id = e.target.value;
-                if (id && id !== selectedId) {
-                  setAnalysisLoading(true);
-                  setAnalysis(null);
-                  setSelectedId(id);
-                }
-              }}
-            >
-              {games.map((g) => (
-                <option key={g.session_id} value={g.session_id}>
-                  {resultLabel(g.result)} vs {g.engine_elo} —{" "}
-                  {g.ended_at ? formatDate(g.ended_at) : "In progress"} (
-                  {g.summary.total_moves} moves)
-                </option>
-              ))}
-            </select>
+            <div className="game-selector-row">
+              <select
+                className="game-selector"
+                value={selectedId ?? ""}
+                onChange={(e) => {
+                  const id = e.target.value;
+                  if (id && id !== selectedId) {
+                    setAnalysisLoading(true);
+                    setAnalysis(null);
+                    setSelectedId(id);
+                  }
+                }}
+              >
+                {games.map((g) => (
+                  <option key={g.session_id} value={g.session_id}>
+                    {resultLabel(g.result)} vs {g.engine_elo} —{" "}
+                    {g.ended_at ? formatDate(g.ended_at) : "In progress"} (
+                    {g.summary.total_moves} moves)
+                  </option>
+                ))}
+              </select>
+              {selectedId && (
+                <Link to={`/game?id=${selectedId}`} className="game-share-link" aria-label="Open game analysis link">
+                  &#x1F517;
+                </Link>
+              )}
+            </div>
           )}
 
           {loading && (
@@ -288,7 +201,7 @@ function HistoryPage() {
               <p className="history-shell__placeholder">
                 Play your first game to start building your history!
               </p>
-              <Link to="/game" className="chess-button primary">
+              <Link to="/play" className="chess-button primary">
                 Start New Game
               </Link>
             </div>
@@ -318,66 +231,14 @@ function HistoryPage() {
                     highlightedMoves={highlightedMoves}
                     onGraphMoveClick={handleGraphMoveClick}
                     footer={
-                      <div className="history-stats-pane">
-                        <div className="history-stats-pane__grid">
-                          {/* Header row */}
-                          <div className="history-stats-pane__header" />
-                          <div className="history-stats-pane__header">You</div>
-                          <div className="history-stats-pane__header">Ghost</div>
-
-                          {/* Classification rows */}
-                          {CLASS_KEYS.map((cls) => {
-                            const label = cls === 'inaccuracy' ? 'Inaccur.' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
-                            const fullLabel = cls === 'inaccuracy' ? 'Inaccuracies' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
-                            const labelSel = { side: 'player' as const, cls };
-                            const isLabelActive = activeStat?.cls === cls;
-                            const isLabelPressed = pinnedStat?.side === 'player' && pinnedStat?.cls === cls;
-                            return [
-                              <button
-                                key={`${cls}-label`}
-                                type="button"
-                                aria-label={`Your ${fullLabel}`}
-                                aria-pressed={isLabelPressed}
-                                className={`history-stats-pane__label history-stats-pane__label--${cls} history-stats-pane__label--interactive${isLabelActive ? ' history-stats-pane__label--active' : ''}`}
-                                onMouseEnter={() => handleStatHover(labelSel)}
-                                onMouseLeave={() => handleStatHover(null)}
-                                onClick={() => handleStatClick(labelSel)}
-                              >
-                                {label}
-                              </button>,
-                              ...(['player', 'opponent'] as const).map((side) => {
-                                const sel = { side, cls };
-                                const isActive = activeStat?.side === side && activeStat?.cls === cls;
-                                const isPressed = pinnedStat?.side === side && pinnedStat?.cls === cls;
-                                const sideLabel = side === 'player' ? 'Your' : 'Ghost';
-                                return (
-                                  <button
-                                    key={`${cls}-${side}`}
-                                    type="button"
-                                    aria-label={`${sideLabel} ${fullLabel}: ${sideStats[side][cls].count}`}
-                                    aria-pressed={isPressed}
-                                    className={`history-stats-pane__value history-stats-pane__value--${cls} history-stats-pane__value--interactive${isActive ? ' history-stats-pane__value--active' : ''}`}
-                                    onMouseEnter={() => handleStatHover(sel)}
-                                    onMouseLeave={() => handleStatHover(null)}
-                                    onClick={() => handleStatClick(sel)}
-                                  >
-                                    {sideStats[side][cls].count}
-                                  </button>
-                                );
-                              }),
-                            ];
-                          })}
-
-                          {/* Avg CPL row */}
-                          <div className="history-stats-pane__label">Avg CPL</div>
-                          <div className="history-stats-pane__value">{sideStats.player.avgCpl}</div>
-                          <div className="history-stats-pane__value">{sideStats.opponent.avgCpl}</div>
-
-                          {/* Moves row */}
-                          <div className="history-stats-pane__label">Moves</div>
-                          <div className="history-stats-pane__value history-stats-pane__value--span">{analysis.moves.length}</div>
-                        </div>
-                      </div>
+                      <GameReviewStats
+                        sideStats={sideStats}
+                        activeStat={activeStat}
+                        pinnedStat={pinnedStat}
+                        totalMoves={analysis.moves.length}
+                        onStatHover={handleStatHover}
+                        onStatClick={handleStatClick}
+                      />
                     }
                   />
                 )}

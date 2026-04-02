@@ -16,7 +16,7 @@ function App() {
             ghost lines, and build better habits move by move.
           </p>
           <div className="cta-row">
-            <Link to="/game" className="chess-button primary">
+            <Link to="/play" className="chess-button primary">
               Play a Game
             </Link>
             <Link to="/history" className="chess-button">

@@ -31,8 +31,8 @@ function AppNav({ showLogo = false }: AppNavProps) {
         <Link to="/" className="nav-bar__link">
           Home
         </Link>
-        <Link to="/game" className="nav-bar__link">
-          Game
+        <Link to="/play" className="nav-bar__link">
+          Play
         </Link>
         <Link to="/history" className="nav-bar__link">
           History

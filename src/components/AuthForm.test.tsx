@@ -107,7 +107,7 @@ describe('AuthForm', () => {
 
       await waitFor(() => {
         expect(mockClaimAccount).toHaveBeenCalledWith('myuser', 'password123')
-        expect(mockNavigate).toHaveBeenCalledWith('/game')
+        expect(mockNavigate).toHaveBeenCalledWith('/play')
       })
     })
 
@@ -156,7 +156,7 @@ describe('AuthForm', () => {
 
       await waitFor(() => {
         expect(mockLogin).toHaveBeenCalledWith('myuser', 'password123')
-        expect(mockNavigate).toHaveBeenCalledWith('/game')
+        expect(mockNavigate).toHaveBeenCalledWith('/play')
       })
     })
 
@@ -192,7 +192,7 @@ describe('AuthForm', () => {
 
       resolveLogin!()
       await waitFor(() => {
-        expect(mockNavigate).toHaveBeenCalledWith('/game')
+        expect(mockNavigate).toHaveBeenCalledWith('/play')
       })
     })
   })

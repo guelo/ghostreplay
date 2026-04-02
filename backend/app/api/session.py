@@ -88,6 +88,7 @@ class SessionAnalysisResponse(BaseModel):
     session_id: uuid.UUID
     pgn: str | None
     result: str | None
+    player_color: str
     moves: list[SessionAnalysisMove]
     summary: SessionAnalysisSummary
     position_analysis: dict[str, PositionAnalysis] = {}
@@ -369,6 +370,7 @@ def get_session_analysis(
         session_id=game_session.id,
         pgn=game_session.pgn,
         result=game_session.result,
+        player_color=game_session.player_color,
         moves=[
             SessionAnalysisMove(
                 move_number=move.move_number,

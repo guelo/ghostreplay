@@ -45,7 +45,7 @@ export default function AuthForm({ mode }: AuthFormProps) {
       } else {
         await login(username, password)
       }
-      navigate('/game')
+      navigate('/play')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {

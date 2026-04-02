@@ -513,6 +513,7 @@ export interface SessionAnalysis {
   expected_total_moves: number | null
   analyzed_moves: number
   is_complete: boolean
+  player_color: 'white' | 'black'
 }
 
 /**

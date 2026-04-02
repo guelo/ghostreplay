@@ -979,6 +979,12 @@
 }
 
 /* Game selector dropdown */
+.game-selector-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
 .game-selector {
     font-size: 0.85rem;
     padding: 0.4rem 0.75rem;
@@ -989,6 +995,17 @@
     width: auto;
     max-width: 360px;
     cursor: pointer;
+}
+
+.game-share-link {
+    font-size: 1rem;
+    text-decoration: none;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+}
+
+.game-share-link:hover {
+    opacity: 1;
 }
 
 /* Analysis pane */

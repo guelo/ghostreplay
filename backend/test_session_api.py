@@ -325,6 +325,7 @@ def test_session_analysis_success(client, auth_headers, create_game_session):
 
     data = response.json()
     assert data["session_id"] == session_id
+    assert data["player_color"] == "white"
     assert data["result"] == "checkmate_win"
     assert data["pgn"] == "1. e4 e5 2. Nf3"
     assert data["summary"] == {
