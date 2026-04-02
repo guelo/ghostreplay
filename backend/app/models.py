@@ -158,6 +158,10 @@ class SessionMove(Base):
     __tablename__ = "session_moves"
     __table_args__ = (
         CheckConstraint("color in ('white','black')", name="ck_session_moves_color"),
+        CheckConstraint(
+            "decision_source is null or decision_source in ('ghost_path','backend_engine','local_fallback')",
+            name="ck_session_moves_decision_source",
+        ),
         UniqueConstraint("session_id", "move_number", "color", name="uq_session_moves_session_move_color"),
         Index("idx_session_moves_session", "session_id"),
     )
@@ -180,6 +184,8 @@ class SessionMove(Base):
     classification: Mapped[str | None] = mapped_column(String(20))
     fen_before: Mapped[str | None] = mapped_column(Text)
     best_move_uci: Mapped[str | None] = mapped_column(String(5))
+    decision_source: Mapped[str | None] = mapped_column(String(20))
+    target_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id"))
 
 
 class AnalysisCache(Base):

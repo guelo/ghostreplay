@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import type { Chess } from "chess.js";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import type { TargetBlunderSrs } from "../utils/api";
+import type { SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
 import { useGameStore } from "../stores/useGameStore";
 
@@ -84,12 +84,22 @@ export const useChessGameController = ({
       fenBeforeMove: string,
       legalMoveCount: number,
       analysisColor: "white" | "black",
+      metadata?: {
+        decisionSource?: SessionDecisionSource;
+        targetBlunderId?: number | null;
+      },
     ) => {
       const store = useGameStore.getState();
       const newFen = chess.fen();
       const moveIndex = store.moveHistory.length;
       const uciMove = `${appliedMove.from}${appliedMove.to}${appliedMove.promotion ?? ""}`;
-      const nextMove = { san: appliedMove.san, fen: newFen, uci: uciMove };
+      const nextMove = {
+        san: appliedMove.san,
+        fen: newFen,
+        uci: uciMove,
+        decisionSource: metadata?.decisionSource,
+        targetBlunderId: metadata?.targetBlunderId ?? null,
+      };
       const nextMoveHistory = [...store.moveHistory, nextMove];
 
       store.setLiveFen(newFen);
@@ -246,6 +256,7 @@ export const useChessGameController = ({
         fenBeforeMove,
         legalMoveCount,
         opponentColor,
+        { decisionSource: "local_fallback" },
       );
       setEngineMessage(null);
 
@@ -270,6 +281,7 @@ export const useChessGameController = ({
   const applyGhostMove = useCallback(
     async (
       sanMove: string,
+      decisionSource: Exclude<SessionDecisionSource, "local_fallback">,
       targetBlunderId: number | null,
       targetBlunderSrs: TargetBlunderSrs | null,
       targetFen: string | null,
@@ -291,6 +303,7 @@ export const useChessGameController = ({
           fenBeforeMove,
           legalMoveCount,
           opponentColor,
+          { decisionSource, targetBlunderId },
         );
         setEngineMessage(null);
 

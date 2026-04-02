@@ -49,6 +49,7 @@ describe("determineOpponentMove", () => {
       targetBlunderId: 42,
       targetBlunderSrs: null,
       targetFen: null,
+      decisionSource: "ghost_path",
     });
     expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
       "session-123",
@@ -70,6 +71,7 @@ describe("determineOpponentMove", () => {
       targetBlunderId: null,
       targetBlunderSrs: null,
       targetFen: null,
+      decisionSource: "backend_engine",
     });
   });
 
@@ -120,7 +122,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("ghost");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", 42, null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", "ghost_path", 42, null, null);
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
@@ -145,7 +147,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", null, null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", "backend_engine", null, null, null);
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 

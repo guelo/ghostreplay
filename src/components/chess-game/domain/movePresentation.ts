@@ -6,6 +6,8 @@ export type MoveRecord = {
   san: string;
   fen: string; // Position after this move
   uci: string;
+  decisionSource?: "ghost_path" | "backend_engine" | "local_fallback";
+  targetBlunderId?: number | null;
 };
 
 export type BlunderAlert = {

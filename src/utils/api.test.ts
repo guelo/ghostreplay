@@ -205,6 +205,8 @@ describe('uploadSessionMoves', () => {
         fen_before: 'fen-0',
         move_uci: 'e2e4',
         best_move_uci: 'e2e4',
+        decision_source: null,
+        target_blunder_id: null,
       },
       {
         move_number: 1,
@@ -220,6 +222,8 @@ describe('uploadSessionMoves', () => {
         fen_before: 'fen-1',
         move_uci: 'e7e5',
         best_move_uci: 'e7e5',
+        decision_source: 'backend_engine',
+        target_blunder_id: null,
       },
     ])
 
@@ -243,6 +247,8 @@ describe('uploadSessionMoves', () => {
               fen_before: 'fen-0',
               move_uci: 'e2e4',
               best_move_uci: 'e2e4',
+              decision_source: null,
+              target_blunder_id: null,
             },
             {
               move_number: 1,
@@ -258,6 +264,8 @@ describe('uploadSessionMoves', () => {
               fen_before: 'fen-1',
               move_uci: 'e7e5',
               best_move_uci: 'e7e5',
+              decision_source: 'backend_engine',
+              target_blunder_id: null,
             },
           ],
         }),

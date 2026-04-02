@@ -34,6 +34,12 @@ class MoveClassification(str, Enum):
     BLUNDER = "blunder"
 
 
+class SessionDecisionSource(str, Enum):
+    GHOST_PATH = "ghost_path"
+    BACKEND_ENGINE = "backend_engine"
+    LOCAL_FALLBACK = "local_fallback"
+
+
 class SessionMoveInput(BaseModel):
     move_number: int = Field(..., ge=1)
     color: MoveColor
@@ -48,6 +54,8 @@ class SessionMoveInput(BaseModel):
     fen_before: str | None = Field(None, min_length=1)
     move_uci: str | None = Field(None, min_length=2, max_length=5)
     best_move_uci: str | None = Field(None, max_length=5)
+    decision_source: SessionDecisionSource | None = None
+    target_blunder_id: int | None = Field(None, ge=1)
 
 
 class SessionMovesRequest(BaseModel):
@@ -236,6 +244,8 @@ def upsert_session_moves(
             "classification": move.classification.value if move.classification else None,
             "fen_before": move.fen_before,
             "best_move_uci": move.best_move_uci,
+            "decision_source": move.decision_source.value if move.decision_source else None,
+            "target_blunder_id": move.target_blunder_id,
         }
         for move in request.moves
     ]
@@ -263,6 +273,8 @@ def upsert_session_moves(
                 existing_row.classification = value["classification"]
                 existing_row.fen_before = value["fen_before"]
                 existing_row.best_move_uci = value["best_move_uci"]
+                existing_row.decision_source = value["decision_source"]
+                existing_row.target_blunder_id = value["target_blunder_id"]
             else:
                 db.add(SessionMove(**value))
 
@@ -288,6 +300,8 @@ def upsert_session_moves(
             "classification": statement.excluded.classification,
             "fen_before": statement.excluded.fen_before,
             "best_move_uci": statement.excluded.best_move_uci,
+            "decision_source": statement.excluded.decision_source,
+            "target_blunder_id": statement.excluded.target_blunder_id,
         },
     )
     db.execute(statement)

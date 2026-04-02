@@ -1,5 +1,9 @@
 import { useCallback, useState } from "react";
-import { getNextOpponentMove, type TargetBlunderSrs } from "../utils/api";
+import {
+  getNextOpponentMove,
+  type SessionDecisionSource,
+  type TargetBlunderSrs,
+} from "../utils/api";
 
 export type OpponentMode = "ghost" | "engine";
 
@@ -9,6 +13,7 @@ export type OpponentMoveResult = {
   targetBlunderId: number | null;
   targetBlunderSrs: TargetBlunderSrs | null;
   targetFen: string | null;
+  decisionSource: Exclude<SessionDecisionSource, "local_fallback">;
 };
 
 /**
@@ -29,6 +34,7 @@ export const determineOpponentMove = async (
       targetBlunderId: response.target_blunder_id,
       targetBlunderSrs: response.target_blunder_srs,
       targetFen: response.target_fen,
+      decisionSource: response.decision_source,
     };
   } catch (error) {
     console.error("[OpponentMove] Backend unavailable:", error);
@@ -40,6 +46,7 @@ type UseOpponentMoveOptions = {
   sessionId: string | null;
   onApplyBackendMove: (
     sanMove: string,
+    decisionSource: Exclude<SessionDecisionSource, "local_fallback">,
     targetBlunderId: number | null,
     targetBlunderSrs: TargetBlunderSrs | null,
     targetFen: string | null,
@@ -74,7 +81,13 @@ export const useOpponentMove = ({
           `[OpponentMove] Applying ${result.mode} move:`,
           result.move
         );
-        await onApplyBackendMove(result.move, result.targetBlunderId, result.targetBlunderSrs, result.targetFen);
+        await onApplyBackendMove(
+          result.move,
+          result.decisionSource,
+          result.targetBlunderId,
+          result.targetBlunderSrs,
+          result.targetFen,
+        );
       } else {
         setOpponentMode("engine");
         await onApplyLocalFallback();

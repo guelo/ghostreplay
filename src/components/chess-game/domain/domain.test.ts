@@ -240,6 +240,8 @@ describe("chess-game domain helpers", () => {
         fen_before: startingFen,
         move_uci: "e2e4",
         best_move_uci: "e2e4",
+        decision_source: null,
+        target_blunder_id: null,
       },
       {
         move_number: 1,
@@ -257,6 +259,8 @@ describe("chess-game domain helpers", () => {
           "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
         move_uci: "d7d5",
         best_move_uci: "d7d5",
+        decision_source: null,
+        target_blunder_id: null,
       },
     ]);
   });

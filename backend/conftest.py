@@ -104,8 +104,12 @@ def _create_test_schema(conn) -> None:
             classification VARCHAR(20),
             fen_before TEXT,
             best_move_uci VARCHAR(5),
+            decision_source VARCHAR(20),
+            target_blunder_id INTEGER,
             UNIQUE(session_id, move_number, color),
-            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (target_blunder_id) REFERENCES blunders(id),
+            CHECK (decision_source IS NULL OR decision_source IN ('ghost_path', 'backend_engine', 'local_fallback'))
         )
     """))
     conn.execute(text("""

@@ -2,6 +2,7 @@ import uuid
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import text
 
 from app.models import SessionMove
 
@@ -43,6 +44,7 @@ def test_session_moves_bulk_insert_success(client, auth_headers, create_game_ses
                     "best_move_eval_cp": 12,
                     "eval_delta": 0,
                     "classification": "excellent",
+                    "decision_source": "backend_engine",
                 },
             ]
         },
@@ -63,6 +65,8 @@ def test_session_moves_bulk_insert_success(client, auth_headers, create_game_ses
     assert rows[0].color == "black"
     assert rows[0].move_san == "e5"
     assert rows[0].classification == "excellent"
+    assert rows[0].decision_source == "backend_engine"
+    assert rows[0].target_blunder_id is None
     assert rows[1].move_number == 1
     assert rows[1].color == "white"
     assert rows[1].move_san == "e4"
@@ -72,6 +76,23 @@ def test_session_moves_bulk_insert_success(client, auth_headers, create_game_ses
 def test_session_moves_upsert_idempotent(client, auth_headers, create_game_session, db_session):
     session_id = create_game_session(user_id=123, player_color="white")
     session_uuid = uuid.UUID(session_id)
+
+    db_session.execute(
+        text("""
+            INSERT INTO positions (user_id, fen_hash, fen_raw, active_color)
+            VALUES (123, 'obs-hash', 'obs-fen', 'white')
+        """)
+    )
+    position_id = db_session.execute(text("SELECT id FROM positions WHERE fen_hash = 'obs-hash'")).scalar_one()
+    db_session.execute(
+        text("""
+            INSERT INTO blunders (user_id, position_id, bad_move_san, best_move_san, eval_loss_cp)
+            VALUES (123, :position_id, 'e4', 'Nf3', 120)
+        """),
+        {"position_id": position_id},
+    )
+    blunder_id = db_session.execute(text("SELECT id FROM blunders WHERE position_id = :position_id"), {"position_id": position_id}).scalar_one()
+    db_session.commit()
 
     first = client.post(
         f"/api/session/{session_id}/moves",
@@ -87,6 +108,8 @@ def test_session_moves_upsert_idempotent(client, auth_headers, create_game_sessi
                     "best_move_eval_cp": 30,
                     "eval_delta": 0,
                     "classification": "best",
+                    "decision_source": "ghost_path",
+                    "target_blunder_id": blunder_id,
                 }
             ]
         },
@@ -109,6 +132,8 @@ def test_session_moves_upsert_idempotent(client, auth_headers, create_game_sessi
                     "best_move_eval_cp": 20,
                     "eval_delta": 30,
                     "classification": "good",
+                    "decision_source": "local_fallback",
+                    "target_blunder_id": None,
                 }
             ]
         },
@@ -141,6 +166,8 @@ def test_session_moves_upsert_idempotent(client, auth_headers, create_game_sessi
     assert row.best_move_eval_cp == 20
     assert row.eval_delta == 30
     assert row.classification == "good"
+    assert row.decision_source == "local_fallback"
+    assert row.target_blunder_id is None
 
 
 def test_session_moves_session_not_found(client, auth_headers):

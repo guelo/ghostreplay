@@ -257,7 +257,7 @@ describe("useChessGameController", () => {
     });
 
     await act(async () => {
-      await result.current.applyGhostMove("e5", 77, targetSrs, "target-fen");
+      await result.current.applyGhostMove("e5", "ghost_path", 77, targetSrs, "target-fen");
     });
 
     expect(analyzeMove).toHaveBeenCalledWith(

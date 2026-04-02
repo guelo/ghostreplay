@@ -179,6 +179,10 @@ export interface RatingHistoryResponse {
 }
 
 export type SessionMoveColor = 'white' | 'black'
+export type SessionDecisionSource =
+  | 'ghost_path'
+  | 'backend_engine'
+  | 'local_fallback'
 
 import type { MoveClassification } from '../workers/analysisUtils'
 // Re-export MoveClassification so existing imports from api.ts keep working
@@ -198,6 +202,8 @@ export interface SessionMoveUpload {
   fen_before: string | null
   move_uci: string | null
   best_move_uci: string | null
+  decision_source: SessionDecisionSource | null
+  target_blunder_id: number | null
 }
 
 interface SessionMovesRequest {
@@ -249,7 +255,7 @@ interface NextOpponentMoveResponse {
   target_blunder_id: number | null
   target_blunder_srs: TargetBlunderSrs | null
   target_fen: string | null
-  decision_source: 'ghost_path' | 'backend_engine'
+  decision_source: Exclude<SessionDecisionSource, 'local_fallback'>
 }
 
 interface SrsReviewRequest {
