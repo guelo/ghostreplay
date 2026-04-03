@@ -162,38 +162,67 @@ const MoveRowInner = ({
       ? CLASSIFICATION_ICON[move.classification]
       : undefined;
 
-    const popClass = fresh && iconInfo
-      ? move.classification === "best"
-        ? " move-icon--pop-best"
-        : " move-icon--pop"
+    const celebrateBest = fresh && move.classification === "best" && !!iconInfo;
+    const popClass = fresh && iconInfo && !celebrateBest
+      ? " move-icon--pop"
       : "";
+    const buttonCelebrateClass = celebrateBest ? " move-button--celebrate-best" : "";
+    const sanTextCelebrateClass = celebrateBest ? " move-san__text--celebrate-best" : "";
+    const iconCelebrateClass = celebrateBest ? " move-icon--celebrate-best" : "";
 
     return (
       <button
         ref={isSelected ? selectedMoveRef : null}
-        className={`move-button move-col-${side} ${colorClass} ${isSelected ? "selected" : ""}`}
+        className={`move-button move-col-${side} ${colorClass}${buttonCelebrateClass} ${isSelected ? "selected" : ""}`}
         type="button"
         onClick={() => onMoveClick(index)}
       >
+        {celebrateBest && (
+          <span className="move-best-fx" aria-hidden="true">
+            <span className="move-best-fx__plate" />
+          </span>
+        )}
         <span className="move-san">
           {iconInfo && (
-            <span
-              className={`move-icon move-icon--${move.classification}${popClass}`}
-              title={iconInfo.title}
-              onClick={(e) => {
-                e.stopPropagation();
-                onIconTap(index);
-              }}
-              onAnimationEnd={
-                popClass
-                  ? () => onFreshAnimationDone?.(index)
-                  : undefined
-              }
-            >
-              {tappedIconIndex === index ? iconInfo.title : iconInfo.icon}
+            <span className={celebrateBest ? "move-icon-stage move-icon-stage--celebrate-best" : "move-icon-stage"}>
+              {celebrateBest && (
+                <>
+                  <span className="move-icon-stage__burst" aria-hidden="true" />
+                  <span className="move-icon-stage__ring" aria-hidden="true" />
+                  <span className="move-icon-stage__spark move-icon-stage__spark--1" aria-hidden="true" />
+                  <span className="move-icon-stage__spark move-icon-stage__spark--2" aria-hidden="true" />
+                  <span className="move-icon-stage__spark move-icon-stage__spark--3" aria-hidden="true" />
+                  <span
+                    className="move-icon-stage__tail"
+                    aria-hidden="true"
+                    onAnimationEnd={(event) => {
+                      if (event.target !== event.currentTarget) {
+                        return;
+                      }
+                      onFreshAnimationDone?.(index);
+                    }}
+                  />
+                </>
+              )}
+              <span
+                className={`move-icon move-icon--${move.classification}${popClass}${iconCelebrateClass}`}
+                title={iconInfo.title}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onIconTap(index);
+                }}
+                onAnimationEnd={
+                  popClass
+                    ? () => onFreshAnimationDone?.(index)
+                    : undefined
+                }
+              >
+                {tappedIconIndex === index ? iconInfo.title : iconInfo.icon}
+              </span>
             </span>
           )}
-          {move.san}
+          {celebrateBest && <span className="move-san__connector" aria-hidden="true" />}
+          <span className={`move-san__text${sanTextCelebrateClass}`}>{move.san}</span>
           {isAnalyzing && <span className="move-analyzing-spinner" />}
         </span>
         <span className="move-eval">

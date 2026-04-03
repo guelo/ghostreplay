@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render } from "../test/utils";
+import { fireEvent, render } from "../test/utils";
 import MoveRow from "./MoveRow";
 import type { MoveRowProps } from "./MoveRow";
 import { createRef } from "react";
@@ -37,15 +37,24 @@ describe("MoveRow — pop animation classes", () => {
     );
     const whiteIcon = container.querySelector(".move-col-white .move-icon");
     expect(whiteIcon?.classList.contains("move-icon--pop")).toBe(true);
-    expect(whiteIcon?.classList.contains("move-icon--pop-best")).toBe(false);
+    expect(whiteIcon?.classList.contains("move-icon--celebrate-best")).toBe(false);
   });
 
-  it("adds move-icon--pop-best when freshBlack=true and classification is best", () => {
+  it("adds best-only celebration classes when freshBlack=true and classification is best", () => {
     const { container } = render(
       <MoveRow {...baseProps} freshBlack={true} />,
     );
+    const blackButton = container.querySelector(".move-col-black.move-button");
     const blackIcon = container.querySelector(".move-col-black .move-icon");
-    expect(blackIcon?.classList.contains("move-icon--pop-best")).toBe(true);
+    const blackSanText = container.querySelector(".move-col-black .move-san__text");
+    const blackRing = container.querySelector(".move-col-black .move-icon-stage__ring");
+    const blackConnector = container.querySelector(".move-col-black .move-san__connector");
+
+    expect(blackButton?.classList.contains("move-button--celebrate-best")).toBe(true);
+    expect(blackIcon?.classList.contains("move-icon--celebrate-best")).toBe(true);
+    expect(blackSanText?.classList.contains("move-san__text--celebrate-best")).toBe(true);
+    expect(blackRing).not.toBeNull();
+    expect(blackConnector).not.toBeNull();
   });
 
   it("no pop class when fresh=false", () => {
@@ -55,7 +64,7 @@ describe("MoveRow — pop animation classes", () => {
     const icons = container.querySelectorAll(".move-icon");
     for (const icon of icons) {
       expect(icon.classList.contains("move-icon--pop")).toBe(false);
-      expect(icon.classList.contains("move-icon--pop-best")).toBe(false);
+      expect(icon.classList.contains("move-icon--celebrate-best")).toBe(false);
     }
   });
 
@@ -67,9 +76,30 @@ describe("MoveRow — pop animation classes", () => {
     const icon = container.querySelector(".move-icon--pop");
     expect(icon).not.toBeNull();
 
-    // Simulate animationEnd event
-    const event = new Event("animationend", { bubbles: true });
-    icon!.dispatchEvent(event);
+    fireEvent.animationEnd(icon!);
     expect(onDone).toHaveBeenCalledWith(0); // whiteIdx
+  });
+
+  it("clears fresh best moves only after the final tail animation ends", () => {
+    const onDone = vi.fn();
+    const { container } = render(
+      <MoveRow {...baseProps} freshBlack={true} onFreshAnimationDone={onDone} />,
+    );
+
+    const bestIcon = container.querySelector(".move-col-black .move-icon--celebrate-best");
+    const bestBurst = container.querySelector(".move-col-black .move-icon-stage__burst");
+    const bestTail = container.querySelector(".move-col-black .move-icon-stage__tail");
+
+    expect(bestIcon).not.toBeNull();
+    expect(bestBurst).not.toBeNull();
+    expect(bestTail).not.toBeNull();
+
+    fireEvent.animationEnd(bestIcon!);
+    fireEvent.animationEnd(bestBurst!);
+    expect(onDone).not.toHaveBeenCalled();
+
+    fireEvent.animationEnd(bestTail!);
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledWith(1);
   });
 });

@@ -72,6 +72,21 @@ describe("AnalysisEffects — best-move bling", () => {
     expect(mockPlayBling).toHaveBeenCalledTimes(1);
   });
 
+  it("plays bling when best-move analysis arrives for a black player move", () => {
+    useGameStore.setState({ playerColor: "black", isGameActive: true });
+    renderEffects();
+
+    // Player's move (index 1 = black = player)
+    act(() => {
+      store.getState().resolveAnalysis(1, makeResult({
+        moveIndex: 1,
+        classification: "best",
+      }));
+    });
+
+    expect(mockPlayBling).toHaveBeenCalledTimes(1);
+  });
+
   it("does NOT play bling for engine moves with best classification", () => {
     useGameStore.setState({ playerColor: "white", isGameActive: true });
     renderEffects();
