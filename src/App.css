@@ -3213,19 +3213,30 @@
 }
 
 .openings-shell__stats-card {
+    --opening-card-accent: var(--text-tertiary);
+    position: relative;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
     gap: 0.85rem;
     padding: 0.95rem;
-    border: 1px solid color-mix(in srgb, var(--brand-primary) 18%, var(--border-color));
+    border: 1px solid color-mix(in srgb, var(--opening-card-accent) 18%, var(--border-color));
     border-radius: 1.2rem;
     background:
         linear-gradient(
             180deg,
-            color-mix(in srgb, var(--brand-primary) 8%, var(--card-bg)),
+            color-mix(in srgb, var(--opening-card-accent) 8%, var(--card-bg)),
             color-mix(in srgb, var(--color-white) 78%, var(--bg-primary))
         );
     box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-white) 72%, transparent);
+}
+
+.openings-shell__stats-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 4px;
+    background: var(--opening-card-accent);
 }
 
 .openings-shell__stats-copy {
@@ -3569,7 +3580,8 @@ button.openings-shell__crumb:hover {
     background: var(--opening-card-accent);
 }
 
-.opening-family-card--alert {
+.opening-family-card--alert,
+.openings-shell__stats-card--alert {
     --opening-card-accent: var(--error);
     background:
         linear-gradient(
@@ -3579,7 +3591,8 @@ button.openings-shell__crumb:hover {
         );
 }
 
-.opening-family-card--watch {
+.opening-family-card--watch,
+.openings-shell__stats-card--watch {
     --opening-card-accent: var(--warning-dark);
     background:
         linear-gradient(
@@ -3589,7 +3602,8 @@ button.openings-shell__crumb:hover {
         );
 }
 
-.opening-family-card--steady {
+.opening-family-card--steady,
+.openings-shell__stats-card--steady {
     --opening-card-accent: var(--success-dark);
     background:
         linear-gradient(
@@ -3599,7 +3613,8 @@ button.openings-shell__crumb:hover {
         );
 }
 
-.opening-family-card--muted {
+.opening-family-card--muted,
+.openings-shell__stats-card--muted {
     --opening-card-accent: var(--text-tertiary);
     background:
         linear-gradient(

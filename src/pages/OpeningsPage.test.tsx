@@ -399,6 +399,7 @@ describe("OpeningsPage", () => {
       expect(within(heroStats).getByText("72%")).toBeInTheDocument();
     });
     expect(within(heroStats).getByText("Repertoire-wide")).toBeInTheDocument();
+    expect(heroStats).toHaveClass("openings-shell__stats-card--watch");
   });
 
   it("renders populated opening cards strongest-first with normalized percentages", async () => {

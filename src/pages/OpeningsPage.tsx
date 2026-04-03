@@ -334,6 +334,7 @@ function OpeningsPage() {
     breadcrumbs.length > 1 ? (breadcrumbs.at(-2) ?? null) : null;
   const currentTitle = currentBreadcrumb?.opening_name ?? "OPENING SCOREBOARD";
   const currentBranchStats = response?.current_branch_stats ?? null;
+  const heroTone = getPriorityTone(currentBranchStats?.score ?? null);
   const heroStatsLabel = currentBreadcrumb ? "Current branch" : "Repertoire-wide";
   const heroStatsCaption = currentBreadcrumb
     ? "Selected opening aggregate"
@@ -436,7 +437,7 @@ function OpeningsPage() {
 
             <div className="openings-shell__hero-rail">
               <aside
-                className="openings-shell__stats-card"
+                className={`openings-shell__stats-card openings-shell__stats-card--${heroTone}`}
                 aria-label="Current branch stats"
               >
                 <div className="openings-shell__stats-copy">
