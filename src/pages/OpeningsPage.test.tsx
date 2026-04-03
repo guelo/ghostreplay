@@ -7,8 +7,8 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
 import { flushSync } from "react-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import type { ChildrenResponse, OpeningChildItem } from "../utils/api";
 
 const mockLogout = vi.fn();
@@ -56,6 +56,30 @@ vi.mock("../openings/openingBook", () => ({
 import AppRoutes from "../AppRoutes";
 import OpeningsPage from "./OpeningsPage";
 
+const FEN_ROOT = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -";
+const FEN_PARENT = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -";
+const FEN_LEAF =
+  "rnbqkbnr/pppp1ppp/8/4p3/3PP3/8/PPP2PPP/RNBQKBNR b KQkq -";
+
+function LocationProbe() {
+  const location = useLocation();
+
+  return (
+    <output data-testid="route-location">
+      {location.pathname}
+      {location.search}
+    </output>
+  );
+}
+
+function makeBreadcrumb(
+  opening_key: string,
+  opening_name: string,
+  is_current = false,
+) {
+  return { opening_key, opening_name, is_current };
+}
+
 function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
   const merged: OpeningChildItem = {
     opening_key: "root-1",
@@ -94,6 +118,9 @@ function makeResponse(
     player_color: "white",
     parent_key: null,
     parent_name: null,
+    canonical_opening_key: null,
+    canonical_path: [],
+    breadcrumbs: [],
     children: [],
     total_children: overrides.children?.length ?? 0,
     computed_at: "2026-03-30T12:00:00Z",
@@ -161,18 +188,84 @@ const blackTopLevelResponse = makeResponse({
   ],
 });
 
-function renderPage() {
+const polishResponse = makeResponse({
+  parent_key: "polish",
+  parent_name: "Polish Opening",
+  canonical_opening_key: "polish",
+  canonical_path: [],
+  breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
+  children: [
+    makeChild({
+      opening_key: "polish-e6",
+      opening_name: "Polish Opening, 1...e6",
+      child_count: 1,
+      subtree_score: 42,
+      subtree_confidence: 0.55,
+      subtree_coverage: 0.33,
+      subtree_sample_size: 8,
+      subtree_root_count: 1,
+      weakest_root_key: "polish-e6",
+      weakest_root_name: "Polish Opening, 1...e6",
+      weakest_root_family: "Polish Opening",
+      weakest_root_score: 42,
+    }),
+  ],
+});
+
+const polishE6Response = makeResponse({
+  parent_key: "polish-e6",
+  parent_name: "Polish Opening, 1...e6",
+  canonical_opening_key: "polish-e6",
+  canonical_path: ["polish"],
+  breadcrumbs: [
+    makeBreadcrumb("polish", "Polish Opening"),
+    makeBreadcrumb("polish-e6", "Polish Opening, 1...e6", true),
+  ],
+  children: [
+    makeChild({
+      opening_key: "polish-leaf",
+      opening_name: "Polish Leaf",
+      child_count: 1,
+      subtree_score: 39,
+      subtree_confidence: 0.48,
+      subtree_coverage: 0.27,
+      subtree_sample_size: 5,
+      subtree_root_count: 1,
+      weakest_root_key: "polish-leaf",
+      weakest_root_name: "Polish Leaf",
+      weakest_root_family: "Polish Opening",
+      weakest_root_score: 39,
+    }),
+  ],
+});
+
+const polishLeafResponse = makeResponse({
+  parent_key: "polish-leaf",
+  parent_name: "Polish Leaf",
+  canonical_opening_key: "polish-leaf",
+  canonical_path: ["polish", "polish-e6"],
+  breadcrumbs: [
+    makeBreadcrumb("polish", "Polish Opening"),
+    makeBreadcrumb("polish-e6", "Polish Opening, 1...e6"),
+    makeBreadcrumb("polish-leaf", "Polish Leaf", true),
+  ],
+  children: [],
+});
+
+function renderPage(path = "/openings?color=white") {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[path]}>
       <OpeningsPage />
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
 
-function renderRoute(path = "/openings") {
+function renderRoute(path = "/openings?color=white") {
   return render(
     <MemoryRouter initialEntries={[path]}>
       <AppRoutes />
+      <LocationProbe />
     </MemoryRouter>,
   );
 }
@@ -204,10 +297,14 @@ describe("OpeningsPage", () => {
   it("registers a dedicated /openings route and nav link", async () => {
     getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
 
-    renderRoute("/openings");
+    renderRoute("/openings?color=white");
 
     await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenCalledWith("white", undefined);
+      expect(getOpeningChildrenMock).toHaveBeenCalledWith({
+        playerColor: "white",
+        path: [],
+        parentKey: undefined,
+      });
     });
 
     expect(
@@ -228,7 +325,11 @@ describe("OpeningsPage", () => {
     renderPage();
 
     expect(screen.getByText("Loading openings...")).toBeInTheDocument();
-    expect(getOpeningChildrenMock).toHaveBeenCalledWith("white", undefined);
+    expect(getOpeningChildrenMock).toHaveBeenCalledWith({
+      playerColor: "white",
+      path: [],
+      parentKey: undefined,
+    });
   });
 
   it("renders populated opening cards strongest-first with normalized percentages", async () => {
@@ -283,7 +384,11 @@ describe("OpeningsPage", () => {
 
     renderPage();
 
-    expect(getOpeningChildrenMock).toHaveBeenCalledWith("white", undefined);
+    expect(getOpeningChildrenMock).toHaveBeenCalledWith({
+      playerColor: "white",
+      path: [],
+      parentKey: undefined,
+    });
 
     flushSync(() => {
       fireEvent.click(screen.getByRole("button", { name: "Black" }));
@@ -307,6 +412,232 @@ describe("OpeningsPage", () => {
       await screen.findByRole("region", { name: "Black openings" }),
     ).toBeInTheDocument();
     expect(screen.getByText("King's Indian Defense")).toBeInTheDocument();
+  });
+
+  it("accepts deep links with FEN-shaped opening and repeated path params", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        player_color: "black",
+        parent_key: FEN_LEAF,
+        parent_name: "French Defense: Advance Variation",
+        canonical_opening_key: FEN_LEAF,
+        canonical_path: [FEN_ROOT, FEN_PARENT],
+        breadcrumbs: [
+          makeBreadcrumb(FEN_ROOT, "King's Pawn Game"),
+          makeBreadcrumb(FEN_PARENT, "King's Pawn Game: ...e5"),
+          makeBreadcrumb(FEN_LEAF, "French Defense: Advance Variation", true),
+        ],
+        children: [
+          makeChild({
+            opening_key: "fen-child",
+            opening_name: "Fen Child",
+            child_count: 0,
+          }),
+        ],
+      }),
+    );
+
+    renderRoute(
+      `/openings?color=black&opening=${encodeURIComponent(FEN_LEAF)}&path=${encodeURIComponent(FEN_ROOT)}&path=${encodeURIComponent(FEN_PARENT)}`,
+    );
+
+    await waitFor(() => {
+      expect(getOpeningChildrenMock).toHaveBeenCalledWith({
+        playerColor: "black",
+        parentKey: FEN_LEAF,
+        path: [FEN_ROOT, FEN_PARENT],
+      });
+    });
+
+    expect(
+      screen.getAllByText("French Defense: Advance Variation").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("card clicks update the URL and grow repeated path params", async () => {
+    const user = userEvent.setup();
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        children: [
+          makeChild({
+            opening_key: "polish",
+            opening_name: "Polish Opening",
+            child_count: 1,
+          }),
+        ],
+      }),
+    );
+    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
+    getOpeningChildrenMock.mockResolvedValueOnce(polishE6Response);
+
+    renderPage();
+
+    await screen.findByRole("region", { name: "White openings" });
+
+    await user.click(screen.getByRole("button", { name: /Polish Opening/ }));
+    await waitFor(() => {
+      expect(screen.getByTestId("route-location")).toHaveTextContent(
+        "/openings?color=white&opening=polish",
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: /Polish Opening, 1...e6/ }));
+
+    await waitFor(() => {
+      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(3, {
+        playerColor: "white",
+        parentKey: "polish-e6",
+        path: ["polish"],
+      });
+    });
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      "/openings?color=white&opening=polish-e6&path=polish",
+    );
+  });
+
+  it("breadcrumb clicks navigate to an intermediate level", async () => {
+    const user = userEvent.setup();
+    getOpeningChildrenMock.mockResolvedValueOnce(polishLeafResponse);
+    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
+
+    renderPage(
+      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Polish Leaf").length).toBeGreaterThan(0);
+    });
+
+    await user.click(
+      screen.getByRole("button", { name: "Polish Opening" }),
+    );
+
+    await waitFor(() => {
+      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, {
+        playerColor: "white",
+        parentKey: "polish",
+        path: [],
+      });
+    });
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      "/openings?color=white&opening=polish",
+    );
+  });
+
+  it("invalid color canonicalizes to white", async () => {
+    getOpeningChildrenMock.mockResolvedValue(whiteTopLevelResponse);
+
+    renderRoute("/openings?color=chartreuse");
+
+    await screen.findByRole("region", { name: "White openings" });
+
+    expect(getOpeningChildrenMock).toHaveBeenCalledWith({
+      playerColor: "white",
+      parentKey: undefined,
+      path: [],
+    });
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      "/openings?color=white",
+    );
+  });
+
+  it("invalid path canonicalizes to the deepest valid prefix", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        parent_key: "polish",
+        parent_name: "Polish Opening",
+        canonical_opening_key: "polish",
+        canonical_path: [],
+        breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
+        children: [
+          makeChild({
+            opening_key: "polish-e6",
+            opening_name: "Polish Opening, 1...e6",
+            child_count: 0,
+          }),
+        ],
+      }),
+    );
+    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
+
+    renderRoute("/openings?color=white&opening=shared&path=polish&path=english");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("route-location")).toHaveTextContent(
+        "/openings?color=white&opening=polish",
+      );
+    });
+    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(1, {
+      playerColor: "white",
+      parentKey: "shared",
+      path: ["polish", "english"],
+    });
+    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, {
+      playerColor: "white",
+      parentKey: "polish",
+      path: [],
+    });
+  });
+
+  it("unknown opening preserves the URL and shows the error state", async () => {
+    getOpeningChildrenMock.mockRejectedValueOnce(
+      new Error("Unknown opening root"),
+    );
+
+    renderRoute("/openings?color=white&opening=missing-root&path=polish");
+
+    await waitFor(() => {
+      expect(screen.getByText("Unknown opening root")).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      "/openings?color=white&opening=missing-root&path=polish",
+    );
+  });
+
+  it("retry preserves the current search params", async () => {
+    const user = userEvent.setup();
+    getOpeningChildrenMock.mockRejectedValueOnce(
+      new Error("Opening children cache unavailable"),
+    );
+    getOpeningChildrenMock.mockResolvedValueOnce(polishLeafResponse);
+
+    renderRoute(
+      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Opening children cache unavailable"),
+      ).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+
+    await waitFor(() => {
+      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, {
+        playerColor: "white",
+        parentKey: "polish-leaf",
+        path: ["polish", "polish-e6"],
+      });
+    });
+    expect(screen.getByTestId("route-location")).toHaveTextContent(
+      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
+    );
+  });
+
+  it("direct deep links to a structural leaf show the leaf empty state", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(polishLeafResponse);
+
+    renderRoute(
+      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No deeper named openings under Polish Leaf."),
+      ).toBeInTheDocument();
+    });
   });
 
   it("shows the true no-evidence empty state when computed_at is null and all children are unscored", async () => {
@@ -433,150 +764,5 @@ describe("OpeningsPage", () => {
       within(unscoredCard!).getByText("No scored roots in this subtree yet."),
     ).toBeInTheDocument();
     expect(within(unscoredCard!).getAllByText("—")).toHaveLength(3);
-  });
-
-  it("drills down by refetching with parent_key and can navigate back", async () => {
-    const user = userEvent.setup();
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        children: [
-          makeChild({
-            opening_key: "polish",
-            opening_name: "Polish Opening",
-            child_count: 2,
-            subtree_score: 58,
-            subtree_confidence: 0.64,
-            subtree_coverage: 0.41,
-            subtree_sample_size: 14,
-            subtree_root_count: 3,
-            weakest_root_name: "Polish Opening, 1...e6",
-            weakest_root_score: 42,
-          }),
-        ],
-      }),
-    );
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        parent_key: "polish",
-        parent_name: "Polish Opening",
-        children: [
-          makeChild({
-            opening_key: "polish-e6",
-            opening_name: "Polish Opening, 1...e6",
-            child_count: 0,
-            subtree_score: 42,
-            subtree_confidence: 0.55,
-            subtree_coverage: 0.33,
-            subtree_sample_size: 8,
-            subtree_root_count: 1,
-            weakest_root_key: "polish-e6",
-            weakest_root_name: "Polish Opening, 1...e6",
-            weakest_root_family: "Polish Opening",
-            weakest_root_score: 42,
-          }),
-        ],
-      }),
-    );
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        children: [
-          makeChild({
-            opening_key: "polish",
-            opening_name: "Polish Opening",
-            child_count: 2,
-            subtree_score: 58,
-            subtree_confidence: 0.64,
-            subtree_coverage: 0.41,
-            subtree_sample_size: 14,
-            subtree_root_count: 3,
-            weakest_root_name: "Polish Opening, 1...e6",
-            weakest_root_score: 42,
-          }),
-        ],
-      }),
-    );
-
-    renderPage();
-
-    await screen.findByRole("region", { name: "White openings" });
-
-    await user.click(screen.getByRole("button", { name: /Polish Opening/ }));
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, "white", "polish");
-    });
-
-    expect(await screen.findByText("Polish Opening")).toBeInTheDocument();
-    expect(screen.getByText("OPENING SCOREBOARD / Polish Opening")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Back" }));
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(3, "white", undefined);
-    });
-
-    expect(
-      await screen.findByRole("region", { name: "White openings" }),
-    ).toBeInTheDocument();
-  });
-
-  it("switches colors and refetches for the selected side", async () => {
-    const user = userEvent.setup();
-    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
-    getOpeningChildrenMock.mockResolvedValueOnce(blackTopLevelResponse);
-
-    renderPage();
-
-    await screen.findByRole("region", { name: "White openings" });
-
-    await user.click(screen.getByRole("button", { name: "Black" }));
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenLastCalledWith("black", undefined);
-    });
-
-    expect(
-      await screen.findByRole("region", { name: "Black openings" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("King's Indian Defense")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Black" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-  });
-
-  it("shows fetch failure and retry preserves the active color", async () => {
-    const user = userEvent.setup();
-    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
-    getOpeningChildrenMock.mockRejectedValueOnce(
-      new Error("Opening children cache unavailable"),
-    );
-    getOpeningChildrenMock.mockResolvedValueOnce(blackTopLevelResponse);
-
-    renderPage();
-
-    await screen.findByRole("region", { name: "White openings" });
-
-    await user.click(screen.getByRole("button", { name: "Black" }));
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Opening children cache unavailable"),
-      ).toBeInTheDocument();
-    });
-
-    expect(screen.getByRole("button", { name: "Black" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-
-    expect(
-      await screen.findByRole("region", { name: "Black openings" }),
-    ).toBeInTheDocument();
-    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(1, "white", undefined);
-    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, "black", undefined);
-    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(3, "black", undefined);
   });
 });

@@ -1730,26 +1730,26 @@
 @keyframes move-best-burst {
     0% {
         opacity: 0;
-        transform: translate(-50%, -50%) scale(0.4);
+        transform: translate(-50%, -50%) scale(0.22) rotate(-18deg);
     }
-    28% {
-        opacity: 0.9;
-        transform: translate(-50%, -50%) scale(1.42);
+    22% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1.2) rotate(2deg);
     }
-    68% {
-        opacity: 0.24;
-        transform: translate(-50%, -50%) scale(1.85);
+    58% {
+        opacity: 0.46;
+        transform: translate(-50%, -50%) scale(2.28) rotate(14deg);
     }
     100% {
         opacity: 0;
-        transform: translate(-50%, -50%) scale(2.05);
+        transform: translate(-50%, -50%) scale(2.95) rotate(24deg);
     }
 }
 
 @keyframes move-best-tail {
     0% {
         opacity: 0;
-        transform: translate(-50%, -50%) scale(0.72);
+        transform: translate(-50%, -50%) scale(0.56);
         box-shadow:
             inset 0 0 0 0 color-mix(in srgb, #fde68a 0%, transparent),
             0 0 0 0 color-mix(in srgb, #facc15 0%, transparent),
@@ -1757,27 +1757,27 @@
     }
     24% {
         opacity: 0.88;
-        transform: translate(-50%, -50%) scale(1.08);
+        transform: translate(-50%, -50%) scale(1.18);
         box-shadow:
             inset 0 0 0 1px color-mix(in srgb, #fde68a 100%, transparent),
-            0 0 18px 0 color-mix(in srgb, #facc15 44%, transparent),
-            0 0 30px 0 color-mix(in srgb, #fff8d6 30%, transparent);
+            0 0 26px 2px color-mix(in srgb, #facc15 52%, transparent),
+            0 0 44px 6px color-mix(in srgb, #fff8d6 32%, transparent);
     }
     58% {
         opacity: 0.52;
-        transform: translate(-50%, -50%) scale(1.28);
+        transform: translate(-50%, -50%) scale(1.64);
         box-shadow:
             inset 0 0 0 1px color-mix(in srgb, #fde68a 55%, transparent),
-            0 0 22px 0 color-mix(in srgb, #f59e0b 28%, transparent),
-            0 0 34px 0 color-mix(in srgb, #fff8d6 18%, transparent);
+            0 0 34px 4px color-mix(in srgb, #f59e0b 28%, transparent),
+            0 0 56px 10px color-mix(in srgb, #fff8d6 18%, transparent);
     }
     100% {
         opacity: 0;
-        transform: translate(-50%, -50%) scale(1.52);
+        transform: translate(-50%, -50%) scale(2.12);
         box-shadow:
             inset 0 0 0 1px color-mix(in srgb, #fde68a 0%, transparent),
-            0 0 28px 0 color-mix(in srgb, #f59e0b 0%, transparent),
-            0 0 38px 0 color-mix(in srgb, #fff8d6 0%, transparent);
+            0 0 44px 8px color-mix(in srgb, #f59e0b 0%, transparent),
+            0 0 72px 12px color-mix(in srgb, #fff8d6 0%, transparent);
     }
 }
 
@@ -1788,11 +1788,11 @@
     }
     24% {
         opacity: 1;
-        transform: translate(-16px, -18px) scale(1);
+        transform: translate(-24px, -28px) scale(1.12);
     }
     100% {
         opacity: 0;
-        transform: translate(-20px, -24px) scale(0.35);
+        transform: translate(-34px, -40px) scale(0.32);
     }
 }
 
@@ -1803,11 +1803,11 @@
     }
     28% {
         opacity: 0.95;
-        transform: translate(18px, -10px) scale(1.05);
+        transform: translate(28px, -16px) scale(1.14);
     }
     100% {
         opacity: 0;
-        transform: translate(24px, -16px) scale(0.3);
+        transform: translate(40px, -24px) scale(0.28);
     }
 }
 
@@ -1818,11 +1818,11 @@
     }
     30% {
         opacity: 0.9;
-        transform: translate(6px, 14px) scale(0.95);
+        transform: translate(12px, 24px) scale(1.08);
     }
     100% {
         opacity: 0;
-        transform: translate(12px, 20px) scale(0.28);
+        transform: translate(18px, 38px) scale(0.26);
     }
 }
 
@@ -1850,6 +1850,7 @@
 
 .move-button.move-button--celebrate-best {
     overflow: visible;
+    z-index: 3;
 }
 
 .move-san__text--celebrate-best {
@@ -1862,7 +1863,7 @@
 
 .move-best-fx {
     position: absolute;
-    inset: -0.2rem -0.25rem -0.25rem -0.25rem;
+    inset: -1.1rem -1.4rem -1.2rem -0.9rem;
     pointer-events: none;
     z-index: 0;
 }
@@ -1871,6 +1872,10 @@
     position: absolute;
     inset: 0;
     border-radius: 0.55rem;
+    background:
+        radial-gradient(circle at 24% 50%, color-mix(in srgb, #fff8d6 26%, transparent), transparent 58%),
+        radial-gradient(circle at 70% 50%, color-mix(in srgb, #fde68a 22%, transparent), transparent 62%);
+    filter: blur(8px);
 }
 
 .move-icon-stage {
@@ -1881,11 +1886,17 @@
     margin-right: 0.4em;
 }
 
+.move-icon-stage--celebrate-best {
+    z-index: 1;
+}
+
 .move-best-fx__plate {
     animation: move-best-button 620ms cubic-bezier(0.2, 0.9, 0.25, 1.15) both;
 }
 
 .move-icon-stage > .move-icon {
+    position: relative;
+    z-index: 2;
     margin-right: 0;
 }
 
@@ -1897,6 +1908,7 @@
     top: 50%;
     left: 50%;
     pointer-events: none;
+    z-index: 1;
 }
 
 .move-icon-stage__burst,
@@ -1906,30 +1918,58 @@
 }
 
 .move-icon-stage__burst {
-    width: 1.55rem;
-    height: 1.55rem;
+    width: 3.8rem;
+    height: 3.8rem;
     background:
-        radial-gradient(circle, color-mix(in srgb, #fff8d8 92%, transparent) 0 18%, color-mix(in srgb, #fde68a 48%, transparent) 36%, transparent 72%);
+        radial-gradient(circle, color-mix(in srgb, #fffdf2 96%, transparent) 0 12%, color-mix(in srgb, #fde68a 68%, transparent) 24%, color-mix(in srgb, #facc15 20%, transparent) 46%, transparent 72%);
+    clip-path: polygon(
+        50% 0%,
+        58% 22%,
+        78% 6%,
+        70% 30%,
+        100% 18%,
+        82% 42%,
+        100% 50%,
+        82% 58%,
+        100% 82%,
+        70% 70%,
+        78% 94%,
+        58% 78%,
+        50% 100%,
+        42% 78%,
+        22% 94%,
+        30% 70%,
+        0% 82%,
+        18% 58%,
+        0% 50%,
+        18% 42%,
+        0% 18%,
+        30% 30%,
+        22% 6%,
+        42% 22%
+    );
+    filter: drop-shadow(0 0 10px color-mix(in srgb, #facc15 70%, transparent));
     animation: move-best-burst 480ms ease-out both;
 }
 
 .move-icon-stage__ring {
-    width: 1.8rem;
-    height: 1.8rem;
+    width: 3.4rem;
+    height: 3.4rem;
     border: 1px solid color-mix(in srgb, #fde68a 86%, transparent);
     animation: move-best-tail 860ms ease-out both;
 }
 
 .move-icon-stage__tail {
-    width: 2.4rem;
-    height: 2.4rem;
-    background: radial-gradient(circle, color-mix(in srgb, #fff8d6 18%, transparent) 0, transparent 72%);
+    width: 5rem;
+    height: 5rem;
+    background:
+        radial-gradient(circle, color-mix(in srgb, #fff8d6 26%, transparent) 0, color-mix(in srgb, #fde68a 10%, transparent) 34%, transparent 72%);
     animation: move-best-tail 860ms ease-out both;
 }
 
 .move-icon-stage__spark {
-    width: 0.38rem;
-    height: 0.38rem;
+    width: 0.5rem;
+    height: 0.5rem;
     border-radius: 999px;
     background: radial-gradient(circle, #fff 0 34%, #fde68a 48%, transparent 72%);
     opacity: 0;
