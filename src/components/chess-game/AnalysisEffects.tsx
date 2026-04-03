@@ -13,8 +13,9 @@ import {
   BLUNDER_AUDIO_CLIPS,
   STARTING_FEN,
 } from "./config";
-import { useAnalysisStore } from "../../stores/createAnalysisStore";
+import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
+import { playBling } from "../../utils/blingSound";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -58,6 +59,7 @@ const AnalysisEffects = ({
   setBlunderAlert,
   setShowFlash,
 }: AnalysisEffectsProps) => {
+  const analysisStoreApi = useAnalysisStoreApi();
   const lastAnalysis = useAnalysisStore((s) => s.lastAnalysis);
   const sessionId = useGameStore((s) => s.sessionId);
   const isGameActive = useGameStore((s) => s.isGameActive);
@@ -259,6 +261,26 @@ const AnalysisEffects = ({
     playRandomBlunderAudio();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastAnalysis, playerColor, setBlunderAlert, setShowFlash]);
+
+  // Best-move bling sound for player moves.
+  // Uses zustand subscribe (not a React effect) so it fires for every
+  // resolveAnalysis call even when React batches multiple updates.
+  useEffect(() => {
+    const unsub = analysisStoreApi.subscribe((state, prev) => {
+      if (state.lastAnalysis === prev.lastAnalysis) return;
+      const la = state.lastAnalysis;
+      if (!la || la.moveIndex === null || la.classification !== "best") return;
+      // Read playerColor directly from the game store (not a ref) to avoid
+      // stale reads when analysis arrives before React re-renders with the
+      // new playerColor (e.g. on game start).
+      const pc = useGameStore.getState().playerColor;
+      const isWhite = la.moveIndex % 2 === 0;
+      const isPlayer = pc === "white" ? isWhite : !isWhite;
+      if (!isPlayer) return;
+      playBling();
+    });
+    return unsub;
+  }, [analysisStoreApi]);
 
   return null;
 };

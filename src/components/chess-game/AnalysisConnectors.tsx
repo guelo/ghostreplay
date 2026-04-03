@@ -1,4 +1,4 @@
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
@@ -185,6 +185,33 @@ export const ConnectedMoveList = memo(
       [playerColor],
     );
 
+    const freshlyResolved = useAnalysisStore((s) => s.freshlyResolved);
+
+    // Mark freshly-resolved player moves via zustand subscribe (not a React
+    // effect) so every resolveAnalysis call is captured even when React
+    // batches multiple updates. Reads playerColor from the game store
+    // directly to avoid stale ref reads on game start.
+    useEffect(() => {
+      const unsub = analysisStoreApi.subscribe((state, prev) => {
+        if (state.lastAnalysis === prev.lastAnalysis) return;
+        const la = state.lastAnalysis;
+        if (!la || la.moveIndex === null || !la.classification) return;
+        const pc = useGameStore.getState().playerColor;
+        const isWhite = la.moveIndex % 2 === 0;
+        const isPlayer = pc === "white" ? isWhite : !isWhite;
+        if (!isPlayer) return;
+        analysisStoreApi.getState().markFreshlyResolved(la.moveIndex);
+      });
+      return unsub;
+    }, [analysisStoreApi]);
+
+    const handleFreshAnimationDone = useCallback(
+      (moveIndex: number) => {
+        analysisStoreApi.getState().clearFreshlyResolved(moveIndex);
+      },
+      [analysisStoreApi],
+    );
+
     const prevAnnotatedRef = useRef<
       ReturnType<typeof deriveAnnotatedMoves>
     >([]);
@@ -279,6 +306,8 @@ export const ConnectedMoveList = memo(
         onAddSelectedMove={handleAddSelectedMove}
         messages={messages}
         analyzingIndices={analyzingIndices}
+        freshlyResolvedIndices={freshlyResolved}
+        onFreshAnimationDone={handleFreshAnimationDone}
         playerColor={playerColor}
         onRevealSrsFail={onRevealSrsFail}
         revealedSrsFailIndex={revealedSrsFailIndex}

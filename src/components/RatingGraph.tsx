@@ -130,9 +130,26 @@ function computeTickFormat(visibleSpanDays: number) {
     });
 }
 
+function computeViewRange(
+  dataMin: number,
+  domainMax: number,
+  windowDays: number,
+): [number, number] {
+  const span = domainMax - dataMin;
+  if (windowDays === 0 || span <= 0) return [0, 1];
+  const cutoff = domainMax - windowDays * DAY_MS;
+  return [Math.max(0, (cutoff - dataMin) / span), 1];
+}
+
+function rangesEqual(
+  a: [number, number],
+  b: [number, number],
+): boolean {
+  return a[0] === b[0] && a[1] === b[1];
+}
+
 function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   const [showProvisional, setShowProvisional] = useState(true);
-  const [provisionalDefaultSet, setProvisionalDefaultSet] = useState(false);
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -147,14 +164,27 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
     fetchRatingHistory("all")
       .then((res) => {
         if (!cancelled) {
+          const stableRatings = res.ratings.filter((r) => !r.is_provisional);
+          const nextShowProvisional = stableRatings.length <= 3;
+          const initialRatings = nextShowProvisional
+            ? res.ratings
+            : stableRatings;
+          const initialChartData = buildChartData(initialRatings);
+          const initialDataMin = initialChartData[0]?.date ?? 0;
+          const initialRawDataMax = initialChartData.at(-1)?.date ?? 0;
+          const initialDomainMax = Math.max(initialRawDataMax, Date.now());
+
+          domainMaxRef.current = initialDomainMax;
+          setViewRange((prev) => {
+            const next = computeViewRange(
+              initialDataMin,
+              initialDomainMax,
+              windowDays,
+            );
+            return rangesEqual(prev, next) ? prev : next;
+          });
+          setShowProvisional(nextShowProvisional);
           setData(res);
-          if (!provisionalDefaultSet) {
-            const stableCount = res.ratings.filter(
-              (r) => !r.is_provisional,
-            ).length;
-            if (stableCount > 3) setShowProvisional(false);
-            setProvisionalDefaultSet(true);
-          }
         }
       })
       .catch((err: unknown) => {
@@ -222,14 +252,13 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   spanRef.current = span;
 
   useEffect(() => {
-    if (!hasChartData || spanRef.current <= 0) return;
-    if (windowDays === 0) {
-      setViewRange([0, 1]);
-      return;
-    }
-    const cutoff = domainMaxRef.current - windowDays * DAY_MS;
-    const frac = Math.max(0, (cutoff - dataMinRef.current) / spanRef.current);
-    setViewRange([frac, 1]);
+    if (!hasChartData) return;
+    const next = computeViewRange(
+      dataMinRef.current,
+      domainMaxRef.current,
+      windowDays,
+    );
+    setViewRange((prev) => (rangesEqual(prev, next) ? prev : next));
     // Triggers: initial data load, preset button click.
     // NOT triggered by dataMin/span changes (provisional toggle).
   }, [windowDays, presetKey, hasChartData]);

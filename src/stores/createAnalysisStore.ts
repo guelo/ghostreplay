@@ -12,6 +12,7 @@ export type AnalysisStoreState = {
   error: string | null;
   isAnalyzing: boolean;
   analyzingMove: string | null;
+  freshlyResolved: Set<number>;
 
   resolveAnalysis: (moveIndex: number, result: AnalysisResult) => void;
   setLastAnalysis: (result: AnalysisResult | null) => void;
@@ -22,6 +23,8 @@ export type AnalysisStoreState = {
   setError: (error: string | null) => void;
   setIsAnalyzing: (value: boolean) => void;
   setAnalyzingMove: (move: string | null) => void;
+  markFreshlyResolved: (moveIndex: number) => void;
+  clearFreshlyResolved: (moveIndex: number) => void;
   /** Reset worker-lifecycle state while preserving analysisMap. */
   resetTransient: () => void;
   /** Reset everything including analysisMap (for new game). */
@@ -39,6 +42,7 @@ export const createAnalysisStore = () =>
     error: null,
     isAnalyzing: false,
     analyzingMove: null,
+    freshlyResolved: new Set(),
 
     resolveAnalysis: (moveIndex, result) =>
       set((s) => {
@@ -52,6 +56,18 @@ export const createAnalysisStore = () =>
     setError: (error) => set({ error }),
     setIsAnalyzing: (value) => set({ isAnalyzing: value }),
     setAnalyzingMove: (move) => set({ analyzingMove: move }),
+    markFreshlyResolved: (moveIndex) =>
+      set((s) => {
+        const next = new Set(s.freshlyResolved);
+        next.add(moveIndex);
+        return { freshlyResolved: next };
+      }),
+    clearFreshlyResolved: (moveIndex) =>
+      set((s) => {
+        const next = new Set(s.freshlyResolved);
+        next.delete(moveIndex);
+        return { freshlyResolved: next };
+      }),
     resetTransient: () =>
       set({
         lastAnalysis: null,
@@ -60,6 +76,7 @@ export const createAnalysisStore = () =>
         error: null,
         isAnalyzing: false,
         analyzingMove: null,
+        freshlyResolved: new Set(),
       }),
     clearAll: () =>
       set({
@@ -69,6 +86,7 @@ export const createAnalysisStore = () =>
         isAnalyzing: false,
         analyzingMove: null,
         error: null,
+        freshlyResolved: new Set(),
       }),
   }));
 

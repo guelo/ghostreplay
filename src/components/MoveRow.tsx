@@ -106,6 +106,9 @@ export type MoveRowProps = {
   isLastBubbleRow: boolean;
   analyzingWhite: boolean;
   analyzingBlack: boolean;
+  freshWhite: boolean;
+  freshBlack: boolean;
+  onFreshAnimationDone?: (index: number) => void;
   playerColor: "white" | "black";
   tappedIconIndex: number | null;
   revealedSrsFailIndex: number | null;
@@ -132,6 +135,9 @@ const MoveRowInner = ({
   isLastBubbleRow,
   analyzingWhite,
   analyzingBlack,
+  freshWhite,
+  freshBlack,
+  onFreshAnimationDone,
   playerColor,
   tappedIconIndex,
   revealedSrsFailIndex,
@@ -149,11 +155,18 @@ const MoveRowInner = ({
     isSelected: boolean,
     isAnalyzing: boolean,
     prevEval: number | null | undefined,
+    fresh: boolean,
   ) => {
     const colorClass = classificationClass(move.classification);
     const iconInfo = move.classification
       ? CLASSIFICATION_ICON[move.classification]
       : undefined;
+
+    const popClass = fresh && iconInfo
+      ? move.classification === "best"
+        ? " move-icon--pop-best"
+        : " move-icon--pop"
+      : "";
 
     return (
       <button
@@ -165,12 +178,17 @@ const MoveRowInner = ({
         <span className="move-san">
           {iconInfo && (
             <span
-              className={`move-icon move-icon--${move.classification}`}
+              className={`move-icon move-icon--${move.classification}${popClass}`}
               title={iconInfo.title}
               onClick={(e) => {
                 e.stopPropagation();
                 onIconTap(index);
               }}
+              onAnimationEnd={
+                popClass
+                  ? () => onFreshAnimationDone?.(index)
+                  : undefined
+              }
             >
               {tappedIconIndex === index ? iconInfo.title : iconInfo.icon}
             </span>
@@ -268,7 +286,7 @@ const MoveRowInner = ({
     return (
       <React.Fragment key={pairNumber}>
         <span className="move-number">{pairNumber}</span>
-        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval)}
+        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, freshWhite)}
         <span className="move-button-placeholder move-placeholder-dots">…</span>
         {whiteBubbles.length > 0 && renderBubbleMessages(whiteBubbles, whiteIdx, "white")}
       </React.Fragment>
@@ -280,7 +298,7 @@ const MoveRowInner = ({
         <span className="move-number" />
         <span className="move-button-placeholder" />
         {black ? (
-          renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval)
+          renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, freshBlack)
         ) : (
           <span className="move-button-placeholder" />
         )}
@@ -295,7 +313,7 @@ const MoveRowInner = ({
     return (
       <React.Fragment key={pairNumber}>
         <span className="move-number">{pairNumber}</span>
-        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval)}
+        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, freshWhite)}
         <span className="move-button-placeholder move-placeholder-dots">
           …
         </span>
@@ -305,7 +323,7 @@ const MoveRowInner = ({
           <>
             <span className="move-number" />
             <span className="move-button-placeholder" />
-            {renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval)}
+            {renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, freshBlack)}
             {blackBubbles.length > 0 &&
               renderBubbleMessages(blackBubbles, blackIdx, "black")}
           </>
@@ -318,9 +336,9 @@ const MoveRowInner = ({
   return (
     <React.Fragment key={pairNumber}>
       <span className="move-number">{pairNumber}</span>
-      {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval)}
+      {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, freshWhite)}
       {black ? (
-        renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval)
+        renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, freshBlack)
       ) : (
         <span className="move-button-placeholder" />
       )}
@@ -357,6 +375,10 @@ function areEqual(prev: MoveRowProps, next: MoveRowProps): boolean {
   // Analysis spinners
   if (prev.analyzingWhite !== next.analyzingWhite) return false;
   if (prev.analyzingBlack !== next.analyzingBlack) return false;
+
+  // Fresh animation flags
+  if (prev.freshWhite !== next.freshWhite) return false;
+  if (prev.freshBlack !== next.freshBlack) return false;
 
   // Prev evals for formula
   if (prev.prevWhiteEval !== next.prevWhiteEval) return false;

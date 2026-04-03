@@ -24,6 +24,8 @@ type MoveListProps = {
   onAddSelectedMove?: (index: number) => void;
   messages?: ReadonlyMap<number, MoveMessage[]>;
   analyzingIndices?: ReadonlySet<number>;
+  freshlyResolvedIndices?: ReadonlySet<number>;
+  onFreshAnimationDone?: (index: number) => void;
   playerColor?: "white" | "black";
   /** Called when user clicks the srs-fail animated icon to reveal arrows */
   onRevealSrsFail?: (detail: SrsFailDetail, moveIndex: number) => void;
@@ -63,6 +65,8 @@ const MoveList = ({
   onAddSelectedMove,
   messages = EMPTY_MESSAGES,
   analyzingIndices,
+  freshlyResolvedIndices,
+  onFreshAnimationDone,
   playerColor = "white",
   onRevealSrsFail,
   revealedSrsFailIndex = null,
@@ -391,6 +395,9 @@ const MoveList = ({
                   isLastBubbleRow={isLastBubbleRow}
                   analyzingWhite={analyzingIndices?.has(whiteIdx) ?? false}
                   analyzingBlack={analyzingIndices?.has(blackIdx) ?? false}
+                  freshWhite={freshlyResolvedIndices?.has(whiteIdx) ?? false}
+                  freshBlack={freshlyResolvedIndices?.has(blackIdx) ?? false}
+                  onFreshAnimationDone={onFreshAnimationDone}
                   playerColor={playerColor}
                   tappedIconIndex={tappedIconIndex}
                   revealedSrsFailIndex={revealedSrsFailIndex}

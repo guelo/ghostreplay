@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render } from "../../test/utils";
-import { ConnectedAnalysisGraph } from "./AnalysisConnectors";
+import { render, act } from "../../test/utils";
+import { ConnectedAnalysisGraph, ConnectedMoveList } from "./AnalysisConnectors";
 import { useGameStore } from "../../stores/useGameStore";
 import {
   AnalysisStoreProvider,
@@ -99,5 +99,89 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
     renderConnected();
 
     expect(capturedProps.isCheckmate).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ConnectedMoveList — freshlyResolved filtering
+// ---------------------------------------------------------------------------
+
+let capturedMoveListProps: Record<string, unknown> = {};
+
+vi.mock("../MoveList", () => ({
+  default: (props: Record<string, unknown>) => {
+    capturedMoveListProps = props;
+    return <div data-testid="move-list" />;
+  },
+}));
+
+describe("ConnectedMoveList — freshlyResolvedIndices", () => {
+  let store: ReturnType<typeof createAnalysisStore>;
+
+  beforeEach(() => {
+    capturedMoveListProps = {};
+    useGameStore.setState(initialGameState, true);
+    store = createAnalysisStore();
+  });
+
+  function renderConnected() {
+    return render(
+      <AnalysisStoreProvider value={store}>
+        <ConnectedMoveList
+          onNavigate={vi.fn()}
+          messages={new Map()}
+          onRevealSrsFail={vi.fn()}
+          revealedSrsFailIndex={null}
+        />
+      </AnalysisStoreProvider>,
+    );
+  }
+
+  it("marks only player-move indices via subscribe on resolveAnalysis", () => {
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN), // 0: white (player)
+      makeMoveRecord(NORMAL_FEN), // 1: black (engine)
+    ];
+    useGameStore.setState({
+      moveHistory: moves,
+      viewIndex: null,
+      playerColor: "white",
+    });
+
+    renderConnected();
+
+    // Resolve both moves — subscribe should only mark player move (index 0)
+    act(() => {
+      store.getState().resolveAnalysis(0, makeAnalysis({ moveIndex: 0, playedEval: 30, bestEval: 30, bestMove: "e4", delta: 0, classification: "good", blunder: false }));
+      store.getState().resolveAnalysis(1, makeAnalysis({ moveIndex: 1, playedEval: -10, bestEval: -10, bestMove: "e5", delta: 0, classification: "good", blunder: false }));
+    });
+
+    const fresh = capturedMoveListProps.freshlyResolvedIndices as ReadonlySet<number>;
+    expect(fresh.has(0)).toBe(true); // player move marked
+    expect(fresh.has(1)).toBe(false); // engine move not marked
+  });
+
+  it("does not include indices after resetTransient", () => {
+    useGameStore.setState({
+      moveHistory: [makeMoveRecord(NORMAL_FEN)],
+      viewIndex: null,
+      playerColor: "white",
+    });
+
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ moveIndex: 0, playedEval: 30, bestEval: 30, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+      ]),
+      freshlyResolved: new Set([0]),
+    });
+
+    renderConnected();
+
+    act(() => {
+      store.getState().resetTransient();
+    });
+
+    const fresh = capturedMoveListProps.freshlyResolvedIndices as ReadonlySet<number>;
+    expect(fresh.size).toBe(0);
   });
 });
