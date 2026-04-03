@@ -1,5 +1,6 @@
 Place blunder audio clips in this folder using these exact names:
 
+- `bestmove.mp3`
 - `blunder1.m4a`
 - `blunder2.m4a`
 - `blunder3.m4a`
@@ -12,3 +13,4 @@ Place blunder audio clips in this folder using these exact names:
 - `blunder10.m4a`
 
 `ChessGame` picks one clip at random whenever a player blunder is detected.
+`AnalysisEffects` plays `bestmove.mp3` whenever a player move resolves as the best move.
