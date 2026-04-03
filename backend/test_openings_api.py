@@ -1705,6 +1705,9 @@ def test_children_top_level_returns_structural_roots_without_scores(client, auth
     data = resp.json()
     assert data["parent_key"] is None
     assert data["parent_name"] is None
+    assert data["canonical_opening_key"] is None
+    assert data["canonical_path"] == []
+    assert data["breadcrumbs"] == []
     assert data["computed_at"] is None
     assert data["total_children"] == 3
     assert [child["opening_key"] for child in data["children"]] == [
@@ -1787,9 +1790,137 @@ def test_children_drill_down_returns_immediate_children(client, auth_headers):
     data = resp.json()
     assert data["parent_key"] == CHILD_KEY_POLISH
     assert data["parent_name"] == "Polish Opening"
+    assert data["canonical_opening_key"] == CHILD_KEY_POLISH
+    assert data["canonical_path"] == []
+    assert data["breadcrumbs"] == [
+        {
+            "opening_key": CHILD_KEY_POLISH,
+            "opening_name": "Polish Opening",
+            "is_current": True,
+        }
+    ]
     assert [child["opening_key"] for child in data["children"]] == [
         CHILD_KEY_POLISH_ALT,
         CHILD_KEY_POLISH_E6,
+    ]
+
+
+def test_children_accepts_repeated_path_params_and_returns_full_breadcrumbs(
+    client, auth_headers
+):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, [])),
+    ):
+        resp = client.get(
+            _children_url(),
+            params=[
+                ("player_color", "white"),
+                ("parent_key", CHILD_KEY_SHARED),
+                ("path", CHILD_KEY_POLISH),
+                ("path", CHILD_KEY_POLISH_E6),
+            ],
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["parent_key"] == CHILD_KEY_SHARED
+    assert data["parent_name"] == "Polish Shared Node"
+    assert data["canonical_opening_key"] == CHILD_KEY_SHARED
+    assert data["canonical_path"] == [CHILD_KEY_POLISH, CHILD_KEY_POLISH_E6]
+    assert data["breadcrumbs"] == [
+        {
+            "opening_key": CHILD_KEY_POLISH,
+            "opening_name": "Polish Opening",
+            "is_current": False,
+        },
+        {
+            "opening_key": CHILD_KEY_POLISH_E6,
+            "opening_name": "Polish Opening, 1...e6",
+            "is_current": False,
+        },
+        {
+            "opening_key": CHILD_KEY_SHARED,
+            "opening_name": "Polish Shared Node",
+            "is_current": True,
+        },
+    ]
+
+
+def test_children_canonicalizes_inconsistent_path_to_deepest_valid_prefix(
+    client, auth_headers
+):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, [])),
+    ):
+        resp = client.get(
+            _children_url(),
+            params=[
+                ("player_color", "white"),
+                ("parent_key", CHILD_KEY_SHARED),
+                ("path", CHILD_KEY_POLISH),
+                ("path", CHILD_KEY_ENGLISH),
+            ],
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["parent_key"] == CHILD_KEY_POLISH
+    assert data["parent_name"] == "Polish Opening"
+    assert data["canonical_opening_key"] == CHILD_KEY_POLISH
+    assert data["canonical_path"] == []
+    assert data["breadcrumbs"] == [
+        {
+            "opening_key": CHILD_KEY_POLISH,
+            "opening_name": "Polish Opening",
+            "is_current": True,
+        }
+    ]
+    assert [child["opening_key"] for child in data["children"]] == [
+        CHILD_KEY_POLISH_ALT,
+        CHILD_KEY_POLISH_E6,
+    ]
+
+
+def test_children_canonical_route_fields_reconstruct_exact_route(client, auth_headers):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, [])),
+    ):
+        resp = client.get(
+            _children_url(),
+            params=[
+                ("player_color", "white"),
+                ("parent_key", CHILD_KEY_SHARED),
+                ("path", CHILD_KEY_POLISH),
+                ("path", CHILD_KEY_POLISH_ALT),
+            ],
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    canonical_params = [
+        ("player_color", data["player_color"]),
+        *[("path", key) for key in data["canonical_path"]],
+    ]
+    if data["canonical_opening_key"] is not None:
+        canonical_params.append(("parent_key", data["canonical_opening_key"]))
+
+    assert canonical_params == [
+        ("player_color", "white"),
+        ("path", CHILD_KEY_POLISH),
+        ("path", CHILD_KEY_POLISH_ALT),
+        ("parent_key", CHILD_KEY_SHARED),
     ]
 
 

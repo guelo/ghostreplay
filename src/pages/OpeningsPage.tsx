@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Chessboard } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import { getOpeningBook } from "../openings/openingBook";
 import {
   getOpeningChildren,
   type ChildrenResponse,
-  type OpeningChildItem,
   type OpeningPlayerColor,
 } from "../utils/api";
 import "../App.css";
@@ -17,10 +17,27 @@ const COLOR_OPTIONS: Array<{ label: string; value: OpeningPlayerColor }> = [
 
 const LOADING_CARD_COUNT = 3;
 
-type NavigationItem = {
-  openingKey: string;
-  openingName: string;
+type OpeningRoute = {
+  playerColor: OpeningPlayerColor;
+  openingKey?: string;
+  path?: string[];
 };
+
+function buildOpeningsSearchParams(route: OpeningRoute): URLSearchParams {
+  const params = new URLSearchParams({
+    color: route.playerColor,
+  });
+
+  if (route.openingKey) {
+    params.set("opening", route.openingKey);
+
+    for (const pathKey of route.path ?? []) {
+      params.append("path", pathKey);
+    }
+  }
+
+  return params;
+}
 
 function getColorLabel(playerColor: OpeningPlayerColor): string {
   return playerColor === "white" ? "White" : "Black";
@@ -121,7 +138,9 @@ function getOpeningMoveLine(
   return line ? formatOpeningMoveLine(line) : null;
 }
 
-function sortChildrenByStrength(children: OpeningChildItem[]): OpeningChildItem[] {
+function sortChildrenByStrength(
+  children: ChildrenResponse["children"],
+): ChildrenResponse["children"] {
   return [...children].sort((left, right) => {
     if (left.subtree_score === null && right.subtree_score !== null) {
       return 1;
@@ -148,23 +167,65 @@ function sortChildrenByStrength(children: OpeningChildItem[]): OpeningChildItem[
 }
 
 function OpeningsPage() {
-  const [playerColor, setPlayerColor] = useState<OpeningPlayerColor>("white");
-  const [navStack, setNavStack] = useState<NavigationItem[]>([]);
+  const [searchParams, setSearchParams] = useSearchParams();
   const [response, setResponse] = useState<ChildrenResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retryCount, setRetryCount] = useState(0);
-  const [moveLinesByFen, setMoveLinesByFen] = useState<Map<string, string> | null>(
-    null,
-  );
+  const [moveLinesByFen, setMoveLinesByFen] = useState<Map<
+    string,
+    string
+  > | null>(null);
   const requestVersionRef = useRef(0);
 
-  const activeParent = navStack.at(-1) ?? null;
-  const activeParentKey = activeParent?.openingKey;
+  const rawColor = searchParams.get("color");
+  const playerColor: OpeningPlayerColor =
+    rawColor === "black" ? "black" : "white";
+  const requestedOpeningKey = searchParams.get("opening");
+  const rawPath = searchParams.getAll("path");
+  const requestedPath = requestedOpeningKey ? rawPath : [];
+  const requestedRoute = buildOpeningsSearchParams({
+    playerColor,
+    openingKey: requestedOpeningKey ?? undefined,
+    path: requestedPath,
+  });
+  const requestedRouteString = requestedRoute.toString();
+  const requestedPathKey = JSON.stringify(requestedPath);
+  const needsInitialCanonicalization =
+    rawColor !== playerColor || (!requestedOpeningKey && rawPath.length > 0);
 
   const invalidatePendingRequests = () => {
     requestVersionRef.current += 1;
   };
+
+  const navigateToRoute = (route: OpeningRoute, replace = false) => {
+    invalidatePendingRequests();
+    setLoading(true);
+    setError(null);
+    setResponse(null);
+    setSearchParams(buildOpeningsSearchParams(route), { replace });
+  };
+
+  useEffect(() => {
+    if (!needsInitialCanonicalization) {
+      return;
+    }
+
+    setSearchParams(
+      buildOpeningsSearchParams({
+        playerColor,
+        openingKey: requestedOpeningKey ?? undefined,
+        path: requestedPath,
+      }),
+      { replace: true },
+    );
+  }, [
+    needsInitialCanonicalization,
+    playerColor,
+    requestedOpeningKey,
+    requestedPathKey,
+    setSearchParams,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -201,10 +262,23 @@ function OpeningsPage() {
     setError(null);
     setResponse(null);
 
-    getOpeningChildren(playerColor, activeParentKey)
+    getOpeningChildren({
+      playerColor,
+      parentKey: requestedOpeningKey ?? undefined,
+      path: requestedPath,
+    })
       .then((data) => {
         if (!active || requestVersionRef.current !== requestVersion) {
           return;
+        }
+
+        const canonicalRoute = buildOpeningsSearchParams({
+          playerColor,
+          openingKey: data.canonical_opening_key ?? undefined,
+          path: data.canonical_path,
+        });
+        if (canonicalRoute.toString() !== requestedRouteString) {
+          setSearchParams(canonicalRoute, { replace: true });
         }
 
         setResponse(data);
@@ -215,7 +289,9 @@ function OpeningsPage() {
         }
 
         setResponse(null);
-        setError(err instanceof Error ? err.message : "Failed to load openings");
+        setError(
+          err instanceof Error ? err.message : "Failed to load openings",
+        );
       })
       .finally(() => {
         if (!active || requestVersionRef.current !== requestVersion) {
@@ -228,10 +304,34 @@ function OpeningsPage() {
     return () => {
       active = false;
     };
-  }, [activeParentKey, playerColor, retryCount]);
+  }, [
+    playerColor,
+    requestedOpeningKey,
+    requestedPathKey,
+    requestedRouteString,
+    retryCount,
+    setSearchParams,
+  ]);
 
   const selectedColorLabel = getColorLabel(playerColor);
-  const currentTitle = activeParent?.openingName ?? response?.parent_name;
+  const breadcrumbs = response?.breadcrumbs ?? [];
+  const fullBreadcrumbs = breadcrumbs.length
+    ? [
+        {
+          opening_key: "__start__",
+          opening_name: "Start",
+          is_current: false,
+        },
+        ...breadcrumbs,
+      ]
+    : [];
+  const currentBreadcrumb = breadcrumbs.at(-1) ?? null;
+  const parentBreadcrumb =
+    breadcrumbs.length > 1 ? (breadcrumbs.at(-2) ?? null) : null;
+  const currentTitle = currentBreadcrumb?.opening_name ?? "OPENING SCOREBOARD";
+  const parentMoveLine = parentBreadcrumb
+    ? getOpeningMoveLine(parentBreadcrumb.opening_key, moveLinesByFen)
+    : null;
   const allChildrenUnscored =
     response !== null &&
     response.children.length > 0 &&
@@ -241,10 +341,15 @@ function OpeningsPage() {
   const isSnapshotEmpty =
     response !== null && response.computed_at !== null && allChildrenUnscored;
   const hasVisibleChildren =
-    response !== null && response.children.some((child) => child.subtree_root_count > 0);
+    response !== null &&
+    response.children.some((child) => child.subtree_root_count > 0);
   const isStructuralLeaf =
-    response !== null && response.children.length === 0 && navStack.length > 0;
-  const sortedChildren = response ? sortChildrenByStrength(response.children) : [];
+    response !== null &&
+    response.children.length === 0 &&
+    response.canonical_opening_key !== null;
+  const sortedChildren = response
+    ? sortChildrenByStrength(response.children)
+    : [];
 
   return (
     <main className="app-shell">
@@ -254,15 +359,66 @@ function OpeningsPage() {
         <section className="openings-shell">
           <header className="openings-shell__hero">
             <div className="openings-shell__copy">
-              <p className="openings-shell__eyebrow">Opening Scoreboard</p>
               <div className="openings-shell__title-row">
-                <h1 className="openings-shell__title">OPENING SCOREBOARD</h1>
+                <h1 className="openings-shell__title">{currentTitle}</h1>
                 <span className="openings-shell__badge">
                   {selectedColorLabel} repertoire
                 </span>
               </div>
-              {currentTitle && (
-                <p className="openings-shell__context">{currentTitle}</p>
+              {fullBreadcrumbs.length > 0 && (
+                <nav
+                  className="openings-shell__breadcrumbs"
+                  aria-label="Opening breadcrumbs"
+                >
+                  {fullBreadcrumbs.map((breadcrumb, index) => {
+                    if (breadcrumb.opening_key === "__start__") {
+                      return (
+                        <button
+                          key={breadcrumb.opening_key}
+                          type="button"
+                          className="openings-shell__crumb"
+                          onClick={() => {
+                            navigateToRoute({
+                              playerColor,
+                            });
+                          }}
+                        >
+                          {breadcrumb.opening_name}
+                        </button>
+                      );
+                    }
+
+                    if (breadcrumb.is_current) {
+                      return (
+                        <span
+                          key={breadcrumb.opening_key}
+                          className="openings-shell__crumb openings-shell__crumb--current"
+                        >
+                          {breadcrumb.opening_name}
+                        </span>
+                      );
+                    }
+
+                    return (
+                      <button
+                        key={breadcrumb.opening_key}
+                        type="button"
+                        className="openings-shell__crumb"
+                        onClick={() => {
+                          navigateToRoute({
+                            playerColor,
+                            openingKey: breadcrumb.opening_key,
+                            path: fullBreadcrumbs
+                              .slice(1, index)
+                              .map((item) => item.opening_key),
+                          });
+                        }}
+                      >
+                        {breadcrumb.opening_name}
+                      </button>
+                    );
+                  })}
+                </nav>
               )}
               <p className="openings-shell__hint">
                 Score is your 0-100 result in this opening branch. Confidence
@@ -270,6 +426,32 @@ function OpeningsPage() {
                 that branch you have actually played.
               </p>
             </div>
+
+            {parentBreadcrumb && (
+              <aside className="openings-shell__parent-card">
+                <p className="openings-shell__parent-label">Parent branch</p>
+                <button
+                  type="button"
+                  className="openings-shell__parent-button"
+                  onClick={() => {
+                    navigateToRoute({
+                      playerColor,
+                      openingKey: parentBreadcrumb.opening_key,
+                      path: breadcrumbs
+                        .slice(0, -2)
+                        .map((item) => item.opening_key),
+                    });
+                  }}
+                >
+                  <span className="openings-shell__parent-name">
+                    {parentBreadcrumb.opening_name}
+                  </span>
+                  <span className="openings-shell__parent-meta">
+                    {parentMoveLine ?? "Line unavailable."}
+                  </span>
+                </button>
+              </aside>
+            )}
           </header>
 
           <div className="openings-shell__toolbar">
@@ -289,12 +471,9 @@ function OpeningsPage() {
                       return;
                     }
 
-                    invalidatePendingRequests();
-                    setLoading(true);
-                    setError(null);
-                    setResponse(null);
-                    setNavStack([]);
-                    setPlayerColor(option.value);
+                    navigateToRoute({
+                      playerColor: option.value,
+                    });
                   }}
                 >
                   {option.label}
@@ -307,29 +486,6 @@ function OpeningsPage() {
               the end.
             </p>
           </div>
-
-          {navStack.length > 0 && (
-            <div className="openings-shell__backbar">
-              <button
-                className="openings-shell__backbutton"
-                type="button"
-                onClick={() => {
-                  invalidatePendingRequests();
-                  setLoading(true);
-                  setError(null);
-                  setResponse(null);
-                  setNavStack((value) => value.slice(0, -1));
-                }}
-              >
-                Back
-              </button>
-              <p className="openings-shell__path">
-                {["OPENING SCOREBOARD", ...navStack.map((item) => item.openingName)].join(
-                  " / ",
-                )}
-              </p>
-            </div>
-          )}
 
           {loading && (
             <section
@@ -363,7 +519,10 @@ function OpeningsPage() {
           )}
 
           {!loading && error && (
-            <section className="openings-state openings-state--error" role="alert">
+            <section
+              className="openings-state openings-state--error"
+              role="alert"
+            >
               <p className="openings-state__title">{error}</p>
               <p className="openings-state__body">
                 The {selectedColorLabel.toLowerCase()} openings snapshot did not
@@ -412,7 +571,7 @@ function OpeningsPage() {
           {!loading && !error && isStructuralLeaf && (
             <section className="openings-state openings-state--empty">
               <p className="openings-state__title">
-                No deeper named openings under {activeParent?.openingName}.
+                No deeper named openings under {response?.parent_name}.
               </p>
               <p className="openings-state__body">
                 This branch is a structural leaf in the named opening tree.
@@ -442,7 +601,10 @@ function OpeningsPage() {
                         {child.opening_name}
                       </h2>
                       <p className="opening-family-card__hint">
-                        Moves: <strong>{openingMoveLine ?? "Line unavailable."}</strong>
+                        Moves:{" "}
+                        <strong>
+                          {openingMoveLine ?? "Line unavailable."}
+                        </strong>
                       </p>
                       {isUnscored && (
                         <p className="opening-family-card__subhint">
@@ -452,7 +614,10 @@ function OpeningsPage() {
                     </div>
 
                     <div className="opening-family-card__overview">
-                      <div className="opening-family-card__board" aria-hidden="true">
+                      <div
+                        className="opening-family-card__board"
+                        aria-hidden="true"
+                      >
                         <Chessboard
                           options={{
                             position: child.opening_key,
@@ -515,17 +680,16 @@ function OpeningsPage() {
                       type="button"
                       className={cardClassName}
                       onClick={() => {
-                        invalidatePendingRequests();
-                        setLoading(true);
-                        setError(null);
-                        setResponse(null);
-                        setNavStack((value) => [
-                          ...value,
-                          {
-                            openingKey: child.opening_key,
-                            openingName: child.opening_name,
-                          },
-                        ]);
+                        navigateToRoute({
+                          playerColor,
+                          openingKey: child.opening_key,
+                          path: response.canonical_opening_key
+                            ? [
+                                ...response.canonical_path,
+                                response.canonical_opening_key,
+                              ]
+                            : [],
+                        });
                       }}
                     >
                       {headline}

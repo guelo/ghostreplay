@@ -798,42 +798,55 @@ describe('getOpeningChildren', () => {
       player_color: 'white',
       parent_key: null,
       parent_name: null,
+      canonical_opening_key: null,
+      canonical_path: [],
+      breadcrumbs: [],
       children: [],
       total_children: 0,
       computed_at: null,
     })
 
-    await getOpeningChildren('white')
+    await getOpeningChildren({ playerColor: 'white' })
 
     const [url, options] = fetchMock.mock.calls[0]
     expect(options.method).toBe('GET')
     expect(url).toContain('/api/openings/children')
     expect(url).toContain('player_color=white')
     expect(url).not.toContain('parent_key=')
+    expect(url).not.toContain('path=')
   })
 
-  it('includes an encoded parent_key query when provided', async () => {
+  it('includes encoded parent_key and repeated path queries when provided', async () => {
     mockResponse({
       player_color: 'white',
       parent_key: 'fen value',
       parent_name: 'Polish Opening',
+      canonical_opening_key: 'fen value',
+      canonical_path: ['ancestor one', 'ancestor two'],
+      breadcrumbs: [],
       children: [],
       total_children: 0,
       computed_at: null,
     })
 
-    await getOpeningChildren('white', 'fen value')
+    await getOpeningChildren({
+      playerColor: 'white',
+      parentKey: 'fen value',
+      path: ['ancestor one', 'ancestor two'],
+    })
 
     const [url] = fetchMock.mock.calls[0]
     expect(url).toContain('/api/openings/children')
     expect(url).toContain('player_color=white')
     expect(url).toContain('parent_key=fen+value')
+    expect(url).toContain('path=ancestor+one')
+    expect(url).toContain('path=ancestor+two')
   })
 
   it('surfaces the fallback error message for non-ok responses', async () => {
     mockResponse({}, false, 'Bad Request', 400)
 
-    await expect(getOpeningChildren('white')).rejects.toThrow(
+    await expect(getOpeningChildren({ playerColor: 'white' })).rejects.toThrow(
       'Failed to load openings: Bad Request',
     )
   })

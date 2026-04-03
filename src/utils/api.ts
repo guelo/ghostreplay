@@ -643,10 +643,19 @@ export interface OpeningChildItem {
   weakest_root_score: number | null
 }
 
+export interface OpeningBreadcrumbItem {
+  opening_key: string
+  opening_name: string
+  is_current: boolean
+}
+
 export interface ChildrenResponse {
   player_color: OpeningPlayerColor
   parent_key: string | null
   parent_name: string | null
+  canonical_opening_key: string | null
+  canonical_path: string[]
+  breadcrumbs: OpeningBreadcrumbItem[]
   children: OpeningChildItem[]
   total_children: number
   computed_at: string | null
@@ -673,14 +682,21 @@ export const getOpeningFamilyScores = async (
  * Fetch structural opening children for one player color and optional parent root.
  */
 export const getOpeningChildren = async (
-  playerColor: OpeningPlayerColor,
-  parentKey?: string,
+  options: {
+    playerColor: OpeningPlayerColor
+    parentKey?: string
+    path?: string[]
+  },
 ): Promise<ChildrenResponse> => {
+  const { playerColor, parentKey, path = [] } = options
   const params = new URLSearchParams({
     player_color: playerColor,
   })
   if (parentKey) {
     params.set('parent_key', parentKey)
+  }
+  for (const pathKey of path) {
+    params.append('path', pathKey)
   }
 
   return requestJson<ChildrenResponse>(

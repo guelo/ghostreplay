@@ -178,10 +178,19 @@ class OpeningChildItem(BaseModel):
     weakest_root_score: float | None
 
 
+class OpeningBreadcrumbItem(BaseModel):
+    opening_key: str
+    opening_name: str
+    is_current: bool
+
+
 class ChildrenResponse(BaseModel):
     player_color: str
     parent_key: str | None
     parent_name: str | None
+    canonical_opening_key: str | None
+    canonical_path: list[str]
+    breadcrumbs: list[OpeningBreadcrumbItem]
     children: list[OpeningChildItem]
     total_children: int
     computed_at: datetime | None
@@ -578,6 +587,61 @@ def build_opening_children(
     return items
 
 
+def canonicalize_children_route(
+    parent_key: str | None,
+    path_keys: list[str],
+    roots_registry: OpeningRoots,
+) -> tuple[str | None, list[str], list[OpeningRoot]]:
+    """Return the deepest valid route prefix for the requested DAG path.
+
+    The requested route is interpreted as [*path_keys, parent_key] where the
+    final item is the currently selected opening and path entries are its
+    explicit ancestors from top-level down to the immediate parent.
+    """
+    if parent_key is None:
+        return None, [], []
+
+    route_keys = [*path_keys, parent_key]
+    validated_roots: list[OpeningRoot] = []
+
+    for index, opening_key in enumerate(route_keys):
+        root = roots_registry.get_root(opening_key)
+        if root is None:
+            break
+
+        if index == 0:
+            if root.parent_keys:
+                break
+        else:
+            previous_key = validated_roots[-1].opening_key
+            if previous_key not in root.parent_keys:
+                break
+
+        validated_roots.append(root)
+
+    if not validated_roots:
+        return None, [], []
+
+    canonical_opening_key = validated_roots[-1].opening_key
+    canonical_path = [root.opening_key for root in validated_roots[:-1]]
+    return canonical_opening_key, canonical_path, validated_roots
+
+
+def build_opening_breadcrumbs(route_roots: list[OpeningRoot]) -> list[OpeningBreadcrumbItem]:
+    if not route_roots:
+        return []
+
+    current_key = route_roots[-1].opening_key
+    return [
+        OpeningBreadcrumbItem(
+            opening_key=root.opening_key,
+            opening_name=root.opening_name,
+            is_current=root.opening_key == current_key,
+        )
+        for root in route_roots
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Dataclass → Pydantic conversion
 # ---------------------------------------------------------------------------
@@ -766,6 +830,7 @@ def get_family_drill_down(
 def get_opening_children(
     player_color: Literal["white", "black"] = Query(...),
     parent_key: str | None = Query(None),
+    path: list[str] = Query([]),
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> ChildrenResponse:
@@ -787,12 +852,28 @@ def get_opening_children(
     )
     computed_at = batch.computed_at if batch is not None else None
 
-    parent_root = roots_registry.get_root(parent_key) if parent_key is not None else None
-    children = build_opening_children(_snapshot_cached_rows(rows), parent_key, roots_registry)
+    canonical_parent_key, canonical_path, route_roots = canonicalize_children_route(
+        parent_key,
+        path,
+        roots_registry,
+    )
+    parent_root = (
+        roots_registry.get_root(canonical_parent_key)
+        if canonical_parent_key is not None
+        else None
+    )
+    children = build_opening_children(
+        _snapshot_cached_rows(rows),
+        canonical_parent_key,
+        roots_registry,
+    )
     return ChildrenResponse(
         player_color=player_color,
-        parent_key=parent_key,
+        parent_key=canonical_parent_key,
         parent_name=parent_root.opening_name if parent_root is not None else None,
+        canonical_opening_key=canonical_parent_key,
+        canonical_path=canonical_path,
+        breadcrumbs=build_opening_breadcrumbs(route_roots),
         children=children,
         total_children=len(children),
         computed_at=computed_at,
