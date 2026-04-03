@@ -649,6 +649,14 @@ export interface OpeningBreadcrumbItem {
   is_current: boolean
 }
 
+export interface CurrentBranchStats {
+  score: number | null
+  confidence: number | null
+  coverage: number | null
+  sample_size: number | null
+  root_count: number
+}
+
 export interface ChildrenResponse {
   player_color: OpeningPlayerColor
   parent_key: string | null
@@ -656,6 +664,7 @@ export interface ChildrenResponse {
   canonical_opening_key: string | null
   canonical_path: string[]
   breadcrumbs: OpeningBreadcrumbItem[]
+  current_branch_stats: CurrentBranchStats
   children: OpeningChildItem[]
   total_children: number
   computed_at: string | null

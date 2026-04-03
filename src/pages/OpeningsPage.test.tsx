@@ -9,7 +9,11 @@ import {
 import userEvent from "@testing-library/user-event";
 import { flushSync } from "react-dom";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import type { ChildrenResponse, OpeningChildItem } from "../utils/api";
+import type {
+  ChildrenResponse,
+  CurrentBranchStats,
+  OpeningChildItem,
+} from "../utils/api";
 
 const mockLogout = vi.fn();
 const getOpeningChildrenMock = vi.fn();
@@ -80,6 +84,19 @@ function makeBreadcrumb(
   return { opening_key, opening_name, is_current };
 }
 
+function makeCurrentBranchStats(
+  overrides: Partial<CurrentBranchStats> = {},
+): CurrentBranchStats {
+  return {
+    score: 61,
+    confidence: 0.72,
+    coverage: 0.48,
+    sample_size: 56,
+    root_count: 4,
+    ...overrides,
+  };
+}
+
 function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
   const merged: OpeningChildItem = {
     opening_key: "root-1",
@@ -121,6 +138,7 @@ function makeResponse(
     canonical_opening_key: null,
     canonical_path: [],
     breadcrumbs: [],
+    current_branch_stats: makeCurrentBranchStats(),
     children: [],
     total_children: overrides.children?.length ?? 0,
     computed_at: "2026-03-30T12:00:00Z",
@@ -130,6 +148,13 @@ function makeResponse(
 
 const whiteTopLevelResponse = makeResponse({
   player_color: "white",
+  current_branch_stats: makeCurrentBranchStats({
+    score: 63,
+    confidence: 0.72,
+    coverage: 0.81,
+    sample_size: 144,
+    root_count: 7,
+  }),
   children: [
     makeChild({
       opening_key: "sicilian",
@@ -172,6 +197,13 @@ const whiteTopLevelResponse = makeResponse({
 
 const blackTopLevelResponse = makeResponse({
   player_color: "black",
+  current_branch_stats: makeCurrentBranchStats({
+    score: 74,
+    confidence: 0.69,
+    coverage: 0.62,
+    sample_size: 88,
+    root_count: 3,
+  }),
   children: [
     makeChild({
       opening_key: "kings-indian",
@@ -194,6 +226,13 @@ const polishResponse = makeResponse({
   canonical_opening_key: "polish",
   canonical_path: [],
   breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
+  current_branch_stats: makeCurrentBranchStats({
+    score: 67,
+    confidence: 0.59,
+    coverage: 0.38,
+    sample_size: 23,
+    root_count: 2,
+  }),
   children: [
     makeChild({
       opening_key: "polish-e6",
@@ -221,6 +260,13 @@ const polishE6Response = makeResponse({
     makeBreadcrumb("polish", "Polish Opening"),
     makeBreadcrumb("polish-e6", "Polish Opening, 1...e6", true),
   ],
+  current_branch_stats: makeCurrentBranchStats({
+    score: 31,
+    confidence: 0.44,
+    coverage: 0.29,
+    sample_size: 9,
+    root_count: 1,
+  }),
   children: [
     makeChild({
       opening_key: "polish-leaf",
@@ -249,6 +295,13 @@ const polishLeafResponse = makeResponse({
     makeBreadcrumb("polish-e6", "Polish Opening, 1...e6"),
     makeBreadcrumb("polish-leaf", "Polish Leaf", true),
   ],
+  current_branch_stats: makeCurrentBranchStats({
+    score: 28,
+    confidence: 0.33,
+    coverage: 0.21,
+    sample_size: 4,
+    root_count: 1,
+  }),
   children: [],
 });
 
@@ -332,6 +385,22 @@ describe("OpeningsPage", () => {
     });
   });
 
+  it("shows repertoire-wide hero stats at Start", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
+
+    renderPage();
+
+    const heroStats = screen.getByLabelText("Current branch stats");
+
+    await waitFor(() => {
+      expect(within(heroStats).getByText("63")).toBeInTheDocument();
+      expect(within(heroStats).getByText("81%")).toBeInTheDocument();
+      expect(within(heroStats).getByText("144")).toBeInTheDocument();
+      expect(within(heroStats).getByText("72%")).toBeInTheDocument();
+    });
+    expect(within(heroStats).getByText("Repertoire-wide")).toBeInTheDocument();
+  });
+
   it("renders populated opening cards strongest-first with normalized percentages", async () => {
     getOpeningBookMock.mockResolvedValueOnce({
       entries: [
@@ -373,6 +442,23 @@ describe("OpeningsPage", () => {
       "data-position",
       "french",
     );
+  });
+
+  it("shows branch hero stats on drill pages instead of reusing the child summary", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
+
+    renderPage("/openings?color=white&opening=polish");
+
+    const heroStats = screen.getByLabelText("Current branch stats");
+
+    await waitFor(() => {
+      expect(within(heroStats).getByText("67")).toBeInTheDocument();
+      expect(within(heroStats).getByText("38%")).toBeInTheDocument();
+      expect(within(heroStats).getByText("23")).toBeInTheDocument();
+      expect(within(heroStats).getByText("59%")).toBeInTheDocument();
+    });
+    expect(within(heroStats).queryByText("42")).not.toBeInTheDocument();
+    expect(screen.getByText("42")).toBeInTheDocument();
   });
 
   it("ignores a stale response that settles during a color switch", async () => {
@@ -549,6 +635,13 @@ describe("OpeningsPage", () => {
         canonical_opening_key: "polish",
         canonical_path: [],
         breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
+        current_branch_stats: makeCurrentBranchStats({
+          score: 68,
+          confidence: 0.58,
+          coverage: 0.34,
+          sample_size: 21,
+          root_count: 2,
+        }),
         children: [
           makeChild({
             opening_key: "polish-e6",
@@ -566,6 +659,11 @@ describe("OpeningsPage", () => {
       expect(screen.getByTestId("route-location")).toHaveTextContent(
         "/openings?color=white&opening=polish",
       );
+    });
+    await waitFor(() => {
+      expect(
+        within(screen.getByLabelText("Current branch stats")).getByText("67"),
+      ).toBeInTheDocument();
     });
     expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(1, {
       playerColor: "white",
@@ -644,6 +742,13 @@ describe("OpeningsPage", () => {
     getOpeningChildrenMock.mockResolvedValueOnce(
       makeResponse({
         computed_at: null,
+        current_branch_stats: makeCurrentBranchStats({
+          score: null,
+          confidence: null,
+          coverage: null,
+          sample_size: null,
+          root_count: 0,
+        }),
         children: [
           makeChild({
             opening_key: "polish",
@@ -670,12 +775,22 @@ describe("OpeningsPage", () => {
         screen.getByText("No opening evidence for White yet."),
       ).toBeInTheDocument();
     });
+    expect(
+      within(screen.getByLabelText("Current branch stats")).getAllByText("—"),
+    ).toHaveLength(4);
   });
 
   it("shows the computed snapshot empty state when all returned children are unscored", async () => {
     getOpeningChildrenMock.mockResolvedValueOnce(
       makeResponse({
         computed_at: "2026-03-30T12:00:00Z",
+        current_branch_stats: makeCurrentBranchStats({
+          score: null,
+          confidence: null,
+          coverage: null,
+          sample_size: null,
+          root_count: 0,
+        }),
         children: [
           makeChild({
             opening_key: "polish",
@@ -702,6 +817,61 @@ describe("OpeningsPage", () => {
         screen.getByText("No scored openings are available for White yet."),
       ).toBeInTheDocument();
     });
+  });
+
+  it("keeps the normal content state when the current branch is scored but all listed children are unscored", async () => {
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        parent_key: "polish",
+        parent_name: "Polish Opening",
+        canonical_opening_key: "polish",
+        canonical_path: [],
+        breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
+        current_branch_stats: makeCurrentBranchStats({
+          score: 61,
+          confidence: 0.52,
+          coverage: 0.37,
+          sample_size: 19,
+          root_count: 1,
+        }),
+        children: [
+          makeChild({
+            opening_key: "polish-e6",
+            opening_name: "Polish Opening, 1...e6",
+            child_count: 0,
+            subtree_score: null,
+            subtree_confidence: null,
+            subtree_coverage: null,
+            subtree_sample_size: 0,
+            subtree_root_count: 0,
+            weakest_root_key: null,
+            weakest_root_name: null,
+            weakest_root_family: null,
+            weakest_root_score: null,
+          }),
+        ],
+      }),
+    );
+
+    renderPage("/openings?color=white&opening=polish");
+
+    await waitFor(() => {
+      expect(
+        within(screen.getByLabelText("Current branch stats")).getByText("61"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("No opening evidence for White yet."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No scored openings are available for White yet."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "White openings" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Polish Opening, 1...e6" }),
+    ).toBeInTheDocument();
   });
 
   it("renders mixed scored and unscored children without switching to the empty state", async () => {

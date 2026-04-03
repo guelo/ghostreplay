@@ -484,6 +484,75 @@ def _make_children_roots() -> OpeningRoots:
     return OpeningRoots(roots, ownership)
 
 
+def _make_children_score_rows(
+    *,
+    include_polish_root: bool = True,
+    include_english: bool = False,
+) -> list[UserOpeningScore]:
+    rows: list[UserOpeningScore] = []
+    if include_polish_root:
+        rows.append(
+            _make_row(
+                opening_key=CHILD_KEY_POLISH,
+                opening_name="Polish Opening",
+                opening_family="Polish Opening",
+                opening_score=60.0,
+                confidence=0.4,
+                coverage=0.6,
+                sample_size=6,
+                last_practiced_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+            )
+        )
+    rows.extend(
+        [
+            _make_row(
+                opening_key=CHILD_KEY_POLISH_E6,
+                opening_name="Polish Opening, 1...e6",
+                opening_family="Polish Opening",
+                opening_score=20.0,
+                confidence=0.3,
+                coverage=0.3,
+                sample_size=4,
+                last_practiced_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+            ),
+            _make_row(
+                opening_key=CHILD_KEY_POLISH_ALT,
+                opening_name="Polish",
+                opening_family="Polish",
+                opening_score=40.0,
+                confidence=0.2,
+                coverage=0.4,
+                sample_size=2,
+                last_practiced_at=datetime(2026, 3, 3, tzinfo=timezone.utc),
+            ),
+            _make_row(
+                opening_key=CHILD_KEY_SHARED,
+                opening_name="Polish Shared Node",
+                opening_family="Polish Shared Node",
+                opening_score=80.0,
+                confidence=0.1,
+                coverage=0.8,
+                sample_size=8,
+                last_practiced_at=datetime(2026, 3, 4, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    if include_english:
+        rows.append(
+            _make_row(
+                opening_key=CHILD_KEY_ENGLISH,
+                opening_name="English Opening",
+                opening_family="English Opening",
+                opening_score=70.0,
+                confidence=0.5,
+                coverage=0.7,
+                sample_size=9,
+                last_practiced_at=datetime(2026, 3, 5, tzinfo=timezone.utc),
+            )
+        )
+    return rows
+
+
 def _children_url() -> str:
     return "/api/openings/children"
 
@@ -1708,6 +1777,13 @@ def test_children_top_level_returns_structural_roots_without_scores(client, auth
     assert data["canonical_opening_key"] is None
     assert data["canonical_path"] == []
     assert data["breadcrumbs"] == []
+    assert data["current_branch_stats"] == {
+        "score": None,
+        "confidence": None,
+        "coverage": None,
+        "sample_size": None,
+        "root_count": 0,
+    }
     assert data["computed_at"] is None
     assert data["total_children"] == 3
     assert [child["opening_key"] for child in data["children"]] == [
@@ -1717,6 +1793,34 @@ def test_children_top_level_returns_structural_roots_without_scores(client, auth
     ]
     assert all(child["subtree_score"] is None for child in data["children"])
     assert all(child["subtree_root_count"] == 0 for child in data["children"])
+
+
+def test_children_top_level_current_branch_stats_aggregate_all_cached_rows(
+    client, auth_headers
+):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = _make_children_score_rows(include_polish_root=True, include_english=True)
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white"},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["current_branch_stats"] == pytest.approx(
+        {
+            "score": 54.0,
+            "confidence": 0.3,
+            "coverage": 0.56,
+            "sample_size": 29,
+            "root_count": 5,
+        }
+    )
 
 
 def test_children_parent_key_returns_404_for_unknown_root(client, auth_headers):
@@ -1734,48 +1838,7 @@ def test_children_parent_key_returns_404_for_unknown_root(client, auth_headers):
 def test_children_drill_down_returns_immediate_children(client, auth_headers):
     roots = _make_children_roots()
     batch = _make_batch_for_roots(roots)
-    rows = [
-        _make_row(
-            opening_key=CHILD_KEY_POLISH_E6,
-            opening_name="Polish Opening, 1...e6",
-            opening_family="Polish Opening",
-            opening_score=20.0,
-            confidence=0.3,
-            coverage=0.3,
-            sample_size=4,
-            last_practiced_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
-        ),
-        _make_row(
-            opening_key=CHILD_KEY_POLISH_BB2,
-            opening_name="Polish Opening, 1...e6 2. Bb2",
-            opening_family="Polish Opening",
-            opening_score=40.0,
-            confidence=0.2,
-            coverage=0.4,
-            sample_size=6,
-            last_practiced_at=datetime(2026, 3, 3, tzinfo=timezone.utc),
-        ),
-        _make_row(
-            opening_key=CHILD_KEY_SHARED,
-            opening_name="Polish Shared Node",
-            opening_family="Polish Shared Node",
-            opening_score=80.0,
-            confidence=0.1,
-            coverage=0.8,
-            sample_size=8,
-            last_practiced_at=datetime(2026, 3, 4, tzinfo=timezone.utc),
-        ),
-        _make_row(
-            opening_key=CHILD_KEY_POLISH_ALT,
-            opening_name="Polish",
-            opening_family="Polish",
-            opening_score=50.0,
-            confidence=0.2,
-            coverage=0.5,
-            sample_size=2,
-            last_practiced_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        ),
-    ]
+    rows = _make_children_score_rows(include_polish_root=True)
     with (
         patch(_PATCH_ROOTS, return_value=roots),
         patch(_PATCH_ENSURE, return_value=(batch, rows)),
@@ -1799,6 +1862,15 @@ def test_children_drill_down_returns_immediate_children(client, auth_headers):
             "is_current": True,
         }
     ]
+    assert data["current_branch_stats"] == pytest.approx(
+        {
+            "score": 46.0,
+            "confidence": 0.25,
+            "coverage": 0.525,
+            "sample_size": 20,
+            "root_count": 4,
+        }
+    )
     assert [child["opening_key"] for child in data["children"]] == [
         CHILD_KEY_POLISH_ALT,
         CHILD_KEY_POLISH_E6,
@@ -1855,9 +1927,10 @@ def test_children_canonicalizes_inconsistent_path_to_deepest_valid_prefix(
 ):
     roots = _make_children_roots()
     batch = _make_batch_for_roots(roots)
+    rows = _make_children_score_rows(include_polish_root=True)
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(batch, [])),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
     ):
         resp = client.get(
             _children_url(),
@@ -1883,6 +1956,15 @@ def test_children_canonicalizes_inconsistent_path_to_deepest_valid_prefix(
             "is_current": True,
         }
     ]
+    assert data["current_branch_stats"] == pytest.approx(
+        {
+            "score": 46.0,
+            "confidence": 0.25,
+            "coverage": 0.525,
+            "sample_size": 20,
+            "root_count": 4,
+        }
+    )
     assert [child["opening_key"] for child in data["children"]] == [
         CHILD_KEY_POLISH_ALT,
         CHILD_KEY_POLISH_E6,
@@ -1994,6 +2076,34 @@ def test_children_subtree_aggregation_deduplicates_shared_descendants(client, au
     assert polish_item["weakest_root_family"] == "Polish Opening"
     assert polish_item["weakest_root_score"] == pytest.approx(20.0)
     assert polish_item["last_practiced_at"].startswith("2026-03-04")
+
+
+def test_children_current_branch_stats_deduplicate_shared_descendants_for_drill_route(
+    client, auth_headers
+):
+    roots = _make_children_roots()
+    batch = _make_batch_for_roots(roots)
+    rows = _make_children_score_rows(include_polish_root=False)
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch(_PATCH_ENSURE, return_value=(batch, rows)),
+    ):
+        resp = client.get(
+            _children_url(),
+            params={"player_color": "white", "parent_key": CHILD_KEY_POLISH},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["current_branch_stats"] == pytest.approx(
+        {
+            "score": 36.666666666666664,
+            "confidence": 0.2,
+            "coverage": 0.5,
+            "sample_size": 14,
+            "root_count": 3,
+        }
+    )
 
 
 def test_children_sorts_scored_before_unscored_with_null_last(client, auth_headers):

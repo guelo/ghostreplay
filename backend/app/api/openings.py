@@ -184,6 +184,14 @@ class OpeningBreadcrumbItem(BaseModel):
     is_current: bool
 
 
+class CurrentBranchStats(BaseModel):
+    score: float | None
+    confidence: float | None
+    coverage: float | None
+    sample_size: int | None
+    root_count: int
+
+
 class ChildrenResponse(BaseModel):
     player_color: str
     parent_key: str | None
@@ -191,6 +199,7 @@ class ChildrenResponse(BaseModel):
     canonical_opening_key: str | None
     canonical_path: list[str]
     breadcrumbs: list[OpeningBreadcrumbItem]
+    current_branch_stats: CurrentBranchStats
     children: list[OpeningChildItem]
     total_children: int
     computed_at: datetime | None
@@ -218,6 +227,17 @@ class CachedOpeningScoreRow:
     underexposed_branch_value: float | None
 
 
+@dataclass(frozen=True)
+class OpeningBranchAggregate:
+    score: float | None
+    confidence: float | None
+    coverage: float | None
+    sample_size: int
+    root_count: int
+    last_practiced_at: datetime | None
+    weakest_root: CachedOpeningScoreRow | None
+
+
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
@@ -227,6 +247,67 @@ def _weakest_root(rows: list[CachedOpeningScoreRow]) -> CachedOpeningScoreRow:
     return min(
         rows,
         key=lambda r: (r.opening_score, r.confidence, r.opening_name, r.opening_key),
+    )
+
+
+def _collect_branch_rows(
+    rows_by_key: dict[str, CachedOpeningScoreRow],
+    branch_key: str,
+    roots_registry: OpeningRoots,
+) -> list[CachedOpeningScoreRow]:
+    return [
+        row
+        for row in (
+            rows_by_key.get(branch_key),
+            *(
+                rows_by_key.get(descendant.opening_key)
+                for descendant in roots_registry.get_descendants(branch_key)
+            ),
+        )
+        if row is not None
+    ]
+
+
+def _aggregate_branch_rows(rows: list[CachedOpeningScoreRow]) -> OpeningBranchAggregate:
+    if not rows:
+        return OpeningBranchAggregate(
+            score=None,
+            confidence=None,
+            coverage=None,
+            sample_size=0,
+            root_count=0,
+            last_practiced_at=None,
+            weakest_root=None,
+        )
+
+    total_conf = sum(row.confidence for row in rows)
+    if total_conf > 0:
+        score = sum(row.opening_score * row.confidence for row in rows) / total_conf
+    else:
+        score = sum(row.opening_score for row in rows) / len(rows)
+
+    practiced_dates = [
+        row.last_practiced_at for row in rows if row.last_practiced_at is not None
+    ]
+
+    return OpeningBranchAggregate(
+        score=score,
+        confidence=sum(row.confidence for row in rows) / len(rows),
+        coverage=sum(row.coverage for row in rows) / len(rows),
+        sample_size=sum(row.sample_size for row in rows),
+        root_count=len(rows),
+        last_practiced_at=max(practiced_dates) if practiced_dates else None,
+        weakest_root=_weakest_root(rows),
+    )
+
+
+def _branch_aggregate_to_response(aggregate: OpeningBranchAggregate) -> CurrentBranchStats:
+    return CurrentBranchStats(
+        score=aggregate.score,
+        confidence=aggregate.confidence,
+        coverage=aggregate.coverage,
+        sample_size=aggregate.sample_size if aggregate.root_count > 0 else None,
+        root_count=aggregate.root_count,
     )
 
 
@@ -492,67 +573,16 @@ def build_drill_down_roots(
 
 
 def build_opening_children(
-    rows: list[CachedOpeningScoreRow],
+    rows_by_key: dict[str, CachedOpeningScoreRow],
     parent_key: str | None,
     roots_registry: OpeningRoots,
 ) -> list[OpeningChildItem]:
-    rows_by_key = {row.opening_key: row for row in rows}
     items: list[OpeningChildItem] = []
 
     for child in roots_registry.get_children(parent_key):
-        subtree_rows = [
-            row
-            for row in (
-                rows_by_key.get(child.opening_key),
-                *(
-                    rows_by_key.get(descendant.opening_key)
-                    for descendant in roots_registry.get_descendants(child.opening_key)
-                ),
-            )
-            if row is not None
-        ]
-
-        weakest_root_key: str | None = None
-        weakest_root_name: str | None = None
-        weakest_root_family: str | None = None
-        weakest_root_score: float | None = None
-
-        if subtree_rows:
-            total_conf = sum(row.confidence for row in subtree_rows)
-            if total_conf > 0:
-                subtree_score = (
-                    sum(row.opening_score * row.confidence for row in subtree_rows) / total_conf
-                )
-            else:
-                subtree_score = (
-                    sum(row.opening_score for row in subtree_rows) / len(subtree_rows)
-                )
-            subtree_confidence = (
-                sum(row.confidence for row in subtree_rows) / len(subtree_rows)
-            )
-            subtree_coverage = (
-                sum(row.coverage for row in subtree_rows) / len(subtree_rows)
-            )
-            subtree_sample_size = sum(row.sample_size for row in subtree_rows)
-            subtree_root_count = len(subtree_rows)
-
-            practiced_dates = [
-                row.last_practiced_at for row in subtree_rows if row.last_practiced_at is not None
-            ]
-            last_practiced_at = max(practiced_dates) if practiced_dates else None
-
-            weakest = _weakest_root(subtree_rows)
-            weakest_root_key = weakest.opening_key
-            weakest_root_name = weakest.opening_name
-            weakest_root_family = weakest.opening_family
-            weakest_root_score = weakest.opening_score
-        else:
-            subtree_score = None
-            subtree_confidence = None
-            subtree_coverage = None
-            subtree_sample_size = 0
-            subtree_root_count = 0
-            last_practiced_at = None
+        subtree_rows = _collect_branch_rows(rows_by_key, child.opening_key, roots_registry)
+        aggregate = _aggregate_branch_rows(subtree_rows)
+        weakest = aggregate.weakest_root
 
         items.append(
             OpeningChildItem(
@@ -562,16 +592,16 @@ def build_opening_children(
                 eco=child.eco,
                 depth=child.depth,
                 child_count=len(roots_registry.get_children(child.opening_key)),
-                subtree_score=subtree_score,
-                subtree_confidence=subtree_confidence,
-                subtree_coverage=subtree_coverage,
-                subtree_sample_size=subtree_sample_size,
-                subtree_root_count=subtree_root_count,
-                last_practiced_at=last_practiced_at,
-                weakest_root_key=weakest_root_key,
-                weakest_root_name=weakest_root_name,
-                weakest_root_family=weakest_root_family,
-                weakest_root_score=weakest_root_score,
+                subtree_score=aggregate.score,
+                subtree_confidence=aggregate.confidence,
+                subtree_coverage=aggregate.coverage,
+                subtree_sample_size=aggregate.sample_size,
+                subtree_root_count=aggregate.root_count,
+                last_practiced_at=aggregate.last_practiced_at,
+                weakest_root_key=weakest.opening_key if weakest is not None else None,
+                weakest_root_name=weakest.opening_name if weakest is not None else None,
+                weakest_root_family=weakest.opening_family if weakest is not None else None,
+                weakest_root_score=weakest.opening_score if weakest is not None else None,
             )
         )
 
@@ -852,6 +882,8 @@ def get_opening_children(
     )
     computed_at = batch.computed_at if batch is not None else None
 
+    row_views = _snapshot_cached_rows(rows)
+    rows_by_key = {row.opening_key: row for row in row_views}
     canonical_parent_key, canonical_path, route_roots = canonicalize_children_route(
         parent_key,
         path,
@@ -863,9 +895,14 @@ def get_opening_children(
         else None
     )
     children = build_opening_children(
-        _snapshot_cached_rows(rows),
+        rows_by_key,
         canonical_parent_key,
         roots_registry,
+    )
+    current_branch_rows = (
+        row_views
+        if canonical_parent_key is None
+        else _collect_branch_rows(rows_by_key, canonical_parent_key, roots_registry)
     )
     return ChildrenResponse(
         player_color=player_color,
@@ -874,6 +911,9 @@ def get_opening_children(
         canonical_opening_key=canonical_parent_key,
         canonical_path=canonical_path,
         breadcrumbs=build_opening_breadcrumbs(route_roots),
+        current_branch_stats=_branch_aggregate_to_response(
+            _aggregate_branch_rows(current_branch_rows)
+        ),
         children=children,
         total_children=len(children),
         computed_at=computed_at,

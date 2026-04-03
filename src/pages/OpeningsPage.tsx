@@ -68,7 +68,11 @@ function formatPercent(value: number | null): string {
   return `${Math.round(normalizePercentValue(value))}%`;
 }
 
-function formatGames(value: number): string {
+function formatGames(value: number | null): string {
+  if (value === null) {
+    return "—";
+  }
+
   return value.toLocaleString();
 }
 
@@ -329,24 +333,27 @@ function OpeningsPage() {
   const parentBreadcrumb =
     breadcrumbs.length > 1 ? (breadcrumbs.at(-2) ?? null) : null;
   const currentTitle = currentBreadcrumb?.opening_name ?? "OPENING SCOREBOARD";
+  const currentBranchStats = response?.current_branch_stats ?? null;
+  const heroStatsLabel = currentBreadcrumb ? "Current branch" : "Repertoire-wide";
+  const heroStatsCaption = currentBreadcrumb
+    ? "Selected opening aggregate"
+    : "All scored roots in this repertoire";
   const parentMoveLine = parentBreadcrumb
     ? getOpeningMoveLine(parentBreadcrumb.opening_key, moveLinesByFen)
     : null;
-  const allChildrenUnscored =
-    response !== null &&
-    response.children.length > 0 &&
-    response.children.every((child) => child.subtree_root_count === 0);
+  const hasScoredCurrentBranch =
+    response !== null && response.current_branch_stats.root_count > 0;
   const isTrueNoEvidence =
-    response !== null && response.computed_at === null && allChildrenUnscored;
+    response !== null && response.computed_at === null && !hasScoredCurrentBranch;
   const isSnapshotEmpty =
-    response !== null && response.computed_at !== null && allChildrenUnscored;
-  const hasVisibleChildren =
-    response !== null &&
-    response.children.some((child) => child.subtree_root_count > 0);
+    response !== null && response.computed_at !== null && !hasScoredCurrentBranch;
+  const showChildrenGrid =
+    response !== null && response.children.length > 0 && hasScoredCurrentBranch;
   const isStructuralLeaf =
     response !== null &&
     response.children.length === 0 &&
-    response.canonical_opening_key !== null;
+    response.canonical_opening_key !== null &&
+    hasScoredCurrentBranch;
   const sortedChildren = response
     ? sortChildrenByStrength(response.children)
     : [];
@@ -427,31 +434,65 @@ function OpeningsPage() {
               </p>
             </div>
 
-            {parentBreadcrumb && (
-              <aside className="openings-shell__parent-card">
-                <p className="openings-shell__parent-label">Parent branch</p>
-                <button
-                  type="button"
-                  className="openings-shell__parent-button"
-                  onClick={() => {
-                    navigateToRoute({
-                      playerColor,
-                      openingKey: parentBreadcrumb.opening_key,
-                      path: breadcrumbs
-                        .slice(0, -2)
-                        .map((item) => item.opening_key),
-                    });
-                  }}
-                >
-                  <span className="openings-shell__parent-name">
-                    {parentBreadcrumb.opening_name}
-                  </span>
-                  <span className="openings-shell__parent-meta">
-                    {parentMoveLine ?? "Line unavailable."}
-                  </span>
-                </button>
+            <div className="openings-shell__hero-rail">
+              <aside
+                className="openings-shell__stats-card"
+                aria-label="Current branch stats"
+              >
+                <div className="openings-shell__stats-copy">
+                  <p className="openings-shell__stats-label">{heroStatsLabel}</p>
+                  <p className="openings-shell__stats-caption">
+                    {heroStatsCaption}
+                  </p>
+                </div>
+                <dl className="openings-shell__stats-grid">
+                  <div className="openings-shell__stats-metric">
+                    <dt>Score</dt>
+                    <dd>{formatScore(currentBranchStats?.score ?? null)}</dd>
+                  </div>
+                  <div className="openings-shell__stats-metric">
+                    <dt>Coverage</dt>
+                    <dd>{formatPercent(currentBranchStats?.coverage ?? null)}</dd>
+                  </div>
+                  <div className="openings-shell__stats-metric">
+                    <dt>Games</dt>
+                    <dd>{formatGames(currentBranchStats?.sample_size ?? null)}</dd>
+                  </div>
+                  <div className="openings-shell__stats-metric">
+                    <dt>Confidence</dt>
+                    <dd>
+                      {formatPercent(currentBranchStats?.confidence ?? null)}
+                    </dd>
+                  </div>
+                </dl>
               </aside>
-            )}
+
+              {parentBreadcrumb && (
+                <aside className="openings-shell__parent-card">
+                  <p className="openings-shell__parent-label">Parent branch</p>
+                  <button
+                    type="button"
+                    className="openings-shell__parent-button"
+                    onClick={() => {
+                      navigateToRoute({
+                        playerColor,
+                        openingKey: parentBreadcrumb.opening_key,
+                        path: breadcrumbs
+                          .slice(0, -2)
+                          .map((item) => item.opening_key),
+                      });
+                    }}
+                  >
+                    <span className="openings-shell__parent-name">
+                      {parentBreadcrumb.opening_name}
+                    </span>
+                    <span className="openings-shell__parent-meta">
+                      {parentMoveLine ?? "Line unavailable."}
+                    </span>
+                  </button>
+                </aside>
+              )}
+            </div>
           </header>
 
           <div className="openings-shell__toolbar">
@@ -579,7 +620,7 @@ function OpeningsPage() {
             </section>
           )}
 
-          {!loading && !error && hasVisibleChildren && response && (
+          {!loading && !error && showChildrenGrid && response && (
             <section
               className="openings-grid"
               aria-label={`${selectedColorLabel} openings`}
