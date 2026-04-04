@@ -1,4 +1,4 @@
-const BEST_MOVE_AUDIO_CLIP = "/audio/bestmove.mp3";
+const BEST_MOVE_AUDIO_CLIP = "/audio/bestmove2.wav";
 
 let bestMoveAudio: HTMLAudioElement | null = null;
 
