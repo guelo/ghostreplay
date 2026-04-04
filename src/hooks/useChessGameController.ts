@@ -57,6 +57,7 @@ type UseChessGameControllerOptions = {
   evaluatePosition: EvaluatePositionFn;
   handleGameEnd: () => Promise<void>;
   clearMoveHighlights: () => void;
+  clearBlunderBoardOverride?: () => void;
 };
 
 type AppliedMove = NonNullable<ReturnType<Chess["move"]>>;
@@ -77,6 +78,7 @@ export const useChessGameController = ({
   evaluatePosition,
   handleGameEnd,
   clearMoveHighlights,
+  clearBlunderBoardOverride,
 }: UseChessGameControllerOptions) => {
   const commitAppliedMove = useCallback(
     (
@@ -146,6 +148,7 @@ export const useChessGameController = ({
       }
 
       clearMoveHighlights();
+      clearBlunderBoardOverride?.();
       setBlunderAlert(null);
 
       const playerColor = useGameStore.getState().playerColor;
@@ -195,6 +198,7 @@ export const useChessGameController = ({
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
+      clearBlunderBoardOverride,
     ],
   );
 

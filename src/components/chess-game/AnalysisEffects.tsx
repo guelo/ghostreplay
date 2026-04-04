@@ -1,5 +1,4 @@
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
-import { Chess } from "chess.js";
 import type { TargetBlunderSrs } from "../../utils/api";
 import {
   recordBlunder,
@@ -7,12 +6,14 @@ import {
 } from "../../utils/api";
 import { shouldRecordBlunder } from "../../utils/blunder";
 import { isRecordableFailure } from "../../workers/analysisUtils";
-import type { BlunderAlert } from "./domain/movePresentation";
-import type { MoveMessage } from "../MoveList";
 import {
-  BLUNDER_AUDIO_CLIPS,
-  STARTING_FEN,
-} from "./config";
+  buildBlunderAlert,
+  fenBeforeMove,
+  sanForUciMove,
+  type BlunderAlert,
+} from "./domain/movePresentation";
+import type { MoveMessage } from "../MoveList";
+import { BLUNDER_AUDIO_CLIPS } from "./config";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
 import { playBling } from "../../utils/blingSound";
@@ -149,26 +150,11 @@ const AnalysisEffects = ({
     }
 
     if (!passed) {
-      let bestMoveSan = lastAnalysis.bestMove;
-      const fenBeforeMove =
-        lastAnalysis.moveIndex === 0
-          ? STARTING_FEN
-          : useGameStore.getState().moveHistory[lastAnalysis.moveIndex - 1]
-              ?.fen;
-      if (fenBeforeMove) {
-        try {
-          const tempChess = new Chess(fenBeforeMove);
-          const from = lastAnalysis.bestMove.slice(0, 2);
-          const to = lastAnalysis.bestMove.slice(2, 4);
-          const promotion = lastAnalysis.bestMove.slice(4) || undefined;
-          const bestMoveResult = tempChess.move({ from, to, promotion });
-          if (bestMoveResult) {
-            bestMoveSan = bestMoveResult.san;
-          }
-        } catch {
-          // Fall back to UCI notation
-        }
-      }
+      const sourceFen = fenBeforeMove(
+        useGameStore.getState().moveHistory,
+        lastAnalysis.moveIndex,
+      );
+      const bestMoveSan = sanForUciMove(sourceFen, lastAnalysis.bestMove);
 
       const srs = pendingReview.srs;
       appendMoveMessage(lastAnalysis.moveIndex, {
@@ -218,10 +204,6 @@ const AnalysisEffects = ({
       return;
     }
 
-    if (lastAnalysis.moveIndex === 0) {
-      return;
-    }
-
     if (!isPlayerMoveIndex(lastAnalysis.moveIndex)) {
       return;
     }
@@ -229,34 +211,17 @@ const AnalysisEffects = ({
     const moveHistory = useGameStore.getState().moveHistory;
     const moveSan =
       moveHistory[lastAnalysis.moveIndex]?.san ?? lastAnalysis.move;
-
-    let bestMoveSan = lastAnalysis.bestMove;
-    try {
-      const fenBeforeMove =
-        lastAnalysis.moveIndex === 0
-          ? STARTING_FEN
-          : moveHistory[lastAnalysis.moveIndex - 1]?.fen;
-      if (fenBeforeMove) {
-        const tempChess = new Chess(fenBeforeMove);
-        const from = lastAnalysis.bestMove.slice(0, 2);
-        const to = lastAnalysis.bestMove.slice(2, 4);
-        const promotion = lastAnalysis.bestMove.slice(4) || undefined;
-        const bestMoveResult = tempChess.move({ from, to, promotion });
-        if (bestMoveResult) {
-          bestMoveSan = bestMoveResult.san;
-        }
-      }
-    } catch {
-      // Fall back to UCI notation
-    }
-
-    setBlunderAlert({
-      moveSan,
-      moveUci: lastAnalysis.move,
-      bestMoveUci: lastAnalysis.bestMove,
-      bestMoveSan,
-      delta: lastAnalysis.delta,
-    });
+    setBlunderAlert(
+      buildBlunderAlert({
+        moveHistory,
+        moveIndex: lastAnalysis.moveIndex,
+        moveSan,
+        moveUci: lastAnalysis.move,
+        bestMoveUci: lastAnalysis.bestMove,
+        delta: lastAnalysis.delta,
+        shouldRewind: true,
+      }),
+    );
     setShowFlash(true);
     playRandomBlunderAudio();
   // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -17,6 +17,7 @@ import { lookupOpeningByFen } from "../openings/openingBook";
 import type { TargetBlunderSrs } from "../utils/api";
 import { normalize_fen } from "../utils/fen";
 import {
+  buildBlunderAlert,
   deriveBlunderArrows,
   deriveLastMoveSquares,
   type BlunderAlert,
@@ -141,6 +142,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
   >({});
+  const [boardInstanceKey, setBoardInstanceKey] = useState(0);
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -165,12 +167,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
   const handleGameEndRef = useRef<() => Promise<void>>(async () => {});
+  const blunderBoardTimerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
   const handleGameEndStable = useCallback(
     () => handleGameEndRef.current(),
     [],
   );
 
-  // Get the FEN to display on the board (accounts for viewing past positions)
   const displayedFen = useMemo(() => {
     if (viewIndex === null) {
       return fen; // Live position
@@ -180,10 +182,26 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
     return moveHistory[viewIndex]?.fen ?? fen;
   }, [viewIndex, fen, moveHistory]);
+  const displayedIndex = useMemo(() => {
+    if (viewIndex === null) {
+      return moveHistory.length - 1;
+    }
+    return viewIndex;
+  }, [moveHistory.length, viewIndex]);
+  const displayedIndexRef = useRef(displayedIndex);
+  displayedIndexRef.current = displayedIndex;
+  const isBlunderBoardOverrideActive = blunderAlert !== null;
+
+  const clearBlunderBoardOverride = useCallback(() => {
+    for (const timer of blunderBoardTimerRefs.current) {
+      clearTimeout(timer);
+    }
+    blunderBoardTimerRefs.current = [];
+  }, []);
 
   const lastMoveSquares = useMemo((): Record<string, React.CSSProperties> => {
     return deriveLastMoveSquares(moveHistory, viewIndex);
-  }, [viewIndex, moveHistory]);
+  }, [moveHistory, viewIndex]);
 
   // Compute arrows from review fail modal or blunder alert
   const blunderArrows = useMemo(() => {
@@ -223,38 +241,25 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           isPlayerMoveIndex(index)
         ) {
           const moveSan = history[index]?.san ?? analysis.move;
-          let bestMoveSan = analysis.bestMove;
-          try {
-            const fenBeforeMove =
-              index === 0 ? STARTING_FEN : history[index - 1]?.fen;
-            if (fenBeforeMove) {
-              const tempChess = new Chess(fenBeforeMove);
-              const from = analysis.bestMove.slice(0, 2);
-              const to = analysis.bestMove.slice(2, 4);
-              const promotion = analysis.bestMove.slice(4) || undefined;
-              const bestMoveResult = tempChess.move({ from, to, promotion });
-              if (bestMoveResult) {
-                bestMoveSan = bestMoveResult.san;
-              }
-            }
-          } catch {
-            // Fall back to UCI notation
-          }
-          setBlunderAlert({
-            moveSan,
-            moveUci: analysis.move,
-            bestMoveUci: analysis.bestMove,
-            bestMoveSan,
-            delta: analysis.delta,
-          });
+          setBlunderAlert(
+            buildBlunderAlert({
+              moveHistory: history,
+              moveIndex: index,
+              moveSan,
+              moveUci: analysis.move,
+              bestMoveUci: analysis.bestMove,
+              delta: analysis.delta,
+            }),
+          );
           return;
         }
       }
 
       // Clear blunder alert when navigating to a non-blunder move
+      clearBlunderBoardOverride();
       setBlunderAlert(null);
     },
-    [analysisStore, isPlayerMoveIndex],
+    [analysisStore, clearBlunderBoardOverride, isPlayerMoveIndex],
   );
 
   const clearMoveHighlights = useCallback(() => {
@@ -370,6 +375,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       evaluatePosition,
       handleGameEnd: handleGameEndStable,
       clearMoveHighlights,
+      clearBlunderBoardOverride,
     });
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
@@ -418,6 +424,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     showRevertWarning,
     setShowRevertWarning,
     setShowResignWarning,
+    clearBlunderBoardOverride,
   });
 
   useEffect(() => {
@@ -474,6 +481,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleSquareClick = useCallback(
     ({ square }: { square: string }) => {
+      if (isBlunderBoardOverrideActive) {
+        clearMoveHighlights();
+        return;
+      }
+
       const playersTurn =
         chess.turn() === (playerColor === "white" ? "w" : "b");
       if (!isGameActive || !playersTurn || !isViewingLive) {
@@ -508,6 +520,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [
       chess,
       isGameActive,
+      isBlunderBoardOverrideActive,
       isViewingLive,
       selectedSquare,
       playerColor,
@@ -595,12 +608,54 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => clearTimeout(timer);
   }, [showFlash]);
 
-  // Auto-dismiss blunder toast after 4 seconds
   useEffect(() => {
-    if (!blunderAlert) return;
-    const timer = setTimeout(() => setBlunderAlert(null), 4000);
-    return () => clearTimeout(timer);
-  }, [blunderAlert]);
+    if (!blunderAlert) {
+      clearBlunderBoardOverride();
+      return;
+    }
+
+    if (!blunderAlert.shouldRewind) {
+      clearBlunderBoardOverride();
+      return;
+    }
+
+    clearMoveHighlights();
+    for (const timer of blunderBoardTimerRefs.current) {
+      clearTimeout(timer);
+    }
+    blunderBoardTimerRefs.current = [];
+
+    setBoardInstanceKey((current) => current + 1);
+    const startIndex = displayedIndexRef.current;
+    const targetDisplayIndex = blunderAlert.moveIndex - 1;
+    setViewIndex(startIndex);
+
+    if (startIndex <= targetDisplayIndex) {
+      const timer = setTimeout(() => {
+        setViewIndex(targetDisplayIndex);
+      }, 125);
+      blunderBoardTimerRefs.current.push(timer);
+      return () => {
+        clearBlunderBoardOverride();
+      };
+    }
+
+    for (let index = startIndex - 1, step = 0; index >= targetDisplayIndex; index -= 1, step += 1) {
+      const timer = setTimeout(() => {
+        setViewIndex(index);
+      }, 125 + step * 240);
+      blunderBoardTimerRefs.current.push(timer);
+    }
+
+    return () => {
+      clearBlunderBoardOverride();
+    };
+  }, [
+    blunderAlert,
+    clearBlunderBoardOverride,
+    clearMoveHighlights,
+    setViewIndex,
+  ]);
 
   // Auto-dismiss re-hook toast after 3 seconds
   useEffect(() => {
@@ -626,6 +681,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       sourceSquare,
       targetSquare,
     }: PieceDropHandlerArgs) => {
+      if (isBlunderBoardOverrideActive) {
+        return false;
+      }
+
       const result = handleDrop(sourceSquare, targetSquare);
       if (!result.applied) {
         return false;
@@ -639,11 +698,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       return true;
     },
-    [applyOpponentMove, handleDrop, handleGameEnd],
+    [applyOpponentMove, handleDrop, handleGameEnd, isBlunderBoardOverrideActive],
   );
 
   const handleRevealSrsFail = useCallback(
     (detail: SrsFailDetail, moveIndex: number) => {
+      clearBlunderBoardOverride();
+      setBlunderAlert(null);
       setReviewFailModal({
         userMoveSan: detail.userMoveSan,
         bestMoveSan: detail.bestMoveSan,
@@ -654,7 +715,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       });
       setViewIndex(moveIndex - 1);
     },
-    [],
+    [clearBlunderBoardOverride],
   );
 
   const flipBoard = () => {
@@ -710,7 +771,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     engineStatus === "ready" &&
     isPlayersTurn &&
     !isThinking &&
-    isViewingLive;
+    isViewingLive &&
+    !isBlunderBoardOverrideActive;
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
 
   return (
@@ -744,6 +806,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             <div className="chessboard-board-with-eval">
               <ConnectedEvalBar />
               <BoardStage
+                boardInstanceKey={boardInstanceKey}
                 boardOrientation={boardOrientation}
                 displayedFen={displayedFen}
                 onPieceDrop={handleDropPiece}

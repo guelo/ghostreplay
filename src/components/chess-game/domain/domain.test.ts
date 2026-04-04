@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildBlunderAlert,
   deriveAnnotatedMoves,
   deriveBlunderArrows,
   deriveLastMoveSquares,
+  fenBeforeMove,
   type BlunderAlert,
   type MoveRecord,
   type ReviewFailInfo,
@@ -131,6 +133,9 @@ describe("chess-game domain helpers", () => {
       bestMoveUci: "d2d4",
       bestMoveSan: "d4",
       delta: 120,
+      moveIndex: 0,
+      sourceFen: "source-fen",
+      shouldRewind: false,
     };
 
     expect(deriveBlunderArrows(reviewFail, blunderAlert)).toEqual([
@@ -169,6 +174,46 @@ describe("chess-game domain helpers", () => {
     expect(deriveDisplayedOpening(history, -1)).toEqual(c20);
     expect(deriveDisplayedOpening(history, 0)).toEqual(c20);
     expect(deriveDisplayedOpening([], null)).toBeNull();
+  });
+
+  it("derives pre-move fen targets and blunder alerts from move history", () => {
+    const moveHistory: MoveRecord[] = [
+      {
+        san: "e4",
+        fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        uci: "e2e4",
+      },
+      {
+        san: "d5",
+        fen: "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+        uci: "d7d5",
+      },
+    ];
+
+    expect(fenBeforeMove(moveHistory, 0)).toBe(
+      "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    );
+    expect(fenBeforeMove(moveHistory, 1)).toBe(moveHistory[0].fen);
+
+    expect(
+      buildBlunderAlert({
+        moveHistory,
+        moveIndex: 1,
+        moveSan: "d5",
+        moveUci: "d7d5",
+        bestMoveUci: "g8f6",
+        delta: 120,
+      }),
+    ).toEqual({
+      moveSan: "d5",
+      moveUci: "d7d5",
+      bestMoveUci: "g8f6",
+      bestMoveSan: "Nf6",
+      delta: 120,
+      moveIndex: 1,
+      sourceFen: moveHistory[0].fen,
+      shouldRewind: false,
+    });
   });
 
   it("parses UCI to SAN and builds session upload payload", () => {

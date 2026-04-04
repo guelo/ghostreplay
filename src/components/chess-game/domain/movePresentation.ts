@@ -1,6 +1,8 @@
 import type React from "react";
+import { Chess } from "chess.js";
 import type { AnalysisResult } from "../../../hooks/useMoveAnalysis";
 import { toWhitePerspective } from "../../../workers/analysisUtils";
+import { STARTING_FEN } from "../config";
 
 export type MoveRecord = {
   san: string;
@@ -16,6 +18,9 @@ export type BlunderAlert = {
   bestMoveUci: string;
   bestMoveSan: string;
   delta: number;
+  moveIndex: number;
+  sourceFen: string;
+  shouldRewind: boolean;
 };
 
 export type ReviewFailInfo = {
@@ -31,6 +36,59 @@ export type MoveArrow = {
   startSquare: string;
   endSquare: string;
   color: string;
+};
+
+export const fenBeforeMove = (
+  moveHistory: MoveRecord[],
+  moveIndex: number,
+): string => {
+  if (moveIndex <= 0) {
+    return STARTING_FEN;
+  }
+  return moveHistory[moveIndex - 1]?.fen ?? STARTING_FEN;
+};
+
+export const sanForUciMove = (sourceFen: string, moveUci: string): string => {
+  try {
+    const tempChess = new Chess(sourceFen);
+    const from = moveUci.slice(0, 2);
+    const to = moveUci.slice(2, 4);
+    const promotion = moveUci.slice(4) || undefined;
+    const appliedMove = tempChess.move({ from, to, promotion });
+    return appliedMove?.san ?? moveUci;
+  } catch {
+    return moveUci;
+  }
+};
+
+export const buildBlunderAlert = ({
+  moveHistory,
+  moveIndex,
+  moveSan,
+  moveUci,
+  bestMoveUci,
+  delta,
+  shouldRewind = false,
+}: {
+  moveHistory: MoveRecord[];
+  moveIndex: number;
+  moveSan: string;
+  moveUci: string;
+  bestMoveUci: string;
+  delta: number;
+  shouldRewind?: boolean;
+}): BlunderAlert => {
+  const sourceFen = fenBeforeMove(moveHistory, moveIndex);
+  return {
+    moveSan,
+    moveUci,
+    bestMoveUci,
+    bestMoveSan: sanForUciMove(sourceFen, bestMoveUci),
+    delta,
+    moveIndex,
+    sourceFen,
+    shouldRewind,
+  };
 };
 
 export const deriveLastMoveSquares = (

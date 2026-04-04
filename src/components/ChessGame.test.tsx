@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { Chess } from "chess.js";
 import { render, screen, fireEvent, waitFor, act } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
+import { STARTING_FEN } from "./chess-game/config";
 
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
@@ -76,6 +78,9 @@ vi.mock("react-chessboard", () => ({
       <div
         data-testid="chessboard"
         data-orientation={options.boardOrientation as string}
+        data-position={options.position as string}
+        data-allow-dragging={String(options.allowDragging)}
+        data-arrow-count={String(((options.arrows as unknown[] | undefined) ?? []).length)}
       />
     );
   },
@@ -87,6 +92,15 @@ beforeEach(() => {
   useGameStore.setState(initialGameStoreState, true);
   gameAnalysisStore.getState().clearAll();
   gameAnalysisStore.getState().setStatus("ready");
+  class MockAudio {
+    preload = "auto";
+    currentTime = 0;
+
+    play() {
+      return Promise.resolve();
+    }
+  }
+  vi.stubGlobal("Audio", MockAudio);
   fetchCurrentRatingMock.mockReset();
   fetchCurrentRatingMock.mockResolvedValue({
     current_rating: 1200,
@@ -1679,5 +1693,282 @@ describe("ChessGame remount persistence", () => {
     expect(useGameStore.getState().engineElo).toBe(eloAfterStart);
     // But player rating should still be updated
     expect(useGameStore.getState().playerRating).toBe(1800);
+  });
+});
+
+describe("ChessGame blunder board rewind", () => {
+  const reachDelayedPlayerBlunder = async () => {
+    const line = new Chess();
+    line.move("e4");
+    line.move("d5");
+    const sourceFenBeforeBlunder = line.fen();
+    line.move("Nf3");
+    const fenAfterBlunder = line.fen();
+    line.move("Nc6");
+    const liveFenAfterReply = line.fen();
+
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-rewind",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    getNextOpponentMoveMock.mockReset();
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "engine",
+        move: { uci: "d7d5", san: "d5" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      })
+      .mockResolvedValueOnce({
+        mode: "engine",
+        move: { uci: "b8c6", san: "Nc6" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+
+    render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /nc6/i })).toBeInTheDocument();
+    });
+
+    return {
+      sourceFenBeforeBlunder,
+      fenAfterBlunder,
+      liveFenAfterReply,
+    };
+  };
+
+  const resolveMoveTwoAsBlunder = () => {
+    act(() => {
+      gameAnalysisStore.getState().resolveAnalysis(2, {
+        id: "rewind-blunder",
+        move: "g1f3",
+        bestMove: "d2d4",
+        bestEval: 50,
+        playedEval: -150,
+        currentPositionEval: -150,
+        moveIndex: 2,
+        delta: 200,
+        classification: "blunder" as const,
+        blunder: true,
+        recordable: true,
+      });
+    });
+  };
+
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    startGameMock.mockReset();
+    endGameMock.mockReset();
+    uploadSessionMovesMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    recordBlunderMock.mockReset();
+    recordManualBlunderMock.mockReset();
+    reviewSrsBlunderMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    evaluatePositionMock.mockReset();
+    lookupOpeningByFenMock.mockReset();
+    gameAnalysisStore.getState().clearAll();
+    capturedPieceDrop = null;
+    capturedSquareClick = null;
+
+    endGameMock.mockResolvedValue({});
+    uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+    lookupOpeningByFenMock.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("rewinds one ply at a time and stays on the pre-blunder position", async () => {
+    const { sourceFenBeforeBlunder, fenAfterBlunder, liveFenAfterReply } =
+      await reachDelayedPlayerBlunder();
+
+    vi.useFakeTimers();
+    resolveMoveTwoAsBlunder();
+
+    expect(useGameStore.getState().viewIndex).toBe(3);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      liveFenAfterReply,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(124);
+    });
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      liveFenAfterReply,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(useGameStore.getState().viewIndex).toBe(2);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      fenAfterBlunder,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(239);
+    });
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      fenAfterBlunder,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(10000);
+    });
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+  });
+
+  it("uses stored source fen when analysis resolves after later moves are already on the live board", async () => {
+    const { sourceFenBeforeBlunder, liveFenAfterReply } =
+      await reachDelayedPlayerBlunder();
+
+    expect(liveFenAfterReply).not.toBe(sourceFenBeforeBlunder);
+
+    vi.useFakeTimers();
+    resolveMoveTwoAsBlunder();
+
+    act(() => {
+      vi.advanceTimersByTime(365);
+    });
+
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+  });
+
+  it("ignores square-click interaction while the blunder rewind override is active", async () => {
+    const { sourceFenBeforeBlunder } = await reachDelayedPlayerBlunder();
+
+    vi.useFakeTimers();
+    resolveMoveTwoAsBlunder();
+
+    act(() => {
+      vi.advanceTimersByTime(365);
+    });
+
+    const moveCountBeforeClick = useGameStore.getState().moveHistory.length;
+    act(() => {
+      capturedSquareClick?.({ square: "e2" });
+      capturedSquareClick?.({ square: "e4" });
+    });
+
+    expect(useGameStore.getState().moveHistory).toHaveLength(moveCountBeforeClick);
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-allow-dragging",
+      "false",
+    );
+  });
+
+  it("clears pending rewind timers during reset so stale fen does not reapply afterward", async () => {
+    await reachDelayedPlayerBlunder();
+
+    vi.useFakeTimers();
+    resolveMoveTwoAsBlunder();
+
+    fireEvent.click(screen.getByRole("button", { name: /reset game/i }));
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      STARTING_FEN,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(5000);
+    });
+
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      STARTING_FEN,
+    );
+  });
+
+  it("shows blunder arrows on historical navigation without rewinding the selected move", async () => {
+    const { sourceFenBeforeBlunder, fenAfterBlunder, liveFenAfterReply } =
+      await reachDelayedPlayerBlunder();
+
+    vi.useFakeTimers();
+    resolveMoveTwoAsBlunder();
+
+    act(() => {
+      vi.advanceTimersByTime(365);
+    });
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /nc6/i }));
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      liveFenAfterReply,
+    );
+
+    const blunderMoveButton = screen.getByRole("button", { name: /nf3/i });
+    fireEvent.click(blunderMoveButton);
+
+    expect(useGameStore.getState().viewIndex).toBe(2);
+    expect(blunderMoveButton.className).toContain("selected");
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      fenAfterBlunder,
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+
+    expect(useGameStore.getState().viewIndex).toBe(2);
+    expect(blunderMoveButton.className).toContain("selected");
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      fenAfterBlunder,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute("data-arrow-count", "2");
   });
 });

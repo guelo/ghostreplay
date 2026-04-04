@@ -1,39 +1,56 @@
+import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
 import BoardStage from "./BoardStage";
 
+let boardMountCount = 0;
+let boardUnmountCount = 0;
+let nextBoardInstanceId = 1;
+
 vi.mock("react-chessboard", () => ({
-  Chessboard: ({ options }: { options: Record<string, unknown> }) => (
-    <div
-      data-testid="board"
-      data-position={options.position as string}
-      data-orientation={options.boardOrientation as string}
-    >
-      <button
-        type="button"
-        onClick={() =>
-          (
-            options.onPieceDrop as ((args: {
-              sourceSquare: string;
-              targetSquare: string;
-            }) => boolean)
-          )({ sourceSquare: "e2", targetSquare: "e4" })
-        }
+  Chessboard: ({ options }: { options: Record<string, unknown> }) => {
+    const instanceIdRef = React.useRef(nextBoardInstanceId++);
+
+    React.useEffect(() => {
+      boardMountCount += 1;
+      return () => {
+        boardUnmountCount += 1;
+      };
+    }, []);
+
+    return (
+      <div
+        data-testid="board"
+        data-instance-id={String(instanceIdRef.current)}
+        data-position={options.position as string}
+        data-orientation={options.boardOrientation as string}
       >
-        Drop move
-      </button>
-      <button
-        type="button"
-        onClick={() =>
-          (options.onSquareClick as (args: { square: string }) => void)({
-            square: "e2",
-          })
-        }
-      >
-        Click square
-      </button>
-    </div>
-  ),
+        <button
+          type="button"
+          onClick={() =>
+            (
+              options.onPieceDrop as ((args: {
+                sourceSquare: string;
+                targetSquare: string;
+              }) => boolean)
+            )({ sourceSquare: "e2", targetSquare: "e4" })
+          }
+        >
+          Drop move
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            (options.onSquareClick as (args: { square: string }) => void)({
+              square: "e2",
+            })
+          }
+        >
+          Click square
+        </button>
+      </div>
+    );
+  },
 }));
 
 const makeProps = () => {
@@ -51,6 +68,7 @@ const makeProps = () => {
   const onDismissRehookToast = vi.fn();
 
   return {
+    boardInstanceKey: 0,
     boardOrientation: "black" as const,
     displayedFen: "fen-value",
     onPieceDrop,
@@ -86,6 +104,26 @@ const makeProps = () => {
 };
 
 describe("BoardStage", () => {
+  it("remounts the board when boardInstanceKey changes", () => {
+    boardMountCount = 0;
+    boardUnmountCount = 0;
+    nextBoardInstanceId = 1;
+
+    const props = makeProps();
+    const { rerender } = render(<BoardStage {...props} />);
+    const firstInstanceId = screen.getByTestId("board").getAttribute("data-instance-id");
+
+    expect(boardMountCount).toBe(1);
+    expect(boardUnmountCount).toBe(0);
+
+    rerender(<BoardStage {...props} boardInstanceKey={1} />);
+    const secondInstanceId = screen.getByTestId("board").getAttribute("data-instance-id");
+
+    expect(boardMountCount).toBe(2);
+    expect(boardUnmountCount).toBe(1);
+    expect(secondInstanceId).not.toBe(firstInstanceId);
+  });
+
   it("wires chessboard contract props", () => {
     const props = makeProps();
     render(<BoardStage {...props} />);

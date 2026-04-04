@@ -59,6 +59,7 @@ type UseChessGameLifecycleArgs = {
   showRevertWarning: boolean;
   setShowRevertWarning: Dispatch<SetStateAction<boolean>>;
   setShowResignWarning: Dispatch<SetStateAction<boolean>>;
+  clearBlunderBoardOverride?: () => void;
 };
 
 export const useChessGameLifecycle = ({
@@ -88,6 +89,7 @@ export const useChessGameLifecycle = ({
   showRevertWarning,
   setShowRevertWarning,
   setShowResignWarning,
+  clearBlunderBoardOverride,
 }: UseChessGameLifecycleArgs) => {
   useEffect(() => {
     fetchCurrentRating()
@@ -168,6 +170,7 @@ export const useChessGameLifecycle = ({
     store.setIsRated(false);
     setShowRevertWarning(false);
     setShowResignWarning(false);
+    clearBlunderBoardOverride?.();
 
     const isPlayerTurn = chess.turn() === (store.playerColor === "white" ? "w" : "b");
     const undoCount = isPlayerTurn && store.moveHistory.length >= 2 ? 2 : 1;
@@ -192,6 +195,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    clearBlunderBoardOverride,
     setShowResignWarning,
     setShowRevertWarning,
   ]);
@@ -252,6 +256,7 @@ export const useChessGameLifecycle = ({
         openingHistoryRef.current = [];
         resetEngine();
         coordinator.startSession(response.session_id);
+        clearBlunderBoardOverride?.();
         setBlunderAlert(null);
         setShowFlash(false);
         setBlunderReviewId(null);
@@ -288,6 +293,7 @@ export const useChessGameLifecycle = ({
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
+      clearBlunderBoardOverride,
       setEngineMessage,
       setIsStartingGame,
       setLiveOpening,
@@ -371,6 +377,7 @@ export const useChessGameLifecycle = ({
     openingHistoryRef.current = [];
     resetEngine();
     coordinator.clearSession();
+    clearBlunderBoardOverride?.();
     setBlunderAlert(null);
     setShowFlash(false);
     setShowPassToast(false);
@@ -401,6 +408,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    clearBlunderBoardOverride,
     setEngineMessage,
     setLiveOpening,
     setReviewFailModal,

@@ -5,6 +5,7 @@ import React, { memo } from "react";
 type BoardOrientation = "white" | "black";
 
 type BoardStageProps = {
+  boardInstanceKey: number;
   boardOrientation: BoardOrientation;
   displayedFen: string;
   onPieceDrop: (args: PieceDropHandlerArgs) => boolean;
@@ -52,6 +53,7 @@ const WarningTriangleIcon = () => (
 );
 
 const BoardStage = ({
+  boardInstanceKey,
   boardOrientation,
   displayedFen,
   onPieceDrop,
@@ -229,6 +231,7 @@ const BoardStage = ({
           {showEndedScrim && <div className="chessboard-ended-scrim" />}
           {showFlash && <div className="blunder-flash" />}
           <Chessboard
+            key={boardInstanceKey}
             options={{
               position: displayedFen,
               onPieceDrop,
