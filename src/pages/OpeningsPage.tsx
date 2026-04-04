@@ -330,8 +330,6 @@ function OpeningsPage() {
       ]
     : [];
   const currentBreadcrumb = breadcrumbs.at(-1) ?? null;
-  const parentBreadcrumb =
-    breadcrumbs.length > 1 ? (breadcrumbs.at(-2) ?? null) : null;
   const currentTitle = currentBreadcrumb?.opening_name ?? "OPENING SCOREBOARD";
   const currentBranchStats = response?.current_branch_stats ?? null;
   const heroTone = getPriorityTone(currentBranchStats?.score ?? null);
@@ -339,9 +337,6 @@ function OpeningsPage() {
   const heroStatsCaption = currentBreadcrumb
     ? "Selected opening aggregate"
     : "All scored roots in this repertoire";
-  const parentMoveLine = parentBreadcrumb
-    ? getOpeningMoveLine(parentBreadcrumb.opening_key, moveLinesByFen)
-    : null;
   const hasScoredCurrentBranch =
     response !== null && response.current_branch_stats.root_count > 0;
   const isTrueNoEvidence =
@@ -467,32 +462,6 @@ function OpeningsPage() {
                   </div>
                 </dl>
               </aside>
-
-              {parentBreadcrumb && (
-                <aside className="openings-shell__parent-card">
-                  <p className="openings-shell__parent-label">Parent branch</p>
-                  <button
-                    type="button"
-                    className="openings-shell__parent-button"
-                    onClick={() => {
-                      navigateToRoute({
-                        playerColor,
-                        openingKey: parentBreadcrumb.opening_key,
-                        path: breadcrumbs
-                          .slice(0, -2)
-                          .map((item) => item.opening_key),
-                      });
-                    }}
-                  >
-                    <span className="openings-shell__parent-name">
-                      {parentBreadcrumb.opening_name}
-                    </span>
-                    <span className="openings-shell__parent-meta">
-                      {parentMoveLine ?? "Line unavailable."}
-                    </span>
-                  </button>
-                </aside>
-              )}
             </div>
           </header>
 
