@@ -807,6 +807,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             isReviewMomentActive={isReviewMomentActive}
             resolvedReview={resolvedReview}
             isViewingLive={isViewingLive}
+            showRehookToast={showRehookToast}
+            onDismissRehookToast={handleDismissRehookToast}
           />
 
           <div className="chessboard-wrapper">
@@ -843,8 +845,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onCancelResign={cancelResign}
                 showEndedScrim={showEndedScrim}
                 showFlash={showFlash}
-                showRehookToast={showRehookToast}
-                onDismissRehookToast={handleDismissRehookToast}
               />
             </div>
             <PostGameBanner

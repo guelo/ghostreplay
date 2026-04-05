@@ -35,8 +35,6 @@ type BoardStageProps = {
   onCancelResign: () => void;
   showEndedScrim: boolean;
   showFlash: boolean;
-  showRehookToast: boolean;
-  onDismissRehookToast: () => void;
 };
 
 const WarningTriangleIcon = () => (
@@ -83,8 +81,6 @@ const BoardStage = ({
   onCancelResign,
   showEndedScrim,
   showFlash,
-  showRehookToast,
-  onDismissRehookToast,
 }: BoardStageProps) => {
   return (
       <div className="chessboard-board-area">
@@ -247,18 +243,6 @@ const BoardStage = ({
               },
             }}
           />
-          {showRehookToast && (
-            <div
-              className="rehook-toast"
-              onClick={onDismissRehookToast}
-              role="status"
-            >
-              <span className="rehook-toast__label">Ghost reactivated</span>
-              <p className="rehook-toast__detail">
-                Ghost reactivated: steering to past mistake
-              </p>
-            </div>
-          )}
       </div>
   );
 };

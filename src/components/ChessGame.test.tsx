@@ -1023,7 +1023,7 @@ describe("ChessGame blunder recording", () => {
     });
 
     expect(
-      screen.queryByText("Ghost reactivated: steering to past mistake"),
+      screen.queryByText("Ghost reactivated"),
     ).not.toBeInTheDocument();
 
     await act(async () => {
@@ -1032,7 +1032,7 @@ describe("ChessGame blunder recording", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("Ghost reactivated: steering to past mistake"),
+        screen.getByText("Ghost reactivated"),
       ).toBeInTheDocument();
     });
 

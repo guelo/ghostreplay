@@ -29,6 +29,8 @@ type GameInfoPanelProps = {
   isReviewMomentActive: boolean;
   resolvedReview: ResolvedReview | null;
   isViewingLive: boolean;
+  showRehookToast: boolean;
+  onDismissRehookToast: () => void;
 };
 
 const GhostIcon = () => (
@@ -89,6 +91,8 @@ const GameInfoPanel = ({
   isReviewMomentActive,
   resolvedReview,
   isViewingLive,
+  showRehookToast,
+  onDismissRehookToast,
 }: GameInfoPanelProps) => {
   return (
     <div className="chess-panel" aria-live="polite">
@@ -193,6 +197,18 @@ const GameInfoPanel = ({
             <span className="chess-meta-strong">{opponentName}</span>
           )}
         </div>
+      )}
+      {isGameActive && opponentMode === "ghost" && showRehookToast && (
+        <button
+          className="rehook-toast"
+          onClick={onDismissRehookToast}
+          type="button"
+        >
+          <span className="rehook-toast__label">Ghost reactivated</span>
+          <span className="rehook-toast__detail">
+            Steering to past mistake
+          </span>
+        </button>
       )}
       {isGameActive && (
         <p className="chess-meta">
