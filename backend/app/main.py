@@ -22,6 +22,7 @@ from app.api.session import router as session_router
 from app.api.srs import router as srs_router
 from app.db import engine
 from app.security import AuthMiddleware
+from app.http_logging import HTTPLoggingMiddleware
 
 
 @asynccontextmanager
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(HTTPLoggingMiddleware)
 
     app.include_router(analysis_router)
     app.include_router(auth_router)
