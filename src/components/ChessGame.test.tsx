@@ -1071,8 +1071,9 @@ describe("ChessGame blunder recording", () => {
             delta: 20,
             classification: "good" as const,
             blunder: false,
-        recordable: false,
+            recordable: false,
           });
+          return "review-pass";
         }
       },
     );
@@ -1143,8 +1144,9 @@ describe("ChessGame blunder recording", () => {
             delta: 50,
             classification: "good" as const,
             blunder: false,
-        recordable: false,
+            recordable: false,
           });
+          return "review-fail";
         }
       },
     );
@@ -1202,8 +1204,9 @@ describe("ChessGame blunder recording", () => {
             delta: 20,
             classification: "good" as const,
             blunder: false,
-        recordable: false,
+            recordable: false,
           });
+          return "review-pass-api-error";
         }
       },
     );
@@ -1269,6 +1272,7 @@ describe("ChessGame blunder recording", () => {
             blunder: false,
             recordable: false,
           });
+          return "review-pass-overlay";
         }
       },
     );
@@ -1322,6 +1326,7 @@ describe("ChessGame blunder recording", () => {
             blunder: false,
             recordable: false,
           });
+          return "review-fail-overlay";
         }
       },
     );
@@ -1375,6 +1380,7 @@ describe("ChessGame blunder recording", () => {
             blunder: false,
             recordable: false,
           });
+          return "review-pass-clear";
         }
       },
     );
@@ -1435,6 +1441,7 @@ describe("ChessGame blunder recording", () => {
             blunder: false,
             recordable: false,
           });
+          return "review-pass-revert";
         }
       },
     );
