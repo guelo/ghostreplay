@@ -68,4 +68,29 @@ describe("createAnalysisStore — freshlyResolved", () => {
     expect(seen[0]?.moveIndex).toBe(0);
     expect(seen[1]?.moveIndex).toBe(1);
   });
+
+  it("removeAnalysis clears a stale entry and related transient state for that ply", () => {
+    store.getState().resolveAnalysis(
+      2,
+      makeResult({ moveIndex: 2, classification: "best" }),
+    );
+    store.getState().markFreshlyResolved(2);
+    store.getState().setStreamingEval({ moveIndex: 2, cp: 18 });
+
+    store.getState().removeAnalysis(2);
+
+    expect(store.getState().analysisMap.has(2)).toBe(false);
+    expect(store.getState().freshlyResolved.has(2)).toBe(false);
+    expect(store.getState().lastAnalysis).toBeNull();
+    expect(store.getState().streamingEval).toBeNull();
+  });
+
+  it("removeAnalysis clears same-ply streaming state even without a resolved map entry", () => {
+    store.getState().setStreamingEval({ moveIndex: 4, cp: 36 });
+
+    store.getState().removeAnalysis(4);
+
+    expect(store.getState().analysisMap.has(4)).toBe(false);
+    expect(store.getState().streamingEval).toBeNull();
+  });
 });

@@ -2,6 +2,7 @@ import { Chessboard } from "react-chessboard";
 import { memo, type RefObject } from "react";
 import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { TargetBlunderSrs } from "../../../utils/api";
+import type { ResolvedReview } from "../types";
 
 type BoardOrientation = "white" | "black";
 
@@ -26,6 +27,8 @@ type GameInfoPanelProps = {
   blunderReviewSrs: TargetBlunderSrs | null;
   displayedOpening: OpeningLookupResult | null;
   isReviewMomentActive: boolean;
+  resolvedReview: ResolvedReview | null;
+  isViewingLive: boolean;
 };
 
 const GhostIcon = () => (
@@ -84,6 +87,8 @@ const GameInfoPanel = ({
   blunderReviewSrs,
   displayedOpening,
   isReviewMomentActive,
+  resolvedReview,
+  isViewingLive,
 }: GameInfoPanelProps) => {
   return (
     <div className="chess-panel" aria-live="polite">
@@ -198,6 +203,24 @@ const GameInfoPanel = ({
               : "Unknown"}
           </span>
         </p>
+      )}
+      {resolvedReview && isViewingLive && (
+        <div className={`review-warning-toast review-warning-toast--${resolvedReview.result}`}>
+          <div className="review-warning-toast__header">
+            <WarningTriangleIcon />
+            <span className="review-warning-toast__label">Review Position</span>
+          </div>
+          <p className="review-warning-toast__detail">
+            Be careful. You've messed this position up before.
+          </p>
+          {resolvedReview.result !== 'pending' && (
+            <div className="review-warning-toast__overlay">
+              <span className="review-warning-toast__overlay-icon">
+                {resolvedReview.result === 'pass' ? '✓' : '✗'}
+              </span>
+            </div>
+          )}
+        </div>
       )}
       {isReviewMomentActive && (
         <div className="review-warning-toast" role="alert">

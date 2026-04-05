@@ -74,9 +74,11 @@ const setup = ({
     moveIndex: number;
   } | null> = { current: null };
   const pendingSrsReviewRef: MutableRefObject<{
+    analysisId: string;
     blunderId: number;
     moveIndex: number;
     userMoveSan: string;
+    srs: null;
   } | null> = { current: null };
 
   const clearMoveHighlights = vi.fn();
@@ -126,6 +128,7 @@ const setup = ({
       showRevertWarning: false,
       setShowRevertWarning,
       setShowResignWarning: vi.fn(),
+      setResolvedReview: vi.fn(),
     }),
   );
 

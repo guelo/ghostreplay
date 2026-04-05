@@ -1236,6 +1236,231 @@ describe("ChessGame blunder recording", () => {
       ).toBeInTheDocument();
     });
   });
+
+  it("shows pass overlay on resolved review toast after analysis returns", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 42,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        decision_source: "ghost_path",
+      })
+      .mockResolvedValue({
+        mode: "engine",
+        move: { uci: "b8c6", san: "Nc6" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
+            id: "review-pass-overlay",
+            move,
+            bestMove: "g1f3",
+            bestEval: 40,
+            playedEval: 20,
+            currentPositionEval: 20,
+            moveIndex: 2,
+            delta: 20,
+            classification: "good" as const,
+            blunder: false,
+            recordable: false,
+          });
+        }
+      },
+    );
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      const toast = document.querySelector(".review-warning-toast--pass");
+      expect(toast).toBeInTheDocument();
+      expect(toast?.querySelector(".review-warning-toast__overlay-icon")?.textContent).toBe("✓");
+    });
+  });
+
+  it("shows fail overlay on resolved review toast after analysis returns", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 99,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        decision_source: "ghost_path",
+      })
+      .mockResolvedValue({
+        mode: "engine",
+        move: { uci: "b8c6", san: "Nc6" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
+            id: "review-fail-overlay",
+            move,
+            bestMove: "g1f3",
+            bestEval: 40,
+            playedEval: -10,
+            currentPositionEval: -10,
+            moveIndex: 2,
+            delta: 50,
+            classification: "good" as const,
+            blunder: false,
+            recordable: false,
+          });
+        }
+      },
+    );
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      const toast = document.querySelector(".review-warning-toast--fail");
+      expect(toast).toBeInTheDocument();
+      expect(toast?.querySelector(".review-warning-toast__overlay-icon")?.textContent).toBe("✗");
+    });
+  });
+
+  it("clears resolved review overlay on next move", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 42,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        decision_source: "ghost_path",
+      })
+      .mockResolvedValue({
+        mode: "engine",
+        move: { uci: "b8c6", san: "Nc6" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
+            id: "review-pass-clear",
+            move,
+            bestMove: "g1f3",
+            bestEval: 40,
+            playedEval: 20,
+            currentPositionEval: 20,
+            moveIndex: 2,
+            delta: 20,
+            classification: "good" as const,
+            blunder: false,
+            recordable: false,
+          });
+        }
+      },
+    );
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast--pass")).toBeInTheDocument();
+    });
+
+    // Make another move — overlay should clear
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "d2", targetSquare: "d4" });
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast--pass")).not.toBeInTheDocument();
+    });
+  });
+
+  it("clears resolved review overlay on revert", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 42,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        decision_source: "ghost_path",
+      })
+      .mockResolvedValue({
+        mode: "engine",
+        move: { uci: "b8c6", san: "Nc6" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
+            id: "review-pass-revert",
+            move,
+            bestMove: "g1f3",
+            bestEval: 40,
+            playedEval: 20,
+            currentPositionEval: 20,
+            moveIndex: 2,
+            delta: 20,
+            classification: "good" as const,
+            blunder: false,
+            recordable: false,
+          });
+        }
+      },
+    );
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast--pass")).toBeInTheDocument();
+    });
+
+    // Trigger revert (unrated, so no warning dialog)
+    useGameStore.getState().setIsRated(false);
+    fireEvent.click(screen.getByTitle("Revert last move"));
+
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast--pass")).not.toBeInTheDocument();
+    });
+  });
 });
 
 describe("ChessGame move analysis", () => {

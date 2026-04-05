@@ -570,6 +570,66 @@
     margin-top: 0.15rem;
 }
 
+.review-warning-toast--pending,
+.review-warning-toast--pass,
+.review-warning-toast--fail {
+    position: relative;
+    overflow: hidden;
+}
+
+.review-warning-toast--pending {
+    opacity: 0.7;
+}
+
+.review-warning-toast--pass {
+    border-color: var(--success);
+    border-left-color: var(--success);
+    background: color-mix(in srgb, var(--success) 8%, var(--warning-bg));
+}
+
+.review-warning-toast--fail {
+    border-color: var(--eval-blunder);
+    border-left-color: var(--eval-blunder);
+    background: color-mix(in srgb, var(--eval-blunder) 8%, var(--warning-bg));
+}
+
+.review-warning-toast__overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: inherit;
+    animation: review-overlay-in 300ms ease-out;
+}
+
+.review-warning-toast--pass .review-warning-toast__overlay {
+    background: color-mix(in srgb, var(--success) 20%, transparent);
+}
+
+.review-warning-toast--fail .review-warning-toast__overlay {
+    background: color-mix(in srgb, var(--eval-blunder) 20%, transparent);
+}
+
+.review-warning-toast__overlay-icon {
+    font-size: 2.5rem;
+    font-weight: 900;
+    line-height: 1;
+}
+
+.review-warning-toast--pass .review-warning-toast__overlay-icon {
+    color: var(--success);
+}
+
+.review-warning-toast--fail .review-warning-toast__overlay-icon {
+    color: var(--eval-blunder);
+}
+
+@keyframes review-overlay-in {
+    0% { opacity: 0; transform: scale(0.8); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
 .chessboard-overlay {
     position: absolute;
     inset: 0;

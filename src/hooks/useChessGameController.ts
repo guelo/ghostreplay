@@ -3,6 +3,7 @@ import type { Chess } from "chess.js";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
+import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
 
 export type PendingAnalysisContext = {
@@ -14,6 +15,7 @@ export type PendingAnalysisContext = {
 };
 
 export type PendingSrsReview = {
+  analysisId: string;
   blunderId: number;
   moveIndex: number;
   userMoveSan: string;
@@ -37,7 +39,7 @@ type AnalyzeMoveFn = (
   playerColor: "white" | "black",
   moveIndex?: number,
   legalMoveCount?: number,
-) => void;
+) => string | undefined;
 
 type EvaluatePositionFn = (fen: string) => Promise<{ move: string; raw: string }>;
 
@@ -53,6 +55,8 @@ type UseChessGameControllerOptions = {
   setBlunderReviewSrs: Dispatch<SetStateAction<TargetBlunderSrs | null>>;
   setBlunderTargetFen: Dispatch<SetStateAction<string | null>>;
   setShowGhostInfo: Dispatch<SetStateAction<boolean>>;
+  resolvedReview: ResolvedReview | null;
+  setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
   analyzeMove: AnalyzeMoveFn;
   evaluatePosition: EvaluatePositionFn;
   handleGameEnd: () => Promise<void>;
@@ -74,6 +78,8 @@ export const useChessGameController = ({
   setBlunderReviewSrs,
   setBlunderTargetFen,
   setShowGhostInfo,
+  resolvedReview,
+  setResolvedReview,
   analyzeMove,
   evaluatePosition,
   handleGameEnd,
@@ -108,15 +114,17 @@ export const useChessGameController = ({
       store.setMoveHistory(nextMoveHistory);
       store.setViewIndex(null);
 
-      analyzeMove(
-        fenBeforeMove,
-        uciMove,
-        analysisColor,
-        moveIndex,
-        legalMoveCount,
-      );
+      const analysisId =
+        analyzeMove(
+          fenBeforeMove,
+          uciMove,
+          analysisColor,
+          moveIndex,
+          legalMoveCount,
+        ) ?? `analysis-${moveIndex}-${uciMove}`;
 
       return {
+        analysisId,
         fenAfter: newFen,
         moveIndex,
         moveSan: appliedMove.san,
@@ -151,6 +159,11 @@ export const useChessGameController = ({
       clearBlunderBoardOverride?.();
       setBlunderAlert(null);
 
+      // Clear any existing resolved review overlay before processing
+      if (resolvedReview !== null) {
+        setResolvedReview(null);
+      }
+
       const playerColor = useGameStore.getState().playerColor;
       const committed = commitAppliedMove(
         move,
@@ -161,6 +174,7 @@ export const useChessGameController = ({
 
       if (blunderReviewId !== null) {
         pendingSrsReviewRef.current = {
+          analysisId: committed.analysisId,
           blunderId: blunderReviewId,
           moveIndex: committed.moveIndex,
           userMoveSan: committed.moveSan,
@@ -168,6 +182,11 @@ export const useChessGameController = ({
         };
         setBlunderReviewId(null);
         setBlunderReviewSrs(null);
+        setResolvedReview({
+          analysisId: committed.analysisId,
+          moveIndex: committed.moveIndex,
+          result: "pending",
+        });
       }
 
       pendingAnalysisContextRef.current = {
@@ -195,9 +214,11 @@ export const useChessGameController = ({
       commitAppliedMove,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
+      resolvedReview,
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
+      setResolvedReview,
       clearBlunderBoardOverride,
     ],
   );
@@ -315,6 +336,7 @@ export const useChessGameController = ({
         // and it's now the player's turn.
         const sideToMove = chess.turn() === "w" ? "white" : "black";
         if (targetBlunderId !== null && sideToMove === playerColor) {
+          setResolvedReview(null);
           setBlunderReviewId(targetBlunderId);
           setBlunderReviewSrs(targetBlunderSrs);
           setBlunderTargetFen(targetFen);
@@ -344,6 +366,7 @@ export const useChessGameController = ({
       setBlunderReviewSrs,
       setBlunderTargetFen,
       setEngineMessage,
+      setResolvedReview,
       setShowGhostInfo,
     ],
   );

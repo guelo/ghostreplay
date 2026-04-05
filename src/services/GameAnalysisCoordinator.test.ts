@@ -224,6 +224,73 @@ describe('GameAnalysisCoordinator', () => {
     })
   })
 
+  describe('latest request wins per move index', () => {
+    it('ignores stale worker results for a replayed ply', () => {
+      coordinator.startSession('session-A')
+
+      const firstId = coordinator.analyzeMove('fen-old', 'e2e4', 'white', 0, 20)
+      const secondId = coordinator.analyzeMove('fen-new', 'd2d4', 'white', 0, 20)
+
+      expect(firstId).toBeTruthy()
+      expect(secondId).toBeTruthy()
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: firstId,
+          move: 'e2e4',
+          bestMove: 'e2e4',
+          bestEval: 15,
+          playedEval: 15,
+          delta: 0,
+          classification: 'best',
+        },
+      })
+
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: secondId,
+          move: 'd2d4',
+          bestMove: 'd2d4',
+          bestEval: 20,
+          playedEval: 20,
+          delta: 0,
+          classification: 'best',
+        },
+      })
+
+      expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(secondId)
+      expect(coordinator.store.getState().analysisMap.get(0)?.move).toBe('d2d4')
+    })
+
+    it('clears the previous analysisMap entry as soon as a replay starts for that ply', () => {
+      coordinator.startSession('session-A')
+
+      ;(coordinator.store.getState()).resolveAnalysis(0, {
+        id: 'old-id',
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 10,
+        playedEval: 10,
+        currentPositionEval: 10,
+        moveIndex: 0,
+        delta: 0,
+        classification: 'best',
+        blunder: false,
+        recordable: false,
+      })
+
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(true)
+
+      coordinator.analyzeMove('fen-new', 'd2d4', 'white', 0, 20)
+
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+    })
+  })
+
   // ---------------------------------------------------------------
   // In-flight upload handoff: dirty indices accumulated while an
   // upload is in flight must still be drained after session switch

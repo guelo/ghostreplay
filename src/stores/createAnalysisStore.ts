@@ -15,6 +15,7 @@ export type AnalysisStoreState = {
   freshlyResolved: Set<number>;
 
   resolveAnalysis: (moveIndex: number, result: AnalysisResult) => void;
+  removeAnalysis: (moveIndex: number) => void;
   setLastAnalysis: (result: AnalysisResult | null) => void;
   setStreamingEval: (
     value: { moveIndex: number; cp: number } | null,
@@ -49,6 +50,28 @@ export const createAnalysisStore = () =>
         const next = new Map(s.analysisMap);
         next.set(moveIndex, result);
         return { analysisMap: next, lastAnalysis: result };
+      }),
+    removeAnalysis: (moveIndex) =>
+      set((s) => {
+        const hasAnalysis = s.analysisMap.has(moveIndex);
+        const hasFresh = s.freshlyResolved.has(moveIndex);
+        const clearsLastAnalysis = s.lastAnalysis?.moveIndex === moveIndex;
+        const clearsStreaming = s.streamingEval?.moveIndex === moveIndex;
+        if (!hasAnalysis && !hasFresh && !clearsLastAnalysis && !clearsStreaming) {
+          return {};
+        }
+        const next = new Map(s.analysisMap);
+        next.delete(moveIndex);
+        const nextFresh = new Set(s.freshlyResolved);
+        nextFresh.delete(moveIndex);
+        return {
+          analysisMap: next,
+          freshlyResolved: nextFresh,
+          lastAnalysis:
+            s.lastAnalysis?.moveIndex === moveIndex ? null : s.lastAnalysis,
+          streamingEval:
+            s.streamingEval?.moveIndex === moveIndex ? null : s.streamingEval,
+        };
       }),
     setLastAnalysis: (result) => set({ lastAnalysis: result }),
     setStreamingEval: (value) => set({ streamingEval: value }),

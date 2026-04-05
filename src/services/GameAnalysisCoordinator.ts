@@ -36,6 +36,7 @@ const IDLE_SHUTDOWN_MS = 5 * 60 * 1000 // 5 minutes
 const RETRY_MAX_DELAY_MS = 30_000
 
 type PendingCacheLookup = {
+  requestId: string
   fen: string
   move: string
   moveIndex: number
@@ -54,6 +55,7 @@ const toPlayerPerspective = (
 }
 
 const fromCachedAnalysis = (
+  requestId: string,
   cached: CachedAnalysis,
   move: string,
   moveIndex: number,
@@ -72,7 +74,7 @@ const fromCachedAnalysis = (
     isWithinRecordingMoveCap(moveIndex)
 
   return {
-    id: createRequestId(),
+    id: requestId,
     move,
     bestMove: cached.best_move_uci ?? move,
     bestEval,
@@ -103,6 +105,7 @@ export class GameAnalysisCoordinator {
   private worker: Worker | null = null
   private pendingMoveIndices = new Map<string, number>()
   private pendingMeta = new Map<string, { moveIndex: number; legalMoveCount: number | undefined }>()
+  private latestRequestIds = new Map<number, string>()
   private resolvedIndices = new Set<number>()
   private lastStreamingUpdateMs = 0
 
@@ -186,6 +189,7 @@ export class GameAnalysisCoordinator {
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
+    this.latestRequestIds.clear()
     this.pendingCacheLookups = []
     if (this.cacheFlushTimer) {
       clearTimeout(this.cacheFlushTimer)
@@ -219,6 +223,7 @@ export class GameAnalysisCoordinator {
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
+    this.latestRequestIds.clear()
     this.pendingCacheLookups = []
     if (this.cacheFlushTimer) {
       clearTimeout(this.cacheFlushTimer)
@@ -264,8 +269,11 @@ export class GameAnalysisCoordinator {
 
     const id = createRequestId()
     if (moveIndex !== undefined) {
+      this.store.getState().removeAnalysis(moveIndex)
       this.pendingMoveIndices.set(id, moveIndex)
       this.pendingMeta.set(id, { moveIndex, legalMoveCount })
+      this.latestRequestIds.set(moveIndex, id)
+      this.resolvedIndices.delete(moveIndex)
     }
 
     const message: AnalyzeMoveMessage = {
@@ -280,7 +288,7 @@ export class GameAnalysisCoordinator {
     this.worker.postMessage(message)
 
     if (moveIndex !== undefined) {
-      this.scheduleCacheLookup({ fen, move, moveIndex, playerColor, legalMoveCount })
+      this.scheduleCacheLookup({ requestId: id, fen, move, moveIndex, playerColor, legalMoveCount })
     }
 
     this.resetIdleTimer()
@@ -292,6 +300,7 @@ export class GameAnalysisCoordinator {
     this.lastStreamingUpdateMs = 0
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
+    this.latestRequestIds.clear()
     this.resolvedIndices.clear()
     this.pendingCacheLookups = []
     if (this.cacheFlushTimer) {
@@ -316,7 +325,11 @@ export class GameAnalysisCoordinator {
         break
       case 'analysis-streaming': {
         const streamIdx = this.pendingMoveIndices.get(message.id)
-        if (streamIdx !== undefined && !this.resolvedIndices.has(streamIdx)) {
+        if (
+          streamIdx !== undefined &&
+          this.latestRequestIds.get(streamIdx) === message.id &&
+          !this.resolvedIndices.has(streamIdx)
+        ) {
           const now = performance.now()
           if (now - this.lastStreamingUpdateMs >= 250) {
             this.lastStreamingUpdateMs = now
@@ -338,7 +351,13 @@ export class GameAnalysisCoordinator {
         const meta = this.pendingMeta.get(message.id)
         this.pendingMeta.delete(message.id)
 
-        if (moveIndex !== undefined && this.resolvedIndices.has(moveIndex)) {
+        if (
+          moveIndex !== undefined &&
+          (
+            this.latestRequestIds.get(moveIndex) !== message.id ||
+            this.resolvedIndices.has(moveIndex)
+          )
+        ) {
           break
         }
 
@@ -399,6 +418,7 @@ export class GameAnalysisCoordinator {
   // --- Resolution ---
 
   private resolveAnalysisResult(moveIndex: number, result: AnalysisResult) {
+    if (this.latestRequestIds.get(moveIndex) !== result.id) return
     if (this.resolvedIndices.has(moveIndex)) return
     this.resolvedIndices.add(moveIndex)
     this.store.getState().resolveAnalysis(moveIndex, result)
@@ -444,6 +464,7 @@ export class GameAnalysisCoordinator {
 
         for (const pending of batch) {
           if (pending.moveIndex === undefined) continue
+          if (this.latestRequestIds.get(pending.moveIndex) !== pending.requestId) continue
           if (this.resolvedIndices.has(pending.moveIndex)) continue
 
           const key = makeCacheKey(pending.fen, pending.move)
@@ -451,6 +472,7 @@ export class GameAnalysisCoordinator {
           if (!cached) continue
 
           const result = fromCachedAnalysis(
+            pending.requestId,
             cached,
             pending.move,
             pending.moveIndex,

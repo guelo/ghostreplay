@@ -1,5 +1,6 @@
 import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { TargetBlunderSrs } from "../../utils/api";
+import type { ResolvedReview } from "./types";
 import {
   recordBlunder,
   reviewSrsBlunder,
@@ -27,6 +28,7 @@ type PendingAnalysisContext = {
 };
 
 type PendingSrsReview = {
+  analysisId: string;
   blunderId: number;
   moveIndex: number;
   userMoveSan: string;
@@ -40,6 +42,8 @@ type AnalysisEffectsProps = {
   appendMoveMessage: (moveIndex: number, msg: MoveMessage) => void;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
+  resolvedReview: ResolvedReview | null;
+  setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
 };
 
 const playRandomBlunderAudio = () => {
@@ -59,6 +63,8 @@ const AnalysisEffects = ({
   appendMoveMessage,
   setBlunderAlert,
   setShowFlash,
+  resolvedReview,
+  setResolvedReview,
 }: AnalysisEffectsProps) => {
   const analysisStoreApi = useAnalysisStoreApi();
   const lastAnalysis = useAnalysisStore((s) => s.lastAnalysis);
@@ -120,7 +126,11 @@ const AnalysisEffects = ({
     }
 
     const pendingReview = pendingSrsReviewRef.current;
-    if (!pendingReview || pendingReview.moveIndex !== lastAnalysis.moveIndex) {
+    if (
+      !pendingReview ||
+      pendingReview.analysisId !== lastAnalysis.id ||
+      pendingReview.moveIndex !== lastAnalysis.moveIndex
+    ) {
       return;
     }
 
@@ -132,6 +142,15 @@ const AnalysisEffects = ({
 
     const evalLossCp = Math.max(lastAnalysis.delta, 0);
     const passed = !isRecordableFailure(evalLossCp);
+
+    // Only update the overlay if it's still the pending review for this move.
+    if (resolvedReview?.analysisId === lastAnalysis.id) {
+      setResolvedReview({
+        analysisId: lastAnalysis.id,
+        moveIndex: lastAnalysis.moveIndex,
+        result: passed ? "pass" : "fail",
+      });
+    }
 
     if (passed) {
       const srs = pendingReview.srs;
@@ -192,7 +211,7 @@ const AnalysisEffects = ({
     };
 
     void postReview();
-  }, [isGameActive, lastAnalysis, sessionId, pendingSrsReviewRef, appendMoveMessage]);
+  }, [isGameActive, lastAnalysis, sessionId, pendingSrsReviewRef, appendMoveMessage, resolvedReview, setResolvedReview]);
 
   // Blunder alert: show flash + toast + arrows for player blunders
   useEffect(() => {

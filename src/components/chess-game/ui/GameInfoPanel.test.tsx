@@ -38,6 +38,8 @@ const makeProps = () => {
     blunderReviewSrs: null as TargetBlunderSrs | null,
     displayedOpening: { eco: "C20", name: "King's Pawn Game", source: "eco" },
     isReviewMomentActive: false,
+    resolvedReview: null,
+    isViewingLive: true,
   };
 };
 

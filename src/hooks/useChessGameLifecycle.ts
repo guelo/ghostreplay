@@ -14,7 +14,7 @@ import type {
 } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
 import { sampleEloBin } from "../components/chess-game/elo";
-import type { BoardOrientation, OpenHistoryOptions } from "../components/chess-game/types";
+import type { BoardOrientation, OpenHistoryOptions, ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
 import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
 
@@ -27,9 +27,11 @@ type PendingAnalysisContext = {
 };
 
 type PendingSrsReview = {
+  analysisId: string;
   blunderId: number;
   moveIndex: number;
   userMoveSan: string;
+  srs: TargetBlunderSrs | null;
 };
 
 type UseChessGameLifecycleArgs = {
@@ -59,6 +61,7 @@ type UseChessGameLifecycleArgs = {
   showRevertWarning: boolean;
   setShowRevertWarning: Dispatch<SetStateAction<boolean>>;
   setShowResignWarning: Dispatch<SetStateAction<boolean>>;
+  setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
   clearBlunderBoardOverride?: () => void;
 };
 
@@ -89,6 +92,7 @@ export const useChessGameLifecycle = ({
   showRevertWarning,
   setShowRevertWarning,
   setShowResignWarning,
+  setResolvedReview,
   clearBlunderBoardOverride,
 }: UseChessGameLifecycleArgs) => {
   useEffect(() => {
@@ -149,6 +153,7 @@ export const useChessGameLifecycle = ({
         }
         useGameStore.getState().setIsGameActive(false);
         useGameStore.getState().setGameResult(result);
+        setResolvedReview(null);
         setShowPostGamePrompt(true);
       } catch (error) {
         const message =
@@ -160,6 +165,7 @@ export const useChessGameLifecycle = ({
     chess,
     coordinator,
     setEngineMessage,
+    setResolvedReview,
     setShowPostGamePrompt,
   ]);
 
@@ -185,6 +191,7 @@ export const useChessGameLifecycle = ({
     store.setViewIndex(null);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
+    setResolvedReview(null);
     setBlunderAlert(null);
     pendingSrsReviewRef.current = null;
     pendingAnalysisContextRef.current = null;
@@ -195,6 +202,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    setResolvedReview,
     clearBlunderBoardOverride,
     setShowResignWarning,
     setShowRevertWarning,
@@ -261,6 +269,7 @@ export const useChessGameLifecycle = ({
         setShowFlash(false);
         setBlunderReviewId(null);
         setBlunderReviewSrs(null);
+        setResolvedReview(null);
         setShowPassToast(false);
         setReviewFailModal(null);
         setShowPostGamePrompt(false);
@@ -293,6 +302,7 @@ export const useChessGameLifecycle = ({
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
+      setResolvedReview,
       clearBlunderBoardOverride,
       setEngineMessage,
       setIsStartingGame,
@@ -334,6 +344,7 @@ export const useChessGameLifecycle = ({
       const s = useGameStore.getState();
       s.setIsGameActive(false);
       s.setGameResult({ type: "resign", message: "You resigned." });
+      setResolvedReview(null);
       setShowPostGamePrompt(true);
     } catch (error) {
       const message =
@@ -344,6 +355,7 @@ export const useChessGameLifecycle = ({
     chess,
     coordinator,
     setEngineMessage,
+    setResolvedReview,
     setShowPostGamePrompt,
   ]);
 
@@ -387,6 +399,7 @@ export const useChessGameLifecycle = ({
     setShowStartOverlay(true);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
+    setResolvedReview(null);
     store.setIsRated(true);
     setShowRevertWarning(false);
     setShowResignWarning(false);
@@ -408,6 +421,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    setResolvedReview,
     clearBlunderBoardOverride,
     setEngineMessage,
     setLiveOpening,

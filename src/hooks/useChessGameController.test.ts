@@ -4,6 +4,7 @@ import { renderHook, act } from "@testing-library/react";
 import type { MutableRefObject } from "react";
 import type { TargetBlunderSrs } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
+import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
 import {
   useChessGameController,
@@ -19,6 +20,7 @@ type SetupOptions = {
   playerColor?: "white" | "black";
   blunderReviewId?: number | null;
   blunderReviewSrs?: TargetBlunderSrs | null;
+  resolvedReview?: ResolvedReview | null;
   moveHistory?: MoveRecord[];
 };
 
@@ -27,6 +29,7 @@ const createSetup = ({
   playerColor = "white",
   blunderReviewId = null,
   blunderReviewSrs = null,
+  resolvedReview = null,
   moveHistory = [],
 }: SetupOptions = {}) => {
   // Set up store state
@@ -50,6 +53,7 @@ const createSetup = ({
   const setBlunderReviewSrs = vi.fn();
   const setBlunderTargetFen = vi.fn();
   const setShowGhostInfo = vi.fn();
+  const setResolvedReview = vi.fn();
   const analyzeMove = vi.fn();
   const evaluatePosition = vi.fn().mockResolvedValue({ move: "(none)", raw: "" });
   const handleGameEnd = vi.fn().mockResolvedValue(undefined);
@@ -68,6 +72,8 @@ const createSetup = ({
       setBlunderReviewSrs,
       setBlunderTargetFen,
       setShowGhostInfo,
+      resolvedReview,
+      setResolvedReview,
       analyzeMove,
       evaluatePosition,
       handleGameEnd,
@@ -86,6 +92,7 @@ const createSetup = ({
     setBlunderReviewSrs,
     setBlunderTargetFen,
     setShowGhostInfo,
+    setResolvedReview,
     analyzeMove,
     evaluatePosition,
     handleGameEnd,
@@ -153,6 +160,7 @@ describe("useChessGameController", () => {
 
     expect(moveResult.applied).toBe(true);
     expect(pendingSrsReviewRef.current).toEqual({
+      analysisId: expect.any(String),
       blunderId: 42,
       moveIndex: 0,
       userMoveSan: "e4",
@@ -160,6 +168,42 @@ describe("useChessGameController", () => {
     });
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
+  });
+
+  it("sets resolvedReview to pending synchronously when clearing blunder review", () => {
+    const {
+      result,
+      setResolvedReview,
+    } = createSetup({ blunderReviewId: 42 });
+
+    act(() => {
+      result.current.applyPlayerMove("e2", "e4");
+    });
+
+    expect(setResolvedReview).toHaveBeenCalledWith({
+      analysisId: expect.any(String),
+      moveIndex: 0,
+      result: "pending",
+    });
+  });
+
+  it("clears previous resolvedReview on next move", () => {
+    const {
+      result,
+      setResolvedReview,
+    } = createSetup({
+      resolvedReview: {
+        analysisId: "analysis-0-e2e4",
+        moveIndex: 0,
+        result: "pass",
+      },
+    });
+
+    act(() => {
+      result.current.applyPlayerMove("e2", "e4");
+    });
+
+    expect(setResolvedReview).toHaveBeenCalledWith(null);
   });
 
   it("rejects drop moves when interaction preconditions fail", () => {
@@ -250,6 +294,7 @@ describe("useChessGameController", () => {
       setBlunderReviewId,
       setBlunderReviewSrs,
       setBlunderTargetFen,
+      setResolvedReview,
       setShowGhostInfo,
     } = createSetup({
       chess,
@@ -270,6 +315,7 @@ describe("useChessGameController", () => {
     expect(setBlunderReviewId).toHaveBeenCalledWith(77);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(targetSrs);
     expect(setBlunderTargetFen).toHaveBeenCalledWith("target-fen");
+    expect(setResolvedReview).toHaveBeenCalledWith(null);
     expect(setShowGhostInfo).not.toHaveBeenCalled();
   });
 });

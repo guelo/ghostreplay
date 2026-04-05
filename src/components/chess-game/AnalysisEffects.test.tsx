@@ -52,6 +52,8 @@ describe("AnalysisEffects — best-move bling", () => {
           appendMoveMessage={vi.fn()}
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
+          resolvedReview={null}
+          setResolvedReview={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );

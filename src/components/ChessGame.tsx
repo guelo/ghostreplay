@@ -34,7 +34,7 @@ import {
   STARTING_FEN,
 } from "./chess-game/config";
 import { eloStakes } from "./chess-game/elo";
-import type { OpenHistoryOptions } from "./chess-game/types";
+import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
@@ -123,6 +123,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
   const [blunderReviewSrs, setBlunderReviewSrs] =
     useState<TargetBlunderSrs | null>(null);
+  const [resolvedReview, setResolvedReview] = useState<ResolvedReview | null>(null);
   const [blunderTargetFen, setBlunderTargetFen] = useState<string | null>(null);
   const [showGhostInfo, setShowGhostInfo] = useState(false);
   const ghostInfoAnchorRef = useRef<HTMLSpanElement>(null);
@@ -155,6 +156,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveIndex: number;
   } | null>(null);
   const pendingSrsReviewRef = useRef<{
+    analysisId: string;
     blunderId: number;
     moveIndex: number;
     userMoveSan: string;
@@ -371,6 +373,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setBlunderReviewSrs,
       setBlunderTargetFen,
       setShowGhostInfo,
+      resolvedReview,
+      setResolvedReview,
       analyzeMove,
       evaluatePosition,
       handleGameEnd: handleGameEndStable,
@@ -424,6 +428,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     showRevertWarning,
     setShowRevertWarning,
     setShowResignWarning,
+    setResolvedReview,
     clearBlunderBoardOverride,
   });
 
@@ -800,6 +805,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             blunderReviewSrs={blunderReviewSrs}
             displayedOpening={displayedOpening}
             isReviewMomentActive={isReviewMomentActive}
+            resolvedReview={resolvedReview}
+            isViewingLive={isViewingLive}
           />
 
           <div className="chessboard-wrapper">
@@ -878,6 +885,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           appendMoveMessage={appendMoveMessage}
           setBlunderAlert={setBlunderAlert}
           setShowFlash={setShowFlash}
+          resolvedReview={resolvedReview}
+          setResolvedReview={setResolvedReview}
         />
       </section>
     </AnalysisStoreProvider>
