@@ -138,7 +138,8 @@ class HTTPLoggingMiddleware:
             duration_ms = (time.monotonic() - start) * 1000
             status_code = res_status[0] if res_status[0] is not None else 500
 
-            user = scope.get("state", {}).get("user")
+            state = scope.get("state") or {}
+            user = state.get("user") if isinstance(state, dict) else getattr(state, "user", None)
             user_id = getattr(user, "user_id", None)
 
             http_fields: dict = {

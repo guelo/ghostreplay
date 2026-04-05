@@ -36,16 +36,6 @@ def test_logs_metadata_on_success(client, http_log):
     assert "request_id" in h
 
 
-def test_logs_user_id_when_authenticated(client, http_log):
-    token = create_access_token(user_id=42, username="testuser", is_anonymous=False)
-    client.get("/health", headers={"Authorization": f"Bearer {token}"})
-    rec = next(r for r in http_log.records if hasattr(r, "http") and r.http.get("path") == "/health")
-    # /health is exempt from auth so user_id will be None; use an authenticated endpoint
-    # instead — the path that matters is that user_id flows through when auth succeeds.
-    # We'll hit /api/game/start which requires auth (but will 422 without body — that's fine).
-    pass
-
-
 def test_logs_authenticated_user_id(client, http_log):
     token = create_access_token(user_id=77, username="ghost_tester", is_anonymous=False)
     client.post("/api/game/start", json={"engine_elo": 1500, "player_color": "white"},
