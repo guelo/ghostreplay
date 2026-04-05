@@ -885,7 +885,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           appendMoveMessage={appendMoveMessage}
           setBlunderAlert={setBlunderAlert}
           setShowFlash={setShowFlash}
-          resolvedReview={resolvedReview}
           setResolvedReview={setResolvedReview}
         />
       </section>

@@ -42,7 +42,6 @@ type AnalysisEffectsProps = {
   appendMoveMessage: (moveIndex: number, msg: MoveMessage) => void;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
-  resolvedReview: ResolvedReview | null;
   setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
 };
 
@@ -63,7 +62,6 @@ const AnalysisEffects = ({
   appendMoveMessage,
   setBlunderAlert,
   setShowFlash,
-  resolvedReview,
   setResolvedReview,
 }: AnalysisEffectsProps) => {
   const analysisStoreApi = useAnalysisStoreApi();
@@ -144,13 +142,18 @@ const AnalysisEffects = ({
     const passed = !isRecordableFailure(evalLossCp);
 
     // Only update the overlay if it's still the pending review for this move.
-    if (resolvedReview?.analysisId === lastAnalysis.id) {
-      setResolvedReview({
-        analysisId: lastAnalysis.id,
-        moveIndex: lastAnalysis.moveIndex,
-        result: passed ? "pass" : "fail",
-      });
-    }
+    // Use functional update to avoid adding resolvedReview to deps (which would
+    // cause this effect to re-fire on the pending→pass/fail transition itself,
+    // potentially skipping the pending state if analysis returned quickly).
+    setResolvedReview((prev) =>
+      prev?.analysisId === lastAnalysis.id
+        ? {
+            analysisId: lastAnalysis.id,
+            moveIndex: lastAnalysis.moveIndex!,
+            result: passed ? "pass" : "fail",
+          }
+        : prev,
+    );
 
     if (passed) {
       const srs = pendingReview.srs;
@@ -211,7 +214,7 @@ const AnalysisEffects = ({
     };
 
     void postReview();
-  }, [isGameActive, lastAnalysis, sessionId, pendingSrsReviewRef, appendMoveMessage, resolvedReview, setResolvedReview]);
+  }, [isGameActive, lastAnalysis, sessionId, pendingSrsReviewRef, appendMoveMessage, setResolvedReview]);
 
   // Blunder alert: show flash + toast + arrows for player blunders
   useEffect(() => {
