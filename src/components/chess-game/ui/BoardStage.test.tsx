@@ -65,8 +65,6 @@ const makeProps = () => {
   const onCancelRevert = vi.fn();
   const onResignAnyway = vi.fn();
   const onCancelResign = vi.fn();
-  const onDismissRehookToast = vi.fn();
-
   return {
     boardInstanceKey: 0,
     boardOrientation: "black" as const,
@@ -98,8 +96,6 @@ const makeProps = () => {
     onCancelResign,
     showEndedScrim: false,
     showFlash: false,
-    showRehookToast: false,
-    onDismissRehookToast,
   };
 };
 
@@ -160,22 +156,14 @@ describe("BoardStage", () => {
     expect(props.onPlayBlack).toHaveBeenCalledTimes(1);
   });
 
-  it("dismisses revert warning and toast overlays through callbacks", () => {
+  it("dismisses revert warning through callbacks", () => {
     const props = makeProps();
-    render(
-      <BoardStage
-        {...props}
-        showRevertWarning
-        showRehookToast
-      />,
-    );
+    render(<BoardStage {...props} showRevertWarning />);
 
     fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
-    fireEvent.click(screen.getByText(/steering to past mistake/i));
 
     expect(props.onRevertAnyway).toHaveBeenCalledTimes(1);
     expect(props.onCancelRevert).toHaveBeenCalledTimes(1);
-    expect(props.onDismissRehookToast).toHaveBeenCalledTimes(1);
   });
 });

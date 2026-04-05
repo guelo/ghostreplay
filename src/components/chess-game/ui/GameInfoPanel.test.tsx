@@ -17,6 +17,7 @@ vi.mock("react-chessboard", () => ({
 const makeProps = () => {
   const onToggleGhostInfo = vi.fn();
   const onCloseGhostInfo = vi.fn();
+  const onDismissRehookToast = vi.fn();
   return {
     statusText: "White to move",
     gameStatusBadge: { label: "Active", className: "active" },
@@ -40,6 +41,8 @@ const makeProps = () => {
     isReviewMomentActive: false,
     resolvedReview: null,
     isViewingLive: true,
+    showRehookToast: false,
+    onDismissRehookToast,
   };
 };
 
@@ -50,6 +53,24 @@ describe("GameInfoPanel", () => {
 
     expect(screen.getByText("Ghost Master 2000")).toBeInTheDocument();
     expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
+  });
+
+  it("shows rehook toast below opponent label and calls dismiss on click", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        opponentMode="ghost"
+        opponentName=""
+        showRehookToast
+      />,
+    );
+
+    expect(screen.getByText("Ghost reactivated")).toBeInTheDocument();
+    expect(screen.getByText("Steering to past mistake")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Ghost reactivated"));
+    expect(props.onDismissRehookToast).toHaveBeenCalledTimes(1);
   });
 
   it("renders ghost target info and forwards ghost-info callbacks", () => {
