@@ -168,7 +168,9 @@
     --game-panel-width: 240px;
     --game-moves-width: 300px;
     --game-layout-gap: 1.5rem;
-    --game-board-max-width: calc((100dvh - var(--game-viewport-chrome)) * 5 / 6);
+    /* Graph is always 220px; board yields space down to 300px, then content scrolls */
+    --game-graph-height: 220px;
+    --game-board-max-width: max(300px, calc(100dvh - var(--game-viewport-chrome) - var(--game-graph-height) - 1rem));
     display: grid;
     grid-template-columns:
         var(--game-panel-width)
@@ -258,6 +260,16 @@
     position: relative;
     width: 100%;
     max-width: var(--game-board-max-width);
+}
+
+.chessboard-wrapper .analysis-graph > svg {
+    height: var(--game-graph-height);
+}
+
+@media (max-width: 767px) {
+    .chessboard-wrapper .analysis-graph > svg {
+        height: 330px;
+    }
 }
 
 .chessboard-board-with-eval {
@@ -973,7 +985,7 @@
 }
 
 .history-page .analysis-board__graph-row .analysis-graph > svg {
-    height: 8rem;
+    height: 220px;
 }
 
 .history-page .analysis-board__graph-footer {
@@ -1028,6 +1040,9 @@
     .history-page .analysis-board__graph-row .analysis-graph {
         width: 100%;
         max-width: 100%;
+    }
+    .history-page .analysis-board__graph-row .analysis-graph > svg {
+        height: 330px;
     }
     .history-page .analysis-board__graph-footer {
         max-width: 100%;
