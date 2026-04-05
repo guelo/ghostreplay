@@ -129,6 +129,7 @@ const setup = ({
       setShowRevertWarning,
       setShowResignWarning: vi.fn(),
       setResolvedReview: vi.fn(),
+      setPendingPromotion: vi.fn(),
     }),
   );
 

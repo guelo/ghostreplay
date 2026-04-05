@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import type { Chess } from "chess.js";
+import type { Square } from "chess.js";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
@@ -23,7 +24,7 @@ export type PendingSrsReview = {
 };
 
 export type PlayerMoveApplyResult =
-  | { applied: false }
+  | { applied: false; requiresPromotion?: true }
   | {
     applied: true;
     fenAfter: string;
@@ -63,6 +64,15 @@ type UseChessGameControllerOptions = {
   clearMoveHighlights: () => void;
   clearBlunderBoardOverride?: () => void;
 };
+
+function isPromotionNeeded(chess: Chess, from: string, to: string): boolean {
+  const piece = chess.get(from as Square);
+  if (!piece || piece.type !== 'p') return false;
+  const toRank = to[1];
+  if (piece.color === 'w' && toRank !== '8') return false;
+  if (piece.color === 'b' && toRank !== '1') return false;
+  return chess.moves({ verbose: true }).some((m) => m.from === from && m.to === to);
+}
 
 type AppliedMove = NonNullable<ReturnType<Chess["move"]>>;
 
@@ -136,16 +146,20 @@ export const useChessGameController = ({
   );
 
   const applyPlayerMove = useCallback(
-    (sourceSquare: string, targetSquare: string): PlayerMoveApplyResult => {
+    (sourceSquare: string, targetSquare: string, promotion?: string): PlayerMoveApplyResult => {
       const fenBeforeMove = chess.fen();
       const legalMoveCount = chess.moves().length;
+
+      if (!promotion && isPromotionNeeded(chess, sourceSquare, targetSquare)) {
+        return { applied: false, requiresPromotion: true };
+      }
 
       let move: AppliedMove | null = null;
       try {
         move = chess.move({
           from: sourceSquare,
           to: targetSquare,
-          promotion: "q",
+          promotion: promotion ?? "q",
         });
       } catch {
         return { applied: false };
@@ -227,6 +241,7 @@ export const useChessGameController = ({
     (
       sourceSquare: string | null,
       targetSquare: string | null | undefined,
+      promotion?: string,
     ): PlayerMoveApplyResult => {
       if (!sourceSquare) {
         return { applied: false };
@@ -249,7 +264,7 @@ export const useChessGameController = ({
         return { applied: false };
       }
 
-      return applyPlayerMove(sourceSquare, targetSquare);
+      return applyPlayerMove(sourceSquare, targetSquare, promotion);
     },
     [applyPlayerMove, chess],
   );

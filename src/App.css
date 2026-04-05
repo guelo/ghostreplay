@@ -4327,3 +4327,36 @@ button.openings-shell__crumb:hover {
         max-height: 300px;
     }
 }
+
+.promotion-picker-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    background: rgba(0, 0, 0, 0.45);
+    cursor: default;
+}
+
+.promotion-picker-square {
+    position: absolute;
+    z-index: 10;
+    width: 12.5%;
+    height: 12.5%;
+    padding: 4%;
+    border: none;
+    background: var(--overlay-bg);
+    backdrop-filter: blur(4px);
+    cursor: pointer;
+    transition: background 120ms;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.promotion-picker-square:hover {
+    background: var(--surface-hover, rgba(255, 255, 255, 0.12));
+}
+
+.promotion-picker-square svg {
+    width: 100%;
+    height: 100%;
+}

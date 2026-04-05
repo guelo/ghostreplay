@@ -139,6 +139,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const playerRating = useGameStore((s) => s.playerRating);
   const isProvisional = useGameStore((s) => s.isProvisional);
   const ratingChange = useGameStore((s) => s.ratingChange);
+  const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [optionSquares, setOptionSquares] = useState<
     Record<string, React.CSSProperties>
@@ -227,10 +228,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [playerColor],
   );
 
+  const clearMoveHighlights = useCallback(() => {
+    setSelectedSquare(null);
+    setOptionSquares({});
+  }, []);
+
   const handleNavigate = useCallback(
     (index: number | null) => {
       setViewIndex(index);
       setReviewFailModal(null);
+      if (pendingPromotion) {
+        setPendingPromotion(null);
+        clearMoveHighlights();
+      }
 
       // Re-show blunder alert when clicking on a player's blunder move
       if (index !== null && index >= 0) {
@@ -261,13 +271,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       clearBlunderBoardOverride();
       setBlunderAlert(null);
     },
-    [analysisStore, clearBlunderBoardOverride, isPlayerMoveIndex],
+    [analysisStore, clearBlunderBoardOverride, clearMoveHighlights, isPlayerMoveIndex, pendingPromotion],
   );
-
-  const clearMoveHighlights = useCallback(() => {
-    setSelectedSquare(null);
-    setOptionSquares({});
-  }, []);
 
   const getMoveOptions = useCallback(
     (square: string): boolean => {
@@ -429,6 +434,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowRevertWarning,
     setShowResignWarning,
     setResolvedReview,
+    setPendingPromotion,
     clearBlunderBoardOverride,
   });
 
@@ -445,9 +451,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [coordinator]);
 
   const applyPlayerMoveAndAdvance = useCallback(
-    (sourceSquare: string, targetSquare: string): boolean => {
-      const result = applyPlayerMove(sourceSquare, targetSquare);
+    (sourceSquare: string, targetSquare: string, promotion?: string): boolean => {
+      const result = applyPlayerMove(sourceSquare, targetSquare, promotion);
       if (!result.applied) {
+        if (result.requiresPromotion) {
+          setPendingPromotion({ from: sourceSquare, to: targetSquare });
+          return true; // consume the click
+        }
         return false;
       }
 
@@ -486,6 +496,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleSquareClick = useCallback(
     ({ square }: { square: string }) => {
+      if (pendingPromotion) {
+        return; // picker is open, ignore board clicks (backdrop handles cancel)
+      }
+
       if (isBlunderBoardOverrideActive) {
         clearMoveHighlights();
         return;
@@ -500,7 +514,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       // If a square is already selected, try to make a move to the clicked square
       if (selectedSquare) {
-        if (applyPlayerMoveAndAdvance(selectedSquare, square)) {
+        const result = applyPlayerMoveAndAdvance(selectedSquare, square);
+        if (result) {
           return;
         }
 
@@ -527,6 +542,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       isGameActive,
       isBlunderBoardOverrideActive,
       isViewingLive,
+      pendingPromotion,
       selectedSquare,
       playerColor,
       applyPlayerMoveAndAdvance,
@@ -692,7 +708,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       const result = handleDrop(sourceSquare, targetSquare);
       if (!result.applied) {
-        return false;
+        if (result.requiresPromotion) {
+          setPendingPromotion({ from: sourceSquare, to: targetSquare });
+        }
+        return false; // piece snaps back in both cases
       }
 
       if (result.gameOver) {
@@ -705,6 +724,28 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     [applyOpponentMove, handleDrop, handleGameEnd, isBlunderBoardOverrideActive],
   );
+
+  const handlePromotionPick = useCallback(
+    (piece: 'q' | 'r' | 'b' | 'n') => {
+      if (!pendingPromotion) return;
+      const store = useGameStore.getState();
+      const isLive = store.viewIndex === null;
+      const isCorrectTurn = chess.turn() === (store.playerColor === 'white' ? 'w' : 'b');
+      if (!store.isGameActive || !isLive || !isCorrectTurn) {
+        setPendingPromotion(null);
+        return;
+      }
+      const { from, to } = pendingPromotion;
+      setPendingPromotion(null);
+      applyPlayerMoveAndAdvance(from, to, piece);
+    },
+    [pendingPromotion, chess, applyPlayerMoveAndAdvance],
+  );
+
+  const handlePromotionCancel = useCallback(() => {
+    setPendingPromotion(null);
+    clearMoveHighlights();
+  }, [clearMoveHighlights]);
 
   const handleRevealSrsFail = useCallback(
     (detail: SrsFailDetail, moveIndex: number) => {
@@ -845,6 +886,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onCancelResign={cancelResign}
                 showEndedScrim={showEndedScrim}
                 showFlash={showFlash}
+                pendingPromotion={pendingPromotion}
+                playerColor={playerColor}
+                onPromotionPick={handlePromotionPick}
+                onPromotionCancel={handlePromotionCancel}
               />
             </div>
             <PostGameBanner

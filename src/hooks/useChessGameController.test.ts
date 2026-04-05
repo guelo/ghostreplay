@@ -318,4 +318,43 @@ describe("useChessGameController", () => {
     expect(setResolvedReview).toHaveBeenCalledWith(null);
     expect(setShowGhostInfo).not.toHaveBeenCalled();
   });
+
+  it("normal pawn move (e2→e4) returns applied: true without requiresPromotion", () => {
+    const { result } = createSetup();
+    let moveResult: PlayerMoveApplyResult = { applied: false };
+    act(() => {
+      moveResult = result.current.applyPlayerMove("e2", "e4");
+    });
+    expect(moveResult.applied).toBe(true);
+    expect((moveResult as { applied: false; requiresPromotion?: true }).requiresPromotion).toBeUndefined();
+  });
+
+  it("white pawn e7→e8 without promotion arg returns requiresPromotion: true", () => {
+    // Set up a position where white pawn is on e7
+    const chess = new Chess("8/4P3/8/8/8/8/8/4K2k w - - 0 1");
+    useGameStore.setState({ ...initialStoreState, playerColor: "white", liveFen: chess.fen(), isGameActive: true });
+    const { result } = createSetup({ chess });
+    let moveResult: PlayerMoveApplyResult = { applied: false };
+    act(() => {
+      moveResult = result.current.applyPlayerMove("e7", "e8");
+    });
+    expect(moveResult.applied).toBe(false);
+    expect((moveResult as { applied: false; requiresPromotion?: true }).requiresPromotion).toBe(true);
+    // Chess state must be unchanged
+    expect(chess.fen()).toBe("8/4P3/8/8/8/8/8/4K2k w - - 0 1");
+  });
+
+  it("white pawn e7→e8 with promotion 'r' returns applied: true with rook in SAN", () => {
+    const chess = new Chess("8/4P3/8/8/8/8/8/4K2k w - - 0 1");
+    useGameStore.setState({ ...initialStoreState, playerColor: "white", liveFen: chess.fen(), isGameActive: true });
+    const { result } = createSetup({ chess });
+    let moveResult: PlayerMoveApplyResult = { applied: false };
+    act(() => {
+      moveResult = result.current.applyPlayerMove("e7", "e8", "r");
+    });
+    expect(moveResult.applied).toBe(true);
+    if (moveResult.applied) {
+      expect(moveResult.moveSan).toMatch(/R/);
+    }
+  });
 });

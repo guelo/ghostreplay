@@ -1,6 +1,7 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo } from "react";
+import { PromotionPicker } from "./PromotionPicker";
 
 type BoardOrientation = "white" | "black";
 
@@ -35,6 +36,10 @@ type BoardStageProps = {
   onCancelResign: () => void;
   showEndedScrim: boolean;
   showFlash: boolean;
+  pendingPromotion: { from: string; to: string } | null;
+  playerColor: 'white' | 'black';
+  onPromotionPick: (piece: 'q' | 'r' | 'b' | 'n') => void;
+  onPromotionCancel: () => void;
 };
 
 const WarningTriangleIcon = () => (
@@ -81,6 +86,10 @@ const BoardStage = ({
   onCancelResign,
   showEndedScrim,
   showFlash,
+  pendingPromotion,
+  playerColor,
+  onPromotionPick,
+  onPromotionCancel,
 }: BoardStageProps) => {
   return (
       <div className="chessboard-board-area">
@@ -226,6 +235,15 @@ const BoardStage = ({
           )}
           {showEndedScrim && <div className="chessboard-ended-scrim" />}
           {showFlash && <div className="blunder-flash" />}
+          {pendingPromotion && !showRevertWarning && !showResignWarning && (
+            <PromotionPicker
+              targetSquare={pendingPromotion.to}
+              playerColor={playerColor}
+              boardOrientation={boardOrientation}
+              onPick={onPromotionPick}
+              onCancel={onPromotionCancel}
+            />
+          )}
           <Chessboard
             key={boardInstanceKey}
             options={{

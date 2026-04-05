@@ -8,6 +8,16 @@ let boardUnmountCount = 0;
 let nextBoardInstanceId = 1;
 
 vi.mock("react-chessboard", () => ({
+  defaultPieces: {
+    wQ: () => <svg data-testid="piece-wQ" />,
+    wR: () => <svg data-testid="piece-wR" />,
+    wB: () => <svg data-testid="piece-wB" />,
+    wN: () => <svg data-testid="piece-wN" />,
+    bQ: () => <svg data-testid="piece-bQ" />,
+    bR: () => <svg data-testid="piece-bR" />,
+    bB: () => <svg data-testid="piece-bB" />,
+    bN: () => <svg data-testid="piece-bN" />,
+  },
   Chessboard: ({ options }: { options: Record<string, unknown> }) => {
     const instanceIdRef = React.useRef(nextBoardInstanceId++);
 
@@ -96,6 +106,10 @@ const makeProps = () => {
     onCancelResign,
     showEndedScrim: false,
     showFlash: false,
+    pendingPromotion: null,
+    playerColor: "white" as const,
+    onPromotionPick: vi.fn(),
+    onPromotionCancel: vi.fn(),
   };
 };
 
@@ -165,5 +179,33 @@ describe("BoardStage", () => {
 
     expect(props.onRevertAnyway).toHaveBeenCalledTimes(1);
     expect(props.onCancelRevert).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render PromotionPicker when pendingPromotion is null", () => {
+    const props = makeProps();
+    render(<BoardStage {...props} pendingPromotion={null} />);
+    expect(screen.queryByRole("button", { name: /promote to/i })).toBeNull();
+  });
+
+  it("renders PromotionPicker when pendingPromotion is non-null", () => {
+    const props = makeProps();
+    render(<BoardStage {...props} pendingPromotion={{ from: "e7", to: "e8" }} playerColor="white" />);
+    expect(screen.getAllByRole("button", { name: /promote to/i })).toHaveLength(4);
+  });
+
+  it("calls onPromotionPick when a promotion piece is clicked", () => {
+    const props = makeProps();
+    render(<BoardStage {...props} pendingPromotion={{ from: "e7", to: "e8" }} playerColor="white" />);
+    fireEvent.click(screen.getByRole("button", { name: /promote to q/i }));
+    expect(props.onPromotionPick).toHaveBeenCalledWith("q");
+  });
+
+  it("calls onPromotionCancel when the backdrop is clicked", () => {
+    const props = makeProps();
+    const { container } = render(<BoardStage {...props} pendingPromotion={{ from: "e7", to: "e8" }} playerColor="white" />);
+    const backdrop = container.querySelector(".promotion-picker-backdrop");
+    expect(backdrop).not.toBeNull();
+    fireEvent.click(backdrop!);
+    expect(props.onPromotionCancel).toHaveBeenCalledTimes(1);
   });
 });
