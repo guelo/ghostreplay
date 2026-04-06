@@ -906,6 +906,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
           <div className="moves-column">
             <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
+            {isGameActive && !isPlayersTurn && (
+              <span className="turn-label">Waiting for opponent</span>
+            )}
             <ConnectedMoveList
               onNavigate={handleNavigate}
               messages={moveMessages}
@@ -919,6 +922,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               onReset={handleReset}
               isGameActive={isGameActive}
             />
+            {isGameActive && isPlayersTurn && (
+              <span className="turn-label">Your turn</span>
+            )}
             <MaterialDisplay fen={displayedFen} perspective={playerColor} />
           </div>
         </div>

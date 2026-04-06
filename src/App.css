@@ -2373,6 +2373,14 @@
     }
 }
 
+/* Turn labels */
+.turn-label {
+    font-size: 0.7rem;
+    color: var(--text-secondary, #888);
+    padding: 0 0.5rem;
+    letter-spacing: 0.02em;
+}
+
 /* Material Display */
 .material-display {
     display: flex;
