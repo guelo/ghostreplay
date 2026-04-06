@@ -348,7 +348,7 @@ describe("useChessGameController", () => {
     const chess = new Chess("8/4P3/8/8/8/8/8/4K2k w - - 0 1");
     useGameStore.setState({ ...initialStoreState, playerColor: "white", liveFen: chess.fen(), isGameActive: true });
     const { result } = createSetup({ chess });
-    let moveResult: PlayerMoveApplyResult = { applied: false };
+    let moveResult!: PlayerMoveApplyResult;
     act(() => {
       moveResult = result.current.applyPlayerMove("e7", "e8", "r");
     });

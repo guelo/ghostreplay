@@ -702,7 +702,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       sourceSquare,
       targetSquare,
     }: PieceDropHandlerArgs) => {
-      if (isBlunderBoardOverrideActive) {
+      if (isBlunderBoardOverrideActive || !targetSquare) {
         return false;
       }
 
