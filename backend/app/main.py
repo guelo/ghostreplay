@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 
-logging.basicConfig(level=logging.INFO)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -23,6 +22,9 @@ from app.api.srs import router as srs_router
 from app.db import engine
 from app.security import AuthMiddleware
 from app.http_logging import HTTPLoggingMiddleware
+from app.logging_config import configure_logging
+
+configure_logging()
 
 
 @asynccontextmanager

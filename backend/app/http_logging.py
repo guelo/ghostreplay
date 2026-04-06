@@ -12,19 +12,70 @@ _SECRET_KEYS = {"password", "token", "secret", "jwt"}
 BODY_BUFFER_CAP = 4096
 BODY_LOG_CAP = 1024
 
-_handler = logging.StreamHandler()
-
-
-class _JsonFormatter(logging.Formatter):
-    def format(self, record: logging.LogRecord) -> str:
-        return json.dumps({"level": record.levelname, **getattr(record, "http", {})})
-
-
-_handler.setFormatter(_JsonFormatter())
 logger = logging.getLogger("ghostreplay.http")
-logger.addHandler(_handler)
-logger.setLevel(logging.INFO)
-logger.propagate = False
+
+
+def _single_line(value: object) -> str:
+    return str(value).replace("\n", "\\n")
+
+
+def _build_http_message(fields: dict[str, object]) -> str:
+    parts = [
+        _single_line(fields["method"]),
+        _single_line(fields["path"]),
+        str(fields["status_code"]),
+        f'{fields["duration_ms"]}ms',
+    ]
+
+    client_ip = fields.get("client_ip")
+    if client_ip:
+        client_port = fields.get("client_port")
+        if client_port is not None:
+            parts.append(f"client={client_ip}:{client_port}")
+        else:
+            parts.append(f"client={client_ip}")
+
+    query = fields.get("query")
+    if query:
+        parts.append(f"query={_single_line(query)}")
+
+    user_id = fields.get("user_id")
+    if user_id is not None:
+        parts.append(f"user_id={user_id}")
+
+    parts.append(f'request_id={fields["request_id"]}')
+
+    if "request_body" in fields:
+        parts.append(f'request_body={_single_line(fields["request_body"])}')
+    if "response_body" in fields:
+        parts.append(f'response_body={_single_line(fields["response_body"])}')
+
+    return " ".join(parts)
+
+
+def _header_value(scope, header_name: bytes) -> str | None:
+    for name, value in scope.get("headers", []):
+        if name == header_name:
+            return value.decode("latin-1").strip()
+    return None
+
+
+def _extract_client(scope) -> tuple[str | None, int | None]:
+    forwarded_for = _header_value(scope, b"x-forwarded-for")
+    if forwarded_for:
+        first_hop = forwarded_for.split(",", 1)[0].strip()
+        if first_hop:
+            return first_hop, None
+
+    real_ip = _header_value(scope, b"x-real-ip")
+    if real_ip:
+        return real_ip, None
+
+    client = scope.get("client")
+    if isinstance(client, (list, tuple)) and len(client) >= 2:
+        return client[0], client[1]
+
+    return None, None
 
 
 def _redact_query(query_string: bytes) -> str:
@@ -83,6 +134,9 @@ class HTTPLoggingMiddleware:
         path = scope.get("path", "")
         query_string = scope.get("query_string", b"")
         query = _redact_query(query_string)
+        if method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
 
         log_body = os.environ.get("LOG_HTTP_BODY", "").lower() == "true"
 
@@ -141,6 +195,7 @@ class HTTPLoggingMiddleware:
             state = scope.get("state") or {}
             user = state.get("user") if isinstance(state, dict) else getattr(state, "user", None)
             user_id = getattr(user, "user_id", None)
+            client_ip, client_port = _extract_client(scope)
 
             http_fields: dict = {
                 "request_id": request_id,
@@ -150,6 +205,8 @@ class HTTPLoggingMiddleware:
                 "status_code": status_code,
                 "duration_ms": round(duration_ms, 3),
                 "user_id": user_id,
+                "client_ip": client_ip,
+                "client_port": client_port,
             }
 
             if log_body:
@@ -160,4 +217,4 @@ class HTTPLoggingMiddleware:
                 elif res_body_chunks:
                     http_fields["response_body"] = _process_body(res_body_chunks, res_content_type)
 
-            logger.info("", extra={"http": http_fields})
+            logger.info(_build_http_message(http_fields), extra={"http": http_fields})

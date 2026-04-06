@@ -18,4 +18,4 @@ cd "$BACKEND_DIR"
 source .venv/bin/activate
 python scripts/seed_e2e_data.py --reset --database-url "$DATABASE_URL"
 
-exec uvicorn app.main:app --host 127.0.0.1 --port "$BACKEND_PORT"
+exec uvicorn app.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --no-access-log

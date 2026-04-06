@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.http_logging import HTTPLoggingMiddleware
+from app.logging_config import SimpleFormatter
 from app.security import create_access_token
 
 
 @pytest.fixture
 def http_log(caplog):
-    target = logging.getLogger("ghostreplay.http")
-    target.addHandler(caplog.handler)
     with caplog.at_level(logging.INFO, logger="ghostreplay.http"):
         yield caplog
-    target.removeHandler(caplog.handler)
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +33,50 @@ def test_logs_metadata_on_success(client, http_log):
     assert h["status_code"] == 200
     assert h["duration_ms"] >= 0
     assert "request_id" in h
+    assert h["client_ip"]
+    assert h["client_port"] is not None
+
+
+def test_simple_formatter_uses_local_timestamp_and_message():
+    formatter = SimpleFormatter("%(asctime)s %(levelname)s %(message)s")
+    record = logging.LogRecord(
+        name="ghostreplay.http",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="GET /health 200 1.23ms",
+        args=(),
+        exc_info=None,
+    )
+
+    formatted = formatter.format(record)
+    assert re.match(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} INFO GET /health 200 1\.23ms", formatted)
+
+
+def test_http_log_message_is_plain_text(client, http_log):
+    client.get("/health?token=abc&foo=bar")
+    rec = next(r for r in http_log.records if hasattr(r, "http") and r.http.get("path") == "/health")
+    assert rec.getMessage().startswith("GET /health 200 ")
+    assert "client=" in rec.getMessage()
+    assert "query=token=%5BREDACTED%5D&foo=bar" in rec.getMessage() or "query=token=[REDACTED]&foo=bar" in rec.getMessage()
+
+
+def test_forwarded_ip_used_when_present(http_log):
+    mini = FastAPI()
+    mini.add_middleware(HTTPLoggingMiddleware)
+
+    @mini.get("/forwarded")
+    async def forwarded():
+        return {"ok": True}
+
+    with TestClient(mini) as c:
+        response = c.get("/forwarded", headers={"X-Forwarded-For": "203.0.113.10, 10.0.0.2"})
+
+    assert response.status_code == 200
+    rec = next(r for r in http_log.records if hasattr(r, "http") and r.http.get("path") == "/forwarded")
+    assert rec.http["client_ip"] == "203.0.113.10"
+    assert rec.http["client_port"] is None
+    assert "client=203.0.113.10" in rec.getMessage()
 
 
 def test_logs_authenticated_user_id(client, http_log):
@@ -66,6 +109,24 @@ def test_query_param_secret_redacted(client, http_log):
     assert "abc" not in rec.http["query"]
     assert "token=%5BREDACTED%5D" in rec.http["query"] or "token=[REDACTED]" in rec.http["query"]
     assert "foo=bar" in rec.http["query"]
+
+
+def test_options_requests_not_logged(http_log):
+    mini = FastAPI()
+    mini.add_middleware(HTTPLoggingMiddleware)
+
+    @mini.options("/preflight")
+    async def preflight():
+        return {"ok": True}
+
+    with TestClient(mini) as c:
+        response = c.options("/preflight")
+
+    assert response.status_code == 200
+    assert not any(
+        hasattr(r, "http") and r.http.get("path") == "/preflight"
+        for r in http_log.records
+    )
 
 
 # ---------------------------------------------------------------------------
