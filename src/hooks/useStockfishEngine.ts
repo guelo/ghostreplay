@@ -13,9 +13,23 @@ type EvaluationOptions = {
   searchmoves?: string[]
 }
 
-const evalCacheKey = (fen: string, searchmoves?: string[]): string => {
-  if (!searchmoves?.length) return fen
-  return fen + '|' + [...searchmoves].sort().join(',')
+type EvaluationSignature = Pick<
+  EvaluationOptions,
+  'movetime' | 'depth' | 'multipv' | 'searchmoves'
+>
+
+const evalCacheKey = (fen: string, options?: EvaluationSignature): string => {
+  const searchmoves = options?.searchmoves?.length
+    ? [...options.searchmoves].sort().join(',')
+    : ''
+
+  return [
+    fen,
+    `movetime=${options?.movetime ?? ''}`,
+    `depth=${options?.depth ?? ''}`,
+    `multipv=${options?.multipv ?? 1}`,
+    `searchmoves=${searchmoves}`,
+  ].join('|')
 }
 
 type EvaluationResult = {
@@ -163,7 +177,7 @@ export const useStockfishEngine = () => {
       }
 
       // Return cached result if available
-      const cacheKey = evalCacheKey(fen, options?.searchmoves)
+      const cacheKey = evalCacheKey(fen, options)
       const cached = evalCache.current.get(cacheKey)
       if (cached) {
         setInfo(cached)

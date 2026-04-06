@@ -8,10 +8,15 @@ import type { WorkerResponse } from '../workers/stockfishMessages'
 // ---------------------------------------------------------------------------
 
 let messageHandler: ((e: MessageEvent<WorkerResponse>) => void) | null = null
+const workerInstances: FakeWorker[] = []
 
 class FakeWorker {
   postMessage = vi.fn()
   terminate = vi.fn()
+
+  constructor() {
+    workerInstances.push(this)
+  }
 
   addEventListener(type: string, handler: (e: MessageEvent) => void) {
     if (type === 'message') messageHandler = handler
@@ -43,6 +48,7 @@ describe('useStockfishEngine', () => {
     vi.stubGlobal('Worker', FakeWorker)
     vi.stubGlobal('SharedArrayBuffer', ArrayBuffer)
     messageHandler = null
+    workerInstances.length = 0
   })
 
   it('starts in booting when SharedArrayBuffer is unavailable', async () => {
@@ -131,5 +137,67 @@ describe('useStockfishEngine', () => {
     })
     expect(result.current.info[0]?.pv).toEqual(['d2d4', 'd7d5'])
     expect(result.current.info[0]?.depth).toBe(11)
+  })
+
+  it('does not reuse a single-pv cache entry for a later multipv request', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result } = renderHook(() => useStockfishEngine())
+
+    act(() => emit({ type: 'ready' }))
+
+    const worker = workerInstances[0]
+    expect(worker).toBeDefined()
+
+    let firstPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      firstPromise = result.current.evaluatePosition('fen-1', { depth: 21 })
+    })
+
+    expect(worker.postMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: 'evaluate-position',
+        fen: 'fen-1',
+        depth: 21,
+        multipv: undefined,
+      }),
+    )
+    const firstRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+
+    act(() => emit({ type: 'thinking', id: firstRequestId, fen: 'fen-1' }))
+    act(() => {
+      emit({
+        type: 'info',
+        id: firstRequestId,
+        info: { depth: 21, multipv: 1, pv: ['e2e4'], score: { type: 'cp', value: 30 } },
+        raw: 'info depth 21 multipv 1 score cp 30 pv e2e4',
+      })
+    })
+    act(() => emit({ type: 'bestmove', id: firstRequestId, move: 'e2e4', raw: 'bestmove e2e4' }))
+    await act(async () => {
+      await firstPromise
+    })
+
+    worker.postMessage.mockClear()
+
+    let secondPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      secondPromise = result.current.evaluatePosition('fen-1', { depth: 21, multipv: 3 })
+    })
+
+    expect(worker.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'evaluate-position',
+        fen: 'fen-1',
+        depth: 21,
+        multipv: 3,
+      }),
+    )
+    const secondRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+
+    act(() => emit({ type: 'thinking', id: secondRequestId, fen: 'fen-1' }))
+    act(() => emit({ type: 'bestmove', id: secondRequestId, move: 'e2e4', raw: 'bestmove e2e4' }))
+    await act(async () => {
+      await secondPromise
+    })
   })
 })
