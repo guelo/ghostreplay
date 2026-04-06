@@ -1,9 +1,7 @@
 /// <reference lib="webworker" />
 
-import Stockfish from 'stockfish.wasm'
-import stockfishWasmUrl from 'stockfish.wasm/stockfish.wasm?url'
-import stockfishWorkerUrl from 'stockfish.wasm/stockfish.worker.js?url'
-import stockfishMainUrl from 'stockfish.wasm/stockfish.js?url'
+import stockfishEngineUrl from 'stockfish/bin/stockfish-18-lite-single.js?url'
+import stockfishWasmUrl from 'stockfish/bin/stockfish-18-lite-single.wasm?url'
 import type {
   AnalysisWorkerRequest,
   AnalysisWorkerResponse,
@@ -23,7 +21,7 @@ import type { MoveClassification } from './analysisUtils'
 const ctx = self as DedicatedWorkerGlobalScope
 
 let engineReady = false
-let engine: Awaited<ReturnType<typeof Stockfish>> | null = null
+let engine: Worker | null = null
 let activeSearch:
   | {
       resolve: (value: { bestmove: string; score: EngineScore | null }) => void
@@ -36,28 +34,21 @@ let activeSearch:
 const pendingAnalyses: AnalyzeMoveMessage[] = []
 let analysisInFlight = false
 
+// Stockfish's browser worker bootstrap reads the wasm asset from location.hash.
+// This is a private package contract, so upgrades must be revalidated with the
+// real-browser smoke test before changing the pinned stockfish version.
+const createEngineWorkerUrl = () =>
+  `${stockfishEngineUrl}#${encodeURIComponent(stockfishWasmUrl)}`
+
 const ensureEngine = async () => {
   if (engine) {
     return engine
   }
 
   try {
-    engine = await Stockfish({
-      locateFile: (file) => {
-        if (file.endsWith('.wasm')) {
-          return stockfishWasmUrl
-        }
-
-        if (file.endsWith('.worker.js')) {
-          return stockfishWorkerUrl
-        }
-
-        return file
-      },
-      mainScriptUrlOrBlob: stockfishMainUrl,
-    })
-
-    engine.addMessageListener(handleEngineLine)
+    engine = new Worker(createEngineWorkerUrl())
+    engine.addEventListener('message', handleEngineMessage)
+    engine.addEventListener('error', handleEngineError)
     engine.postMessage('uci')
   } catch (error) {
     const message =
@@ -94,11 +85,18 @@ const runSearch = async (
   )
 }
 
+const handleEngineError = (event: ErrorEvent) => {
+  const message = event.message || 'Failed to initialize Stockfish'
+  ctx.postMessage({ type: 'error', error: message } satisfies AnalysisWorkerResponse)
+}
+
+const handleEngineMessage = (event: MessageEvent<string>) => {
+  handleEngineLine(event.data)
+}
+
 const handleEngineLine = (line: string) => {
   if (line === 'uciok') {
     engine?.postMessage('setoption name Hash value 128')
-    const threads = Math.min(Math.max(Math.floor(navigator.hardwareConcurrency / 2), 1), 4)
-    engine?.postMessage(`setoption name Threads value ${threads}`)
     engine?.postMessage('setoption name MultiPV value 1')
     engine?.postMessage('isready')
     return
@@ -271,10 +269,13 @@ ctx.addEventListener('message', (event: MessageEvent<AnalysisWorkerRequest>) => 
       break
     }
     case 'terminate': {
+      engine?.removeEventListener('message', handleEngineMessage)
+      engine?.removeEventListener('error', handleEngineError)
       engine?.terminate()
       engine = null
       engineReady = false
       activeSearch = null
+      analysisInFlight = false
       pendingAnalyses.length = 0
       break
     }

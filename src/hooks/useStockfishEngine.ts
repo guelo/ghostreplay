@@ -36,30 +36,18 @@ const createRequestId = () => {
   return Math.random().toString(36).slice(2)
 }
 
-const sharedArrayBufferAvailable = typeof SharedArrayBuffer !== 'undefined'
-const sharedArrayBufferError =
-  'SharedArrayBuffer is unavailable. Ensure COOP/COEP headers are active and reload the page.'
-
 export const useStockfishEngine = () => {
   const workerRef = useRef<Worker | null>(null)
   const pendingEvaluations = useRef<Map<string, PendingEntry>>(new Map())
   const activeRequestId = useRef<string | null>(null)
-  const [status, setStatus] = useState<EngineStatus>(
-    sharedArrayBufferAvailable ? 'booting' : 'error',
-  )
-  const [error, setError] = useState<string | null>(
-    sharedArrayBufferAvailable ? null : sharedArrayBufferError,
-  )
+  const [status, setStatus] = useState<EngineStatus>('booting')
+  const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<EngineInfo[]>([])
   const [isThinking, setIsThinking] = useState(false)
   const evalCache = useRef<Map<string, EngineInfo[]>>(new Map())
   const activeCacheKey = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!sharedArrayBufferAvailable) {
-      return
-    }
-
     const worker = new Worker(
       new URL('../workers/stockfishWorker.ts', import.meta.url),
       { type: 'module' },

@@ -1,9 +1,7 @@
 /// <reference lib="webworker" />
 
-import Stockfish from 'stockfish.wasm'
-import stockfishWasmUrl from 'stockfish.wasm/stockfish.wasm?url'
-import stockfishWorkerUrl from 'stockfish.wasm/stockfish.worker.js?url'
-import stockfishMainUrl from 'stockfish.wasm/stockfish.js?url'
+import stockfishEngineUrl from 'stockfish/bin/stockfish-18-lite-single.js?url'
+import stockfishWasmUrl from 'stockfish/bin/stockfish-18-lite-single.wasm?url'
 import type {
   EvaluatePositionMessage,
   WorkerRequest,
@@ -14,10 +12,17 @@ import { parseUciInfoLine } from './parseInfo'
 const ctx = self as DedicatedWorkerGlobalScope
 
 let engineReady = false
-let engine: Awaited<ReturnType<typeof Stockfish>> | null = null
+let engine: Worker | null = null
 let runningSearch: EvaluatePositionMessage | null = null
+let engineConfigured = false
 const queuedOperations: Array<() => void> = []
 const queuedEvaluations: EvaluatePositionMessage[] = []
+
+// Stockfish's browser worker bootstrap reads the wasm asset from location.hash.
+// This is a private package contract, so upgrades must be revalidated with the
+// real-browser smoke test before changing the pinned stockfish version.
+const createEngineWorkerUrl = () =>
+  `${stockfishEngineUrl}#${encodeURIComponent(stockfishWasmUrl)}`
 
 const ensureEngine = async () => {
   if (engine) {
@@ -25,28 +30,15 @@ const ensureEngine = async () => {
   }
 
   try {
-    engine = await Stockfish({
-      locateFile: (file) => {
-        if (file.endsWith('.wasm')) {
-          return stockfishWasmUrl
-        }
-
-        if (file.endsWith('.worker.js')) {
-          return stockfishWorkerUrl
-        }
-
-        return file
-      },
-      mainScriptUrlOrBlob: stockfishMainUrl,
-    })
-
-    engine.addMessageListener(handleEngineLine)
+    engine = new Worker(createEngineWorkerUrl())
+    engine.addEventListener('message', handleEngineMessage)
+    engine.addEventListener('error', handleEngineError)
     ctx.postMessage({ type: 'booted' } satisfies WorkerResponse)
     engine.postMessage('uci')
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Failed to initialize Stockfish'
-    ctx.postMessage({ type: 'error', error: message })
+    ctx.postMessage({ type: 'error', error: message } satisfies WorkerResponse)
   }
 
   return engine
@@ -70,10 +62,6 @@ function flushQueuedOperations() {
   }
 }
 
-// parseUciInfoLine is imported from ./parseInfo
-
-let engineConfigured = false
-
 function startEvaluation(request: EvaluatePositionMessage) {
   const pendingEngine = engine
 
@@ -81,19 +69,13 @@ function startEvaluation(request: EvaluatePositionMessage) {
     return
   }
 
-  // Configure threads/hash on first deep analysis request only
   if (!engineConfigured && (request.depth || (request.multipv && request.multipv > 1))) {
-    const threads = Math.min(
-      Math.max(1, Math.floor(navigator.hardwareConcurrency / 2)),
-      4,
-    )
-    pendingEngine.postMessage(`setoption name Threads value ${threads}`)
     pendingEngine.postMessage('setoption name Hash value 64')
     engineConfigured = true
   }
 
   runningSearch = request
-  ctx.postMessage({ type: 'thinking', id: request.id, fen: request.fen })
+  ctx.postMessage({ type: 'thinking', id: request.id, fen: request.fen } satisfies WorkerResponse)
 
   const movesSegment =
     request.moves && request.moves.length > 0
@@ -117,8 +99,17 @@ function startEvaluation(request: EvaluatePositionMessage) {
   }
 }
 
+function handleEngineError(event: ErrorEvent) {
+  const message = event.message || 'Failed to initialize Stockfish'
+  ctx.postMessage({ type: 'error', error: message } satisfies WorkerResponse)
+}
+
+function handleEngineMessage(event: MessageEvent<string>) {
+  handleEngineLine(event.data)
+}
+
 function handleEngineLine(line: string) {
-  ctx.postMessage({ type: 'log', line })
+  ctx.postMessage({ type: 'log', line } satisfies WorkerResponse)
 
   if (line === 'uciok') {
     engine?.postMessage('isready')
@@ -127,7 +118,7 @@ function handleEngineLine(line: string) {
 
   if (line === 'readyok') {
     engineReady = true
-    ctx.postMessage({ type: 'ready' })
+    ctx.postMessage({ type: 'ready' } satisfies WorkerResponse)
     flushQueuedOperations()
 
     if (queuedEvaluations.length > 0 && !runningSearch) {
@@ -149,7 +140,7 @@ function handleEngineLine(line: string) {
         id: runningSearch.id,
         move,
         raw: line,
-      })
+      } satisfies WorkerResponse)
     }
 
     runningSearch = null
@@ -165,7 +156,7 @@ function handleEngineLine(line: string) {
   const info = parseUciInfoLine(line)
 
   if (info && runningSearch) {
-    ctx.postMessage({ type: 'info', id: runningSearch.id, info, raw: line })
+    ctx.postMessage({ type: 'info', id: runningSearch.id, info, raw: line } satisfies WorkerResponse)
   }
 }
 
@@ -202,11 +193,14 @@ ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
       break
     }
     case 'terminate': {
+      engine?.removeEventListener('message', handleEngineMessage)
+      engine?.removeEventListener('error', handleEngineError)
       engine?.terminate()
       runningSearch = null
       queuedEvaluations.length = 0
       engine = null
       engineReady = false
+      engineConfigured = false
       break
     }
     default:
