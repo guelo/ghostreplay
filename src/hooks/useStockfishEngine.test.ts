@@ -139,6 +139,20 @@ describe('useStockfishEngine', () => {
     expect(result.current.info[0]?.depth).toBe(11)
   })
 
+  it('forwards worker log messages to console', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const useStockfishEngine = await loadHook()
+    renderHook(() => useStockfishEngine())
+
+    act(() => emit({ type: 'log', line: '[stockfishWorker <-] info depth 10 pv e2e4' }))
+
+    expect(logSpy).toHaveBeenCalledWith(
+      '[StockfishEngine] [stockfishWorker <-] info depth 10 pv e2e4',
+    )
+
+    logSpy.mockRestore()
+  })
+
   it('does not reuse a single-pv cache entry for a later multipv request', async () => {
     const useStockfishEngine = await loadHook()
     const { result } = renderHook(() => useStockfishEngine())

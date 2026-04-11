@@ -69,6 +69,12 @@ export const useStockfishEngine = () => {
     workerRef.current = worker
     const pendingMap = pendingEvaluations.current
 
+    if (import.meta.env.DEV) {
+      ;(window as unknown as { __sf?: (cmd: string) => void }).__sf = (
+        cmd: string,
+      ) => worker.postMessage({ type: 'command', command: cmd })
+    }
+
     const handleMessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data
 
@@ -135,7 +141,7 @@ export const useStockfishEngine = () => {
           break
         }
         case 'log':
-          // Logs are forwarded for debugging but intentionally ignored here.
+          console.log(`[StockfishEngine] ${message.line}`)
           break
         default:
           message satisfies never
@@ -161,6 +167,9 @@ export const useStockfishEngine = () => {
       pendingMap.clear()
       worker.terminate()
       workerRef.current = null
+      if (import.meta.env.DEV) {
+        delete (window as unknown as { __sf?: (cmd: string) => void }).__sf
+      }
     }
   }, [])
 

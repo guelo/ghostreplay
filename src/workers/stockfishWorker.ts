@@ -24,6 +24,15 @@ const queuedEvaluations: EvaluatePositionMessage[] = []
 const createEngineWorkerUrl = () =>
   `${stockfishEngineUrl}#${encodeURIComponent(stockfishWasmUrl)}`
 
+function postLog(line: string) {
+  ctx.postMessage({ type: 'log', line } satisfies WorkerResponse)
+}
+
+function sendEngineCommand(command: string) {
+  postLog(`[stockfishWorker ->] ${command}`)
+  engine?.postMessage(command)
+}
+
 const ensureEngine = async () => {
   if (engine) {
     return engine
@@ -34,7 +43,7 @@ const ensureEngine = async () => {
     engine.addEventListener('message', handleEngineMessage)
     engine.addEventListener('error', handleEngineError)
     ctx.postMessage({ type: 'booted' } satisfies WorkerResponse)
-    engine.postMessage('uci')
+    sendEngineCommand('uci')
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Failed to initialize Stockfish'
@@ -70,7 +79,7 @@ function startEvaluation(request: EvaluatePositionMessage) {
   }
 
   if (!engineConfigured && (request.depth || (request.multipv && request.multipv > 1))) {
-    pendingEngine.postMessage('setoption name Hash value 64')
+    sendEngineCommand('setoption name Hash value 64')
     engineConfigured = true
   }
 
@@ -83,8 +92,8 @@ function startEvaluation(request: EvaluatePositionMessage) {
       : ''
 
   const multipv = request.multipv ?? 1
-  pendingEngine.postMessage(`setoption name MultiPV value ${multipv}`)
-  pendingEngine.postMessage(`position fen ${request.fen}${movesSegment}`)
+  sendEngineCommand(`setoption name MultiPV value ${multipv}`)
+  sendEngineCommand(`position fen ${request.fen}${movesSegment}`)
 
   const searchmovesSuffix =
     request.searchmoves && request.searchmoves.length > 0
@@ -92,10 +101,10 @@ function startEvaluation(request: EvaluatePositionMessage) {
       : ''
 
   if (request.depth) {
-    pendingEngine.postMessage(`go depth ${request.depth}${searchmovesSuffix}`)
+    sendEngineCommand(`go depth ${request.depth}${searchmovesSuffix}`)
   } else {
     const movetime = request.movetime ?? 1500
-    pendingEngine.postMessage(`go movetime ${movetime}${searchmovesSuffix}`)
+    sendEngineCommand(`go movetime ${movetime}${searchmovesSuffix}`)
   }
 }
 
@@ -109,10 +118,10 @@ function handleEngineMessage(event: MessageEvent<string>) {
 }
 
 function handleEngineLine(line: string) {
-  ctx.postMessage({ type: 'log', line } satisfies WorkerResponse)
+  postLog(`[stockfishWorker <-] ${line}`)
 
   if (line === 'uciok') {
-    engine?.postMessage('isready')
+    sendEngineCommand('isready')
     return
   }
 
@@ -165,13 +174,13 @@ ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
 
   switch (message.type) {
     case 'command': {
-      enqueueOrRun(() => engine?.postMessage(message.command))
+      enqueueOrRun(() => sendEngineCommand(message.command))
       break
     }
     case 'newgame': {
       enqueueOrRun(() => {
-        engine?.postMessage('stop')
-        engine?.postMessage('ucinewgame')
+        sendEngineCommand('stop')
+        sendEngineCommand('ucinewgame')
       })
       runningSearch = null
       queuedEvaluations.length = 0
@@ -182,7 +191,7 @@ ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
         if (runningSearch) {
           queuedEvaluations.length = 0
           queuedEvaluations.push(message)
-          engine?.postMessage('stop')
+          sendEngineCommand('stop')
           return
         }
 
