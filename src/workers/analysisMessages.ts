@@ -10,6 +10,7 @@ export type AnalyzeMoveMessage = {
 
 export type AnalysisWorkerRequest =
   | AnalyzeMoveMessage
+  | { type: 'cancel-analysis'; id: string }
   | { type: 'terminate' }
 
 import type { MoveClassification } from './analysisUtils'

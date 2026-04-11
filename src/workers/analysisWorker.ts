@@ -28,6 +28,8 @@ let activeSearch: {
   lastScore: EngineScore | null;
   onInfo?: (score: EngineScore, depth: number) => void;
 } | null = null;
+let activeAnalysisId: string | null = null;
+const canceledAnalyses = new Set<string>();
 
 const pendingAnalyses: AnalyzeMoveMessage[] = [];
 let analysisInFlight = false;
@@ -45,6 +47,19 @@ const postLog = (message: string) => {
 const sendEngineCommand = (command: string) => {
   postLog(`[analysisWorker ->] ${command}`);
   engine?.postMessage(command);
+};
+
+class AnalysisCanceledError extends Error {
+  constructor() {
+    super("Analysis canceled");
+    this.name = "AnalysisCanceledError";
+  }
+}
+
+const throwIfCanceled = (analysisId: string) => {
+  if (canceledAnalyses.has(analysisId)) {
+    throw new AnalysisCanceledError();
+  }
 };
 
 const ensureEngine = async () => {
@@ -154,20 +169,53 @@ const enqueueAnalysis = (message: AnalyzeMoveMessage) => {
   drainQueue();
 };
 
+const cancelAnalysis = (analysisId: string) => {
+  if (activeAnalysisId === analysisId) {
+    canceledAnalyses.add(analysisId);
+    if (activeSearch) {
+      sendEngineCommand("stop");
+    }
+    return;
+  }
+
+  const pendingIndex = pendingAnalyses.findIndex((entry) => entry.id === analysisId);
+  if (pendingIndex >= 0) {
+    pendingAnalyses.splice(pendingIndex, 1);
+  }
+};
+
 const drainQueue = () => {
   if (!engineReady || analysisInFlight) {
     return;
   }
 
-  const next = pendingAnalyses.shift();
+  let next: AnalyzeMoveMessage | undefined;
+  while (!next && pendingAnalyses.length > 0) {
+    const candidate = pendingAnalyses.shift();
+    if (!candidate) {
+      continue;
+    }
+    // `delete()` returns true only when a cancel tombstone existed, and also
+    // consumes it so future request-id reuse would not be poisoned.
+    if (canceledAnalyses.delete(candidate.id)) {
+      continue;
+    }
+    next = candidate;
+  }
+
   if (!next) {
     return;
   }
 
   analysisInFlight = true;
+  const request = next;
+  activeAnalysisId = request.id;
 
-  void analyzeMove(next)
+  void analyzeMove(request)
     .catch((error) => {
+      if (error instanceof AnalysisCanceledError) {
+        return;
+      }
       const message =
         error instanceof Error ? error.message : "Failed to analyze move";
       ctx.postMessage({
@@ -176,12 +224,18 @@ const drainQueue = () => {
       } satisfies AnalysisWorkerResponse);
     })
     .finally(() => {
+      canceledAnalyses.delete(request.id);
+      if (activeAnalysisId === request.id) {
+        activeAnalysisId = null;
+      }
       analysisInFlight = false;
       drainQueue();
     });
 };
 
 const analyzeMove = async (request: AnalyzeMoveMessage) => {
+  throwIfCanceled(request.id);
+
   ctx.postMessage({
     type: "analysis-started",
     id: request.id,
@@ -195,6 +249,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   }
 
   const bestSearch = await runSearch(request.fen, []);
+  throwIfCanceled(request.id);
   const bestMove = bestSearch.bestmove;
 
   if (!bestMove || bestMove === "(none)") {
@@ -217,6 +272,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     request.fen,
     [request.move],
     (score, depth) => {
+      if (canceledAnalyses.has(request.id)) {
+        return;
+      }
       const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
       if (cp !== null) {
         ctx.postMessage({
@@ -228,6 +286,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       }
     },
   );
+  throwIfCanceled(request.id);
 
   // When best != played, search after the best move too for an apples-to-apples
   // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because
@@ -236,6 +295,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     request.move === bestMove
       ? playedEvalSearch.score
       : (await runSearch(request.fen, [bestMove])).score;
+  throwIfCanceled(request.id);
 
   const { bestEval, playedEval, delta } = computeAnalysisResult({
     bestMove,
@@ -292,6 +352,10 @@ ctx.addEventListener(
         enqueueAnalysis(message);
         break;
       }
+      case "cancel-analysis": {
+        cancelAnalysis(message.id);
+        break;
+      }
       case "terminate": {
         engine?.removeEventListener("message", handleEngineMessage);
         engine?.removeEventListener("error", handleEngineError);
@@ -299,6 +363,8 @@ ctx.addEventListener(
         engine = null;
         engineReady = false;
         activeSearch = null;
+        activeAnalysisId = null;
+        canceledAnalyses.clear();
         analysisInFlight = false;
         pendingAnalyses.length = 0;
         break;

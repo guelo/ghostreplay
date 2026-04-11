@@ -6,6 +6,7 @@
 
 import type {
   AnalyzeMoveMessage,
+  AnalysisWorkerRequest,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
 import {
@@ -108,6 +109,7 @@ export class GameAnalysisCoordinator {
   private latestRequestIds = new Map<number, string>()
   private resolvedIndices = new Set<number>()
   private lastStreamingUpdateMs = 0
+  private currentAnalyzingRequestId: string | null = null
 
   // Cache lookup batching
   private pendingCacheLookups: PendingCacheLookup[] = []
@@ -140,6 +142,24 @@ export class GameAnalysisCoordinator {
     this.onAnalysisResolved = cb
   }
 
+  private cancelWorkerAnalysis(requestId: string) {
+    if (!this.worker) return
+    this.worker.postMessage({ type: 'cancel-analysis', id: requestId } satisfies AnalysisWorkerRequest)
+  }
+
+  private clearActiveAnalysisStateIfCurrent(requestId: string) {
+    if (this.currentAnalyzingRequestId !== requestId) {
+      return
+    }
+
+    const s = this.store.getState()
+    this.currentAnalyzingRequestId = null
+    this.lastStreamingUpdateMs = 0
+    s.setIsAnalyzing(false)
+    s.setAnalyzingMove(null)
+    s.setStreamingEval(null)
+  }
+
   // --- Worker lifecycle ---
 
   private ensureWorker() {
@@ -155,6 +175,10 @@ export class GameAnalysisCoordinator {
   }
 
   private terminateWorker() {
+    if (this.idleTimer) {
+      clearTimeout(this.idleTimer)
+      this.idleTimer = null
+    }
     if (!this.worker) return
     this.worker.removeEventListener('message', this.handleWorkerMessage)
     this.worker.removeEventListener('error', this.handleWorkerError)
@@ -191,6 +215,7 @@ export class GameAnalysisCoordinator {
     this.pendingMeta.clear()
     this.latestRequestIds.clear()
     this.pendingCacheLookups = []
+    this.currentAnalyzingRequestId = null
     if (this.cacheFlushTimer) {
       clearTimeout(this.cacheFlushTimer)
       this.cacheFlushTimer = null
@@ -200,6 +225,10 @@ export class GameAnalysisCoordinator {
     // clearAll doesn't reset status — do it explicitly so a prior worker
     // error doesn't stick across sessions.
     this.store.getState().setStatus('booting')
+
+    // Reset the worker between gameplay sessions so stale queue entries and
+    // accumulated Stockfish state do not leak into the next game.
+    this.terminateWorker()
 
     this.uploadState = {
       sessionId,
@@ -225,12 +254,13 @@ export class GameAnalysisCoordinator {
     this.pendingMeta.clear()
     this.latestRequestIds.clear()
     this.pendingCacheLookups = []
+    this.currentAnalyzingRequestId = null
     if (this.cacheFlushTimer) {
       clearTimeout(this.cacheFlushTimer)
       this.cacheFlushTimer = null
     }
     this.lastStreamingUpdateMs = 0
-    this.resetIdleTimer()
+    this.terminateWorker()
   }
 
   private finalizeOldSession() {
@@ -269,6 +299,10 @@ export class GameAnalysisCoordinator {
 
     const id = createRequestId()
     if (moveIndex !== undefined) {
+      const previousRequestId = this.latestRequestIds.get(moveIndex)
+      if (previousRequestId && previousRequestId !== id) {
+        this.cancelWorkerAnalysis(previousRequestId)
+      }
       this.store.getState().removeAnalysis(moveIndex)
       this.pendingMoveIndices.set(id, moveIndex)
       this.pendingMeta.set(id, { moveIndex, legalMoveCount })
@@ -303,6 +337,7 @@ export class GameAnalysisCoordinator {
     this.latestRequestIds.clear()
     this.resolvedIndices.clear()
     this.pendingCacheLookups = []
+    this.currentAnalyzingRequestId = null
     if (this.cacheFlushTimer) {
       clearTimeout(this.cacheFlushTimer)
       this.cacheFlushTimer = null
@@ -320,6 +355,7 @@ export class GameAnalysisCoordinator {
         s.setStatus('ready')
         break
       case 'analysis-started':
+        this.currentAnalyzingRequestId = message.id
         s.setIsAnalyzing(true)
         s.setAnalyzingMove(message.move)
         break
@@ -339,10 +375,7 @@ export class GameAnalysisCoordinator {
         break
       }
       case 'analysis': {
-        s.setIsAnalyzing(false)
-        s.setAnalyzingMove(null)
-        s.setStreamingEval(null)
-        this.lastStreamingUpdateMs = 0
+        this.clearActiveAnalysisStateIfCurrent(message.id)
 
         const moveIndex = this.pendingMoveIndices.get(message.id)
         if (moveIndex !== undefined) {
@@ -396,10 +429,13 @@ export class GameAnalysisCoordinator {
         break
       }
       case 'error':
+        this.currentAnalyzingRequestId = null
+        this.lastStreamingUpdateMs = 0
         s.setStatus('error')
         s.setError(message.error)
         s.setIsAnalyzing(false)
         s.setAnalyzingMove(null)
+        s.setStreamingEval(null)
         break
       case 'log':
         console.log(`[Analyst] ${message.message}`)
@@ -485,6 +521,8 @@ export class GameAnalysisCoordinator {
               `[Analyst] Cache hit for move ${pending.move} at index ${pending.moveIndex}`,
             )
             this.resolveAnalysisResult(pending.moveIndex, result)
+            this.clearActiveAnalysisStateIfCurrent(pending.requestId)
+            this.cancelWorkerAnalysis(pending.requestId)
             if (result.blunder && result.delta !== null) {
               console.log(
                 `[Analyst] Blunder detected (cached): \u0394${result.delta}cp (best ${result.bestMove}).`,

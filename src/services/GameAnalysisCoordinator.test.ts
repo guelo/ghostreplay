@@ -266,6 +266,21 @@ describe('GameAnalysisCoordinator', () => {
       expect(coordinator.store.getState().analysisMap.get(0)?.move).toBe('d2d4')
     })
 
+    it('cancels the older worker request when a move index is replayed', () => {
+      coordinator.startSession('session-A')
+
+      const firstId = coordinator.analyzeMove('fen-old', 'e2e4', 'white', 0, 20)
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+
+      coordinator.analyzeMove('fen-new', 'd2d4', 'white', 0, 20)
+
+      expect(worker.postMessage).toHaveBeenCalledWith({
+        type: 'cancel-analysis',
+        id: firstId,
+      })
+    })
+
     it('clears the previous analysisMap entry as soon as a replay starts for that ply', () => {
       coordinator.startSession('session-A')
 
@@ -288,6 +303,81 @@ describe('GameAnalysisCoordinator', () => {
       coordinator.analyzeMove('fen-new', 'd2d4', 'white', 0, 20)
 
       expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+    })
+  })
+
+  describe('cache hits cancel worker analysis', () => {
+    it('stops the matching worker request after a cache hit resolves the move', async () => {
+      coordinator.startSession('session-A')
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+
+      vi.advanceTimersByTime(200)
+
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4',
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          played_eval: 25,
+          best_eval: 25,
+          eval_delta: 0,
+          classification: 'best',
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(worker.postMessage).toHaveBeenCalledWith({
+        type: 'cancel-analysis',
+        id: requestId,
+      })
+    })
+
+    it('clears analyzing state when a cache hit resolves the active request', async () => {
+      coordinator.startSession('session-A')
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis-started',
+          id: requestId,
+          move: 'e2e4',
+        },
+      })
+
+      expect(coordinator.store.getState().isAnalyzing).toBe(true)
+      expect(coordinator.store.getState().analyzingMove).toBe('e2e4')
+
+      vi.advanceTimersByTime(200)
+
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4',
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          played_eval: 25,
+          best_eval: 25,
+          eval_delta: 0,
+          classification: 'best',
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().isAnalyzing).toBe(false)
+      expect(coordinator.store.getState().analyzingMove).toBeNull()
+      expect(coordinator.store.getState().streamingEval).toBeNull()
     })
   })
 
@@ -394,6 +484,16 @@ describe('GameAnalysisCoordinator', () => {
 
       // Store should remain empty — stale result dropped
       expect(coordinator.store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('terminates the worker so stale searches do not keep running after reset', () => {
+      coordinator.startSession('session-C')
+
+      const worker = (coordinator as any).worker as MockWorker
+      coordinator.clearSession()
+
+      expect(worker.terminate).toHaveBeenCalled()
+      expect((coordinator as any).worker).toBeNull()
     })
   })
 })

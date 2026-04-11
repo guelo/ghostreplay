@@ -102,7 +102,120 @@ describe('analysisWorker', () => {
       expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
         'position fen 4k3/8/8/8/8/8/8/4K3 w - - 0 1',
       )
-      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 20 movetime 3000')
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
     })
+  })
+
+  it('stops an active analysis when a cancel message arrives', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-1',
+          fen: '4k3/8/8/8/8/8/8/4K3 w - - 0 1',
+          move: 'e1e2',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'cancel-analysis',
+          id: 'analysis-1',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('stop')
+  })
+
+  it('removes a queued analysis before it ever starts', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-1',
+          fen: '4k3/8/8/8/8/8/8/4K3 w - - 0 1',
+          move: 'e1e2',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-2',
+          fen: '8/8/8/8/8/8/8/4K3 w - - 0 1',
+          move: 'e1e2',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'cancel-analysis',
+          id: 'analysis-2',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    engineMessageHandler?.('bestmove e1e2')
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen 4k3/8/8/8/8/8/8/4K3 w - - 0 1 moves e1e2',
+      )
+    })
+
+    engineMessageHandler?.('bestmove e1e2')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-1',
+        }),
+      )
+    })
+
+    expect(postMessageMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'analysis-started',
+        id: 'analysis-2',
+      }),
+    )
+    expect(postMessageMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'analysis',
+        id: 'analysis-2',
+      }),
+    )
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
+      'position fen 8/8/8/8/8/8/8/4K3 w - - 0 1',
+    )
   })
 })
