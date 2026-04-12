@@ -29,27 +29,25 @@ export const MAIA_OPPONENT_AVATARS: Record<
   (typeof MAIA_ELO_BINS)[number],
   string
 > = {
-  600: "/images/gh600.png",
-  800: "/images/gh800.png",
-  1000: "/images/gh1000.png",
-  1100: "/images/gh1100.png",
-  1200: "/images/gh1200.png",
-  1300: "/images/gh1300.png",
-  1400: "/images/gh1400.png",
-  1500: "/images/gh1500.png",
-  1600: "/images/gh1500.png",
-  1700: "/images/gh1500.png",
-  1800: "/images/gh1500.png",
-  1900: "/images/gh1500.png",
-  2000: "/images/gh1500.png",
-  2200: "/images/gh1500.png",
-  2400: "/images/gh1500.png",
+  600: "/images/a.png",
+  800: "/images/b.png",
+  1000: "/images/gh600.png",
+  1100: "/images/ghd.png",
+  1200: "/images/gh800.png",
+  1300: "/images/gh1000.png",
+  1400: "/images/gha.png",
+  1500: "/images/e.png",
+  1600: "/images/ghf.png",
+  1700: "/images/gh1100.png",
+  1800: "/images/gh1200.png",
+  1900: "/images/j.png",
+  2000: "/images/gh1300.png",
+  2200: "/images/l.png",
+  2400: "/images/k.png",
   2600: "/images/gh1500.png",
 };
 
-const isMaiaBin = (
-  elo: number,
-): elo is (typeof MAIA_ELO_BINS)[number] =>
+const isMaiaBin = (elo: number): elo is (typeof MAIA_ELO_BINS)[number] =>
   (MAIA_ELO_BINS as readonly number[]).includes(elo);
 
 export const getOpponentAvatarSrc = (engineElo: number): string => {
