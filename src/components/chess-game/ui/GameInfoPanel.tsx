@@ -3,6 +3,7 @@ import { memo, type RefObject } from "react";
 import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { TargetBlunderSrs } from "../../../utils/api";
 import type { ResolvedReview } from "../types";
+import OpponentAvatar from "./OpponentAvatar";
 
 type BoardOrientation = "white" | "black";
 
@@ -17,6 +18,7 @@ type GameInfoPanelProps = {
   isProvisional: boolean;
   opponentMode: "ghost" | "engine";
   opponentName: string;
+  engineElo: number;
   blunderReviewId: number | null;
   showGhostInfo: boolean;
   onToggleGhostInfo: () => void;
@@ -32,19 +34,6 @@ type GameInfoPanelProps = {
   showRehookToast: boolean;
   onDismissRehookToast: () => void;
 };
-
-const GhostIcon = () => (
-  <svg
-    className="ghost-icon"
-    width="24"
-    height="24"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M12 2C7.58 2 4 5.58 4 10v10.5c0 .83 1 1.25 1.59.66l1.41-1.41 1.41 1.41a.996.996 0 0 0 1.41 0L11.24 19.75l1.41 1.41a.996.996 0 0 0 1.41 0l1.41-1.41 1.41 1.41c.59.59 1.59.17 1.59-.66V10c0-4.42-3.58-8-8-8Zm-2 11a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Zm4 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3Z" />
-  </svg>
-);
 
 const WarningTriangleIcon = () => (
   <svg
@@ -79,6 +68,7 @@ const GameInfoPanel = ({
   isProvisional,
   opponentMode,
   opponentName,
+  engineElo,
   blunderReviewId,
   showGhostInfo,
   onToggleGhostInfo,
@@ -119,12 +109,16 @@ const GameInfoPanel = ({
       )}
       {isGameActive && (
         <div
-          className={`chess-meta${opponentMode === "ghost" ? " chess-meta--ghost" : ""}`}
+          className={`chess-meta${
+            opponentMode === "ghost"
+              ? " chess-meta--ghost"
+              : " chess-meta--engine"
+          }`}
         >
           Opponent:{" "}
           {opponentMode === "ghost" ? (
             <>
-              <GhostIcon />{" "}
+              <OpponentAvatar mode="ghost" engineElo={engineElo} size={70} />{" "}
               <span className="chess-meta-strong ghost-mode-label">Ghost</span>
               {blunderReviewId !== null && (
                 <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
@@ -194,7 +188,14 @@ const GameInfoPanel = ({
               )}
             </>
           ) : (
-            <span className="chess-meta-strong">{opponentName}</span>
+            <>
+              <OpponentAvatar
+                mode="engine"
+                engineElo={engineElo}
+                size={70}
+              />{" "}
+              <span className="chess-meta-strong">{opponentName}</span>
+            </>
           )}
         </div>
       )}

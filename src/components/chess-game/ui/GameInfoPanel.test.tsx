@@ -29,6 +29,7 @@ const makeProps = () => {
     isProvisional: false,
     opponentMode: "engine" as const,
     opponentName: "Ghost Master 2000",
+    engineElo: 2000,
     blunderReviewId: null,
     showGhostInfo: false,
     onToggleGhostInfo,
@@ -49,10 +50,33 @@ const makeProps = () => {
 describe("GameInfoPanel", () => {
   it("renders engine-mode details", () => {
     const props = makeProps();
-    render(<GameInfoPanel {...props} />);
+    const { container } = render(<GameInfoPanel {...props} />);
 
     expect(screen.getByText("Ghost Master 2000")).toBeInTheDocument();
     expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
+
+    const avatar = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(avatar).not.toBeNull();
+    // 2000 is above the highest asset bin; should fall back to gh1500.png.
+    expect(avatar?.getAttribute("src")).toBe("/images/gh1500.png");
+  });
+
+  it("renders an on-bin engine avatar", () => {
+    const props = makeProps();
+    const { container } = render(
+      <GameInfoPanel
+        {...props}
+        engineElo={1200}
+        opponentName="Specter Scout 1200"
+      />,
+    );
+
+    const avatar = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(avatar?.getAttribute("src")).toBe("/images/gh1200.png");
   });
 
   it("shows rehook toast below opponent label and calls dismiss on click", () => {
@@ -83,7 +107,7 @@ describe("GameInfoPanel", () => {
       pass_streak: 2,
     };
 
-    render(
+    const { container } = render(
       <GameInfoPanel
         {...props}
         opponentMode="ghost"
@@ -93,6 +117,13 @@ describe("GameInfoPanel", () => {
         blunderTargetFen="8/8/8/8/8/8/8/8 w - - 0 1"
         blunderReviewSrs={srs}
       />,
+    );
+
+    const avatar = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(avatar?.getAttribute("src")).toBe(
+      "/branding/ghost-logo-option-1-buddy.svg",
     );
 
     fireEvent.click(screen.getByRole("button", { name: /toggle ghost info/i }));

@@ -2,6 +2,7 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo } from "react";
 import { PromotionPicker } from "./PromotionPicker";
+import OpponentAvatar from "./OpponentAvatar";
 
 type BoardOrientation = "white" | "black";
 
@@ -107,22 +108,31 @@ const BoardStage = ({
                 </button>
                 <p className="chess-start-title">Difficulty</p>
                 <div className="chess-elo-selector">
-                  <input
-                    type="range"
-                    min={0}
-                    max={maiaEloBins.length - 1}
-                    step={1}
-                    value={maiaEloBins.indexOf(engineElo)}
-                    onChange={(e) => {
-                      const nextElo = maiaEloBins[Number(e.target.value)];
-                      if (nextElo !== undefined) {
-                        onEngineEloChange(nextElo);
-                      }
-                    }}
-                    disabled={isStartingGame}
-                    className="chess-elo-slider"
-                  />
-                  <span className="chess-elo-label">{botLabel}</span>
+                  <div className="chess-elo-slider-row">
+                    <input
+                      type="range"
+                      min={0}
+                      max={maiaEloBins.length - 1}
+                      step={1}
+                      value={maiaEloBins.indexOf(engineElo)}
+                      onChange={(e) => {
+                        const nextElo = maiaEloBins[Number(e.target.value)];
+                        if (nextElo !== undefined) {
+                          onEngineEloChange(nextElo);
+                        }
+                      }}
+                      disabled={isStartingGame}
+                      className="chess-elo-slider"
+                    />
+                  </div>
+                  <div className="chess-elo-bot-row">
+                    <OpponentAvatar
+                      mode="engine"
+                      engineElo={engineElo}
+                      size={70}
+                    />
+                    <span className="chess-elo-label">{botLabel}</span>
+                  </div>
                 </div>
                 <p className="elo-stakes">
                   <span className="elo-stakes__win">Win +{winDelta}</span>

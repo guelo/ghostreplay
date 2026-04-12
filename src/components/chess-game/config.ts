@@ -23,6 +23,48 @@ export const MAIA_BOT_NAMES: Record<(typeof MAIA_ELO_BINS)[number], string> = {
   2600: "Wraith Nova 2600",
 };
 
+export const GHOST_AVATAR_SRC = "/branding/ghost-logo-option-1-buddy.svg";
+
+export const MAIA_OPPONENT_AVATARS: Record<
+  (typeof MAIA_ELO_BINS)[number],
+  string
+> = {
+  600: "/images/gh600.png",
+  800: "/images/gh800.png",
+  1000: "/images/gh1000.png",
+  1100: "/images/gh1100.png",
+  1200: "/images/gh1200.png",
+  1300: "/images/gh1300.png",
+  1400: "/images/gh1400.png",
+  1500: "/images/gh1500.png",
+  1600: "/images/gh1500.png",
+  1700: "/images/gh1500.png",
+  1800: "/images/gh1500.png",
+  1900: "/images/gh1500.png",
+  2000: "/images/gh1500.png",
+  2200: "/images/gh1500.png",
+  2400: "/images/gh1500.png",
+  2600: "/images/gh1500.png",
+};
+
+const isMaiaBin = (
+  elo: number,
+): elo is (typeof MAIA_ELO_BINS)[number] =>
+  (MAIA_ELO_BINS as readonly number[]).includes(elo);
+
+export const getOpponentAvatarSrc = (engineElo: number): string => {
+  if (isMaiaBin(engineElo)) {
+    return MAIA_OPPONENT_AVATARS[engineElo];
+  }
+  let best: (typeof MAIA_ELO_BINS)[number] = MAIA_ELO_BINS[0];
+  for (const bin of MAIA_ELO_BINS) {
+    if (bin <= engineElo && bin > best) {
+      best = bin;
+    }
+  }
+  return MAIA_OPPONENT_AVATARS[best];
+};
+
 export const STARTING_FEN =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 

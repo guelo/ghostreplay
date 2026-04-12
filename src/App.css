@@ -700,24 +700,42 @@
 
 .chess-elo-selector {
     display: flex;
-    align-items: center;
-    gap: 0.75rem;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
     width: 100%;
 }
 
+.chess-elo-slider-row {
+    display: flex;
+    width: 100%;
+}
+
+.chess-elo-bot-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+}
+
 .chess-elo-slider {
-    flex: 1;
+    width: 100%;
     accent-color: var(--accent);
     cursor: pointer;
     height: 6px;
 }
 
 .chess-elo-label {
-    min-width: 3rem;
     font-size: 1.1rem;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
     color: var(--text-primary);
+}
+
+.opponent-avatar {
+    border-radius: 4px;
+    object-fit: contain;
+    flex-shrink: 0;
 }
 
 .elo-stakes {
@@ -2193,6 +2211,12 @@
 
 /* Ghost mode indicator */
 .chess-meta--ghost {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.chess-meta--engine {
     display: flex;
     align-items: center;
     gap: 0.3rem;

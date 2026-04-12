@@ -170,6 +170,22 @@ describe("BoardStage", () => {
     expect(props.onPlayBlack).toHaveBeenCalledTimes(1);
   });
 
+  it("updates the popup opponent avatar when engineElo changes", () => {
+    const props = makeProps();
+    const { container, rerender } = render(<BoardStage {...props} />);
+
+    const initial = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(initial?.getAttribute("src")).toBe("/images/gh1000.png");
+
+    rerender(<BoardStage {...props} engineElo={1200} />);
+    const updated = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(updated?.getAttribute("src")).toBe("/images/gh1200.png");
+  });
+
   it("dismisses revert warning through callbacks", () => {
     const props = makeProps();
     render(<BoardStage {...props} showRevertWarning />);
