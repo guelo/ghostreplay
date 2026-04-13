@@ -56,6 +56,60 @@ type DisplayItem =
 const EMPTY_MESSAGES: ReadonlyMap<number, MoveMessage[]> = new Map();
 const EMPTY_BUBBLES: MoveMessage[] = [];
 
+const getMoveListStickyInset = (container: HTMLDivElement): number => {
+  const containerRect = container.getBoundingClientRect();
+  let stickyInset = 0;
+
+  for (const header of container.querySelectorAll<HTMLElement>(".move-list-header")) {
+    const headerRect = header.getBoundingClientRect();
+    stickyInset = Math.max(stickyInset, headerRect.bottom - containerRect.top);
+  }
+
+  return Math.max(0, stickyInset);
+};
+
+const setMoveListScrollTop = (
+  container: HTMLDivElement,
+  top: number,
+  behavior: ScrollBehavior,
+) => {
+  const nextTop = Math.max(0, top);
+  if (typeof container.scrollTo === "function") {
+    container.scrollTo({ top: nextTop, behavior });
+    return;
+  }
+  container.scrollTop = nextTop;
+};
+
+const scrollMoveListTargetIntoView = (
+  container: HTMLDivElement,
+  target: HTMLElement,
+  stickyInset: number,
+  behavior: ScrollBehavior,
+) => {
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const targetTop = targetRect.top - containerRect.top + container.scrollTop;
+  const targetBottom = targetTop + targetRect.height;
+  const visibleTop = container.scrollTop + stickyInset;
+  const visibleBottom = container.scrollTop + container.clientHeight;
+  const visibleHeight = Math.max(0, container.clientHeight - stickyInset);
+
+  if (targetRect.height > visibleHeight) {
+    setMoveListScrollTop(container, targetTop - stickyInset, behavior);
+    return;
+  }
+
+  if (targetTop < visibleTop) {
+    setMoveListScrollTop(container, targetTop - stickyInset, behavior);
+    return;
+  }
+
+  if (targetBottom > visibleBottom) {
+    setMoveListScrollTop(container, targetBottom - container.clientHeight, behavior);
+  }
+};
+
 const MoveList = ({
   moves,
   currentIndex,
@@ -199,23 +253,41 @@ const MoveList = ({
 
   // Auto-scroll to selected move
   useEffect(() => {
-    if (!selectedMoveRef.current || !moveListRef.current) return;
+    if (!moveListRef.current) return;
     const id = requestAnimationFrame(() => {
-      selectedMoveRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-      });
+      const container = moveListRef.current;
+      if (!container) return;
+      if (!isVariationActive && effectiveIndex === -1) {
+        setMoveListScrollTop(container, 0, "smooth");
+        return;
+      }
+
+      const target = selectedMoveRef.current;
+      if (!target) return;
+      scrollMoveListTargetIntoView(
+        container,
+        target,
+        getMoveListStickyInset(container),
+        "smooth",
+      );
     });
     return () => cancelAnimationFrame(id);
-  }, [effectiveIndex]);
+  }, [effectiveIndex, isVariationActive]);
 
   // Auto-scroll to selected variation ply
   useEffect(() => {
     if (!isVariationActive || !moveListRef.current) return;
-    const el = moveListRef.current.querySelector(".variation-ply--selected");
-    if (!el) return;
     const id = requestAnimationFrame(() => {
-      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      const container = moveListRef.current;
+      if (!container) return;
+      const el = container.querySelector<HTMLElement>(".variation-ply--selected");
+      if (!el) return;
+      scrollMoveListTargetIntoView(
+        container,
+        el,
+        getMoveListStickyInset(container),
+        "smooth",
+      );
     });
     return () => cancelAnimationFrame(id);
   }, [isVariationActive, selectedVarNodeId]);
@@ -237,10 +309,15 @@ const MoveList = ({
     if (!hasChange) return;
     if (!lastMessageRef.current || !moveListRef.current) return;
     const id = requestAnimationFrame(() => {
-      lastMessageRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-      });
+      const container = moveListRef.current;
+      const target = lastMessageRef.current;
+      if (!container || !target) return;
+      scrollMoveListTargetIntoView(
+        container,
+        target,
+        getMoveListStickyInset(container),
+        "smooth",
+      );
     });
     return () => cancelAnimationFrame(id);
   }, [messages]);

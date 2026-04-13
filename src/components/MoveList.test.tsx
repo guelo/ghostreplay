@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render } from '../test/utils'
 import MoveList from './MoveList'
 import type { VariationTree, VarNode, VariationNodeId } from '../types/variationTree'
@@ -8,6 +8,132 @@ import type { NavigateUpResult } from '../hooks/useVariationTree'
 Element.prototype.scrollIntoView = vi.fn()
 
 const noop = () => {}
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+type RectSpec = {
+  top: number
+  height: number
+  left?: number
+  width?: number
+}
+
+function makeRect({ top, height, left = 0, width = 160 }: RectSpec): DOMRect {
+  return {
+    x: left,
+    y: top,
+    top,
+    left,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => '',
+  } as DOMRect
+}
+
+function installAnimationFrameQueue() {
+  const callbacks = new Map<number, FrameRequestCallback>()
+  let nextId = 1
+
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+    const id = nextId++
+    callbacks.set(id, cb)
+    return id
+  })
+
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => {
+    callbacks.delete(id)
+  })
+
+  return {
+    clear() {
+      callbacks.clear()
+    },
+    flushAll() {
+      const pending = [...callbacks.entries()]
+      callbacks.clear()
+      for (const [, cb] of pending) {
+        cb(0)
+      }
+    },
+  }
+}
+
+function setMoveListScrollMetrics(
+  container: HTMLDivElement,
+  {
+    containerTop,
+    clientHeight,
+    headerHeight,
+    initialScrollTop,
+  }: {
+    containerTop: number
+    clientHeight: number
+    headerHeight: number
+    initialScrollTop: number
+  },
+) {
+  let scrollTop = initialScrollTop
+  const scrollTo = vi.fn(({ top }: ScrollToOptions) => {
+    scrollTop = top ?? scrollTop
+  })
+
+  Object.defineProperty(container, 'clientHeight', {
+    configurable: true,
+    value: clientHeight,
+  })
+  Object.defineProperty(container, 'scrollTop', {
+    configurable: true,
+    get: () => scrollTop,
+    set: (value: number) => {
+      scrollTop = value
+    },
+  })
+  Object.defineProperty(container, 'scrollTo', {
+    configurable: true,
+    value: scrollTo,
+  })
+
+  vi
+    .spyOn(container, 'getBoundingClientRect')
+    .mockReturnValue(makeRect({ top: containerTop, height: clientHeight }))
+
+  for (const header of container.querySelectorAll('.move-list-header')) {
+    vi
+      .spyOn(header, 'getBoundingClientRect')
+      .mockReturnValue(makeRect({ top: containerTop, height: headerHeight }))
+  }
+
+  return {
+    scrollTo,
+    getScrollTop: () => scrollTop,
+  }
+}
+
+function mockTargetRect(
+  element: Element,
+  {
+    containerTop,
+    contentTop,
+    initialScrollTop,
+    height,
+  }: {
+    containerTop: number
+    contentTop: number
+    initialScrollTop: number
+    height: number
+  },
+) {
+  vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(
+    makeRect({
+      top: containerTop + contentTop - initialScrollTop,
+      height,
+    }),
+  )
+}
 
 /**
  * Render MoveList and return the delta text for each move cell.
@@ -143,6 +269,158 @@ describe('MoveList header eval', () => {
       0,
     )
     expect(headerEval).toBe('')
+  })
+})
+
+describe('MoveList auto-scroll', () => {
+  it('scrolls to the top and clears move selection at the starting position', () => {
+    const frames = installAnimationFrameQueue()
+    const onNavigate = vi.fn()
+    const { container, rerender } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={onNavigate}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 120,
+      headerHeight: 32,
+      initialScrollTop: 180,
+    })
+
+    frames.clear()
+    const startButton = container.querySelector('[title="Go to starting position"]') as HTMLButtonElement
+    fireEvent.click(startButton)
+    expect(onNavigate).toHaveBeenCalledWith(-1)
+
+    rerender(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={-1}
+        onNavigate={onNavigate}
+      />,
+    )
+
+    frames.flushAll()
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+    expect(getScrollTop()).toBe(0)
+    expect(container.querySelectorAll('.move-button.selected')).toHaveLength(0)
+  })
+
+  it('scrolls selected moves below the sticky header when they are clipped at the top', () => {
+    const frames = installAnimationFrameQueue()
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={noop}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 120,
+      headerHeight: 32,
+      initialScrollTop: 40,
+    })
+    const selectedMove = container.querySelector('.move-button.selected') as HTMLButtonElement
+    mockTargetRect(selectedMove, {
+      containerTop: 100,
+      contentTop: 60,
+      initialScrollTop: 40,
+      height: 24,
+    })
+
+    frames.flushAll()
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 28, behavior: 'smooth' })
+    expect(getScrollTop()).toBe(28)
+  })
+
+  it('auto-scrolls selected variation plies with the shared helper', () => {
+    const frames = installAnimationFrameQueue()
+    const varNode = makeNode({ id: 'v1', san: 'Nf6', parentGameIndex: 4 })
+    const tree = makeTree([varNode], new Map([[4, ['v1']]]))
+
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={4}
+        onNavigate={noop}
+        {...variationActiveProps(tree, 'v1')}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 120,
+      headerHeight: 32,
+      initialScrollTop: 0,
+    })
+    const selectedPly = container.querySelector('.variation-ply--selected') as HTMLElement
+    mockTargetRect(selectedPly, {
+      containerTop: 100,
+      contentTop: 150,
+      initialScrollTop: 0,
+      height: 24,
+    })
+
+    frames.flushAll()
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 54, behavior: 'smooth' })
+    expect(getScrollTop()).toBe(54)
+  })
+
+  it('auto-scrolls the latest message bubble with the shared helper', () => {
+    const frames = installAnimationFrameQueue()
+    const { container, rerender } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={noop}
+      />,
+    )
+
+    frames.clear()
+    const messages = new Map([
+      [4, [{ key: 'msg1', variant: 'srs-pass' as const, text: 'Nice!' }]],
+    ])
+
+    rerender(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={noop}
+        messages={messages}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 120,
+      headerHeight: 32,
+      initialScrollTop: 20,
+    })
+    const lastMessage = container.querySelector('.move-bubble') as HTMLDivElement
+    mockTargetRect(lastMessage, {
+      containerTop: 100,
+      contentTop: 160,
+      initialScrollTop: 20,
+      height: 30,
+    })
+
+    frames.flushAll()
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 70, behavior: 'smooth' })
+    expect(getScrollTop()).toBe(70)
   })
 })
 
