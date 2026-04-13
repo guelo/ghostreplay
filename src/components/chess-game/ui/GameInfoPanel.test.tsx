@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
 import type { TargetBlunderSrs } from "../../../utils/api";
 import GameInfoPanel from "./GameInfoPanel";
+import { getOpponentAvatarSrc } from "../config";
 
 vi.mock("react-chessboard", () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => (
@@ -59,8 +60,7 @@ describe("GameInfoPanel", () => {
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
     expect(avatar).not.toBeNull();
-    // 2000 is above the highest asset bin; should fall back to gh1500.png.
-    expect(avatar?.getAttribute("src")).toBe("/images/gh1500.png");
+    expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(2000));
   });
 
   it("renders an on-bin engine avatar", () => {
@@ -76,7 +76,7 @@ describe("GameInfoPanel", () => {
     const avatar = container.querySelector(
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
-    expect(avatar?.getAttribute("src")).toBe("/images/gh1200.png");
+    expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(1200));
   });
 
   it("shows rehook toast below opponent label and calls dismiss on click", () => {

@@ -2,6 +2,7 @@ import React from "react";
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
 import BoardStage from "./BoardStage";
+import { getOpponentAvatarSrc } from "../config";
 
 let boardMountCount = 0;
 let boardUnmountCount = 0;
@@ -177,13 +178,13 @@ describe("BoardStage", () => {
     const initial = container.querySelector(
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
-    expect(initial?.getAttribute("src")).toBe("/images/gh1000.png");
+    expect(initial?.getAttribute("src")).toBe(getOpponentAvatarSrc(1000));
 
     rerender(<BoardStage {...props} engineElo={1200} />);
     const updated = container.querySelector(
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
-    expect(updated?.getAttribute("src")).toBe("/images/gh1200.png");
+    expect(updated?.getAttribute("src")).toBe(getOpponentAvatarSrc(1200));
   });
 
   it("dismisses revert warning through callbacks", () => {
