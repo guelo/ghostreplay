@@ -3,6 +3,12 @@ import { renderHook, act } from '@testing-library/react'
 import { useMoveAnalysis } from './useMoveAnalysis'
 import { createAnalysisStore, type AnalysisStore } from '../stores/createAnalysisStore'
 
+const lookupAnalysisCacheMock = vi.fn()
+
+vi.mock('../utils/api', () => ({
+  lookupAnalysisCache: (...args: unknown[]) => lookupAnalysisCacheMock(...args),
+}))
+
 type MessageHandler = (event: MessageEvent) => void
 type ErrorHandler = (event: ErrorEvent) => void
 type WorkerListener = MessageHandler | ErrorHandler
@@ -44,6 +50,7 @@ describe('useMoveAnalysis', () => {
   beforeEach(() => {
     postMessageMock.mockClear()
     terminateMock.mockClear()
+    lookupAnalysisCacheMock.mockReset()
     messageHandler = null
     errorHandler = null
     store = createAnalysisStore()
@@ -51,6 +58,7 @@ describe('useMoveAnalysis', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    vi.useRealTimers()
   })
 
   it('initializes with booting status', () => {
@@ -686,5 +694,77 @@ describe('useMoveAnalysis', () => {
       blunder: false,
       recordable: false,
     })
+  })
+
+  it('ignores incomplete cache hits and waits for the worker result', async () => {
+    vi.useFakeTimers()
+
+    let resolveLookup!: (value: Map<string, unknown>) => void
+    lookupAnalysisCacheMock.mockReturnValueOnce(
+      new Promise((resolve) => { resolveLookup = resolve }),
+    )
+
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0, 20)
+    })
+
+    const requestId = postMessageMock.mock.calls[0][0].id
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+
+    act(() => {
+      resolveLookup(new Map([
+        ['fen::e2e4', {
+          move_san: 'e4',
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          played_eval: 25,
+          best_eval: null,
+          eval_delta: null,
+          classification: null,
+        }],
+      ]))
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(store.getState().analysisMap.size).toBe(0)
+    expect(
+      postMessageMock.mock.calls.some(
+        ([message]) => message.type === 'cancel-analysis' && message.id === requestId,
+      ),
+    ).toBe(false)
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 25,
+        playedEval: 25,
+        delta: 0,
+        classification: 'best',
+      })
+    })
+
+    expect(store.getState().analysisMap.get(0)).toEqual(
+      expect.objectContaining({
+        id: requestId,
+        move: 'e2e4',
+        delta: 0,
+        classification: 'best',
+      }),
+    )
   })
 })

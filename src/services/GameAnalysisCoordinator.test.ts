@@ -379,6 +379,62 @@ describe('GameAnalysisCoordinator', () => {
       expect(coordinator.store.getState().analyzingMove).toBeNull()
       expect(coordinator.store.getState().streamingEval).toBeNull()
     })
+
+    it('ignores incomplete cache hits and lets the worker finish the analysis', async () => {
+      coordinator.startSession('session-A')
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+
+      vi.advanceTimersByTime(200)
+
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4',
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          played_eval: 25,
+          best_eval: null,
+          eval_delta: null,
+          classification: null,
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+      expect(worker.postMessage).not.toHaveBeenCalledWith({
+        type: 'cancel-analysis',
+        id: requestId,
+      })
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'e2e4',
+          bestMove: 'e2e4',
+          bestEval: 25,
+          playedEval: 25,
+          delta: 0,
+          classification: 'best',
+        },
+      })
+
+      expect(coordinator.store.getState().analysisMap.get(0)).toEqual(
+        expect.objectContaining({
+          id: requestId,
+          move: 'e2e4',
+          delta: 0,
+          classification: 'best',
+        }),
+      )
+    })
   })
 
   // ---------------------------------------------------------------

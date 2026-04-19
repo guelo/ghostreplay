@@ -3,7 +3,7 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, canResolveCachedAnalysis } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
@@ -136,6 +136,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
           if (!cached) continue
+          if (!canResolveCachedAnalysis(cached)) continue
 
           const result = fromCachedAnalysis(
             cached,

@@ -152,6 +152,19 @@ export const classifyMove = (
   return 'blunder'
 }
 
+/**
+ * Cache hits must carry enough data to classify the move immediately.
+ * Rows missing both explicit classification and eval_delta are treated as
+ * misses so the worker can produce a complete result instead of freezing a
+ * null classification into session uploads.
+ */
+export const canResolveCachedAnalysis = (input: {
+  classification: MoveClassification | string | null | undefined
+  eval_delta: number | null | undefined
+}): boolean => {
+  return input.classification != null || input.eval_delta != null
+}
+
 // ── Win-chance classifier (Lichess logistic model) ──────────────────
 
 export const WIN_CHANCE_MULTIPLIER = -0.00368208

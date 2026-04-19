@@ -13,6 +13,7 @@ import {
   isRecordableFailure,
   isWithinRecordingMoveCap,
   classifyMove,
+  canResolveCachedAnalysis,
 } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
@@ -506,6 +507,7 @@ export class GameAnalysisCoordinator {
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
           if (!cached) continue
+          if (!canResolveCachedAnalysis(cached)) continue
 
           const result = fromCachedAnalysis(
             pending.requestId,
