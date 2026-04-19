@@ -1093,6 +1093,9 @@ describe("ChessGame blunder recording", () => {
         expect.any(Number),
       );
     });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+    });
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -1155,6 +1158,9 @@ describe("ChessGame blunder recording", () => {
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
     });
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -1220,6 +1226,9 @@ describe("ChessGame blunder recording", () => {
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+    });
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
     });
@@ -1282,6 +1291,9 @@ describe("ChessGame blunder recording", () => {
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+    });
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -1336,6 +1348,9 @@ describe("ChessGame blunder recording", () => {
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+    });
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -1389,6 +1404,9 @@ describe("ChessGame blunder recording", () => {
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -1450,6 +1468,9 @@ describe("ChessGame blunder recording", () => {
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
     });
 
     await act(async () => {

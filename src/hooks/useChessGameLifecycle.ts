@@ -54,6 +54,7 @@ type UseChessGameLifecycleArgs = {
   setShowFlash: Dispatch<SetStateAction<boolean>>;
   setBlunderReviewId: Dispatch<SetStateAction<number | null>>;
   setBlunderReviewSrs: Dispatch<SetStateAction<TargetBlunderSrs | null>>;
+  setBlunderTargetFen: Dispatch<SetStateAction<string | null>>;
   setShowPassToast: Dispatch<SetStateAction<boolean>>;
   setShowRehookToast: Dispatch<SetStateAction<boolean>>;
   setReviewFailModal: Dispatch<SetStateAction<ReviewFailInfo | null>>;
@@ -86,6 +87,7 @@ export const useChessGameLifecycle = ({
   setShowFlash,
   setBlunderReviewId,
   setBlunderReviewSrs,
+  setBlunderTargetFen,
   setShowPassToast,
   setShowRehookToast,
   setReviewFailModal,
@@ -155,6 +157,9 @@ export const useChessGameLifecycle = ({
         }
         useGameStore.getState().setIsGameActive(false);
         useGameStore.getState().setGameResult(result);
+        setBlunderReviewId(null);
+        setBlunderReviewSrs(null);
+        setBlunderTargetFen(null);
         setResolvedReview(null);
         setShowPostGamePrompt(true);
       } catch (error) {
@@ -166,6 +171,9 @@ export const useChessGameLifecycle = ({
   }, [
     chess,
     coordinator,
+    setBlunderReviewId,
+    setBlunderReviewSrs,
+    setBlunderTargetFen,
     setEngineMessage,
     setResolvedReview,
     setShowPostGamePrompt,
@@ -193,6 +201,7 @@ export const useChessGameLifecycle = ({
     store.setViewIndex(null);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
+    setBlunderTargetFen(null);
     setResolvedReview(null);
     setBlunderAlert(null);
     setPendingPromotion(null);
@@ -205,6 +214,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    setBlunderTargetFen,
     setResolvedReview,
     setPendingPromotion,
     clearBlunderBoardOverride,
@@ -273,6 +283,7 @@ export const useChessGameLifecycle = ({
         setShowFlash(false);
         setBlunderReviewId(null);
         setBlunderReviewSrs(null);
+        setBlunderTargetFen(null);
         setResolvedReview(null);
         setPendingPromotion(null);
         setShowPassToast(false);
@@ -307,6 +318,7 @@ export const useChessGameLifecycle = ({
       setBlunderAlert,
       setBlunderReviewId,
       setBlunderReviewSrs,
+      setBlunderTargetFen,
       setResolvedReview,
       setPendingPromotion,
       clearBlunderBoardOverride,
@@ -350,6 +362,9 @@ export const useChessGameLifecycle = ({
       const s = useGameStore.getState();
       s.setIsGameActive(false);
       s.setGameResult({ type: "resign", message: "You resigned." });
+      setBlunderReviewId(null);
+      setBlunderReviewSrs(null);
+      setBlunderTargetFen(null);
       setResolvedReview(null);
       setPendingPromotion(null);
       setShowPostGamePrompt(true);
@@ -361,6 +376,9 @@ export const useChessGameLifecycle = ({
   }, [
     chess,
     coordinator,
+    setBlunderReviewId,
+    setBlunderReviewSrs,
+    setBlunderTargetFen,
     setEngineMessage,
     setResolvedReview,
     setPendingPromotion,
@@ -407,6 +425,7 @@ export const useChessGameLifecycle = ({
     setShowStartOverlay(true);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
+    setBlunderTargetFen(null);
     setResolvedReview(null);
     setPendingPromotion(null);
     store.setIsRated(true);
@@ -430,6 +449,7 @@ export const useChessGameLifecycle = ({
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    setBlunderTargetFen,
     setResolvedReview,
     setPendingPromotion,
     clearBlunderBoardOverride,

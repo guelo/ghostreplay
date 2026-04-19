@@ -84,6 +84,40 @@ const GameInfoPanel = ({
   showRehookToast,
   onDismissRehookToast,
 }: GameInfoPanelProps) => {
+  const reviewWarning =
+    resolvedReview && isViewingLive ? (
+      <div className={`review-warning-toast review-warning-toast--${resolvedReview.result}`}>
+        <div className="review-warning-toast__header">
+          <WarningTriangleIcon />
+          <span className="review-warning-toast__label">Review Position</span>
+        </div>
+        <p className="review-warning-toast__detail">
+          Be careful. You've messed this position up before.
+        </p>
+        {resolvedReview.result !== 'pending' && (
+          <div className="review-warning-toast__overlay">
+            <span className="review-warning-toast__overlay-icon">
+              {resolvedReview.result === 'pass' ? '✓' : '✗'}
+            </span>
+          </div>
+        )}
+      </div>
+    ) : isReviewMomentActive ? (
+      <div className="review-warning-toast" role="alert">
+        <div className="review-warning-toast__header">
+          <WarningTriangleIcon />
+          <span className="review-warning-toast__label">Review Position</span>
+        </div>
+        <p className="review-warning-toast__detail">
+          Be careful. You've messed this position up before.
+        </p>
+      </div>
+    ) : null;
+
+  const showWarningStack =
+    reviewWarning !== null ||
+    (isGameActive && opponentMode === "ghost" && showRehookToast);
+
   return (
     <div className="chess-panel" aria-live="polite">
       <p className="chess-status">{statusText}</p>
@@ -199,17 +233,22 @@ const GameInfoPanel = ({
           )}
         </div>
       )}
-      {isGameActive && opponentMode === "ghost" && showRehookToast && (
-        <button
-          className="rehook-toast"
-          onClick={onDismissRehookToast}
-          type="button"
-        >
-          <span className="rehook-toast__label">Ghost reactivated</span>
-          <span className="rehook-toast__detail">
-            Steering to past mistake
-          </span>
-        </button>
+      {showWarningStack && (
+        <div className="chess-warning-stack">
+          {isGameActive && opponentMode === "ghost" && showRehookToast && (
+            <button
+              className="rehook-toast"
+              onClick={onDismissRehookToast}
+              type="button"
+            >
+              <span className="rehook-toast__label">Ghost reactivated</span>
+              <span className="rehook-toast__detail">
+                Steering to past mistake
+              </span>
+            </button>
+          )}
+          {reviewWarning}
+        </div>
       )}
       {isGameActive && (
         <p className="chess-meta">
@@ -220,35 +259,6 @@ const GameInfoPanel = ({
               : "Unknown"}
           </span>
         </p>
-      )}
-      {resolvedReview && isViewingLive && (
-        <div className={`review-warning-toast review-warning-toast--${resolvedReview.result}`}>
-          <div className="review-warning-toast__header">
-            <WarningTriangleIcon />
-            <span className="review-warning-toast__label">Review Position</span>
-          </div>
-          <p className="review-warning-toast__detail">
-            Be careful. You've messed this position up before.
-          </p>
-          {resolvedReview.result !== 'pending' && (
-            <div className="review-warning-toast__overlay">
-              <span className="review-warning-toast__overlay-icon">
-                {resolvedReview.result === 'pass' ? '✓' : '✗'}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-      {isReviewMomentActive && (
-        <div className="review-warning-toast" role="alert">
-          <div className="review-warning-toast__header">
-            <WarningTriangleIcon />
-            <span className="review-warning-toast__label">Review Position</span>
-          </div>
-          <p className="review-warning-toast__detail">
-            Be careful. You've messed this position up before.
-          </p>
-        </div>
       )}
     </div>
   );

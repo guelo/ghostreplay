@@ -15,7 +15,6 @@ import { useGameAnalysisCoordinator } from "../contexts/GameAnalysisCoordinatorC
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
 import type { TargetBlunderSrs } from "../utils/api";
-import { normalize_fen } from "../utils/fen";
 import {
   buildBlunderAlert,
   deriveBlunderArrows,
@@ -24,6 +23,7 @@ import {
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
 import { deriveDisplayedOpening } from "./chess-game/domain/opening";
+import { hasReviewTargetAtFen } from "./chess-game/domain/reviewState";
 import {
   deriveGameStatusBadge,
   deriveStatusText,
@@ -314,9 +314,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const isPlayersTurn = chess.turn() === (playerColor === "white" ? "w" : "b");
   const moveCount = moveHistory.length;
   const isReviewMomentActive =
-    blunderReviewId !== null &&
-    blunderTargetFen !== null &&
-    normalize_fen(fen) === normalize_fen(blunderTargetFen) &&
+    hasReviewTargetAtFen(blunderReviewId, blunderTargetFen, fen) &&
     isGameActive &&
     isPlayersTurn &&
     isViewingLive &&
@@ -370,6 +368,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       chess,
       blunderReviewId,
       blunderReviewSrs,
+      blunderTargetFen,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
       setEngineMessage,
@@ -426,6 +425,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowFlash,
     setBlunderReviewId,
     setBlunderReviewSrs,
+    setBlunderTargetFen,
     setShowPassToast,
     setShowRehookToast,
     setReviewFailModal,

@@ -94,6 +94,7 @@ const setup = ({
   const setShowFlash = vi.fn();
   const setBlunderReviewId = vi.fn();
   const setBlunderReviewSrs = vi.fn();
+  const setBlunderTargetFen = vi.fn();
   const setShowPassToast = vi.fn();
   const setShowRehookToast = vi.fn();
   const setReviewFailModal = vi.fn();
@@ -121,6 +122,7 @@ const setup = ({
       setShowFlash,
       setBlunderReviewId,
       setBlunderReviewSrs,
+      setBlunderTargetFen,
       setShowPassToast,
       setShowRehookToast,
       setReviewFailModal,

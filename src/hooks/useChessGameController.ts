@@ -4,6 +4,10 @@ import type { Square } from "chess.js";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import type { SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
+import {
+  canArmReviewTarget,
+  hasReviewTargetAtFen,
+} from "../components/chess-game/domain/reviewState";
 import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
 
@@ -48,6 +52,7 @@ type UseChessGameControllerOptions = {
   chess: Chess;
   blunderReviewId: number | null;
   blunderReviewSrs: TargetBlunderSrs | null;
+  blunderTargetFen: string | null;
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
   pendingSrsReviewRef: MutableRefObject<PendingSrsReview | null>;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
@@ -80,6 +85,7 @@ export const useChessGameController = ({
   chess,
   blunderReviewId,
   blunderReviewSrs,
+  blunderTargetFen,
   pendingAnalysisContextRef,
   pendingSrsReviewRef,
   setEngineMessage,
@@ -96,6 +102,12 @@ export const useChessGameController = ({
   clearMoveHighlights,
   clearBlunderBoardOverride,
 }: UseChessGameControllerOptions) => {
+  const clearReviewTarget = useCallback(() => {
+    setBlunderReviewId(null);
+    setBlunderReviewSrs(null);
+    setBlunderTargetFen(null);
+  }, [setBlunderReviewId, setBlunderReviewSrs, setBlunderTargetFen]);
+
   const commitAppliedMove = useCallback(
     (
       appliedMove: AppliedMove,
@@ -178,6 +190,16 @@ export const useChessGameController = ({
         setResolvedReview(null);
       }
 
+      const isTargetedReviewMove = hasReviewTargetAtFen(
+        blunderReviewId,
+        blunderTargetFen,
+        fenBeforeMove,
+      );
+
+      if (blunderReviewId !== null && !isTargetedReviewMove) {
+        clearReviewTarget();
+      }
+
       const playerColor = useGameStore.getState().playerColor;
       const committed = commitAppliedMove(
         move,
@@ -186,7 +208,7 @@ export const useChessGameController = ({
         playerColor,
       );
 
-      if (blunderReviewId !== null) {
+      if (isTargetedReviewMove) {
         pendingSrsReviewRef.current = {
           analysisId: committed.analysisId,
           blunderId: blunderReviewId,
@@ -194,8 +216,7 @@ export const useChessGameController = ({
           userMoveSan: committed.moveSan,
           srs: blunderReviewSrs,
         };
-        setBlunderReviewId(null);
-        setBlunderReviewSrs(null);
+        clearReviewTarget();
         setResolvedReview({
           analysisId: committed.analysisId,
           moveIndex: committed.moveIndex,
@@ -223,8 +244,10 @@ export const useChessGameController = ({
     [
       blunderReviewId,
       blunderReviewSrs,
+      blunderTargetFen,
       chess,
       clearMoveHighlights,
+      clearReviewTarget,
       commitAppliedMove,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
@@ -350,15 +373,13 @@ export const useChessGameController = ({
         // Mark position as under review if ghost-move targets a blunder
         // and it's now the player's turn.
         const sideToMove = chess.turn() === "w" ? "white" : "black";
-        if (targetBlunderId !== null && sideToMove === playerColor) {
+        if (canArmReviewTarget(targetBlunderId, targetFen, sideToMove, playerColor)) {
           setResolvedReview(null);
           setBlunderReviewId(targetBlunderId);
           setBlunderReviewSrs(targetBlunderSrs);
           setBlunderTargetFen(targetFen);
         } else {
-          setBlunderReviewId(null);
-          setBlunderReviewSrs(null);
-          setBlunderTargetFen(null);
+          clearReviewTarget();
           setShowGhostInfo(false);
         }
 
@@ -375,6 +396,7 @@ export const useChessGameController = ({
     },
     [
       chess,
+      clearReviewTarget,
       commitAppliedMove,
       handleGameEnd,
       setBlunderReviewId,

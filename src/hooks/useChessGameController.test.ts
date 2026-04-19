@@ -20,6 +20,7 @@ type SetupOptions = {
   playerColor?: "white" | "black";
   blunderReviewId?: number | null;
   blunderReviewSrs?: TargetBlunderSrs | null;
+  blunderTargetFen?: string | null;
   resolvedReview?: ResolvedReview | null;
   moveHistory?: MoveRecord[];
 };
@@ -29,6 +30,7 @@ const createSetup = ({
   playerColor = "white",
   blunderReviewId = null,
   blunderReviewSrs = null,
+  blunderTargetFen = null,
   resolvedReview = null,
   moveHistory = [],
 }: SetupOptions = {}) => {
@@ -64,6 +66,7 @@ const createSetup = ({
       chess,
       blunderReviewId,
       blunderReviewSrs,
+      blunderTargetFen,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
       setEngineMessage,
@@ -144,12 +147,18 @@ describe("useChessGameController", () => {
   });
 
   it("captures pending SRS review metadata for targeted player moves", () => {
+    const chess = new Chess();
     const {
       result,
       pendingSrsReviewRef,
       setBlunderReviewId,
       setBlunderReviewSrs,
-    } = createSetup({ blunderReviewId: 42 });
+      setBlunderTargetFen,
+    } = createSetup({
+      chess,
+      blunderReviewId: 42,
+      blunderTargetFen: chess.fen(),
+    });
 
     let moveResult: PlayerMoveApplyResult = {
       applied: false,
@@ -168,13 +177,19 @@ describe("useChessGameController", () => {
     });
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
+    expect(setBlunderTargetFen).toHaveBeenCalledWith(null);
   });
 
   it("sets resolvedReview to pending synchronously when clearing blunder review", () => {
+    const chess = new Chess();
     const {
       result,
       setResolvedReview,
-    } = createSetup({ blunderReviewId: 42 });
+    } = createSetup({
+      chess,
+      blunderReviewId: 42,
+      blunderTargetFen: chess.fen(),
+    });
 
     act(() => {
       result.current.applyPlayerMove("e2", "e4");
@@ -185,6 +200,29 @@ describe("useChessGameController", () => {
       moveIndex: 0,
       result: "pending",
     });
+  });
+
+  it("clears stale review targeting instead of grading a hidden review", () => {
+    const {
+      result,
+      pendingSrsReviewRef,
+      setBlunderReviewId,
+      setBlunderReviewSrs,
+      setBlunderTargetFen,
+      setResolvedReview,
+    } = createSetup({ blunderReviewId: 42 });
+
+    act(() => {
+      result.current.applyPlayerMove("e2", "e4");
+    });
+
+    expect(pendingSrsReviewRef.current).toBeNull();
+    expect(setBlunderReviewId).toHaveBeenCalledWith(null);
+    expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
+    expect(setBlunderTargetFen).toHaveBeenCalledWith(null);
+    expect(setResolvedReview).not.toHaveBeenCalledWith(
+      expect.objectContaining({ result: "pending" }),
+    );
   });
 
   it("clears previous resolvedReview on next move", () => {

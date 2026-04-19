@@ -97,6 +97,24 @@ describe("GameInfoPanel", () => {
     expect(props.onDismissRehookToast).toHaveBeenCalledTimes(1);
   });
 
+  it("stacks ghost warnings in a shared warning container", () => {
+    const props = makeProps();
+    const { container } = render(
+      <GameInfoPanel
+        {...props}
+        opponentMode="ghost"
+        opponentName=""
+        showRehookToast
+        isReviewMomentActive
+      />,
+    );
+
+    const stack = container.querySelector(".chess-warning-stack");
+    expect(stack).not.toBeNull();
+    expect(stack?.querySelector(".rehook-toast")).not.toBeNull();
+    expect(stack?.querySelector(".review-warning-toast")).not.toBeNull();
+  });
+
   it("renders ghost target info and forwards ghost-info callbacks", () => {
     const props = makeProps();
     const srs: TargetBlunderSrs = {
