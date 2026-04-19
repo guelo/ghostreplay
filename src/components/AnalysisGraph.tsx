@@ -22,12 +22,19 @@ const SVG_HEIGHT = 120;
 const PAD_X = 8;
 const PAD_X_RIGHT = 0;
 const PAD_Y = 4;
+const WINNING_CHANCES_SLOPE = 0.00368208;
+const WINNING_CHANCES_MAX_CP = 1000;
+const WINNING_CHANCES_RANGE = 1.05;
 
 /**
- * Bounded tanh scale: gives more vertical separation to early-game eval swings
- * while preventing late-game blowouts from flattening the whole chart.
+ * Match Lichess's analysis graph by plotting bounded winning chances instead of
+ * raw centipawns. This keeps large late-game swings visible without a hard
+ * centipawn ceiling flattening the chart.
  */
-const scale = (cp: number) => Math.tanh(cp / 300);
+export const cpToWinningChances = (cp: number) => {
+  const clamped = Math.max(-WINNING_CHANCES_MAX_CP, Math.min(WINNING_CHANCES_MAX_CP, cp));
+  return 2 / (1 + Math.exp(-WINNING_CHANCES_SLOPE * clamped)) - 1;
+};
 
 const EVAL_COLOR_LOSING: [number, number, number] = [255, 59, 48]; // #FF3B30
 const EVAL_COLOR_EQUAL: [number, number, number] = [158, 158, 158]; // #9E9E9E
@@ -92,14 +99,14 @@ const AnalysisGraph = ({
 
   const cpToY = useCallback(
     (cp: number) => {
-      const raw = midY - scale(cp) * (chartH / 2);
+      const raw = midY - (cpToWinningChances(cp) / WINNING_CHANCES_RANGE) * (chartH / 2);
       // Keep all points inside the chart bounds even for extreme mate scores.
       return Math.max(PAD_Y, Math.min(PAD_Y + chartH, raw));
     },
     [chartH, midY],
   );
 
-  // Build points array using the bounded tanh scale.
+  // Build points array using the winning-chances scale.
   const points = useMemo(() => {
     if (n === 0) return [];
     return evals.map((ev, i) => {

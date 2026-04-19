@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from '../test/utils'
-import AnalysisGraph from './AnalysisGraph'
+import AnalysisGraph, { cpToWinningChances } from './AnalysisGraph'
 
 const onSelectMove = vi.fn()
 
@@ -19,6 +19,15 @@ function getLinePoints(container: HTMLElement) {
 }
 
 describe('AnalysisGraph — y-axis', () => {
+  it('converts centipawns to Lichess-style winning chances for graph geometry', () => {
+    const expected = 2 / (1 + Math.exp(-0.00368208 * 500)) - 1
+
+    expect(cpToWinningChances(0)).toBeCloseTo(0, 8)
+    expect(cpToWinningChances(500)).toBeCloseTo(expected, 8)
+    expect(cpToWinningChances(-500)).toBeCloseTo(-expected, 8)
+    expect(cpToWinningChances(3000)).toBeCloseTo(cpToWinningChances(1000), 8)
+  })
+
   it('renders "#" when isCheckmate is true', () => {
     const { container } = render(
       <AnalysisGraph
@@ -322,6 +331,36 @@ describe('AnalysisGraph — incremental geometry', () => {
     expect(after[1]).toEqual(before[1])
     expect(after[2].x).toBe(before[2].x)
     expect(after[2].y).not.toBe(before[2].y)
+  })
+
+  it('keeps large late-game eval swings visually separated', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 500, 1000]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const points = getLinePoints(container)
+    expect(points).toHaveLength(3)
+
+    const yDelta = Math.abs(points[1].y - points[2].y)
+    expect(yDelta).toBeGreaterThan(10)
+  })
+
+  it('clamps graph geometry beyond the Lichess-style winning-chances cap', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 1000, 3000]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const points = getLinePoints(container)
+    expect(points).toHaveLength(3)
+    expect(points[2].y).toBe(points[1].y)
   })
 
   it('streaming dot is clamped within chart bounds', () => {
