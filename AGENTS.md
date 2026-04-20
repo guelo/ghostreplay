@@ -46,6 +46,8 @@ This repo may be edited by multiple agents/users at the same time.
 ## Issue Tracking
 
 This project uses **bd (beads)** for issue tracking.
+**CRITICAL**: Use the `bd` CLI tool exclusively. Never read or modify files in the `.beads/` directory directly.
+
 Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
 
 **Quick reference:**
