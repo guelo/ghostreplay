@@ -30,6 +30,7 @@ export type GameState = {
   boardOrientation: BoardOrientation;
   engineElo: number;
   isRated: boolean;
+  isPracticeContinuation: boolean;
   playerRating: number;
   isProvisional: boolean;
   ratingChange: RatingChange | null;
@@ -49,6 +50,7 @@ export type GameActions = {
   setBoardOrientation: (update: SetStateAction<BoardOrientation>) => void;
   setEngineElo: (update: SetStateAction<number>) => void;
   setIsRated: (update: SetStateAction<boolean>) => void;
+  setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
   setPlayerRating: (update: SetStateAction<number>) => void;
   setIsProvisional: (update: SetStateAction<boolean>) => void;
   setRatingChange: (update: SetStateAction<RatingChange | null>) => void;
@@ -70,6 +72,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   boardOrientation: "white",
   engineElo: 800,
   isRated: true,
+  isPracticeContinuation: false,
   playerRating: 1200,
   isProvisional: true,
   ratingChange: null,
@@ -92,6 +95,10 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ boardOrientation: resolve(u, s.boardOrientation) })),
   setEngineElo: (u) => set((s) => ({ engineElo: resolve(u, s.engineElo) })),
   setIsRated: (u) => set((s) => ({ isRated: resolve(u, s.isRated) })),
+  setIsPracticeContinuation: (u) =>
+    set((s) => ({
+      isPracticeContinuation: resolve(u, s.isPracticeContinuation),
+    })),
   setPlayerRating: (u) =>
     set((s) => ({ playerRating: resolve(u, s.playerRating) })),
   setIsProvisional: (u) =>

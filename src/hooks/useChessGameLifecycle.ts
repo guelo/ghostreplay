@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import type {
   Dispatch,
   MutableRefObject,
@@ -7,9 +7,15 @@ import type {
 import { Chess } from "chess.js";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import type { TargetBlunderSrs } from "../utils/api";
-import { endGame, fetchCurrentRating, startGame } from "../utils/api";
+import {
+  endGame,
+  fetchCurrentRating,
+  startGame,
+  uploadSessionMoves,
+} from "../utils/api";
 import type {
   BlunderAlert,
+  MoveRecord,
   ReviewFailInfo,
 } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
@@ -17,6 +23,8 @@ import { sampleEloBin } from "../components/chess-game/elo";
 import type { BoardOrientation, OpenHistoryOptions, ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
 import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
+import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
+import { STARTING_FEN } from "../components/chess-game/config";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -59,6 +67,8 @@ type UseChessGameLifecycleArgs = {
   setShowRehookToast: Dispatch<SetStateAction<boolean>>;
   setReviewFailModal: Dispatch<SetStateAction<ReviewFailInfo | null>>;
   setShowPostGamePrompt: Dispatch<SetStateAction<boolean>>;
+  setIsRevertPending: Dispatch<SetStateAction<boolean>>;
+  setRevertError: Dispatch<SetStateAction<string | null>>;
   showRevertWarning: boolean;
   setShowRevertWarning: Dispatch<SetStateAction<boolean>>;
   setShowResignWarning: Dispatch<SetStateAction<boolean>>;
@@ -92,6 +102,8 @@ export const useChessGameLifecycle = ({
   setShowRehookToast,
   setReviewFailModal,
   setShowPostGamePrompt,
+  setIsRevertPending,
+  setRevertError,
   showRevertWarning,
   setShowRevertWarning,
   setShowResignWarning,
@@ -99,6 +111,34 @@ export const useChessGameLifecycle = ({
   setPendingPromotion,
   clearBlunderBoardOverride,
 }: UseChessGameLifecycleArgs) => {
+  const revertExecutionIdRef = useRef(0);
+  const isCurrentRevertExecution = useCallback(
+    (executionId: number) => revertExecutionIdRef.current === executionId,
+    [],
+  );
+
+  const finishLocalGame = useCallback(
+    (result: GameResult, options?: { showPostGamePrompt?: boolean }) => {
+      const store = useGameStore.getState();
+      store.setIsGameActive(false);
+      store.setGameResult(result);
+      setBlunderReviewId(null);
+      setBlunderReviewSrs(null);
+      setBlunderTargetFen(null);
+      setResolvedReview(null);
+      setPendingPromotion(null);
+      setShowPostGamePrompt(options?.showPostGamePrompt ?? true);
+    },
+    [
+      setBlunderReviewId,
+      setBlunderReviewSrs,
+      setBlunderTargetFen,
+      setResolvedReview,
+      setPendingPromotion,
+      setShowPostGamePrompt,
+    ],
+  );
+
   useEffect(() => {
     fetchCurrentRating()
       .then((data) => {
@@ -137,6 +177,11 @@ export const useChessGameLifecycle = ({
     }
 
     if (result) {
+      if (store.isPracticeContinuation) {
+        finishLocalGame(result);
+        return;
+      }
+
       try {
         // Best-effort flush of already-resolved analyses — does not block
         coordinator.flushPendingUploads().catch((err) =>
@@ -155,13 +200,7 @@ export const useChessGameLifecycle = ({
           s.setPlayerRating(endResponse.rating.rating_after);
           s.setIsProvisional(endResponse.rating.is_provisional);
         }
-        useGameStore.getState().setIsGameActive(false);
-        useGameStore.getState().setGameResult(result);
-        setBlunderReviewId(null);
-        setBlunderReviewSrs(null);
-        setBlunderTargetFen(null);
-        setResolvedReview(null);
-        setShowPostGamePrompt(true);
+        finishLocalGame(result);
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to end game.";
@@ -171,6 +210,7 @@ export const useChessGameLifecycle = ({
   }, [
     chess,
     coordinator,
+    finishLocalGame,
     setBlunderReviewId,
     setBlunderReviewSrs,
     setBlunderTargetFen,
@@ -179,23 +219,16 @@ export const useChessGameLifecycle = ({
     setShowPostGamePrompt,
   ]);
 
-  const executeRevert = useCallback(() => {
+  const rewindBoardLocally = useCallback((storeMoveHistory: MoveRecord[]) => {
     const store = useGameStore.getState();
-    if (!store.isGameActive || store.moveHistory.length === 0 || chess.isGameOver()) return;
-
-    store.setIsRated(false);
-    setShowRevertWarning(false);
-    setShowResignWarning(false);
-    clearBlunderBoardOverride?.();
-
     const isPlayerTurn = chess.turn() === (store.playerColor === "white" ? "w" : "b");
-    const undoCount = isPlayerTurn && store.moveHistory.length >= 2 ? 2 : 1;
+    const undoCount = isPlayerTurn && storeMoveHistory.length >= 2 ? 2 : 1;
 
     for (let i = 0; i < undoCount; i++) {
       chess.undo();
     }
 
-    const newHistory = store.moveHistory.slice(0, -undoCount);
+    const newHistory = storeMoveHistory.slice(0, -undoCount);
     store.setMoveHistory(newHistory);
     store.setLiveFen(chess.fen());
     store.setViewIndex(null);
@@ -217,31 +250,116 @@ export const useChessGameLifecycle = ({
     setBlunderTargetFen,
     setResolvedReview,
     setPendingPromotion,
+    setShowRevertWarning,
     clearBlunderBoardOverride,
+  ]);
+
+  const executeRevert = useCallback(async () => {
+    const store = useGameStore.getState();
+    if (!store.isGameActive || store.moveHistory.length === 0 || chess.isGameOver()) return;
+
+    const executionId = revertExecutionIdRef.current + 1;
+    revertExecutionIdRef.current = executionId;
+    setShowResignWarning(false);
+    setRevertError(null);
+    setIsRevertPending(true);
+    clearBlunderBoardOverride?.();
+
+    const snapshotMoveHistory = [...store.moveHistory];
+
+    try {
+      if (!store.isPracticeContinuation && store.isRated) {
+        const snapshotPgn = chess.pgn();
+        const snapshotUploads = buildSessionMoveUploads(
+          snapshotMoveHistory,
+          new Map(coordinator.store.getState().analysisMap),
+          STARTING_FEN,
+        );
+
+        await uploadSessionMoves(store.sessionId!, snapshotUploads);
+        if (!isCurrentRevertExecution(executionId)) {
+          return;
+        }
+        const endResponse = await endGame(
+          store.sessionId!,
+          "resign",
+          snapshotPgn,
+          true,
+        );
+        if (!isCurrentRevertExecution(executionId)) {
+          return;
+        }
+        if (endResponse.rating) {
+          const s = useGameStore.getState();
+          s.setRatingChange(endResponse.rating);
+          s.setPlayerRating(endResponse.rating.rating_after);
+          s.setIsProvisional(endResponse.rating.is_provisional);
+        }
+        const s = useGameStore.getState();
+        s.setIsRated(false);
+        s.setIsPracticeContinuation(true);
+        coordinator.stopSessionUploads();
+      }
+
+      if (!isCurrentRevertExecution(executionId)) {
+        return;
+      }
+
+      rewindBoardLocally(snapshotMoveHistory);
+      setShowRevertWarning(false);
+    } catch (error) {
+      if (!isCurrentRevertExecution(executionId)) {
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : "Failed to record resignation before revert.";
+      setRevertError(message);
+    } finally {
+      if (isCurrentRevertExecution(executionId)) {
+        setIsRevertPending(false);
+      }
+    }
+  }, [
+    chess,
+    clearBlunderBoardOverride,
+    coordinator,
+    isCurrentRevertExecution,
+    rewindBoardLocally,
+    setIsRevertPending,
+    setRevertError,
     setShowResignWarning,
     setShowRevertWarning,
   ]);
 
   const handleRevertClick = useCallback(() => {
+    setRevertError(null);
     if (useGameStore.getState().isRated) {
       setShowRevertWarning(true);
     } else {
-      executeRevert();
+      void executeRevert();
     }
-  }, [executeRevert, setShowRevertWarning]);
+  }, [executeRevert, setRevertError, setShowRevertWarning]);
 
   const cancelRevert = useCallback(() => {
+    if (useGameStore.getState().isGameActive) {
+      setRevertError(null);
+    }
     setShowRevertWarning(false);
-  }, [setShowRevertWarning]);
+  }, [setRevertError, setShowRevertWarning]);
 
   const handleNewGame = useCallback(
     async (colorOverride?: BoardOrientation | "random") => {
       try {
         setIsStartingGame(true);
         setStartError(null);
+        revertExecutionIdRef.current += 1;
 
         const store = useGameStore.getState();
-        if (store.sessionId && store.isGameActive) {
+        if (
+          store.sessionId &&
+          store.isGameActive &&
+          !store.isPracticeContinuation
+        ) {
           coordinator.flushPendingUploads().catch((err) =>
             console.error("[SessionMoves] Flush failed:", err),
           );
@@ -289,7 +407,10 @@ export const useChessGameLifecycle = ({
         setShowPassToast(false);
         setReviewFailModal(null);
         setShowPostGamePrompt(false);
+        setRevertError(null);
+        setIsRevertPending(false);
         s2.setIsRated(true);
+        s2.setIsPracticeContinuation(false);
         setShowRevertWarning(false);
         setShowResignWarning(false);
         clearMoveHighlights();
@@ -342,6 +463,11 @@ export const useChessGameLifecycle = ({
       return;
     }
 
+    if (store.isPracticeContinuation) {
+      finishLocalGame({ type: "resign", message: "Practice ended." });
+      return;
+    }
+
     try {
       coordinator.flushPendingUploads().catch((err) =>
         console.error("[SessionMoves] Flush failed:", err),
@@ -359,15 +485,7 @@ export const useChessGameLifecycle = ({
         s.setPlayerRating(endResponse.rating.rating_after);
         s.setIsProvisional(endResponse.rating.is_provisional);
       }
-      const s = useGameStore.getState();
-      s.setIsGameActive(false);
-      s.setGameResult({ type: "resign", message: "You resigned." });
-      setBlunderReviewId(null);
-      setBlunderReviewSrs(null);
-      setBlunderTargetFen(null);
-      setResolvedReview(null);
-      setPendingPromotion(null);
-      setShowPostGamePrompt(true);
+      finishLocalGame({ type: "resign", message: "You resigned." });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to resign game.";
@@ -402,6 +520,7 @@ export const useChessGameLifecycle = ({
 
   const handleReset = useCallback(() => {
     const store = useGameStore.getState();
+    revertExecutionIdRef.current += 1;
     chess.reset();
     store.setLiveFen(chess.fen());
     store.setBoardOrientation(store.playerColor);
@@ -422,6 +541,8 @@ export const useChessGameLifecycle = ({
     setShowRehookToast(false);
     setReviewFailModal(null);
     setShowPostGamePrompt(false);
+    setRevertError(null);
+    setIsRevertPending(false);
     setShowStartOverlay(true);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
@@ -429,6 +550,7 @@ export const useChessGameLifecycle = ({
     setResolvedReview(null);
     setPendingPromotion(null);
     store.setIsRated(true);
+    store.setIsPracticeContinuation(false);
     setShowRevertWarning(false);
     setShowResignWarning(false);
     clearMoveHighlights();
@@ -457,11 +579,13 @@ export const useChessGameLifecycle = ({
     setLiveOpening,
     setReviewFailModal,
     setShowFlash,
-    setShowPassToast,
-    setShowPostGamePrompt,
-    setShowRehookToast,
-    setShowResignWarning,
-    setShowRevertWarning,
+      setShowPassToast,
+      setShowPostGamePrompt,
+      setShowRehookToast,
+      setIsRevertPending,
+      setRevertError,
+      setShowResignWarning,
+      setShowRevertWarning,
     setShowStartOverlay,
   ]);
 

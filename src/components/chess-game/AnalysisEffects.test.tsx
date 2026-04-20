@@ -10,8 +10,14 @@ import type { AnalysisResult } from "../../hooks/useMoveAnalysis";
 import { createRef } from "react";
 
 const mockPlayBling = vi.fn();
+const recordBlunderMock = vi.fn();
+const reviewSrsBlunderMock = vi.fn();
 vi.mock("../../utils/blingSound", () => ({
   playBling: () => mockPlayBling(),
+}));
+vi.mock("../../utils/api", () => ({
+  recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
+  reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
 }));
 
 const makeResult = (
@@ -38,6 +44,10 @@ describe("AnalysisEffects — best-move bling", () => {
 
   beforeEach(() => {
     mockPlayBling.mockClear();
+    recordBlunderMock.mockReset();
+    reviewSrsBlunderMock.mockReset();
+    recordBlunderMock.mockResolvedValue({});
+    reviewSrsBlunderMock.mockResolvedValue({});
     useGameStore.setState(initialGameState, true);
     store = createAnalysisStore();
   });
@@ -115,5 +125,52 @@ describe("AnalysisEffects — best-move bling", () => {
     });
 
     expect(mockPlayBling).not.toHaveBeenCalled();
+  });
+
+  it("does not record blunders during practice continuation", () => {
+    useGameStore.setState({
+      sessionId: "session-1",
+      playerColor: "white",
+      isGameActive: true,
+      isPracticeContinuation: true,
+    });
+
+    const pendingAnalysisContextRef = createRef<any>();
+    const blunderRecordedRef = createRef<any>();
+    pendingAnalysisContextRef.current = {
+      fen: "fen-before",
+      pgn: "1. e4",
+      moveSan: "e4",
+      moveUci: "e2e4",
+      moveIndex: 1,
+    };
+    blunderRecordedRef.current = false;
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={pendingAnalysisContextRef}
+          blunderRecordedRef={blunderRecordedRef}
+          pendingSrsReviewRef={createRef() as any}
+          appendMoveMessage={vi.fn()}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={vi.fn()}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().setLastAnalysis(makeResult({
+        moveIndex: 1,
+        bestMove: "d2d4",
+        delta: 250,
+        classification: "blunder",
+        blunder: true,
+        recordable: true,
+      }));
+    });
+
+    expect(recordBlunderMock).not.toHaveBeenCalled();
   });
 });

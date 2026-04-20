@@ -30,9 +30,12 @@ type BoardStageProps = {
   onPlayBlack: () => void;
   startError: string | null;
   showRevertWarning: boolean;
+  isRevertPending: boolean;
+  revertError: string | null;
   onRevertAnyway: () => void;
   onCancelRevert: () => void;
   showResignWarning: boolean;
+  isPracticeContinuation: boolean;
   onResignAnyway: () => void;
   onCancelResign: () => void;
   showEndedScrim: boolean;
@@ -54,6 +57,13 @@ const WarningTriangleIcon = () => (
   >
     <path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" />
   </svg>
+);
+
+const InlineSpinner = () => (
+  <span
+    className="revert-warning-dialog__spinner"
+    aria-hidden="true"
+  />
 );
 
 const BoardStage = ({
@@ -80,9 +90,12 @@ const BoardStage = ({
   onPlayBlack,
   startError,
   showRevertWarning,
+  isRevertPending,
+  revertError,
   onRevertAnyway,
   onCancelRevert,
   showResignWarning,
+  isPracticeContinuation,
   onResignAnyway,
   onCancelResign,
   showEndedScrim,
@@ -182,24 +195,38 @@ const BoardStage = ({
                   id="revert-warning-title"
                   className="revert-warning-dialog__title"
                 >
-                  This game will not be rated
+                  Reverting records this game as a resignation
                 </p>
                 <p className="revert-warning-dialog__body">
-                  Reverting a move removes this game from your rating history.
-                  This cannot be undone.
+                  The rated result is locked as a loss before the board rewinds.
+                  After that, you can keep playing in practice mode.
                 </p>
+                {revertError && (
+                  <p className="chess-start-error" role="alert">
+                    {revertError}
+                  </p>
+                )}
                 <div className="revert-warning-dialog__actions">
                   <button
                     className="chess-button danger"
                     type="button"
                     onClick={onRevertAnyway}
+                    disabled={isRevertPending}
                   >
-                    Revert anyway
+                    {isRevertPending ? (
+                      <span className="revert-warning-dialog__pending-label">
+                        <InlineSpinner />
+                        <span>Recording resignation...</span>
+                      </span>
+                    ) : (
+                      "Revert anyway"
+                    )}
                   </button>
                   <button
                     className="chess-button"
                     type="button"
                     onClick={onCancelRevert}
+                    disabled={isRevertPending}
                   >
                     Cancel
                   </button>
@@ -222,7 +249,9 @@ const BoardStage = ({
                   Are you sure?
                 </p>
                 <p className="revert-warning-dialog__body">
-                  Resigning will end the current game and count as a loss.
+                  {isPracticeContinuation
+                    ? "This will end the current practice continuation."
+                    : "Resigning will end the current game and count as a loss."}
                 </p>
                 <div className="revert-warning-dialog__actions">
                   <button

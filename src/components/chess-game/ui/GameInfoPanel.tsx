@@ -11,6 +11,7 @@ type GameInfoPanelProps = {
   statusText: string;
   gameStatusBadge: { label: string; className: string } | null;
   isRated: boolean;
+  isPracticeContinuation: boolean;
   isGameActive: boolean;
   playerColorChoice: BoardOrientation | "random";
   playerColor: BoardOrientation;
@@ -61,6 +62,7 @@ const GameInfoPanel = ({
   statusText,
   gameStatusBadge,
   isRated,
+  isPracticeContinuation,
   isGameActive,
   playerColorChoice: _playerColorChoice,
   playerColor: _playerColor,
@@ -128,7 +130,10 @@ const GameInfoPanel = ({
           {gameStatusBadge.label}
         </span>
       )}
-      {!isRated && isGameActive && (
+      {isPracticeContinuation && isGameActive && (
+        <span className="unrated-badge">Practice</span>
+      )}
+      {!isPracticeContinuation && !isRated && isGameActive && (
         <span className="unrated-badge">Unrated</span>
       )}
       <p className="chess-meta">

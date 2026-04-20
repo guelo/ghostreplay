@@ -10,11 +10,13 @@ import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinato
 const fetchCurrentRatingMock = vi.fn();
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
+const uploadSessionMovesMock = vi.fn();
 
 vi.mock("../utils/api", () => ({
   fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
+  uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
 }));
 
 const initialStoreState = useGameStore.getInitialState();
@@ -24,6 +26,7 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
     startSession: vi.fn(),
     clearSession: vi.fn(),
     flushPendingUploads: vi.fn().mockResolvedValue(undefined),
+    stopSessionUploads: vi.fn(),
     analyzeMove: vi.fn(),
     clearAnalysis: vi.fn(),
     sessionId: null,
@@ -99,6 +102,8 @@ const setup = ({
   const setShowRehookToast = vi.fn();
   const setReviewFailModal = vi.fn();
   const setShowPostGamePrompt = vi.fn();
+  const setIsRevertPending = vi.fn();
+  const setRevertError = vi.fn();
   const setShowRevertWarning = vi.fn();
 
   const { result } = renderHook(() =>
@@ -127,6 +132,8 @@ const setup = ({
       setShowRehookToast,
       setReviewFailModal,
       setShowPostGamePrompt,
+      setIsRevertPending,
+      setRevertError,
       showRevertWarning: false,
       setShowRevertWarning,
       setShowResignWarning: vi.fn(),
@@ -138,6 +145,8 @@ const setup = ({
   return {
     result,
     onOpenHistory,
+    setIsRevertPending,
+    setRevertError,
     setShowRevertWarning,
     setShowPostGamePrompt,
     setShowStartOverlay,
@@ -154,6 +163,8 @@ beforeEach(() => {
   });
   startGameMock.mockReset();
   endGameMock.mockReset();
+  uploadSessionMovesMock.mockReset();
+  uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
 });
 
 describe("useChessGameLifecycle", () => {
@@ -172,7 +183,76 @@ describe("useChessGameLifecycle", () => {
     expect(setShowRevertWarning).toHaveBeenCalledWith(true);
   });
 
-  it("reverts two half-moves when it is the player's turn", async () => {
+  it("records a resignation before reverting a rated game into practice mode", async () => {
+    const chess = new Chess();
+    const moveOne = chess.move("e4");
+    const fenAfterMoveOne = chess.fen();
+    const moveTwo = chess.move("e5");
+    const fenAfterMoveTwo = chess.fen();
+    if (!moveOne || !moveTwo) {
+      throw new Error("Unable to construct test position");
+    }
+    const moveHistory: MoveRecord[] = [
+      { san: moveOne.san, fen: fenAfterMoveOne, uci: "e2e4" },
+      { san: moveTwo.san, fen: fenAfterMoveTwo, uci: "e7e5" },
+    ];
+
+    const { result, setIsRevertPending, setShowRevertWarning } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: true,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: {
+        rating_before: 1200,
+        rating_after: 1184,
+        is_provisional: true,
+      },
+    });
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    const store = useGameStore.getState();
+    expect(store.isRated).toBe(false);
+    expect(store.isPracticeContinuation).toBe(true);
+    expect(store.moveHistory).toEqual([]);
+    expect(store.viewIndex).toBeNull();
+    expect(uploadSessionMovesMock).toHaveBeenCalledWith(
+      "session-123",
+      expect.arrayContaining([
+        expect.objectContaining({
+          move_number: 1,
+          color: "white",
+          move_san: "e4",
+        }),
+        expect.objectContaining({
+          move_number: 1,
+          color: "black",
+          move_san: "e5",
+        }),
+      ]),
+    );
+    expect(endGameMock).toHaveBeenCalledWith(
+      "session-123",
+      "resign",
+      expect.any(String),
+      true,
+    );
+    expect(setIsRevertPending).toHaveBeenNthCalledWith(1, true);
+    expect(setIsRevertPending).toHaveBeenLastCalledWith(false);
+    expect(setShowRevertWarning).toHaveBeenLastCalledWith(false);
+  });
+
+  it("does not apply stale revert side effects after reset cancels a pending revert", async () => {
     const chess = new Chess();
     const moveOne = chess.move("e4");
     const fenAfterMoveOne = chess.fen();
@@ -190,20 +270,49 @@ describe("useChessGameLifecycle", () => {
       chess,
       moveHistory,
       isGameActive: true,
-      isRated: false,
+      isRated: true,
       playerColor: "white",
     });
 
     await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
 
+    let resolveUpload!: (value: { moves_inserted: number }) => void;
+    uploadSessionMovesMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: null,
+    });
+
+    const pendingRevert = result.current.executeRevert();
+
     act(() => {
-      result.current.executeRevert();
+      result.current.handleReset();
+      useGameStore.setState({
+        sessionId: "session-new",
+        isGameActive: true,
+        isRated: true,
+        isPracticeContinuation: false,
+      });
+    });
+
+    await act(async () => {
+      resolveUpload({ moves_inserted: 2 });
+      await pendingRevert;
     });
 
     const store = useGameStore.getState();
-    expect(store.isRated).toBe(false);
+    expect(store.sessionId).toBe("session-new");
+    expect(store.isGameActive).toBe(true);
+    expect(store.isRated).toBe(true);
+    expect(store.isPracticeContinuation).toBe(false);
     expect(store.moveHistory).toEqual([]);
-    expect(store.viewIndex).toBeNull();
+    expect(store.liveFen).toBe(new Chess().fen());
   });
 
   it("routes view-analysis action through history callback and hides prompt", async () => {

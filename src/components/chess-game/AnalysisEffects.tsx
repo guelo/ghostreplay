@@ -68,6 +68,7 @@ const AnalysisEffects = ({
   const lastAnalysis = useAnalysisStore((s) => s.lastAnalysis);
   const sessionId = useGameStore((s) => s.sessionId);
   const isGameActive = useGameStore((s) => s.isGameActive);
+  const isPracticeContinuation = useGameStore((s) => s.isPracticeContinuation);
   const playerColor = useGameStore((s) => s.playerColor);
 
   const isPlayerMoveIndex = (index: number) => {
@@ -82,7 +83,7 @@ const AnalysisEffects = ({
       analysis: lastAnalysis,
       context: pendingAnalysisContextRef.current,
       sessionId,
-      isGameActive,
+      isGameActive: isGameActive && !isPracticeContinuation,
       alreadyRecorded: blunderRecordedRef.current,
     });
 
@@ -110,13 +111,21 @@ const AnalysisEffects = ({
     };
 
     void postBlunder();
-  }, [lastAnalysis, sessionId, isGameActive, pendingAnalysisContextRef, blunderRecordedRef]);
+  }, [
+    lastAnalysis,
+    sessionId,
+    isGameActive,
+    isPracticeContinuation,
+    pendingAnalysisContextRef,
+    blunderRecordedRef,
+  ]);
 
   // SRS review grading: evaluate user move from a targeted blunder position.
   useEffect(() => {
     if (
       !sessionId ||
       !isGameActive ||
+      isPracticeContinuation ||
       !lastAnalysis ||
       lastAnalysis.moveIndex === null
     ) {
@@ -214,7 +223,15 @@ const AnalysisEffects = ({
     };
 
     void postReview();
-  }, [isGameActive, lastAnalysis, sessionId, pendingSrsReviewRef, appendMoveMessage, setResolvedReview]);
+  }, [
+    isGameActive,
+    isPracticeContinuation,
+    lastAnalysis,
+    sessionId,
+    pendingSrsReviewRef,
+    appendMoveMessage,
+    setResolvedReview,
+  ]);
 
   // Blunder alert: show flash + toast + arrows for player blunders
   useEffect(() => {

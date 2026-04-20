@@ -774,6 +774,23 @@
     max-width: 260px;
 }
 
+.revert-warning-dialog__pending-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.revert-warning-dialog__spinner {
+    display: inline-block;
+    width: 0.95rem;
+    height: 0.95rem;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
 .chess-button.toggle {
     border-color: var(--border-color-strong);
     background: var(--bg-tertiary);

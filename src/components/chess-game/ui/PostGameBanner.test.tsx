@@ -11,6 +11,7 @@ const makeProps = () => {
 
   return {
     isGameActive: false,
+    isPracticeContinuation: false,
     showPostGamePrompt: true,
     gameResult: {
       type: "checkmate_win",
@@ -73,5 +74,18 @@ describe("PostGameBanner", () => {
     );
 
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("suppresses rating delta after a practice continuation ends", () => {
+    const props = makeProps();
+    render(
+      <PostGameBanner
+        {...props}
+        isPracticeContinuation
+      />,
+    );
+
+    expect(screen.getByText("Checkmate! You won!")).toBeInTheDocument();
+    expect(screen.queryByText("+16")).not.toBeInTheDocument();
   });
 });

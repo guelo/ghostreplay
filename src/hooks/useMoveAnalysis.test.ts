@@ -51,6 +51,7 @@ describe('useMoveAnalysis', () => {
     postMessageMock.mockClear()
     terminateMock.mockClear()
     lookupAnalysisCacheMock.mockReset()
+    lookupAnalysisCacheMock.mockResolvedValue(new Map())
     messageHandler = null
     errorHandler = null
     store = createAnalysisStore()

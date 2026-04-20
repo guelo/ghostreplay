@@ -4,6 +4,7 @@ import type { GameResult } from "../domain/status";
 
 type PostGameBannerProps = {
   isGameActive: boolean;
+  isPracticeContinuation: boolean;
   showPostGamePrompt: boolean;
   gameResult: GameResult | null;
   ratingChange: RatingChange | null;
@@ -14,6 +15,7 @@ type PostGameBannerProps = {
 
 const PostGameBanner = ({
   isGameActive,
+  isPracticeContinuation,
   showPostGamePrompt,
   gameResult,
   ratingChange,
@@ -29,7 +31,7 @@ const PostGameBanner = ({
         aria-label="Post-game options"
       >
         <p className="game-end-banner-message">{gameResult.message}</p>
-        {ratingChange && (
+        {ratingChange && !isPracticeContinuation && (
           <p
             className={`rating-delta ${ratingChange.rating_after >= ratingChange.rating_before ? "rating-delta--up" : "rating-delta--down"}`}
           >

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { SetStateAction } from "react";
 import { Chess } from "chess.js";
 import type { Square } from "chess.js";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -134,7 +135,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   );
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const isRated = useGameStore((s) => s.isRated);
+  const isPracticeContinuation = useGameStore((s) => s.isPracticeContinuation);
   const [showRevertWarning, setShowRevertWarning] = useState(false);
+  const [isRevertPendingState, setIsRevertPendingState] = useState(false);
+  const [revertError, setRevertError] = useState<string | null>(null);
   const [showResignWarning, setShowResignWarning] = useState(false);
   const playerRating = useGameStore((s) => s.playerRating);
   const isProvisional = useGameStore((s) => s.isProvisional);
@@ -145,6 +149,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     Record<string, React.CSSProperties>
   >({});
   const [boardInstanceKey, setBoardInstanceKey] = useState(0);
+  const isRevertPendingRef = useRef(isRevertPendingState);
+  const setIsRevertPending = useCallback((update: SetStateAction<boolean>) => {
+    const nextValue =
+      typeof update === "function"
+        ? (update as (prev: boolean) => boolean)(isRevertPendingRef.current)
+        : update;
+    isRevertPendingRef.current = nextValue;
+    setIsRevertPendingState(nextValue);
+  }, []);
+  const isRevertPending = isRevertPendingState;
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -235,6 +249,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleNavigate = useCallback(
     (index: number | null) => {
+      if (isRevertPendingRef.current) {
+        return;
+      }
       setViewIndex(index);
       setReviewFailModal(null);
       if (pendingPromotion) {
@@ -388,8 +405,24 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const { opponentMode, applyOpponentMove, resetMode } = useOpponentMove({
     sessionId,
-    onApplyBackendMove: applyGhostMove,
-    onApplyLocalFallback: applyEngineMove,
+    canApplyResult: (requestSessionId) => {
+      const store = useGameStore.getState();
+      return (
+        store.isGameActive &&
+        store.sessionId === requestSessionId &&
+        !isRevertPendingRef.current
+      );
+    },
+    onApplyBackendMove: async (...args) => {
+      if (useGameStore.getState().isGameActive && !isRevertPendingRef.current) {
+        await applyGhostMove(...args);
+      }
+    },
+    onApplyLocalFallback: async () => {
+      if (useGameStore.getState().isGameActive && !isRevertPendingRef.current) {
+        await applyEngineMove();
+      }
+    },
   });
 
   const {
@@ -430,6 +463,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowRehookToast,
     setReviewFailModal,
     setShowPostGamePrompt,
+    setIsRevertPending,
+    setRevertError,
     showRevertWarning,
     setShowRevertWarning,
     setShowResignWarning,
@@ -463,13 +498,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       if (result.gameOver) {
         void handleGameEnd();
-      } else {
+      } else if (!isRevertPending) {
         void applyOpponentMove(result.fenAfter, result.uciHistory);
       }
 
       return true;
     },
-    [applyOpponentMove, applyPlayerMove, handleGameEnd],
+    [applyOpponentMove, applyPlayerMove, handleGameEnd, isRevertPending],
   );
 
   // Clear move messages when a new game starts
@@ -500,7 +535,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return; // picker is open, ignore board clicks (backdrop handles cancel)
       }
 
-      if (isBlunderBoardOverrideActive) {
+      if (isRevertPending || isBlunderBoardOverrideActive) {
         clearMoveHighlights();
         return;
       }
@@ -541,6 +576,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       chess,
       isGameActive,
       isBlunderBoardOverrideActive,
+      isRevertPending,
       isViewingLive,
       pendingPromotion,
       selectedSquare,
@@ -595,6 +631,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
+    if (isRevertPending) {
+      return;
+    }
+
     if (playerColor !== "black") {
       return;
     }
@@ -616,6 +656,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     chess,
     engineStatus,
     isGameActive,
+    isRevertPending,
     isThinking,
     isViewingLive,
     moveCount,
@@ -702,7 +743,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       sourceSquare,
       targetSquare,
     }: PieceDropHandlerArgs) => {
-      if (isBlunderBoardOverrideActive || !targetSquare) {
+      if (isRevertPending || isBlunderBoardOverrideActive || !targetSquare) {
         return false;
       }
 
@@ -716,13 +757,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       if (result.gameOver) {
         void handleGameEnd();
-      } else {
+      } else if (!isRevertPending) {
         void applyOpponentMove(result.fenAfter, result.uciHistory);
       }
 
       return true;
     },
-    [applyOpponentMove, handleDrop, handleGameEnd, isBlunderBoardOverrideActive],
+    [applyOpponentMove, handleDrop, handleGameEnd, isBlunderBoardOverrideActive, isRevertPending],
   );
 
   const handlePromotionPick = useCallback(
@@ -731,7 +772,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const store = useGameStore.getState();
       const isLive = store.viewIndex === null;
       const isCorrectTurn = chess.turn() === (store.playerColor === 'white' ? 'w' : 'b');
-      if (!store.isGameActive || !isLive || !isCorrectTurn) {
+      if (!store.isGameActive || isRevertPending || !isLive || !isCorrectTurn) {
         setPendingPromotion(null);
         return;
       }
@@ -739,7 +780,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setPendingPromotion(null);
       applyPlayerMoveAndAdvance(from, to, piece);
     },
-    [pendingPromotion, chess, applyPlayerMoveAndAdvance],
+    [pendingPromotion, chess, applyPlayerMoveAndAdvance, isRevertPending],
   );
 
   const handlePromotionCancel = useCallback(() => {
@@ -749,6 +790,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleRevealSrsFail = useCallback(
     (detail: SrsFailDetail, moveIndex: number) => {
+      if (isRevertPendingRef.current) {
+        return;
+      }
       clearBlunderBoardOverride();
       setBlunderAlert(null);
       setReviewFailModal({
@@ -816,6 +860,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isGameActive &&
     engineStatus === "ready" &&
     isPlayersTurn &&
+    !isRevertPending &&
     !isThinking &&
     isViewingLive &&
     !isBlunderBoardOverrideActive;
@@ -829,6 +874,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             statusText={statusText}
             gameStatusBadge={gameStatusBadge}
             isRated={isRated}
+            isPracticeContinuation={isPracticeContinuation}
             isGameActive={isGameActive}
             playerColorChoice={playerColorChoice}
             playerColor={playerColor}
@@ -880,9 +926,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onPlayBlack={handlePlayBlack}
                 startError={startError}
                 showRevertWarning={showRevertWarning}
+                isRevertPending={isRevertPending}
+                revertError={revertError}
                 onRevertAnyway={executeRevert}
                 onCancelRevert={cancelRevert}
                 showResignWarning={showResignWarning}
+                isPracticeContinuation={isPracticeContinuation}
                 onResignAnyway={executeResign}
                 onCancelResign={cancelResign}
                 showEndedScrim={showEndedScrim}
@@ -895,6 +944,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             </div>
             <PostGameBanner
               isGameActive={isGameActive}
+              isPracticeContinuation={isPracticeContinuation}
               showPostGamePrompt={showPostGamePrompt}
               gameResult={gameResult}
               ratingChange={ratingChange}
@@ -922,6 +972,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               onFlipBoard={flipBoard}
               onReset={handleReset}
               isGameActive={isGameActive}
+              isInteractionDisabled={isRevertPending}
             />
             {isGameActive && isPlayersTurn && (
               <span className="turn-label">Your turn</span>

@@ -23,6 +23,7 @@ const makeProps = () => {
     statusText: "White to move",
     gameStatusBadge: { label: "Active", className: "active" },
     isRated: true,
+    isPracticeContinuation: false,
     isGameActive: true,
     playerColorChoice: "white" as const,
     playerColor: "white" as const,
@@ -155,6 +156,20 @@ describe("GameInfoPanel", () => {
       "data-position",
       "8/8/8/8/8/8/8/8 w - - 0 1",
     );
+  });
+
+  it("shows a practice badge during post-revert continuation", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        isRated={false}
+        isPracticeContinuation
+      />,
+    );
+
+    expect(screen.getByText("Practice")).toBeInTheDocument();
+    expect(screen.queryByText("Unrated")).not.toBeInTheDocument();
   });
 
 });

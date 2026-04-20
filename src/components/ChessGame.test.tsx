@@ -55,6 +55,7 @@ const mockCoordinator = {
   startSession: vi.fn(),
   clearSession: vi.fn(),
   flushPendingUploads: vi.fn().mockResolvedValue(undefined),
+  stopSessionUploads: vi.fn(),
   sessionId: null,
   store: gameAnalysisStore,
   setOnAnalysisResolved: vi.fn(),
@@ -243,7 +244,7 @@ describe("ChessGame characterization safeguards", () => {
     });
   };
 
-  it("shows a warning before revert and only marks game unrated after confirm", async () => {
+  it("records resignation on revert, then continues in practice mode", async () => {
     await startGameAsWhite();
 
     await act(async () => {
@@ -256,23 +257,247 @@ describe("ChessGame characterization safeguards", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
     expect(
-      screen.getByText("This game will not be rated"),
+      screen.getByText("Reverting records this game as a resignation"),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
     expect(
-      screen.queryByText("This game will not be rated"),
+      screen.queryByText("Reverting records this game as a resignation"),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/^unrated$/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^practice$/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
-    fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: {
+        rating_before: 1200,
+        rating_after: 1184,
+        is_provisional: true,
+      },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+    });
 
     expect(
-      screen.queryByText("This game will not be rated"),
+      screen.queryByText("Reverting records this game as a resignation"),
     ).not.toBeInTheDocument();
-    expect(screen.getByText(/^unrated$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^practice$/i)).toBeInTheDocument();
     expect(screen.getByText(/no moves yet/i)).toBeInTheDocument();
+    expect(uploadSessionMovesMock).toHaveBeenCalledWith(
+      "session-characterization",
+      expect.any(Array),
+    );
+    expect(endGameMock).toHaveBeenCalledWith(
+      "session-characterization",
+      "resign",
+      expect.any(String),
+      true,
+    );
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "d2", targetSquare: "d4" });
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("keeps the revert modal open with an inline error when sealing resignation fails", async () => {
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    uploadSessionMovesMock.mockRejectedValueOnce(new Error("Network down"));
+
+    fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+    });
+
+    expect(
+      screen.getByText("Reverting records this game as a resignation"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Network down");
+    expect(screen.queryByText(/^practice$/i)).not.toBeInTheDocument();
+  });
+
+  it("freezes move entry while a rated revert is being sealed", async () => {
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    let resolveUpload: ((value: { moves_inserted: number }) => void) | null = null;
+    uploadSessionMovesMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: {
+        rating_before: 1200,
+        rating_after: 1184,
+        is_provisional: true,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /recording resignation/i }),
+      ).toBeDisabled();
+    });
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-allow-dragging",
+      "false",
+    );
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "d2", targetSquare: "d4" });
+    });
+
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+
+    await act(async () => {
+      resolveUpload?.({ moves_inserted: 2 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/^practice$/i)).toBeInTheDocument();
+    });
+  });
+
+  it("disables move-list actions while a rated revert is being sealed", async () => {
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    let resolveUpload: ((value: { moves_inserted: number }) => void) | null = null;
+    uploadSessionMovesMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: {
+        rating_before: 1200,
+        rating_after: 1184,
+        is_provisional: true,
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTitle("Reset game")).toBeDisabled();
+    });
+
+    expect(screen.getByTitle("Resign")).toBeDisabled();
+    expect(screen.getByTitle("Revert last move")).toBeDisabled();
+    expect(screen.getByTitle("Flip board")).toBeDisabled();
+
+    await act(async () => {
+      resolveUpload?.({ moves_inserted: 2 });
+    });
+  });
+
+  it("drops an already in-flight opponent reply once revert sealing begins", async () => {
+    await startGameAsWhite();
+
+    let resolveOpponentMove!: (value: {
+      mode: "engine";
+      move: { uci: string; san: string };
+      target_blunder_id: null;
+      decision_source: "backend_engine";
+    }) => void;
+    getNextOpponentMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveOpponentMove = resolve;
+      }),
+    );
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /revert last move/i }));
+
+    let resolveUpload!: (value: { moves_inserted: number }) => void;
+    uploadSessionMovesMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: {
+        rating_before: 1200,
+        rating_after: 1184,
+        is_provisional: true,
+      },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
+    });
+
+    await act(async () => {
+      resolveOpponentMove({
+        mode: "engine",
+        move: { uci: "d7d5", san: "d5" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+    });
+
+    expect(screen.queryByRole("button", { name: /d5/i })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolveUpload({ moves_inserted: 2 });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/^practice$/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: /d5/i })).not.toBeInTheDocument();
   });
 
   it("applies player move through square-click flow and requests opponent reply", async () => {

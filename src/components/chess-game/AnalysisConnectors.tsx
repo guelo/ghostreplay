@@ -150,6 +150,7 @@ type ConnectedMoveListProps = {
   onFlipBoard?: () => void;
   onReset?: () => void;
   isGameActive?: boolean;
+  isInteractionDisabled?: boolean;
 };
 
 export const ConnectedMoveList = memo(
@@ -165,6 +166,7 @@ export const ConnectedMoveList = memo(
     onFlipBoard,
     onReset,
     isGameActive,
+    isInteractionDisabled,
   }: ConnectedMoveListProps) => {
     const analysisStoreApi = useAnalysisStoreApi();
     const analysisMap = useAnalysisStore((s) => s.analysisMap);
@@ -318,6 +320,7 @@ export const ConnectedMoveList = memo(
         onFlipBoard={onFlipBoard}
         onReset={onReset}
         isGameActive={isGameActive}
+        isInteractionDisabled={isInteractionDisabled}
       />
     );
   },

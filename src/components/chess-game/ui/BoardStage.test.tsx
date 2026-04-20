@@ -100,9 +100,12 @@ const makeProps = () => {
     onPlayBlack,
     startError: null,
     showRevertWarning: false,
+    isRevertPending: false,
+    revertError: null,
     onRevertAnyway,
     onCancelRevert,
     showResignWarning: false,
+    isPracticeContinuation: false,
     onResignAnyway,
     onCancelResign,
     showEndedScrim: false,
@@ -191,11 +194,53 @@ describe("BoardStage", () => {
     const props = makeProps();
     render(<BoardStage {...props} showRevertWarning />);
 
+    expect(
+      screen.getByText("Reverting records this game as a resignation"),
+    ).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /revert anyway/i }));
     fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
 
     expect(props.onRevertAnyway).toHaveBeenCalledTimes(1);
     expect(props.onCancelRevert).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows inline revert failure and disables actions while revert is pending", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        showRevertWarning
+        isRevertPending
+        revertError="Failed to record resignation before revert."
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Failed to record resignation before revert.",
+    );
+    expect(
+      screen.getByRole("button", { name: /recording resignation/i }),
+    ).toBeDisabled();
+    expect(
+      document.querySelector(".revert-warning-dialog__spinner"),
+    ).not.toBeNull();
+    expect(screen.getByRole("button", { name: /cancel/i })).toBeDisabled();
+  });
+
+  it("shows practice-specific resign copy during continuation mode", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        showResignWarning
+        isPracticeContinuation
+      />,
+    );
+
+    expect(
+      screen.getByText("This will end the current practice continuation."),
+    ).toBeInTheDocument();
   });
 
   it("does not render PromotionPicker when pendingPromotion is null", () => {

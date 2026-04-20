@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getNextOpponentMove,
   type SessionDecisionSource,
@@ -44,6 +44,7 @@ export const determineOpponentMove = async (
 
 type UseOpponentMoveOptions = {
   sessionId: string | null;
+  canApplyResult?: (requestSessionId: string | null) => boolean;
   onApplyBackendMove: (
     sanMove: string,
     decisionSource: Exclude<SessionDecisionSource, "local_fallback">,
@@ -60,20 +61,45 @@ type UseOpponentMoveOptions = {
  */
 export const useOpponentMove = ({
   sessionId,
+  canApplyResult,
   onApplyBackendMove,
   onApplyLocalFallback,
 }: UseOpponentMoveOptions) => {
   const [opponentMode, setOpponentMode] = useState<OpponentMode>("engine");
+  const canApplyResultRef = useRef(canApplyResult);
+  const onApplyBackendMoveRef = useRef(onApplyBackendMove);
+  const onApplyLocalFallbackRef = useRef(onApplyLocalFallback);
+
+  useEffect(() => {
+    canApplyResultRef.current = canApplyResult;
+  }, [canApplyResult]);
+
+  useEffect(() => {
+    onApplyBackendMoveRef.current = onApplyBackendMove;
+  }, [onApplyBackendMove]);
+
+  useEffect(() => {
+    onApplyLocalFallbackRef.current = onApplyLocalFallback;
+  }, [onApplyLocalFallback]);
 
   const applyOpponentMove = useCallback(
     async (fen: string, moves: string[] = []) => {
-      if (!sessionId) {
+      const requestSessionId = sessionId;
+
+      if (!requestSessionId) {
         setOpponentMode("engine");
-        await onApplyLocalFallback();
+        await onApplyLocalFallbackRef.current();
         return;
       }
 
-      const result = await determineOpponentMove(sessionId, fen, moves);
+      const result = await determineOpponentMove(requestSessionId, fen, moves);
+
+      if (
+        canApplyResultRef.current &&
+        !canApplyResultRef.current(requestSessionId)
+      ) {
+        return;
+      }
 
       if (result) {
         setOpponentMode(result.mode);
@@ -81,7 +107,7 @@ export const useOpponentMove = ({
           `[OpponentMove] Applying ${result.mode} move:`,
           result.move
         );
-        await onApplyBackendMove(
+        await onApplyBackendMoveRef.current(
           result.move,
           result.decisionSource,
           result.targetBlunderId,
@@ -90,10 +116,10 @@ export const useOpponentMove = ({
         );
       } else {
         setOpponentMode("engine");
-        await onApplyLocalFallback();
+        await onApplyLocalFallbackRef.current();
       }
     },
-    [sessionId, onApplyBackendMove, onApplyLocalFallback]
+    [sessionId]
   );
 
   const resetMode = useCallback(() => {

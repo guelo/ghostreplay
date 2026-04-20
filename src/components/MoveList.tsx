@@ -47,6 +47,7 @@ type MoveListProps = {
   onFlipBoard?: () => void;
   onReset?: () => void;
   isGameActive?: boolean;
+  isInteractionDisabled?: boolean;
 };
 
 type DisplayItem =
@@ -131,6 +132,7 @@ const MoveList = ({
   onFlipBoard,
   onReset,
   isGameActive = false,
+  isInteractionDisabled = false,
   variationTree,
   selectedVarNodeId,
   onVarSelect,
@@ -158,6 +160,7 @@ const MoveList = ({
     : moves.length > 0 && effectiveIndex < moves.length - 1;
 
   const handlePrev = useCallback(() => {
+    if (isInteractionDisabled) return;
     if (isVariationActive) {
       const result = navigateUp!(selectedVarNodeId!);
       if (result?.type === "game") {
@@ -170,9 +173,10 @@ const MoveList = ({
     }
     if (!canGoBack) return;
     onNavigate(effectiveIndex - 1); // -1 is valid (starting position)
-  }, [isVariationActive, canGoBack, effectiveIndex, onNavigate, selectedVarNodeId, navigateUp, onVarSelect]);
+  }, [isInteractionDisabled, isVariationActive, canGoBack, effectiveIndex, onNavigate, selectedVarNodeId, navigateUp, onVarSelect]);
 
   const handleNext = useCallback(() => {
+    if (isInteractionDisabled) return;
     if (isVariationActive) {
       const nextId = navigateDown!(selectedVarNodeId!);
       if (nextId) onVarSelect!(nextId);
@@ -182,10 +186,11 @@ const MoveList = ({
     const newIndex = effectiveIndex + 1;
     // If we've reached the end, use null to indicate "live" position
     onNavigate(newIndex >= moves.length - 1 ? null : newIndex);
-  }, [isVariationActive, canGoForward, effectiveIndex, moves.length, onNavigate, selectedVarNodeId, navigateDown, onVarSelect]);
+  }, [isInteractionDisabled, isVariationActive, canGoForward, effectiveIndex, moves.length, onNavigate, selectedVarNodeId, navigateDown, onVarSelect]);
 
   const handleMoveClick = useCallback(
     (index: number) => {
+      if (isInteractionDisabled) return;
       setTappedIconIndex(null);
       // Clear variation selection when clicking a main-line move
       if (isVariationActive) {
@@ -194,14 +199,15 @@ const MoveList = ({
       // If clicking on the last move, set to null (live position)
       onNavigate(index === moves.length - 1 ? null : index);
     },
-    [moves.length, onNavigate, isVariationActive, onVarSelect],
+    [isInteractionDisabled, moves.length, onNavigate, isVariationActive, onVarSelect],
   );
 
   const handleVarNodeClick = useCallback(
     (nodeId: VariationNodeId) => {
+      if (isInteractionDisabled) return;
       onVarSelect?.(nodeId);
     },
-    [onVarSelect],
+    [isInteractionDisabled, onVarSelect],
   );
 
   const handleIconTap = useCallback(
@@ -212,6 +218,7 @@ const MoveList = ({
   );
 
   const handleStartPosition = () => {
+    if (isInteractionDisabled) return;
     if (isVariationActive) {
       onVarSelect!(null);
     }
@@ -478,6 +485,7 @@ const MoveList = ({
                   playerColor={playerColor}
                   tappedIconIndex={tappedIconIndex}
                   revealedSrsFailIndex={revealedSrsFailIndex}
+                  isInteractionDisabled={isInteractionDisabled}
                   onMoveClick={handleMoveClick}
                   onIconTap={handleIconTap}
                   onRevealSrsFail={onRevealSrsFail}
@@ -495,7 +503,7 @@ const MoveList = ({
           className="move-nav-button"
           type="button"
           onClick={handleStartPosition}
-          disabled={moves.length === 0 || isAtStart}
+          disabled={isInteractionDisabled || moves.length === 0 || isAtStart}
           title="Go to starting position"
         >
           ⟨⟨
@@ -504,7 +512,7 @@ const MoveList = ({
           className="move-nav-button"
           type="button"
           onClick={handlePrev}
-          disabled={!canGoBack}
+          disabled={isInteractionDisabled || !canGoBack}
           title="Previous move (←)"
         >
           ⟨
@@ -513,7 +521,7 @@ const MoveList = ({
           className="move-nav-button"
           type="button"
           onClick={handleNext}
-          disabled={!canGoForward}
+          disabled={isInteractionDisabled || !canGoForward}
           title="Next move (→)"
         >
           ⟩
@@ -522,7 +530,7 @@ const MoveList = ({
           className="move-nav-button"
           type="button"
           onClick={handleLatest}
-          disabled={isAtLatest}
+          disabled={isInteractionDisabled || isAtLatest}
           title="Go to current position"
         >
           ⟩⟩
@@ -536,7 +544,7 @@ const MoveList = ({
               className="move-action-button danger"
               type="button"
               onClick={onResign}
-              disabled={isResignDisabled}
+              disabled={isInteractionDisabled || isResignDisabled}
               title="Resign"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -549,6 +557,7 @@ const MoveList = ({
               className="move-action-button"
               type="button"
               onClick={onFlipBoard}
+              disabled={isInteractionDisabled}
               title="Flip board"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -568,7 +577,7 @@ const MoveList = ({
                   onAddSelectedMove(effectiveIndex);
                 }
               }}
-              disabled={!isAddEnabled || isAddingSelectedMove}
+              disabled={isInteractionDisabled || !isAddEnabled || isAddingSelectedMove}
               title="Add selected move to ghost library"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
@@ -582,7 +591,7 @@ const MoveList = ({
               className="move-action-button"
               type="button"
               onClick={onRevert}
-              disabled={isRevertDisabled}
+              disabled={isInteractionDisabled || isRevertDisabled}
               title="Revert last move"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -596,6 +605,7 @@ const MoveList = ({
               className="move-action-button"
               type="button"
               onClick={onReset}
+              disabled={isInteractionDisabled}
               title="Reset game"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

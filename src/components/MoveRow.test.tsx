@@ -24,6 +24,7 @@ const baseProps: MoveRowProps = {
   playerColor: "white",
   tappedIconIndex: null,
   revealedSrsFailIndex: null,
+  isInteractionDisabled: false,
   onMoveClick: vi.fn(),
   onIconTap: vi.fn(),
   selectedMoveRef: createRef(),
@@ -101,5 +102,68 @@ describe("MoveRow — pop animation classes", () => {
     fireEvent.animationEnd(bestTail!);
     expect(onDone).toHaveBeenCalledTimes(1);
     expect(onDone).toHaveBeenCalledWith(1);
+  });
+
+  it("disables row interactions when interaction is blocked", () => {
+    const onMoveClick = vi.fn();
+    const onIconTap = vi.fn();
+    const onRevealSrsFail = vi.fn();
+    const { container, getByRole } = render(
+      <MoveRow
+        {...baseProps}
+        onMoveClick={onMoveClick}
+        onIconTap={onIconTap}
+        onRevealSrsFail={onRevealSrsFail}
+        isInteractionDisabled
+        whiteBubbles={[
+          {
+            key: "fail-0",
+            variant: "srs-fail",
+            text: "You made this mistake again!",
+            srsFailDetail: {
+              userMoveSan: "e4",
+              bestMoveSan: "d4",
+              userMoveUci: "e2e4",
+              bestMoveUci: "d2d4",
+            },
+          },
+        ]}
+        isLastBubbleRow
+      />,
+    );
+
+    fireEvent.click(getByRole("button", { name: /e4/i }));
+    fireEvent.click(container.querySelector(".move-col-white .move-icon")!);
+
+    const revealButton = container.querySelector(".srs-fail-icon") as HTMLButtonElement;
+    expect(revealButton.disabled).toBe(true);
+    fireEvent.click(revealButton);
+
+    expect(onMoveClick).not.toHaveBeenCalled();
+    expect(onIconTap).not.toHaveBeenCalled();
+    expect(onRevealSrsFail).not.toHaveBeenCalled();
+  });
+
+  it("rerenders mounted rows when interaction disabled changes", () => {
+    const onMoveClick = vi.fn();
+    const { getByRole, rerender } = render(
+      <MoveRow
+        {...baseProps}
+        onMoveClick={onMoveClick}
+      />,
+    );
+
+    const moveButton = getByRole("button", { name: /e4/i }) as HTMLButtonElement;
+    expect(moveButton.disabled).toBe(false);
+
+    rerender(
+      <MoveRow
+        {...baseProps}
+        onMoveClick={onMoveClick}
+        isInteractionDisabled
+      />,
+    );
+
+    expect(getByRole("button", { name: /e4/i })).toBeDisabled();
   });
 });

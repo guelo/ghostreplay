@@ -195,6 +195,40 @@ describe("useOpponentMove", () => {
     expect(onApplyLocalFallback).toHaveBeenCalled();
   });
 
+  it("uses the latest sessionId immediately after rerender", async () => {
+    getNextOpponentMoveMock.mockResolvedValueOnce(
+      backendResponse("engine", "e4")
+    );
+
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+
+    const { result, rerender } = renderHook(
+      ({ sessionId }: { sessionId: string | null }) =>
+        useOpponentMove({
+          sessionId,
+          onApplyBackendMove,
+          onApplyLocalFallback,
+        }),
+      {
+        initialProps: { sessionId: null } as { sessionId: string | null },
+      },
+    );
+
+    rerender({ sessionId: "session-new" });
+
+    await act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+    });
+
+    expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
+      "session-new",
+      "test-fen",
+      [],
+    );
+    expect(onApplyLocalFallback).not.toHaveBeenCalled();
+  });
+
   it("resets mode to engine", async () => {
     getNextOpponentMoveMock.mockResolvedValueOnce(
       backendResponse("ghost", "e4", 42)
@@ -219,5 +253,39 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
+  });
+
+  it("drops an in-flight backend reply when canApplyResult turns false before resolution", async () => {
+    let resolveMove!: (value: ReturnType<typeof backendResponse>) => void;
+    getNextOpponentMoveMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveMove = resolve;
+      }),
+    );
+
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+    let shouldApply = true;
+
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: "session-123",
+        canApplyResult: () => shouldApply,
+        onApplyBackendMove,
+        onApplyLocalFallback,
+      }),
+    );
+
+    const pending = act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+    });
+
+    shouldApply = false;
+
+    resolveMove(backendResponse("engine", "e4"));
+    await pending;
+
+    expect(onApplyBackendMove).not.toHaveBeenCalled();
+    expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 });

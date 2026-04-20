@@ -224,6 +224,36 @@ describe('GameAnalysisCoordinator', () => {
     })
   })
 
+  describe('practice continuation upload gating', () => {
+    it('stops uploading newly resolved moves after session uploads are disabled', async () => {
+      coordinator.startSession('session-practice')
+      useGameStore.setState({ moveHistory: makeMoveHistory(2) })
+
+      coordinator.stopSessionUploads()
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+
+      resolveLookup(new Map([
+        ['fen-0::uci-0', {
+          move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      vi.advanceTimersByTime(5000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled()
+    })
+  })
+
   describe('latest request wins per move index', () => {
     it('ignores stale worker results for a replayed ply', () => {
       coordinator.startSession('session-A')

@@ -218,6 +218,34 @@ def test_next_opponent_move_black_player_validates_turn(
     assert "player's turn" in response.json()["detail"]
 
 
+def test_next_opponent_move_allows_ended_session(
+    client, auth_headers, create_game_session, db_session
+):
+    """Opponent move lookup still works after the session has been ended."""
+    from app.opponent_move_controller import ControllerMove
+
+    session_id = create_game_session(user_id=123, player_color="white")
+    db_session.execute(
+        text("UPDATE game_sessions SET status = 'ended', result = 'resign' WHERE id = :id"),
+        {"id": session_id},
+    )
+    db_session.commit()
+
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["move"]["uci"] == "e7e5"
+
+
 def test_next_opponent_move_ghost_branch_happy_path(
     client, auth_headers, create_game_session, db_session
 ):

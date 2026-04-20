@@ -112,6 +112,7 @@ export type MoveRowProps = {
   playerColor: "white" | "black";
   tappedIconIndex: number | null;
   revealedSrsFailIndex: number | null;
+  isInteractionDisabled?: boolean;
   onMoveClick: (index: number) => void;
   onIconTap: (index: number) => void;
   onRevealSrsFail?: (detail: SrsFailDetail, moveIndex: number) => void;
@@ -141,6 +142,7 @@ const MoveRowInner = ({
   playerColor,
   tappedIconIndex,
   revealedSrsFailIndex,
+  isInteractionDisabled = false,
   onMoveClick,
   onIconTap,
   onRevealSrsFail,
@@ -175,6 +177,7 @@ const MoveRowInner = ({
         ref={isSelected ? selectedMoveRef : null}
         className={`move-button move-col-${side} ${colorClass}${buttonCelebrateClass} ${isSelected ? "selected" : ""}`}
         type="button"
+        disabled={isInteractionDisabled}
         onClick={() => onMoveClick(index)}
       >
         {celebrateBest && (
@@ -209,6 +212,9 @@ const MoveRowInner = ({
                 title={iconInfo.title}
                 onClick={(e) => {
                   e.stopPropagation();
+                  if (isInteractionDisabled) {
+                    return;
+                  }
                   onIconTap(index);
                 }}
                 onAnimationEnd={
@@ -253,7 +259,11 @@ const MoveRowInner = ({
             <button
               type="button"
               className={`srs-fail-icon ${isRevealed ? "srs-fail-icon--revealed" : ""}`}
+              disabled={isInteractionDisabled}
               onClick={() => {
+                if (isInteractionDisabled) {
+                  return;
+                }
                 if (!isRevealed && onRevealSrsFail && msg.srsFailDetail) {
                   onRevealSrsFail(msg.srsFailDetail, moveIndex);
                 }
@@ -395,6 +405,9 @@ function areEqual(prev: MoveRowProps, next: MoveRowProps): boolean {
 
   // Player color affects eval formula coloring
   if (prev.playerColor !== next.playerColor) return false;
+
+  // Modal interaction blocking must propagate to mounted rows
+  if (prev.isInteractionDisabled !== next.isInteractionDisabled) return false;
 
   // Bubble arrays (stable if Step 2b works)
   if (prev.whiteBubbles !== next.whiteBubbles) return false;

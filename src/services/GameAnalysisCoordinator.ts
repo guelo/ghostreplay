@@ -100,6 +100,7 @@ type UploadState = {
   /** True after the session is finalized — the interval timer is gone,
    *  so the success handler must drain all remaining dirty indices. */
   detached: boolean
+  uploadsEnabled: boolean
 }
 
 export class GameAnalysisCoordinator {
@@ -239,6 +240,7 @@ export class GameAnalysisCoordinator {
       retryCount: 0,
       retryTimer: null,
       detached: false,
+      uploadsEnabled: true,
     }
 
     this.startIncrementalUploadTimer()
@@ -461,7 +463,11 @@ export class GameAnalysisCoordinator {
     this.store.getState().resolveAnalysis(moveIndex, result)
 
     // Mark dirty for incremental upload
-    if (this.uploadState && this.uploadState.sessionId === this.activeSessionId) {
+    if (
+      this.uploadState &&
+      this.uploadState.uploadsEnabled &&
+      this.uploadState.sessionId === this.activeSessionId
+    ) {
       this.uploadState.dirtyIndices.add(moveIndex)
       // Trigger immediate upload if threshold reached
       if (this.uploadState.dirtyIndices.size >= INCREMENTAL_UPLOAD_BATCH_THRESHOLD) {
@@ -567,6 +573,7 @@ export class GameAnalysisCoordinator {
     frozenPayload?: SessionMoveUpload[],
     frozenIndices?: Set<number>,
   ) {
+    if (!state.uploadsEnabled) return
     if (state.uploadInFlight) return
 
     // First call for this batch — snapshot from global state
@@ -628,8 +635,25 @@ export class GameAnalysisCoordinator {
    * worker completion. Called at game-end for final reconciliation.
    */
   async flushPendingUploads(): Promise<void> {
-    if (!this.uploadState || this.uploadState.dirtyIndices.size === 0) return
+    if (
+      !this.uploadState ||
+      !this.uploadState.uploadsEnabled ||
+      this.uploadState.dirtyIndices.size === 0
+    ) {
+      return
+    }
     this.flushIncrementalUpload(this.uploadState)
+  }
+
+  stopSessionUploads() {
+    this.stopIncrementalUploadTimer()
+    if (!this.uploadState) return
+    this.uploadState.uploadsEnabled = false
+    this.uploadState.dirtyIndices.clear()
+    if (this.uploadState.retryTimer) {
+      clearTimeout(this.uploadState.retryTimer)
+      this.uploadState.retryTimer = null
+    }
   }
 
   // --- Teardown ---
