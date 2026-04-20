@@ -133,6 +133,7 @@ function GameAnalysisPage() {
                   key={id}
                   moves={analysis.moves}
                   boardOrientation={playerColor}
+                  initialMoveIndex={analysis.moves.length > 0 ? 0 : undefined}
                   positionAnalysis={analysis.position_analysis}
                   highlightedMoves={highlightedMoves}
                   onGraphMoveClick={handleGraphMoveClick}

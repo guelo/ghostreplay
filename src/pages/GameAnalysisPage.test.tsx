@@ -30,8 +30,12 @@ vi.mock('../utils/api', async () => {
 
 // Mock AnalysisBoard to avoid pulling in chess rendering
 vi.mock('../components/AnalysisBoard', () => ({
-  default: ({ boardOrientation }: { boardOrientation: string }) => (
-    <div data-testid="analysis-board" data-orientation={boardOrientation} />
+  default: ({ boardOrientation, initialMoveIndex }: { boardOrientation: string; initialMoveIndex?: number }) => (
+    <div
+      data-testid="analysis-board"
+      data-orientation={boardOrientation}
+      data-initial-move={initialMoveIndex}
+    />
   ),
 }));
 
@@ -124,6 +128,22 @@ describe('GameAnalysisPage', () => {
       'data-orientation',
       'black',
     );
+    expect(screen.getByTestId('analysis-board')).toHaveAttribute(
+      'data-initial-move',
+      '0',
+    );
+  });
+
+  it('fetches analysis and renders board without initialMoveIndex for empty game', async () => {
+    mockFetchAnalysis.mockResolvedValue({ ...ANALYSIS_RESPONSE, moves: [] });
+
+    renderPage('/game?id=abc-123');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+    });
+
+    expect(screen.getByTestId('analysis-board')).not.toHaveAttribute('data-initial-move');
   });
 
   it('shows loading state initially', () => {

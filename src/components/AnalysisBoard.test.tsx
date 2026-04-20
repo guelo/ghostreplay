@@ -166,6 +166,13 @@ describe('AnalysisBoard MoveList', () => {
 
     expect(screen.getByTestId('move-list-player-color')).toHaveTextContent('black')
   })
+
+  it('initializes to initialMoveIndex when provided', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" initialMoveIndex={0} />)
+
+    expect(capturedChessboardProps.position).toBe(moves[0].fen_after)
+    expect(capturedMoveListProps.currentIndex).toBe(0)
+  })
 })
 
 describe('AnalysisBoard — AnalysisGraph props', () => {
