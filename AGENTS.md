@@ -1,13 +1,14 @@
 # Agent Instructions
 
-The overall project and architecure is described in SPEC.md but we are now in a post-SPEC environment, changes have been made that are beyond the spec. The spec will likely become more and more outdated over time. But it is still a good doc to get an idea of the overall project.
+The overall project and architecure is described in SPEC.md but we are now in a post-SPEC environment, changes have been made that are beyond the spec.
+The spec will likely become more and more outdated over time. But it is still a good doc to get an idea of the overall project.
 
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.
 
 ## Frontend Architecture
 - React 19 + Vite + TypeScript
-- Main game component: `src/components/ChessGame.tsx` (~1200 lines)
+- Main game component: `src/components/ChessGame.tsx` (~1000 lines)
 - Styles: `src/App.css` (no CSS modules)
 - Toast pattern: absolute-positioned in `.chessboard-board-area`, z-index 8, slide-up animation via `blunder-toast-in` keyframes
 - Blunder review flow: `blunderReviewId` set in `applyGhostMove` when `target_blunder_id` received from API
