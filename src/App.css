@@ -190,6 +190,26 @@
     max-width: 100%;
 }
 
+.chess-layout.has-graph {
+    grid-template-areas:
+        "panel board moves"
+        "panel graph .";
+}
+
+.chess-graph-area {
+    grid-area: graph;
+    width: 100%;
+    /* No margin-top here; we rely on game-layout-gap from chess-layout */
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.chess-graph-area .analysis-graph,
+.chess-graph-area .game-end-banner {
+    margin-top: 0;
+}
+
 .chess-panel {
     grid-area: panel;
     display: flex;
@@ -262,12 +282,12 @@
     max-width: var(--game-board-max-width);
 }
 
-.chessboard-wrapper .analysis-graph > svg {
+.chess-graph-area .analysis-graph > svg {
     height: var(--game-graph-height);
 }
 
 @media (max-width: 767px) {
-    .chessboard-wrapper .analysis-graph > svg {
+    .chess-graph-area .analysis-graph > svg {
         height: 330px;
     }
 }
@@ -2406,6 +2426,8 @@
     gap: 0.25rem;
     align-self: stretch;
     max-height: calc(100dvh - var(--game-viewport-chrome));
+    height: 0;
+    min-height: 100%;
 }
 
 @media (max-height: 760px) {
@@ -4316,6 +4338,13 @@ button.openings-shell__crumb:hover {
             "board moves";
     }
 
+    .chess-layout.has-graph {
+        grid-template-areas:
+            "panel panel"
+            "board moves"
+            "graph .";
+    }
+
     .chess-panel {
         flex-direction: row;
         flex-wrap: wrap;
@@ -4371,6 +4400,14 @@ button.openings-shell__crumb:hover {
             "moves";
     }
 
+    .chess-layout.has-graph {
+        grid-template-areas:
+            "panel"
+            "board"
+            "graph"
+            "moves";
+    }
+
     .chess-panel {
         flex-direction: row;
         flex-wrap: wrap;
@@ -4380,6 +4417,8 @@ button.openings-shell__crumb:hover {
 
     .moves-column {
         max-height: 300px;
+        height: auto;
+        min-height: 0;
     }
 }
 

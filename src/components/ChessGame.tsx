@@ -865,11 +865,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isViewingLive &&
     !isBlunderBoardOverrideActive;
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
+  const hasBelowBoardContent = moveHistory.length > 0 || !isGameActive;
 
   return (
     <AnalysisStoreProvider value={analysisStore}>
       <section className="chess-section">
-        <div className="chess-layout">
+        <div className={`chess-layout ${hasBelowBoardContent ? 'has-graph' : ''}`}>
           <GameInfoPanel
             statusText={statusText}
             gameStatusBadge={gameStatusBadge}
@@ -942,18 +943,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onPromotionCancel={handlePromotionCancel}
               />
             </div>
-            <PostGameBanner
-              isGameActive={isGameActive}
-              isPracticeContinuation={isPracticeContinuation}
-              showPostGamePrompt={showPostGamePrompt}
-              gameResult={gameResult}
-              ratingChange={ratingChange}
-              onViewAnalysis={handleViewAnalysis}
-              onShowStartOverlay={handleShowStartOverlay}
-              onViewHistory={handleViewHistory}
-            />
-            <ConnectedAnalysisGraph onSelectMove={handleNavigate} />
           </div>
+          {hasBelowBoardContent && (
+            <div className="chess-graph-area">
+              <PostGameBanner
+                isGameActive={isGameActive}
+                isPracticeContinuation={isPracticeContinuation}
+                showPostGamePrompt={showPostGamePrompt}
+                gameResult={gameResult}
+                ratingChange={ratingChange}
+                onViewAnalysis={handleViewAnalysis}
+                onShowStartOverlay={handleShowStartOverlay}
+                onViewHistory={handleViewHistory}
+              />
+              <ConnectedAnalysisGraph onSelectMove={handleNavigate} />
+            </div>
+          )}
 
           <div className="moves-column">
             <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
