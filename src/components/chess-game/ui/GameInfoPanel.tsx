@@ -86,7 +86,9 @@ const GameInfoPanel = ({
 }: GameInfoPanelProps) => {
   const reviewWarning =
     resolvedReview && isViewingLive ? (
-      <div className={`review-warning-toast review-warning-toast--${resolvedReview.result}`}>
+      <div
+        className={`review-warning-toast review-warning-toast--${resolvedReview.result}`}
+      >
         <div className="review-warning-toast__header">
           <WarningTriangleIcon />
           <span className="review-warning-toast__label">Review Position</span>
@@ -94,10 +96,10 @@ const GameInfoPanel = ({
         <p className="review-warning-toast__detail">
           Be careful. You've messed this position up before.
         </p>
-        {resolvedReview.result !== 'pending' && (
+        {resolvedReview.result !== "pending" && (
           <div className="review-warning-toast__overlay">
             <span className="review-warning-toast__overlay-icon">
-              {resolvedReview.result === 'pass' ? '✓' : '✗'}
+              {resolvedReview.result === "pass" ? "✓" : "✗"}
             </span>
           </div>
         )}
@@ -136,11 +138,7 @@ const GameInfoPanel = ({
           {isProvisional ? "?" : ""}
         </span>
       </p>
-      {!isGameActive && (
-        <p className="chess-meta">
-          Click New game to start
-        </p>
-      )}
+      {!isGameActive && <p className="chess-meta">Click New game to start</p>}
       {isGameActive && (
         <div
           className={`chess-meta${
@@ -153,7 +151,9 @@ const GameInfoPanel = ({
           {opponentMode === "ghost" ? (
             <>
               <OpponentAvatar mode="ghost" engineElo={engineElo} size={70} />{" "}
-              <span className="chess-meta-strong ghost-mode-label">Ghost</span>
+              <span className="chess-meta-strong ghost-mode-label">
+                Replay Ghost
+              </span>
               {blunderReviewId !== null && (
                 <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
                   <button
@@ -204,7 +204,9 @@ const GameInfoPanel = ({
                           <span>
                             Last seen:{" "}
                             {blunderReviewSrs.last_reviewed_at
-                              ? formatLastSeen(blunderReviewSrs.last_reviewed_at)
+                              ? formatLastSeen(
+                                  blunderReviewSrs.last_reviewed_at,
+                                )
                               : blunderReviewSrs.created_at
                                 ? formatLastSeen(blunderReviewSrs.created_at)
                                 : "never"}
@@ -223,11 +225,7 @@ const GameInfoPanel = ({
             </>
           ) : (
             <>
-              <OpponentAvatar
-                mode="engine"
-                engineElo={engineElo}
-                size={70}
-              />{" "}
+              <OpponentAvatar mode="engine" engineElo={engineElo} size={70} />{" "}
               <span className="chess-meta-strong">{opponentName}</span>
             </>
           )}
