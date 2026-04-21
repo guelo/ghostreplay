@@ -40,3 +40,8 @@ test-results/
 blob-report/
 backend/.tmp/e2e.sqlite3
 backend/.opening_graph_cache/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

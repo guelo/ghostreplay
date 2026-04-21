@@ -1,5 +1,7 @@
 {
-  "database": "beads.db",
-  "jsonl_export": "issues.jsonl",
-  "last_bd_version": "0.47.1"
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ghostreplay",
+  "project_id": "2729aeee-d916-4de8-aca6-6e11ef3e70d4"
 }

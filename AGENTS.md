@@ -1,7 +1,7 @@
 # Agent Instructions
 
-The overall project and architecure is described in SPEC.md but we are now in a post-SPEC environment, changes have been made that are beyond the spec.
-The spec will likely become more and more outdated over time. But it is still a good doc to get an idea of the overall project.
+The initial project and architecture is described in SPEC.md but we are now in a post-SPEC environment, changes have been made that are beyond the spec.
+The spec will become more and more outdated over time. It might still be useful to get an idea of the overall project.
 
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.
@@ -14,21 +14,16 @@ If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backe
 - Blunder review flow: `blunderReviewId` set in `applyGhostMove` when `target_blunder_id` received from API
 
 ## Design Preferences
-- [Zustand store design](feedback_zustand_store_design.md) — narrow stores, derive cheap values, keep Chess + effects outside
+- [Zustand store design](docs/memory/feedback_zustand_store_design.md) — narrow stores, derive cheap values, keep Chess + effects outside
 
 ## Feedback
-- [No commit without review](feedback_no_commit_without_review.md) — do not commit until user has reviewed changes
-- [Thorough plans](feedback_thorough_plans.md) — plans must trace data flows, layout math, sizing constraints, and test coverage precisely
-- [Plans in beads](feedback_plans_in_beads.md) — always update bead design field with plan content before exiting plan mode
+- [No commit without review](docs/memory/feedback_no_commit_without_review.md) — do not commit until user has reviewed changes
+- [Thorough plans](docs/memory/feedback_thorough_plans.md) — plans must trace data flows, layout math, sizing constraints, and test coverage precisely
+- [Plans in beads](docs/memory/feedback_plans_in_beads.md) — always update bead design field with plan content before exiting plan mode
 
-## Beads Workflow
-- Use `bd close --force` when closing issues with open blockers (if UI-only work is complete)
-- Always `bd sync` before and after commits
-- 
 ## Testing Guidance
 - Avoid overly detailed UI/interface tests (exact layout structure, cosmetic copy, or styling-specific assertions).
 - Prefer testing behavior contracts, data flow, and critical user outcomes instead of pixel-level or nav-chrome details.
-
 
 ## Multi-Agent Workspace Rules
 
@@ -43,27 +38,30 @@ This repo may be edited by multiple agents/users at the same time.
 
 
 
-## Issue Tracking
+<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:ca08a54f -->
+## Beads Issue Tracker
 
-This project uses **bd (beads)** for issue tracking.
-**CRITICAL**: Use the `bd` CLI tool exclusively. Never read or modify files in the `.beads/` directory directly.
+This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
 
-Run `bd prime` for workflow context, or install hooks (`bd hooks install`) for auto-injection.
+### Quick Reference
 
-**Quick reference:**
-- `bd ready` - Find unblocked work
-- `bd create --id=g-<slug> --title="..." --type task --priority 2` - Create issue
-- `bd close <id>` - Complete work
-- `bd sync` - Sync with git (run at session end)
+```bash
+bd ready              # Find available work
+bd create --id=g-<slug> --title="..." --type task --priority 2` # Create issue
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+```
 
-> **REQUIRED**: Always pass `--id=g-<slug>` when creating issues. `<slug>` must be 5–20 char lowercase kebab-case mini-summary (e.g. `g-fix-login-redirect`). Never let beads auto-generate IDs.
+### Rules
 
-For full workflow details: `bd prime`
+- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Run `bd prime` for detailed command reference and session close protocol
+- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
-## Landing the Plane (Session Completion)
+## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
-Before running git workflow steps, follow `Multi-Agent Workspace Rules` above to avoid touching unrelated local changes.
 
 **MANDATORY WORKFLOW:**
 
@@ -73,7 +71,7 @@ Before running git workflow steps, follow `Multi-Agent Workspace Rules` above to
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd dolt push
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -86,3 +84,10 @@ Before running git workflow steps, follow `Multi-Agent Workspace Rules` above to
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
+<!-- END BEADS INTEGRATION -->
+
+**CRITICAL**: Use the `bd` CLI tool exclusively. Never read or modify files in the `.beads/` directory directly.
+
+ **REQUIRED**: Always pass `--id=g-<slug>` when creating issues. `<slug>` must be 5–20 char lowercase kebab-case mini-summary (e.g. `g-fix-login-redirect`). Never let beads auto-generate IDs.
+
+
