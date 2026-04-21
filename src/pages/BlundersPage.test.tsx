@@ -21,8 +21,19 @@ beforeAll(() => {
 });
 
 // Mock the API module
-const mockFetchBlunders = vi.fn();
-const mockFetchAnalysis = vi.fn();
+const { mockFetchBlunders, mockFetchAnalysis, mockAnalysisBoard } = vi.hoisted(() => ({
+  mockFetchBlunders: vi.fn(),
+  mockFetchAnalysis: vi.fn(),
+  mockAnalysisBoard: vi.fn(
+    ({ initialMoveIndex }: { initialMoveIndex?: number }) => (
+    <div
+      data-testid="analysis-board"
+      data-initial-move={initialMoveIndex === undefined ? 'undefined' : initialMoveIndex}
+    />
+  ),
+  ),
+}));
+
 vi.mock('../utils/api', async () => {
   const actual = await vi.importActual('../utils/api');
   return {
@@ -34,12 +45,7 @@ vi.mock('../utils/api', async () => {
 
 // Mock AnalysisBoard
 vi.mock('../components/AnalysisBoard', () => ({
-  default: ({ initialMoveIndex }: { initialMoveIndex?: number }) => (
-    <div
-      data-testid="analysis-board"
-      data-initial-move={initialMoveIndex === undefined ? 'undefined' : initialMoveIndex}
-    />
-  ),
+  default: mockAnalysisBoard,
 }));
 
 // Mock AppNav
@@ -90,11 +96,15 @@ describe('BlundersPage', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(mockFetchAnalysis).toHaveBeenCalledWith('session-123');
+      expect(mockAnalysisBoard).toHaveBeenCalled();
     });
 
     // The blunder FEN matches the position BEFORE Bc4 (index 4)
-    expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-initial-move', '4');
+    expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
+      expect.objectContaining({ initialMoveIndex: 4 }),
+      undefined,
+    );
   });
 
   it('falls back to undefined (latest) when move is not found in analysis', async () => {
@@ -112,9 +122,13 @@ describe('BlundersPage', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(mockFetchAnalysis).toHaveBeenCalledWith('session-123');
+      expect(mockAnalysisBoard).toHaveBeenCalled();
     });
 
-    expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-initial-move', 'undefined');
+    expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
+      expect.objectContaining({ initialMoveIndex: undefined }),
+      undefined,
+    );
   });
 });
