@@ -136,106 +136,120 @@ const GameInfoPanel = ({
       {!isPracticeContinuation && !isRated && isGameActive && (
         <span className="unrated-badge">Unrated</span>
       )}
-      <p className="chess-meta">
-        Your Elo:{" "}
-        <span className="chess-meta-strong">
-          {playerRating}
-          {isProvisional ? "?" : ""}
-        </span>
-      </p>
-      {!isGameActive && <p className="chess-meta">Click New game to start</p>}
-      {isGameActive && (
-        <div
-          className={`chess-meta${
-            opponentMode === "ghost"
-              ? " chess-meta--ghost"
-              : " chess-meta--engine"
-          }`}
-        >
-          Opponent:{" "}
-          {opponentMode === "ghost" ? (
-            <>
-              <OpponentAvatar mode="ghost" engineElo={engineElo} size={70} />{" "}
-              <span className="chess-meta-strong ghost-mode-label">
-                Replay Ghost
-              </span>
-              {blunderReviewId !== null && (
-                <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
-                  <button
-                    className="ghost-info-btn"
-                    onClick={onToggleGhostInfo}
-                    aria-label="Toggle ghost info"
-                    title="Ghost target info"
-                  >
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      aria-hidden="true"
-                    >
-                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm1 15h-2v-6h2v6Zm0-8h-2V7h2v2Z" />
-                    </svg>
-                  </button>
-                  {showGhostInfo && (
-                    <div className="ghost-info-box">
-                      <div className="ghost-info-box__header">
-                        <span className="ghost-info-box__title">
-                          Ghost Target Blunder Position
-                        </span>
-                        <button
-                          className="ghost-info-box__close"
-                          onClick={onCloseGhostInfo}
-                          aria-label="Close ghost info"
-                        >
-                          &times;
-                        </button>
-                      </div>
-                      {blunderTargetFen && (
-                        <div className="ghost-info-box__board">
-                          <Chessboard
-                            options={{
-                              position: blunderTargetFen,
-                              boardOrientation,
-                              allowDragging: false,
-                              animationDurationInMs: 0,
-                              boardStyle: { borderRadius: "4px" },
-                            }}
-                          />
-                        </div>
-                      )}
-                      {blunderReviewSrs && (
-                        <div className="ghost-info-box__srs">
-                          <span>
-                            Last seen:{" "}
-                            {blunderReviewSrs.last_reviewed_at
-                              ? formatLastSeen(
-                                  blunderReviewSrs.last_reviewed_at,
-                                )
-                              : blunderReviewSrs.created_at
-                                ? formatLastSeen(blunderReviewSrs.created_at)
-                                : "never"}
-                          </span>
-                          <span>
-                            Pass/Fail: {blunderReviewSrs.pass_count}/
-                            {blunderReviewSrs.fail_count}
-                          </span>
-                          <span>Streak: {blunderReviewSrs.pass_streak}</span>
-                        </div>
-                      )}
-                    </div>
-                  )}
+      <div
+        className={
+          isGameActive
+            ? "chess-panel__active-matchup"
+            : "chess-panel__inactive-summary"
+        }
+      >
+        <p className="chess-meta chess-panel__player-rating">
+          <span className="chess-panel__desktop-label">Your Elo: </span>
+          <span className="chess-panel__mobile-label">You </span>
+          <span className="chess-meta-strong">
+            {playerRating}
+            {isProvisional ? "?" : ""}
+          </span>
+        </p>
+        {!isGameActive && <p className="chess-meta">Click New game to start</p>}
+        {isGameActive && (
+          <div
+            className={`chess-meta chess-panel__opponent${
+              opponentMode === "ghost"
+                ? " chess-meta--ghost"
+                : " chess-meta--engine"
+            }`}
+          >
+            <span className="chess-panel__desktop-label">Opponent: </span>
+            <span className="chess-panel__mobile-versus">vs</span>
+            {opponentMode === "ghost" ? (
+              <>
+                <OpponentAvatar mode="ghost" engineElo={engineElo} size={70} />{" "}
+                <span className="chess-meta-strong ghost-mode-label">
+                  Replay Ghost
                 </span>
-              )}
-            </>
-          ) : (
-            <>
-              <OpponentAvatar mode="engine" engineElo={engineElo} size={70} />{" "}
-              <span className="chess-meta-strong">{opponentName}</span>
-            </>
-          )}
-        </div>
-      )}
+                {blunderReviewId !== null && (
+                  <span className="ghost-info-anchor" ref={ghostInfoAnchorRef}>
+                    <button
+                      className="ghost-info-btn"
+                      onClick={onToggleGhostInfo}
+                      aria-label="Toggle ghost info"
+                      title="Ghost target info"
+                    >
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="currentColor"
+                        aria-hidden="true"
+                      >
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2Zm1 15h-2v-6h2v6Zm0-8h-2V7h2v2Z" />
+                      </svg>
+                    </button>
+                    {showGhostInfo && (
+                      <div className="ghost-info-box">
+                        <div className="ghost-info-box__header">
+                          <span className="ghost-info-box__title">
+                            Ghost Target Blunder Position
+                          </span>
+                          <button
+                            className="ghost-info-box__close"
+                            onClick={onCloseGhostInfo}
+                            aria-label="Close ghost info"
+                          >
+                            &times;
+                          </button>
+                        </div>
+                        {blunderTargetFen && (
+                          <div className="ghost-info-box__board">
+                            <Chessboard
+                              options={{
+                                position: blunderTargetFen,
+                                boardOrientation,
+                                allowDragging: false,
+                                animationDurationInMs: 0,
+                                boardStyle: { borderRadius: "4px" },
+                              }}
+                            />
+                          </div>
+                        )}
+                        {blunderReviewSrs && (
+                          <div className="ghost-info-box__srs">
+                            <span>
+                              Last seen:{" "}
+                              {blunderReviewSrs.last_reviewed_at
+                                ? formatLastSeen(
+                                    blunderReviewSrs.last_reviewed_at,
+                                  )
+                                : blunderReviewSrs.created_at
+                                  ? formatLastSeen(blunderReviewSrs.created_at)
+                                  : "never"}
+                            </span>
+                            <span>
+                              Pass/Fail: {blunderReviewSrs.pass_count}/
+                              {blunderReviewSrs.fail_count}
+                            </span>
+                            <span>Streak: {blunderReviewSrs.pass_streak}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                <OpponentAvatar
+                  mode="engine"
+                  engineElo={engineElo}
+                  size={70}
+                />{" "}
+                <span className="chess-meta-strong">{opponentName}</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
       {showWarningStack && (
         <div className="chess-warning-stack">
           {isGameActive && opponentMode === "ghost" && showRehookToast && (
@@ -254,7 +268,7 @@ const GameInfoPanel = ({
         </div>
       )}
       {isGameActive && (
-        <p className="chess-meta">
+        <p className="chess-meta chess-panel__opening">
           Opening:{" "}
           <span className="chess-meta-strong">
             {displayedOpening

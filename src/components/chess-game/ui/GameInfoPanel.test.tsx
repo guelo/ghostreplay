@@ -64,6 +64,22 @@ describe("GameInfoPanel", () => {
     expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(2000));
   });
 
+  it("groups active matchup data for the compact mobile summary", () => {
+    const props = makeProps();
+    const { container } = render(<GameInfoPanel {...props} />);
+
+    const matchup = container.querySelector(".chess-panel__active-matchup");
+    expect(matchup).not.toBeNull();
+    expect(matchup).toHaveTextContent("1234");
+    expect(matchup).toHaveTextContent("Ghost Master 2000");
+    expect(matchup?.querySelector(".chess-panel__mobile-versus")).toHaveTextContent(
+      "vs",
+    );
+    expect(container.querySelector(".chess-panel__opening")).toHaveTextContent(
+      "C20 King's Pawn Game",
+    );
+  });
+
   it("renders an on-bin engine avatar", () => {
     const props = makeProps();
     const { container } = render(

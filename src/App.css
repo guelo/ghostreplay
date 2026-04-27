@@ -231,6 +231,16 @@
     font-size: 0.95rem;
 }
 
+.chess-panel__active-matchup,
+.chess-panel__inactive-summary {
+    display: contents;
+}
+
+.chess-panel__mobile-label,
+.chess-panel__mobile-versus {
+    display: none;
+}
+
 .chess-controls {
     display: flex;
     flex-wrap: wrap;
@@ -288,7 +298,7 @@
 
 @media (max-width: 767px) {
     .chess-graph-area .analysis-graph > svg {
-        height: 330px;
+        height: var(--game-graph-height);
     }
 }
 
@@ -2907,6 +2917,30 @@
     gap: 1rem;
 }
 
+.nav-bar__menu-button {
+    display: none;
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0;
+    border: 1px solid var(--border-color-strong);
+    border-radius: 0.6rem;
+    background: var(--card-bg);
+    color: var(--text-primary);
+    cursor: pointer;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 0.22rem;
+}
+
+.nav-bar__menu-button span {
+    display: block;
+    width: 1.1rem;
+    height: 2px;
+    border-radius: 999px;
+    background: currentColor;
+}
+
 .nav-bar__btn {
     text-decoration: none;
     font-size: 0.85rem;
@@ -2933,6 +2967,107 @@
     color: var(--text-secondary);
     font-size: 0.85rem;
     font-weight: 500;
+}
+
+.nav-drawer-shell {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+}
+
+.nav-drawer-backdrop {
+    position: absolute;
+    inset: 0;
+    border: none;
+    padding: 0;
+    background: var(--overlay-scrim);
+    cursor: pointer;
+}
+
+.nav-drawer {
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: min(18rem, calc(100vw - 2rem));
+    height: 100%;
+    box-sizing: border-box;
+    padding: max(1rem, env(safe-area-inset-top)) 1rem
+        max(1rem, env(safe-area-inset-bottom));
+    border-left: 1px solid var(--border-color-strong);
+    background: var(--surface-elevated);
+    box-shadow: var(--shadow-xl);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.nav-drawer__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.nav-drawer__title {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 700;
+}
+
+.nav-drawer__close {
+    width: 2.2rem;
+    height: 2.2rem;
+    border: none;
+    border-radius: 0.5rem;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.nav-drawer__actions {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+}
+
+.nav-drawer__link,
+.nav-drawer__user {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.7rem 0.6rem;
+    border: none;
+    border-radius: 0.5rem;
+    background: transparent;
+    color: var(--text-secondary);
+    text-align: left;
+    text-decoration: none;
+    font-size: 0.95rem;
+    font-weight: 600;
+}
+
+.nav-drawer__link {
+    cursor: pointer;
+}
+
+.nav-drawer__link:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-drawer__user {
+    color: var(--text-tertiary);
+    font-size: 0.85rem;
+}
+
+.nav-drawer__btn {
+    justify-content: center;
+    text-align: center;
+    text-decoration: none;
+    margin: 0.25rem 0;
 }
 
 /* Auth Form Page */
@@ -4296,14 +4431,17 @@ button.openings-shell__crumb:hover {
 
 @media (max-width: 720px) {
     .nav-bar {
-        align-items: flex-start;
-        flex-direction: column;
-        gap: 0.8rem;
+        align-items: center;
+        flex-direction: row;
+        gap: 0.75rem;
     }
 
     .nav-bar__actions {
-        justify-content: flex-start;
-        row-gap: 0.7rem;
+        display: none;
+    }
+
+    .nav-bar__menu-button {
+        display: inline-flex;
     }
 
     .stats-list-card__item {
@@ -4317,6 +4455,12 @@ button.openings-shell__crumb:hover {
 
     .openings-shell__toolbar-note {
         width: 100%;
+    }
+}
+
+@media (min-width: 721px) {
+    .nav-drawer-shell {
+        display: none;
     }
 }
 
@@ -4354,6 +4498,196 @@ button.openings-shell__crumb:hover {
 }
 
 @media (max-width: 767px) {
+    .app-shell.game-page {
+        padding: 0.5rem 0 0.75rem;
+        gap: 0.5rem;
+    }
+
+    .game-page .nav-bar {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0 0.5rem;
+    }
+
+    .game-page .chess-section {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        background: transparent;
+    }
+
+    .game-page .chess-layout {
+        --game-layout-gap: 0.5rem;
+        --game-graph-height: 140px;
+        width: 100%;
+        gap: var(--game-layout-gap);
+        min-width: 0;
+    }
+
+    .game-page .chess-panel,
+    .game-page .chessboard-wrapper,
+    .game-page .chess-graph-area,
+    .game-page .moves-column {
+        min-width: 0;
+    }
+
+    .game-page .chessboard-wrapper {
+        width: 100%;
+        max-width: 100vw;
+        justify-self: center;
+    }
+
+    .game-page .chessboard-board-with-eval {
+        gap: 0;
+    }
+
+    .game-page .eval-bar {
+        display: none;
+    }
+
+    .game-page .chess-panel {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0 0.5rem;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.35rem 0.45rem;
+    }
+
+    .game-page .chess-status {
+        display: none;
+    }
+
+    .game-page .chess-panel__active-matchup {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex: 1 1 11rem;
+        min-width: 0;
+        order: 3;
+    }
+
+    .game-page .chess-panel__inactive-summary {
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+    }
+
+    .game-page .chess-panel__desktop-label,
+    .game-page .chess-panel__opening {
+        display: none;
+    }
+
+    .game-page .chess-panel__mobile-label,
+    .game-page .chess-panel__mobile-versus {
+        display: inline;
+    }
+
+    .game-page .chess-panel__player-rating,
+    .game-page .chess-panel__opponent {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        min-width: 0;
+    }
+
+    .game-page .chess-panel__player-rating {
+        flex: 0 0 auto;
+        white-space: nowrap;
+    }
+
+    .game-page .chess-panel__opponent {
+        flex: 1 1 auto;
+    }
+
+    .game-page .chess-panel__opponent .opponent-avatar {
+        width: 36px;
+        height: 36px;
+    }
+
+    .game-page .chess-panel__opponent .chess-meta-strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .game-page .game-status-badge,
+    .game-page .unrated-badge {
+        align-self: center;
+        padding: 0.18rem 0.45rem;
+        border-radius: 0.4rem;
+        font-size: 0.7rem;
+        letter-spacing: 0;
+    }
+
+    .game-page .chess-warning-stack {
+        order: 4;
+        flex-basis: 100%;
+    }
+
+    .game-page .review-warning-toast,
+    .game-page .rehook-toast {
+        max-width: none;
+    }
+
+    .game-page .chessboard-overlay {
+        box-sizing: border-box;
+        padding: max(0.5rem, env(safe-area-inset-top))
+            max(0.5rem, env(safe-area-inset-right))
+            max(0.5rem, env(safe-area-inset-bottom))
+            max(0.5rem, env(safe-area-inset-left));
+    }
+
+    .game-page .chess-start-panel,
+    .game-page .revert-warning-dialog {
+        width: min(calc(100vw - 2rem), 22rem);
+        max-width: 100%;
+        box-sizing: border-box;
+        padding: 1rem;
+        gap: 0.75rem;
+        border-radius: 0.8rem;
+    }
+
+    .game-page .chess-start-options {
+        gap: 0.5rem;
+    }
+
+    .game-page .chess-start-options .chess-button {
+        padding: 0.5rem 0.75rem;
+    }
+
+    .game-page .chess-graph-area {
+        gap: 0.35rem;
+        padding: 0 0.5rem;
+        box-sizing: border-box;
+    }
+
+    .game-page .chess-graph-area .analysis-graph > svg {
+        height: var(--game-graph-height);
+    }
+
+    .game-page .moves-column {
+        max-height: clamp(220px, 34dvh, 360px);
+        height: auto;
+        min-height: 0;
+        padding: 0 0.5rem;
+        box-sizing: border-box;
+    }
+
+    .game-page .material-display {
+        min-height: 1.5rem;
+        padding: 0 0.35rem;
+    }
+
+    .game-page .material-icons {
+        font-size: 26px;
+    }
+
     .openings-shell__hero {
         display: block;
     }
