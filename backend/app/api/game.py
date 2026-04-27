@@ -58,6 +58,14 @@ def _stable_seed(user_id: int, fen: str, session_id: uuid.UUID) -> int:
     return int.from_bytes(hashlib.sha256(raw).digest()[:8], byteorder="big")
 
 
+def _isoformat_optional(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 def find_ghost_move(
     db: Session,
     user_id: int,
@@ -507,8 +515,8 @@ def get_next_opponent_move(
             ).fetchone()
 
             target_srs = TargetBlunderSrs(
-                last_reviewed_at=blunder_last_reviewed.isoformat() if blunder_last_reviewed else None,
-                created_at=blunder_created_at.isoformat() if isinstance(blunder_created_at, datetime) else blunder_created_at,
+                last_reviewed_at=_isoformat_optional(blunder_last_reviewed),
+                created_at=_isoformat_optional(blunder_created_at),
                 pass_count=review_counts[0] or 0 if review_counts else 0,
                 fail_count=review_counts[1] or 0 if review_counts else 0,
                 pass_streak=blunder_row[0] if blunder_row else 0,

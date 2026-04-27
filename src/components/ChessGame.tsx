@@ -37,7 +37,7 @@ import {
 import { eloStakes } from "./chess-game/elo";
 import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
-import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
+import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import MaterialDisplay from "./MaterialDisplay";
 import type { MoveMessage, SrsFailDetail } from "./MoveList";
@@ -944,6 +944,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               />
             </div>
           </div>
+          <GameWarningStack
+            className="chess-warning-stack--mobile"
+            isGameActive={isGameActive}
+            opponentMode={opponentMode}
+            isReviewMomentActive={isReviewMomentActive}
+            resolvedReview={resolvedReview}
+            isViewingLive={isViewingLive}
+            showRehookToast={showRehookToast}
+            onDismissRehookToast={handleDismissRehookToast}
+          />
           {hasBelowBoardContent && (
             <div className="chess-graph-area">
               <PostGameBanner

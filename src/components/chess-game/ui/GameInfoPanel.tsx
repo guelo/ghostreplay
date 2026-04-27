@@ -6,6 +6,7 @@ import type { ResolvedReview } from "../types";
 import OpponentAvatar from "./OpponentAvatar";
 
 type BoardOrientation = "white" | "black";
+type OpponentMode = "ghost" | "engine";
 
 type GameInfoPanelProps = {
   statusText: string;
@@ -17,7 +18,7 @@ type GameInfoPanelProps = {
   playerColor: BoardOrientation;
   playerRating: number;
   isProvisional: boolean;
-  opponentMode: "ghost" | "engine";
+  opponentMode: OpponentMode;
   opponentName: string;
   engineElo: number;
   blunderReviewId: number | null;
@@ -29,6 +30,17 @@ type GameInfoPanelProps = {
   boardOrientation: BoardOrientation;
   blunderReviewSrs: TargetBlunderSrs | null;
   displayedOpening: OpeningLookupResult | null;
+  isReviewMomentActive: boolean;
+  resolvedReview: ResolvedReview | null;
+  isViewingLive: boolean;
+  showRehookToast: boolean;
+  onDismissRehookToast: () => void;
+};
+
+type GameWarningStackProps = {
+  className?: string;
+  isGameActive: boolean;
+  opponentMode: OpponentMode;
   isReviewMomentActive: boolean;
   resolvedReview: ResolvedReview | null;
   isViewingLive: boolean;
@@ -58,34 +70,16 @@ const formatLastSeen = (isoDate: string): string => {
   return new Date(isoDate).toLocaleDateString();
 };
 
-const GameInfoPanel = ({
-  statusText,
-  gameStatusBadge,
-  isRated,
-  isPracticeContinuation,
+export const GameWarningStack = memo(({
+  className = "",
   isGameActive,
-  playerColorChoice: _playerColorChoice,
-  playerColor: _playerColor,
-  playerRating,
-  isProvisional,
   opponentMode,
-  opponentName,
-  engineElo,
-  blunderReviewId,
-  showGhostInfo,
-  onToggleGhostInfo,
-  onCloseGhostInfo,
-  ghostInfoAnchorRef,
-  blunderTargetFen,
-  boardOrientation,
-  blunderReviewSrs,
-  displayedOpening,
   isReviewMomentActive,
   resolvedReview,
   isViewingLive,
   showRehookToast,
   onDismissRehookToast,
-}: GameInfoPanelProps) => {
+}: GameWarningStackProps) => {
   const reviewWarning =
     resolvedReview && isViewingLive ? (
       <div
@@ -122,6 +116,57 @@ const GameInfoPanel = ({
     reviewWarning !== null ||
     (isGameActive && opponentMode === "ghost" && showRehookToast);
 
+  if (!showWarningStack) {
+    return null;
+  }
+
+  return (
+    <div className={`chess-warning-stack ${className}`.trim()}>
+      {isGameActive && opponentMode === "ghost" && showRehookToast && (
+        <button
+          className="rehook-toast"
+          onClick={onDismissRehookToast}
+          type="button"
+        >
+          <span className="rehook-toast__label">Ghost reactivated</span>
+          <span className="rehook-toast__detail">
+            Steering to past mistake
+          </span>
+        </button>
+      )}
+      {reviewWarning}
+    </div>
+  );
+});
+
+const GameInfoPanel = ({
+  statusText,
+  gameStatusBadge,
+  isRated,
+  isPracticeContinuation,
+  isGameActive,
+  playerColorChoice: _playerColorChoice,
+  playerColor: _playerColor,
+  playerRating,
+  isProvisional,
+  opponentMode,
+  opponentName,
+  engineElo,
+  blunderReviewId,
+  showGhostInfo,
+  onToggleGhostInfo,
+  onCloseGhostInfo,
+  ghostInfoAnchorRef,
+  blunderTargetFen,
+  boardOrientation,
+  blunderReviewSrs,
+  displayedOpening,
+  isReviewMomentActive,
+  resolvedReview,
+  isViewingLive,
+  showRehookToast,
+  onDismissRehookToast,
+}: GameInfoPanelProps) => {
   return (
     <div className="chess-panel" aria-live="polite">
       <p className="chess-status">{statusText}</p>
@@ -250,23 +295,16 @@ const GameInfoPanel = ({
           </div>
         )}
       </div>
-      {showWarningStack && (
-        <div className="chess-warning-stack">
-          {isGameActive && opponentMode === "ghost" && showRehookToast && (
-            <button
-              className="rehook-toast"
-              onClick={onDismissRehookToast}
-              type="button"
-            >
-              <span className="rehook-toast__label">Ghost reactivated</span>
-              <span className="rehook-toast__detail">
-                Steering to past mistake
-              </span>
-            </button>
-          )}
-          {reviewWarning}
-        </div>
-      )}
+      <GameWarningStack
+        className="chess-warning-stack--panel"
+        isGameActive={isGameActive}
+        opponentMode={opponentMode}
+        isReviewMomentActive={isReviewMomentActive}
+        resolvedReview={resolvedReview}
+        isViewingLive={isViewingLive}
+        showRehookToast={showRehookToast}
+        onDismissRehookToast={onDismissRehookToast}
+      />
       {isGameActive && (
         <p className="chess-meta chess-panel__opening">
           Opening:{" "}

@@ -1256,9 +1256,14 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
+      const rehookToasts = Array.from(
+        document.querySelectorAll(".chess-warning-stack .rehook-toast"),
+      );
       expect(
-        screen.getByText("Ghost reactivated"),
-      ).toBeInTheDocument();
+        rehookToasts.some((toast) =>
+          toast.textContent?.includes("Ghost reactivated"),
+        ),
+      ).toBe(true);
     });
 
     expect(

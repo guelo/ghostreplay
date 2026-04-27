@@ -489,6 +489,10 @@
     max-width: 420px;
 }
 
+.chess-warning-stack--mobile {
+    display: none;
+}
+
 .rehook-toast {
     display: flex;
     flex-direction: column;
@@ -4548,6 +4552,7 @@ button.openings-shell__crumb:hover {
     }
 
     .game-page .chess-panel {
+        position: relative;
         width: 100%;
         box-sizing: border-box;
         padding: 0 0.5rem;
@@ -4626,13 +4631,62 @@ button.openings-shell__crumb:hover {
     }
 
     .game-page .chess-warning-stack {
-        order: 4;
-        flex-basis: 100%;
+        width: 100%;
+        max-width: none;
     }
 
     .game-page .review-warning-toast,
     .game-page .rehook-toast {
+        box-sizing: border-box;
         max-width: none;
+        pointer-events: auto;
+        box-shadow: var(--shadow-xl);
+    }
+
+    .game-page .chess-warning-stack--panel {
+        display: none;
+    }
+
+    .game-page .chess-warning-stack--mobile {
+        display: flex;
+        grid-area: notices;
+        box-sizing: border-box;
+        padding: 0 0.5rem;
+        z-index: 2;
+    }
+
+    .game-page .review-warning-toast {
+        background: color-mix(in srgb, var(--warning) 18%, var(--card-bg));
+        pointer-events: none;
+    }
+
+    .game-page .review-warning-toast--pending {
+        opacity: 1;
+    }
+
+    .game-page .rehook-toast {
+        background: color-mix(in srgb, var(--status-ghost) 12%, var(--card-bg));
+    }
+
+    .game-page .rehook-toast__detail {
+        color: var(--text-secondary);
+    }
+
+    .game-page .ghost-info-box {
+        position: fixed;
+        top: calc(3.25rem + env(safe-area-inset-top));
+        left: max(0.5rem, env(safe-area-inset-left));
+        right: max(0.5rem, env(safe-area-inset-right));
+        width: auto;
+        min-width: 0;
+        max-width: none;
+        box-sizing: border-box;
+        z-index: 20;
+    }
+
+    .game-page .ghost-info-box__board {
+        width: min(200px, calc(100vw - 2.75rem));
+        height: min(200px, calc(100vw - 2.75rem));
     }
 
     .game-page .chessboard-overlay {
@@ -4672,11 +4726,35 @@ button.openings-shell__crumb:hover {
     }
 
     .game-page .moves-column {
-        max-height: clamp(220px, 34dvh, 360px);
+        max-height: clamp(310px, 42dvh, 440px);
         height: auto;
-        min-height: 0;
+        min-height: 280px;
         padding: 0 0.5rem;
         box-sizing: border-box;
+    }
+
+    .game-page .moves-column > .move-list-container {
+        min-height: 0;
+    }
+
+    .game-page .move-list-container {
+        gap: 0.5rem;
+        padding-bottom: 0.5rem;
+    }
+
+    .game-page .move-list-nav {
+        order: -2;
+        padding: 0.5rem 0.5rem 0;
+    }
+
+    .game-page .move-list-actions {
+        order: -1;
+        padding: 0 0.5rem;
+    }
+
+    .game-page .move-list-scroll {
+        flex: 1 1 auto;
+        min-height: 96px;
     }
 
     .game-page .material-display {
@@ -4738,8 +4816,25 @@ button.openings-shell__crumb:hover {
         grid-template-areas:
             "panel"
             "board"
-            "graph"
+            "moves"
+            "graph";
+    }
+
+    .chess-layout:has(> .chess-warning-stack--mobile) {
+        grid-template-areas:
+            "panel"
+            "board"
+            "notices"
             "moves";
+    }
+
+    .chess-layout.has-graph:has(> .chess-warning-stack--mobile) {
+        grid-template-areas:
+            "panel"
+            "board"
+            "notices"
+            "moves"
+            "graph";
     }
 
     .chess-panel {
