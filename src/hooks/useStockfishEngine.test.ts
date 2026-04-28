@@ -60,6 +60,31 @@ describe('useStockfishEngine', () => {
     expect(result.current.error).toBeNull()
   })
 
+  it('does not create a worker while disabled', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result } = renderHook(() => useStockfishEngine({ enabled: false }))
+
+    expect(workerInstances).toHaveLength(0)
+    await expect(result.current.evaluatePosition('fen-1')).rejects.toThrow(
+      'Stockfish engine disabled',
+    )
+  })
+
+  it('terminates the worker when disabled after being enabled', async () => {
+    const useStockfishEngine = await loadHook()
+    const { rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useStockfishEngine({ enabled }),
+      { initialProps: { enabled: true } },
+    )
+
+    const worker = workerInstances[0]
+    expect(worker).toBeDefined()
+
+    rerender({ enabled: false })
+
+    expect(worker.terminate).toHaveBeenCalled()
+  })
+
   it('does not overwrite slot 0 with a pv-less currmove info line', async () => {
     const useStockfishEngine = await loadHook()
     const { result } = renderHook(() => useStockfishEngine())

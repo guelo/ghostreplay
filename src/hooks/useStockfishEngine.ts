@@ -13,6 +13,10 @@ type EvaluationOptions = {
   searchmoves?: string[]
 }
 
+type UseStockfishEngineOptions = {
+  enabled?: boolean
+}
+
 type EvaluationSignature = Pick<
   EvaluationOptions,
   'movetime' | 'depth' | 'multipv' | 'searchmoves'
@@ -50,18 +54,31 @@ const createRequestId = () => {
   return Math.random().toString(36).slice(2)
 }
 
-export const useStockfishEngine = () => {
+export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
+  const enabled = options.enabled ?? true
   const workerRef = useRef<Worker | null>(null)
   const pendingEvaluations = useRef<Map<string, PendingEntry>>(new Map())
   const activeRequestId = useRef<string | null>(null)
   const [status, setStatus] = useState<EngineStatus>('booting')
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<EngineInfo[]>([])
+  const [infoFen, setInfoFen] = useState<string | null>(null)
   const [isThinking, setIsThinking] = useState(false)
   const evalCache = useRef<Map<string, EngineInfo[]>>(new Map())
   const activeCacheKey = useRef<string | null>(null)
+  const requestFenById = useRef<Map<string, string>>(new Map())
 
   useEffect(() => {
+    if (!enabled) {
+      activeRequestId.current = null
+      activeCacheKey.current = null
+      requestFenById.current.clear()
+      setIsThinking(false)
+      setInfo([])
+      setInfoFen(null)
+      return
+    }
+
     const worker = new Worker(
       new URL('../workers/stockfishWorker.ts', import.meta.url),
       { type: 'module' },
@@ -88,6 +105,7 @@ export const useStockfishEngine = () => {
           activeRequestId.current = message.id
           setIsThinking(true)
           setInfo([])
+          setInfoFen(null)
           break
         case 'info':
           // Only update PV lines for info messages that contain an actual
@@ -103,6 +121,7 @@ export const useStockfishEngine = () => {
               next[idx] = message.info
               return next
             })
+            setInfoFen(requestFenById.current.get(message.id) ?? null)
           }
           break
         case 'bestmove': {
@@ -112,6 +131,7 @@ export const useStockfishEngine = () => {
             entry.resolve({ move: message.move, raw: message.raw })
             pendingMap.delete(message.id)
           }
+          requestFenById.current.delete(message.id)
 
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
@@ -133,6 +153,8 @@ export const useStockfishEngine = () => {
           setError(message.error)
           setIsThinking(false)
           activeRequestId.current = null
+          requestFenById.current.clear()
+          setInfoFen(null)
 
           pendingMap.forEach((entry) => {
             entry.reject(new Error(message.error))
@@ -153,6 +175,8 @@ export const useStockfishEngine = () => {
       setError(event.message)
       setIsThinking(false)
       activeRequestId.current = null
+      requestFenById.current.clear()
+      setInfoFen(null)
     }
 
     worker.addEventListener('message', handleMessage)
@@ -165,16 +189,21 @@ export const useStockfishEngine = () => {
         entry.reject(new Error('Stockfish worker disposed'))
       })
       pendingMap.clear()
+      requestFenById.current.clear()
       worker.terminate()
       workerRef.current = null
       if (import.meta.env.DEV) {
         delete (window as unknown as { __sf?: (cmd: string) => void }).__sf
       }
     }
-  }, [])
+  }, [enabled])
 
   const evaluatePosition = useCallback(
     (fen: string, options?: EvaluationOptions) => {
+      if (!enabled) {
+        return Promise.reject(new Error('Stockfish engine disabled'))
+      }
+
       if (status === 'error') {
         return Promise.reject(
           new Error(error ?? 'Stockfish engine unavailable'),
@@ -190,12 +219,14 @@ export const useStockfishEngine = () => {
       const cached = evalCache.current.get(cacheKey)
       if (cached) {
         setInfo(cached)
+        setInfoFen(fen)
         setIsThinking(false)
         activeCacheKey.current = cacheKey
         return Promise.resolve({ move: cached[0]?.pv?.[0] ?? '', raw: '' })
       }
 
       setInfo([])
+      setInfoFen(null)
       activeCacheKey.current = cacheKey
       const requestId = createRequestId()
       const payload = {
@@ -212,29 +243,34 @@ export const useStockfishEngine = () => {
         pendingEvaluations.current.set(requestId, { resolve, reject })
       })
 
+      requestFenById.current.set(requestId, fen)
       workerRef.current.postMessage(payload)
       return result
     },
-    [error, status],
+    [enabled, error, status],
   )
 
   const stopSearch = useCallback(() => {
-    if (!workerRef.current) return
-    workerRef.current.postMessage({ type: 'command', command: 'stop' })
+    if (workerRef.current) {
+      workerRef.current.postMessage({ type: 'command', command: 'stop' })
+    }
     activeRequestId.current = null
+    requestFenById.current.clear()
     setIsThinking(false)
     setInfo([])
+    setInfoFen(null)
   }, [])
 
   const resetEngine = useCallback(() => {
-    if (!workerRef.current) {
-      return
+    if (workerRef.current) {
+      workerRef.current.postMessage({ type: 'newgame' })
     }
 
-    workerRef.current.postMessage({ type: 'newgame' })
     activeRequestId.current = null
+    requestFenById.current.clear()
     setIsThinking(false)
     setInfo([])
+    setInfoFen(null)
     pendingEvaluations.current.forEach((entry) => {
       entry.reject(new Error('Engine reset'))
     })
@@ -246,6 +282,7 @@ export const useStockfishEngine = () => {
     error,
     isThinking,
     info,
+    infoFen,
     stopSearch,
     evaluatePosition,
     resetEngine,

@@ -7,6 +7,7 @@ interface UseGameReviewStatsArgs {
   selectedId: string | null;
   moves: AnalysisMove[] | null;
   playerColor: 'white' | 'black';
+  onJumpToMove?: (index: number) => void;
 }
 
 interface UseGameReviewStatsReturn {
@@ -19,19 +20,17 @@ interface UseGameReviewStatsReturn {
   activeStat: StatSelection;
 }
 
-export function useGameReviewStats({ selectedId, moves, playerColor }: UseGameReviewStatsArgs): UseGameReviewStatsReturn {
+export function useGameReviewStats({ selectedId, moves, playerColor, onJumpToMove }: UseGameReviewStatsArgs): UseGameReviewStatsReturn {
   const [statInteraction, setStatInteraction] = useState<{
     gameId: string | null;
     pinned: StatSelection;
     hovered: StatSelection;
-  }>({ gameId: null, pinned: null, hovered: null });
+    cycleIndex: number;
+  }>({ gameId: null, pinned: null, hovered: null, cycleIndex: 0 });
 
   const pinnedStat = statInteraction.gameId === selectedId ? statInteraction.pinned : null;
   const hoveredStat = statInteraction.gameId === selectedId ? statInteraction.hovered : null;
-
-  const setPinnedStat = useCallback((pinned: StatSelection) => {
-    setStatInteraction(prev => ({ ...prev, gameId: selectedId, pinned }));
-  }, [selectedId]);
+  const cycleIndex = statInteraction.gameId === selectedId ? statInteraction.cycleIndex : 0;
 
   const setHoveredStat = useCallback((hovered: StatSelection) => {
     setStatInteraction(prev => ({ ...prev, gameId: selectedId, hovered }));
@@ -58,13 +57,30 @@ export function useGameReviewStats({ selectedId, moves, playerColor }: UseGameRe
   }, [isTouchOnly, setHoveredStat]);
 
   const handleStatClick = useCallback((sel: StatSelection) => {
-    const isToggleOff = pinnedStat?.side === sel?.side && pinnedStat?.cls === sel?.cls;
-    setPinnedStat(isToggleOff ? null : sel);
-  }, [pinnedStat, setPinnedStat]);
+    const isSameCategory = pinnedStat?.side === sel?.side && pinnedStat?.cls === sel?.cls;
+    const targetStats = sel?.side === 'player' ? sideStats?.player : sideStats?.opponent;
+    const targetMoves = sel && targetStats ? targetStats[sel.cls].indices : [];
+    let newCycleIndex = 0;
+
+    if (isSameCategory && targetMoves.length > 0) {
+      newCycleIndex = (cycleIndex + 1) % targetMoves.length;
+    }
+
+    setStatInteraction((prev) => ({
+      ...prev,
+      gameId: selectedId,
+      pinned: sel,
+      cycleIndex: newCycleIndex,
+    }));
+
+    if (targetMoves.length > 0) {
+      onJumpToMove?.(targetMoves[newCycleIndex]);
+    }
+  }, [cycleIndex, onJumpToMove, pinnedStat, selectedId, sideStats]);
 
   const handleGraphMoveClick = useCallback(() => {
-    setPinnedStat(null);
-  }, [setPinnedStat]);
+    setStatInteraction(prev => ({ ...prev, gameId: selectedId, pinned: null, cycleIndex: 0 }));
+  }, [selectedId]);
 
   return { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat };
 }

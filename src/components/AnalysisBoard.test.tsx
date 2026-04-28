@@ -1,12 +1,13 @@
 import { Chess } from 'chess.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, fireEvent, render, screen } from '../test/utils'
+import { act, fireEvent, render, screen, waitFor } from '../test/utils'
 import AnalysisBoard from './AnalysisBoard'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
 import { createEmptyTree } from '../types/variationTree'
 import type { AddMoveParams } from '../hooks/useVariationTree'
 import type { AnalysisResult } from '../hooks/useMoveAnalysis'
+import type { EngineInfo } from '../workers/stockfishMessages'
 
 // --- Mutable mock state for useVariationTree ---
 
@@ -44,6 +45,33 @@ vi.mock('../hooks/useVariationTree', () => ({
 }))
 
 const mockAnalyzeMove = vi.fn(() => 'req-123')
+const {
+  mockEngineInfoRef,
+  mockEngineInfoFenRef,
+  mockEvaluatePosition,
+  mockStopSearch,
+  mockUseStockfishEngine,
+} = vi.hoisted(() => {
+  const mockEngineInfoRef = { current: [] as EngineInfo[] }
+  const mockEngineInfoFenRef = { current: null as string | null }
+  const mockEvaluatePosition = vi.fn(async () => {})
+  const mockStopSearch = vi.fn()
+  const mockUseStockfishEngine = vi.fn((_options?: { enabled?: boolean }) => ({
+    info: mockEngineInfoRef.current,
+    infoFen: mockEngineInfoFenRef.current,
+    isThinking: false,
+    evaluatePosition: mockEvaluatePosition,
+    stopSearch: mockStopSearch,
+  }))
+
+  return {
+    mockEngineInfoRef,
+    mockEngineInfoFenRef,
+    mockEvaluatePosition,
+    mockStopSearch,
+    mockUseStockfishEngine,
+  }
+})
 
 vi.mock('../hooks/useMoveAnalysis', () => ({
   useMoveAnalysis: () => ({
@@ -55,12 +83,7 @@ vi.mock('../hooks/useMoveAnalysis', () => ({
 }))
 
 vi.mock('../hooks/useStockfishEngine', () => ({
-  useStockfishEngine: () => ({
-    info: [],
-    isThinking: false,
-    evaluatePosition: vi.fn(async () => {}),
-    stopSearch: vi.fn(),
-  }),
+  useStockfishEngine: mockUseStockfishEngine,
 }))
 
 // --- Prop-capturing mocks ---
@@ -156,6 +179,8 @@ beforeEach(() => {
   capturedMoveListProps = {}
   mockTree = createEmptyTree()
   mockSelectedVarNodeId = null
+  mockEngineInfoRef.current = []
+  mockEngineInfoFenRef.current = null
   mockPendingRequestsRef.current.clear()
   vi.clearAllMocks()
 })
@@ -172,6 +197,95 @@ describe('AnalysisBoard MoveList', () => {
 
     expect(capturedChessboardProps.position).toBe(moves[0].fen_after)
     expect(capturedMoveListProps.currentIndex).toBe(0)
+  })
+
+  it('disables the Stockfish hook and stops search when engine lines are turned off', async () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(mockUseStockfishEngine).toHaveBeenLastCalledWith({ enabled: true })
+
+    fireEvent.click(screen.getByLabelText('Engine lines'))
+
+    await waitFor(() => {
+      expect(mockUseStockfishEngine).toHaveBeenLastCalledWith({ enabled: false })
+    })
+    expect(mockStopSearch).toHaveBeenCalled()
+  })
+
+  it('does not request new engine evaluations while engine lines are disabled', async () => {
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [moves[0].fen_after]: {
+            best_move_uci: 'g8f6',
+            best_move_san: 'Nf6',
+            best_move_eval_cp: 20,
+          },
+        }}
+      />,
+    )
+
+    await waitFor(() => {
+      expect(mockEvaluatePosition).toHaveBeenCalled()
+    })
+
+    mockEvaluatePosition.mockClear()
+    fireEvent.click(screen.getByLabelText('Engine lines'))
+    mockStopSearch.mockClear()
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    expect(mockEvaluatePosition).not.toHaveBeenCalled()
+    expect(mockStopSearch).not.toHaveBeenCalled()
+  })
+
+  it('hides engine-only display data when engine lines are disabled', async () => {
+    mockEngineInfoRef.current = [
+      {
+        pv: ['g1f3'],
+        score: { type: 'cp', value: 30 },
+        depth: 12,
+      },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('d12')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByLabelText('Engine lines'))
+
+    expect(screen.queryByText('d12')).not.toBeInTheDocument()
+    const arrows = capturedChessboardProps.arrows as
+      | Array<{ startSquare: string; endSquare: string }>
+      | undefined
+    expect(
+      arrows?.some((arrow) => arrow.startSquare === 'g1' && arrow.endSquare === 'f3'),
+    ).not.toBe(true)
+  })
+
+  it('hides stale engine depth immediately after navigating to another position', async () => {
+    mockEngineInfoRef.current = [
+      {
+        pv: ['g1f3'],
+        score: { type: 'cp', value: 30 },
+        depth: 12,
+      },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    await waitFor(() => {
+      expect(screen.getByText('d12')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    expect(screen.queryByText('d12')).not.toBeInTheDocument()
   })
 })
 

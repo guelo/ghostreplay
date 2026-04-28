@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -129,7 +129,11 @@ const hasPendingForFen = (pending: Map<string, string>, fen: string): boolean =>
   return false;
 };
 
-const AnalysisBoard = ({
+export interface AnalysisBoardRef {
+  jumpToMove(index: number): void;
+}
+
+const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   moves,
   boardOrientation,
   startingFen = STARTING_FEN,
@@ -138,15 +142,16 @@ const AnalysisBoard = ({
   positionAnalysis,
   highlightedMoves,
   onGraphMoveClick,
-}: AnalysisBoardProps) => {
+}, ref) => {
   const [currentIndex, setCurrentIndex] = useState<number | null>(
     initialMoveIndex ?? null,
   );
   const [analysisStore] = useState(() => createAnalysisStore());
   const { analyzeMove } = useMoveAnalysis(analysisStore);
   const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
-  const { info: engineLines, isThinking: engineThinking, evaluatePosition, stopSearch } = useStockfishEngine();
   const [showEngineArrows, setShowEngineArrows] = useState(true);
+  const { info: engineLines, infoFen: engineInfoFen, isThinking: engineThinking, evaluatePosition, stopSearch } =
+    useStockfishEngine({ enabled: showEngineArrows });
 
   // Variation tree hook
   const {
@@ -209,17 +214,6 @@ const AnalysisBoard = ({
     return moves[effectiveIndex]?.fen_after ?? startingFen;
   }, [isInVariation, selectedVarNode, effectiveIndex, moves, startingFen]);
 
-  // Stop engine and clear lines synchronously when position changes.
-  // engineStaleRef prevents using leftover engine data with the new
-  // sideToMove for one frame (setInfo is async, but the ref is instant).
-  const prevFenRef = useRef(displayedFen);
-  const engineStaleRef = useRef(false);
-  if (prevFenRef.current !== displayedFen) {
-    prevFenRef.current = displayedFen;
-    engineStaleRef.current = true;
-    stopSearch();
-  }
-
   // Side-to-move derived from FEN (avoids constructing Chess just for turn())
   const sideToMove = useMemo(() => fenSideToMove(displayedFen), [displayedFen]);
 
@@ -228,7 +222,7 @@ const AnalysisBoard = ({
 
   // Legal moves excluding cached best move (for restricted engine search)
   const searchmoves = useMemo(() => {
-    if (!cachedBest) return undefined;
+    if (!showEngineArrows || !cachedBest) return undefined;
     try {
       const chess = new Chess(displayedFen);
       const allMoves = chess.moves({ verbose: true });
@@ -239,12 +233,16 @@ const AnalysisBoard = ({
     } catch {
       return undefined;
     }
-  }, [displayedFen, cachedBest]);
+  }, [displayedFen, cachedBest, showEngineArrows]);
 
   // Start new evaluation after render
   useEffect(() => {
-    if (!displayedFen || !showEngineArrows) return;
-    engineStaleRef.current = false;
+    if (!showEngineArrows) return;
+
+    if (!displayedFen) return;
+
+    stopSearch();
+
     if (cachedBest && searchmoves && searchmoves.length > 0) {
       evaluatePosition(displayedFen, { depth: 21, multipv: 2, searchmoves }).catch(() => {});
     } else {
@@ -253,7 +251,17 @@ const AnalysisBoard = ({
   }, [displayedFen, evaluatePosition, showEngineArrows, cachedBest, searchmoves]);
 
   // Whether the restricted search path is active (same condition as the engine request)
-  const useRestrictedSearch = !!(cachedBest && searchmoves && searchmoves.length > 0);
+  const useRestrictedSearch = !!(
+    showEngineArrows &&
+    cachedBest &&
+    searchmoves &&
+    searchmoves.length > 0
+  );
+
+  const activeEngineLines = showEngineArrows && engineInfoFen === displayedFen
+    ? engineLines
+    : [];
+  const activeEngineDepth = activeEngineLines[0]?.depth ?? 0;
 
   // Merge cached best move into engine lines so arrows and panel stay in sync.
   // Only merge when the restricted search was actually used — otherwise the
@@ -261,7 +269,8 @@ const AnalysisBoard = ({
   // EngineInfo.score.value is side-to-move-relative; best_move_eval_cp is also
   // side-to-move-relative, so we pass it through without sign conversion.
   const mergedEngineLines: EngineInfo[] = useMemo(() => {
-    if (!useRestrictedSearch || !cachedBest) return engineLines;
+    if (!showEngineArrows) return [];
+    if (!useRestrictedSearch || !cachedBest) return activeEngineLines;
 
     const cachedLine: EngineInfo = {
       pv: [cachedBest.best_move_uci],
@@ -272,11 +281,12 @@ const AnalysisBoard = ({
       depth: undefined,
     };
 
-    return [cachedLine, ...engineLines];
-  }, [useRestrictedSearch, cachedBest, engineLines]);
+    return [cachedLine, ...activeEngineLines];
+  }, [showEngineArrows, useRestrictedSearch, cachedBest, activeEngineLines]);
 
   // Engine lines with SAN moves and formatted evals for display
   const engineLinesDisplay = useMemo(() => {
+    if (!showEngineArrows) return [];
     if (mergedEngineLines.length === 0) return [];
     return mergedEngineLines
       .filter((line) => line?.pv?.length)
@@ -318,13 +328,13 @@ const AnalysisBoard = ({
           depth: line!.depth ?? 0,
         };
       });
-  }, [mergedEngineLines, displayedFen]);
+  }, [showEngineArrows, mergedEngineLines, displayedFen, sideToMove]);
 
   // Engine-recommended move arrows — best move is blue, others grey with
   // opacity proportional to their centipawn loss relative to the best move.
   const engineArrows = useMemo(
-    () => buildEngineArrows(mergedEngineLines),
-    [mergedEngineLines],
+    () => showEngineArrows ? buildEngineArrows(mergedEngineLines) : [],
+    [showEngineArrows, mergedEngineLines],
   );
 
   // Arrows for the current position
@@ -384,21 +394,21 @@ const AnalysisBoard = ({
 
   // Live engine eval from top PV line (white perspective)
   const liveEngineEvalCp = useMemo(() => {
-    if (engineStaleRef.current) return null;
+    if (!showEngineArrows) return null;
     const topLine = mergedEngineLines[0];
     if (!topLine?.score) return null;
     const raw = topLine.score.type === "cp" ? topLine.score.value : null;
     if (raw === null) return null;
     return sideToMove === "w" ? raw : -raw;
-  }, [mergedEngineLines, sideToMove]);
+  }, [showEngineArrows, mergedEngineLines, sideToMove]);
 
   const liveEngineEvalMate = useMemo(() => {
-    if (engineStaleRef.current) return null;
+    if (!showEngineArrows) return null;
     const topLine = mergedEngineLines[0];
     if (!topLine?.score) return null;
     if (topLine.score.type !== "mate") return null;
     return sideToMove === "w" ? topLine.score.value : -topLine.score.value;
-  }, [mergedEngineLines, sideToMove]);
+  }, [showEngineArrows, mergedEngineLines, sideToMove]);
 
   const currentEvalCp = useMemo(() => {
     if (isInVariation || effectiveIndex < 0) return null;
@@ -467,6 +477,12 @@ const AnalysisBoard = ({
     },
     [setSelectedVarNode],
   );
+
+  useImperativeHandle(ref, () => ({
+    jumpToMove: (index: number) => {
+      handleNavigate(index);
+    }
+  }), [handleNavigate]);
 
   // Graph click: navigate + clear pinned highlights
   const handleGraphSelect = useCallback(
@@ -564,9 +580,14 @@ const AnalysisBoard = ({
   );
 
   const handleToggleEngineArrows = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) =>
-      setShowEngineArrows(e.target.checked),
-    [],
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const next = e.target.checked;
+      if (!next) {
+        stopSearch();
+      }
+      setShowEngineArrows(next);
+    },
+    [stopSearch],
   );
 
   return (
@@ -619,12 +640,12 @@ const AnalysisBoard = ({
               />
               Engine lines
             </label>
-            {showEngineArrows && engineLines[0]?.depth != null && engineLines[0].depth > 0 && (
+            {showEngineArrows && activeEngineDepth > 0 && (
               <span className="analysis-board__engine-depth">
                 {engineThinking && (
                   <span className="analysis-board__engine-spinner" />
                 )}
-                d{engineLines[0].depth}
+                d{activeEngineDepth}
               </span>
             )}
           </div>
@@ -686,6 +707,6 @@ const AnalysisBoard = ({
 
     </div>
   );
-};
+});
 
 export default memo(AnalysisBoard);
