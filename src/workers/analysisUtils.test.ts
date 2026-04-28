@@ -331,6 +331,36 @@ describe('computeAnalysisResult', () => {
 
     expect(result.delta).toBeNull()
   })
+
+  it('treats an alternate terminal mating move as equivalent to the engine mate', () => {
+    const result = computeAnalysisResult({
+      bestMove: 'g6e8',
+      playedMove: 'g6g7',
+      postPlayedScore: { type: 'mate', value: 0 },
+      postBestScore: { type: 'mate', value: 0 },
+      sideToMove: 'w',
+      playerColor: 'white',
+    })
+
+    expect(result.bestEval).toBe(10000)
+    expect(result.playedEval).toBe(10000)
+    expect(result.delta).toBe(0)
+  })
+
+  it('fails an inferior terminal draw when the best move checkmates', () => {
+    const result = computeAnalysisResult({
+      bestMove: 'g6g7',
+      playedMove: 'f7e8',
+      postPlayedScore: { type: 'cp', value: 0 },
+      postBestScore: { type: 'mate', value: 0 },
+      sideToMove: 'w',
+      playerColor: 'white',
+    })
+
+    expect(result.bestEval).toBe(10000)
+    expect(result.playedEval).toBeCloseTo(0)
+    expect(result.delta).toBe(10000)
+  })
 })
 
 describe('isRecordableFailure', () => {
@@ -453,6 +483,11 @@ describe('calculateWinChance', () => {
   it('returns near -1 for losing mate', () => {
     const wc = calculateWinChance({ type: 'mate', value: -2 }, 'white')
     expect(wc).toBeLessThan(-0.9)
+  })
+
+  it('treats mate 0 as the score POV being checkmated', () => {
+    expect(calculateWinChance({ type: 'mate', value: 0 }, 'white')).toBeLessThan(-0.9)
+    expect(calculateWinChance({ type: 'mate', value: 0 }, 'black')).toBeGreaterThan(0.9)
   })
 
   it('exports expected constants', () => {

@@ -118,14 +118,24 @@ export const useChessGameLifecycle = ({
   );
 
   const finishLocalGame = useCallback(
-    (result: GameResult, options?: { showPostGamePrompt?: boolean }) => {
+    (
+      result: GameResult,
+      options?: {
+        showPostGamePrompt?: boolean;
+        preserveResolvedReviewMoveIndex?: number;
+      },
+    ) => {
       const store = useGameStore.getState();
       store.setIsGameActive(false);
       store.setGameResult(result);
       setBlunderReviewId(null);
       setBlunderReviewSrs(null);
       setBlunderTargetFen(null);
-      setResolvedReview(null);
+      setResolvedReview((prev) =>
+        prev?.moveIndex === options?.preserveResolvedReviewMoveIndex
+          ? prev
+          : null,
+      );
       setPendingPromotion(null);
       setShowPostGamePrompt(options?.showPostGamePrompt ?? true);
     },
@@ -178,7 +188,9 @@ export const useChessGameLifecycle = ({
 
     if (result) {
       if (store.isPracticeContinuation) {
-        finishLocalGame(result);
+        finishLocalGame(result, {
+          preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
+        });
         return;
       }
 
@@ -200,7 +212,9 @@ export const useChessGameLifecycle = ({
           s.setPlayerRating(endResponse.rating.rating_after);
           s.setIsProvisional(endResponse.rating.is_provisional);
         }
-        finishLocalGame(result);
+        finishLocalGame(result, {
+          preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
+        });
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to end game.";

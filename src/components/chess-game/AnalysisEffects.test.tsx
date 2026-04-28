@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, act } from "../../test/utils";
+import { render, act, waitFor } from "../../test/utils";
 import AnalysisEffects from "./AnalysisEffects";
 import { useGameStore } from "../../stores/useGameStore";
 import {
@@ -172,5 +172,78 @@ describe("AnalysisEffects — best-move bling", () => {
     });
 
     expect(recordBlunderMock).not.toHaveBeenCalled();
+  });
+
+  it("submits an armed SRS review after the game has become inactive", async () => {
+    const analysisId = "analysis-terminal";
+    useGameStore.setState({
+      sessionId: "session-1",
+      playerColor: "white",
+      isGameActive: false,
+      isPracticeContinuation: false,
+      moveHistory: [{ san: "Qg7#", fen: "mate-fen", uci: "g6g7" }],
+    });
+
+    const pendingSrsReviewRef = createRef<any>();
+    pendingSrsReviewRef.current = {
+      analysisId,
+      blunderId: 42,
+      moveIndex: 0,
+      userMoveSan: "Qg7#",
+      srs: {
+        due_at: "2026-04-28T00:00:00Z",
+        fail_count: 1,
+        interval_days: 1,
+        pass_count: 2,
+        pass_streak: 1,
+        state: "due",
+      },
+    };
+    const appendMoveMessage = vi.fn();
+    const setResolvedReview = vi.fn((updater) => {
+      if (typeof updater === "function") {
+        updater({ analysisId, moveIndex: 0, result: "pending" });
+      }
+    });
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={createRef() as any}
+          blunderRecordedRef={createRef() as any}
+          pendingSrsReviewRef={pendingSrsReviewRef}
+          appendMoveMessage={appendMoveMessage}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={setResolvedReview}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().setLastAnalysis(makeResult({
+        id: analysisId,
+        move: "g6g7",
+        bestMove: "g6e8",
+        moveIndex: 0,
+        delta: 0,
+        classification: "excellent",
+      }));
+    });
+
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
+        "session-1",
+        42,
+        true,
+        "Qg7#",
+        0,
+      );
+    });
+    expect(pendingSrsReviewRef.current).toBeNull();
+    expect(appendMoveMessage).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({ variant: "srs-pass" }),
+    );
   });
 });

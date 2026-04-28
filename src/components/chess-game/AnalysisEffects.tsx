@@ -124,7 +124,6 @@ const AnalysisEffects = ({
   useEffect(() => {
     if (
       !sessionId ||
-      !isGameActive ||
       isPracticeContinuation ||
       !lastAnalysis ||
       lastAnalysis.moveIndex === null
@@ -224,7 +223,6 @@ const AnalysisEffects = ({
 
     void postReview();
   }, [
-    isGameActive,
     isPracticeContinuation,
     lastAnalysis,
     sessionId,

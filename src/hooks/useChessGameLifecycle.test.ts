@@ -41,6 +41,7 @@ type SetupOptions = {
   playerColor?: "white" | "black";
   playerColorChoice?: "white" | "black" | "random";
   playerRating?: number;
+  resolvedReview?: { analysisId: string; moveIndex: number; result: "pending" | "pass" | "fail" } | null;
 };
 
 const setup = ({
@@ -51,6 +52,7 @@ const setup = ({
   playerColor = "white",
   playerColorChoice = "random",
   playerRating = 1200,
+  resolvedReview = null,
 }: SetupOptions = {}) => {
   // Set up store state
   useGameStore.setState({
@@ -105,6 +107,12 @@ const setup = ({
   const setIsRevertPending = vi.fn();
   const setRevertError = vi.fn();
   const setShowRevertWarning = vi.fn();
+  const setResolvedReview = vi.fn();
+  let currentResolvedReview = resolvedReview;
+  setResolvedReview.mockImplementation((value) => {
+    currentResolvedReview =
+      typeof value === "function" ? value(currentResolvedReview) : value;
+  });
 
   const { result } = renderHook(() =>
     useChessGameLifecycle({
@@ -137,7 +145,7 @@ const setup = ({
       showRevertWarning: false,
       setShowRevertWarning,
       setShowResignWarning: vi.fn(),
-      setResolvedReview: vi.fn(),
+      setResolvedReview,
       setPendingPromotion: vi.fn(),
     }),
   );
@@ -150,6 +158,8 @@ const setup = ({
     setShowRevertWarning,
     setShowPostGamePrompt,
     setShowStartOverlay,
+    setResolvedReview,
+    getResolvedReview: () => currentResolvedReview,
   };
 };
 
@@ -346,5 +356,87 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().playerColorChoice).toBe("random");
     expect(setShowPostGamePrompt).toHaveBeenCalledWith(false);
     expect(setShowStartOverlay).toHaveBeenCalledWith(true);
+  });
+
+  it("preserves the final move review state when terminal game finalization runs", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result, getResolvedReview } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      resolvedReview: {
+        analysisId: "analysis-terminal",
+        moveIndex: 0,
+        result: "pass",
+      },
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "checkmate_win",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(getResolvedReview()).toEqual({
+      analysisId: "analysis-terminal",
+      moveIndex: 0,
+      result: "pass",
+    });
+
+    act(() => {
+      result.current.handleReset();
+    });
+
+    expect(getResolvedReview()).toBeNull();
+  });
+
+  it("clears unrelated resolved review state when resignation finalization runs", async () => {
+    const chess = new Chess();
+    const firstMove = chess.move("e4");
+    const secondMove = chess.move("e5");
+    if (!firstMove || !secondMove) {
+      throw new Error("Unable to construct test moves");
+    }
+    const { result, getResolvedReview } = setup({
+      chess,
+      moveHistory: [
+        { san: firstMove.san, fen: "fen-after-e4", uci: "e2e4" },
+        { san: secondMove.san, fen: chess.fen(), uci: "e7e5" },
+      ],
+      isGameActive: true,
+      isRated: false,
+      resolvedReview: {
+        analysisId: "analysis-old",
+        moveIndex: 0,
+        result: "pass",
+      },
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+
+    act(() => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(getResolvedReview()).toBeNull();
   });
 });

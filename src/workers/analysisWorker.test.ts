@@ -88,7 +88,7 @@ describe('analysisWorker', () => {
         data: {
           type: 'analyze-move',
           id: 'analysis-1',
-          fen: '4k3/8/8/8/8/8/8/4K3 w - - 0 1',
+          fen: '4k3/8/8/8/8/8/8/4K2R w - - 0 1',
           move: 'e1e2',
           playerColor: 'white',
         } satisfies AnalysisWorkerRequest,
@@ -100,7 +100,7 @@ describe('analysisWorker', () => {
         { type: 'analysis-started', id: 'analysis-1', move: 'e1e2' } satisfies AnalysisWorkerResponse,
       )
       expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
-        'position fen 4k3/8/8/8/8/8/8/4K3 w - - 0 1',
+        'position fen 4k3/8/8/8/8/8/8/4K2R w - - 0 1',
       )
       expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
     })
@@ -117,7 +117,7 @@ describe('analysisWorker', () => {
         data: {
           type: 'analyze-move',
           id: 'analysis-1',
-          fen: '4k3/8/8/8/8/8/8/4K3 w - - 0 1',
+          fen: '4k3/8/8/8/8/8/8/4K2R w - - 0 1',
           move: 'e1e2',
           playerColor: 'white',
         } satisfies AnalysisWorkerRequest,
@@ -151,7 +151,7 @@ describe('analysisWorker', () => {
         data: {
           type: 'analyze-move',
           id: 'analysis-1',
-          fen: '4k3/8/8/8/8/8/8/4K3 w - - 0 1',
+          fen: '4k3/8/8/8/8/8/8/4K2R w - - 0 1',
           move: 'e1e2',
           playerColor: 'white',
         } satisfies AnalysisWorkerRequest,
@@ -187,7 +187,7 @@ describe('analysisWorker', () => {
 
     await vi.waitFor(() => {
       expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
-        'position fen 4k3/8/8/8/8/8/8/4K3 w - - 0 1 moves e1e2',
+        'position fen 4k3/8/8/8/8/8/8/4K2R w - - 0 1 moves e1e2',
       )
     })
 
@@ -217,5 +217,147 @@ describe('analysisWorker', () => {
     expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
       'position fen 8/8/8/8/8/8/8/4K3 w - - 0 1',
     )
+  })
+
+  it('synthesizes terminal mate scores without searching post-move positions', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-mate',
+          fen: '7k/8/6QK/8/8/8/8/8 w - - 0 1',
+          move: 'g6g7',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen 7k/8/6QK/8/8/8/8/8 w - - 0 1',
+      )
+    })
+
+    engineMessageHandler?.('bestmove g6e8')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-mate',
+          bestMove: 'g6e8',
+          playedEval: 10000,
+          bestEval: 10000,
+          delta: 0,
+        }),
+      )
+    })
+
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
+      'position fen 7k/8/6QK/8/8/8/8/8 w - - 0 1 moves g6g7',
+    )
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
+      'position fen 7k/8/6QK/8/8/8/8/8 w - - 0 1 moves g6e8',
+    )
+  })
+
+  it('synthesizes terminal draw scores so inferior draw conversions get a delta', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-draw',
+          fen: '7k/5K2/6Q1/8/8/8/8/8 w - - 0 1',
+          move: 'f7e8',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen 7k/5K2/6Q1/8/8/8/8/8 w - - 0 1',
+      )
+    })
+
+    engineMessageHandler?.('bestmove g6g7')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-draw',
+          bestMove: 'g6g7',
+          playedEval: expect.closeTo(0, 0),
+          bestEval: 10000,
+          delta: 10000,
+          classification: 'blunder',
+        }),
+      )
+    })
+
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
+      'position fen 7k/5K2/6Q1/8/8/8/8/8 w - - 0 1 moves f7e8',
+    )
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith(
+      'position fen 7k/5K2/6Q1/8/8/8/8/8 w - - 0 1 moves g6g7',
+    )
+  })
+
+  it('classifies alternate black terminal mating moves from the mated side perspective', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-black-mate',
+          fen: '8/8/8/8/8/6qk/8/7K b - - 0 1',
+          move: 'g3g2',
+          playerColor: 'black',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen 8/8/8/8/8/6qk/8/7K b - - 0 1',
+      )
+    })
+
+    engineMessageHandler?.('bestmove g3h2')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-black-mate',
+          bestMove: 'g3h2',
+          playedEval: 10000,
+          bestEval: 10000,
+          delta: 0,
+          classification: 'excellent',
+        }),
+      )
+    })
   })
 })

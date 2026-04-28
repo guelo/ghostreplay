@@ -1,5 +1,6 @@
 /// <reference lib="webworker" />
 
+import { Chess } from "chess.js";
 import stockfishEngineUrl from "stockfish/bin/stockfish-18-lite-single.js?url";
 import stockfishWasmUrl from "stockfish/bin/stockfish-18-lite-single.wasm?url";
 import type {
@@ -107,6 +108,40 @@ const runSearch = async (
       sendEngineCommand("go depth 17");
     },
   );
+};
+
+const parseUciMove = (uci: string) => {
+  const from = uci.slice(0, 2);
+  const to = uci.slice(2, 4);
+  const promotion = uci.slice(4, 5) || undefined;
+
+  if (from.length !== 2 || to.length !== 2) {
+    return null;
+  }
+
+  return { from, to, ...(promotion ? { promotion } : {}) };
+};
+
+const terminalScoreAfterMove = (
+  fen: string,
+  moveUci: string,
+): EngineScore | null => {
+  const move = parseUciMove(moveUci);
+  if (!move) {
+    return null;
+  }
+
+  const chess = new Chess(fen);
+  const played = chess.move(move);
+  if (!played || !chess.isGameOver()) {
+    return null;
+  }
+
+  if (chess.isCheckmate()) {
+    return { type: "mate", value: 0 };
+  }
+
+  return { type: "cp", value: 0 };
 };
 
 const handleEngineError = (event: ErrorEvent) => {
@@ -268,33 +303,38 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
 
   // Evaluate the position after the played move, streaming intermediate evals
   const opponentToMove = sideToMove === "w" ? "b" : "w";
-  const playedEvalSearch = await runSearch(
-    request.fen,
-    [request.move],
-    (score, depth) => {
-      if (canceledAnalyses.has(request.id)) {
-        return;
-      }
-      const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
-      if (cp !== null) {
-        ctx.postMessage({
-          type: "analysis-streaming",
-          id: request.id,
-          cp,
-          depth,
-        } satisfies AnalysisWorkerResponse);
-      }
-    },
-  );
+  const terminalPlayedScore = terminalScoreAfterMove(request.fen, request.move);
+  const playedEvalSearch = terminalPlayedScore
+    ? { bestmove: "(terminal)", score: terminalPlayedScore }
+    : await runSearch(
+        request.fen,
+        [request.move],
+        (score, depth) => {
+          if (canceledAnalyses.has(request.id)) {
+            return;
+          }
+          const cp = scoreForPlayer(score, opponentToMove, request.playerColor);
+          if (cp !== null) {
+            ctx.postMessage({
+              type: "analysis-streaming",
+              id: request.id,
+              cp,
+              depth,
+            } satisfies AnalysisWorkerResponse);
+          }
+        },
+      );
   throwIfCanceled(request.id);
 
   // When best != played, search after the best move too for an apples-to-apples
   // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because
   // independent searches reach different depths, inflating the delta.
-  const postBestScore =
-    request.move === bestMove
-      ? playedEvalSearch.score
-      : (await runSearch(request.fen, [bestMove])).score;
+  let postBestScore = playedEvalSearch.score;
+  if (request.move !== bestMove) {
+    const terminalBestScore = terminalScoreAfterMove(request.fen, bestMove);
+    postBestScore =
+      terminalBestScore ?? (await runSearch(request.fen, [bestMove])).score;
+  }
   throwIfCanceled(request.id);
 
   const { bestEval, playedEval, delta } = computeAnalysisResult({

@@ -182,7 +182,9 @@ export const calculateWinChance = (
 
   const cp =
     score.type === 'mate'
-      ? (whiteValue >= 0 ? CP_CEILING : -CP_CEILING)
+      ? score.value === 0
+        ? (pov === 'white' ? -CP_CEILING : CP_CEILING)
+        : (whiteValue > 0 ? CP_CEILING : -CP_CEILING)
       : Math.max(-CP_CEILING, Math.min(CP_CEILING, whiteValue))
 
   return 2 / (1 + Math.exp(WIN_CHANCE_MULTIPLIER * cp)) - 1
