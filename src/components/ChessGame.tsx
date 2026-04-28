@@ -170,13 +170,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveUci: string;
     moveIndex: number;
   } | null>(null);
-  const pendingSrsReviewRef = useRef<{
+  const pendingSrsReviewRef = useRef<Map<string, {
+    sessionId: string;
     analysisId: string;
     blunderId: number;
     moveIndex: number;
     userMoveSan: string;
     srs: TargetBlunderSrs | null;
-  } | null>(null);
+  }>>(new Map());
   const openingLookupRequestIdRef = useRef(0);
   // Index 0 = starting position (before any move), index N = after move N
   const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);

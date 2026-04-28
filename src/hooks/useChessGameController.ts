@@ -20,6 +20,7 @@ export type PendingAnalysisContext = {
 };
 
 export type PendingSrsReview = {
+  sessionId: string;
   analysisId: string;
   blunderId: number;
   moveIndex: number;
@@ -54,7 +55,7 @@ type UseChessGameControllerOptions = {
   blunderReviewSrs: TargetBlunderSrs | null;
   blunderTargetFen: string | null;
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
-  pendingSrsReviewRef: MutableRefObject<PendingSrsReview | null>;
+  pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setBlunderReviewId: Dispatch<SetStateAction<number | null>>;
@@ -209,19 +210,23 @@ export const useChessGameController = ({
       );
 
       if (isTargetedReviewMove) {
-        pendingSrsReviewRef.current = {
-          analysisId: committed.analysisId,
-          blunderId: blunderReviewId,
-          moveIndex: committed.moveIndex,
-          userMoveSan: committed.moveSan,
-          srs: blunderReviewSrs,
-        };
+        const sessionId = useGameStore.getState().sessionId;
         clearReviewTarget();
-        setResolvedReview({
-          analysisId: committed.analysisId,
-          moveIndex: committed.moveIndex,
-          result: "pending",
-        });
+        if (sessionId) {
+          pendingSrsReviewRef.current.set(committed.analysisId, {
+            sessionId,
+            analysisId: committed.analysisId,
+            blunderId: blunderReviewId,
+            moveIndex: committed.moveIndex,
+            userMoveSan: committed.moveSan,
+            srs: blunderReviewSrs,
+          });
+          setResolvedReview({
+            analysisId: committed.analysisId,
+            moveIndex: committed.moveIndex,
+            result: "pending",
+          });
+        }
       }
 
       pendingAnalysisContextRef.current = {

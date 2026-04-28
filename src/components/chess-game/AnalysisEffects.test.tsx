@@ -52,13 +52,17 @@ describe("AnalysisEffects — best-move bling", () => {
     store = createAnalysisStore();
   });
 
+  function createPendingSrsReviewRef(entries: Array<[string, any]> = []) {
+    return { current: new Map(entries) };
+  }
+
   function renderEffects() {
     return render(
       <AnalysisStoreProvider value={store}>
         <AnalysisEffects
           pendingAnalysisContextRef={createRef() as any}
           blunderRecordedRef={createRef() as any}
-          pendingSrsReviewRef={createRef() as any}
+          pendingSrsReviewRef={createPendingSrsReviewRef() as any}
           appendMoveMessage={vi.fn()}
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
@@ -151,7 +155,7 @@ describe("AnalysisEffects — best-move bling", () => {
         <AnalysisEffects
           pendingAnalysisContextRef={pendingAnalysisContextRef}
           blunderRecordedRef={blunderRecordedRef}
-          pendingSrsReviewRef={createRef() as any}
+          pendingSrsReviewRef={createPendingSrsReviewRef() as any}
           appendMoveMessage={vi.fn()}
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
@@ -184,21 +188,26 @@ describe("AnalysisEffects — best-move bling", () => {
       moveHistory: [{ san: "Qg7#", fen: "mate-fen", uci: "g6g7" }],
     });
 
-    const pendingSrsReviewRef = createRef<any>();
-    pendingSrsReviewRef.current = {
-      analysisId,
-      blunderId: 42,
-      moveIndex: 0,
-      userMoveSan: "Qg7#",
-      srs: {
-        due_at: "2026-04-28T00:00:00Z",
-        fail_count: 1,
-        interval_days: 1,
-        pass_count: 2,
-        pass_streak: 1,
-        state: "due",
-      },
-    };
+    const pendingSrsReviewRef = createPendingSrsReviewRef([
+      [
+        analysisId,
+        {
+          sessionId: "session-1",
+          analysisId,
+          blunderId: 42,
+          moveIndex: 0,
+          userMoveSan: "Qg7#",
+          srs: {
+            due_at: "2026-04-28T00:00:00Z",
+            fail_count: 1,
+            interval_days: 1,
+            pass_count: 2,
+            pass_streak: 1,
+            state: "due",
+          },
+        },
+      ],
+    ]);
     const appendMoveMessage = vi.fn();
     const setResolvedReview = vi.fn((updater) => {
       if (typeof updater === "function") {
@@ -240,10 +249,265 @@ describe("AnalysisEffects — best-move bling", () => {
         0,
       );
     });
-    expect(pendingSrsReviewRef.current).toBeNull();
+    expect(pendingSrsReviewRef.current.size).toBe(0);
     expect(appendMoveMessage).toHaveBeenCalledWith(
       0,
       expect.objectContaining({ variant: "srs-pass" }),
     );
+  });
+
+  it("submits multiple pending SRS reviews when analyses resolve out of order", async () => {
+    useGameStore.setState({
+      sessionId: "live-session",
+      playerColor: "white",
+      isGameActive: true,
+      isPracticeContinuation: false,
+      moveHistory: [
+        { san: "e4", fen: "fen-after-e4", uci: "e2e4" },
+        { san: "Nf6", fen: "fen-after-nf6", uci: "g8f6" },
+      ],
+    });
+
+    const pendingSrsReviewRef = createPendingSrsReviewRef([
+      [
+        "analysis-one",
+        {
+          sessionId: "session-one",
+          analysisId: "analysis-one",
+          blunderId: 42,
+          moveIndex: 0,
+          userMoveSan: "e4",
+          srs: null,
+        },
+      ],
+      [
+        "analysis-two",
+        {
+          sessionId: "session-two",
+          analysisId: "analysis-two",
+          blunderId: 99,
+          moveIndex: 1,
+          userMoveSan: "Nf6",
+          srs: null,
+        },
+      ],
+    ]);
+    const appendMoveMessage = vi.fn();
+    let currentReview: any = {
+      analysisId: "analysis-two",
+      moveIndex: 1,
+      result: "pending",
+    };
+    const setResolvedReview = vi.fn((updater) => {
+      currentReview =
+        typeof updater === "function" ? updater(currentReview) : updater;
+    });
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={createRef() as any}
+          blunderRecordedRef={createRef() as any}
+          pendingSrsReviewRef={pendingSrsReviewRef as any}
+          appendMoveMessage={appendMoveMessage}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={setResolvedReview}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().resolveAnalysis(1, makeResult({
+        id: "analysis-two",
+        move: "g8f6",
+        moveIndex: 1,
+        delta: 0,
+      }));
+      store.getState().resolveAnalysis(0, makeResult({
+        id: "analysis-one",
+        move: "e2e4",
+        moveIndex: 0,
+        delta: 0,
+      }));
+    });
+
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalledTimes(2);
+    });
+    expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
+      "session-two",
+      99,
+      true,
+      "Nf6",
+      0,
+    );
+    expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
+      "session-one",
+      42,
+      true,
+      "e4",
+      0,
+    );
+    expect(appendMoveMessage).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ variant: "srs-pass" }),
+    );
+    expect(appendMoveMessage).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({ variant: "srs-pass" }),
+    );
+    expect(currentReview).toEqual({
+      analysisId: "analysis-two",
+      moveIndex: 1,
+      result: "pass",
+    });
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+  });
+
+  it("observes same-tick cache-like SRS resolutions independently", async () => {
+    useGameStore.setState({
+      sessionId: "live-session",
+      playerColor: "white",
+      isGameActive: true,
+      isPracticeContinuation: false,
+    });
+
+    const pendingSrsReviewRef = createPendingSrsReviewRef([
+      [
+        "analysis-one",
+        {
+          sessionId: "session-one",
+          analysisId: "analysis-one",
+          blunderId: 42,
+          moveIndex: 0,
+          userMoveSan: "e4",
+          srs: null,
+        },
+      ],
+      [
+        "analysis-two",
+        {
+          sessionId: "session-two",
+          analysisId: "analysis-two",
+          blunderId: 43,
+          moveIndex: 2,
+          userMoveSan: "d4",
+          srs: null,
+        },
+      ],
+    ]);
+    const appendMoveMessage = vi.fn();
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={createRef() as any}
+          blunderRecordedRef={createRef() as any}
+          pendingSrsReviewRef={pendingSrsReviewRef as any}
+          appendMoveMessage={appendMoveMessage}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={vi.fn()}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().setLastAnalysis(makeResult({
+        id: "analysis-one",
+        moveIndex: 0,
+        move: "e2e4",
+        delta: 0,
+      }));
+      store.getState().setLastAnalysis(makeResult({
+        id: "analysis-two",
+        moveIndex: 2,
+        move: "d2d4",
+        delta: 0,
+      }));
+    });
+
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalledTimes(2);
+    });
+    expect(reviewSrsBlunderMock).toHaveBeenNthCalledWith(
+      1,
+      "session-one",
+      42,
+      true,
+      "e4",
+      0,
+    );
+    expect(reviewSrsBlunderMock).toHaveBeenNthCalledWith(
+      2,
+      "session-two",
+      43,
+      true,
+      "d4",
+      0,
+    );
+    expect(appendMoveMessage).toHaveBeenCalledWith(
+      0,
+      expect.objectContaining({ variant: "srs-pass" }),
+    );
+    expect(appendMoveMessage).toHaveBeenCalledWith(
+      2,
+      expect.objectContaining({ variant: "srs-pass" }),
+    );
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+  });
+
+  it("keeps pending SRS entries for unknown analysis ids and move-index mismatches", () => {
+    useGameStore.setState({
+      sessionId: "session-1",
+      playerColor: "white",
+      isGameActive: true,
+      isPracticeContinuation: false,
+    });
+
+    const pendingSrsReviewRef = createPendingSrsReviewRef([
+      [
+        "analysis-one",
+        {
+          sessionId: "session-one",
+          analysisId: "analysis-one",
+          blunderId: 42,
+          moveIndex: 0,
+          userMoveSan: "e4",
+          srs: null,
+        },
+      ],
+    ]);
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={createRef() as any}
+          blunderRecordedRef={createRef() as any}
+          pendingSrsReviewRef={pendingSrsReviewRef as any}
+          appendMoveMessage={vi.fn()}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={vi.fn()}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().setLastAnalysis(makeResult({
+        id: "unknown-analysis",
+        moveIndex: 0,
+      }));
+      store.getState().setLastAnalysis(makeResult({
+        id: "analysis-one",
+        moveIndex: 1,
+      }));
+    });
+
+    expect(Array.from(pendingSrsReviewRef.current.keys())).toEqual([
+      "analysis-one",
+    ]);
+    expect(reviewSrsBlunderMock).not.toHaveBeenCalled();
   });
 });

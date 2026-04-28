@@ -23,6 +23,8 @@ type SetupOptions = {
   blunderTargetFen?: string | null;
   resolvedReview?: ResolvedReview | null;
   moveHistory?: MoveRecord[];
+  sessionId?: string | null;
+  pendingSrsReviewRef?: MutableRefObject<Map<string, PendingSrsReview>>;
 };
 
 const createSetup = ({
@@ -33,11 +35,14 @@ const createSetup = ({
   blunderTargetFen = null,
   resolvedReview = null,
   moveHistory = [],
+  sessionId = "session-1",
+  pendingSrsReviewRef = { current: new Map() },
 }: SetupOptions = {}) => {
   // Set up store state
   useGameStore.setState({
     ...initialStoreState,
     playerColor,
+    sessionId,
     liveFen: chess.fen(),
     moveHistory: [...moveHistory],
   });
@@ -45,10 +50,6 @@ const createSetup = ({
   const pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null> = {
     current: null,
   };
-  const pendingSrsReviewRef: MutableRefObject<PendingSrsReview | null> = {
-    current: null,
-  };
-
   const setEngineMessage = vi.fn();
   const setBlunderAlert = vi.fn();
   const setBlunderReviewId = vi.fn();
@@ -168,13 +169,15 @@ describe("useChessGameController", () => {
     });
 
     expect(moveResult.applied).toBe(true);
-    expect(pendingSrsReviewRef.current).toEqual({
+    const pendingReviews = Array.from(pendingSrsReviewRef.current.values());
+    expect(pendingReviews).toEqual([{
+      sessionId: "session-1",
       analysisId: expect.any(String),
       blunderId: 42,
       moveIndex: 0,
       userMoveSan: "e4",
       srs: null,
-    });
+    }]);
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
     expect(setBlunderTargetFen).toHaveBeenCalledWith(null);
@@ -202,6 +205,92 @@ describe("useChessGameController", () => {
     });
   });
 
+  it("accumulates multiple targeted SRS reviews without overwriting", () => {
+    const pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>> = {
+      current: new Map(),
+    };
+
+    const firstChess = new Chess();
+    const first = createSetup({
+      chess: firstChess,
+      blunderReviewId: 42,
+      blunderTargetFen: firstChess.fen(),
+      sessionId: "session-1",
+      pendingSrsReviewRef,
+    });
+    first.analyzeMove.mockReturnValueOnce("analysis-one");
+
+    act(() => {
+      first.result.current.applyPlayerMove("e2", "e4");
+    });
+
+    const secondChess = new Chess();
+    secondChess.move("d4");
+    const second = createSetup({
+      chess: secondChess,
+      blunderReviewId: 99,
+      blunderTargetFen: secondChess.fen(),
+      sessionId: "session-2",
+      moveHistory: [{ san: "d4", fen: secondChess.fen(), uci: "d2d4" }],
+      pendingSrsReviewRef,
+    });
+    second.analyzeMove.mockReturnValueOnce("analysis-two");
+
+    act(() => {
+      second.result.current.applyPlayerMove("g8", "f6");
+    });
+
+    expect(Array.from(pendingSrsReviewRef.current.entries())).toEqual([
+      [
+        "analysis-one",
+        expect.objectContaining({
+          sessionId: "session-1",
+          blunderId: 42,
+          moveIndex: 0,
+          userMoveSan: "e4",
+        }),
+      ],
+      [
+        "analysis-two",
+        expect.objectContaining({
+          sessionId: "session-2",
+          blunderId: 99,
+          moveIndex: 1,
+          userMoveSan: "Nf6",
+        }),
+      ],
+    ]);
+  });
+
+  it("clears a targeted review without pending UI when session id is missing", () => {
+    const chess = new Chess();
+    const {
+      result,
+      pendingSrsReviewRef,
+      setBlunderReviewId,
+      setBlunderReviewSrs,
+      setBlunderTargetFen,
+      setResolvedReview,
+    } = createSetup({
+      chess,
+      blunderReviewId: 42,
+      blunderTargetFen: chess.fen(),
+      sessionId: null,
+    });
+
+    act(() => {
+      result.current.applyPlayerMove("e2", "e4");
+    });
+
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(setBlunderReviewId).toHaveBeenCalledWith(null);
+    expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
+    expect(setBlunderTargetFen).toHaveBeenCalledWith(null);
+    expect(setResolvedReview).not.toHaveBeenCalledWith(
+      expect.objectContaining({ result: "pending" }),
+    );
+  });
+
   it("clears stale review targeting instead of grading a hidden review", () => {
     const {
       result,
@@ -216,7 +305,7 @@ describe("useChessGameController", () => {
       result.current.applyPlayerMove("e2", "e4");
     });
 
-    expect(pendingSrsReviewRef.current).toBeNull();
+    expect(pendingSrsReviewRef.current.size).toBe(0);
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
     expect(setBlunderTargetFen).toHaveBeenCalledWith(null);

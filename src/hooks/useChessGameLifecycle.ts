@@ -35,6 +35,7 @@ type PendingAnalysisContext = {
 };
 
 type PendingSrsReview = {
+  sessionId: string;
   analysisId: string;
   blunderId: number;
   moveIndex: number;
@@ -48,7 +49,7 @@ type UseChessGameLifecycleArgs = {
   openingHistoryRef: MutableRefObject<(OpeningLookupResult | null)[]>;
   blunderRecordedRef: MutableRefObject<boolean>;
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
-  pendingSrsReviewRef: MutableRefObject<PendingSrsReview | null>;
+  pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
   clearMoveHighlights: () => void;
   resetMode: () => void;
   resetEngine: () => void;
@@ -115,6 +116,28 @@ export const useChessGameLifecycle = ({
   const isCurrentRevertExecution = useCallback(
     (executionId: number) => revertExecutionIdRef.current === executionId,
     [],
+  );
+
+  const getRewindHistoryLength = useCallback(
+    (storeMoveHistory: MoveRecord[]) => {
+      const store = useGameStore.getState();
+      const isPlayerTurn =
+        chess.turn() === (store.playerColor === "white" ? "w" : "b");
+      const undoCount = isPlayerTurn && storeMoveHistory.length >= 2 ? 2 : 1;
+      return Math.max(0, storeMoveHistory.length - undoCount);
+    },
+    [chess],
+  );
+
+  const prunePendingSrsReviewsFromMoveIndex = useCallback(
+    (boundaryMoveIndex: number) => {
+      for (const [analysisId, pendingReview] of pendingSrsReviewRef.current) {
+        if (pendingReview.moveIndex >= boundaryMoveIndex) {
+          pendingSrsReviewRef.current.delete(analysisId);
+        }
+      }
+    },
+    [pendingSrsReviewRef],
   );
 
   const finishLocalGame = useCallback(
@@ -235,14 +258,14 @@ export const useChessGameLifecycle = ({
 
   const rewindBoardLocally = useCallback((storeMoveHistory: MoveRecord[]) => {
     const store = useGameStore.getState();
-    const isPlayerTurn = chess.turn() === (store.playerColor === "white" ? "w" : "b");
-    const undoCount = isPlayerTurn && storeMoveHistory.length >= 2 ? 2 : 1;
+    const newHistoryLength = getRewindHistoryLength(storeMoveHistory);
+    const undoCount = storeMoveHistory.length - newHistoryLength;
 
     for (let i = 0; i < undoCount; i++) {
       chess.undo();
     }
 
-    const newHistory = storeMoveHistory.slice(0, -undoCount);
+    const newHistory = storeMoveHistory.slice(0, newHistoryLength);
     store.setMoveHistory(newHistory);
     store.setLiveFen(chess.fen());
     store.setViewIndex(null);
@@ -252,12 +275,13 @@ export const useChessGameLifecycle = ({
     setResolvedReview(null);
     setBlunderAlert(null);
     setPendingPromotion(null);
-    pendingSrsReviewRef.current = null;
+    prunePendingSrsReviewsFromMoveIndex(newHistory.length);
     pendingAnalysisContextRef.current = null;
   }, [
     chess,
+    getRewindHistoryLength,
     pendingAnalysisContextRef,
-    pendingSrsReviewRef,
+    prunePendingSrsReviewsFromMoveIndex,
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
@@ -280,6 +304,10 @@ export const useChessGameLifecycle = ({
     clearBlunderBoardOverride?.();
 
     const snapshotMoveHistory = [...store.moveHistory];
+    prunePendingSrsReviewsFromMoveIndex(
+      getRewindHistoryLength(snapshotMoveHistory),
+    );
+    setResolvedReview(null);
 
     try {
       if (!store.isPracticeContinuation && store.isRated) {
@@ -337,10 +365,13 @@ export const useChessGameLifecycle = ({
     chess,
     clearBlunderBoardOverride,
     coordinator,
+    getRewindHistoryLength,
     isCurrentRevertExecution,
+    prunePendingSrsReviewsFromMoveIndex,
     rewindBoardLocally,
     setIsRevertPending,
     setRevertError,
+    setResolvedReview,
     setShowResignWarning,
     setShowRevertWarning,
   ]);
@@ -374,12 +405,16 @@ export const useChessGameLifecycle = ({
           store.isGameActive &&
           !store.isPracticeContinuation
         ) {
+          pendingSrsReviewRef.current.clear();
+          setResolvedReview(null);
           coordinator.flushPendingUploads().catch((err) =>
             console.error("[SessionMoves] Flush failed:", err),
           );
           await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
         }
 
+        pendingSrsReviewRef.current.clear();
+        setResolvedReview(null);
         const effectiveChoice = colorOverride ?? store.playerColorChoice;
         const resolvedPlayerColor =
           effectiveChoice === "random"
@@ -430,7 +465,7 @@ export const useChessGameLifecycle = ({
         clearMoveHighlights();
         blunderRecordedRef.current = false;
         pendingAnalysisContextRef.current = null;
-        pendingSrsReviewRef.current = null;
+        pendingSrsReviewRef.current.clear();
         resetMode();
       } catch (error) {
         const message =
@@ -570,7 +605,7 @@ export const useChessGameLifecycle = ({
     clearMoveHighlights();
     blunderRecordedRef.current = false;
     pendingAnalysisContextRef.current = null;
-    pendingSrsReviewRef.current = null;
+    pendingSrsReviewRef.current.clear();
     resetMode();
   }, [
     blunderRecordedRef,

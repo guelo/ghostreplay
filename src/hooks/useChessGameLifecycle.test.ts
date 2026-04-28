@@ -42,6 +42,14 @@ type SetupOptions = {
   playerColorChoice?: "white" | "black" | "random";
   playerRating?: number;
   resolvedReview?: { analysisId: string; moveIndex: number; result: "pending" | "pass" | "fail" } | null;
+  pendingSrsEntries?: Array<[string, {
+    sessionId: string;
+    analysisId: string;
+    blunderId: number;
+    moveIndex: number;
+    userMoveSan: string;
+    srs: null;
+  }]>;
 };
 
 const setup = ({
@@ -53,6 +61,7 @@ const setup = ({
   playerColorChoice = "random",
   playerRating = 1200,
   resolvedReview = null,
+  pendingSrsEntries = [],
 }: SetupOptions = {}) => {
   // Set up store state
   useGameStore.setState({
@@ -78,13 +87,14 @@ const setup = ({
     moveUci: string;
     moveIndex: number;
   } | null> = { current: null };
-  const pendingSrsReviewRef: MutableRefObject<{
+  const pendingSrsReviewRef: MutableRefObject<Map<string, {
+    sessionId: string;
     analysisId: string;
     blunderId: number;
     moveIndex: number;
     userMoveSan: string;
     srs: null;
-  } | null> = { current: null };
+  }>> = { current: new Map(pendingSrsEntries) };
 
   const clearMoveHighlights = vi.fn();
   const resetMode = vi.fn();
@@ -159,6 +169,7 @@ const setup = ({
     setShowPostGamePrompt,
     setShowStartOverlay,
     setResolvedReview,
+    pendingSrsReviewRef,
     getResolvedReview: () => currentResolvedReview,
   };
 };
@@ -260,6 +271,200 @@ describe("useChessGameLifecycle", () => {
     expect(setIsRevertPending).toHaveBeenNthCalledWith(1, true);
     expect(setIsRevertPending).toHaveBeenLastCalledWith(false);
     expect(setShowRevertWarning).toHaveBeenLastCalledWith(false);
+  });
+
+  it("prunes only pending SRS reviews removed by a local rewind", async () => {
+    const chess = new Chess();
+    const moveOne = chess.move("e4");
+    const moveTwo = chess.move("e5");
+    const moveThree = chess.move("Nf3");
+    if (!moveOne || !moveTwo || !moveThree) {
+      throw new Error("Unable to construct test position");
+    }
+    const moveHistory: MoveRecord[] = [
+      { san: moveOne.san, fen: "fen-after-e4", uci: "e2e4" },
+      { san: moveTwo.san, fen: "fen-after-e5", uci: "e7e5" },
+      { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
+    ];
+
+    const { result, pendingSrsReviewRef } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+      pendingSrsEntries: [
+        [
+          "kept-analysis",
+          {
+            sessionId: "session-123",
+            analysisId: "kept-analysis",
+            blunderId: 42,
+            moveIndex: 0,
+            userMoveSan: "e4",
+            srs: null,
+          },
+        ],
+        [
+          "removed-analysis",
+          {
+            sessionId: "session-123",
+            analysisId: "removed-analysis",
+            blunderId: 99,
+            moveIndex: 2,
+            userMoveSan: "Nf3",
+            srs: null,
+          },
+        ],
+      ],
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    expect(useGameStore.getState().moveHistory).toHaveLength(2);
+    expect(Array.from(pendingSrsReviewRef.current.keys())).toEqual([
+      "kept-analysis",
+    ]);
+  });
+
+  it("prunes pending SRS reviews before rated revert network calls resolve", async () => {
+    const chess = new Chess();
+    const moveOne = chess.move("e4");
+    const moveTwo = chess.move("e5");
+    const moveThree = chess.move("Nf3");
+    if (!moveOne || !moveTwo || !moveThree) {
+      throw new Error("Unable to construct test position");
+    }
+    const moveHistory: MoveRecord[] = [
+      { san: moveOne.san, fen: "fen-after-e4", uci: "e2e4" },
+      { san: moveTwo.san, fen: "fen-after-e5", uci: "e7e5" },
+      { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
+    ];
+
+    const { result, pendingSrsReviewRef, getResolvedReview } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: true,
+      playerColor: "white",
+      resolvedReview: {
+        analysisId: "removed-analysis",
+        moveIndex: 2,
+        result: "pending",
+      },
+      pendingSrsEntries: [
+        [
+          "kept-analysis",
+          {
+            sessionId: "session-123",
+            analysisId: "kept-analysis",
+            blunderId: 42,
+            moveIndex: 0,
+            userMoveSan: "e4",
+            srs: null,
+          },
+        ],
+        [
+          "removed-analysis",
+          {
+            sessionId: "session-123",
+            analysisId: "removed-analysis",
+            blunderId: 99,
+            moveIndex: 2,
+            userMoveSan: "Nf3",
+            srs: null,
+          },
+        ],
+      ],
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    let resolveUpload!: (value: { moves_inserted: number }) => void;
+    uploadSessionMovesMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpload = resolve;
+      }),
+    );
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-19T00:00:00Z",
+      rating: null,
+    });
+
+    let pendingRevert!: Promise<void>;
+    act(() => {
+      pendingRevert = result.current.executeRevert();
+    });
+
+    expect(Array.from(pendingSrsReviewRef.current.keys())).toEqual([
+      "kept-analysis",
+    ]);
+    expect(getResolvedReview()).toBeNull();
+
+    await act(async () => {
+      resolveUpload({ moves_inserted: 3 });
+      await pendingRevert;
+    });
+  });
+
+  it("keeps cancelled SRS UI cleared when rated revert sealing fails", async () => {
+    const chess = new Chess();
+    const moveOne = chess.move("e4");
+    const moveTwo = chess.move("e5");
+    const moveThree = chess.move("Nf3");
+    if (!moveOne || !moveTwo || !moveThree) {
+      throw new Error("Unable to construct test position");
+    }
+    const moveHistory: MoveRecord[] = [
+      { san: moveOne.san, fen: "fen-after-e4", uci: "e2e4" },
+      { san: moveTwo.san, fen: "fen-after-e5", uci: "e7e5" },
+      { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
+    ];
+
+    const { result, pendingSrsReviewRef, getResolvedReview, setRevertError } =
+      setup({
+        chess,
+        moveHistory,
+        isGameActive: true,
+        isRated: true,
+        playerColor: "white",
+        resolvedReview: {
+          analysisId: "removed-analysis",
+          moveIndex: 2,
+          result: "pending",
+        },
+        pendingSrsEntries: [
+          [
+            "removed-analysis",
+            {
+              sessionId: "session-123",
+              analysisId: "removed-analysis",
+              blunderId: 99,
+              moveIndex: 2,
+              userMoveSan: "Nf3",
+              srs: null,
+            },
+          ],
+        ],
+      });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    uploadSessionMovesMock.mockRejectedValueOnce(new Error("upload failed"));
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    expect(useGameStore.getState().moveHistory).toHaveLength(3);
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(getResolvedReview()).toBeNull();
+    expect(setRevertError).toHaveBeenCalledWith("upload failed");
   });
 
   it("does not apply stale revert side effects after reset cancels a pending revert", async () => {
@@ -400,6 +605,131 @@ describe("useChessGameLifecycle", () => {
     });
 
     expect(getResolvedReview()).toBeNull();
+  });
+
+  it("clears pending SRS review registry on reset", async () => {
+    const { result, pendingSrsReviewRef } = setup({
+      pendingSrsEntries: [
+        [
+          "analysis-one",
+          {
+            sessionId: "session-123",
+            analysisId: "analysis-one",
+            blunderId: 42,
+            moveIndex: 0,
+            userMoveSan: "e4",
+            srs: null,
+          },
+        ],
+      ],
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.handleReset();
+    });
+
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+  });
+
+  it("clears pending SRS review registry when replacing an abandoned session", async () => {
+    const { result, pendingSrsReviewRef, getResolvedReview } = setup({
+      isGameActive: true,
+      isRated: true,
+      resolvedReview: {
+        analysisId: "analysis-one",
+        moveIndex: 0,
+        result: "pending",
+      },
+      pendingSrsEntries: [
+        [
+          "analysis-one",
+          {
+            sessionId: "session-123",
+            analysisId: "analysis-one",
+            blunderId: 42,
+            moveIndex: 0,
+            userMoveSan: "e4",
+            srs: null,
+          },
+        ],
+      ],
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "abandon",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+    startGameMock.mockRejectedValueOnce(new Error("start failed"));
+
+    await act(async () => {
+      await result.current.handleNewGame("white");
+    });
+
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(getResolvedReview()).toBeNull();
+  });
+
+  it("clears pending SRS review registry before active new-game abandonment resolves", async () => {
+    const { result, pendingSrsReviewRef, getResolvedReview } = setup({
+      isGameActive: true,
+      isRated: true,
+      resolvedReview: {
+        analysisId: "analysis-one",
+        moveIndex: 0,
+        result: "pending",
+      },
+      pendingSrsEntries: [
+        [
+          "analysis-one",
+          {
+            sessionId: "session-123",
+            analysisId: "analysis-one",
+            blunderId: 42,
+            moveIndex: 0,
+            userMoveSan: "e4",
+            srs: null,
+          },
+        ],
+      ],
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    let resolveAbandon!: (value: {
+      session_id: string;
+      result: string;
+      ended_at: string;
+      rating: null;
+    }) => void;
+    endGameMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAbandon = resolve;
+      }),
+    );
+    startGameMock.mockResolvedValueOnce({ session_id: "session-new" });
+
+    let pendingNewGame!: Promise<void>;
+    act(() => {
+      pendingNewGame = result.current.handleNewGame("white");
+    });
+
+    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(getResolvedReview()).toBeNull();
+
+    await act(async () => {
+      resolveAbandon({
+        session_id: "session-123",
+        result: "abandon",
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: null,
+      });
+      await pendingNewGame;
+    });
   });
 
   it("clears unrelated resolved review state when resignation finalization runs", async () => {

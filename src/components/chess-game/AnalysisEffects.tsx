@@ -1,4 +1,4 @@
-import { useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import type { TargetBlunderSrs } from "../../utils/api";
 import type { ResolvedReview } from "./types";
 import {
@@ -18,6 +18,7 @@ import { BLUNDER_AUDIO_CLIPS } from "./config";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
 import { playBling } from "../../utils/blingSound";
+import type { AnalysisResult } from "../../hooks/useMoveAnalysis";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -28,6 +29,7 @@ type PendingAnalysisContext = {
 };
 
 type PendingSrsReview = {
+  sessionId: string;
   analysisId: string;
   blunderId: number;
   moveIndex: number;
@@ -38,7 +40,7 @@ type PendingSrsReview = {
 type AnalysisEffectsProps = {
   pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
   blunderRecordedRef: MutableRefObject<boolean>;
-  pendingSrsReviewRef: MutableRefObject<PendingSrsReview | null>;
+  pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
   appendMoveMessage: (moveIndex: number, msg: MoveMessage) => void;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
@@ -120,44 +122,30 @@ const AnalysisEffects = ({
     blunderRecordedRef,
   ]);
 
-  // SRS review grading: evaluate user move from a targeted blunder position.
-  useEffect(() => {
-    if (
-      !sessionId ||
-      isPracticeContinuation ||
-      !lastAnalysis ||
-      lastAnalysis.moveIndex === null
-    ) {
+  const processSrsReview = useCallback((analysis: AnalysisResult | null) => {
+    if (!analysis || analysis.moveIndex === null) {
       return;
     }
 
-    const pendingReview = pendingSrsReviewRef.current;
-    if (
-      !pendingReview ||
-      pendingReview.analysisId !== lastAnalysis.id ||
-      pendingReview.moveIndex !== lastAnalysis.moveIndex
-    ) {
+    const pendingReview = pendingSrsReviewRef.current.get(analysis.id);
+    if (!pendingReview || pendingReview.moveIndex !== analysis.moveIndex) {
       return;
     }
 
-    pendingSrsReviewRef.current = null;
+    pendingSrsReviewRef.current.delete(analysis.id);
 
-    if (lastAnalysis.delta === null) {
+    if (analysis.delta === null) {
       return;
     }
 
-    const evalLossCp = Math.max(lastAnalysis.delta, 0);
+    const evalLossCp = Math.max(analysis.delta, 0);
     const passed = !isRecordableFailure(evalLossCp);
 
-    // Only update the overlay if it's still the pending review for this move.
-    // Use functional update to avoid adding resolvedReview to deps (which would
-    // cause this effect to re-fire on the pending→pass/fail transition itself,
-    // potentially skipping the pending state if analysis returned quickly).
     setResolvedReview((prev) =>
-      prev?.analysisId === lastAnalysis.id
+      prev?.analysisId === analysis.id
         ? {
-            analysisId: lastAnalysis.id,
-            moveIndex: lastAnalysis.moveIndex!,
+            analysisId: analysis.id,
+            moveIndex: analysis.moveIndex!,
             result: passed ? "pass" : "fail",
           }
         : prev,
@@ -165,8 +153,8 @@ const AnalysisEffects = ({
 
     if (passed) {
       const srs = pendingReview.srs;
-      appendMoveMessage(lastAnalysis.moveIndex, {
-        key: `srs-${lastAnalysis.moveIndex}`,
+      appendMoveMessage(analysis.moveIndex, {
+        key: `srs-${analysis.id}`,
         text: "Correct! You avoided your past mistake.",
         variant: "srs-pass",
         srsStats: srs
@@ -182,20 +170,20 @@ const AnalysisEffects = ({
     if (!passed) {
       const sourceFen = fenBeforeMove(
         useGameStore.getState().moveHistory,
-        lastAnalysis.moveIndex,
+        analysis.moveIndex,
       );
-      const bestMoveSan = sanForUciMove(sourceFen, lastAnalysis.bestMove);
+      const bestMoveSan = sanForUciMove(sourceFen, analysis.bestMove);
 
       const srs = pendingReview.srs;
-      appendMoveMessage(lastAnalysis.moveIndex, {
-        key: `srs-${lastAnalysis.moveIndex}`,
+      appendMoveMessage(analysis.moveIndex, {
+        key: `srs-${analysis.id}`,
         text: "You made this mistake again!",
         variant: "srs-fail",
         srsFailDetail: {
           userMoveSan: pendingReview.userMoveSan,
           bestMoveSan,
-          userMoveUci: lastAnalysis.move,
-          bestMoveUci: lastAnalysis.bestMove,
+          userMoveUci: analysis.move,
+          bestMoveUci: analysis.bestMove,
         },
         srsStats: srs
           ? {
@@ -210,7 +198,7 @@ const AnalysisEffects = ({
     const postReview = async () => {
       try {
         await reviewSrsBlunder(
-          sessionId,
+          pendingReview.sessionId,
           pendingReview.blunderId,
           passed,
           pendingReview.userMoveSan,
@@ -222,14 +210,25 @@ const AnalysisEffects = ({
     };
 
     void postReview();
-  }, [
-    isPracticeContinuation,
-    lastAnalysis,
-    sessionId,
-    pendingSrsReviewRef,
-    appendMoveMessage,
-    setResolvedReview,
-  ]);
+  }, [pendingSrsReviewRef, appendMoveMessage, setResolvedReview]);
+
+  // Covers synchronous cache hits that resolve before the pending review entry
+  // can be inserted after analyzeMove returns.
+  useEffect(() => {
+    processSrsReview(lastAnalysis);
+  }, [lastAnalysis, processSrsReview]);
+
+  // SRS review grading: evaluate user move from a targeted blunder position.
+  // Zustand subscription observes every resolveAnalysis update, including
+  // cache-hit sequences that React may batch into one render.
+  useEffect(() => {
+    const unsub = analysisStoreApi.subscribe((state, prev) => {
+      if (state.lastAnalysis === prev.lastAnalysis) return;
+      processSrsReview(state.lastAnalysis);
+    });
+
+    return unsub;
+  }, [analysisStoreApi, processSrsReview]);
 
   // Blunder alert: show flash + toast + arrows for player blunders
   useEffect(() => {
