@@ -89,7 +89,11 @@ const MaterialDisplay = ({ fen, perspective }: MaterialDisplayProps) => {
   return (
     <div className="material-display">
       {icons.length > 0 && (
-        <span className="material-icons">{icons.join("")}</span>
+        <span className="material-icons">
+          {icons.map((icon, idx) => (
+            <span key={idx}>{icon}</span>
+          ))}
+        </span>
       )}
       {score > 0 && <span className="material-score">+{score}</span>}
     </div>

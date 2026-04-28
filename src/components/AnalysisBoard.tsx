@@ -14,6 +14,7 @@ import { mateToCp, playerToWhite, toWhitePerspective } from "../workers/analysis
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
+import MaterialDisplay from "./MaterialDisplay";
 import { formatEval } from "./MoveRow";
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -672,6 +673,10 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               })}
             </div>
           )}
+          <MaterialDisplay
+            fen={displayedFen}
+            perspective={boardOrientation === "white" ? "black" : "white"}
+          />
           <MoveList
             moves={mappedMoves}
             currentIndex={currentIndex}
@@ -684,6 +689,10 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             navigateUp={navigateUp}
             navigateDown={navigateDown}
             headerEvalOverride={varHeaderEval}
+          />
+          <MaterialDisplay
+            fen={displayedFen}
+            perspective={boardOrientation}
           />
         </div>
       </div>
