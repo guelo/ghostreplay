@@ -1109,6 +1109,7 @@
         max-width: 100%;
     }
     .history-page .analysis-board__moves-col {
+        min-height: 0;
         max-height: 200px;
         max-width: 100%;
     }
@@ -1443,6 +1444,9 @@
 
 .analysis-board__moves-col {
     flex: 0 0 230px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
 }
 
 .analysis-board__engine-header {
@@ -1527,7 +1531,7 @@
 }
 
 .analysis-board__moves-col > .move-list-container {
-    flex: 1;
+    flex: 1 1 auto;
     min-height: 0;
     max-height: none;
 }
@@ -2477,6 +2481,10 @@
     font-size: 32px;
     line-height: 1;
     letter-spacing: -0.08em;
+}
+
+.analysis-board .material-icons {
+    font-size: 16px;
 }
 
 .material-score {
@@ -4764,6 +4772,7 @@ button.openings-shell__crumb:hover {
 
     .game-page .material-icons {
         font-size: 26px;
+        line-height: 1;
     }
 
     .openings-shell__hero {

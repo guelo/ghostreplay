@@ -145,6 +145,15 @@ vi.mock('./MoveList', () => ({
   },
 }))
 
+const capturedMaterialDisplays: Array<{ fen: string; perspective: string }> = []
+
+vi.mock('./MaterialDisplay', () => ({
+  default: (props: { fen: string; perspective: string }) => {
+    capturedMaterialDisplays.push(props)
+    return <div data-testid={`material-display-${props.perspective}`} data-fen={props.fen} />
+  },
+}))
+
 const moves: AnalysisMove[] = [
   {
     move_number: 1,
@@ -177,12 +186,66 @@ beforeEach(() => {
   capturedEvalBarProps = {}
   capturedGraphProps = {}
   capturedMoveListProps = {}
+  capturedMaterialDisplays.length = 0
   mockTree = createEmptyTree()
   mockSelectedVarNodeId = null
   mockEngineInfoRef.current = []
   mockEngineInfoFenRef.current = null
   mockPendingRequestsRef.current.clear()
   vi.clearAllMocks()
+})
+
+describe('AnalysisBoard — MaterialDisplays', () => {
+  it('renders two material displays with correct perspectives', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const displays = screen.getAllByTestId(/material-display-/)
+    expect(displays).toHaveLength(2)
+
+    expect(capturedMaterialDisplays[0].perspective).toBe('black')
+    expect(capturedMaterialDisplays[1].perspective).toBe('white')
+  })
+
+  it('passes displayedFen to both displays for latest move', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="black" />)
+
+    // latest move FEN
+    expect(capturedMaterialDisplays[0].fen).toBe(moves[1].fen_after)
+    expect(capturedMaterialDisplays[1].fen).toBe(moves[1].fen_after)
+  })
+
+  it('passes displayedFen to both displays when navigating to main line move', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    // click Move 1
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    const lastRenderedDisplays = capturedMaterialDisplays.slice(-2)
+    expect(lastRenderedDisplays[0].fen).toBe(moves[0].fen_after)
+    expect(lastRenderedDisplays[1].fen).toBe(moves[0].fen_after)
+  })
+
+  it('passes displayedFen to both displays when selecting a variation node', () => {
+    const node: VarNode = {
+      id: 'var-1',
+      san: 'Bc4',
+      fen: 'rnbqkbnr/pp1ppppp/8/2p5/2B1P3/8/PPPP1PPP/RNBQKNR b KQkq - 1 2',
+      fenBefore: moves[0].fen_after,
+      uci: 'f1c4',
+      parentId: null,
+      parentGameIndex: 1,
+      branchPlyOffset: 0,
+      children: [],
+      nestingLevel: 0,
+    }
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(capturedMaterialDisplays[0].fen).toBe(node.fen)
+    expect(capturedMaterialDisplays[1].fen).toBe(node.fen)
+  })
 })
 
 describe('AnalysisBoard MoveList', () => {
