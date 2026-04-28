@@ -48,18 +48,20 @@ const mockAnalyzeMove = vi.fn(() => 'req-123')
 const {
   mockEngineInfoRef,
   mockEngineInfoFenRef,
+  mockEngineThinkingRef,
   mockEvaluatePosition,
   mockStopSearch,
   mockUseStockfishEngine,
 } = vi.hoisted(() => {
   const mockEngineInfoRef = { current: [] as EngineInfo[] }
   const mockEngineInfoFenRef = { current: null as string | null }
+  const mockEngineThinkingRef = { current: false }
   const mockEvaluatePosition = vi.fn(async () => {})
   const mockStopSearch = vi.fn()
   const mockUseStockfishEngine = vi.fn((_options?: { enabled?: boolean }) => ({
     info: mockEngineInfoRef.current,
     infoFen: mockEngineInfoFenRef.current,
-    isThinking: false,
+    isThinking: mockEngineThinkingRef.current,
     evaluatePosition: mockEvaluatePosition,
     stopSearch: mockStopSearch,
   }))
@@ -67,6 +69,7 @@ const {
   return {
     mockEngineInfoRef,
     mockEngineInfoFenRef,
+    mockEngineThinkingRef,
     mockEvaluatePosition,
     mockStopSearch,
     mockUseStockfishEngine,
@@ -197,6 +200,7 @@ beforeEach(() => {
   mockSelectedVarNodeId = null
   mockEngineInfoRef.current = []
   mockEngineInfoFenRef.current = null
+  mockEngineThinkingRef.current = false
   mockPendingRequestsRef.current.clear()
   vi.clearAllMocks()
 })
@@ -324,10 +328,12 @@ describe('AnalysisBoard MoveList', () => {
     await waitFor(() => {
       expect(screen.getByText('d12')).toBeInTheDocument()
     })
+    expect(screen.getByRole('progressbar', { name: 'Engine analysis depth' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByLabelText('Engine lines'))
 
     expect(screen.queryByText('d12')).not.toBeInTheDocument()
+    expect(screen.queryByRole('progressbar', { name: 'Engine analysis depth' })).not.toBeInTheDocument()
     const arrows = capturedChessboardProps.arrows as
       | Array<{ startSquare: string; endSquare: string }>
       | undefined
@@ -351,10 +357,72 @@ describe('AnalysisBoard MoveList', () => {
     await waitFor(() => {
       expect(screen.getByText('d12')).toBeInTheDocument()
     })
+    expect(screen.getByRole('progressbar', { name: 'Engine analysis depth' })).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
 
     expect(screen.queryByText('d12')).not.toBeInTheDocument()
+    expect(screen.queryByRole('progressbar', { name: 'Engine analysis depth' })).not.toBeInTheDocument()
+  })
+
+  it('renders engine depth as capped determinate progress while keeping the raw label', async () => {
+    mockEngineInfoRef.current = [
+      {
+        pv: ['g1f3'],
+        score: { type: 'cp', value: 30 },
+        depth: 12,
+      },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const progressbar = await screen.findByRole('progressbar', { name: 'Engine analysis depth' })
+    expect(progressbar).toHaveAttribute('aria-valuenow', '12')
+    expect(progressbar).toHaveAttribute('aria-valuemax', '21')
+    expect(screen.getByText('d12')).toBeInTheDocument()
+    expect(progressbar.firstElementChild).toHaveStyle({ width: '57.14285714285714%' })
+  })
+
+  it('caps over-depth engine progress without changing the visible depth label', async () => {
+    mockEngineInfoRef.current = [
+      {
+        pv: ['g1f3'],
+        score: { type: 'cp', value: 30 },
+        depth: 24,
+      },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const progressbar = await screen.findByRole('progressbar', { name: 'Engine analysis depth' })
+    expect(progressbar).toHaveAttribute('aria-valuenow', '21')
+    expect(progressbar).toHaveAttribute('aria-valuemax', '21')
+    expect(screen.getByText('d24')).toBeInTheDocument()
+    expect(progressbar.firstElementChild).toHaveStyle({ width: '100%' })
+  })
+
+  it('animates engine progress only while Stockfish is thinking', async () => {
+    mockEngineInfoRef.current = [
+      {
+        pv: ['g1f3'],
+        score: { type: 'cp', value: 30 },
+        depth: 12,
+      },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    mockEngineThinkingRef.current = true
+    const { rerender } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    let progressbar = await screen.findByRole('progressbar', { name: 'Engine analysis depth' })
+    expect(progressbar.firstElementChild).toHaveClass('analysis-board__engine-progress-fill--thinking')
+
+    mockEngineThinkingRef.current = false
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+
+    progressbar = screen.getByRole('progressbar', { name: 'Engine analysis depth' })
+    expect(progressbar.firstElementChild).not.toHaveClass('analysis-board__engine-progress-fill--thinking')
   })
 
   it('opens an engine-line popup with the full SAN PV and preview after the first move', async () => {

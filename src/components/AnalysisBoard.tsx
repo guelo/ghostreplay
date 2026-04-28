@@ -18,6 +18,7 @@ import MaterialDisplay from "./MaterialDisplay";
 import { formatEval } from "./MoveRow";
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+const ENGINE_SEARCH_DEPTH = 21;
 
 type AnalysisBoardProps = {
   moves: AnalysisMove[];
@@ -313,9 +314,9 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     stopSearch();
 
     if (cachedBest && searchmoves && searchmoves.length > 0) {
-      evaluatePosition(displayedFen, { depth: 21, multipv: 2, searchmoves }).catch(() => {});
+      evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 2, searchmoves }).catch(() => {});
     } else {
-      evaluatePosition(displayedFen, { depth: 21, multipv: 3 }).catch(() => {});
+      evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 3 }).catch(() => {});
     }
   }, [displayedFen, evaluatePosition, showEngineArrows, cachedBest, searchmoves]);
 
@@ -331,6 +332,8 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     ? engineLines
     : [];
   const activeEngineDepth = activeEngineLines[0]?.depth ?? 0;
+  const cappedEngineDepth = Math.min(activeEngineDepth, ENGINE_SEARCH_DEPTH);
+  const engineProgressPercent = (cappedEngineDepth / ENGINE_SEARCH_DEPTH) * 100;
 
   // Merge cached best move into engine lines so arrows and panel stay in sync.
   // Only merge when the restricted search was actually used — otherwise the
@@ -782,6 +785,23 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
         </div>
         <div className="analysis-board__moves-col">
           <div className="analysis-board__engine-header">
+            {showEngineArrows && activeEngineDepth > 0 && (
+              <div
+                className="analysis-board__engine-progress"
+                role="progressbar"
+                aria-label="Engine analysis depth"
+                aria-valuemin={0}
+                aria-valuemax={ENGINE_SEARCH_DEPTH}
+                aria-valuenow={cappedEngineDepth}
+              >
+                <div
+                  className={`analysis-board__engine-progress-fill${
+                    engineThinking ? " analysis-board__engine-progress-fill--thinking" : ""
+                  }`}
+                  style={{ width: `${engineProgressPercent}%` }}
+                />
+              </div>
+            )}
             <label className="analysis-board__toggle">
               <input
                 type="checkbox"
@@ -792,9 +812,6 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             </label>
             {showEngineArrows && activeEngineDepth > 0 && (
               <span className="analysis-board__engine-depth">
-                {engineThinking && (
-                  <span className="analysis-board__engine-spinner" />
-                )}
                 d{activeEngineDepth}
               </span>
             )}
