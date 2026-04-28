@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   fetchHistory,
@@ -7,7 +7,7 @@ import {
   type SessionAnalysis,
 } from "../utils/api";
 import type { OpenHistoryOptions } from "../components/chess-game/types";
-import AnalysisBoard from "../components/AnalysisBoard";
+import AnalysisBoard, { type AnalysisBoardRef } from "../components/AnalysisBoard";
 import GameReviewStats from "../components/GameReviewStats";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
@@ -143,11 +143,16 @@ function HistoryPage() {
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
   const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
 
+  const boardRef = useRef<AnalysisBoardRef>(null);
+
   const { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat } =
     useGameReviewStats({
       selectedId,
       moves: analysis?.moves ?? null,
       playerColor,
+      onJumpToMove: useCallback((index: number) => {
+        boardRef.current?.jumpToMove(index);
+      }, []),
     });
 
   return (
@@ -224,6 +229,7 @@ function HistoryPage() {
 
                 {!analysisLoading && analysis && sideStats && (
                   <AnalysisBoard
+                    ref={boardRef}
                     key={selectedGame.session_id}
                     moves={analysis.moves}
                     boardOrientation={playerColor}
