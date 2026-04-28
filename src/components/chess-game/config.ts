@@ -4,23 +4,41 @@ export const MAIA_ELO_BINS = [
   2200, 2400, 2600,
 ] as const;
 
+/**
+ 1	Tiny Boo	harmless baby ghost
+ 2	Sleepy Wisp	gentle beginner
+ 3	Glowglide	friendly floating ghost
+ 4	Gigglegeist	silly but playful
+ 5	Timid Ticker	nervous little haunter
+ 6	Professor Pallor	smarter, trickier ghost
+ 7	Pawntergeist	game-themed ghost pun
+ 8	Frost Frown	first mildly hostile one
+ 9	Glower Wraith	confident and mean
+ 10	Droolshade	creepy but not deadly
+ 11	Scrapspirit	damaged/mechanical ghost
+ 12	Iron Haunt	stronger armored ghost
+ 13	Claw Wraith	dangerous melee ghost
+ 14	Crackskull Revenant	elite undead ghost
+ 15	Crimson Poltergeist	rage-powered menace
+ 16	Dreadnova	final-boss energy
+ */
 export const MAIA_BOT_NAMES: Record<(typeof MAIA_ELO_BINS)[number], string> = {
-  600: "Boo Bud 600",
-  800: "Wisp Cub 800",
-  1000: "Phantom Puff 1000",
-  1100: "Misty Paws 1100",
-  1200: "Specter Scout 1200",
-  1300: "Boo Bishop 1300",
-  1400: "Wisp Gambit 1400",
-  1500: "Phantom Tempo 1500",
-  1600: "Misty Sharp 1600",
-  1700: "Specter Prep 1700",
-  1800: "Boo Tactician 1800",
-  1900: "Wraith Endgame 1900",
-  2000: "Ghost Master 2000",
-  2200: "Phantom Engine 2200",
-  2400: "Specter Legend 2400",
-  2600: "Wraith Nova 2600",
+  600: "Blinky Boo 600",
+  800: "Sleepy Wisp 800",
+  1000: "Slobberboo 1000",
+  1100: "Lollygeist 1100",
+  1200: "Gigglegeist 1200",
+  1300: "Glowglide 1300",
+  1400: "Spellshade 1400",
+  1500: "Chainling 1500",
+  1600: "Murk Puff 1600",
+  1700: "Sneerling 1700",
+  1800: "Scowlshade 1800",
+  1900: "Gloomclaw 1900",
+  2000: "Dreadglare 2000",
+  2200: "Crimson Poltergeist 2200",
+  2400: "Gravechill 2400",
+  2600: "The Hollow Maw 2600",
 };
 
 export const GHOST_AVATAR_SRC = "/branding/ghost-logo-option-1-buddy.svg";
