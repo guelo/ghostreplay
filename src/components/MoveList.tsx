@@ -48,6 +48,7 @@ type MoveListProps = {
   onReset?: () => void;
   isGameActive?: boolean;
   isInteractionDisabled?: boolean;
+  suppressKeyboardNavigation?: boolean;
 };
 
 type DisplayItem =
@@ -133,6 +134,7 @@ const MoveList = ({
   onReset,
   isGameActive = false,
   isInteractionDisabled = false,
+  suppressKeyboardNavigation = false,
   variationTree,
   selectedVarNodeId,
   onVarSelect,
@@ -237,6 +239,8 @@ const MoveList = ({
   // Keyboard navigation
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (suppressKeyboardNavigation) return;
+
       // Don't handle if user is typing in an input
       if (
         e.target instanceof HTMLInputElement ||
@@ -256,7 +260,7 @@ const MoveList = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handlePrev, handleNext]);
+  }, [handlePrev, handleNext, suppressKeyboardNavigation]);
 
   // Auto-scroll to selected move
   useEffect(() => {

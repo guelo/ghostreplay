@@ -1,4 +1,4 @@
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
+import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -69,6 +69,15 @@ const DEFAULT_GREY_ARROW = "rgba(150, 150, 150, 0.45)";
 
 type MoveArrow = { startSquare: string; endSquare: string; color: string };
 
+type EngineLinePreview = {
+  sourceSlot: number;
+  sanMoves: string[];
+  fenAfterPly: string[];
+  uciMoves: string[];
+  evalText: string;
+  depth: number;
+};
+
 /** Convert an EngineScore to a single number (side-to-move relative). */
 const scoreToNum = (s: EngineInfo["score"]): number | null => {
   if (!s) return null;
@@ -122,6 +131,58 @@ const toWhitePerspectiveMate = (
   return moveIndex % 2 === 0 ? moverPerspectiveMate : -moverPerspectiveMate;
 };
 
+const buildEngineLinePreview = (
+  line: EngineInfo,
+  sourceSlot: number,
+  displayedFen: string,
+  sideToMove: "w" | "b",
+): EngineLinePreview | null => {
+  if (!line?.pv?.length) return null;
+
+  const tempChess = new Chess(displayedFen);
+  const sanMoves: string[] = [];
+  const fenAfterPly: string[] = [];
+  const uciMoves: string[] = [];
+
+  for (const uci of line.pv) {
+    try {
+      const from = uci.slice(0, 2);
+      const to = uci.slice(2, 4);
+      const promotion = uci.length > 4 ? uci[4] : undefined;
+      const result = tempChess.move({ from, to, promotion });
+      if (!result) break;
+      sanMoves.push(result.san);
+      fenAfterPly.push(tempChess.fen());
+      uciMoves.push(uci);
+    } catch {
+      break;
+    }
+  }
+
+  if (sanMoves.length === 0) return null;
+
+  let evalText = "";
+  if (line.score) {
+    if (line.score.type === "mate") {
+      const mate = sideToMove === "w" ? line.score.value : -line.score.value;
+      evalText = mate >= 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
+    } else {
+      const cp = sideToMove === "w" ? line.score.value : -line.score.value;
+      const val = cp / 100;
+      evalText = `${val >= 0 ? "+" : ""}${val.toFixed(1)}`;
+    }
+  }
+
+  return {
+    sourceSlot,
+    sanMoves,
+    fenAfterPly,
+    uciMoves,
+    evalText,
+    depth: line.depth ?? 0,
+  };
+};
+
 /** Check whether a FEN already has a pending analysis request in flight. */
 const hasPendingForFen = (pending: Map<string, string>, fen: string): boolean => {
   for (const v of pending.values()) {
@@ -151,6 +212,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const { analyzeMove } = useMoveAnalysis(analysisStore);
   const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
   const [showEngineArrows, setShowEngineArrows] = useState(true);
+  const [selectedEngineLineIndex, setSelectedEngineLineIndex] = useState<number | null>(null);
+  const [selectedEnginePlyIndex, setSelectedEnginePlyIndex] = useState(0);
+  const [enginePopupPosition, setEnginePopupPosition] = useState<React.CSSProperties | null>(null);
+  const boardRootRef = useRef<HTMLDivElement>(null);
+  const engineLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const enginePopupRef = useRef<HTMLDivElement>(null);
   const { info: engineLines, infoFen: engineInfoFen, isThinking: engineThinking, evaluatePosition, stopSearch } =
     useStockfishEngine({ enabled: showEngineArrows });
 
@@ -214,6 +281,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     if (effectiveIndex === -1) return startingFen;
     return moves[effectiveIndex]?.fen_after ?? startingFen;
   }, [isInVariation, selectedVarNode, effectiveIndex, moves, startingFen]);
+  const previousDisplayedFenRef = useRef(displayedFen);
 
   // Side-to-move derived from FEN (avoids constructing Chess just for turn())
   const sideToMove = useMemo(() => fenSideToMove(displayedFen), [displayedFen]);
@@ -285,51 +353,126 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     return [cachedLine, ...activeEngineLines];
   }, [showEngineArrows, useRestrictedSearch, cachedBest, activeEngineLines]);
 
-  // Engine lines with SAN moves and formatted evals for display
+  // Engine lines with SAN moves, replay FENs, and formatted evals for display/preview
   const engineLinesDisplay = useMemo(() => {
     if (!showEngineArrows) return [];
     if (mergedEngineLines.length === 0) return [];
-    return mergedEngineLines
-      .filter((line) => line?.pv?.length)
-      .map((line) => {
-        // Convert PV moves from UCI to SAN
-        const tempChess = new Chess(displayedFen);
-        const sanMoves: string[] = [];
-        for (const uci of line!.pv!) {
-          try {
-            const from = uci.slice(0, 2);
-            const to = uci.slice(2, 4);
-            const promotion = uci.length > 4 ? uci[4] : undefined;
-            const result = tempChess.move({ from, to, promotion });
-            if (!result) break;
-            sanMoves.push(result.san);
-          } catch {
-            break;
-          }
-        }
-
-        // Format eval from side-to-move perspective to white perspective
-        let evalText = "";
-        if (line!.score) {
-          if (line!.score.type === "mate") {
-            const mate =
-              sideToMove === "w" ? line!.score.value : -line!.score.value;
-            evalText = mate >= 0 ? `M${mate}` : `-M${Math.abs(mate)}`;
-          } else {
-            const cp =
-              sideToMove === "w" ? line!.score.value : -line!.score.value;
-            const val = cp / 100;
-            evalText = `${val >= 0 ? "+" : ""}${val.toFixed(1)}`;
-          }
-        }
-
-        return {
-          sanMoves,
-          evalText,
-          depth: line!.depth ?? 0,
-        };
-      });
+    return mergedEngineLines.map((line, index) =>
+      buildEngineLinePreview(line, index, displayedFen, sideToMove)
+    );
   }, [showEngineArrows, mergedEngineLines, displayedFen, sideToMove]);
+
+  const selectedEngineLine =
+    selectedEngineLineIndex === null
+      ? null
+      : engineLinesDisplay[selectedEngineLineIndex] ?? null;
+
+  const selectedEnginePlyRenderIndex = selectedEngineLine
+    ? Math.min(selectedEnginePlyIndex, selectedEngineLine.fenAfterPly.length - 1)
+    : 0;
+
+  const selectedPreviewFen =
+    selectedEngineLine?.fenAfterPly[selectedEnginePlyRenderIndex] ?? null;
+
+  const selectedPreviewMove = selectedEngineLine?.uciMoves[selectedEnginePlyRenderIndex] ?? null;
+  const previewSquareStyles = useMemo((): Record<string, React.CSSProperties> => {
+    if (!selectedPreviewMove) return {};
+    const style: React.CSSProperties = { background: "rgba(59, 130, 246, 0.3)" };
+    return {
+      [selectedPreviewMove.slice(0, 2)]: style,
+      [selectedPreviewMove.slice(2, 4)]: style,
+    };
+  }, [selectedPreviewMove]);
+
+  const closeEnginePopup = useCallback(() => {
+    setSelectedEngineLineIndex(null);
+    setEnginePopupPosition(null);
+  }, []);
+
+  const updateEnginePopupPosition = useCallback(() => {
+    if (selectedEngineLineIndex === null) return;
+    const root = boardRootRef.current;
+    const anchor = engineLineRefs.current[selectedEngineLineIndex];
+    if (!root || !anchor) return;
+
+    const rootRect = root.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
+    const popupWidth = enginePopupRef.current?.offsetWidth ?? Math.min(192, window.innerWidth - 32);
+    const viewportPadding = 16;
+    const preferredLeft = anchorRect.right - rootRect.left - popupWidth;
+    const minLeft = viewportPadding - rootRect.left;
+    const maxLeft = window.innerWidth - viewportPadding - rootRect.left - popupWidth;
+    const left = Math.min(Math.max(preferredLeft, minLeft), Math.max(minLeft, maxLeft));
+    const top = anchorRect.bottom - rootRect.top + 8;
+
+    setEnginePopupPosition({ left, top });
+  }, [selectedEngineLineIndex]);
+
+  useEffect(() => {
+    if (previousDisplayedFenRef.current !== displayedFen) {
+      previousDisplayedFenRef.current = displayedFen;
+      closeEnginePopup();
+    }
+  }, [displayedFen, closeEnginePopup]);
+
+  useEffect(() => {
+    if (!showEngineArrows) {
+      closeEnginePopup();
+    }
+  }, [showEngineArrows, closeEnginePopup]);
+
+  useEffect(() => {
+    if (selectedEngineLineIndex === null) return;
+    const line = engineLinesDisplay[selectedEngineLineIndex];
+    if (!line) {
+      closeEnginePopup();
+      return;
+    }
+
+    setSelectedEnginePlyIndex((prev) => Math.min(prev, line.fenAfterPly.length - 1));
+    window.requestAnimationFrame(updateEnginePopupPosition);
+  }, [engineLinesDisplay, selectedEngineLineIndex, closeEnginePopup, updateEnginePopupPosition]);
+
+  useEffect(() => {
+    if (selectedEngineLineIndex === null) return;
+    updateEnginePopupPosition();
+
+    const handleResize = () => updateEnginePopupPosition();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [selectedEngineLineIndex, updateEnginePopupPosition]);
+
+  useEffect(() => {
+    if (selectedEngineLineIndex === null) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (enginePopupRef.current?.contains(target)) return;
+      if (engineLineRefs.current.some((button) => button?.contains(target))) return;
+      closeEnginePopup();
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [selectedEngineLineIndex, closeEnginePopup]);
+
+  useEffect(() => {
+    if (!selectedEngineLine) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setSelectedEnginePlyIndex((prev) => {
+        if (event.key === "ArrowLeft") return Math.max(0, prev - 1);
+        return Math.min(selectedEngineLine.fenAfterPly.length - 1, prev + 1);
+      });
+    };
+
+    window.addEventListener("keydown", handleKeyDown, { capture: true });
+    return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
+  }, [selectedEngineLine]);
 
   // Engine-recommended move arrows — best move is blue, others grey with
   // opacity proportional to their centipawn loss relative to the best move.
@@ -591,8 +734,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     [stopSearch],
   );
 
+  const handleEngineLineOpen = useCallback((index: number) => {
+    setSelectedEngineLineIndex(index);
+    setSelectedEnginePlyIndex(0);
+    window.requestAnimationFrame(updateEnginePopupPosition);
+  }, [updateEnginePopupPosition]);
+
   return (
-    <div className="analysis-board">
+    <div className="analysis-board" ref={boardRootRef}>
       <div className="analysis-board__layout">
         <div className="analysis-board__board-col">
           <div className="analysis-board__board-with-eval">
@@ -650,25 +799,43 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               </span>
             )}
           </div>
-          {showEngineArrows && engineLinesDisplay.length > 0 && (
+          {showEngineArrows && engineLinesDisplay.some(Boolean) && (
             <div className="analysis-board__engine-lines">
               {[0, 1, 2].map((i) => {
                 const line = engineLinesDisplay[i];
                 return (
-                  <span
+                  line ? (
+                  <button
                     key={i}
+                    ref={(node) => {
+                      engineLineRefs.current[i] = node;
+                    }}
+                    type="button"
                     className="analysis-board__engine-line"
+                    aria-label={`Show engine line ${i + 1}`}
+                    aria-pressed={selectedEngineLineIndex === line.sourceSlot}
+                    onClick={() => handleEngineLineOpen(i)}
                     style={{
-                      opacity: line ? (i === 0 ? 1 : 0.6) : 0,
+                      opacity: i === 0 ? 1 : 0.6,
                     }}
                   >
                     <span className="analysis-board__engine-eval">
-                      {line?.evalText ?? "+0.0"}
+                      {line.evalText || "+0.0"}
                     </span>{" "}
                     <span className="analysis-board__engine-pv">
-                      {line?.sanMoves[0] ?? "---"}
+                      {line.sanMoves[0]}
                     </span>
-                  </span>
+                  </button>
+                  ) : (
+                    <span
+                      key={i}
+                      className="analysis-board__engine-line analysis-board__engine-line--placeholder"
+                      aria-hidden="true"
+                    >
+                      <span className="analysis-board__engine-eval">+0.0</span>{" "}
+                      <span className="analysis-board__engine-pv">---</span>
+                    </span>
+                  )
                 );
               })}
             </div>
@@ -689,6 +856,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             navigateUp={navigateUp}
             navigateDown={navigateDown}
             headerEvalOverride={varHeaderEval}
+            suppressKeyboardNavigation={selectedEngineLine !== null}
           />
           <MaterialDisplay
             fen={displayedFen}
@@ -696,6 +864,55 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
           />
         </div>
       </div>
+
+      {selectedEngineLine && selectedPreviewFen && (
+        <div
+          ref={enginePopupRef}
+          className="analysis-board__engine-popup"
+          style={enginePopupPosition ?? undefined}
+          role="dialog"
+          aria-label="Engine line preview"
+        >
+          <div className="analysis-board__engine-popup-header">
+            <span className="analysis-board__engine-popup-eval">
+              {selectedEngineLine.evalText || "+0.0"}
+            </span>
+            {selectedEngineLine.depth > 0 && (
+              <span className="analysis-board__engine-popup-depth">
+                d{selectedEngineLine.depth}
+              </span>
+            )}
+          </div>
+          <div className="analysis-board__engine-popup-board">
+            <Chessboard
+              options={{
+                position: selectedPreviewFen,
+                boardOrientation,
+                allowDragging: false,
+                animationDurationInMs: 0,
+                squareStyles: previewSquareStyles,
+                boardStyle: {
+                  borderRadius: "0",
+                  boxShadow: "none",
+                },
+              }}
+            />
+          </div>
+          <div className="analysis-board__engine-popup-pv" aria-label="Full engine line">
+            {selectedEngineLine.sanMoves.map((san, index) => (
+              <button
+                key={`${san}-${index}`}
+                type="button"
+                className="analysis-board__engine-popup-move"
+                aria-current={index === selectedEnginePlyRenderIndex ? "step" : undefined}
+                onClick={() => setSelectedEnginePlyIndex(index)}
+              >
+                {san}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {!isInVariation && evals.length > 0 && (
         <div className="analysis-board__graph-row">

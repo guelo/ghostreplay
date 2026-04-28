@@ -89,11 +89,16 @@ vi.mock('../hooks/useStockfishEngine', () => ({
 // --- Prop-capturing mocks ---
 
 let capturedChessboardProps: Record<string, unknown> = {}
+const capturedChessboardRenders: Array<{ kind: 'main' | 'preview'; options: Record<string, unknown> }> = []
 
 vi.mock('react-chessboard', () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => {
-    capturedChessboardProps = options
-    return <div data-testid="chessboard" />
+    const kind = options.allowDragging === false ? 'preview' : 'main'
+    capturedChessboardRenders.push({ kind, options })
+    if (kind === 'main') {
+      capturedChessboardProps = options
+    }
+    return <div data-testid={`${kind}-chessboard`} />
   },
 }))
 
@@ -183,6 +188,7 @@ const moves: AnalysisMove[] = [
 
 beforeEach(() => {
   capturedChessboardProps = {}
+  capturedChessboardRenders.length = 0
   capturedEvalBarProps = {}
   capturedGraphProps = {}
   capturedMoveListProps = {}
@@ -349,6 +355,175 @@ describe('AnalysisBoard MoveList', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
 
     expect(screen.queryByText('d12')).not.toBeInTheDocument()
+  })
+
+  it('opens an engine-line popup with the full SAN PV and preview after the first move', async () => {
+    const pv = ['g1f3', 'd7d6', 'd2d4']
+    mockEngineInfoRef.current = [{ pv, score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const chess = new Chess(moves[1].fen_after)
+    chess.move({ from: 'g1', to: 'f3' })
+    const firstFen = chess.fen()
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+    expect(dialog).toHaveTextContent('Nf3')
+    expect(dialog).toHaveTextContent('d6')
+    expect(dialog).toHaveTextContent('d4')
+    const preview = capturedChessboardRenders.find((rendered) => rendered.kind === 'preview')
+    expect(preview?.options.position).toBe(firstFen)
+    expect(preview?.options.animationDurationInMs).toBe(0)
+    expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(true)
+  })
+
+  it('updates only the preview board when clicking PV moves or using arrow keys', async () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6', 'd2d4'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const chess = new Chess(moves[1].fen_after)
+    chess.move({ from: 'g1', to: 'f3' })
+    chess.move({ from: 'd7', to: 'd6' })
+    const secondFen = chess.fen()
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+    fireEvent.click(screen.getByRole('button', { name: 'd6' }))
+
+    await waitFor(() => {
+      const lastPreview = capturedChessboardRenders.filter((rendered) => rendered.kind === 'preview').at(-1)
+      expect(lastPreview?.options.position).toBe(secondFen)
+    })
+    expect(capturedMoveListProps.currentIndex).toBeNull()
+    expect(capturedChessboardProps.position).toBe(moves[1].fen_after)
+
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    await waitFor(() => {
+      expect(dialog.querySelector('[aria-current="step"]')).toHaveTextContent('Nf3')
+    })
+    expect(capturedMoveListProps.currentIndex).toBeNull()
+  })
+
+  it('preserves the popup across engine refreshes and clamps when the selected PV shortens', async () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6', 'd2d4'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const { rerender } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    await screen.findByRole('dialog', { name: 'Engine line preview' })
+    fireEvent.click(screen.getByRole('button', { name: 'd4' }))
+    expect(screen.getByRole('button', { name: 'd4' })).toHaveAttribute('aria-current', 'step')
+
+    mockEngineInfoRef.current = [{ pv: ['g1f3'], score: { type: 'cp', value: 30 }, depth: 19 }]
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+
+    expect(screen.getByRole('dialog', { name: 'Engine line preview' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: 'Engine line preview' })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Nf3' })).toHaveAttribute('aria-current', 'step')
+    })
+    expect(screen.queryByRole('button', { name: 'd4' })).not.toBeInTheDocument()
+  })
+
+  it('keeps popup identity tied to the selected source engine slot when earlier slots become invalid', async () => {
+    mockEngineInfoRef.current = [
+      { pv: ['g1f3'], score: { type: 'cp', value: 42 }, depth: 18 },
+      { pv: ['d2d4'], score: { type: 'cp', value: 30 }, depth: 18 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const { rerender } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 2' }))
+    await screen.findByRole('dialog', { name: 'Engine line preview' })
+    expect(screen.getByRole('button', { name: 'd4' })).toHaveAttribute('aria-current', 'step')
+
+    mockEngineInfoRef.current = [
+      { pv: ['a1a2'], score: { type: 'cp', value: 44 }, depth: 19 },
+      { pv: ['d2d4', 'g8f6'], score: { type: 'cp', value: 28 }, depth: 19 },
+    ]
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+
+    expect(screen.getByRole('dialog', { name: 'Engine line preview' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'd4' })).toHaveAttribute('aria-current', 'step')
+    expect(screen.queryByRole('button', { name: 'Nf3' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show engine line 2' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('recalculates popup position on resize and renders outside the clipped moves column', async () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const { container } = render(
+      <div className="history-page">
+        <AnalysisBoard moves={moves} boardOrientation="white" />
+      </div>,
+    )
+    const root = container.querySelector('.analysis-board') as HTMLElement
+    vi.spyOn(root, 'getBoundingClientRect').mockReturnValue({
+      x: 100, y: 50, top: 50, left: 100, right: 700, bottom: 600, width: 600, height: 550, toJSON: () => '',
+    } as DOMRect)
+    const anchor = screen.getByRole('button', { name: 'Show engine line 1' })
+    vi.spyOn(anchor, 'getBoundingClientRect').mockReturnValue({
+      x: 600, y: 90, top: 90, left: 600, right: 690, bottom: 112, width: 90, height: 22, toJSON: () => '',
+    } as DOMRect)
+
+    fireEvent.click(anchor)
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+    await waitFor(() => {
+      expect(dialog.style.top).toBe('70px')
+    })
+    expect(dialog.closest('.analysis-board__moves-col')).toBeNull()
+
+    vi.spyOn(anchor, 'getBoundingClientRect').mockReturnValue({
+      x: 300, y: 80, top: 80, left: 300, right: 390, bottom: 102, width: 90, height: 22, toJSON: () => '',
+    } as DOMRect)
+    fireEvent.resize(window)
+    await waitFor(() => {
+      expect(dialog.style.top).toBe('60px')
+    })
+  })
+
+  it('closes the popup on selected line disappearance, engine toggle off, displayed position changes, and outside pointer-down', async () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const { rerender } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    await screen.findByRole('dialog', { name: 'Engine line preview' })
+    mockEngineInfoRef.current = []
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Engine line preview' })).not.toBeInTheDocument())
+
+    mockEngineInfoRef.current = [{ pv: ['g1f3'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    await screen.findByRole('dialog', { name: 'Engine line preview' })
+    fireEvent.click(screen.getByLabelText('Engine lines'))
+    expect(screen.queryByRole('dialog', { name: 'Engine line preview' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByLabelText('Engine lines'))
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    await screen.findByRole('dialog', { name: 'Engine line preview' })
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+    expect(screen.queryByRole('dialog', { name: 'Engine line preview' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    mockEngineInfoRef.current = [{ pv: ['g1f3'], score: { type: 'cp', value: 20 }, depth: 18 }]
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Show engine line 1' }))
+    await screen.findByRole('dialog', { name: 'Engine line preview' })
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('dialog', { name: 'Engine line preview' })).not.toBeInTheDocument()
+  })
+
+  it('does not render focusable buttons for missing engine line placeholders', () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(screen.getAllByRole('button', { name: /Show engine line/ })).toHaveLength(1)
   })
 })
 

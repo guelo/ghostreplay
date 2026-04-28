@@ -884,6 +884,40 @@ describe('MoveList variation integration', () => {
       // Should advance to next main-line move, not enter variation
       expect(onNavigate).toHaveBeenCalledWith(3)
     })
+
+    it('does not handle window arrow keys when keyboard navigation is suppressed', () => {
+      const onNavigate = vi.fn()
+
+      render(
+        <MoveList
+          moves={GAME_MOVES}
+          currentIndex={2}
+          onNavigate={onNavigate}
+          suppressKeyboardNavigation
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+      fireEvent.keyDown(window, { key: 'ArrowLeft' })
+
+      expect(onNavigate).not.toHaveBeenCalled()
+    })
+
+    it('handles window arrow keys when keyboard navigation is not suppressed', () => {
+      const onNavigate = vi.fn()
+
+      render(
+        <MoveList
+          moves={GAME_MOVES}
+          currentIndex={2}
+          onNavigate={onNavigate}
+        />,
+      )
+
+      fireEvent.keyDown(window, { key: 'ArrowRight' })
+
+      expect(onNavigate).toHaveBeenCalledWith(3)
+    })
   })
 
   it('starting-position variation renders when moves array is empty', () => {
