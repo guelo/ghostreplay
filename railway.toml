@@ -1,0 +1,15 @@
+# Railway deployment configuration for Ghost Replay (backend)
+# Docs: https://docs.railway.app/deploy/config-as-code
+
+[build]
+builder = "nixpacks"
+# Tell Nixpacks to look for Python code inside the backend folder
+rootDirectory = "backend"
+
+[deploy]
+# Run Alembic migrations before starting the server
+startCommand = "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
