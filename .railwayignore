@@ -1,0 +1,8 @@
+.beads-sqlite-backup/
+.beads/
+node_modules/
+dist/
+backend/.venv/
+backend/.tmp/
+__pycache__/
+*.pyc

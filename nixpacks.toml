@@ -7,11 +7,11 @@ NIXPACKS_PYTHON_PACKAGE_MANAGER = "requirements"
 [phases.install]
 cmds = [
   "/opt/venv/bin/python -m ensurepip --upgrade",
-  "/opt/venv/bin/python -m pip install -r backend/requirements.txt",
+  "if [ -f backend/requirements.txt ]; then requirements=backend/requirements.txt; else requirements=requirements.txt; fi; /opt/venv/bin/python -m pip install -r \"$requirements\"",
 ]
 
 [phases.build]
 cmds = ["true"]
 
 [start]
-cmd = "cd backend && /opt/venv/bin/python -m alembic upgrade head && /opt/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+cmd = "if [ -d backend ]; then cd backend; fi; /opt/venv/bin/python -m alembic upgrade head && /opt/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"
