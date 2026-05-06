@@ -307,7 +307,7 @@ describe('MoveList auto-scroll', () => {
 
     frames.flushAll()
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'auto' })
     expect(getScrollTop()).toBe(0)
     expect(container.querySelectorAll('.move-button.selected')).toHaveLength(0)
   })
@@ -339,7 +339,7 @@ describe('MoveList auto-scroll', () => {
 
     frames.flushAll()
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 28, behavior: 'smooth' })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 28, behavior: 'auto' })
     expect(getScrollTop()).toBe(28)
   })
 
@@ -374,7 +374,7 @@ describe('MoveList auto-scroll', () => {
 
     frames.flushAll()
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 54, behavior: 'smooth' })
+    expect(scrollTo).toHaveBeenCalledWith({ top: 54, behavior: 'auto' })
     expect(getScrollTop()).toBe(54)
   })
 

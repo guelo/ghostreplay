@@ -57,6 +57,8 @@ type DisplayItem =
 
 const EMPTY_MESSAGES: ReadonlyMap<number, MoveMessage[]> = new Map();
 const EMPTY_BUBBLES: MoveMessage[] = [];
+const NAVIGATION_SCROLL_BEHAVIOR: ScrollBehavior = "auto";
+const MESSAGE_SCROLL_BEHAVIOR: ScrollBehavior = "smooth";
 
 const getMoveListStickyInset = (container: HTMLDivElement): number => {
   const containerRect = container.getBoundingClientRect();
@@ -269,7 +271,7 @@ const MoveList = ({
       const container = moveListRef.current;
       if (!container) return;
       if (!isVariationActive && effectiveIndex === -1) {
-        setMoveListScrollTop(container, 0, "smooth");
+        setMoveListScrollTop(container, 0, NAVIGATION_SCROLL_BEHAVIOR);
         return;
       }
 
@@ -279,7 +281,7 @@ const MoveList = ({
         container,
         target,
         getMoveListStickyInset(container),
-        "smooth",
+        NAVIGATION_SCROLL_BEHAVIOR,
       );
     });
     return () => cancelAnimationFrame(id);
@@ -297,7 +299,7 @@ const MoveList = ({
         container,
         el,
         getMoveListStickyInset(container),
-        "smooth",
+        NAVIGATION_SCROLL_BEHAVIOR,
       );
     });
     return () => cancelAnimationFrame(id);
@@ -327,7 +329,7 @@ const MoveList = ({
         container,
         target,
         getMoveListStickyInset(container),
-        "smooth",
+        MESSAGE_SCROLL_BEHAVIOR,
       );
     });
     return () => cancelAnimationFrame(id);
