@@ -272,6 +272,22 @@ describe('AnalysisBoard MoveList', () => {
     expect(capturedMoveListProps.currentIndex).toBe(0)
   })
 
+  it('highlights main-line moves and arrows from cached move details', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const styles = capturedChessboardProps.squareStyles as Record<string, unknown>
+    expect(styles).toHaveProperty('c7')
+    expect(styles).toHaveProperty('c5')
+
+    const arrows = capturedChessboardProps.arrows as Array<{ startSquare: string; endSquare: string; color: string }>
+    expect(arrows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ startSquare: 'c7', endSquare: 'c5' }),
+        expect.objectContaining({ startSquare: 'e7', endSquare: 'e5' }),
+      ]),
+    )
+  })
+
   it('disables the Stockfish hook and stops search when engine lines are turned off', async () => {
     render(<AnalysisBoard moves={moves} boardOrientation="white" />)
 
@@ -442,6 +458,9 @@ describe('AnalysisBoard MoveList', () => {
     expect(dialog).toHaveTextContent('d4')
     const preview = capturedChessboardRenders.find((rendered) => rendered.kind === 'preview')
     expect(preview?.options.position).toBe(firstFen)
+    expect(capturedChessboardProps.id).toMatch(/^analysis-board-/)
+    expect(preview?.options.id).toMatch(/^analysis-board-/)
+    expect(preview?.options.id).not.toBe(capturedChessboardProps.id)
     expect(preview?.options.animationDurationInMs).toBe(0)
     expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(true)
   })

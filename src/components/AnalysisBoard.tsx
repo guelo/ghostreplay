@@ -1,4 +1,5 @@
-import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, memo, Profiler, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
+import type { ProfilerOnRenderCallback } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -16,6 +17,10 @@ import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
 import MaterialDisplay from "./MaterialDisplay";
 import { formatEval } from "./MoveRow";
+import {
+  isAnalysisBoardDiagnosticsEnabled,
+  logAnalysisBoardDiagnostic,
+} from "../utils/analysisBoardDiagnostics";
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ENGINE_SEARCH_DEPTH = 21;
@@ -69,6 +74,22 @@ export const engineArrowColor = (cpLoss: number): string => {
 const DEFAULT_GREY_ARROW = "rgba(150, 150, 150, 0.45)";
 
 type MoveArrow = { startSquare: string; endSquare: string; color: string };
+type MoveSquares = { from: string; to: string };
+type MainLineMoveDetails = {
+  fenBefore: string;
+  playedSquares: MoveSquares | null;
+  bestSquares: MoveSquares | null;
+};
+type NavigationTrace = {
+  id: number;
+  startMs: number;
+  fromIndex: number | null;
+  toIndex: number | null;
+  moveCount: number;
+  engineLines: boolean;
+  inVariation: boolean;
+  selectedVarNodeId: VariationNodeId | null;
+};
 
 type EngineLinePreview = {
   sourceSlot: number;
@@ -184,6 +205,27 @@ const buildEngineLinePreview = (
   };
 };
 
+const buildMainLineMoveDetails = (
+  moves: AnalysisMove[],
+  startingFen: string,
+): MainLineMoveDetails[] => {
+  return moves.map((move, index) => {
+    const fenBefore =
+      index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen;
+    const playedSquares = sanToSquares(fenBefore, move.move_san);
+    const bestSquares =
+      move.best_move_san && move.best_move_san !== move.move_san
+        ? sanToSquares(fenBefore, move.best_move_san)
+        : null;
+
+    return {
+      fenBefore,
+      playedSquares,
+      bestSquares,
+    };
+  });
+};
+
 /** Check whether a FEN already has a pending analysis request in flight. */
 const hasPendingForFen = (pending: Map<string, string>, fen: string): boolean => {
   for (const v of pending.values()) {
@@ -206,6 +248,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   highlightedMoves,
   onGraphMoveClick,
 }, ref) => {
+  const debugEnabled = useMemo(isAnalysisBoardDiagnosticsEnabled, []);
+  const reactBoardId = useId();
+  const chessboardId = useMemo(
+    () => `analysis-board-${reactBoardId.replace(/[^a-zA-Z0-9_-]/g, "")}`,
+    [reactBoardId],
+  );
+  const navigationTraceRef = useRef<NavigationTrace | null>(null);
+  const navigationTraceIdRef = useRef(0);
   const [currentIndex, setCurrentIndex] = useState<number | null>(
     initialMoveIndex ?? null,
   );
@@ -245,6 +295,72 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
   const effectiveIndex = currentIndex ?? moves.length - 1;
 
+  const traceNavigation = useCallback(
+    (toIndex: number | null) => {
+      if (!debugEnabled || typeof performance === "undefined") return;
+      navigationTraceRef.current = {
+        id: ++navigationTraceIdRef.current,
+        startMs: performance.now(),
+        fromIndex: currentIndex,
+        toIndex,
+        moveCount: moves.length,
+        engineLines: showEngineArrows,
+        inVariation: isInVariation,
+        selectedVarNodeId,
+      };
+    },
+    [
+      currentIndex,
+      debugEnabled,
+      isInVariation,
+      moves.length,
+      selectedVarNodeId,
+      showEngineArrows,
+    ],
+  );
+
+  const handleProfilerRender = useCallback<ProfilerOnRenderCallback>(
+    (
+      id,
+      phase,
+      actualDuration,
+      baseDuration,
+      startTime,
+      commitTime,
+    ) => {
+      if (!debugEnabled) return;
+      const trace = navigationTraceRef.current;
+      if (!trace && actualDuration < 12) return;
+
+      logAnalysisBoardDiagnostic("react-render", {
+        id,
+        phase,
+        actualDurationMs: Number(actualDuration.toFixed(2)),
+        baseDurationMs: Number(baseDuration.toFixed(2)),
+        renderToCommitMs: Number((commitTime - startTime).toFixed(2)),
+        traceId: trace?.id ?? null,
+        currentIndex,
+        effectiveIndex,
+        moveCount: moves.length,
+        engineLines: showEngineArrows,
+        inVariation: isInVariation,
+      });
+    },
+    [
+      currentIndex,
+      debugEnabled,
+      effectiveIndex,
+      isInVariation,
+      moves.length,
+      showEngineArrows,
+    ],
+  );
+
+  const mainLineMoveDetails = useMemo(
+    () => buildMainLineMoveDetails(moves, startingFen),
+    [moves, startingFen],
+  );
+
   // Map AnalysisMove[] to Move[] for MoveList
   const mappedMoves = useMemo(
     () =>
@@ -272,9 +388,8 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const fenBeforeCurrentMove = useMemo(() => {
     if (isInVariation) return null; // no cached best arrows in variations
     if (effectiveIndex < 0) return null;
-    if (effectiveIndex === 0) return startingFen;
-    return moves[effectiveIndex - 1]?.fen_after ?? startingFen;
-  }, [isInVariation, effectiveIndex, moves, startingFen]);
+    return mainLineMoveDetails[effectiveIndex]?.fenBefore ?? null;
+  }, [isInVariation, effectiveIndex, mainLineMoveDetails]);
 
   // Displayed FEN
   const displayedFen = useMemo(() => {
@@ -286,6 +401,83 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
   // Side-to-move derived from FEN (avoids constructing Chess just for turn())
   const sideToMove = useMemo(() => fenSideToMove(displayedFen), [displayedFen]);
+
+  useEffect(() => {
+    if (!debugEnabled) return;
+    if (typeof PerformanceObserver === "undefined") {
+      logAnalysisBoardDiagnostic("long-task-observer-unavailable", {});
+      return;
+    }
+
+    let observer: PerformanceObserver | null = null;
+    try {
+      observer = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          logAnalysisBoardDiagnostic(
+            "browser-long-task",
+            {
+              durationMs: Number(entry.duration.toFixed(2)),
+              startMs: Number(entry.startTime.toFixed(2)),
+              name: entry.name,
+            },
+            "warn",
+          );
+        }
+      });
+      observer.observe({ entryTypes: ["longtask"] });
+      logAnalysisBoardDiagnostic("enabled", {
+        moveCount: moves.length,
+        engineLines: showEngineArrows,
+      });
+    } catch (error) {
+      logAnalysisBoardDiagnostic("long-task-observer-error", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    return () => observer?.disconnect();
+  }, [debugEnabled, moves.length, showEngineArrows]);
+
+  useEffect(() => {
+    if (!debugEnabled || typeof window === "undefined") return;
+    const trace = navigationTraceRef.current;
+    if (!trace) return;
+
+    const commitMs = performance.now() - trace.startMs;
+    const frameId = window.requestAnimationFrame(() => {
+      const paintMs = performance.now() - trace.startMs;
+      logAnalysisBoardDiagnostic(
+        paintMs >= 100 ? "navigation-slow-paint" : "navigation-paint",
+        {
+          traceId: trace.id,
+          fromIndex: trace.fromIndex,
+          toIndex: trace.toIndex,
+          currentIndex,
+          effectiveIndex,
+          moveCount: trace.moveCount,
+          engineLines: trace.engineLines,
+          wasInVariation: trace.inVariation,
+          selectedVarNodeId: trace.selectedVarNodeId,
+          displayedFen: displayedFen.slice(0, 32),
+          commitMs: Number(commitMs.toFixed(2)),
+          paintMs: Number(paintMs.toFixed(2)),
+        },
+        paintMs >= 100 ? "warn" : "info",
+      );
+
+      if (navigationTraceRef.current?.id === trace.id) {
+        navigationTraceRef.current = null;
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    currentIndex,
+    debugEnabled,
+    displayedFen,
+    effectiveIndex,
+    selectedVarNodeId,
+  ]);
 
   // Cached best move for the displayed position (from pre-existing game analysis)
   const cachedBest = positionAnalysis?.[displayedFen] ?? null;
@@ -497,30 +689,32 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
     // Only show played/best arrows when there's a different best move
     if (move.best_move_san && move.best_move_san !== move.move_san) {
-      const playedSquares = sanToSquares(fenBeforeCurrentMove, move.move_san);
-      if (playedSquares) {
+      const details = mainLineMoveDetails[effectiveIndex];
+      if (details?.playedSquares) {
         result.push({
-          startSquare: playedSquares.from,
-          endSquare: playedSquares.to,
+          startSquare: details.playedSquares.from,
+          endSquare: details.playedSquares.to,
           color: "rgba(248, 113, 113, 0.8)",
         });
       }
 
-      const bestSquares = sanToSquares(
-        fenBeforeCurrentMove,
-        move.best_move_san,
-      );
-      if (bestSquares) {
+      if (details?.bestSquares) {
         result.push({
-          startSquare: bestSquares.from,
-          endSquare: bestSquares.to,
+          startSquare: details.bestSquares.from,
+          endSquare: details.bestSquares.to,
           color: "rgba(52, 211, 153, 0.8)",
         });
       }
     }
 
     return result;
-  }, [isInVariation, effectiveIndex, fenBeforeCurrentMove, moves]);
+  }, [
+    isInVariation,
+    effectiveIndex,
+    fenBeforeCurrentMove,
+    moves,
+    mainLineMoveDetails,
+  ]);
 
   // Merge: played/best arrows take priority over engine arrows on same squares
   const allArrows = useMemo(() => {
@@ -599,7 +793,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     if (effectiveIndex < 0 || !fenBeforeCurrentMove) return {};
     const move = moves[effectiveIndex];
     if (!move) return {};
-    const sq = sanToSquares(fenBeforeCurrentMove, move.move_san);
+    const sq = mainLineMoveDetails[effectiveIndex]?.playedSquares ?? null;
     if (!sq) return {};
     return { [sq.from]: style, [sq.to]: style };
   }, [
@@ -608,6 +802,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     effectiveIndex,
     fenBeforeCurrentMove,
     moves,
+    mainLineMoveDetails,
   ]);
 
   // Resolve pending variation analysis when lastAnalysis fires
@@ -619,10 +814,11 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   // Handle MoveList navigation
   const handleNavigate = useCallback(
     (index: number | null) => {
+      traceNavigation(index);
       setSelectedVarNode(null);
       setCurrentIndex(index);
     },
-    [setSelectedVarNode],
+    [setSelectedVarNode, traceNavigation],
   );
 
   useImperativeHandle(ref, () => ({
@@ -743,7 +939,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     window.requestAnimationFrame(updateEnginePopupPosition);
   }, [updateEnginePopupPosition]);
 
-  return (
+  const content = (
     <div className="analysis-board" ref={boardRootRef}>
       <div className="analysis-board__layout">
         <div className="analysis-board__board-col">
@@ -767,6 +963,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             <div className="analysis-board__board-frame">
               <Chessboard
                 options={{
+                  id: `${chessboardId}-main`,
                   position: displayedFen,
                   boardOrientation,
                   onPieceDrop: handleDrop,
@@ -903,6 +1100,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
           <div className="analysis-board__engine-popup-board">
             <Chessboard
               options={{
+                id: `${chessboardId}-preview`,
                 position: selectedPreviewFen,
                 boardOrientation,
                 allowDragging: false,
@@ -950,6 +1148,16 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
     </div>
   );
+
+  if (debugEnabled) {
+    return (
+      <Profiler id="AnalysisBoard" onRender={handleProfilerRender}>
+        {content}
+      </Profiler>
+    );
+  }
+
+  return content;
 });
 
 export default memo(AnalysisBoard);
