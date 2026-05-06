@@ -3,12 +3,12 @@
 
 [build]
 builder = "nixpacks"
-# Tell Nixpacks to look for Python code inside the backend folder
-rootDirectory = "backend"
+# Keep the backend service build independent from the root frontend package.
+buildCommand = "true"
 
 [deploy]
 # Run Alembic migrations before starting the server
-startCommand = "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+startCommand = "cd backend && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
