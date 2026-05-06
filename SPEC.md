@@ -150,18 +150,18 @@ Represents a unique board state. Positions are pure Ghost Move Library nodes—t
 ```sql
 CREATE TABLE positions (
     id BIGSERIAL PRIMARY KEY,
-    user_id BIGINT REFERENCES users(id),
+    user_id BIGINT NOT NULL,
     fen_hash VARCHAR(64) NOT NULL,         -- SHA256 of Normalized FEN
     fen_raw TEXT NOT NULL,
     active_color VARCHAR(5) NOT NULL,      -- 'white' or 'black' (side to move)
     created_at TIMESTAMP DEFAULT NOW(),
 
+    CONSTRAINT ck_positions_active_color CHECK (active_color IN ('white', 'black')),
     UNIQUE (user_id, fen_hash)
 );
 
 CREATE INDEX idx_positions_user ON positions(user_id);
-CREATE INDEX idx_positions_fen_hash ON positions(user_id, fen_hash);
-CREATE INDEX idx_positions_user_color ON positions(user_id, active_color);
+CREATE INDEX idx_positions_user_active_color ON positions(user_id, active_color);
 ```
 
 #### 5.1.1 FEN Normalization
@@ -239,12 +239,13 @@ CREATE TABLE blunders (
     pass_streak INTEGER NOT NULL DEFAULT 0,
     last_reviewed_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    source_session_id UUID REFERENCES game_sessions(id),  -- Session that produced this blunder
 
     UNIQUE (user_id, position_id)          -- One ghost-library target per position per user
 );
 
 CREATE INDEX idx_blunders_user ON blunders(user_id);
-CREATE INDEX idx_blunders_position ON blunders(position_id);
+CREATE INDEX idx_blunders_position_user ON blunders(position_id, user_id);
 CREATE INDEX idx_blunders_due ON blunders(user_id, pass_streak, last_reviewed_at);
 ```
 
@@ -271,7 +272,7 @@ CREATE TABLE blunder_reviews (
     eval_delta_cp INTEGER NOT NULL                      -- Positive means worse than best
 );
 
-CREATE INDEX idx_blunder_reviews_blunder ON blunder_reviews(blunder_id, reviewed_at DESC);
+CREATE INDEX idx_blunder_reviews_blunder ON blunder_reviews(blunder_id, reviewed_at);
 ```
 
 **Usage notes:**
@@ -300,20 +301,157 @@ Represents both anonymous and claimed user accounts.
 ```sql
 CREATE TABLE users (
     id BIGSERIAL PRIMARY KEY,
-    username VARCHAR(32) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,   -- bcrypt hash
+    username VARCHAR(50) UNIQUE,           -- nullable; auto-generated for anonymous accounts
+    password_hash VARCHAR(255),             -- nullable; set during registration or claim
     is_anonymous BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ```
 
 **Constraints:**
-- `username`: 3-32 characters, alphanumeric + underscores only
+- `username`: 3-50 characters, alphanumeric + underscores only
 - Anonymous users start with auto-generated usernames (e.g., `ghost_a3b5c7d9`)
 - `is_anonymous`: TRUE for auto-created accounts, FALSE after claiming
 
-### 5.5 Authentication
+### 5.5 `rating_history` (Rating Snapshots)
+
+Tracks per-game rating changes for a user, enabling rating trend display and provisional-flag tracking.
+
+```sql
+CREATE TABLE rating_history (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id),
+    game_session_id UUID NOT NULL REFERENCES game_sessions(id),
+    rating INTEGER NOT NULL,              -- New rating after this game
+    is_provisional BOOLEAN NOT NULL,       -- TRUE if user has played < PROVISIONAL_GAMES threshold
+    games_played INTEGER NOT NULL,         -- Total games played at the time of this record
+    recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_rating_history_user_timestamp ON rating_history(user_id, recorded_at);
+```
+
+**Key semantics:**
+- One row per completed rated game; inserted by `compute_new_rating()` after game end
+- `is_provisional` tracks whether the rating is still considered provisional (based on games played count)
+- `games_played` enables the frontend to show progress toward a stable rating
+
+### 5.6 `analysis_cache` (Move Analysis Cache)
+
+Caches move-level analysis results keyed by `(fen_before, move_uci)` to avoid re-running Stockfish for positions that have already been evaluated.
+
+```sql
+CREATE TABLE analysis_cache (
+    id BIGSERIAL PRIMARY KEY,
+    fen_before TEXT NOT NULL,               -- Position before the move
+    move_uci VARCHAR(5) NOT NULL,           -- Move in UCI notation (e.g., "e2e4")
+    move_san VARCHAR(10) NOT NULL,          -- Move in SAN notation (e.g., "e4")
+    best_move_uci VARCHAR(5),               -- Engine's best move in UCI
+    best_move_san VARCHAR(10),              -- Engine's best move in SAN
+    played_eval INTEGER,                    -- Eval after the played move (centipawns)
+    best_eval INTEGER,                      -- Eval of best move (centipawns)
+    eval_delta INTEGER,                     -- best_eval - played_eval (positive = lost advantage)
+    classification VARCHAR(20),             -- Move classification
+    source VARCHAR(20) NOT NULL DEFAULT 'game',  -- Origin: 'game' or 'worker'
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    UNIQUE (fen_before, move_uci)
+);
+
+CREATE INDEX idx_analysis_cache_fen ON analysis_cache(fen_before);
+```
+
+**Key semantics:**
+- The `(fen_before, move_uci)` unique pair enables O(1) lookup: "has this exact position+move been analyzed before?"
+- `source` tracks whether the entry came from a game session (`game`) or a dedicated worker pass (`worker`)
+- The frontend races its own local Stockfish worker against this cache to avoid redundant computation
+
+### 5.7 Opening Score Tables
+
+The opening score system computes and stores per-user weakness metrics for opening lines. Three tables work together: batches group computation runs, cursors track the latest batch per user/color, and scores hold the actual per-opening metrics.
+
+#### 5.7.1 `opening_score_batches` (Computation Runs)
+
+Each row represents a single batch computation of opening scores for a user/color pair.
+
+```sql
+CREATE TABLE opening_score_batches (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
+    generation INTEGER NOT NULL,            -- Monotonic counter per (user_id, player_color)
+    registry_fingerprint TEXT,              -- Hash of the opening registry used, to detect staleness
+    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
+    UNIQUE (user_id, player_color, generation)
+);
+
+CREATE INDEX idx_opening_score_batches_user_color ON opening_score_batches(user_id, player_color, generation);
+```
+
+#### 5.7.2 `opening_score_cursors` (Latest Batch Tracking)
+
+Tracks the latest generation per user/color so the system can quickly find the current scores without scanning the batches table.
+
+```sql
+CREATE TABLE opening_score_cursors (
+    user_id BIGINT NOT NULL,
+    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
+    latest_generation INTEGER NOT NULL DEFAULT 0,
+
+    PRIMARY KEY (user_id, player_color),
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black'))
+);
+```
+
+#### 5.7.3 `user_opening_scores` (Per-Opening Metrics)
+
+Stores the actual weakness metrics for each opening line, computed within a batch.
+
+```sql
+CREATE TABLE user_opening_scores (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id BIGINT NOT NULL REFERENCES opening_score_batches(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
+    opening_key TEXT NOT NULL,             -- ECO-style key identifying the opening line
+    opening_name TEXT NOT NULL,            -- Human-readable opening name
+    opening_family TEXT NOT NULL,          -- Broader family grouping (e.g., "Sicilian Defense")
+    opening_score FLOAT NOT NULL,          -- Composite weakness score (0 = perfect, higher = weaker)
+    confidence FLOAT NOT NULL,             -- Statistical confidence in the score
+    coverage FLOAT NOT NULL,               -- Fraction of moves in this line that have been played
+    weighted_depth FLOAT NOT NULL,         -- Average depth of user's games in this opening
+    sample_size INTEGER NOT NULL,          -- Number of data points used for this score
+    last_practiced_at TIMESTAMP,           -- When the user last played this opening
+    strongest_branch_name TEXT,            -- Name of the user's best sub-line
+    strongest_branch_key TEXT,             -- Key of the user's best sub-line
+    strongest_branch_score FLOAT,          -- Score of the user's best sub-line
+    weakest_branch_name TEXT,              -- Name of the user's worst sub-line
+    weakest_branch_key TEXT,               -- Key of the user's worst sub-line
+    weakest_branch_score FLOAT,            -- Score of the user's worst sub-line
+    underexposed_branch_name TEXT,         -- Name of a sub-line the user hasn't practiced enough
+    underexposed_branch_key TEXT,          -- Key of an underexposed sub-line
+    underexposed_branch_value FLOAT,       -- Coverage gap value for the underexposed branch
+    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
+    UNIQUE (batch_id, opening_key)
+);
+
+CREATE INDEX idx_user_opening_scores_batch ON user_opening_scores(batch_id);
+CREATE INDEX idx_user_opening_scores_user_color ON user_opening_scores(user_id, player_color);
+```
+
+**Key semantics:**
+- `opening_score` is a composite metric — higher values indicate weaker performance in that opening
+- `confidence` and `sample_size` let the frontend de-emphasize scores based on sparse data
+- Branch fields (strongest/weakest/underexposed) identify specific sub-lines for targeted practice recommendations
+- Batches are replaced atomically: a new batch is computed, then the cursor is updated to point to it; old batches are pruned
+- `recompute_opening_scores_if_needed()` is triggered after move uploads and SRS reviews
+
+### 5.8 Authentication
 
 **Method:** Anonymous-first with stateless JWT tokens
 
@@ -761,23 +899,23 @@ A session begins when the user clicks "New Game" and ends when the game terminat
 ### 7.2 Game States
 
 ```
-┌─────────┐     New Game     ┌─────────────┐     Terminal Event     ┌─────────┐
-│  IDLE   │ ───────────────► │ IN_PROGRESS │ ─────────────────────► │  ENDED  │
-└─────────┘                  └─────────────┘                        └─────────┘
-                                   │                                     │
-                                   │ Browser close/refresh               │
-                                   ▼                                     │
-                             ┌───────────┐                               │
-                             │ ABANDONED │ ◄─────────────────────────────┘
-                             └───────────┘   (timeout after disconnect)
+ ┌─────────┐     New Game     ┌─────────┐     Terminal Event     ┌─────────┐
+ │  IDLE   │ ───────────────► │  ACTIVE │ ─────────────────────► │  ENDED  │
+ └─────────┘                  └─────────┘                        └─────────┘
+                                    │                                     │
+                                    │ Browser close/refresh               │
+                                    ▼                                     │
+                              ┌───────────┐                               │
+                              │ ABANDONED │ ◄─────────────────────────────┘
+                              └───────────┘   (timeout after disconnect)
 ```
 
 **State Transitions:**
 | From | To | Trigger |
 |------|------|---------|
-| IDLE | IN_PROGRESS | User clicks "New Game" |
-| IN_PROGRESS | ENDED | Checkmate, stalemate, resignation, draw agreement |
-| IN_PROGRESS | ABANDONED | Browser disconnect + timeout (MVP: 5 minutes) |
+| IDLE | ACTIVE | User clicks "New Game" |
+| ACTIVE | ENDED | Checkmate, stalemate, resignation, draw agreement |
+| ACTIVE | ABANDONED | Browser disconnect + timeout (5 minutes) |
 
 ### 7.3 Session Schema
 
@@ -787,22 +925,20 @@ CREATE TABLE game_sessions (
     user_id BIGINT NOT NULL REFERENCES users(id),
     started_at TIMESTAMP NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMP,
-    status VARCHAR(20) NOT NULL DEFAULT 'in_progress',  -- 'in_progress', 'ended', 'abandoned'
+    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- 'active', 'ended', 'abandoned'
     result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
     engine_elo INTEGER NOT NULL,  -- Bot difficulty selected for this game
-    player_color VARCHAR(5) NOT NULL, -- 'white' or 'black' (user side for this session)
+    player_color VARCHAR(5) NOT NULL DEFAULT 'white', -- 'white' or 'black' (user side for this session)
     blunder_recorded BOOLEAN NOT NULL DEFAULT FALSE,  -- First auto-blunder rule flag (manual captures bypass)
+    is_rated BOOLEAN NOT NULL DEFAULT TRUE,  -- Whether this game affects the user's rating
     pgn TEXT,                     -- Full game in PGN format
 
-    CONSTRAINT valid_status CHECK (status IN ('in_progress', 'ended', 'abandoned')),
-    CONSTRAINT valid_result CHECK (result IS NULL OR result IN (
-        'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
-    )),
     CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black'))
 );
 
-CREATE INDEX idx_sessions_user ON game_sessions(user_id);
-CREATE INDEX idx_sessions_active ON game_sessions(user_id, status) WHERE status = 'in_progress';
+CREATE INDEX idx_game_sessions_user ON game_sessions(user_id);
+CREATE INDEX idx_game_sessions_status ON game_sessions(status);
+CREATE INDEX idx_game_sessions_user_started ON game_sessions(user_id, started_at);
 ```
 
 ### 7.4 Move Analysis Storage
@@ -823,8 +959,15 @@ CREATE TABLE session_moves (
     best_move_eval_cp INTEGER,         -- Eval if best move was played
     eval_delta INTEGER,                -- best_move_eval - actual_eval (positive = lost advantage)
     classification VARCHAR(20),        -- 'best', 'excellent', 'good', 'inaccuracy', 'mistake', 'blunder'
+    fen_before TEXT,                   -- Position before this move (for analysis cache lookups)
+    best_move_uci VARCHAR(5),          -- Engine's recommended move in UCI notation
+    decision_source VARCHAR(20),      -- 'ghost_path', 'backend_engine', 'local_fallback', or NULL
+    target_blunder_id BIGINT REFERENCES blunders(id),  -- Blunder being steered toward (ghost moves only)
 
     CONSTRAINT valid_color CHECK (color IN ('white', 'black')),
+    CONSTRAINT valid_decision_source CHECK (
+        decision_source IS NULL OR decision_source IN ('ghost_path', 'backend_engine', 'local_fallback')
+    ),
     UNIQUE (session_id, move_number, color)
 );
 
@@ -895,7 +1038,7 @@ POST /api/blunder called
 
 **Abandonment (MVP):**
 - User closes browser or navigates away
-- Session remains `in_progress`
+- Session remains `active`
 - Background job marks sessions as `abandoned` if no activity for 5+ minutes
 - Abandoned sessions are treated as ended for all purposes
 
@@ -954,7 +1097,7 @@ Creates an anonymous user account with auto-generated credentials. Called automa
 **Request:**
 ```json
 {
-  "username": "string (3-32 chars, auto-generated by frontend)",
+  "username": "string (3-50 chars, auto-generated by frontend)",
   "password": "string (auto-generated by frontend)"
 }
 ```
@@ -1008,8 +1151,8 @@ Upgrades an anonymous account to a claimed (permanent) account. Allows user to c
 **Request:**
 ```json
 {
-  "new_username": "string (3-32 chars, alphanumeric + underscore)",
-  "new_password": "string (min 8 chars)"
+  "new_username": "string (3-50 chars, alphanumeric + underscore)",
+  "new_password": "string (min 6 chars)"
 }
 ```
 
