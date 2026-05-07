@@ -1,13 +1,11 @@
-import os
 from typing import Generator
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+psycopg://postgres:postgres@localhost:5432/ghostreplay",
-)
+from app.database_url import resolve_database_url
+
+DATABASE_URL = resolve_database_url()
 
 engine = create_engine(
     DATABASE_URL,
