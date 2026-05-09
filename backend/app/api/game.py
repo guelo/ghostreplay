@@ -16,7 +16,14 @@ from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory
 from app.rating import DEFAULT_RATING, RESULT_SCORES, compute_new_rating
 from app.security import TokenPayload, get_current_user
-from app.srs_math import calculate_priority, calculate_urgency
+from app.srs_math import (
+    OPPORTUNITY_POWER,
+    calculate_opportunity_overdue,
+    calculate_priority,
+    calculate_urgency,
+    compute_p_reach,
+)
+from app.srs_opportunity import detect_opening_family, load_opportunity_counters, opening_weight
 
 router = APIRouter(prefix="/api/game", tags=["game"])
 
@@ -35,17 +42,36 @@ class GhostMoveCandidate:
     pass_streak: int
     last_reviewed_at: datetime | None
     created_at: datetime | None
+    opportunities_since_review: int = 0
+    opportunities_30d: int = 0
+    reached_30d: int = 0
+    has_opportunity_events: bool = False
+    opening_family: str | None = None
 
-    def score(self, now: datetime) -> float:
+    def score(self, now: datetime, current_opening_family: str | None = None) -> float:
         urgency = calculate_urgency(
             pass_streak=self.pass_streak,
             last_reviewed_at=self.last_reviewed_at,
             created_at=self.created_at,
             now=now,
         )
+        if self.has_opportunity_events:
+            urgency = calculate_opportunity_overdue(
+                opportunities_since_review=self.opportunities_since_review,
+                pass_streak=self.pass_streak,
+            )
         severity = math.log1p(max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
         distance_weight = math.exp(-DISTANCE_DECAY_RATE * self.depth)
-        return urgency * severity * distance_weight
+        reach_weight = 1.0
+        if self.has_opportunity_events:
+            reach_weight = compute_p_reach(self.reached_30d, self.opportunities_30d) ** OPPORTUNITY_POWER
+        return (
+            urgency
+            * severity
+            * distance_weight
+            * reach_weight
+            * opening_weight(self.opening_family, current_opening_family)
+        )
 
 
 def _stable_seed(user_id: int, fen: str, session_id: uuid.UUID) -> int:
@@ -136,7 +162,8 @@ def find_ghost_move(
             b.eval_loss_cp,
             b.pass_streak,
             b.last_reviewed_at,
-            b.created_at
+            b.created_at,
+            b.opening_family
         FROM reachable r
         JOIN positions p ON p.id = r.position_id
         JOIN blunders b ON b.position_id = r.position_id
@@ -159,9 +186,12 @@ def find_ghost_move(
         return (None, None, None, None)
 
     now = datetime.now(timezone.utc)
+    current_opening_family = detect_opening_family(fen) if any(row[7] for row in candidate_rows) else None
+    opportunity_counters = load_opportunity_counters(db, [row[1] for row in candidate_rows], now=now)
     scored: list[tuple[GhostMoveCandidate, float]] = []
 
     for row in candidate_rows:
+        counters = opportunity_counters.get(row[1])
         candidate = GhostMoveCandidate(
             first_move=row[0],
             blunder_id=row[1],
@@ -170,16 +200,27 @@ def find_ghost_move(
             pass_streak=row[4],
             last_reviewed_at=row[5],
             created_at=row[6],
+            opportunities_since_review=counters.opportunities_since_review if counters else 0,
+            opportunities_30d=counters.opportunities_30d if counters else 0,
+            reached_30d=counters.reached_30d if counters else 0,
+            has_opportunity_events=bool(counters and counters.event_count > 0),
+            opening_family=row[7],
         )
-        priority = calculate_priority(
-            pass_streak=candidate.pass_streak,
-            last_reviewed_at=candidate.last_reviewed_at,
-            created_at=candidate.created_at,
-            now=now,
-        )
+        if candidate.has_opportunity_events:
+            priority = calculate_opportunity_overdue(
+                opportunities_since_review=candidate.opportunities_since_review,
+                pass_streak=candidate.pass_streak,
+            )
+        else:
+            priority = calculate_priority(
+                pass_streak=candidate.pass_streak,
+                last_reviewed_at=candidate.last_reviewed_at,
+                created_at=candidate.created_at,
+                now=now,
+            )
         if priority < 1.0:
             continue
-        scored.append((candidate, candidate.score(now)))
+        scored.append((candidate, candidate.score(now, current_opening_family)))
 
     if not scored:
         return (None, None, None, None)
@@ -294,6 +335,10 @@ class TargetBlunderSrs(BaseModel):
     pass_count: int = Field(0, description="Total times passed")
     fail_count: int = Field(0, description="Total times failed")
     pass_streak: int = Field(0, description="Current consecutive pass streak")
+    opportunities_since_review: int = Field(0, description="Opportunity events since latest review")
+    opportunities_30d: int = Field(0, description="Opportunity events in the last 30 days")
+    reached_30d: int = Field(0, description="Exact blunder reaches in the last 30 days")
+    p_reach: float = Field(0.5, description="Smoothed 30-day reach probability")
 
 
 class NextOpponentMoveResponse(BaseModel):
@@ -513,6 +558,8 @@ def get_next_opponent_move(
                 """),
                 {"id": target_blunder_id},
             ).fetchone()
+            opportunity_counters = load_opportunity_counters(db, [target_blunder_id] if target_blunder_id else [])
+            counters = opportunity_counters.get(target_blunder_id) if target_blunder_id else None
 
             target_srs = TargetBlunderSrs(
                 last_reviewed_at=_isoformat_optional(blunder_last_reviewed),
@@ -520,6 +567,10 @@ def get_next_opponent_move(
                 pass_count=review_counts[0] or 0 if review_counts else 0,
                 fail_count=review_counts[1] or 0 if review_counts else 0,
                 pass_streak=blunder_row[0] if blunder_row else 0,
+                opportunities_since_review=counters.opportunities_since_review if counters else 0,
+                opportunities_30d=counters.opportunities_30d if counters else 0,
+                reached_30d=counters.reached_30d if counters else 0,
+                p_reach=round(counters.p_reach, 4) if counters else 0.5,
             )
 
             target_fen = blunder_row[1] if blunder_row else None

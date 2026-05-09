@@ -79,6 +79,28 @@ class Blunder(Base):
     last_reviewed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     source_session_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("game_sessions.id"), nullable=True)
+    opening_family: Mapped[str | None] = mapped_column(Text)
+
+
+class BlunderOpportunityEvent(Base):
+    __tablename__ = "blunder_opportunity_events"
+    __table_args__ = (
+        UniqueConstraint("session_id", "blunder_id", name="uq_blunder_opportunity_session_blunder"),
+        Index("idx_blunder_opportunity_blunder_time", "blunder_id", "occurred_at"),
+        Index("idx_blunder_opportunity_session", "session_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    blunder_id: Mapped[int] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id", ondelete="CASCADE"), nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("game_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    occurred_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    opportunity: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reached: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class BlunderReview(Base):

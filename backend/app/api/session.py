@@ -12,9 +12,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.fen import fen_hash
 from app.opening_cache import recompute_opening_scores_if_needed
-from app.models import AnalysisCache, GameSession, SessionMove
+from app.models import AnalysisCache, Blunder, BlunderOpportunityEvent, GameSession, Move, Position, SessionMove
 from app.security import TokenPayload, get_current_user
+from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 logger = logging.getLogger(__name__)
@@ -140,6 +142,162 @@ def _refresh_opening_scores_best_effort(db: Session, user_id: int, player_color:
             "opening score cache refresh failed after session upload",
             extra={"user_id": user_id, "player_color": player_color},
         )
+
+
+def _reverse_ancestor_position_ids(
+    db: Session,
+    *,
+    start_position_id: int,
+    player_color: str,
+    radius_ply: int = OPPORTUNITY_ANCESTOR_RADIUS_PLY,
+) -> set[int]:
+    frontier = {start_position_id}
+    visited = {start_position_id}
+    ancestors: set[int] = set()
+
+    for _ in range(radius_ply):
+        if not frontier:
+            break
+        parent_ids = {
+            row[0]
+            for row in db.query(Move.from_position_id)
+            .filter(Move.to_position_id.in_(frontier))
+            .all()
+        }
+        parent_ids -= visited
+        if not parent_ids:
+            break
+        visited.update(parent_ids)
+
+        matching_ids = {
+            row[0]
+            for row in db.query(Position.id)
+            .filter(Position.id.in_(parent_ids), Position.active_color == player_color)
+            .all()
+        }
+        ancestors.update(matching_ids)
+        frontier = parent_ids
+
+    ancestors.discard(start_position_id)
+    return ancestors
+
+
+def _upsert_opportunity_event(
+    db: Session,
+    *,
+    session_id: uuid.UUID,
+    blunder_id: int,
+    occurred_at,
+    opportunity: bool,
+    reached: bool,
+) -> None:
+    values = {
+        "session_id": session_id,
+        "blunder_id": blunder_id,
+        "occurred_at": occurred_at,
+        "opportunity": opportunity,
+        "reached": reached,
+    }
+    dialect_name = db.bind.dialect.name if db.bind else ""
+    if dialect_name == "sqlite":
+        stmt = sqlite_insert(BlunderOpportunityEvent).values(values)
+    elif dialect_name == "postgresql":
+        stmt = postgresql_insert(BlunderOpportunityEvent).values(values)
+    else:
+        existing = db.query(BlunderOpportunityEvent).filter(
+            BlunderOpportunityEvent.session_id == session_id,
+            BlunderOpportunityEvent.blunder_id == blunder_id,
+        ).first()
+        if existing:
+            existing.occurred_at = occurred_at
+            existing.opportunity = opportunity
+            existing.reached = reached
+        else:
+            db.add(BlunderOpportunityEvent(**values))
+        return
+
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[BlunderOpportunityEvent.session_id, BlunderOpportunityEvent.blunder_id],
+        set_={
+            "occurred_at": stmt.excluded.occurred_at,
+            "opportunity": stmt.excluded.opportunity,
+            "reached": stmt.excluded.reached,
+        },
+    )
+    db.execute(stmt)
+
+
+def _compute_blunder_opportunity_events(
+    db: Session,
+    *,
+    session_id: uuid.UUID,
+    user_id: int,
+    player_color: str,
+) -> None:
+    game_session = db.query(GameSession).filter(GameSession.id == session_id).first()
+    if game_session is None:
+        return
+
+    session_moves = db.query(SessionMove).filter(SessionMove.session_id == session_id).all()
+    session_hashes: set[str] = set()
+    for move in session_moves:
+        if move.fen_before:
+            try:
+                session_hashes.add(fen_hash(move.fen_before))
+            except ValueError:
+                pass
+        if move.fen_after:
+            try:
+                session_hashes.add(fen_hash(move.fen_after))
+            except ValueError:
+                pass
+    session_position_ids = (
+        {
+            row[0]
+            for row in db.query(Position.id)
+            .filter(Position.user_id == user_id, Position.fen_hash.in_(session_hashes))
+            .all()
+        }
+        if session_hashes
+        else set()
+    )
+
+    matched: dict[int, tuple[bool, bool]] = {}
+    if session_position_ids:
+        blunders = db.query(Blunder).filter(Blunder.user_id == user_id).all()
+        for blunder in blunders:
+            reached = blunder.position_id in session_position_ids
+            ancestor_ids = _reverse_ancestor_position_ids(
+                db,
+                start_position_id=blunder.position_id,
+                player_color=player_color,
+            )
+            opportunity_only = bool(session_position_ids.intersection(ancestor_ids))
+            opportunity = opportunity_only or reached
+            if opportunity:
+                matched[blunder.id] = (opportunity, reached)
+
+    existing_events = (
+        db.query(BlunderOpportunityEvent)
+        .join(Blunder, Blunder.id == BlunderOpportunityEvent.blunder_id)
+        .filter(BlunderOpportunityEvent.session_id == session_id, Blunder.user_id == user_id)
+        .all()
+    )
+    for event in existing_events:
+        if event.blunder_id not in matched:
+            db.delete(event)
+
+    occurred_at = game_session.started_at or game_session.ended_at
+    for blunder_id, (opportunity, reached) in matched.items():
+        _upsert_opportunity_event(
+            db,
+            session_id=session_id,
+            blunder_id=blunder_id,
+            occurred_at=occurred_at,
+            opportunity=opportunity,
+            reached=reached,
+        )
+    db.commit()
 
 
 def _upsert_analysis_cache(
@@ -279,6 +437,12 @@ def upsert_session_moves(
                 db.add(SessionMove(**value))
 
         db.commit()
+        _compute_blunder_opportunity_events(
+            db,
+            session_id=session_id,
+            user_id=user.user_id,
+            player_color=game_session.player_color,
+        )
         _upsert_analysis_cache(db, request.moves)
         _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
         return SessionMovesResponse(moves_inserted=len(values))
@@ -307,6 +471,12 @@ def upsert_session_moves(
     db.execute(statement)
     db.commit()
 
+    _compute_blunder_opportunity_events(
+        db,
+        session_id=session_id,
+        user_id=user.user_id,
+        player_color=game_session.player_color,
+    )
     _upsert_analysis_cache(db, request.moves)
     _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
 

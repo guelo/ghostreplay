@@ -73,9 +73,24 @@ def _create_test_schema(conn) -> None:
             last_reviewed_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             source_session_id TEXT,
+            opening_family TEXT,
             UNIQUE(user_id, position_id),
             FOREIGN KEY (position_id) REFERENCES positions(id),
             FOREIGN KEY (source_session_id) REFERENCES game_sessions(id)
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS blunder_opportunity_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            blunder_id INTEGER NOT NULL,
+            session_id TEXT NOT NULL,
+            occurred_at TIMESTAMP,
+            opportunity BOOLEAN NOT NULL,
+            reached BOOLEAN NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(session_id, blunder_id),
+            FOREIGN KEY (blunder_id) REFERENCES blunders(id) ON DELETE CASCADE,
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE
         )
     """))
     conn.execute(text("""
@@ -206,6 +221,7 @@ def _create_test_schema(conn) -> None:
 
 def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
+    conn.execute(text("DROP TABLE IF EXISTS blunder_opportunity_events"))
     conn.execute(text("DROP TABLE IF EXISTS user_opening_scores"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))

@@ -24,6 +24,11 @@ from app.fen import active_color, fen_hash, normalize_fen
 from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
 from app.srs_math import calculate_priority
+from app.srs_opportunity import (
+    detect_opening_family,
+    load_opportunity_counters,
+    opportunity_priority,
+)
 
 router = APIRouter(prefix="/api/blunder", tags=["blunder"])
 AUTO_RECORDING_MAX_FULL_MOVES = 10
@@ -218,6 +223,7 @@ def _upsert_blunder_target(
     best_move: str,
     eval_loss: int,
     source_session_id: uuid.UUID | None = None,
+    opening_fen_raw: str | None = None,
 ) -> tuple[int, bool]:
     existing_blunder = db.query(Blunder).filter(
         Blunder.user_id == user_id,
@@ -227,6 +233,7 @@ def _upsert_blunder_target(
     if existing_blunder:
         return existing_blunder.id, False
 
+    opening_family = detect_opening_family(opening_fen_raw) if opening_fen_raw else None
     blunder = Blunder(
         user_id=user_id,
         position_id=position_id,
@@ -234,6 +241,7 @@ def _upsert_blunder_target(
         best_move_san=best_move,
         eval_loss_cp=eval_loss,
         source_session_id=source_session_id,
+        opening_family=opening_family,
     )
     db.add(blunder)
     db.flush()
@@ -295,6 +303,7 @@ def _record_target(
         best_move=best_move,
         eval_loss=eval_before - eval_after,
         source_session_id=session.id,
+        opening_fen_raw=replay_data.pre_move_fen_raw,
     )
 
     if mark_first_blunder_recorded:
@@ -398,6 +407,10 @@ class BlunderListItem(BaseModel):
     last_reviewed_at: datetime | None
     created_at: datetime
     srs_priority: float
+    opportunities_since_review: int = 0
+    opportunities_30d: int = 0
+    reached_30d: int = 0
+    p_reach: float = 0.5
     last_session_id: str | None = None
     last_played_at: datetime | None = None
 
@@ -458,9 +471,17 @@ def list_blunders(
             session_ended[gs.id] = gs.ended_at
 
     now = datetime.now(timezone.utc)
+    opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
     items: list[BlunderListItem] = []
     for b in rows:
-        priority = calculate_priority(
+        counters = opportunity_counters.get(b.id)
+        priority = opportunity_priority(
+            counters=counters,
+            pass_streak=b.pass_streak,
+            last_reviewed_at=b.last_reviewed_at,
+            created_at=b.created_at,
+            now=now,
+        ) if counters is not None else calculate_priority(
             pass_streak=b.pass_streak,
             last_reviewed_at=b.last_reviewed_at,
             created_at=b.created_at,
@@ -496,6 +517,10 @@ def list_blunders(
                 last_reviewed_at=b.last_reviewed_at,
                 created_at=b.created_at,
                 srs_priority=round(priority, 4),
+                opportunities_since_review=counters.opportunities_since_review if counters else 0,
+                opportunities_30d=counters.opportunities_30d if counters else 0,
+                reached_30d=counters.reached_30d if counters else 0,
+                p_reach=round(counters.p_reach, 4) if counters else 0.5,
                 last_session_id=str(last_sid) if last_sid else None,
                 last_played_at=last_played,
             )
