@@ -24,6 +24,7 @@ import {
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ENGINE_SEARCH_DEPTH = 21;
+const ENGINE_EVALUATION_DEBOUNCE_MS = 120;
 
 type AnalysisBoardProps = {
   moves: AnalysisMove[];
@@ -505,11 +506,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
     stopSearch();
 
-    if (cachedBest && searchmoves && searchmoves.length > 0) {
-      evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 2, searchmoves }).catch(() => {});
-    } else {
-      evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 3 }).catch(() => {});
-    }
+    const timerId = window.setTimeout(() => {
+      if (cachedBest && searchmoves && searchmoves.length > 0) {
+        evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 2, searchmoves }).catch(() => {});
+      } else {
+        evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 3 }).catch(() => {});
+      }
+    }, ENGINE_EVALUATION_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timerId);
   }, [displayedFen, evaluatePosition, showEngineArrows, cachedBest, searchmoves]);
 
   // Whether the restricted search path is active (same condition as the engine request)

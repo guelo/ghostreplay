@@ -54,6 +54,16 @@ const createRequestId = () => {
   return Math.random().toString(36).slice(2)
 }
 
+const rejectPendingEvaluations = (
+  pending: Map<string, PendingEntry>,
+  error: Error,
+) => {
+  pending.forEach((entry) => {
+    entry.reject(error)
+  })
+  pending.clear()
+}
+
 export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
   const enabled = options.enabled ?? true
   const workerRef = useRef<Worker | null>(null)
@@ -67,12 +77,14 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
   const evalCache = useRef<Map<string, EngineInfo[]>>(new Map())
   const activeCacheKey = useRef<string | null>(null)
   const requestFenById = useRef<Map<string, string>>(new Map())
+  const requestCacheKeyById = useRef<Map<string, string>>(new Map())
 
   useEffect(() => {
     if (!enabled) {
       activeRequestId.current = null
       activeCacheKey.current = null
       requestFenById.current.clear()
+      requestCacheKeyById.current.clear()
       setIsThinking(false)
       setInfo([])
       setInfoFen(null)
@@ -102,6 +114,9 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
           setStatus('ready')
           break
         case 'thinking':
+          if (!requestFenById.current.has(message.id)) {
+            break
+          }
           activeRequestId.current = message.id
           setIsThinking(true)
           setInfo([])
@@ -132,16 +147,15 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
             pendingMap.delete(message.id)
           }
           requestFenById.current.delete(message.id)
+          const cacheKey = requestCacheKeyById.current.get(message.id) ?? null
+          requestCacheKeyById.current.delete(message.id)
 
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
             setIsThinking(false)
-            // Cache completed result — capture the key now so the
-            // updater doesn't read a stale/mutated ref later.
-            const fenToCache = activeCacheKey.current
-            if (fenToCache) {
+            if (cacheKey) {
               setInfo((current) => {
-                evalCache.current.set(fenToCache, current)
+                evalCache.current.set(cacheKey, current)
                 return current
               })
             }
@@ -154,12 +168,10 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
           setIsThinking(false)
           activeRequestId.current = null
           requestFenById.current.clear()
+          requestCacheKeyById.current.clear()
           setInfoFen(null)
 
-          pendingMap.forEach((entry) => {
-            entry.reject(new Error(message.error))
-          })
-          pendingMap.clear()
+          rejectPendingEvaluations(pendingMap, new Error(message.error))
           break
         }
         case 'log':
@@ -176,6 +188,7 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
       setIsThinking(false)
       activeRequestId.current = null
       requestFenById.current.clear()
+      requestCacheKeyById.current.clear()
       setInfoFen(null)
     }
 
@@ -185,11 +198,9 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
     return () => {
       worker.removeEventListener('message', handleMessage)
       worker.removeEventListener('error', handleError)
-      pendingMap.forEach((entry) => {
-        entry.reject(new Error('Stockfish worker disposed'))
-      })
-      pendingMap.clear()
+      rejectPendingEvaluations(pendingMap, new Error('Stockfish worker disposed'))
       requestFenById.current.clear()
+      requestCacheKeyById.current.clear()
       worker.terminate()
       workerRef.current = null
       if (import.meta.env.DEV) {
@@ -218,6 +229,16 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
       const cacheKey = evalCacheKey(fen, options)
       const cached = evalCache.current.get(cacheKey)
       if (cached) {
+        if (workerRef.current) {
+          workerRef.current.postMessage({ type: 'command', command: 'stop' })
+        }
+        activeRequestId.current = null
+        requestFenById.current.clear()
+        requestCacheKeyById.current.clear()
+        rejectPendingEvaluations(
+          pendingEvaluations.current,
+          new Error('Stockfish evaluation superseded'),
+        )
         setInfo(cached)
         setInfoFen(fen)
         setIsThinking(false)
@@ -227,7 +248,14 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
 
       setInfo([])
       setInfoFen(null)
+      activeRequestId.current = null
       activeCacheKey.current = cacheKey
+      requestFenById.current.clear()
+      requestCacheKeyById.current.clear()
+      rejectPendingEvaluations(
+        pendingEvaluations.current,
+        new Error('Stockfish evaluation superseded'),
+      )
       const requestId = createRequestId()
       const payload = {
         type: 'evaluate-position' as const,
@@ -244,6 +272,7 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
       })
 
       requestFenById.current.set(requestId, fen)
+      requestCacheKeyById.current.set(requestId, cacheKey)
       workerRef.current.postMessage(payload)
       return result
     },
@@ -256,6 +285,11 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
     }
     activeRequestId.current = null
     requestFenById.current.clear()
+    requestCacheKeyById.current.clear()
+    rejectPendingEvaluations(
+      pendingEvaluations.current,
+      new Error('Stockfish evaluation stopped'),
+    )
     setIsThinking(false)
     setInfo([])
     setInfoFen(null)
@@ -268,13 +302,11 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
 
     activeRequestId.current = null
     requestFenById.current.clear()
+    requestCacheKeyById.current.clear()
     setIsThinking(false)
     setInfo([])
     setInfoFen(null)
-    pendingEvaluations.current.forEach((entry) => {
-      entry.reject(new Error('Engine reset'))
-    })
-    pendingEvaluations.current.clear()
+    rejectPendingEvaluations(pendingEvaluations.current, new Error('Engine reset'))
   }, [])
 
   return {

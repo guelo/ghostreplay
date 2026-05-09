@@ -91,7 +91,11 @@ describe('useStockfishEngine', () => {
 
     act(() => emit({ type: 'ready' }))
 
-    const requestId = 'req-1'
+    await act(async () => {
+      void result.current.evaluatePosition('startpos', { depth: 21 }).catch(() => {})
+    })
+    const worker = workerInstances[0]
+    const requestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
 
     act(() => emit({ type: 'thinking', id: requestId, fen: 'startpos' }))
     expect(result.current.info).toEqual([])
@@ -139,7 +143,11 @@ describe('useStockfishEngine', () => {
 
     act(() => emit({ type: 'ready' }))
 
-    const requestId = 'req-2'
+    await act(async () => {
+      void result.current.evaluatePosition('startpos', { depth: 21 }).catch(() => {})
+    })
+    const worker = workerInstances[0]
+    const requestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
     act(() => emit({ type: 'thinking', id: requestId, fen: 'startpos' }))
 
     act(() => {
@@ -238,5 +246,166 @@ describe('useStockfishEngine', () => {
     await act(async () => {
       await secondPromise
     })
+  })
+
+  it('rejects a pending evaluation when a newer evaluation supersedes it', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result } = renderHook(() => useStockfishEngine())
+
+    act(() => emit({ type: 'ready' }))
+
+    let firstPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      firstPromise = result.current.evaluatePosition('fen-1', { depth: 21 })
+    })
+    const firstRejection = firstPromise.catch((error: Error) => error)
+
+    await act(async () => {
+      void result.current.evaluatePosition('fen-2', { depth: 21 }).catch(() => {})
+    })
+
+    await expect(firstRejection).resolves.toMatchObject({
+      message: 'Stockfish evaluation superseded',
+    })
+  })
+
+  it('ignores stale worker messages after a newer evaluation supersedes an active request', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result } = renderHook(() => useStockfishEngine())
+
+    act(() => emit({ type: 'ready' }))
+
+    const worker = workerInstances[0]
+    expect(worker).toBeDefined()
+
+    let firstPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      firstPromise = result.current.evaluatePosition('fen-1', { depth: 21 })
+    })
+    const firstRejection = firstPromise.catch((error: Error) => error)
+    const firstRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+
+    act(() => emit({ type: 'thinking', id: firstRequestId, fen: 'fen-1' }))
+    act(() => {
+      emit({
+        type: 'info',
+        id: firstRequestId,
+        info: { depth: 12, multipv: 1, pv: ['e2e4'], score: { type: 'cp', value: 30 } },
+        raw: 'info depth 12 multipv 1 score cp 30 pv e2e4',
+      })
+    })
+    expect(result.current.info[0]?.pv).toEqual(['e2e4'])
+
+    let secondPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      secondPromise = result.current.evaluatePosition('fen-2', { depth: 21 })
+    })
+    const secondRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+
+    act(() => {
+      emit({
+        type: 'info',
+        id: firstRequestId,
+        info: { depth: 21, multipv: 1, pv: ['d2d4'], score: { type: 'cp', value: 80 } },
+        raw: 'info depth 21 multipv 1 score cp 80 pv d2d4',
+      })
+      emit({ type: 'bestmove', id: firstRequestId, move: 'd2d4', raw: 'bestmove d2d4' })
+    })
+    expect(result.current.info).toEqual([])
+
+    act(() => emit({ type: 'thinking', id: secondRequestId, fen: 'fen-2' }))
+    act(() => {
+      emit({
+        type: 'info',
+        id: secondRequestId,
+        info: { depth: 21, multipv: 1, pv: ['g1f3'], score: { type: 'cp', value: 15 } },
+        raw: 'info depth 21 multipv 1 score cp 15 pv g1f3',
+      })
+      emit({ type: 'bestmove', id: secondRequestId, move: 'g1f3', raw: 'bestmove g1f3' })
+    })
+
+    await expect(firstRejection).resolves.toMatchObject({
+      message: 'Stockfish evaluation superseded',
+    })
+    await act(async () => {
+      await secondPromise
+    })
+
+    worker.postMessage.mockClear()
+
+    let cachedPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      cachedPromise = result.current.evaluatePosition('fen-2', { depth: 21 })
+    })
+
+    await expect(cachedPromise).resolves.toEqual({ move: 'g1f3', raw: '' })
+    expect(worker.postMessage).toHaveBeenCalledWith({ type: 'command', command: 'stop' })
+    expect(worker.postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'evaluate-position', fen: 'fen-2' }),
+    )
+    expect(result.current.info[0]?.pv).toEqual(['g1f3'])
+  })
+
+  it('cached evaluations supersede active uncached work', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result } = renderHook(() => useStockfishEngine())
+
+    act(() => emit({ type: 'ready' }))
+
+    const worker = workerInstances[0]
+    expect(worker).toBeDefined()
+
+    let cachedSeedPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      cachedSeedPromise = result.current.evaluatePosition('fen-cached', { depth: 21 })
+    })
+    const cachedRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+    act(() => emit({ type: 'thinking', id: cachedRequestId, fen: 'fen-cached' }))
+    act(() => {
+      emit({
+        type: 'info',
+        id: cachedRequestId,
+        info: { depth: 21, multipv: 1, pv: ['c2c4'], score: { type: 'cp', value: 25 } },
+        raw: 'info depth 21 multipv 1 score cp 25 pv c2c4',
+      })
+      emit({ type: 'bestmove', id: cachedRequestId, move: 'c2c4', raw: 'bestmove c2c4' })
+    })
+    await act(async () => {
+      await cachedSeedPromise
+    })
+
+    let activePromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      activePromise = result.current.evaluatePosition('fen-active', { depth: 21 })
+    })
+    const activeRejection = activePromise.catch((error: Error) => error)
+    const activeRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+    act(() => emit({ type: 'thinking', id: activeRequestId, fen: 'fen-active' }))
+
+    worker.postMessage.mockClear()
+
+    let cachedPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      cachedPromise = result.current.evaluatePosition('fen-cached', { depth: 21 })
+    })
+
+    await expect(cachedPromise).resolves.toEqual({ move: 'c2c4', raw: '' })
+    await expect(activeRejection).resolves.toMatchObject({
+      message: 'Stockfish evaluation superseded',
+    })
+    expect(worker.postMessage).toHaveBeenCalledWith({ type: 'command', command: 'stop' })
+
+    act(() => {
+      emit({
+        type: 'info',
+        id: activeRequestId,
+        info: { depth: 21, multipv: 1, pv: ['e7e5'], score: { type: 'cp', value: 5 } },
+        raw: 'info depth 21 multipv 1 score cp 5 pv e7e5',
+      })
+      emit({ type: 'bestmove', id: activeRequestId, move: 'e7e5', raw: 'bestmove e7e5' })
+    })
+
+    expect(result.current.info[0]?.pv).toEqual(['c2c4'])
+    expect(result.current.isThinking).toBe(false)
   })
 })

@@ -329,6 +329,38 @@ describe('AnalysisBoard MoveList', () => {
     expect(mockStopSearch).not.toHaveBeenCalled()
   })
 
+  it('debounces engine evaluations while navigating through the move list', () => {
+    vi.useFakeTimers()
+    try {
+      render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+      act(() => {
+        vi.advanceTimersByTime(119)
+      })
+      expect(mockEvaluatePosition).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Latest' }))
+
+      act(() => {
+        vi.advanceTimersByTime(119)
+      })
+      expect(mockEvaluatePosition).not.toHaveBeenCalled()
+
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+
+      expect(mockEvaluatePosition).toHaveBeenCalledTimes(1)
+      expect(mockEvaluatePosition).toHaveBeenCalledWith(
+        moves[1].fen_after,
+        { depth: 21, multipv: 3 },
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('hides engine-only display data when engine lines are disabled', async () => {
     mockEngineInfoRef.current = [
       {
