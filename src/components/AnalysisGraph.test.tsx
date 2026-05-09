@@ -137,7 +137,7 @@ describe('AnalysisGraph — eval badge color', () => {
         evalCp={500}
       />,
     )
-    expect(getBadgeBg(container)).toBe('rgba(0, 200, 83, 0.39)')
+    expect(getBadgeBg(container)).toBe('rgb(0, 200, 83)')
   })
 
   it('shows red when white is losing as white player', () => {
@@ -150,7 +150,7 @@ describe('AnalysisGraph — eval badge color', () => {
         evalCp={-500}
       />,
     )
-    expect(getBadgeBg(container)).toBe('rgba(255, 59, 48, 0.39)')
+    expect(getBadgeBg(container)).toBe('rgb(255, 59, 48)')
   })
 
   it('shows gray at equal eval', () => {
@@ -163,7 +163,7 @@ describe('AnalysisGraph — eval badge color', () => {
         evalCp={0}
       />,
     )
-    expect(getBadgeBg(container)).toBe('rgba(158, 158, 158, 0.39)')
+    expect(getBadgeBg(container)).toBe('rgb(158, 158, 158)')
   })
 
   it('inverts color for black player (positive eval = losing)', () => {
@@ -209,7 +209,7 @@ describe('AnalysisGraph — eval badge color', () => {
       />,
     )
     // Should be clamped to pure winning green
-    expect(getBadgeBg(container)).toBe('rgba(0, 200, 83, 0.39)')
+    expect(getBadgeBg(container)).toBe('rgb(0, 200, 83)')
   })
 
   it('clamps color at eval beyond -5 pawns', () => {
@@ -223,7 +223,7 @@ describe('AnalysisGraph — eval badge color', () => {
       />,
     )
     // Should be clamped to pure losing red
-    expect(getBadgeBg(container)).toBe('rgba(255, 59, 48, 0.39)')
+    expect(getBadgeBg(container)).toBe('rgb(255, 59, 48)')
   })
 })
 

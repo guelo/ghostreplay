@@ -1717,7 +1717,7 @@
 .analysis-graph--with-axis {
     position: relative;
     align-self: flex-start;
-    margin-right: 1.6rem;
+    margin-right: 2.8rem;
 }
 
 .analysis-graph--with-axis > svg {
@@ -1729,10 +1729,12 @@
     top: 0;
     left: 100%;
     bottom: 0;
+    width: 2.8rem;
+    box-sizing: border-box;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    padding: 0.35rem 0.4rem 0.35rem 0;
+    padding: 0.35rem 0.3rem;
     background: #fff;
     border-radius: 0 0.5rem 0.5rem 0;
     border-left: 1px solid var(--border-color);
@@ -1757,15 +1759,23 @@
 
 .analysis-graph__y-eval {
     position: absolute;
-    left: 0;
+    left: 0.3rem;
+    right: 0.3rem;
     transform: translateY(-50%);
-    font-size: 0.7rem;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    font-size: 0.85rem;
     font-weight: 700;
     color: var(--text-primary);
     line-height: 1;
     pointer-events: none;
     border-radius: 0.15rem;
-    padding: 0.1rem 0.15rem;
+    padding: 0.12rem 0.1rem;
+    text-align: center;
+    white-space: nowrap;
 }
 
 .analysis-graph__y-arrow {

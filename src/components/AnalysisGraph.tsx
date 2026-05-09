@@ -61,7 +61,7 @@ function evalToColor(
     b = EVAL_COLOR_EQUAL[2] + (EVAL_COLOR_WINNING[2] - EVAL_COLOR_EQUAL[2]) * s;
   }
 
-  return `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, 0.39)`;
+  return `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
 }
 
 const formatEval = (cp: number) => {
