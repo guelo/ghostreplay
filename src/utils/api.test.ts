@@ -11,6 +11,7 @@ import {
   getOpeningFamilyScores,
   getOpeningChildren,
   getStatsSummary,
+  getStatsAchievements,
 } from './api'
 
 const fetchMock = vi.fn()
@@ -647,6 +648,9 @@ describe('getStatsSummary', () => {
         avg_blunder_eval_loss_cp: 0,
         top_costly_blunders: [],
       },
+      achievements: {
+        perfect_streak: { personal_best: 0 },
+      },
       data_completeness: {
         sessions_with_uploaded_moves_pct: 0,
         notes: [],
@@ -715,6 +719,9 @@ describe('getStatsSummary', () => {
         avg_blunder_eval_loss_cp: 0,
         top_costly_blunders: [],
       },
+      achievements: {
+        perfect_streak: { personal_best: 0 },
+      },
       data_completeness: {
         sessions_with_uploaded_moves_pct: 0,
         notes: [],
@@ -733,6 +740,25 @@ describe('getStatsSummary', () => {
     await expect(getStatsSummary(30)).rejects.toThrow(
       'Failed to load stats summary: Bad Request',
     )
+  })
+})
+
+describe('getStatsAchievements', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('requests the achievements endpoint', async () => {
+    mockResponse({
+      perfect_streak: { personal_best: 7 },
+    })
+
+    await getStatsAchievements()
+
+    const [url, options] = fetchMock.mock.calls[0]
+    expect(options.method).toBe('GET')
+    expect(url).toContain('/api/stats/achievements')
   })
 })
 

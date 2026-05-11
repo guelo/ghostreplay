@@ -44,6 +44,7 @@ type BoardStageProps = {
   playerColor: 'white' | 'black';
   onPromotionPick: (piece: 'q' | 'r' | 'b' | 'n') => void;
   onPromotionCancel: () => void;
+  streakToast: { type: "milestone" | "record"; streak: number } | null;
 };
 
 const WarningTriangleIcon = () => (
@@ -104,9 +105,24 @@ const BoardStage = ({
   playerColor,
   onPromotionPick,
   onPromotionCancel,
+  streakToast,
 }: BoardStageProps) => {
   return (
       <div className="chessboard-board-area">
+          {streakToast && (
+            <div
+              className={`streak-toast streak-toast--${streakToast.type}`}
+              role="status"
+              aria-live="polite"
+            >
+              <span className="streak-toast__label">
+                {streakToast.type === "record"
+                  ? `New record: ${streakToast.streak}`
+                  : `${streakToast.streak} best moves`}
+              </span>
+              <span className="streak-toast__detail">⭐ Perfect streak</span>
+            </div>
+          )}
           {showStartOverlay && !isGameActive && (
             <div className="chessboard-overlay">
               <div className="chess-start-panel">

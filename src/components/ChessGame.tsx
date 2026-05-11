@@ -16,6 +16,7 @@ import { useGameAnalysisCoordinator } from "../contexts/GameAnalysisCoordinatorC
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen } from "../openings/openingBook";
 import type { TargetBlunderSrs } from "../utils/api";
+import { getStatsAchievements } from "../utils/api";
 import {
   buildBlunderAlert,
   deriveBlunderArrows,
@@ -24,6 +25,11 @@ import {
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
 import { deriveDisplayedOpening } from "./chess-game/domain/opening";
+import {
+  derivePerfectStreak,
+  type PreviousPerfectStreakState,
+  type PerfectStreakEvent,
+} from "./chess-game/domain/perfectStreak";
 import { hasReviewTargetAtFen } from "./chess-game/domain/reviewState";
 import {
   deriveGameStatusBadge,
@@ -134,6 +140,24 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     null,
   );
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
+  const [analysisMapSnapshot, setAnalysisMapSnapshot] = useState(
+    () => analysisStore.getState().analysisMap,
+  );
+  const [perfectStreak, setPerfectStreak] = useState({
+    current: 0,
+    bestInHistory: 0,
+    personalBest: 0,
+  });
+  const [streakToast, setStreakToast] = useState<PerfectStreakEvent | null>(
+    null,
+  );
+  const perfectStreakPersonalBestRef = useRef(0);
+  const perfectStreakRecordBaselineRef = useRef<number | null>(null);
+  const [isPerfectStreakBaselineLoaded, setIsPerfectStreakBaselineLoaded] =
+    useState(false);
+  const previousPerfectStreakRef =
+    useRef<PreviousPerfectStreakState | null>(null);
+  const celebratedPerfectStreakKeysRef = useRef<Set<string>>(new Set());
   const isRated = useGameStore((s) => s.isRated);
   const isPracticeContinuation = useGameStore((s) => s.isPracticeContinuation);
   const [showRevertWarning, setShowRevertWarning] = useState(false);
@@ -337,6 +361,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isPlayersTurn &&
     isViewingLive &&
     !chess.isGameOver();
+  const blocksStreakToast =
+    (showStartOverlay && !isGameActive) ||
+    showRevertWarning ||
+    showResignWarning ||
+    pendingPromotion !== null ||
+    blunderAlert !== null ||
+    isReviewMomentActive ||
+    resolvedReview !== null ||
+    showRehookToast;
 
   const statusText = deriveStatusText(chess);
 
@@ -477,6 +510,107 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   useEffect(() => {
     handleGameEndRef.current = handleGameEnd;
   }, [handleGameEnd]);
+
+  useEffect(() => {
+    const unsubscribe = analysisStore.subscribe((state, previous) => {
+      if (state.analysisMap !== previous.analysisMap) {
+        setAnalysisMapSnapshot(state.analysisMap);
+      }
+    });
+    return unsubscribe;
+  }, [analysisStore]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getStatsAchievements()
+      .then((achievements) => {
+        if (cancelled) return;
+        const nextBest = achievements.perfect_streak.personal_best;
+        perfectStreakRecordBaselineRef.current = nextBest;
+        perfectStreakPersonalBestRef.current = Math.max(
+          perfectStreakPersonalBestRef.current,
+          nextBest,
+        );
+        setPerfectStreak((current) => ({
+          ...current,
+          personalBest: Math.max(current.personalBest, nextBest),
+        }));
+        setIsPerfectStreakBaselineLoaded(true);
+      })
+      .catch(() => {
+        // The live streak remains useful even if the all-time best is unavailable.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (moveHistory.length === 0) {
+      previousPerfectStreakRef.current = null;
+      celebratedPerfectStreakKeysRef.current = new Set();
+      setStreakToast(null);
+      setPerfectStreak((current) => ({
+        current: 0,
+        bestInHistory: 0,
+        personalBest: Math.max(
+          current.personalBest,
+          perfectStreakPersonalBestRef.current,
+        ),
+      }));
+      return;
+    }
+
+    const result = derivePerfectStreak({
+      moveHistory,
+      analysisMap: analysisMapSnapshot,
+      playerColor,
+      previousPersonalBest: perfectStreakPersonalBestRef.current,
+      recordPersonalBest: isPerfectStreakBaselineLoaded
+        ? perfectStreakRecordBaselineRef.current
+        : null,
+      previousState: previousPerfectStreakRef.current,
+      celebratedEventKeys: celebratedPerfectStreakKeysRef.current,
+    });
+
+    previousPerfectStreakRef.current = {
+      current: result.current,
+      bestInHistory: result.bestInHistory,
+      personalBest: result.personalBest,
+      recordPersonalBest: isPerfectStreakBaselineLoaded
+        ? perfectStreakRecordBaselineRef.current
+        : null,
+    };
+    perfectStreakPersonalBestRef.current = result.personalBest;
+    setPerfectStreak((current) =>
+      current.current === result.current &&
+      current.bestInHistory === result.bestInHistory &&
+      current.personalBest === result.personalBest
+        ? current
+        : {
+            current: result.current,
+            bestInHistory: result.bestInHistory,
+            personalBest: result.personalBest,
+          },
+    );
+
+    if (result.event) {
+      celebratedPerfectStreakKeysRef.current.add(result.event.key);
+      if (
+        !blocksStreakToast &&
+        (result.event.type === "record" || result.event.streak >= 5)
+      ) {
+        setStreakToast(result.event);
+      }
+    }
+  }, [
+    analysisMapSnapshot,
+    blocksStreakToast,
+    isPerfectStreakBaselineLoaded,
+    moveHistory,
+    playerColor,
+  ]);
 
   // Sync coordinator with existing active session on mount (e.g., after refresh)
   useEffect(() => {
@@ -727,6 +861,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return () => clearTimeout(timer);
   }, [showRehookToast]);
 
+  useEffect(() => {
+    if (!streakToast) return;
+    const timer = setTimeout(() => setStreakToast(null), 2400);
+    return () => clearTimeout(timer);
+  }, [streakToast]);
+
+  useEffect(() => {
+    if (blocksStreakToast) {
+      setStreakToast(null);
+    }
+  }, [blocksStreakToast]);
+
   // Close ghost info popover on click outside
   useEffect(() => {
     if (!showGhostInfo) return;
@@ -899,6 +1045,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             isViewingLive={isViewingLive}
             showRehookToast={showRehookToast}
             onDismissRehookToast={handleDismissRehookToast}
+            perfectStreak={perfectStreak}
           />
 
           <div className="chessboard-wrapper">
@@ -942,6 +1089,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 playerColor={playerColor}
                 onPromotionPick={handlePromotionPick}
                 onPromotionCancel={handlePromotionCancel}
+                streakToast={blocksStreakToast ? null : streakToast}
               />
             </div>
           </div>

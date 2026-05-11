@@ -288,6 +288,19 @@ function StatsPage() {
               </section>
 
               <section className="stats-section">
+                <h2 className="stats-section__title">Achievements</h2>
+                <div className="stats-grid stats-grid--three">
+                  <article className="stats-card stats-card--achievement">
+                    <p className="stats-card__label">All-time</p>
+                    <p className="stats-card__value">
+                      ⭐ {summary.achievements.perfect_streak.personal_best}
+                    </p>
+                    <p className="stats-card__inline">Perfect streak</p>
+                  </article>
+                </div>
+              </section>
+
+              <section className="stats-section">
                 <h2 className="stats-section__title">By Color</h2>
                 <div className="stats-grid stats-grid--two">
                   <article className="stats-card">

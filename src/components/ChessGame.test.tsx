@@ -13,6 +13,7 @@ const recordBlunderMock = vi.fn();
 const recordManualBlunderMock = vi.fn();
 const reviewSrsBlunderMock = vi.fn();
 const fetchCurrentRatingMock = vi.fn();
+const getStatsAchievementsMock = vi.fn();
 const audioPlayMock = vi.fn();
 const audioCtorSpy = vi.fn();
 
@@ -22,6 +23,7 @@ vi.mock("../utils/api", () => ({
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
   fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
+  getStatsAchievements: (...args: unknown[]) => getStatsAchievementsMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
   recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
   reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
@@ -103,6 +105,10 @@ beforeEach(() => {
   }
   vi.stubGlobal("Audio", MockAudio);
   fetchCurrentRatingMock.mockReset();
+  getStatsAchievementsMock.mockReset();
+  getStatsAchievementsMock.mockResolvedValue({
+    perfect_streak: { personal_best: 0 },
+  });
   fetchCurrentRatingMock.mockResolvedValue({
     current_rating: 1200,
     is_provisional: true,

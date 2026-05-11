@@ -114,6 +114,7 @@ const makeProps = () => {
     playerColor: "white" as const,
     onPromotionPick: vi.fn(),
     onPromotionCancel: vi.fn(),
+    streakToast: null,
   };
 };
 
@@ -253,6 +254,14 @@ describe("BoardStage", () => {
     const props = makeProps();
     render(<BoardStage {...props} pendingPromotion={{ from: "e7", to: "e8" }} playerColor="white" />);
     expect(screen.getAllByRole("button", { name: /promote to/i })).toHaveLength(4);
+  });
+
+  it("renders a streak toast when provided", () => {
+    const props = makeProps();
+    render(<BoardStage {...props} streakToast={{ type: "record", streak: 8 }} />);
+
+    expect(screen.getByRole("status")).toHaveTextContent("New record: 8");
+    expect(screen.getByText("⭐ Perfect streak")).toBeInTheDocument();
   });
 
   it("calls onPromotionPick when a promotion piece is clicked", () => {

@@ -241,6 +241,54 @@
     display: none;
 }
 
+.perfect-streak-badge {
+    display: inline-flex;
+    align-items: center;
+    width: fit-content;
+    max-width: 100%;
+    padding: 0.35rem 0.55rem;
+    border: 1px solid color-mix(in srgb, var(--success) 34%, var(--border-color));
+    border-radius: 0.45rem;
+    background: color-mix(in srgb, var(--success) 10%, var(--card-bg));
+    color: var(--text-primary);
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+}
+
+.perfect-streak-badge__desktop {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.perfect-streak-badge__mobile {
+    display: none;
+}
+
+.perfect-streak-badge__best {
+    margin-left: 0.4rem;
+    color: var(--text-tertiary);
+    font-weight: 600;
+}
+
+.perfect-streak-badge--pulse {
+    animation: perfect-streak-pulse 900ms ease-out;
+}
+
+.perfect-streak-badge--hot {
+    border-color: color-mix(in srgb, var(--warning) 60%, var(--success));
+    background: color-mix(in srgb, var(--warning) 14%, var(--card-bg));
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 22%, transparent);
+}
+
+@keyframes perfect-streak-pulse {
+    0% { transform: scale(1); }
+    35% { transform: scale(1.04); }
+    100% { transform: scale(1); }
+}
+
 .chess-controls {
     display: flex;
     flex-wrap: wrap;
@@ -472,6 +520,45 @@
     font-weight: 700;
     font-size: 0.95rem;
     color: var(--success);
+}
+
+.streak-toast {
+    position: absolute;
+    bottom: 0.75rem;
+    right: 0.75rem;
+    z-index: 8;
+    padding: 0.75rem 1rem;
+    border-radius: 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--success) 55%, var(--warning));
+    background: var(--overlay-bg);
+    backdrop-filter: blur(6px);
+    box-shadow: var(--shadow-xl);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    animation: blunder-toast-in 250ms ease-out;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    pointer-events: none;
+}
+
+.streak-toast--record {
+    border-color: var(--warning);
+}
+
+.streak-toast__label {
+    font-weight: 800;
+    font-size: 0.95rem;
+    color: var(--success);
+}
+
+.streak-toast--record .streak-toast__label {
+    color: var(--warning);
+}
+
+.streak-toast__detail {
+    color: var(--text-tertiary);
+    font-size: 0.8rem;
 }
 
 .review-pass-toast__detail {
@@ -4720,6 +4807,25 @@ button.openings-shell__crumb:hover {
     .game-page .chess-panel__mobile-label,
     .game-page .chess-panel__mobile-versus {
         display: inline;
+    }
+
+    .game-page .perfect-streak-badge {
+        flex: 0 0 5.75rem;
+        justify-content: center;
+        padding: 0.22rem 0.35rem;
+        font-size: 0.7rem;
+        white-space: nowrap;
+        order: 4;
+    }
+
+    .game-page .perfect-streak-badge__desktop {
+        display: none;
+    }
+
+    .game-page .perfect-streak-badge__mobile {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.25rem;
     }
 
     .game-page .chess-panel__player-rating,

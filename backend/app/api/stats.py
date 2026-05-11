@@ -87,6 +87,14 @@ class DataCompletenessSummary(BaseModel):
     notes: list[str]
 
 
+class PerfectStreakSummary(BaseModel):
+    personal_best: int
+
+
+class StatsAchievementsSummary(BaseModel):
+    perfect_streak: PerfectStreakSummary
+
+
 class StatsSummaryResponse(BaseModel):
     window_days: int
     generated_at: datetime
@@ -94,6 +102,7 @@ class StatsSummaryResponse(BaseModel):
     colors: ColorSplitSummary
     moves: MoveSummary
     library: LibrarySummary
+    achievements: StatsAchievementsSummary
     data_completeness: DataCompletenessSummary
 
 
@@ -202,6 +211,56 @@ def _base_color_summary() -> ColorSummary:
         avg_cpl=0.0,
         blunders_per_100_moves=0.0,
     )
+
+
+def _perfect_streak_summary(db: Session, user_id: int) -> StatsAchievementsSummary:
+    rows = (
+        db.query(
+            SessionMove.session_id,
+            SessionMove.classification,
+        )
+        .join(GameSession, GameSession.id == SessionMove.session_id)
+        .filter(
+            GameSession.user_id == user_id,
+            SessionMove.color == GameSession.player_color,
+        )
+        .order_by(
+            GameSession.started_at.asc(),
+            GameSession.id.asc(),
+            SessionMove.move_number.asc(),
+            SessionMove.id.asc(),
+        )
+        .all()
+    )
+
+    personal_best = 0
+    current_session_id: uuid.UUID | None = None
+    session_streak = 0
+
+    for session_id, classification in rows:
+        if session_id != current_session_id:
+            current_session_id = session_id
+            session_streak = 0
+
+        if classification is None:
+            continue
+        if classification == "best":
+            session_streak += 1
+            personal_best = max(personal_best, session_streak)
+        else:
+            session_streak = 0
+
+    return StatsAchievementsSummary(
+        perfect_streak=PerfectStreakSummary(personal_best=personal_best)
+    )
+
+
+@router.get("/achievements", response_model=StatsAchievementsSummary)
+def get_stats_achievements(
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> StatsAchievementsSummary:
+    return _perfect_streak_summary(db, user.user_id)
 
 
 @router.get("/summary", response_model=StatsSummaryResponse)
@@ -469,6 +528,7 @@ def get_stats_summary(
             avg_blunder_eval_loss_cp=avg_blunder_eval_loss_cp,
             top_costly_blunders=top_costly_blunders,
         ),
+        achievements=_perfect_streak_summary(db, user.user_id),
         data_completeness=DataCompletenessSummary(
             sessions_with_uploaded_moves_pct=sessions_with_uploaded_moves_pct,
             notes=[

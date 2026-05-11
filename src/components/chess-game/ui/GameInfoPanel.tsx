@@ -35,6 +35,10 @@ type GameInfoPanelProps = {
   isViewingLive: boolean;
   showRehookToast: boolean;
   onDismissRehookToast: () => void;
+  perfectStreak: {
+    current: number;
+    personalBest: number;
+  };
 };
 
 type GameWarningStackProps = {
@@ -68,6 +72,43 @@ const formatLastSeen = (isoDate: string): string => {
   if (hours < 1) return `${Math.max(1, Math.round(ms / 60_000))}m ago`;
   if (hours < 24) return `${Math.round(hours)}h ago`;
   return new Date(isoDate).toLocaleDateString();
+};
+
+const PerfectStreakBadge = ({
+  current,
+  personalBest,
+  isGameActive,
+}: {
+  current: number;
+  personalBest: number;
+  isGameActive: boolean;
+}) => {
+  if (current <= 0 && (isGameActive || personalBest <= 0)) {
+    return null;
+  }
+
+  const hot = current >= 5;
+  const pulse = current >= 3;
+  const classes = [
+    "perfect-streak-badge",
+    hot ? "perfect-streak-badge--hot" : "",
+    pulse ? "perfect-streak-badge--pulse" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <div className={classes} aria-label={`Perfect streak ${current}, best ${personalBest}`}>
+      <span className="perfect-streak-badge__desktop">
+        <span aria-hidden="true">⭐</span> Perfect streak{" "}
+        <strong>{current}</strong>
+        <span className="perfect-streak-badge__best">Best {personalBest}</span>
+      </span>
+      <span className="perfect-streak-badge__mobile" aria-hidden="true">
+        ⭐ {current} <span>Best {personalBest}</span>
+      </span>
+    </div>
+  );
 };
 
 export const GameWarningStack = memo(({
@@ -166,6 +207,7 @@ const GameInfoPanel = ({
   isViewingLive,
   showRehookToast,
   onDismissRehookToast,
+  perfectStreak,
 }: GameInfoPanelProps) => {
   return (
     <div className="chess-panel" aria-live="polite">
@@ -294,6 +336,11 @@ const GameInfoPanel = ({
             )}
           </div>
         )}
+        <PerfectStreakBadge
+          current={perfectStreak.current}
+          personalBest={perfectStreak.personalBest}
+          isGameActive={isGameActive}
+        />
       </div>
       <GameWarningStack
         className="chess-warning-stack--panel"

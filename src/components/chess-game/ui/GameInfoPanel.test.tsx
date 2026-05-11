@@ -46,6 +46,7 @@ const makeProps = () => {
     isViewingLive: true,
     showRehookToast: false,
     onDismissRehookToast,
+    perfectStreak: { current: 0, personalBest: 0 },
   };
 };
 
@@ -78,6 +79,19 @@ describe("GameInfoPanel", () => {
     expect(container.querySelector(".chess-panel__opening")).toHaveTextContent(
       "C20 King's Pawn Game",
     );
+  });
+
+  it("renders the perfect streak badge when a live streak is active", () => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        perfectStreak={{ current: 4, personalBest: 7 }}
+      />,
+    );
+
+    expect(screen.getByLabelText("Perfect streak 4, best 7")).toBeInTheDocument();
+    expect(screen.getAllByText("Best 7").length).toBeGreaterThan(0);
   });
 
   it("renders an on-bin engine avatar", () => {

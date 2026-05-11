@@ -90,6 +90,11 @@ const baseSummary = {
       },
     ],
   },
+  achievements: {
+    perfect_streak: {
+      personal_best: 8,
+    },
+  },
   data_completeness: {
     sessions_with_uploaded_moves_pct: 66.7,
     notes: [
@@ -126,6 +131,8 @@ describe("StatsPage", () => {
 
     expect(getStatsSummaryMock).toHaveBeenCalledWith(30);
     expect(screen.getByText("Qxh7+ vs Re1")).toBeInTheDocument();
+    expect(screen.getByText("Perfect streak")).toBeInTheDocument();
+    expect(screen.getByText("⭐ 8")).toBeInTheDocument();
     expect(screen.getByText("66.7%")).toBeInTheDocument();
   });
 

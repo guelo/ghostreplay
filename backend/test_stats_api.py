@@ -145,6 +145,7 @@ def test_stats_summary_empty_dataset(client, auth_headers):
     assert data["library"]["edges_total"] == 0
     assert data["library"]["new_blunders_in_window"] == 0
     assert data["library"]["top_costly_blunders"] == []
+    assert data["achievements"]["perfect_streak"]["personal_best"] == 0
     assert data["data_completeness"]["sessions_with_uploaded_moves_pct"] == 0.0
     assert len(data["data_completeness"]["notes"]) == 2
 
@@ -272,8 +273,89 @@ def test_stats_summary_mixed_data(client, auth_headers, create_game_session, db_
     assert len(data["library"]["top_costly_blunders"]) == 2
     assert data["library"]["top_costly_blunders"][0]["eval_loss_cp"] == 300
     assert data["library"]["top_costly_blunders"][1]["eval_loss_cp"] == 150
+    assert data["achievements"]["perfect_streak"]["personal_best"] == 0
 
     assert data["data_completeness"]["sessions_with_uploaded_moves_pct"] == 66.7
+
+
+def test_stats_summary_perfect_streak_all_time_and_player_only(
+    client, auth_headers, create_game_session, db_session
+):
+    now = datetime.now(timezone.utc)
+    old_session = create_game_session(user_id=123, player_color="white")
+    recent_session = create_game_session(user_id=123, player_color="black")
+    other_user_session = create_game_session(user_id=999, player_color="white")
+
+    _set_session_times(
+        db_session,
+        old_session,
+        started_at=now - timedelta(days=60),
+        ended_at=now - timedelta(days=60, minutes=-20),
+    )
+    _set_session_times(
+        db_session,
+        recent_session,
+        started_at=now - timedelta(days=2),
+        ended_at=now - timedelta(days=2, minutes=-20),
+    )
+
+    _upload_moves(
+        client,
+        auth_headers,
+        old_session,
+        [
+            {"move_number": 1, "color": "white", "move_san": "e4", "fen_after": "a", "classification": "best"},
+            {"move_number": 1, "color": "black", "move_san": "e5", "fen_after": "b", "classification": "best"},
+            {"move_number": 2, "color": "white", "move_san": "Nf3", "fen_after": "c", "classification": None},
+            {"move_number": 2, "color": "black", "move_san": "Nc6", "fen_after": "d", "classification": "blunder"},
+            {"move_number": 3, "color": "white", "move_san": "Bb5", "fen_after": "e", "classification": "best"},
+            {"move_number": 4, "color": "white", "move_san": "O-O", "fen_after": "f", "classification": "best"},
+            {"move_number": 5, "color": "white", "move_san": "Re1", "fen_after": "g", "classification": "good"},
+            {"move_number": 6, "color": "white", "move_san": "c3", "fen_after": "h", "classification": "best"},
+        ],
+    )
+    _upload_moves(
+        client,
+        auth_headers,
+        recent_session,
+        [
+            {"move_number": 1, "color": "white", "move_san": "d4", "fen_after": "i", "classification": "best"},
+            {"move_number": 1, "color": "black", "move_san": "Nf6", "fen_after": "j", "classification": "best"},
+            {"move_number": 2, "color": "black", "move_san": "g6", "fen_after": "k", "classification": "mistake"},
+            {"move_number": 3, "color": "black", "move_san": "Bg7", "fen_after": "l", "classification": "best"},
+        ],
+    )
+    _upload_moves(
+        client,
+        auth_headers,
+        other_user_session,
+        [
+            {"move_number": 1, "color": "white", "move_san": "e4", "fen_after": "m", "classification": "best"},
+            {"move_number": 2, "color": "white", "move_san": "Nf3", "fen_after": "n", "classification": "best"},
+            {"move_number": 3, "color": "white", "move_san": "Bc4", "fen_after": "o", "classification": "best"},
+        ],
+        user_id=999,
+    )
+
+    response_30 = client.get(
+        "/api/stats/summary?window_days=30",
+        headers=auth_headers(user_id=123),
+    )
+    response_all = client.get(
+        "/api/stats/summary?window_days=0",
+        headers=auth_headers(user_id=123),
+    )
+    response_achievements = client.get(
+        "/api/stats/achievements",
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response_30.status_code == 200
+    assert response_all.status_code == 200
+    assert response_achievements.status_code == 200
+    assert response_30.json()["achievements"]["perfect_streak"]["personal_best"] == 3
+    assert response_all.json()["achievements"]["perfect_streak"]["personal_best"] == 3
+    assert response_achievements.json() == response_all.json()["achievements"]
 
 
 def test_stats_summary_window_filtering(client, auth_headers, create_game_session, db_session):

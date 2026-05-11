@@ -788,6 +788,14 @@ export interface StatsDataCompletenessSummary {
   notes: string[]
 }
 
+export interface PerfectStreakSummary {
+  personal_best: number
+}
+
+export interface StatsAchievementsSummary {
+  perfect_streak: PerfectStreakSummary
+}
+
 export interface StatsSummaryResponse {
   window_days: number
   generated_at: string
@@ -795,6 +803,7 @@ export interface StatsSummaryResponse {
   colors: StatsColorSplitSummary
   moves: StatsMoveSummary
   library: StatsLibrarySummary
+  achievements: StatsAchievementsSummary
   data_completeness: StatsDataCompletenessSummary
 }
 
@@ -812,5 +821,13 @@ export const getStatsSummary = async (
     `${API_BASE_URL}/api/stats/summary?${params}`,
     { method: 'GET', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to load stats summary' },
+  )
+}
+
+export const getStatsAchievements = async (): Promise<StatsAchievementsSummary> => {
+  return requestJson<StatsAchievementsSummary>(
+    `${API_BASE_URL}/api/stats/achievements`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load achievements' },
   )
 }
