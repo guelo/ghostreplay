@@ -92,7 +92,7 @@ describe("GameInfoPanel", () => {
 
     const badge = screen.getByLabelText("Perfect streak 4, best 7");
     expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent("⭐4");
+    expect(badge).toHaveTextContent("⭐Streak4");
     expect(screen.queryByText("Best 7")).not.toBeInTheDocument();
   });
 
