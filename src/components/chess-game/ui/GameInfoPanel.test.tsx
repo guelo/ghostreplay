@@ -90,8 +90,10 @@ describe("GameInfoPanel", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Perfect streak 4, best 7")).toBeInTheDocument();
-    expect(screen.getAllByText("Best 7").length).toBeGreaterThan(0);
+    const badge = screen.getByLabelText("Perfect streak 4, best 7");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent("⭐4");
+    expect(screen.queryByText("Best 7")).not.toBeInTheDocument();
   });
 
   it("renders an on-bin engine avatar", () => {

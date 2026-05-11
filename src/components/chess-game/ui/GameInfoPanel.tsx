@@ -99,14 +99,8 @@ const PerfectStreakBadge = ({
 
   return (
     <div className={classes} aria-label={`Perfect streak ${current}, best ${personalBest}`}>
-      <span className="perfect-streak-badge__desktop">
-        <span aria-hidden="true">⭐</span> Perfect streak{" "}
-        <strong>{current}</strong>
-        <span className="perfect-streak-badge__best">Best {personalBest}</span>
-      </span>
-      <span className="perfect-streak-badge__mobile" aria-hidden="true">
-        ⭐ {current} <span>Best {personalBest}</span>
-      </span>
+      <span aria-hidden="true">⭐</span>
+      <strong>{current}</strong>
     </div>
   );
 };

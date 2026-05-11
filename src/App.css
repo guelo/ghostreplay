@@ -244,33 +244,25 @@
 .perfect-streak-badge {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
     width: fit-content;
     max-width: 100%;
-    padding: 0.35rem 0.55rem;
-    border: 1px solid color-mix(in srgb, var(--success) 34%, var(--border-color));
-    border-radius: 0.45rem;
-    background: color-mix(in srgb, var(--success) 10%, var(--card-bg));
-    color: var(--text-primary);
-    font-size: 0.78rem;
-    font-weight: 700;
+    padding: 0.42rem 0.8rem;
+    border: 1px solid #60a5fa;
+    border-radius: 999px;
+    background: rgba(37, 99, 235, 0.4);
+    color: #ffd700;
+    text-shadow: 0 0 3px rgba(255, 215, 0, 0.6);
+    font-size: 1rem;
+    font-weight: 900;
     line-height: 1.1;
     font-variant-numeric: tabular-nums;
 }
 
-.perfect-streak-badge__desktop {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.25rem;
-}
-
-.perfect-streak-badge__mobile {
-    display: none;
-}
-
-.perfect-streak-badge__best {
-    margin-left: 0.4rem;
-    color: var(--text-tertiary);
-    font-weight: 600;
+.perfect-streak-badge strong {
+    color: var(--text-primary);
+    text-shadow: none;
 }
 
 .perfect-streak-badge--pulse {
@@ -278,9 +270,7 @@
 }
 
 .perfect-streak-badge--hot {
-    border-color: color-mix(in srgb, var(--warning) 60%, var(--success));
-    background: color-mix(in srgb, var(--warning) 14%, var(--card-bg));
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--warning) 22%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, #60a5fa 24%, transparent);
 }
 
 @keyframes perfect-streak-pulse {
@@ -4810,22 +4800,11 @@ button.openings-shell__crumb:hover {
     }
 
     .game-page .perfect-streak-badge {
-        flex: 0 0 5.75rem;
-        justify-content: center;
-        padding: 0.22rem 0.35rem;
-        font-size: 0.7rem;
+        flex: 0 0 4.4rem;
+        padding: 0.32rem 0.55rem;
+        font-size: 0.9rem;
         white-space: nowrap;
         order: 4;
-    }
-
-    .game-page .perfect-streak-badge__desktop {
-        display: none;
-    }
-
-    .game-page .perfect-streak-badge__mobile {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.25rem;
     }
 
     .game-page .chess-panel__player-rating,
