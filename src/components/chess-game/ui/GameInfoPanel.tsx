@@ -74,6 +74,16 @@ const formatLastSeen = (isoDate: string): string => {
   return new Date(isoDate).toLocaleDateString();
 };
 
+type StreakFireIntensity = "none" | "ember" | "flame" | "hot" | "inferno";
+
+const getStreakFireIntensity = (streak: number): StreakFireIntensity => {
+  if (streak >= 12) return "inferno";
+  if (streak >= 8) return "hot";
+  if (streak >= 5) return "flame";
+  if (streak >= 3) return "ember";
+  return "none";
+};
+
 const PerfectStreakBadge = ({
   current,
   personalBest,
@@ -89,6 +99,7 @@ const PerfectStreakBadge = ({
 
   const hot = current >= 5;
   const pulse = current >= 3;
+  const fireIntensity = getStreakFireIntensity(current);
   const classes = [
     "perfect-streak-badge",
     hot ? "perfect-streak-badge--hot" : "",
@@ -98,10 +109,28 @@ const PerfectStreakBadge = ({
     .join(" ");
 
   return (
-    <div className={classes} aria-label={`Perfect streak ${current}, best ${personalBest}`}>
-      <span aria-hidden="true">⭐</span>
-      <span>Streak</span>
-      <strong>{current}</strong>
+    <div
+      className="perfect-streak"
+      aria-label={`Perfect streak ${current}, best ${personalBest}`}
+    >
+      <span className="perfect-streak__label" aria-hidden="true">
+        Streak
+      </span>
+      <span className={classes} data-fire-intensity={fireIntensity}>
+        <span className="perfect-streak-badge__fire" aria-hidden="true">
+          <span className="perfect-streak-badge__aura" />
+          <span className="perfect-streak-badge__flame perfect-streak-badge__flame--outer" />
+          <span className="perfect-streak-badge__flame perfect-streak-badge__flame--middle" />
+          <span className="perfect-streak-badge__flame perfect-streak-badge__flame--core" />
+          <span className="perfect-streak-badge__ember perfect-streak-badge__ember--one" />
+          <span className="perfect-streak-badge__ember perfect-streak-badge__ember--two" />
+          <span className="perfect-streak-badge__ember perfect-streak-badge__ember--three" />
+        </span>
+        <span className="perfect-streak-badge__content">
+          <span aria-hidden="true">⭐</span>
+          <strong>{current}</strong>
+        </span>
+      </span>
     </div>
   );
 };

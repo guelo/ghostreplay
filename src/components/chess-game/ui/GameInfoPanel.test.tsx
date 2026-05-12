@@ -90,10 +90,41 @@ describe("GameInfoPanel", () => {
       />,
     );
 
-    const badge = screen.getByLabelText("Perfect streak 4, best 7");
-    expect(badge).toBeInTheDocument();
-    expect(badge).toHaveTextContent("⭐Streak4");
+    const streak = screen.getByLabelText("Perfect streak 4, best 7");
+    expect(streak).toBeInTheDocument();
+    expect(streak).toHaveTextContent("Streak⭐4");
+    expect(
+      streak.querySelector(".perfect-streak-badge"),
+    ).toHaveAttribute("data-fire-intensity", "ember");
     expect(screen.queryByText("Best 7")).not.toBeInTheDocument();
+  });
+
+  it("hides the perfect streak badge without a live streak or prior best", () => {
+    const props = makeProps();
+    render(<GameInfoPanel {...props} />);
+
+    expect(screen.queryByLabelText(/Perfect streak/i)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [2, "none"],
+    [4, "ember"],
+    [6, "flame"],
+    [9, "hot"],
+    [12, "inferno"],
+  ] as const)("maps streak %i to %s fire intensity", (current, intensity) => {
+    const props = makeProps();
+    render(
+      <GameInfoPanel
+        {...props}
+        perfectStreak={{ current, personalBest: 12 }}
+      />,
+    );
+
+    const streak = screen.getByLabelText(`Perfect streak ${current}, best 12`);
+    expect(
+      streak.querySelector(".perfect-streak-badge"),
+    ).toHaveAttribute("data-fire-intensity", intensity);
   });
 
   it("renders an on-bin engine avatar", () => {
