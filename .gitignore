@@ -45,3 +45,4 @@ backend/.opening_graph_cache/
 .dolt/
 *.db
 .beads-credential-key
+/work
