@@ -5,6 +5,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from typing import TypeVar
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -31,6 +32,12 @@ STEERING_RADIUS = 5
 SEVERITY_NORMALIZER_CP = 50.0
 DISTANCE_DECAY_RATE = 0.35
 TOP_K = 5
+FIRST_MOVE_SECONDARY_WEIGHT = 0.15
+SELECTION_WEIGHT_POWER = 0.5
+REPEAT_HISTORY_SCAN_LIMIT = 200
+REPEAT_PENALTY_LOOKBACK = 3
+REPEAT_PENALTY_FACTORS = (0.35, 0.60, 0.80)
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,18 @@ class GhostMoveCandidate:
         )
 
 
+@dataclass(frozen=True)
+class FirstMoveGroup:
+    first_move: str
+    candidates: tuple[tuple[GhostMoveCandidate, float], ...]
+    aggregate_score: float
+    penalty_factor: float = 1.0
+
+    @property
+    def penalized_score(self) -> float:
+        return self.aggregate_score * self.penalty_factor
+
+
 def _stable_seed(user_id: int, fen: str, session_id: uuid.UUID) -> int:
     """Deterministic seed stable across Python restarts.
 
@@ -82,6 +101,108 @@ def _stable_seed(user_id: int, fen: str, session_id: uuid.UUID) -> int:
     """
     raw = f"{user_id}|{fen_hash(fen)}|{session_id}".encode()
     return int.from_bytes(hashlib.sha256(raw).digest()[:8], byteorder="big")
+
+
+def _candidate_sort_key(scored_candidate: tuple[GhostMoveCandidate, float]) -> tuple[float, int, int, int, str]:
+    candidate, score = scored_candidate
+    return (
+        -score,
+        candidate.depth,
+        -candidate.eval_loss_cp,
+        -candidate.blunder_id,
+        candidate.first_move,
+    )
+
+
+def _dedupe_path_candidates(
+    scored: list[tuple[GhostMoveCandidate, float]],
+) -> list[tuple[GhostMoveCandidate, float]]:
+    best_by_key: dict[tuple[str, int], tuple[GhostMoveCandidate, float]] = {}
+    for candidate, score in scored:
+        key = (candidate.first_move, candidate.blunder_id)
+        existing = best_by_key.get(key)
+        current = (candidate, score)
+        if existing is None or _candidate_sort_key(current) < _candidate_sort_key(existing):
+            best_by_key[key] = current
+    return sorted(best_by_key.values(), key=_candidate_sort_key)
+
+
+def _aggregate_first_move_score(candidate_scores: list[float]) -> float:
+    if not candidate_scores:
+        return 0.0
+    sorted_scores = sorted(candidate_scores, reverse=True)
+    return sorted_scores[0] + FIRST_MOVE_SECONDARY_WEIGHT * sum(sorted_scores[1:])
+
+
+def _group_candidates_by_first_move(
+    scored: list[tuple[GhostMoveCandidate, float]],
+    repeat_penalties: dict[str, float] | None = None,
+) -> list[FirstMoveGroup]:
+    grouped: dict[str, list[tuple[GhostMoveCandidate, float]]] = {}
+    for candidate, score in scored:
+        grouped.setdefault(candidate.first_move, []).append((candidate, score))
+
+    groups: list[FirstMoveGroup] = []
+    for first_move, candidates in grouped.items():
+        stable_candidates = tuple(sorted(candidates, key=_candidate_sort_key))
+        aggregate_score = _aggregate_first_move_score([score for _, score in stable_candidates])
+        groups.append(
+            FirstMoveGroup(
+                first_move=first_move,
+                candidates=stable_candidates,
+                aggregate_score=aggregate_score,
+                penalty_factor=(repeat_penalties or {}).get(first_move, 1.0),
+            )
+        )
+    return sorted(groups, key=lambda group: (-group.penalized_score, group.first_move))
+
+
+def _flatten_selection_weight(score: float) -> float:
+    return max(score, 0.0) ** SELECTION_WEIGHT_POWER
+
+
+def _weighted_choice(items: list[T], weights: list[float], rng: random.Random) -> T:
+    if not items:
+        raise ValueError("Cannot choose from an empty list")
+    if any(weight > 0 for weight in weights):
+        return rng.choices(items, weights=weights, k=1)[0]
+    return items[0]
+
+
+def _same_fen_recent_ghost_moves(db: Session, user_id: int, fen: str) -> list[str]:
+    current_hash = fen_hash(fen)
+    rows = db.execute(
+        text("""
+            SELECT sm.fen_before, sm.move_san
+            FROM session_moves sm
+            JOIN game_sessions gs ON gs.id = sm.session_id
+            WHERE gs.user_id = :user_id
+              AND sm.decision_source = 'ghost_path'
+              AND sm.fen_before IS NOT NULL
+            ORDER BY gs.started_at DESC, sm.id DESC
+            LIMIT :limit
+        """),
+        {"user_id": user_id, "limit": REPEAT_HISTORY_SCAN_LIMIT},
+    ).fetchall()
+
+    matches: list[str] = []
+    for fen_before, move_san in rows:
+        try:
+            if fen_hash(fen_before) != current_hash:
+                continue
+        except ValueError:
+            continue
+        matches.append(move_san)
+        if len(matches) >= REPEAT_PENALTY_LOOKBACK:
+            break
+    return matches
+
+
+def _repeat_penalties(recent_same_fen_moves: list[str]) -> dict[str, float]:
+    penalties: dict[str, float] = {}
+    for move_san, factor in zip(recent_same_fen_moves, REPEAT_PENALTY_FACTORS):
+        penalties[move_san] = penalties.get(move_san, 1.0) * factor
+    return penalties
 
 
 def _isoformat_optional(value: datetime | str | None) -> str | None:
@@ -225,31 +346,29 @@ def find_ghost_move(
     if not scored:
         return (None, None, None, None)
 
-    # Stable sort: primary by score desc, then deterministic tie-break keys
-    scored.sort(key=lambda x: (
-        -x[1],
-        -float(x[0].depth),
-        -x[0].eval_loss_cp,
-        -x[0].blunder_id,
-        x[0].first_move,
-    ))
-    top_k = scored[:TOP_K]
+    deduped = _dedupe_path_candidates(scored)
+    repeat_penalties = _repeat_penalties(_same_fen_recent_ghost_moves(db, user_id, fen))
+    groups = _group_candidates_by_first_move(deduped, repeat_penalties)
+    top_first_moves = groups[:TOP_K]
 
-    # Weighted random selection from top-k
-    weights = [s for _, s in top_k]
-    if any(w > 0 for w in weights):
-        if _rng_seed is not None:
-            seed = _rng_seed
-        elif session_id is not None:
-            seed = _stable_seed(user_id, fen, session_id)
-        else:
-            seed = 0
-        rng = random.Random(seed)
-        chosen_candidate, _ = rng.choices(top_k, weights=weights, k=1)[0]
+    if _rng_seed is not None:
+        seed = _rng_seed
+    elif session_id is not None:
+        seed = _stable_seed(user_id, fen, session_id)
     else:
-        # All zero scores (e.g. manual library entries with eval_loss_cp=0);
-        # fall back to first by stable sort order.
-        chosen_candidate, _ = top_k[0]
+        seed = 0
+    rng = random.Random(seed)
+
+    chosen_group = _weighted_choice(
+        top_first_moves,
+        [_flatten_selection_weight(group.penalized_score) for group in top_first_moves],
+        rng,
+    )
+    chosen_candidate, _ = _weighted_choice(
+        list(chosen_group.candidates),
+        [_flatten_selection_weight(score) for _, score in chosen_group.candidates],
+        rng,
+    )
 
     return (chosen_candidate.first_move, chosen_candidate.blunder_id, chosen_candidate.last_reviewed_at, chosen_candidate.created_at)
 

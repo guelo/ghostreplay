@@ -4,6 +4,7 @@ Simple test for POST /api/game/start endpoint.
 Run with: pytest test_game_api.py -v
 """
 import uuid
+import random
 from datetime import datetime, timedelta, timezone
 
 from app.models import Blunder, GameSession
@@ -1418,6 +1419,126 @@ def test_find_ghost_move_session_id_seed_normalized_fen(db_session):
 
     assert result_a[0] is not None
     assert result_a == result_b
+
+
+def test_ghost_selection_dedupes_and_groups_first_moves():
+    """Duplicate path rows for one first_move/blunder_id do not inflate group score."""
+    from app.api.game import (
+        FIRST_MOVE_SECONDARY_WEIGHT,
+        GhostMoveCandidate,
+        _dedupe_path_candidates,
+        _group_candidates_by_first_move,
+    )
+
+    duplicate_low = GhostMoveCandidate(
+        first_move="e5",
+        blunder_id=1,
+        depth=3,
+        eval_loss_cp=100,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=None,
+    )
+    duplicate_high = GhostMoveCandidate(
+        first_move="e5",
+        blunder_id=1,
+        depth=2,
+        eval_loss_cp=100,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=None,
+    )
+    distinct_same_first = GhostMoveCandidate(
+        first_move="e5",
+        blunder_id=2,
+        depth=2,
+        eval_loss_cp=100,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=None,
+    )
+    other_first = GhostMoveCandidate(
+        first_move="c5",
+        blunder_id=3,
+        depth=2,
+        eval_loss_cp=100,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=None,
+    )
+
+    deduped = _dedupe_path_candidates([
+        (duplicate_low, 9.0),
+        (duplicate_high, 10.0),
+        (distinct_same_first, 4.0),
+        (other_first, 8.0),
+    ])
+    groups = _group_candidates_by_first_move(deduped)
+
+    assert len(deduped) == 3
+    e5_group = next(group for group in groups if group.first_move == "e5")
+    assert len(e5_group.candidates) == 2
+    assert e5_group.aggregate_score == 10.0 + FIRST_MOVE_SECONDARY_WEIGHT * 4.0
+
+
+def test_ghost_selection_weight_flattening_and_zero_fallback():
+    from app.api.game import _flatten_selection_weight, _weighted_choice
+
+    assert _flatten_selection_weight(9.0) == 3.0
+    assert _flatten_selection_weight(-4.0) == 0.0
+    assert _weighted_choice(["first", "second"], [0.0, 0.0], random.Random(1)) == "first"
+
+
+def test_ghost_repeat_penalties_multiply_by_recency():
+    from app.api.game import _repeat_penalties
+
+    assert _repeat_penalties(["e5", "c5", "e5"]) == {
+        "e5": 0.35 * 0.80,
+        "c5": 0.60,
+    }
+
+
+def test_same_fen_recent_ghost_moves_bounded_and_defensive(db_session, monkeypatch):
+    from app.api import game as game_api
+    from app.models import GameSession, SessionMove
+
+    user_id = 123
+    current_fen = "8/8/8/8/K7/8/8/7k b - - 0 1"
+    equivalent_fen = "8/8/8/8/K7/8/8/7k b - - 12 34"
+    different_fen = "8/8/8/8/1K6/8/8/7k b - - 0 1"
+
+    def add_history(started_at, fen_before, move_san):
+        session = GameSession(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            started_at=started_at,
+            status="ended",
+            engine_elo=1500,
+            player_color="white",
+        )
+        db_session.add(session)
+        db_session.flush()
+        db_session.add(SessionMove(
+            session_id=session.id,
+            move_number=1,
+            color="black",
+            move_san=move_san,
+            fen_before=fen_before,
+            fen_after=current_fen,
+            decision_source="ghost_path",
+        ))
+
+    now = datetime.now(timezone.utc)
+    add_history(now, "not-a-fen", "bad")
+    add_history(now - timedelta(minutes=1), different_fen, "d5")
+    add_history(now - timedelta(minutes=2), equivalent_fen, "e5")
+    add_history(now - timedelta(minutes=3), current_fen, "c5")
+    db_session.commit()
+
+    monkeypatch.setattr(game_api, "REPEAT_HISTORY_SCAN_LIMIT", 3)
+    monkeypatch.setattr(game_api, "REPEAT_PENALTY_LOOKBACK", 2)
+
+    assert game_api._same_fen_recent_ghost_moves(db_session, user_id, current_fen) == ["e5"]
 
 
 # === Next Opponent Move Endpoint Tests ===
