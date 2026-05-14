@@ -166,6 +166,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [showResignWarning, setShowResignWarning] = useState(false);
   const playerRating = useGameStore((s) => s.playerRating);
   const isProvisional = useGameStore((s) => s.isProvisional);
+  const ratingScores = useGameStore((s) => s.ratingScores);
+  const ratingDisplayType = useGameStore((s) => s.ratingDisplayType);
+  const scoreChanges = useGameStore((s) => s.scoreChanges);
   const ratingChange = useGameStore((s) => s.ratingChange);
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
@@ -1028,6 +1031,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             playerColor={playerColor}
             playerRating={playerRating}
             isProvisional={isProvisional}
+            ratingScores={ratingScores}
+            ratingDisplayType={ratingDisplayType}
+            onRatingDisplayTypeChange={useGameStore.getState().setRatingDisplayType}
             opponentMode={opponentMode}
             opponentName={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
             engineElo={engineElo}
@@ -1111,6 +1117,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 showPostGamePrompt={showPostGamePrompt}
                 gameResult={gameResult}
                 ratingChange={ratingChange}
+                scoreChanges={scoreChanges}
+                ratingDisplayType={ratingDisplayType}
                 onViewAnalysis={handleViewAnalysis}
                 onShowStartOverlay={handleShowStartOverlay}
                 onViewHistory={handleViewHistory}

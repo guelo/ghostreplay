@@ -1,7 +1,8 @@
 import { Chessboard } from "react-chessboard";
-import { memo, type RefObject } from "react";
+import { memo, useState, type RefObject } from "react";
 import type { OpeningLookupResult } from "../../../openings/openingBook";
-import type { TargetBlunderSrs } from "../../../utils/api";
+import type { RatingScoreKey, RatingScores, TargetBlunderSrs } from "../../../utils/api";
+import { getRatingDisplayLabel, resolveDisplayScore } from "../../../stores/useGameStore";
 import type { ResolvedReview } from "../types";
 import OpponentAvatar from "./OpponentAvatar";
 
@@ -18,6 +19,9 @@ type GameInfoPanelProps = {
   playerColor: BoardOrientation;
   playerRating: number;
   isProvisional: boolean;
+  ratingScores?: RatingScores;
+  ratingDisplayType?: RatingScoreKey;
+  onRatingDisplayTypeChange?: (type: RatingScoreKey) => void;
   opponentMode: OpponentMode;
   opponentName: string;
   engineElo: number;
@@ -214,6 +218,9 @@ const GameInfoPanel = ({
   playerColor: _playerColor,
   playerRating,
   isProvisional,
+  ratingScores,
+  ratingDisplayType = "elo",
+  onRatingDisplayTypeChange,
   opponentMode,
   opponentName,
   engineElo,
@@ -233,6 +240,16 @@ const GameInfoPanel = ({
   onDismissRehookToast,
   perfectStreak,
 }: GameInfoPanelProps) => {
+  const [showRatingSettings, setShowRatingSettings] = useState(false);
+  const resolvedScores = ratingScores ?? {
+    elo: { rating: playerRating, is_provisional: isProvisional },
+    chesscom: null,
+    lichess: null,
+  };
+  const displayScore = resolveDisplayScore(resolvedScores, ratingDisplayType);
+  const displayLabel = getRatingDisplayLabel(
+    resolvedScores[ratingDisplayType] ? ratingDisplayType : "elo",
+  );
   return (
     <div className="chess-panel" aria-live="polite">
       <p className="chess-status">{statusText}</p>
@@ -255,11 +272,42 @@ const GameInfoPanel = ({
         }
       >
         <p className="chess-meta chess-panel__player-rating">
-          <span className="chess-panel__desktop-label">Your Elo: </span>
+          <span className="chess-panel__desktop-label">Your {displayLabel}: </span>
           <span className="chess-panel__mobile-label">You </span>
           <span className="chess-meta-strong">
-            {playerRating}
-            {isProvisional ? "?" : ""}
+            {displayScore.rating}
+            {displayScore.is_provisional ? "?" : ""}
+          </span>
+          <span className="rating-settings-anchor">
+            <button
+              className="rating-settings-button"
+              type="button"
+              aria-label="Rating display settings"
+              title="Rating display"
+              onClick={() => setShowRatingSettings((value) => !value)}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  fill="currentColor"
+                  d="M19.4 13.5c.1-.5.1-1 .1-1.5s0-1-.1-1.5l2-1.5-2-3.5-2.4 1a8.4 8.4 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5C8.7 5.3 7.8 5.8 7 6.5l-2.4-1-2 3.5 2 1.5A8.7 8.7 0 0 0 4.5 12c0 .5 0 1 .1 1.5l-2 1.5 2 3.5 2.4-1c.8.7 1.7 1.2 2.6 1.5l.4 2.5h4l.4-2.5c.9-.3 1.8-.8 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"
+                />
+              </svg>
+            </button>
+            {showRatingSettings && (
+              <div className="rating-settings-popover" role="dialog" aria-label="Rating display">
+                {(["elo", "chesscom", "lichess"] as const).map((type) => (
+                  <label key={type} className="rating-settings-option">
+                    <input
+                      type="radio"
+                      name="rating-display-type"
+                      checked={ratingDisplayType === type}
+                      onChange={() => onRatingDisplayTypeChange?.(type)}
+                    />
+                    {getRatingDisplayLabel(type)}
+                  </label>
+                ))}
+              </div>
+            )}
           </span>
         </p>
         {!isGameActive && <p className="chess-meta">Click New game to start</p>}

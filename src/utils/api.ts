@@ -152,17 +152,36 @@ export interface RatingChange {
   is_provisional: boolean
 }
 
+export type RatingScoreKey = 'elo' | 'chesscom' | 'lichess'
+
+export interface RatingScore {
+  rating: number
+  rd?: number
+  volatility?: number
+  is_provisional: boolean
+}
+
+export type RatingScores = {
+  elo: RatingScore
+  chesscom: RatingScore | null
+  lichess: RatingScore | null
+}
+
 interface EndGameResponse {
   session_id: string
   result: string
   ended_at: string
   rating: RatingChange | null
+  scores?: RatingScores | null
+  score_changes?: RatingScores | null
+  scores_after?: RatingScores | null
 }
 
 export interface CurrentRatingResponse {
   current_rating: number
   is_provisional: boolean
   games_played: number
+  scores?: RatingScores
 }
 
 export interface RatingPoint {
@@ -170,12 +189,14 @@ export interface RatingPoint {
   rating: number
   is_provisional: boolean
   game_session_id: string
+  scores?: RatingScores
 }
 
 export interface RatingHistoryResponse {
   ratings: RatingPoint[]
   current_rating: number
   games_played: number
+  scores?: RatingScores
 }
 
 export type SessionMoveColor = 'white' | 'black'

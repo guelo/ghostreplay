@@ -2585,6 +2585,61 @@
     color: var(--text-tertiary);
     white-space: nowrap;
 }
+
+.rating-settings-anchor {
+    position: relative;
+    display: inline-flex;
+    margin-left: 0.35rem;
+    vertical-align: middle;
+}
+
+.rating-settings-button {
+    width: 24px;
+    height: 24px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+}
+
+.rating-settings-button:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.rating-settings-popover {
+    position: absolute;
+    top: calc(100% + 0.35rem);
+    left: 0;
+    z-index: 12;
+    min-width: 8.5rem;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--card-bg);
+    box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
+    padding: 0.4rem;
+}
+
+.rating-settings-option {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.35rem 0.4rem;
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.rating-settings-option input {
+    margin: 0;
+    accent-color: var(--accent, #7c6fe0);
+}
 .move-bubble--srs-fail {
     display: flex;
     align-items: flex-start;
@@ -4758,6 +4813,13 @@ button.openings-shell__crumb:hover {
     display: flex;
     align-items: baseline;
     gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.rating-graph__series {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
 }
 
 .rating-graph__toggle {

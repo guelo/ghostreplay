@@ -15,7 +15,9 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory
-from app.rating import DEFAULT_RATING, RESULT_SCORES, compute_new_rating
+from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
+from app.rating import DEFAULT_RATING, RESULT_SCORES
+from app.rating_scores import compute_rating_tracks, latest_rating_order, rating_score, scores_for_row
 from app.security import TokenPayload, get_current_user
 from app.srs_math import (
     OPPORTUNITY_POWER,
@@ -415,11 +417,27 @@ class RatingChange(BaseModel):
     is_provisional: bool
 
 
+class RatingScore(BaseModel):
+    rating: int
+    is_provisional: bool
+    rd: float | None = None
+    volatility: float | None = None
+
+
+class RatingScores(BaseModel):
+    elo: RatingScore
+    chesscom: RatingScore | None = None
+    lichess: RatingScore | None = None
+
+
 class GameEndResponse(BaseModel):
     session_id: uuid.UUID
     result: str
     ended_at: datetime
     rating: RatingChange | None = None
+    scores: RatingScores | None = None
+    score_changes: RatingScores | None = None
+    scores_after: RatingScores | None = None
 
 
 class MoveDetails(BaseModel):
@@ -562,14 +580,14 @@ def end_game(
         latest = (
             db.query(RatingHistory)
             .filter(RatingHistory.user_id == user.user_id)
-            .order_by(RatingHistory.recorded_at.desc())
+            .order_by(*latest_rating_order())
             .first()
         )
         current_rating = latest.rating if latest else DEFAULT_RATING
         games_played = latest.games_played if latest else 0
 
-        new_rating, is_provisional = compute_new_rating(
-            current_rating, session.engine_elo, request.result.value, games_played
+        new_rating, is_provisional, chesscom, lichess = compute_rating_tracks(
+            latest, session.engine_elo, request.result.value
         )
 
         rating_row = RatingHistory(
@@ -578,6 +596,11 @@ def end_game(
             rating=new_rating,
             is_provisional=is_provisional,
             games_played=games_played + 1,
+            chesscom_rating=chesscom.rating if chesscom else None,
+            chesscom_rd=chesscom.rd if chesscom else None,
+            lichess_rating=lichess.rating if lichess else None,
+            lichess_rd=lichess.rd if lichess else None,
+            lichess_volatility=lichess.volatility if lichess else None,
             recorded_at=session.ended_at,
         )
         db.add(rating_row)
@@ -587,6 +610,39 @@ def end_game(
             rating_after=new_rating,
             is_provisional=is_provisional,
         )
+        scores_before = scores_for_row(latest)
+        scores_after = scores_for_row(rating_row)
+        score_changes = {
+            "elo": rating_score(new_rating - current_rating, is_provisional),
+            "chesscom": None,
+            "lichess": None,
+        }
+        if chesscom:
+            chesscom_before = (
+                scores_before["chesscom"]["rating"]
+                if scores_before["chesscom"] is not None
+                else round(CHESSCOM_INITIAL_RATING)
+            )
+            score_changes["chesscom"] = rating_score(
+                round(chesscom.rating) - chesscom_before,
+                is_provisional,
+                chesscom.rd,
+            )
+        if lichess:
+            lichess_before = (
+                scores_before["lichess"]["rating"]
+                if scores_before["lichess"] is not None
+                else round(LICHESS_INITIAL_RATING)
+            )
+            score_changes["lichess"] = rating_score(
+                round(lichess.rating) - lichess_before,
+                is_provisional,
+                lichess.rd,
+                lichess.volatility,
+            )
+    else:
+        scores_after = None
+        score_changes = None
 
     db.commit()
     db.refresh(session)
@@ -596,6 +652,9 @@ def end_game(
         result=session.result,
         ended_at=session.ended_at,
         rating=rating_change,
+        scores=scores_after,
+        score_changes=score_changes,
+        scores_after=scores_after,
     )
 
 

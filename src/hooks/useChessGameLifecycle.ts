@@ -25,6 +25,7 @@ import { useGameStore } from "../stores/useGameStore";
 import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
 import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
+import type { RatingScores } from "../utils/api";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -41,6 +42,14 @@ type PendingSrsReview = {
   moveIndex: number;
   userMoveSan: string;
   srs: TargetBlunderSrs | null;
+};
+
+const applyRatingScores = (scores: RatingScores | null | undefined) => {
+  if (!scores) return;
+  const s = useGameStore.getState();
+  s.setRatingScores(scores);
+  s.setPlayerRating(scores.elo.rating);
+  s.setIsProvisional(scores.elo.is_provisional);
 };
 
 type UseChessGameLifecycleArgs = {
@@ -176,8 +185,16 @@ export const useChessGameLifecycle = ({
     fetchCurrentRating()
       .then((data) => {
         const s = useGameStore.getState();
-        s.setPlayerRating(data.current_rating);
-        s.setIsProvisional(data.is_provisional);
+        applyRatingScores(
+          data.scores ?? {
+            elo: {
+              rating: data.current_rating,
+              is_provisional: data.is_provisional,
+            },
+            chesscom: null,
+            lichess: null,
+          },
+        );
         // Only resample engine ELO if no active game — otherwise the
         // displayed Maia name and stake would diverge from the backend session.
         if (!s.isGameActive) {
@@ -232,8 +249,8 @@ export const useChessGameLifecycle = ({
         if (endResponse.rating) {
           const s = useGameStore.getState();
           s.setRatingChange(endResponse.rating);
-          s.setPlayerRating(endResponse.rating.rating_after);
-          s.setIsProvisional(endResponse.rating.is_provisional);
+          s.setScoreChanges(endResponse.score_changes ?? null);
+          applyRatingScores(endResponse.scores_after ?? endResponse.scores);
         }
         finishLocalGame(result, {
           preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
@@ -334,8 +351,8 @@ export const useChessGameLifecycle = ({
         if (endResponse.rating) {
           const s = useGameStore.getState();
           s.setRatingChange(endResponse.rating);
-          s.setPlayerRating(endResponse.rating.rating_after);
-          s.setIsProvisional(endResponse.rating.is_provisional);
+          s.setScoreChanges(endResponse.score_changes ?? null);
+          applyRatingScores(endResponse.scores_after ?? endResponse.scores);
         }
         const s = useGameStore.getState();
         s.setIsRated(false);
@@ -439,6 +456,7 @@ export const useChessGameLifecycle = ({
         setEngineMessage(null);
         s2.setGameResult(null);
         s2.setRatingChange(null);
+        s2.setScoreChanges(null);
         s2.setMoveHistory([]);
         s2.setViewIndex(null);
         setLiveOpening(null);
@@ -531,8 +549,8 @@ export const useChessGameLifecycle = ({
       if (endResponse.rating) {
         const s = useGameStore.getState();
         s.setRatingChange(endResponse.rating);
-        s.setPlayerRating(endResponse.rating.rating_after);
-        s.setIsProvisional(endResponse.rating.is_provisional);
+        s.setScoreChanges(endResponse.score_changes ?? null);
+        applyRatingScores(endResponse.scores_after ?? endResponse.scores);
       }
       finishLocalGame({ type: "resign", message: "You resigned." });
     } catch (error) {

@@ -161,6 +161,7 @@ class RatingHistory(Base):
     __tablename__ = "rating_history"
     __table_args__ = (
         Index("idx_rating_history_user_timestamp", "user_id", "recorded_at"),
+        Index("uq_rating_history_game_session", "game_session_id", unique=True),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
@@ -171,6 +172,11 @@ class RatingHistory(Base):
     rating: Mapped[int] = mapped_column(Integer, nullable=False)
     is_provisional: Mapped[bool] = mapped_column(Boolean, nullable=False)
     games_played: Mapped[int] = mapped_column(Integer, nullable=False)
+    chesscom_rating: Mapped[float | None] = mapped_column(Float)
+    chesscom_rd: Mapped[float | None] = mapped_column(Float)
+    lichess_rating: Mapped[float | None] = mapped_column(Float)
+    lichess_rd: Mapped[float | None] = mapped_column(Float)
+    lichess_volatility: Mapped[float | None] = mapped_column(Float)
     recorded_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

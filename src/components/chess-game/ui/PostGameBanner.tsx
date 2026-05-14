@@ -1,5 +1,6 @@
 import { memo } from "react";
-import type { RatingChange } from "../../../utils/api";
+import type { RatingChange, RatingScoreKey, RatingScores } from "../../../utils/api";
+import { getRatingDisplayLabel } from "../../../stores/useGameStore";
 import type { GameResult } from "../domain/status";
 
 type PostGameBannerProps = {
@@ -8,6 +9,8 @@ type PostGameBannerProps = {
   showPostGamePrompt: boolean;
   gameResult: GameResult | null;
   ratingChange: RatingChange | null;
+  scoreChanges?: RatingScores | null;
+  ratingDisplayType?: RatingScoreKey;
   onViewAnalysis: () => void;
   onShowStartOverlay: () => void;
   onViewHistory: () => void;
@@ -19,10 +22,18 @@ const PostGameBanner = ({
   showPostGamePrompt,
   gameResult,
   ratingChange,
+  scoreChanges,
+  ratingDisplayType = "elo",
   onViewAnalysis,
   onShowStartOverlay,
   onViewHistory,
 }: PostGameBannerProps) => {
+  const selectedChange = scoreChanges?.[ratingDisplayType] ?? scoreChanges?.elo;
+  const selectedLabel = getRatingDisplayLabel(
+    scoreChanges?.[ratingDisplayType] ? ratingDisplayType : "elo",
+  );
+  const selectedDelta = selectedChange?.rating;
+
   if (showPostGamePrompt && gameResult) {
     return (
       <div
@@ -33,13 +44,14 @@ const PostGameBanner = ({
         <p className="game-end-banner-message">{gameResult.message}</p>
         {ratingChange && !isPracticeContinuation && (
           <p
-            className={`rating-delta ${ratingChange.rating_after >= ratingChange.rating_before ? "rating-delta--up" : "rating-delta--down"}`}
+            className={`rating-delta ${(selectedDelta ?? ratingChange.rating_after - ratingChange.rating_before) >= 0 ? "rating-delta--up" : "rating-delta--down"}`}
           >
-            {ratingChange.rating_after >= ratingChange.rating_before ? "+" : ""}
-            {ratingChange.rating_after - ratingChange.rating_before}{" "}
+            {(selectedDelta ?? ratingChange.rating_after - ratingChange.rating_before) >= 0 ? "+" : ""}
+            {selectedDelta ?? ratingChange.rating_after - ratingChange.rating_before}{" "}
             <span className="rating-delta__value">
-              ({ratingChange.rating_before} → {ratingChange.rating_after}
-              {ratingChange.is_provisional ? "?" : ""})
+              {selectedLabel === "Elo"
+                ? `(${ratingChange.rating_before} -> ${ratingChange.rating_after}${ratingChange.is_provisional ? "?" : ""})`
+                : `(${selectedLabel})`}
             </span>
           </p>
         )}

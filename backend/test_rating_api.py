@@ -41,6 +41,11 @@ def test_current_rating_empty(client, auth_headers):
         "current_rating": DEFAULT_RATING,
         "is_provisional": True,
         "games_played": 0,
+        "scores": {
+            "elo": {"rating": DEFAULT_RATING, "is_provisional": True},
+            "chesscom": None,
+            "lichess": None,
+        },
     }
 
 
@@ -97,6 +102,11 @@ def test_rating_history_empty(client, auth_headers):
         "ratings": [],
         "current_rating": DEFAULT_RATING,
         "games_played": 0,
+        "scores": {
+            "elo": {"rating": DEFAULT_RATING, "is_provisional": True},
+            "chesscom": None,
+            "lichess": None,
+        },
     }
 
 
@@ -119,10 +129,13 @@ def test_rating_history_response_shape(client, auth_headers, create_game_session
     assert len(data["ratings"]) == 1
 
     point = data["ratings"][0]
-    assert set(point.keys()) == {"timestamp", "rating", "is_provisional", "game_session_id"}
+    assert set(point.keys()) == {"timestamp", "rating", "is_provisional", "game_session_id", "scores"}
     assert point["rating"] == 1230
     assert point["is_provisional"] is True
     assert point["game_session_id"] == s1
+    assert point["scores"]["elo"] == {"rating": 1230, "is_provisional": True}
+    assert point["scores"]["chesscom"] is None
+    assert point["scores"]["lichess"] is None
 
 
 def test_rating_history_ordered_ascending(client, auth_headers, create_game_session, db_session):

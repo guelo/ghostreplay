@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import Blunder, GameSession, Move, Position, RatingHistory, SessionMove
 from app.rating import DEFAULT_RATING
+from app.rating_scores import latest_rating_order, scores_for_row
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
@@ -120,6 +121,7 @@ class CurrentRatingResponse(BaseModel):
     current_rating: int
     is_provisional: bool
     games_played: int
+    scores: dict
 
 
 @router.get("/current-rating", response_model=CurrentRatingResponse)
@@ -130,7 +132,7 @@ def get_current_rating(
     latest = (
         db.query(RatingHistory)
         .filter(RatingHistory.user_id == user.user_id)
-        .order_by(RatingHistory.recorded_at.desc())
+        .order_by(*latest_rating_order())
         .first()
     )
     if latest:
@@ -138,11 +140,13 @@ def get_current_rating(
             current_rating=latest.rating,
             is_provisional=latest.is_provisional,
             games_played=latest.games_played,
+            scores=scores_for_row(latest),
         )
     return CurrentRatingResponse(
         current_rating=DEFAULT_RATING,
         is_provisional=True,
         games_played=0,
+        scores=scores_for_row(None),
     )
 
 
@@ -151,12 +155,14 @@ class RatingPoint(BaseModel):
     rating: int
     is_provisional: bool
     game_session_id: str
+    scores: dict
 
 
 class RatingHistoryResponse(BaseModel):
     ratings: list[RatingPoint]
     current_rating: int
     games_played: int
+    scores: dict
 
 
 @router.get("/rating-history", response_model=RatingHistoryResponse)
@@ -182,7 +188,7 @@ def get_rating_history(
     latest = (
         db.query(RatingHistory)
         .filter(RatingHistory.user_id == user.user_id)
-        .order_by(RatingHistory.recorded_at.desc())
+        .order_by(*latest_rating_order())
         .first()
     )
 
@@ -193,11 +199,13 @@ def get_rating_history(
                 rating=row.rating,
                 is_provisional=row.is_provisional,
                 game_session_id=str(row.game_session_id),
+                scores=scores_for_row(row),
             )
             for row in rows
         ],
         current_rating=latest.rating if latest else DEFAULT_RATING,
         games_played=latest.games_played if latest else 0,
+        scores=scores_for_row(latest),
     )
 
 

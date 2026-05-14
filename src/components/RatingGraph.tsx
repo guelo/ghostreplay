@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   ResponsiveContainer,
   LineChart,
@@ -12,11 +12,16 @@ import {
   fetchRatingHistory,
   type RatingHistoryResponse,
   type RatingPoint,
+  type RatingScoreKey,
 } from "../utils/api";
 import TimeRangeSlider from "./TimeRangeSlider";
 
 const PROVISIONAL_THRESHOLD = 20;
-const ACCENT = "var(--accent, #7c6fe0)";
+const SERIES: Array<{ key: RatingScoreKey; label: string; color: string }> = [
+  { key: "elo", label: "Elo", color: "var(--accent, #7c6fe0)" },
+  { key: "chesscom", label: "Chess.com", color: "#2d8a57" },
+  { key: "lichess", label: "Lichess", color: "#c27803" },
+];
 const DAY_MS = 86_400_000;
 
 export const CHART_LAYOUT = {
@@ -35,8 +40,12 @@ function formatDate(iso: string): string {
 interface ChartPoint {
   timestamp: string;
   date: number;
-  provisionalRating?: number;
-  stableRating?: number;
+  eloProvisional?: number;
+  eloStable?: number;
+  chesscomProvisional?: number;
+  chesscomStable?: number;
+  lichessProvisional?: number;
+  lichessStable?: number;
   isProvisional: boolean;
   rating: number;
 }
@@ -48,18 +57,34 @@ function buildChartData(points: RatingPoint[]): ChartPoint[] {
     const isProvisional = p.is_provisional;
     const isOverlap = provEnd !== -1 && i === provEnd;
 
-    return {
+    const scores = p.scores ?? {
+      elo: { rating: p.rating, is_provisional: p.is_provisional },
+      chesscom: null,
+      lichess: null,
+    };
+    const point: ChartPoint = {
       timestamp: p.timestamp,
       date: new Date(p.timestamp).getTime(),
       rating: p.rating,
       isProvisional,
-      provisionalRating: isProvisional || isOverlap ? p.rating : undefined,
-      stableRating: !isProvisional ? p.rating : undefined,
     };
+    for (const series of SERIES) {
+      const score = scores[series.key];
+      if (!score) continue;
+      const provisionalKey = `${series.key}Provisional` as keyof ChartPoint;
+      const stableKey = `${series.key}Stable` as keyof ChartPoint;
+      if (isProvisional || isOverlap) {
+        (point[provisionalKey] as number | undefined) = score.rating;
+      }
+      if (!isProvisional) {
+        (point[stableKey] as number | undefined) = score.rating;
+      }
+    }
+    return point;
   });
 }
 
-const hollowDot = (props: Record<string, unknown>) => {
+const hollowDot = (color: string) => (props: Record<string, unknown>) => {
   const { cx, cy, value } = props as { cx: number; cy: number; value?: number };
   if (value == null) return null;
   return (
@@ -68,16 +93,16 @@ const hollowDot = (props: Record<string, unknown>) => {
       cy={cy}
       r={3}
       fill="none"
-      stroke={ACCENT}
+      stroke={color}
       strokeWidth={1.5}
     />
   );
 };
 
-const filledDot = (props: Record<string, unknown>) => {
+const filledDot = (color: string) => (props: Record<string, unknown>) => {
   const { cx, cy, value } = props as { cx: number; cy: number; value?: number };
   if (value == null) return null;
-  return <circle cx={cx} cy={cy} r={3} fill={ACCENT} />;
+  return <circle cx={cx} cy={cy} r={3} fill={color} />;
 };
 
 const CustomTooltip = ({
@@ -85,13 +110,18 @@ const CustomTooltip = ({
   payload,
 }: {
   active?: boolean;
-  payload?: Array<{ payload: ChartPoint }>;
+  payload?: Array<{ payload: ChartPoint; name?: string; value?: number; color?: string }>;
 }) => {
   if (!active || !payload?.length) return null;
   const point = payload[0].payload;
+  const values = payload.filter((item) => item.value != null);
   return (
     <div className="rating-graph__tooltip">
-      <strong>{point.rating}</strong>
+      {values.map((item) => (
+        <div key={`${item.name}-${item.value}`}>
+          <strong style={{ color: item.color }}>{item.value}</strong> {item.name}
+        </div>
+      ))}
       {point.isProvisional ? " (provisional)" : ""}
       <br />
       {formatDate(point.timestamp)}
@@ -150,6 +180,11 @@ function rangesEqual(
 
 function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   const [showProvisional, setShowProvisional] = useState(true);
+  const [visibleSeries, setVisibleSeries] = useState<Record<RatingScoreKey, boolean>>({
+    elo: true,
+    chesscom: true,
+    lichess: true,
+  });
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -214,11 +249,12 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   const filteredRatings = useMemo(
     () =>
       data
-        ? showProvisional
-          ? data.ratings
-          : data.ratings.filter((r) => !r.is_provisional)
+        ? (showProvisional
+            ? data.ratings
+            : data.ratings.filter((r) => !r.is_provisional)
+          ).filter((r) => SERIES.some((series) => visibleSeries[series.key] && (r.scores?.[series.key] ?? (series.key === "elo" ? { rating: r.rating } : null))))
         : [],
-    [data, showProvisional],
+    [data, showProvisional, visibleSeries],
   );
 
   const allChartData = useMemo(
@@ -312,9 +348,17 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
     return { ticks: positions, tickFormatter: fmt };
   }, [viewStart, viewEnd, plotWidth]);
 
-  const hasProvisional = visibleData.some((p) => p.provisionalRating != null);
-  const hasStable = visibleData.some((p) => p.stableRating != null);
+  const hasAnySeriesChecked = SERIES.some((series) => visibleSeries[series.key]);
+  const hasSelectedSeriesData = filteredRatings.length > 0;
   const showSlider = allChartData.length > 1;
+  const currentVisibleScores = useMemo(() => {
+    if (!data?.scores) return [];
+    return SERIES.flatMap((series) => {
+      if (!visibleSeries[series.key]) return [];
+      const score = data.scores?.[series.key];
+      return score ? [{ ...series, score }] : [];
+    });
+  }, [data, visibleSeries]);
 
   const renderChart = () => {
     if (visibleData.length === 0 && allChartData.length === 0) return null;
@@ -358,32 +402,45 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
               content={<CustomTooltip />}
               cursor={{ stroke: "var(--border-color)" }}
             />
-            {hasProvisional && (
-              <Line
-                type="linear"
-                dataKey="provisionalRating"
-                stroke={ACCENT}
-                strokeDasharray="6 4"
-                strokeWidth={2}
-                opacity={0.6}
-                dot={hollowDot}
-                activeDot={false}
-                connectNulls
-                isAnimationActive={false}
-              />
-            )}
-            {hasStable && (
-              <Line
-                type="linear"
-                dataKey="stableRating"
-                stroke={ACCENT}
-                strokeWidth={2}
-                dot={filledDot}
-                activeDot={false}
-                connectNulls
-                isAnimationActive={false}
-              />
-            )}
+            {SERIES.map((series) => {
+              if (!visibleSeries[series.key]) return null;
+              const provisionalKey = `${series.key}Provisional`;
+              const stableKey = `${series.key}Stable`;
+              const hasProvisional = visibleData.some((p) => (p as unknown as Record<string, unknown>)[provisionalKey] != null);
+              const hasStable = visibleData.some((p) => (p as unknown as Record<string, unknown>)[stableKey] != null);
+              return (
+                <Fragment key={series.key}>
+                  {hasProvisional && (
+                    <Line
+                      name={series.label}
+                      type="linear"
+                      dataKey={provisionalKey}
+                      stroke={series.color}
+                      strokeDasharray="6 4"
+                      strokeWidth={2}
+                      opacity={0.6}
+                      dot={hollowDot(series.color)}
+                      activeDot={false}
+                      connectNulls
+                      isAnimationActive={false}
+                    />
+                  )}
+                  {hasStable && (
+                    <Line
+                      name={series.label}
+                      type="linear"
+                      dataKey={stableKey}
+                      stroke={series.color}
+                      strokeWidth={2}
+                      dot={filledDot(series.color)}
+                      activeDot={false}
+                      connectNulls
+                      isAnimationActive={false}
+                    />
+                  )}
+                </Fragment>
+              );
+            })}
           </LineChart>
         </ResponsiveContainer>
         {showSlider && (
@@ -414,6 +471,23 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
               Show provisional
             </label>
           )}
+          <div className="rating-graph__series" role="group" aria-label="Rating series">
+            {SERIES.map((series) => (
+              <label key={series.key} className="rating-graph__toggle">
+                <input
+                  type="checkbox"
+                  checked={visibleSeries[series.key]}
+                  onChange={(e) =>
+                    setVisibleSeries((prev) => ({
+                      ...prev,
+                      [series.key]: e.target.checked,
+                    }))
+                  }
+                />
+                {series.label}
+              </label>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -434,7 +508,11 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
 
         {!loading && !error && data && data.ratings.length > 0 && filteredRatings.length === 0 && (
           <p className="rating-graph__empty">
-            No stable ratings yet. Complete more games to see your rating!
+            {!hasAnySeriesChecked
+              ? "Select at least one rating series."
+              : showProvisional
+                ? "No data for the selected rating series yet."
+                : "No stable ratings yet. Complete more games to see your rating!"}
           </p>
         )}
 
@@ -449,12 +527,19 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
             </p>
           )}
 
-        {!loading && !error && data && filteredRatings.length > 0 && renderChart()}
+        {!loading && !error && data && hasSelectedSeriesData && renderChart()}
 
-        {!loading && !error && data && data.ratings.length > 0 && (
+        {!loading && !error && data && data.ratings.length > 0 && currentVisibleScores.length > 0 && (
           <p className="rating-graph__current">
-            Current: <strong>{data.current_rating}</strong>
-            {data.games_played < PROVISIONAL_THRESHOLD ? "?" : ""}
+            Current{" "}
+            {currentVisibleScores.map((series, index) => (
+              <span key={series.key}>
+                {index > 0 ? " · " : ""}
+                {series.label}:{" "}
+                <strong style={{ color: series.color }}>{series.score.rating}</strong>
+                {series.score.is_provisional ? "?" : ""}
+              </span>
+            ))}
           </p>
         )}
       </div>

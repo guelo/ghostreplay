@@ -7,7 +7,7 @@ import uuid
 import random
 from datetime import datetime, timedelta, timezone
 
-from app.models import Blunder, GameSession
+from app.models import Blunder, GameSession, RatingHistory
 
 
 def test_start_game_success(client, auth_headers):
@@ -164,6 +164,55 @@ def test_end_game_success(client, auth_headers):
     assert data["session_id"] == session_id
     assert data["result"] == "checkmate_win"
     assert "ended_at" in data
+    assert data["rating"]["rating_after"] == data["scores"]["elo"]["rating"]
+    assert data["scores"]["chesscom"]["rating"] > 1200
+    assert data["scores"]["lichess"]["rating"] > 1500
+    assert data["score_changes"]["chesscom"]["rating"] > 0
+
+
+def test_end_game_keeps_glicko_null_for_unbackfilled_legacy_user(client, auth_headers, db_session):
+    user_id = 123
+    legacy_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers=auth_headers(user_id=user_id),
+    )
+    legacy_session_id = uuid.UUID(legacy_response.json()["session_id"])
+    legacy_row = RatingHistory(
+        user_id=user_id,
+        game_session_id=legacy_session_id,
+        rating=1400,
+        is_provisional=False,
+        games_played=30,
+        recorded_at=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    db_session.add(legacy_row)
+    db_session.commit()
+
+    start_response = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500},
+        headers=auth_headers(user_id=user_id),
+    )
+    session_id = start_response.json()["session_id"]
+
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "checkmate_win",
+            "pgn": "1. e4 e5",
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert end_response.status_code == 200
+    data = end_response.json()
+    assert data["scores"]["elo"]["rating"] == data["rating"]["rating_after"]
+    assert data["scores"]["chesscom"] is None
+    assert data["scores"]["lichess"] is None
+    assert data["score_changes"]["chesscom"] is None
+    assert data["score_changes"]["lichess"] is None
 
 
 def test_end_game_with_pgn(client, auth_headers):

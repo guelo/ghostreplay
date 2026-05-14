@@ -1,6 +1,6 @@
 import type { SetStateAction } from "react";
 import { create } from "zustand";
-import type { RatingChange } from "../utils/api";
+import type { RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
 
@@ -11,6 +11,26 @@ const resolve = <T>(update: SetStateAction<T>, prev: T): T =>
   typeof update === "function"
     ? (update as (prev: T) => T)(prev)
     : update;
+
+const RATING_DISPLAY_STORAGE_KEY = "ghostreplay_rating_display_type";
+
+const readRatingDisplayType = (): RatingScoreKey => {
+  if (typeof window === "undefined") return "elo";
+  if (typeof window.localStorage?.getItem !== "function") return "elo";
+  const value = window.localStorage.getItem(RATING_DISPLAY_STORAGE_KEY);
+  return value === "chesscom" || value === "lichess" ? value : "elo";
+};
+
+export const getRatingDisplayLabel = (key: RatingScoreKey): string => {
+  if (key === "chesscom") return "Chess.com";
+  if (key === "lichess") return "Lichess";
+  return "Elo";
+};
+
+export const resolveDisplayScore = (
+  scores: RatingScores,
+  selected: RatingScoreKey,
+) => scores[selected] ?? scores.elo;
 
 export type GameState = {
   // --- Game position (hot, changes every move) ---
@@ -33,7 +53,10 @@ export type GameState = {
   isPracticeContinuation: boolean;
   playerRating: number;
   isProvisional: boolean;
+  ratingScores: RatingScores;
+  ratingDisplayType: RatingScoreKey;
   ratingChange: RatingChange | null;
+  scoreChanges: RatingScores | null;
 };
 
 export type GameActions = {
@@ -53,7 +76,10 @@ export type GameActions = {
   setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
   setPlayerRating: (update: SetStateAction<number>) => void;
   setIsProvisional: (update: SetStateAction<boolean>) => void;
+  setRatingScores: (update: SetStateAction<RatingScores>) => void;
+  setRatingDisplayType: (update: SetStateAction<RatingScoreKey>) => void;
   setRatingChange: (update: SetStateAction<RatingChange | null>) => void;
+  setScoreChanges: (update: SetStateAction<RatingScores | null>) => void;
 };
 
 const STARTING_FEN =
@@ -75,7 +101,14 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   isPracticeContinuation: false,
   playerRating: 1200,
   isProvisional: true,
+  ratingScores: {
+    elo: { rating: 1200, is_provisional: true },
+    chesscom: null,
+    lichess: null,
+  },
+  ratingDisplayType: readRatingDisplayType(),
   ratingChange: null,
+  scoreChanges: null,
 
   // --- Actions ---
   setLiveFen: (u) => set((s) => ({ liveFen: resolve(u, s.liveFen) })),
@@ -103,6 +136,18 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ playerRating: resolve(u, s.playerRating) })),
   setIsProvisional: (u) =>
     set((s) => ({ isProvisional: resolve(u, s.isProvisional) })),
+  setRatingScores: (u) =>
+    set((s) => ({ ratingScores: resolve(u, s.ratingScores) })),
+  setRatingDisplayType: (u) =>
+    set((s) => {
+      const next = resolve(u, s.ratingDisplayType);
+      if (typeof window !== "undefined" && typeof window.localStorage?.setItem === "function") {
+        window.localStorage.setItem(RATING_DISPLAY_STORAGE_KEY, next);
+      }
+      return { ratingDisplayType: next };
+    }),
   setRatingChange: (u) =>
     set((s) => ({ ratingChange: resolve(u, s.ratingChange) })),
+  setScoreChanges: (u) =>
+    set((s) => ({ scoreChanges: resolve(u, s.scoreChanges) })),
 }));

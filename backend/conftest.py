@@ -135,7 +135,13 @@ def _create_test_schema(conn) -> None:
             rating INTEGER NOT NULL,
             is_provisional BOOLEAN NOT NULL,
             games_played INTEGER NOT NULL,
-            recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            chesscom_rating FLOAT,
+            chesscom_rd FLOAT,
+            lichess_rating FLOAT,
+            lichess_rd FLOAT,
+            lichess_volatility FLOAT,
+            recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(game_session_id)
         )
     """))
     conn.execute(text("""
