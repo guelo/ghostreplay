@@ -3728,6 +3728,15 @@
     min-height: 400px;
 }
 
+.blunders-shell .analysis-board__layout {
+    align-items: stretch;
+}
+
+.blunders-shell .analysis-board__moves-col {
+    max-height: var(--analysis-board-main-height, 420px);
+    min-height: 0;
+}
+
 @media (max-width: 720px) {
     .blunders-layout {
         grid-template-columns: 1fr;

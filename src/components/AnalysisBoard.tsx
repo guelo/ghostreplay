@@ -268,6 +268,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const [selectedEnginePlyIndex, setSelectedEnginePlyIndex] = useState(0);
   const [enginePopupPosition, setEnginePopupPosition] = useState<React.CSSProperties | null>(null);
   const boardRootRef = useRef<HTMLDivElement>(null);
+  const boardFrameRef = useRef<HTMLDivElement>(null);
   const engineLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const enginePopupRef = useRef<HTMLDivElement>(null);
   const { info: engineLines, infoFen: engineInfoFen, isThinking: engineThinking, evaluatePosition, stopSearch } =
@@ -622,6 +623,30 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   }, [showEngineArrows, closeEnginePopup]);
 
   useEffect(() => {
+    const root = boardRootRef.current;
+    const boardFrame = boardFrameRef.current;
+    if (!root || !boardFrame) return;
+
+    const syncBoardHeight = () => {
+      const height = boardFrame.getBoundingClientRect().height;
+      if (height > 0) {
+        root.style.setProperty("--analysis-board-main-height", `${height}px`);
+      }
+    };
+
+    syncBoardHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(syncBoardHeight);
+    observer.observe(boardFrame);
+
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
     if (selectedEngineLineIndex === null) return;
     const line = engineLinesDisplay[selectedEngineLineIndex];
     if (!line) {
@@ -965,7 +990,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               }
               whiteOnBottom={boardOrientation === "white"}
             />
-            <div className="analysis-board__board-frame">
+            <div className="analysis-board__board-frame" ref={boardFrameRef}>
               <Chessboard
                 options={{
                   id: `${chessboardId}-main`,
