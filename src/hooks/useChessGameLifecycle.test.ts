@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { Chess } from "chess.js";
 import type { MutableRefObject } from "react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import { useChessGameLifecycle } from "./useChessGameLifecycle";
 import { useGameStore } from "../stores/useGameStore";
@@ -11,6 +11,8 @@ const fetchCurrentRatingMock = vi.fn();
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
+const audioCtorMock = vi.fn();
+const audioPlayMock = vi.fn();
 
 vi.mock("../utils/api", () => ({
   fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
@@ -38,6 +40,7 @@ type SetupOptions = {
   moveHistory?: MoveRecord[];
   isGameActive?: boolean;
   isRated?: boolean;
+  isPracticeContinuation?: boolean;
   playerColor?: "white" | "black";
   playerColorChoice?: "white" | "black" | "random";
   playerRating?: number;
@@ -57,6 +60,7 @@ const setup = ({
   moveHistory = [],
   isGameActive = false,
   isRated = true,
+  isPracticeContinuation = false,
   playerColor = "white",
   playerColorChoice = "random",
   playerRating = 1200,
@@ -69,6 +73,7 @@ const setup = ({
     sessionId: "session-123",
     isGameActive,
     isRated,
+    isPracticeContinuation,
     playerColor,
     playerColorChoice,
     engineElo: 1000,
@@ -186,6 +191,24 @@ beforeEach(() => {
   endGameMock.mockReset();
   uploadSessionMovesMock.mockReset();
   uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+  audioCtorMock.mockReset();
+  audioPlayMock.mockReset();
+  audioPlayMock.mockResolvedValue(undefined);
+  class MockAudio {
+    constructor(src: string) {
+      audioCtorMock(src);
+    }
+
+    play() {
+      return audioPlayMock();
+    }
+  }
+  vi.stubGlobal("Audio", MockAudio);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("useChessGameLifecycle", () => {
@@ -607,6 +630,258 @@ describe("useChessGameLifecycle", () => {
     expect(getResolvedReview()).toBeNull();
   });
 
+  it("plays a win clip once after successful checkmate win finalization", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "checkmate_win",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(audioCtorMock).toHaveBeenCalledTimes(1);
+    expect(audioCtorMock.mock.calls[0][0]).toContain("/assets/audio/win/");
+    expect(audioPlayMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("plays a loss clip after successful checkmate loss finalization", async () => {
+    const chess = new Chess("7K/8/6qk/8/8/8/8/8 b - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "checkmate_loss",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(audioCtorMock).toHaveBeenCalledTimes(1);
+    expect(audioCtorMock.mock.calls[0][0]).toContain("/assets/audio/lose/");
+    expect(audioPlayMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not play audio for draw finalization", async () => {
+    const chess = new Chess("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
+    if (!chess.isStalemate()) {
+      throw new Error("Unable to construct stalemate test position");
+    }
+    const { result } = setup({
+      chess,
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "draw",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(audioCtorMock).not.toHaveBeenCalled();
+  });
+
+  it("plays end-game audio at most once for duplicate same-session finalization", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    let resolveFirst!: (value: {
+      session_id: string;
+      result: string;
+      ended_at: string;
+      rating: null;
+    }) => void;
+    let resolveSecond!: (value: {
+      session_id: string;
+      result: string;
+      ended_at: string;
+      rating: null;
+    }) => void;
+    endGameMock
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveSecond = resolve;
+        }),
+      );
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.handleGameEnd();
+      second = result.current.handleGameEnd();
+    });
+
+    await act(async () => {
+      resolveFirst({
+        session_id: "session-123",
+        result: "checkmate_win",
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: null,
+      });
+      resolveSecond({
+        session_id: "session-123",
+        result: "checkmate_win",
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: null,
+      });
+      await first;
+      await second;
+    });
+
+    expect(audioCtorMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not play audio when stale game finalization resolves after session replacement", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    let resolveEndGame!: (value: {
+      session_id: string;
+      result: string;
+      ended_at: string;
+      rating: {
+        rating_before: number;
+        rating_after: number;
+        is_provisional: boolean;
+      };
+    }) => void;
+    endGameMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveEndGame = resolve;
+      }),
+    );
+
+    let pendingEnd!: Promise<void>;
+    act(() => {
+      pendingEnd = result.current.handleGameEnd();
+      useGameStore.setState({
+        sessionId: "session-new",
+        isGameActive: true,
+        isRated: true,
+        isPracticeContinuation: false,
+      });
+    });
+
+    await act(async () => {
+      resolveEndGame({
+        session_id: "session-123",
+        result: "checkmate_win",
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: {
+          rating_before: 1200,
+          rating_after: 1216,
+          is_provisional: false,
+        },
+      });
+      await pendingEnd;
+    });
+
+    expect(audioCtorMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        sessionId: "session-new",
+        isGameActive: true,
+        isRated: true,
+        isPracticeContinuation: false,
+        ratingChange: null,
+        scoreChanges: null,
+      }),
+    );
+  });
+
+  it("does not play audio for terminal checkmate in practice continuation", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      isPracticeContinuation: true,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(useGameStore.getState().isGameActive).toBe(false);
+    expect(endGameMock).not.toHaveBeenCalled();
+    expect(audioCtorMock).not.toHaveBeenCalled();
+  });
+
   it("clears pending SRS review registry on reset", async () => {
     const { result, pendingSrsReviewRef } = setup({
       pendingSrsEntries: [
@@ -768,5 +1043,144 @@ describe("useChessGameLifecycle", () => {
 
     await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
     expect(getResolvedReview()).toBeNull();
+  });
+
+  it("plays a loss clip after successful resignation finalization", async () => {
+    const chess = new Chess();
+    chess.move("e4");
+    const { result } = setup({
+      chess,
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+    });
+
+    act(() => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(audioCtorMock).toHaveBeenCalledTimes(1);
+    expect(audioCtorMock.mock.calls[0][0]).toContain("/assets/audio/lose/");
+  });
+
+  it("does not apply stale resignation rating side effects after session replacement", async () => {
+    const chess = new Chess();
+    chess.move("e4");
+    const { result } = setup({
+      chess,
+      isGameActive: true,
+      isRated: true,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    let resolveResign!: (value: {
+      session_id: string;
+      result: string;
+      ended_at: string;
+      rating: {
+        rating_before: number;
+        rating_after: number;
+        is_provisional: boolean;
+      };
+    }) => void;
+    endGameMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveResign = resolve;
+      }),
+    );
+
+    act(() => {
+      result.current.executeResign();
+      useGameStore.setState({
+        sessionId: "session-new",
+        isGameActive: true,
+        isRated: true,
+        isPracticeContinuation: false,
+        ratingChange: null,
+        scoreChanges: null,
+      });
+    });
+
+    await act(async () => {
+      resolveResign({
+        session_id: "session-123",
+        result: "resign",
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: {
+          rating_before: 1200,
+          rating_after: 1184,
+          is_provisional: false,
+        },
+      });
+    });
+
+    expect(audioCtorMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        sessionId: "session-new",
+        isGameActive: true,
+        isRated: true,
+        isPracticeContinuation: false,
+        ratingChange: null,
+        scoreChanges: null,
+      }),
+    );
+  });
+
+  it("does not play audio when resignation finalization fails", async () => {
+    const chess = new Chess();
+    chess.move("e4");
+    const { result } = setup({
+      chess,
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockRejectedValueOnce(new Error("resign failed"));
+
+    act(() => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() => expect(endGameMock).toHaveBeenCalledTimes(1));
+    expect(audioCtorMock).not.toHaveBeenCalled();
+  });
+
+  it("does not play audio when practice continuation is ended by resignation", async () => {
+    const chess = new Chess();
+    chess.move("e4");
+    const { result } = setup({
+      chess,
+      isGameActive: true,
+      isRated: false,
+      isPracticeContinuation: true,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(useGameStore.getState().gameResult).toEqual({
+      type: "resign",
+      message: "Practice ended.",
+    });
+    expect(endGameMock).not.toHaveBeenCalled();
+    expect(audioCtorMock).not.toHaveBeenCalled();
   });
 });

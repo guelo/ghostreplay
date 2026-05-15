@@ -19,6 +19,7 @@ import type {
   ReviewFailInfo,
 } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
+import { playEndGameAudio } from "../components/chess-game/endGameAudio";
 import { sampleEloBin } from "../components/chess-game/elo";
 import type { BoardOrientation, OpenHistoryOptions, ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
@@ -122,6 +123,7 @@ export const useChessGameLifecycle = ({
   clearBlunderBoardOverride,
 }: UseChessGameLifecycleArgs) => {
   const revertExecutionIdRef = useRef(0);
+  const playedEndGameAudioSessionIdRef = useRef<string | null>(null);
   const isCurrentRevertExecution = useCallback(
     (executionId: number) => revertExecutionIdRef.current === executionId,
     [],
@@ -155,11 +157,30 @@ export const useChessGameLifecycle = ({
       options?: {
         showPostGamePrompt?: boolean;
         preserveResolvedReviewMoveIndex?: number;
+        playEndGameAudio?: boolean;
+        finalizingSessionId?: string | null;
       },
     ) => {
       const store = useGameStore.getState();
+      const finalizingSessionId =
+        options?.finalizingSessionId ?? store.sessionId;
+      if (
+        finalizingSessionId &&
+        store.sessionId !== finalizingSessionId
+      ) {
+        return;
+      }
+
       store.setIsGameActive(false);
       store.setGameResult(result);
+      if (
+        (options?.playEndGameAudio ?? true) &&
+        finalizingSessionId &&
+        playedEndGameAudioSessionIdRef.current !== finalizingSessionId
+      ) {
+        playedEndGameAudioSessionIdRef.current = finalizingSessionId;
+        playEndGameAudio(result);
+      }
       setBlunderReviewId(null);
       setBlunderReviewSrs(null);
       setBlunderTargetFen(null);
@@ -207,6 +228,7 @@ export const useChessGameLifecycle = ({
   const handleGameEnd = useCallback(async () => {
     const store = useGameStore.getState();
     if (!store.sessionId || !store.isGameActive) return;
+    const finalizingSessionId = store.sessionId;
 
     let result: GameResult | null = null;
 
@@ -230,6 +252,8 @@ export const useChessGameLifecycle = ({
       if (store.isPracticeContinuation) {
         finishLocalGame(result, {
           preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
+          playEndGameAudio: false,
+          finalizingSessionId,
         });
         return;
       }
@@ -246,6 +270,9 @@ export const useChessGameLifecycle = ({
           chess.pgn(),
           store.isRated,
         );
+        if (useGameStore.getState().sessionId !== finalizingSessionId) {
+          return;
+        }
         if (endResponse.rating) {
           const s = useGameStore.getState();
           s.setRatingChange(endResponse.rating);
@@ -254,6 +281,7 @@ export const useChessGameLifecycle = ({
         }
         finishLocalGame(result, {
           preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
+          finalizingSessionId,
         });
       } catch (error) {
         const message =
@@ -415,6 +443,7 @@ export const useChessGameLifecycle = ({
         setIsStartingGame(true);
         setStartError(null);
         revertExecutionIdRef.current += 1;
+        playedEndGameAudioSessionIdRef.current = null;
 
         const store = useGameStore.getState();
         if (
@@ -529,9 +558,13 @@ export const useChessGameLifecycle = ({
     if (!store.sessionId || !store.isGameActive) {
       return;
     }
+    const finalizingSessionId = store.sessionId;
 
     if (store.isPracticeContinuation) {
-      finishLocalGame({ type: "resign", message: "Practice ended." });
+      finishLocalGame(
+        { type: "resign", message: "Practice ended." },
+        { playEndGameAudio: false, finalizingSessionId },
+      );
       return;
     }
 
@@ -546,13 +579,19 @@ export const useChessGameLifecycle = ({
         chess.pgn(),
         store.isRated,
       );
+      if (useGameStore.getState().sessionId !== finalizingSessionId) {
+        return;
+      }
       if (endResponse.rating) {
         const s = useGameStore.getState();
         s.setRatingChange(endResponse.rating);
         s.setScoreChanges(endResponse.score_changes ?? null);
         applyRatingScores(endResponse.scores_after ?? endResponse.scores);
       }
-      finishLocalGame({ type: "resign", message: "You resigned." });
+      finishLocalGame(
+        { type: "resign", message: "You resigned." },
+        { finalizingSessionId },
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to resign game.";
@@ -561,13 +600,8 @@ export const useChessGameLifecycle = ({
   }, [
     chess,
     coordinator,
-    setBlunderReviewId,
-    setBlunderReviewSrs,
-    setBlunderTargetFen,
+    finishLocalGame,
     setEngineMessage,
-    setResolvedReview,
-    setPendingPromotion,
-    setShowPostGamePrompt,
   ]);
 
   const executeResign = useCallback(() => {
@@ -589,6 +623,7 @@ export const useChessGameLifecycle = ({
     const store = useGameStore.getState();
     revertExecutionIdRef.current += 1;
     chess.reset();
+    playedEndGameAudioSessionIdRef.current = null;
     store.setLiveFen(chess.fen());
     store.setBoardOrientation(store.playerColor);
     setEngineMessage(null);
