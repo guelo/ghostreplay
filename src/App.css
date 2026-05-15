@@ -3757,8 +3757,8 @@
 .blunder-card {
     width: 100%;
     display: flex;
-    gap: 0.65rem;
-    padding: 0.55rem;
+    min-height: 76px;
+    padding: 0.7rem 0.75rem;
     border-radius: 0.5rem;
     border: 1px solid var(--border-color);
     background: var(--card-bg);
@@ -3782,17 +3782,12 @@
     background: var(--card-bg-selected);
 }
 
-.blunder-card__board {
-    width: 80px;
-    min-width: 80px;
-    pointer-events: none;
-}
-
 .blunder-card__info {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
     min-width: 0;
+    width: 100%;
 }
 
 .blunder-card__moves {
@@ -3801,10 +3796,14 @@
     gap: 0.3rem;
     font-size: 0.85rem;
     font-weight: 600;
+    min-width: 0;
 }
 
 .blunder-card__bad {
     color: var(--eval-blunder);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .blunder-card__arrow {
@@ -3814,6 +3813,9 @@
 
 .blunder-card__best {
     color: var(--success);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .blunder-card__meta {
@@ -3843,6 +3845,17 @@
 .blunder-card__due--ok {
     background: var(--status-other-bg);
     color: var(--text-tertiary);
+}
+
+.blunder-card__date {
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+}
+
+.blunder-list__load-more {
+    display: flex;
+    justify-content: center;
+    padding: 0.5rem 0;
 }
 
 /* Blunder detail pane */

@@ -6,6 +6,7 @@ import {
   uploadSessionMoves,
   recordBlunder,
   recordManualBlunder,
+  fetchBlunders,
   getNextOpponentMove,
   reviewSrsBlunder,
   getOpeningFamilyScores,
@@ -353,6 +354,51 @@ describe('recordBlunder', () => {
 
     const [, options] = fetchMock.mock.calls[0]
     expect(options.headers.Authorization).toBe('Bearer jwt-123')
+  })
+})
+
+describe('fetchBlunders', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  it('requests paginated blunders and returns the response envelope', async () => {
+    const expected = {
+      items: [],
+      total: 12,
+      due_total: null,
+      limit: 50,
+      offset: 0,
+      due: false,
+    }
+    mockResponse(expected)
+
+    const result = await fetchBlunders({ limit: 50, offset: 0 })
+
+    expect(result).toEqual(expected)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/blunder?limit=50&offset=0'),
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
+  it('sends due, limit, and offset query params', async () => {
+    mockResponse({
+      items: [],
+      total: 2,
+      due_total: 2,
+      limit: 25,
+      offset: 50,
+      due: true,
+    })
+
+    await fetchBlunders({ due: true, limit: 25, offset: 50 })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/blunder?due=true&limit=25&offset=50'),
+      expect.any(Object),
+    )
   })
 })
 

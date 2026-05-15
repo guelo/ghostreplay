@@ -11,13 +11,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import StringIO
-from typing import Sequence
 
 import chess
 import chess.pgn
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy.orm import Session
+from sqlalchemy import func as sa_func
+from sqlalchemy.orm import Session, aliased
 
 from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
@@ -415,120 +415,193 @@ class BlunderListItem(BaseModel):
     last_played_at: datetime | None = None
 
 
-@router.get("", response_model=list[BlunderListItem])
+class BlunderListResponse(BaseModel):
+    items: list[BlunderListItem]
+    total: int
+    due_total: int | None
+    limit: int
+    offset: int
+    due: bool
+
+
+def _latest_review_subquery(db: Session):
+    ranked = (
+        db.query(
+            BlunderReview.id.label("id"),
+            BlunderReview.blunder_id.label("blunder_id"),
+            BlunderReview.session_id.label("session_id"),
+            BlunderReview.reviewed_at.label("reviewed_at"),
+            sa_func.row_number()
+            .over(
+                partition_by=BlunderReview.blunder_id,
+                order_by=(BlunderReview.reviewed_at.desc(), BlunderReview.id.desc()),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
+    return db.query(ranked).filter(ranked.c.rn == 1).subquery()
+
+
+def _blunder_list_query(db: Session, user_id: int):
+    latest_review = _latest_review_subquery(db)
+    review_session = aliased(GameSession)
+    source_session = aliased(GameSession)
+    last_session_id = sa_func.coalesce(
+        latest_review.c.session_id,
+        Blunder.source_session_id,
+    ).label("last_session_id")
+    last_played_at = sa_func.coalesce(
+        review_session.ended_at,
+        latest_review.c.reviewed_at,
+        source_session.ended_at,
+    ).label("last_played_at")
+
+    query = (
+        db.query(
+            Blunder.id.label("id"),
+            Position.fen_raw.label("fen"),
+            Blunder.bad_move_san.label("bad_move"),
+            Blunder.best_move_san.label("best_move"),
+            Blunder.eval_loss_cp.label("eval_loss_cp"),
+            Blunder.pass_streak.label("pass_streak"),
+            Blunder.last_reviewed_at.label("last_reviewed_at"),
+            Blunder.created_at.label("created_at"),
+            last_session_id,
+            last_played_at,
+        )
+        .join(Position, Blunder.position_id == Position.id)
+        .outerjoin(latest_review, latest_review.c.blunder_id == Blunder.id)
+        .outerjoin(review_session, review_session.id == latest_review.c.session_id)
+        .outerjoin(source_session, source_session.id == Blunder.source_session_id)
+        .filter(Blunder.user_id == user_id)
+    )
+    return query, last_played_at
+
+
+def _build_blunder_item(row, counters, priority: float) -> BlunderListItem:
+    return BlunderListItem(
+        id=row.id,
+        fen=row.fen or "",
+        bad_move=row.bad_move,
+        best_move=row.best_move,
+        eval_loss_cp=row.eval_loss_cp,
+        pass_streak=row.pass_streak,
+        last_reviewed_at=row.last_reviewed_at,
+        created_at=row.created_at,
+        srs_priority=round(priority, 4),
+        opportunities_since_review=counters.opportunities_since_review if counters else 0,
+        opportunities_30d=counters.opportunities_30d if counters else 0,
+        reached_30d=counters.reached_30d if counters else 0,
+        p_reach=round(counters.p_reach, 4) if counters else 0.5,
+        last_session_id=str(row.last_session_id) if row.last_session_id else None,
+        last_played_at=row.last_played_at,
+    )
+
+
+@router.get("", response_model=BlunderListResponse)
 def list_blunders(
     due: bool = Query(False, description="If true, only return blunders with srs_priority > 1.0"),
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
-) -> list[BlunderListItem]:
+) -> BlunderListResponse:
     """Return the authenticated user's blunders with calculated SRS priority."""
-    rows: Sequence[Blunder] = (
-        db.query(Blunder)
-        .join(Position, Blunder.position_id == Position.id)
+    now = datetime.now(timezone.utc)
+
+    query, last_played = _blunder_list_query(db, user.user_id)
+    total_all = (
+        db.query(sa_func.count(Blunder.id))
         .filter(Blunder.user_id == user.user_id)
-        .all()
+        .scalar()
+        or 0
     )
 
-    # Batch-fetch the most recent review per blunder for last_session_id
-    blunder_ids = [b.id for b in rows]
-    latest_reviews: dict[int, BlunderReview] = {}
-    if blunder_ids:
-        from sqlalchemy import func as sa_func
-
-        subq = (
-            db.query(
-                BlunderReview.blunder_id,
-                sa_func.max(BlunderReview.reviewed_at).label("max_reviewed"),
+    if not due:
+        rows = (
+            query.order_by(
+                last_played.is_(None),
+                last_played.desc(),
+                Blunder.created_at.desc(),
+                Blunder.id.desc(),
             )
-            .filter(BlunderReview.blunder_id.in_(blunder_ids))
-            .group_by(BlunderReview.blunder_id)
-            .subquery()
-        )
-        review_rows = (
-            db.query(BlunderReview)
-            .join(
-                subq,
-                (BlunderReview.blunder_id == subq.c.blunder_id)
-                & (BlunderReview.reviewed_at == subq.c.max_reviewed),
-            )
+            .offset(offset)
+            .limit(limit)
             .all()
         )
-        for r in review_rows:
-            latest_reviews[r.blunder_id] = r
+        blunder_ids = [row.id for row in rows]
+        opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
+        items = []
+        for row in rows:
+            counters = opportunity_counters.get(row.id)
+            priority = (
+                opportunity_priority(
+                    counters=counters,
+                    pass_streak=row.pass_streak,
+                    last_reviewed_at=row.last_reviewed_at,
+                    created_at=row.created_at,
+                    now=now,
+                )
+                if counters is not None
+                else calculate_priority(
+                    pass_streak=row.pass_streak,
+                    last_reviewed_at=row.last_reviewed_at,
+                    created_at=row.created_at,
+                    now=now,
+                )
+            )
+            items.append(_build_blunder_item(row, counters, priority))
+        return BlunderListResponse(
+            items=items,
+            total=total_all,
+            due_total=None,
+            limit=limit,
+            offset=offset,
+            due=False,
+        )
 
-    # Fetch session ended_at for all relevant sessions
-    session_ids = set()
-    for b in rows:
-        review = latest_reviews.get(b.id)
-        if review:
-            session_ids.add(review.session_id)
-        elif b.source_session_id:
-            session_ids.add(b.source_session_id)
-
-    session_ended: dict[uuid.UUID, datetime | None] = {}
-    if session_ids:
-        for gs in db.query(GameSession).filter(GameSession.id.in_(session_ids)):
-            session_ended[gs.id] = gs.ended_at
-
-    now = datetime.now(timezone.utc)
+    rows = query.all()
+    blunder_ids = [row.id for row in rows]
     opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
     items: list[BlunderListItem] = []
-    for b in rows:
-        counters = opportunity_counters.get(b.id)
-        priority = opportunity_priority(
-            counters=counters,
-            pass_streak=b.pass_streak,
-            last_reviewed_at=b.last_reviewed_at,
-            created_at=b.created_at,
-            now=now,
-        ) if counters is not None else calculate_priority(
-            pass_streak=b.pass_streak,
-            last_reviewed_at=b.last_reviewed_at,
-            created_at=b.created_at,
-            now=now,
-        )
-        if due and priority <= 1.0:
-            continue
-
-        position: Position | None = (
-            db.query(Position).filter(Position.id == b.position_id).first()
-        )
-
-        # Prefer the most recent review session, fall back to source session
-        review = latest_reviews.get(b.id)
-        if review:
-            last_sid = review.session_id
-            last_played = session_ended.get(review.session_id) or review.reviewed_at
-        elif b.source_session_id:
-            last_sid = b.source_session_id
-            last_played = session_ended.get(b.source_session_id)
-        else:
-            last_sid = None
-            last_played = None
-
-        items.append(
-            BlunderListItem(
-                id=b.id,
-                fen=position.fen_raw if position else "",
-                bad_move=b.bad_move_san,
-                best_move=b.best_move_san,
-                eval_loss_cp=b.eval_loss_cp,
-                pass_streak=b.pass_streak,
-                last_reviewed_at=b.last_reviewed_at,
-                created_at=b.created_at,
-                srs_priority=round(priority, 4),
-                opportunities_since_review=counters.opportunities_since_review if counters else 0,
-                opportunities_30d=counters.opportunities_30d if counters else 0,
-                reached_30d=counters.reached_30d if counters else 0,
-                p_reach=round(counters.p_reach, 4) if counters else 0.5,
-                last_session_id=str(last_sid) if last_sid else None,
-                last_played_at=last_played,
+    for row in rows:
+        counters = opportunity_counters.get(row.id)
+        priority = (
+            opportunity_priority(
+                counters=counters,
+                pass_streak=row.pass_streak,
+                last_reviewed_at=row.last_reviewed_at,
+                created_at=row.created_at,
+                now=now,
+            )
+            if counters is not None
+            else calculate_priority(
+                pass_streak=row.pass_streak,
+                last_reviewed_at=row.last_reviewed_at,
+                created_at=row.created_at,
+                now=now,
             )
         )
+        if priority <= 1.0:
+            continue
+        items.append(_build_blunder_item(row, counters, priority))
 
-    # Sort by most recently played first (nulls last)
     items.sort(
-        key=lambda x: (x.last_played_at is not None, x.last_played_at),
+        key=lambda item: (
+            item.last_played_at is not None,
+            item.last_played_at or datetime.min.replace(tzinfo=timezone.utc),
+            item.created_at,
+            item.id,
+        ),
         reverse=True,
     )
-    return items
+    due_total = len(items)
+    return BlunderListResponse(
+        items=items[offset : offset + limit],
+        total=due_total,
+        due_total=due_total,
+        limit=limit,
+        offset=offset,
+        due=True,
+    )

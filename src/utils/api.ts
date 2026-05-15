@@ -606,18 +606,39 @@ export interface BlunderListItem {
   srs_priority: number
   last_session_id: string | null
   last_played_at: string | null
+  opportunities_since_review: number
+  opportunities_30d: number
+  reached_30d: number
+  p_reach: number
+}
+
+export interface BlunderListResponse {
+  items: BlunderListItem[]
+  total: number
+  due_total: number | null
+  limit: number
+  offset: number
+  due: boolean
+}
+
+export interface FetchBlundersParams {
+  due?: boolean
+  limit?: number
+  offset?: number
 }
 
 /**
  * Fetch the user's blunder library, optionally filtered to only due items.
  */
 export const fetchBlunders = async (
-  due: boolean = false,
-): Promise<BlunderListItem[]> => {
-  const params = new URLSearchParams()
-  if (due) params.set('due', 'true')
-  const qs = params.toString()
-  return requestJson<BlunderListItem[]>(
+  params: FetchBlundersParams = {},
+): Promise<BlunderListResponse> => {
+  const searchParams = new URLSearchParams()
+  if (params.due) searchParams.set('due', 'true')
+  if (params.limit !== undefined) searchParams.set('limit', String(params.limit))
+  if (params.offset !== undefined) searchParams.set('offset', String(params.offset))
+  const qs = searchParams.toString()
+  return requestJson<BlunderListResponse>(
     `${API_BASE_URL}/api/blunder${qs ? `?${qs}` : ''}`,
     { method: 'GET', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to load blunders' },

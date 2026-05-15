@@ -34,6 +34,8 @@ function evalLossDisplay(cp: number): string {
   return `\u2212${(cp / 100).toFixed(1)}`;
 }
 
+const BLUNDER_PAGE_SIZE = 50;
+
 /**
  * Determine board orientation from the FEN (whose turn it is = the blunderer's
  * perspective — the side to move at the blunder position).
@@ -73,59 +75,80 @@ function findBlunderMoveIndex(
 
 function BlundersPage() {
   const [blunders, setBlunders] = useState<BlunderListItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [dueTotal, setDueTotal] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [dueOnly, setDueOnly] = useState(false);
 
   const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
+  const requestGenerationRef = useRef(0);
 
   const handleToggleDueOnly = () => {
     setDueOnly((v) => !v);
-    setLoading(true);
-    setError(null);
+    setSelectedId(null);
+    setAnalysis(null);
+    setAnalysisLoading(false);
   };
 
   useEffect(() => {
-    let cancelled = false;
-    fetchBlunders(dueOnly)
+    const generation = requestGenerationRef.current + 1;
+    requestGenerationRef.current = generation;
+    setLoading(true);
+    setLoadingMore(false);
+    setError(null);
+    setSelectedId(null);
+    setAnalysis(null);
+    setAnalysisLoading(false);
+
+    fetchBlunders({ due: dueOnly, limit: BLUNDER_PAGE_SIZE, offset: 0 })
       .then((data) => {
-        if (cancelled) return;
-        setBlunders(data);
-        if (data.length > 0) {
-          setSelectedId((prev) => {
-            if (prev !== null && data.some((b) => b.id === prev)) return prev;
-            return data[0].id;
-          });
-        } else {
-          setSelectedId(null);
-        }
+        if (requestGenerationRef.current !== generation) return;
+        setBlunders(data.items);
+        setTotal(data.total);
+        setDueTotal(data.due_total);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (requestGenerationRef.current !== generation) return;
         setError(err instanceof Error ? err.message : "Failed to load blunders");
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (requestGenerationRef.current === generation) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [dueOnly]);
 
   const selected = blunders.find((b) => b.id === selectedId) ?? null;
 
-  // Reset analysis state synchronously during render when selection changes
-  const prevSessionRef = useRef(selected?.last_session_id);
-  if (prevSessionRef.current !== selected?.last_session_id) {
-    prevSessionRef.current = selected?.last_session_id;
-    setAnalysis(null);
-    setAnalysisLoading(!!selected?.last_session_id);
-  }
+  const handleLoadMore = () => {
+    if (loadingMore || blunders.length >= total) return;
+    const generation = requestGenerationRef.current;
+    const offset = blunders.length;
+    setLoadingMore(true);
+    setError(null);
+
+    fetchBlunders({ due: dueOnly, limit: BLUNDER_PAGE_SIZE, offset })
+      .then((data) => {
+        if (requestGenerationRef.current !== generation) return;
+        setBlunders((current) => [...current, ...data.items]);
+        setTotal(data.total);
+        setDueTotal(data.due_total);
+      })
+      .catch((err) => {
+        if (requestGenerationRef.current !== generation) return;
+        setError(err instanceof Error ? err.message : "Failed to load blunders");
+      })
+      .finally(() => {
+        if (requestGenerationRef.current === generation) setLoadingMore(false);
+      });
+  };
 
   // Fetch full game analysis when a blunder with a session is selected
   useEffect(() => {
+    setAnalysis(null);
+    setAnalysisLoading(!!selected?.last_session_id);
     if (!selected?.last_session_id) {
       return;
     }
@@ -146,11 +169,6 @@ function BlundersPage() {
     };
   }, [selected?.id, selected?.last_session_id]);
 
-  const dueCount = useMemo(
-    () => blunders.filter((b) => b.srs_priority > 1.0).length,
-    [blunders],
-  );
-
   const boardOrientation = useMemo(
     () => (selected ? orientationFromFen(selected.fen) : "white"),
     [selected],
@@ -161,6 +179,8 @@ function BlundersPage() {
     return findBlunderMoveIndex(analysis, selected.fen, selected.bad_move);
   }, [analysis, selected]);
 
+  const hasMore = blunders.length < total;
+
   return (
     <main className="app-shell">
       <AppNav />
@@ -170,12 +190,14 @@ function BlundersPage() {
           <div className="blunders-shell__header">
             <h1 className="blunders-shell__title">Blunder Library</h1>
             <div className="blunders-shell__summary">
-              <span className="blunders-shell__count blunders-shell__count--due">
-                {dueOnly ? blunders.length : dueCount} due
-              </span>
               <span className="blunders-shell__count">
-                {dueOnly ? `of ${blunders.length} shown` : `${blunders.length} total`}
+                {dueOnly ? `${blunders.length} of ${total} due` : `${total} total`}
               </span>
+              {!dueOnly && dueTotal !== null && (
+                <span className="blunders-shell__count blunders-shell__count--due">
+                  {dueTotal} due
+                </span>
+              )}
               <button
                 type="button"
                 className={`chess-button toggle${dueOnly ? " active" : ""}`}
@@ -223,19 +245,6 @@ function BlundersPage() {
                       aria-selected={b.id === selectedId}
                       onClick={() => setSelectedId(b.id)}
                     >
-                      <div className="blunder-card__board">
-                        <Chessboard
-                          options={{
-                            position: b.fen,
-                            boardOrientation: orientationFromFen(b.fen),
-                            allowDragging: false,
-                            boardStyle: {
-                              borderRadius: "4px",
-                              pointerEvents: "none",
-                            },
-                          }}
-                        />
-                      </div>
                       <div className="blunder-card__info">
                         <div className="blunder-card__moves">
                           <span className="blunder-card__bad">
@@ -269,6 +278,18 @@ function BlundersPage() {
                     </button>
                   </li>
                 ))}
+                {hasMore && (
+                  <li className="blunder-list__load-more">
+                    <button
+                      type="button"
+                      className="chess-button"
+                      onClick={handleLoadMore}
+                      disabled={loadingMore}
+                    >
+                      {loadingMore ? "Loading..." : "Load more"}
+                    </button>
+                  </li>
+                )}
               </ul>
 
               <div className="blunder-detail">
