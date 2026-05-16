@@ -59,6 +59,10 @@ bd close <id>         # Complete work
 - Run `bd prime` for detailed command reference and session close protocol
 - Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
 
+### CLI Notes
+
+- When using `bd update --design-file -` through a TTY, the terminal echo may visually garble pasted text or control characters. Always verify the persisted field with `bd show <id>` before retrying. Prefer non-TTY/file-based input when available; if stdin closes immediately, TTY input is acceptable as long as the stored bead text is verified afterward.
+
 ## Session Completion
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
@@ -89,5 +93,4 @@ bd close <id>         # Complete work
 **CRITICAL**: Use the `bd` CLI tool exclusively. Never read or modify files in the `.beads/` directory directly.
 
  **REQUIRED**: Always pass `--id=g-<slug>` when creating issues. `<slug>` must be 5–20 char lowercase kebab-case mini-summary (e.g. `g-fix-login-redirect`). Never let beads auto-generate IDs.
-
 
