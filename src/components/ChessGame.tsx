@@ -692,7 +692,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (prefs.playerColor === "white" || prefs.playerColor === "black" || prefs.playerColor === "random") {
         setPlayerColorChoice(prefs.playerColor);
       }
-      if (prefs.openingKey) {
+      if (prefs.openingKey && !pendingDrillSetupRef.current) {
         pendingDrillSetupRef.current = {
           openingKey: prefs.openingKey,
           playerColor: prefs.playerColor ?? "random",

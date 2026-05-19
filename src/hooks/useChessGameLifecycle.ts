@@ -8,6 +8,7 @@ import { Chess } from "chess.js";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import type { DrillStrictness, TargetBlunderSrs } from "../utils/api";
 import {
+  abandonDrill,
   endGame,
   fetchCurrentRating,
   startDrill,
@@ -459,7 +460,11 @@ export const useChessGameLifecycle = ({
           coordinator.flushPendingUploads().catch((err) =>
             console.error("[SessionMoves] Flush failed:", err),
           );
-          await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+          if (store.drillOpeningKey) {
+            await abandonDrill(store.sessionId);
+          } else {
+            await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+          }
         }
 
         pendingSrsReviewRef.current.clear();
@@ -510,6 +515,8 @@ export const useChessGameLifecycle = ({
         setIsRevertPending(false);
         s2.setIsRated(true);
         s2.setIsPracticeContinuation(false);
+        s2.setDrillOpeningKey(null);
+        s2.setDrillStrictness(null);
         setShowRevertWarning(false);
         setShowResignWarning(false);
         clearMoveHighlights();
@@ -577,7 +584,11 @@ export const useChessGameLifecycle = ({
           coordinator.flushPendingUploads().catch((err) =>
             console.error("[SessionMoves] Flush failed:", err),
           );
-          await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+          if (store.drillOpeningKey) {
+            await abandonDrill(store.sessionId);
+          } else {
+            await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+          }
         }
 
         pendingSrsReviewRef.current.clear();
@@ -639,6 +650,17 @@ export const useChessGameLifecycle = ({
         s.setDrillStrictness(options.strictness);
         s.setLiveFen(tempChess.fen());
         s.setMoveHistory(records);
+
+        // Sync the live Chess instance so move validation / turn() operate on the drill root.
+        if (records.length > 0) {
+          chess.reset();
+          for (const record of records) {
+            chess.move(record.san);
+          }
+        } else {
+          chess.load(tempChess.fen());
+        }
+
         s.setViewIndex(null);
         s.setGameResult(null);
         s.setRatingChange(null);

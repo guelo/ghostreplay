@@ -1198,7 +1198,6 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("handleNewDrill calls startDrill API and sets store correctly", async () => {
-    const chess = new Chess();
     const { result } = setup();
 
     startDrillMock.mockResolvedValueOnce({
@@ -1255,7 +1254,6 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("handleNewDrill replays opening PGN and sets moveHistory", async () => {
-    const chess = new Chess();
     const { result } = setup();
 
     startDrillMock.mockResolvedValueOnce({
@@ -1308,7 +1306,6 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("handleNewDrill falls back to direct FEN load when PGN parse fails", async () => {
-    const chess = new Chess();
     const { result } = setup();
 
     startDrillMock.mockResolvedValueOnce({
