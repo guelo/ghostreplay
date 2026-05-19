@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { SetStateAction } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Chess } from "chess.js";
 import type { Square } from "chess.js";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -8,6 +9,9 @@ import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
 import { useChessGameController } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useGameStore } from "../stores/useGameStore";
+import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel";
+import type { OpeningRootItem } from "../utils/api";
+import { getOpeningRoots } from "../utils/api";
 import {
   gameAnalysisStore,
   AnalysisStoreProvider,
@@ -95,6 +99,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const setBoardOrientation = useGameStore((s) => s.setBoardOrientation);
   const playerColor = useGameStore((s) => s.playerColor);
   const playerColorChoice = useGameStore((s) => s.playerColorChoice);
+  const setPlayerColorChoice = useGameStore((s) => s.setPlayerColorChoice);
   const engineElo = useGameStore((s) => s.engineElo);
   const setEngineElo = useGameStore((s) => s.setEngineElo);
   const moveHistory = useGameStore((s) => s.moveHistory);
@@ -186,6 +191,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setIsRevertPendingState(nextValue);
   }, []);
   const isRevertPending = isRevertPendingState;
+
+  // ---- Drill state --------------------------------------------------
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [isDrillMode, setIsDrillMode] = useState(false);
+  const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
+  const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
+  const [openingFamilies, setOpeningFamilies] = useState<Array<{ family_name: string; roots: OpeningRootItem[] }> | null>(null);
+  const [isLoadingOpenings, setIsLoadingOpenings] = useState(false);
+  const pendingDrillSetupRef = useRef<{ openingKey: string; playerColor: string } | null>(null);
+  const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
+  // -------------------------------------------------------------------
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
@@ -468,6 +485,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleRevertClick,
     cancelRevert,
     handleNewGame,
+    handleNewDrill,
     handleResignClick,
     executeResign,
     cancelResign,
@@ -622,6 +640,86 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       coordinator.startSession(sid);
     }
   }, [coordinator]);
+
+  // ---- Drill effects ------------------------------------------------
+  // Intercept location.state from /openings navigation
+  useEffect(() => {
+    const drillSetup = (location.state as { drillSetup?: { openingKey: string; playerColor: string } } | null)?.drillSetup;
+    if (!drillSetup) return;
+
+    setIsDrillMode(true);
+    pendingDrillSetupRef.current = drillSetup;
+    setShowStartOverlay(true);
+
+    navigate(location.pathname, { replace: true, state: null });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state, navigate, location.pathname]);
+
+  // Fetch opening roots when drill mode active and overlay shown
+  useEffect(() => {
+    if (!showStartOverlay || !isDrillMode) return;
+    let cancelled = false;
+    setIsLoadingOpenings(true);
+    getOpeningRoots()
+      .then((data) => {
+        if (cancelled) return;
+        setOpeningFamilies(data.families);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setOpeningFamilies(null);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setIsLoadingOpenings(false);
+      });
+    return () => { cancelled = true; };
+  }, [showStartOverlay, isDrillMode]);
+
+  // Load sticky drill prefs when overlay opens
+  useEffect(() => {
+    if (!showStartOverlay) return;
+    try {
+      const raw = localStorage.getItem("ghostreplay_drill_prefs");
+      if (!raw) return;
+      const prefs = JSON.parse(raw);
+      if (typeof prefs.strictnessCp === "number") {
+        setDrillStrictnessCp(prefs.strictnessCp);
+      }
+      if (typeof prefs.engineElo === "number") {
+        setEngineElo(prefs.engineElo);
+      }
+      if (prefs.playerColor === "white" || prefs.playerColor === "black" || prefs.playerColor === "random") {
+        setPlayerColorChoice(prefs.playerColor);
+      }
+      if (prefs.openingKey) {
+        pendingDrillSetupRef.current = {
+          openingKey: prefs.openingKey,
+          playerColor: prefs.playerColor ?? "random",
+        };
+      }
+    } catch {
+      // ignore corrupted storage
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showStartOverlay]);
+
+  // Match pending drill setup after openingFamilies loads
+  useEffect(() => {
+    if (!openingFamilies || !pendingDrillSetupRef.current) return;
+    const opening = openingFamilies
+      .flatMap((f) => f.roots)
+      .find((r) => r.opening_key === pendingDrillSetupRef.current?.openingKey);
+    if (opening) {
+      setSelectedDrillOpening(opening);
+    }
+    const color = pendingDrillSetupRef.current.playerColor;
+    if (color === "white" || color === "black" || color === "random") {
+      setPlayerColorChoice(color);
+    }
+    pendingDrillSetupRef.current = null;
+  }, [openingFamilies]);
+  // -------------------------------------------------------------------
 
   const applyPlayerMoveAndAdvance = useCallback(
     (sourceSquare: string, targetSquare: string, promotion?: string): boolean => {
@@ -977,6 +1075,74 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     () => setShowStartOverlay(false),
     [],
   );
+
+  const handleStartDrill = useCallback(async () => {
+    if (!selectedDrillOpening) return;
+    const effectiveChoice = playerColorChoice ?? "random";
+    const resolvedPlayerColor =
+      effectiveChoice === "random"
+        ? Math.random() < 0.5
+          ? "white"
+          : "black"
+        : effectiveChoice;
+
+    const result = await handleNewDrill({
+      openingKey: selectedDrillOpening.opening_key,
+      playerColor: resolvedPlayerColor,
+      engineElo: engineElo,
+      strictness: strictnessFromCp(drillStrictnessCp),
+      selectedOpening: selectedDrillOpening,
+    });
+
+    if (result && chess.turn() !== (resolvedPlayerColor === "white" ? "w" : "b")) {
+      void applyOpponentMove(result.fen, result.uciHistory);
+    }
+  }, [
+    selectedDrillOpening,
+    playerColorChoice,
+    engineElo,
+    drillStrictnessCp,
+    handleNewDrill,
+    chess,
+    applyOpponentMove,
+  ]);
+
+  const handleNewDrillSticky = useCallback(() => {
+    const s = useGameStore.getState();
+    s.setIsGameActive(false);
+    s.setGameResult(null);
+
+    try {
+      const raw = localStorage.getItem("ghostreplay_drill_prefs");
+      const prefs = raw ? JSON.parse(raw) : {};
+      if (typeof prefs.strictnessCp === "number") {
+        setDrillStrictnessCp(prefs.strictnessCp);
+      }
+      if (typeof prefs.engineElo === "number") {
+        setEngineElo(prefs.engineElo);
+      }
+      if (prefs.playerColor === "white" || prefs.playerColor === "black" || prefs.playerColor === "random") {
+        setPlayerColorChoice(prefs.playerColor);
+      }
+      if (prefs.openingKey) {
+        pendingDrillSetupRef.current = {
+          openingKey: prefs.openingKey,
+          playerColor: prefs.playerColor ?? "random",
+        };
+      }
+    } catch {
+      // ignore corrupted storage
+    }
+
+    setIsDrillMode(true);
+    setShowPostGamePrompt(false);
+    setShowStartOverlay(true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSwitchToDrillMode = useCallback(() => setIsDrillMode(true), []);
+  const handleSwitchToPlayMode = useCallback(() => setIsDrillMode(false), []);
+
   const handleEngineEloChange = useCallback(
     (elo: number) => setEngineElo(elo as (typeof MAIA_ELO_BINS)[number]),
     [],
@@ -1096,6 +1262,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onPromotionPick={handlePromotionPick}
                 onPromotionCancel={handlePromotionCancel}
                 streakToast={blocksStreakToast ? null : streakToast}
+                isDrillMode={isDrillMode}
+                onSwitchToPlayMode={handleSwitchToPlayMode}
+                onSwitchToDrillMode={handleSwitchToDrillMode}
+                openingFamilies={openingFamilies}
+                selectedDrillOpening={selectedDrillOpening}
+                drillPlayerColor={playerColorChoice}
+                drillStrictnessCp={drillStrictnessCp}
+                onSelectDrillOpening={setSelectedDrillOpening}
+                onDrillPlayerColorChange={setPlayerColorChoice}
+                onDrillStrictnessChange={setDrillStrictnessCp}
+                onStartDrill={handleStartDrill}
+                isLoadingOpenings={isLoadingOpenings}
               />
             </div>
           </div>
@@ -1116,6 +1294,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 isPracticeContinuation={isPracticeContinuation}
                 showPostGamePrompt={showPostGamePrompt}
                 gameResult={gameResult}
+                drillOpeningKey={drillOpeningKey}
+                onNewDrill={handleNewDrillSticky}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
                 ratingDisplayType={ratingDisplayType}

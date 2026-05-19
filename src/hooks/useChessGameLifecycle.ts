@@ -6,13 +6,15 @@ import type {
 } from "react";
 import { Chess } from "chess.js";
 import type { OpeningLookupResult } from "../openings/openingBook";
-import type { TargetBlunderSrs } from "../utils/api";
+import type { DrillStrictness, TargetBlunderSrs } from "../utils/api";
 import {
   endGame,
   fetchCurrentRating,
+  startDrill,
   startGame,
   uploadSessionMoves,
 } from "../utils/api";
+import { getOpeningBook } from "../openings/openingBook";
 import type {
   BlunderAlert,
   MoveRecord,
@@ -27,6 +29,7 @@ import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinato
 import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
+import type { OpeningRootItem } from "../utils/api";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -553,6 +556,186 @@ export const useChessGameLifecycle = ({
     ],
   );
 
+  const handleNewDrill = useCallback(
+    async (options: {
+      openingKey: string;
+      playerColor: "white" | "black";
+      engineElo: number;
+      strictness: DrillStrictness;
+      selectedOpening: OpeningRootItem;
+    }) => {
+      try {
+        setIsStartingGame(true);
+        setStartError(null);
+        revertExecutionIdRef.current += 1;
+        playedEndGameAudioSessionIdRef.current = null;
+
+        const store = useGameStore.getState();
+        if (store.sessionId && store.isGameActive && !store.isPracticeContinuation) {
+          pendingSrsReviewRef.current.clear();
+          setResolvedReview(null);
+          coordinator.flushPendingUploads().catch((err) =>
+            console.error("[SessionMoves] Flush failed:", err),
+          );
+          await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
+        }
+
+        pendingSrsReviewRef.current.clear();
+        setResolvedReview(null);
+
+        const response = await startDrill({
+          opening_key: options.openingKey,
+          player_color: options.playerColor,
+          engine_elo: options.engineElo,
+          strictness: options.strictness,
+        });
+
+        let entry = null;
+        try {
+          const book = await getOpeningBook();
+          entry = book.byEpd.get(options.openingKey) ?? null;
+        } catch {
+          entry = null;
+        }
+
+        const tempChess = new Chess();
+        const records: MoveRecord[] = [];
+        if (entry?.pgn) {
+          try {
+            const sanTokens = entry.pgn
+              .replace(/\d+\./g, " ")
+              .trim()
+              .split(/\s+/)
+              .filter((t: string) => t.length > 0);
+            for (const san of sanTokens) {
+              tempChess.move(san);
+              const lastMove = tempChess.history({ verbose: true }).at(-1);
+              if (lastMove) {
+                records.push({
+                  san: lastMove.san,
+                  uci: lastMove.from + lastMove.to + (lastMove.promotion || ""),
+                  fen: tempChess.fen(),
+                });
+              }
+            }
+          } catch {
+            console.warn("[Drill] Failed to replay opening PGN, falling back to direct FEN load");
+            tempChess.load(options.openingKey);
+            records.length = 0;
+          }
+        } else {
+          tempChess.load(options.openingKey);
+        }
+
+        const s = useGameStore.getState();
+        s.setSessionId(response.session_id);
+        s.setIsGameActive(true);
+        s.setPlayerColor(options.playerColor);
+        s.setBoardOrientation(options.playerColor);
+        s.setEngineElo(options.engineElo);
+        s.setIsRated(false);
+        s.setIsPracticeContinuation(false);
+        s.setDrillOpeningKey(options.openingKey);
+        s.setDrillStrictness(options.strictness);
+        s.setLiveFen(tempChess.fen());
+        s.setMoveHistory(records);
+        s.setViewIndex(null);
+        s.setGameResult(null);
+        s.setRatingChange(null);
+        s.setScoreChanges(null);
+
+        resetEngine();
+        coordinator.clearSession();
+        coordinator.startSession(response.session_id);
+        clearBlunderBoardOverride?.();
+        setBlunderAlert(null);
+        setShowFlash(false);
+        setBlunderReviewId(null);
+        setBlunderReviewSrs(null);
+        setBlunderTargetFen(null);
+        setResolvedReview(null);
+        setPendingPromotion(null);
+        setShowPassToast(false);
+        setReviewFailModal(null);
+        setShowPostGamePrompt(false);
+        setShowRehookToast(false);
+        setRevertError(null);
+        setIsRevertPending(false);
+        setShowRevertWarning(false);
+        setShowResignWarning(false);
+        clearMoveHighlights();
+        setLiveOpening(null);
+        openingHistoryRef.current = [];
+        blunderRecordedRef.current = false;
+        pendingAnalysisContextRef.current = null;
+        pendingSrsReviewRef.current.clear();
+        resetMode();
+
+        setIsStartingGame(false);
+        setShowStartOverlay(false);
+        setEngineMessage(null);
+
+        try {
+          const prefs = {
+            openingKey: options.openingKey,
+            engineElo: options.engineElo,
+            strictnessCp: options.strictness === "strict" ? 0 : options.strictness === "standard" ? 25 : 50,
+            playerColor: options.playerColor,
+          };
+          localStorage.setItem("ghostreplay_drill_prefs", JSON.stringify(prefs));
+        } catch {
+          // ignore storage errors
+        }
+
+        if (tempChess.turn() !== (options.playerColor === "white" ? "w" : "b")) {
+          // opponent's turn — trigger opponent move via callback in ChessGame
+          // We return the needed state so ChessGame can apply opponent move
+        }
+
+        return { fen: tempChess.fen(), uciHistory: records.map((r) => r.uci) };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to start drill.";
+        setEngineMessage(message);
+        setStartError(message);
+        setIsStartingGame(false);
+        return null;
+      }
+    },
+    [
+      blunderRecordedRef,
+      chess,
+      coordinator,
+      clearMoveHighlights,
+      openingHistoryRef,
+      pendingAnalysisContextRef,
+      pendingSrsReviewRef,
+      resetEngine,
+      resetMode,
+      setBlunderAlert,
+      setBlunderReviewId,
+      setBlunderReviewSrs,
+      setBlunderTargetFen,
+      setResolvedReview,
+      setPendingPromotion,
+      clearBlunderBoardOverride,
+      setEngineMessage,
+      setIsStartingGame,
+      setLiveOpening,
+      setReviewFailModal,
+      setShowFlash,
+      setShowPassToast,
+      setShowPostGamePrompt,
+      setShowRehookToast,
+      setShowResignWarning,
+      setShowRevertWarning,
+      setShowStartOverlay,
+      setStartError,
+      setIsRevertPending,
+      setRevertError,
+    ],
+  );
+
   const handleResign = useCallback(async () => {
     const store = useGameStore.getState();
     if (!store.sessionId || !store.isGameActive) {
@@ -720,6 +903,7 @@ export const useChessGameLifecycle = ({
     handleRevertClick,
     cancelRevert,
     handleNewGame,
+    handleNewDrill,
     handleResignClick,
     executeResign,
     cancelResign,

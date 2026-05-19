@@ -47,6 +47,11 @@ vi.mock("../openings/openingBook", () => ({
   lookupOpeningByFen: (...args: unknown[]) => lookupOpeningByFenMock(...args),
 }));
 
+vi.mock("react-router-dom", () => ({
+  useLocation: () => ({ state: null, pathname: "/play" }),
+  useNavigate: () => vi.fn(),
+}));
+
 import { gameAnalysisStore } from "../stores/createAnalysisStore";
 
 const mockAnalyzeMove = vi.fn();

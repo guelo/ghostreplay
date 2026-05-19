@@ -133,6 +133,49 @@ interface StartGameRequest {
   player_color: 'white' | 'black'
 }
 
+// ---- Drill types --------------------------------------------------
+export type DrillStrictness = 'lenient' | 'standard' | 'strict'
+
+export interface DrillStartRequest {
+  opening_key: string
+  player_color: 'white' | 'black'
+  engine_elo: number
+  strictness: DrillStrictness
+}
+
+export interface DrillSessionContract {
+  session_id: string
+  mode: string
+  drill_state: string
+  opening_key: string
+  opening_name: string
+  opening_family: string
+  eco: string | null
+  depth: number
+  player_color: string
+  engine_elo: number
+  strictness: string
+  is_rated: boolean
+  rated_start_ply: number | null
+  normal_started_at: string | null
+  converted_at: string | null
+}
+
+export interface OpeningRootItem {
+  opening_key: string
+  opening_name: string
+  opening_family: string
+  eco: string | null
+  depth: number
+}
+
+export interface OpeningRootsListResponse {
+  families: Array<{ family_name: string; roots: OpeningRootItem[] }>
+  total_roots: number
+  total_families: number
+}
+// ---- end drill types ----------------------------------------------
+
 interface StartGameResponse {
   session_id: string
   engine_elo: number
@@ -293,6 +336,86 @@ interface SrsReviewResponse {
   priority: number
   next_expected_review: string
 }
+
+/**
+ * Fetch opening root families for drill selection.
+ */
+export const getOpeningRoots = async (): Promise<OpeningRootsListResponse> => {
+  return requestJson<OpeningRootsListResponse>(
+    `${API_BASE_URL}/api/openings/roots`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load opening roots' },
+  )
+}
+
+/**
+ * Start a new drill session.
+ */
+export const startDrill = async (
+  req: DrillStartRequest,
+): Promise<DrillSessionContract> => {
+  return requestJson<DrillSessionContract>(
+    `${API_BASE_URL}/api/drills/start`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(req),
+    },
+    { fallbackMessage: 'Failed to start drill' },
+  )
+}
+
+/**
+ * Fetch an existing drill session contract.
+ */
+export const getDrill = async (sessionId: string): Promise<DrillSessionContract> => {
+  return requestJson<DrillSessionContract>(
+    `${API_BASE_URL}/api/drills/${sessionId}`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load drill session' },
+  )
+}
+
+/**
+ * Continue the current drill from the given ply.
+ */
+export const continueDrill = async (
+  sessionId: string,
+  currentPly: number,
+): Promise<DrillSessionContract> => {
+  return requestJson<DrillSessionContract>(
+    `${API_BASE_URL}/api/drills/${sessionId}/continue`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ current_ply: currentPly }),
+    },
+    { fallbackMessage: 'Failed to continue drill' },
+  )
+}
+
+/**
+ * Mark drill as failed (user deviated from accepted lines).
+ */
+export const failDrill = async (sessionId: string): Promise<DrillSessionContract> => {
+  return requestJson<DrillSessionContract>(
+    `${API_BASE_URL}/api/drills/${sessionId}/fail`,
+    { method: 'POST', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to record drill failure' },
+  )
+}
+
+/**
+ * Abandon the current drill.
+ */
+export const abandonDrill = async (sessionId: string): Promise<DrillSessionContract> => {
+  return requestJson<DrillSessionContract>(
+    `${API_BASE_URL}/api/drills/${sessionId}/abandon`,
+    { method: 'POST', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to abandon drill' },
+  )
+}
+// -------------------------------------------------------------------
 
 /**
  * Start a new game session

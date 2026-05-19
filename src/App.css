@@ -5457,3 +5457,101 @@ button.openings-shell__crumb:hover {
     width: 100%;
     height: 100%;
 }
+
+/* ---- Drill setup panel additions ---- */
+.chess-start-scroll {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    align-items: center;
+    width: 100%;
+}
+
+.chess-start-scroll--drill {
+    max-height: min(70vh, 440px);
+    overflow-y: auto;
+    scrollbar-width: thin;
+    padding-right: 0.5rem;
+}
+
+.mode-toggle-row {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+}
+
+.opening-selector {
+    width: 100%;
+    max-width: 280px;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+}
+
+.opening-selector optgroup {
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.strictness-slider-row {
+    display: flex;
+    width: 100%;
+    max-width: 280px;
+}
+
+.strictness-label {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    min-height: 1.25rem;
+    display: block;
+}
+
+.strictness-hint {
+    font-size: 0.8rem;
+    color: var(--text-tertiary);
+    display: block;
+}
+
+/* OpeningsPage card drill button */
+.opening-family-card__footer-actions {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.opening-family-card__drill-button {
+    border: 1px solid var(--border-color-strong);
+    background: var(--button-secondary-bg);
+    color: var(--text-primary);
+    padding: 0.3rem 0.75rem;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: border-color 200ms ease, background 200ms ease;
+}
+
+.opening-family-card__drill-button:hover {
+    border-color: var(--text-primary);
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+}
+
+@media (max-width: 767px) {
+    .game-page .chess-start-scroll--drill {
+        max-height: min(60vh, 380px);
+    }
+
+    .opening-family-card__footer-actions {
+        gap: 0.25rem;
+    }
+
+    .opening-family-card__drill-button {
+        padding: 0.25rem 0.5rem;
+        font-size: 0.75rem;
+    }
+}

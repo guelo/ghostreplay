@@ -1,8 +1,10 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo } from "react";
+import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
 import OpponentAvatar from "./OpponentAvatar";
+import DrillSetupPanel from "./DrillSetupPanel";
 
 type BoardOrientation = "white" | "black";
 
@@ -45,6 +47,19 @@ type BoardStageProps = {
   onPromotionPick: (piece: 'q' | 'r' | 'b' | 'n') => void;
   onPromotionCancel: () => void;
   streakToast: { type: "milestone" | "record"; streak: number } | null;
+  // Drill mode props
+  isDrillMode?: boolean;
+  onSwitchToPlayMode?: () => void;
+  onSwitchToDrillMode?: () => void;
+  openingFamilies?: Array<{ family_name: string; roots: OpeningRootItem[] }> | null;
+  selectedDrillOpening?: OpeningRootItem | null;
+  drillPlayerColor?: "white" | "black" | "random";
+  drillStrictnessCp?: number;
+  onSelectDrillOpening?: (opening: OpeningRootItem | null) => void;
+  onDrillPlayerColorChange?: (color: "white" | "black" | "random") => void;
+  onDrillStrictnessChange?: (cp: number) => void;
+  onStartDrill?: () => void;
+  isLoadingOpenings?: boolean;
 };
 
 const WarningTriangleIcon = () => (
@@ -106,6 +121,18 @@ const BoardStage = ({
   onPromotionPick,
   onPromotionCancel,
   streakToast,
+  isDrillMode = false,
+  onSwitchToPlayMode,
+  onSwitchToDrillMode,
+  openingFamilies,
+  selectedDrillOpening,
+  drillPlayerColor = "random",
+  drillStrictnessCp = 25,
+  onSelectDrillOpening,
+  onDrillPlayerColorChange,
+  onDrillStrictnessChange,
+  onStartDrill,
+  isLoadingOpenings = false,
 }: BoardStageProps) => {
   return (
       <div className="chessboard-board-area">
@@ -135,67 +162,113 @@ const BoardStage = ({
                 >
                   ×
                 </button>
-                <p className="chess-start-title">Difficulty</p>
-                <div className="chess-elo-selector">
-                  <div className="chess-elo-slider-row">
-                    <input
-                      type="range"
-                      min={0}
-                      max={maiaEloBins.length - 1}
-                      step={1}
-                      value={maiaEloBins.indexOf(engineElo)}
-                      onChange={(e) => {
-                        const nextElo = maiaEloBins[Number(e.target.value)];
-                        if (nextElo !== undefined) {
-                          onEngineEloChange(nextElo);
-                        }
-                      }}
-                      disabled={isStartingGame}
-                      className="chess-elo-slider"
-                    />
-                  </div>
-                  <div className="chess-elo-bot-row">
-                    <OpponentAvatar
-                      mode="engine"
+
+                <div className="mode-toggle-row">
+                  <button
+                    className={`chess-button toggle${!isDrillMode ? " active" : ""}`}
+                    type="button"
+                    onClick={onSwitchToPlayMode}
+                    disabled={isStartingGame}
+                  >
+                    Play
+                  </button>
+                  <button
+                    className={`chess-button toggle${isDrillMode ? " active" : ""}`}
+                    type="button"
+                    onClick={onSwitchToDrillMode}
+                    disabled={isStartingGame}
+                  >
+                    Drill
+                  </button>
+                </div>
+
+                <div className={`chess-start-scroll${isDrillMode ? " chess-start-scroll--drill" : ""}`}>
+                  {isDrillMode ? (
+                    <DrillSetupPanel
+                      openingFamilies={openingFamilies ?? null}
+                      selectedOpening={selectedDrillOpening ?? null}
+                      playerColor={drillPlayerColor}
                       engineElo={engineElo}
-                      size={70}
+                      strictnessCp={drillStrictnessCp}
+                      maiaEloBins={maiaEloBins}
+                      botLabel={botLabel}
+                      winDelta={winDelta}
+                      lossDelta={lossDelta}
+                      isLoadingOpenings={isLoadingOpenings}
+                      isStarting={isStartingGame}
+                      startError={startError}
+                      onSelectOpening={onSelectDrillOpening ?? (() => {})}
+                      onPlayerColorChange={onDrillPlayerColorChange ?? (() => {})}
+                      onEngineEloChange={onEngineEloChange}
+                      onStrictnessChange={onDrillStrictnessChange ?? (() => {})}
+                      onStartDrill={onStartDrill ?? (() => {})}
                     />
-                    <span className="chess-elo-label">{botLabel}</span>
-                  </div>
+                  ) : (
+                    <>
+                      <p className="chess-start-title">Difficulty</p>
+                      <div className="chess-elo-selector">
+                        <div className="chess-elo-slider-row">
+                          <input
+                            type="range"
+                            min={0}
+                            max={maiaEloBins.length - 1}
+                            step={1}
+                            value={maiaEloBins.indexOf(engineElo)}
+                            onChange={(e) => {
+                              const nextElo = maiaEloBins[Number(e.target.value)];
+                              if (nextElo !== undefined) {
+                                onEngineEloChange(nextElo);
+                              }
+                            }}
+                            disabled={isStartingGame}
+                            className="chess-elo-slider"
+                          />
+                        </div>
+                        <div className="chess-elo-bot-row">
+                          <OpponentAvatar
+                            mode="engine"
+                            engineElo={engineElo}
+                            size={70}
+                          />
+                          <span className="chess-elo-label">{botLabel}</span>
+                        </div>
+                      </div>
+                      <p className="elo-stakes">
+                        <span className="elo-stakes__win">Win +{winDelta}</span>
+                        {" / "}
+                        <span className="elo-stakes__loss">Loss {lossDelta}</span>
+                      </p>
+                      <p className="chess-start-title">Side</p>
+                      <div className="chess-start-options">
+                        <button
+                          className="chess-button primary"
+                          type="button"
+                          onClick={onPlayWhite}
+                          disabled={isStartingGame}
+                        >
+                          Play White
+                        </button>
+                        <button
+                          className="chess-button primary"
+                          type="button"
+                          onClick={onPlayRandom}
+                          disabled={isStartingGame}
+                        >
+                          Play Random
+                        </button>
+                        <button
+                          className="chess-button primary"
+                          type="button"
+                          onClick={onPlayBlack}
+                          disabled={isStartingGame}
+                        >
+                          Play Black
+                        </button>
+                      </div>
+                      {startError && <p className="chess-start-error">{startError}</p>}
+                    </>
+                  )}
                 </div>
-                <p className="elo-stakes">
-                  <span className="elo-stakes__win">Win +{winDelta}</span>
-                  {" / "}
-                  <span className="elo-stakes__loss">Loss {lossDelta}</span>
-                </p>
-                <p className="chess-start-title">Side</p>
-                <div className="chess-start-options">
-                  <button
-                    className="chess-button primary"
-                    type="button"
-                    onClick={onPlayWhite}
-                    disabled={isStartingGame}
-                  >
-                    Play White
-                  </button>
-                  <button
-                    className="chess-button primary"
-                    type="button"
-                    onClick={onPlayRandom}
-                    disabled={isStartingGame}
-                  >
-                    Play Random
-                  </button>
-                  <button
-                    className="chess-button primary"
-                    type="button"
-                    onClick={onPlayBlack}
-                    disabled={isStartingGame}
-                  >
-                    Play Black
-                  </button>
-                </div>
-                {startError && <p className="chess-start-error">{startError}</p>}
               </div>
             </div>
           )}

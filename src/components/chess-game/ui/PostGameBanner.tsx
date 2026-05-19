@@ -8,6 +8,8 @@ type PostGameBannerProps = {
   isPracticeContinuation: boolean;
   showPostGamePrompt: boolean;
   gameResult: GameResult | null;
+  drillOpeningKey?: string | null;
+  onNewDrill?: () => void;
   ratingChange: RatingChange | null;
   scoreChanges?: RatingScores | null;
   ratingDisplayType?: RatingScoreKey;
@@ -21,6 +23,8 @@ const PostGameBanner = ({
   isPracticeContinuation,
   showPostGamePrompt,
   gameResult,
+  drillOpeningKey,
+  onNewDrill,
   ratingChange,
   scoreChanges,
   ratingDisplayType = "elo",
@@ -73,6 +77,15 @@ const PostGameBanner = ({
           <button className="chess-button" type="button" onClick={onViewHistory}>
             History
           </button>
+          {drillOpeningKey && onNewDrill && (
+            <button
+              className="chess-button primary"
+              type="button"
+              onClick={onNewDrill}
+            >
+              New Drill
+            </button>
+          )}
         </div>
       </div>
     );

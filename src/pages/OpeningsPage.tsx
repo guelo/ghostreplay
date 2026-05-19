@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chessboard } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import { getOpeningBook } from "../openings/openingBook";
@@ -171,6 +171,7 @@ function sortChildrenByStrength(
 }
 
 function OpeningsPage() {
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [response, setResponse] = useState<ChildrenResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -675,11 +676,30 @@ function OpeningsPage() {
                       <span className="opening-family-card__footer-note">
                         {formatChildCount(child.child_count)}
                       </span>
-                      {canDrillDown && (
-                        <span className="opening-family-card__drilldown">
-                          Drill down
-                        </span>
-                      )}
+                      <div className="opening-family-card__footer-actions">
+                        {canDrillDown && (
+                          <span className="opening-family-card__drilldown">
+                            Drill down
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="opening-family-card__drill-button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            navigate("/play", {
+                              state: {
+                                drillSetup: {
+                                  openingKey: child.opening_key,
+                                  playerColor,
+                                },
+                              },
+                            });
+                          }}
+                        >
+                          Start Drill
+                        </button>
+                      </div>
                     </div>
                   </>
                 );

@@ -88,4 +88,27 @@ describe("PostGameBanner", () => {
     expect(screen.getByText("Checkmate! You won!")).toBeInTheDocument();
     expect(screen.queryByText("+16")).not.toBeInTheDocument();
   });
+
+  it("renders 'New Drill' button when drillOpeningKey is present", () => {
+    const props = makeProps();
+    const onNewDrill = vi.fn();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        onNewDrill={onNewDrill}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /new drill/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /new drill/i }));
+    expect(onNewDrill).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render 'New Drill' button when drillOpeningKey is null", () => {
+    const props = makeProps();
+    render(<PostGameBanner {...props} drillOpeningKey={null} />);
+
+    expect(screen.queryByRole("button", { name: /new drill/i })).not.toBeInTheDocument();
+  });
 });

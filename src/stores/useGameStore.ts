@@ -1,6 +1,6 @@
 import type { SetStateAction } from "react";
 import { create } from "zustand";
-import type { RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
+import type { DrillStrictness, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
 
@@ -51,6 +51,8 @@ export type GameState = {
   engineElo: number;
   isRated: boolean;
   isPracticeContinuation: boolean;
+  drillOpeningKey: string | null;
+  drillStrictness: DrillStrictness | null;
   playerRating: number;
   isProvisional: boolean;
   ratingScores: RatingScores;
@@ -74,6 +76,10 @@ export type GameActions = {
   setEngineElo: (update: SetStateAction<number>) => void;
   setIsRated: (update: SetStateAction<boolean>) => void;
   setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
+  setDrillOpeningKey: (update: SetStateAction<string | null>) => void;
+  setDrillStrictness: (
+    update: SetStateAction<DrillStrictness | null>,
+  ) => void;
   setPlayerRating: (update: SetStateAction<number>) => void;
   setIsProvisional: (update: SetStateAction<boolean>) => void;
   setRatingScores: (update: SetStateAction<RatingScores>) => void;
@@ -99,6 +105,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   engineElo: 800,
   isRated: true,
   isPracticeContinuation: false,
+  drillOpeningKey: null,
+  drillStrictness: null,
   playerRating: 1200,
   isProvisional: true,
   ratingScores: {
@@ -132,6 +140,10 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({
       isPracticeContinuation: resolve(u, s.isPracticeContinuation),
     })),
+  setDrillOpeningKey: (u) =>
+    set((s) => ({ drillOpeningKey: resolve(u, s.drillOpeningKey) })),
+  setDrillStrictness: (u) =>
+    set((s) => ({ drillStrictness: resolve(u, s.drillStrictness) })),
   setPlayerRating: (u) =>
     set((s) => ({ playerRating: resolve(u, s.playerRating) })),
   setIsProvisional: (u) =>

@@ -11,6 +11,8 @@ const fetchCurrentRatingMock = vi.fn();
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
+const startDrillMock = vi.fn();
+const getOpeningRootsMock = vi.fn();
 const audioCtorMock = vi.fn();
 const audioPlayMock = vi.fn();
 
@@ -19,6 +21,14 @@ vi.mock("../utils/api", () => ({
   startGame: (...args: unknown[]) => startGameMock(...args),
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
+  startDrill: (...args: unknown[]) => startDrillMock(...args),
+  getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
+}));
+
+const getOpeningBookMock = vi.fn();
+
+vi.mock("../openings/openingBook", () => ({
+  getOpeningBook: (...args: unknown[]) => getOpeningBookMock(...args),
 }));
 
 const initialStoreState = useGameStore.getInitialState();
@@ -190,6 +200,9 @@ beforeEach(() => {
   startGameMock.mockReset();
   endGameMock.mockReset();
   uploadSessionMovesMock.mockReset();
+  startDrillMock.mockReset();
+  getOpeningRootsMock.mockReset();
+  getOpeningBookMock.mockReset();
   uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
   audioCtorMock.mockReset();
   audioPlayMock.mockReset();
@@ -1182,5 +1195,167 @@ describe("useChessGameLifecycle", () => {
     });
     expect(endGameMock).not.toHaveBeenCalled();
     expect(audioCtorMock).not.toHaveBeenCalled();
+  });
+
+  it("handleNewDrill calls startDrill API and sets store correctly", async () => {
+    const chess = new Chess();
+    const { result } = setup();
+
+    startDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-123",
+      mode: "drill",
+      drill_state: "active",
+      opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+      opening_name: "Sicilian Defense",
+      opening_family: "Sicilian",
+      eco: "B20",
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1000,
+      strictness: "standard",
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+    });
+
+    getOpeningBookMock.mockResolvedValueOnce({
+      byEpd: new Map(),
+    });
+
+    await act(async () => {
+      await result.current.handleNewDrill({
+        openingKey: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        playerColor: "white",
+        engineElo: 1000,
+        strictness: "standard",
+        selectedOpening: {
+          opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+          opening_name: "Sicilian Defense",
+          opening_family: "Sicilian",
+          eco: "B20",
+          depth: 1,
+        },
+      });
+    });
+
+    expect(startDrillMock).toHaveBeenCalledWith({
+      opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+      player_color: "white",
+      engine_elo: 1000,
+      strictness: "standard",
+    });
+
+    const store = useGameStore.getState();
+    expect(store.isGameActive).toBe(true);
+    expect(store.sessionId).toBe("drill-session-123");
+    expect(store.drillOpeningKey).toBe("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+    expect(store.drillStrictness).toBe("standard");
+    expect(store.isRated).toBe(false);
+  });
+
+  it("handleNewDrill replays opening PGN and sets moveHistory", async () => {
+    const chess = new Chess();
+    const { result } = setup();
+
+    startDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-456",
+      mode: "drill",
+      drill_state: "active",
+      opening_key: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+      opening_name: "French Defense",
+      opening_family: "French",
+      eco: "C00",
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1200,
+      strictness: "strict",
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+    });
+
+    getOpeningBookMock.mockResolvedValueOnce({
+      byEpd: new Map([
+        [
+          "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+          { eco: "C00", name: "French Defense", pgn: "1. e4 e6", uci: "e2e4 e7e6", epd: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2" },
+        ],
+      ]),
+    });
+
+    await act(async () => {
+      await result.current.handleNewDrill({
+        openingKey: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        playerColor: "white",
+        engineElo: 1200,
+        strictness: "strict",
+        selectedOpening: {
+          opening_key: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+          opening_name: "French Defense",
+          opening_family: "French",
+          eco: "C00",
+          depth: 1,
+        },
+      });
+    });
+
+    const store = useGameStore.getState();
+    expect(store.moveHistory).toHaveLength(2);
+    expect(store.moveHistory[0]?.san).toBe("e4");
+    expect(store.moveHistory[1]?.san).toBe("e6");
+  });
+
+  it("handleNewDrill falls back to direct FEN load when PGN parse fails", async () => {
+    const chess = new Chess();
+    const { result } = setup();
+
+    startDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-789",
+      mode: "drill",
+      drill_state: "active",
+      opening_key: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+      opening_name: "Unknown",
+      opening_family: "",
+      eco: null,
+      depth: 0,
+      player_color: "black",
+      engine_elo: 800,
+      strictness: "lenient",
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+    });
+
+    getOpeningBookMock.mockResolvedValueOnce({
+      byEpd: new Map([
+        [
+          "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+          { eco: "", name: "Unknown", pgn: "invalid pgn!!!", uci: "", epd: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" },
+        ],
+      ]),
+    });
+
+    await act(async () => {
+      await result.current.handleNewDrill({
+        openingKey: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        playerColor: "black",
+        engineElo: 800,
+        strictness: "lenient",
+        selectedOpening: {
+          opening_key: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+          opening_name: "Unknown",
+          opening_family: "",
+          eco: null,
+          depth: 0,
+        },
+      });
+    });
+
+    const store = useGameStore.getState();
+    expect(store.liveFen).toBe("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+    expect(store.moveHistory).toEqual([]);
   });
 });
