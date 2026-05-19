@@ -28,11 +28,19 @@ def _set_session_times(
     *,
     started_at: datetime,
     ended_at: datetime | None,
+    normal_started_at: datetime | None = None,
 ):
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).first()
     assert session is not None
     session.started_at = started_at
     session.ended_at = ended_at
+    if normal_started_at is not None:
+        session.normal_started_at = normal_started_at
+        session.converted_at = normal_started_at
+        session.rated_start_ply = 0
+        session.session_mode = "drill"
+        session.drill_state = "converted"
+        session.is_rated = True
     db_session.commit()
 
 
@@ -478,6 +486,33 @@ def test_stats_summary_window_filtering(client, auth_headers, create_game_sessio
     assert data_all["games"]["completed"] == 2
     assert data_all["games"]["record"]["draws"] == 1
     assert data_all["library"]["new_blunders_in_window"] == 2
+
+
+def test_stats_summary_converted_drill_uses_normal_started_at_for_window_and_duration(
+    client, auth_headers, create_game_session, db_session
+):
+    now = datetime.now(timezone.utc)
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id, user_id=123, result="draw")
+    normal_started_at = now - timedelta(days=2)
+    _set_session_times(
+        db_session,
+        session_id,
+        started_at=now - timedelta(days=40),
+        normal_started_at=normal_started_at,
+        ended_at=normal_started_at + timedelta(minutes=12),
+    )
+
+    response = client.get(
+        "/api/stats/summary?window_days=30",
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["games"]["played"] == 1
+    assert data["games"]["completed"] == 1
+    assert data["games"]["avg_duration_seconds"] == 720
 
 
 def test_stats_summary_zero_denominator_with_sessions(client, auth_headers, create_game_session):

@@ -173,12 +173,18 @@ def _collect_session_moves(
     rows = db.execute(
         text("""
             SELECT sm.fen_before, sm.fen_after, sm.color, sm.eval_delta, sm.move_san,
-                   COALESCE(gs.ended_at, gs.started_at) AS session_ts
+                   CASE
+                     WHEN gs.drill_state = 'converted'
+                     THEN COALESCE(gs.normal_started_at, gs.started_at)
+                     ELSE gs.started_at
+                   END AS session_ts
             FROM session_moves sm
             JOIN game_sessions gs ON gs.id = sm.session_id
             WHERE gs.user_id = :user_id
               AND gs.player_color = :player_color
               AND sm.fen_before IS NOT NULL
+              AND sm.segment = 'normal'
+              AND (gs.session_mode = 'normal' OR gs.drill_state = 'converted')
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
@@ -281,6 +287,7 @@ def _collect_ghost_targets(
             WHERE b.user_id = :user_id
               AND (gs.player_color = :player_color
                    OR (b.source_session_id IS NULL AND p.active_color = :player_color))
+              AND (gs.id IS NULL OR gs.session_mode = 'normal' OR gs.drill_state = 'converted')
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
@@ -309,6 +316,7 @@ def _collect_reviews(
             WHERE b.user_id = :user_id
               AND (gs.player_color = :player_color
                    OR (b.source_session_id IS NULL AND p.active_color = :player_color))
+              AND (gs.id IS NULL OR gs.session_mode = 'normal' OR gs.drill_state = 'converted')
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()

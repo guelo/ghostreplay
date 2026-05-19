@@ -12,6 +12,7 @@ from sqlalchemy import text
 from app.api.analysis import router as analysis_router
 from app.api.auth import router as auth_router
 from app.api.blunder import router as blunder_router
+from app.api.drills import router as drills_router
 from app.api.health import router as health_router
 from app.api.game import router as game_router
 from app.api.history import router as history_router
@@ -55,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(analysis_router)
     app.include_router(auth_router)
     app.include_router(blunder_router)
+    app.include_router(drills_router)
     app.include_router(health_router)
     app.include_router(game_router)
     app.include_router(history_router)

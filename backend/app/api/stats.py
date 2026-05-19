@@ -13,6 +13,7 @@ from app.models import Blunder, GameSession, Move, Position, RatingHistory, Sess
 from app.rating import DEFAULT_RATING
 from app.rating_scores import latest_rating_order, scores_for_row
 from app.security import TokenPayload, get_current_user
+from app.session_contracts import normal_play_started_at, normal_play_started_at_expr, normal_segment_filter, visible_session_filter
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -231,6 +232,8 @@ def _perfect_streak_summary(db: Session, user_id: int) -> StatsAchievementsSumma
         .filter(
             GameSession.user_id == user_id,
             SessionMove.color == GameSession.player_color,
+            normal_segment_filter(),
+            visible_session_filter(),
         )
         .order_by(
             GameSession.started_at.asc(),
@@ -286,10 +289,11 @@ def get_stats_summary(
 
     now = datetime.now(timezone.utc)
     cutoff = None if window_days == 0 else now - timedelta(days=window_days)
+    normal_started_at = normal_play_started_at_expr()
 
-    session_query = db.query(GameSession).filter(GameSession.user_id == user.user_id)
+    session_query = db.query(GameSession).filter(GameSession.user_id == user.user_id, visible_session_filter())
     if cutoff is not None:
-        session_query = session_query.filter(GameSession.started_at >= cutoff)
+        session_query = session_query.filter(normal_started_at >= cutoff)
     sessions = session_query.all()
     session_ids = [session.id for session in sessions]
 
@@ -297,7 +301,7 @@ def get_stats_summary(
     if session_ids:
         move_count_rows = (
             db.query(SessionMove.session_id, func.count(SessionMove.id))
-            .filter(SessionMove.session_id.in_(session_ids))
+            .filter(SessionMove.session_id.in_(session_ids), normal_segment_filter())
             .group_by(SessionMove.session_id)
             .all()
         )
@@ -332,7 +336,7 @@ def get_stats_summary(
             per_color_games[player_color]["completed"] += 1
             if session.ended_at is not None:
                 ended_duration_seconds.append(
-                    (session.ended_at - session.started_at).total_seconds()
+                    (session.ended_at - normal_play_started_at(session)).total_seconds()
                 )
         elif session.status == "active":
             active += 1
@@ -370,6 +374,7 @@ def get_stats_summary(
             .filter(
                 GameSession.id.in_(session_ids),
                 SessionMove.color == GameSession.player_color,
+                normal_segment_filter(),
             )
             .all()
         )

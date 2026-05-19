@@ -16,6 +16,14 @@ from app.fen import fen_hash
 from app.opening_cache import recompute_opening_scores_if_needed
 from app.models import AnalysisCache, Blunder, BlunderOpportunityEvent, GameSession, Move, Position, SessionMove
 from app.security import TokenPayload, get_current_user
+from app.session_contracts import (
+    DRILL_SESSION_MODE,
+    NORMAL_MOVE_SEGMENT,
+    is_visible_game_session,
+    normal_segment_filter,
+    normal_play_started_at,
+    segment_for_move,
+)
 from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
 
 router = APIRouter(prefix="/api/session", tags=["session"])
@@ -79,6 +87,7 @@ class SessionAnalysisMove(BaseModel):
     best_move_eval_cp: int | None = None
     eval_delta: int | None = None
     classification: MoveClassification | None = None
+    segment: str = NORMAL_MOVE_SEGMENT
 
 
 class SessionAnalysisSummary(BaseModel):
@@ -105,6 +114,7 @@ class SessionAnalysisResponse(BaseModel):
     expected_total_moves: int | None = None
     analyzed_moves: int = 0
     is_complete: bool = False
+    rated_start_ply: int | None = None
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -238,7 +248,11 @@ def _compute_blunder_opportunity_events(
     if game_session is None:
         return
 
-    session_moves = db.query(SessionMove).filter(SessionMove.session_id == session_id).all()
+    session_moves = (
+        db.query(SessionMove)
+        .filter(SessionMove.session_id == session_id, normal_segment_filter())
+        .all()
+    )
     session_hashes: set[str] = set()
     for move in session_moves:
         if move.fen_before:
@@ -287,7 +301,7 @@ def _compute_blunder_opportunity_events(
         if event.blunder_id not in matched:
             db.delete(event)
 
-    occurred_at = game_session.started_at or game_session.ended_at
+    occurred_at = normal_play_started_at(game_session)
     for blunder_id, (opportunity, reached) in matched.items():
         _upsert_opportunity_event(
             db,
@@ -404,8 +418,14 @@ def upsert_session_moves(
             "best_move_uci": move.best_move_uci,
             "decision_source": move.decision_source.value if move.decision_source else None,
             "target_blunder_id": move.target_blunder_id,
+            "segment": segment_for_move(game_session, move.move_number, move.color.value),
         }
         for move in request.moves
+    ]
+    normal_moves = [
+        move
+        for move, value in zip(request.moves, values)
+        if value["segment"] == NORMAL_MOVE_SEGMENT
     ]
 
     dialect_name = db.bind.dialect.name if db.bind else ""
@@ -433,18 +453,20 @@ def upsert_session_moves(
                 existing_row.best_move_uci = value["best_move_uci"]
                 existing_row.decision_source = value["decision_source"]
                 existing_row.target_blunder_id = value["target_blunder_id"]
+                existing_row.segment = value["segment"]
             else:
                 db.add(SessionMove(**value))
 
         db.commit()
-        _compute_blunder_opportunity_events(
-            db,
-            session_id=session_id,
-            user_id=user.user_id,
-            player_color=game_session.player_color,
-        )
-        _upsert_analysis_cache(db, request.moves)
-        _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
+        if normal_moves:
+            _compute_blunder_opportunity_events(
+                db,
+                session_id=session_id,
+                user_id=user.user_id,
+                player_color=game_session.player_color,
+            )
+            _upsert_analysis_cache(db, normal_moves)
+            _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
         return SessionMovesResponse(moves_inserted=len(values))
 
     statement = statement.on_conflict_do_update(
@@ -466,19 +488,21 @@ def upsert_session_moves(
             "best_move_uci": statement.excluded.best_move_uci,
             "decision_source": statement.excluded.decision_source,
             "target_blunder_id": statement.excluded.target_blunder_id,
+            "segment": statement.excluded.segment,
         },
     )
     db.execute(statement)
     db.commit()
 
-    _compute_blunder_opportunity_events(
-        db,
-        session_id=session_id,
-        user_id=user.user_id,
-        player_color=game_session.player_color,
-    )
-    _upsert_analysis_cache(db, request.moves)
-    _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
+    if normal_moves:
+        _compute_blunder_opportunity_events(
+            db,
+            session_id=session_id,
+            user_id=user.user_id,
+            player_color=game_session.player_color,
+        )
+        _upsert_analysis_cache(db, normal_moves)
+        _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
 
     return SessionMovesResponse(moves_inserted=len(values))
 
@@ -491,6 +515,8 @@ def get_session_analysis(
 ) -> SessionAnalysisResponse:
     game_session = _get_session_or_404(db, session_id)
     _ensure_session_owned_by_user(game_session, user)
+    if not is_visible_game_session(game_session):
+        raise HTTPException(status_code=404, detail="Game session not found")
 
     color_order = case((SessionMove.color == MoveColor.WHITE.value, 0), else_=1)
     session_moves = (
@@ -499,6 +525,7 @@ def get_session_analysis(
         .order_by(SessionMove.move_number.asc(), color_order.asc())
         .all()
     )
+    normal_summary_filter = [SessionMove.session_id == session_id, normal_segment_filter()]
 
     summary_row = (
         db.query(
@@ -513,7 +540,7 @@ def get_session_analysis(
             ).label("inaccuracies"),
             func.avg(SessionMove.eval_delta).label("average_centipawn_loss"),
         )
-        .filter(SessionMove.session_id == session_id)
+        .filter(*normal_summary_filter)
         .one()
     )
 
@@ -567,6 +594,7 @@ def get_session_analysis(
                 best_move_eval_cp=move.best_move_eval_cp,
                 eval_delta=move.eval_delta,
                 classification=move.classification,
+                segment=move.segment,
             )
             for move in session_moves
         ],
@@ -580,4 +608,5 @@ def get_session_analysis(
         expected_total_moves=expected_total_moves,
         analyzed_moves=analyzed_moves,
         is_complete=is_complete,
+        rated_start_ply=game_session.rated_start_ply if game_session.session_mode == DRILL_SESSION_MODE else None,
     )

@@ -23,6 +23,7 @@ from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
+from app.session_contracts import is_visible_game_session
 from app.srs_math import calculate_priority
 from app.srs_opportunity import (
     detect_opening_family,
@@ -339,6 +340,8 @@ def record_blunder(
     """
     session = _get_session_or_404(db, request.session_id)
     _ensure_session_owned_by_user(session, user)
+    if not is_visible_game_session(session):
+        raise HTTPException(status_code=400, detail="Automatic blunder recording is unavailable for unconverted drills")
 
     # Check if blunder already recorded for this session
     if session.blunder_recorded:

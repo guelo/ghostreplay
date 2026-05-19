@@ -30,6 +30,8 @@ def _session(
     user_id: int,
     player_color: str = "white",
     started_at: datetime | None = None,
+    normal_started_at: datetime | None = None,
+    converted: bool = False,
 ) -> GameSession:
     game_session = GameSession(
         id=uuid.uuid4(),
@@ -39,6 +41,13 @@ def _session(
         engine_elo=1500,
         player_color=player_color,
     )
+    if converted:
+        game_session.session_mode = "drill"
+        game_session.drill_state = "converted"
+        game_session.is_rated = True
+        game_session.normal_started_at = normal_started_at or game_session.started_at
+        game_session.converted_at = game_session.normal_started_at
+        game_session.rated_start_ply = 0
     db_session.add(game_session)
     db_session.flush()
     return game_session
@@ -178,6 +187,43 @@ def test_reached_position_counts_as_denominator_opportunity(db_session):
     event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
     assert event.opportunity is True
     assert event.reached is True
+
+
+def test_converted_drill_opportunity_event_uses_normal_started_at(db_session):
+    user_id = 123
+    old_started_at = datetime.now(timezone.utc) - timedelta(days=40)
+    normal_started_at = datetime.now(timezone.utc) - timedelta(days=2)
+    blunder_fen = "8/8/8/8/8/8/K7/7k w - - 0 1"
+    blunder_position = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=blunder_position)
+    game_session = _session(
+        db_session,
+        user_id=user_id,
+        started_at=old_started_at,
+        normal_started_at=normal_started_at,
+        converted=True,
+    )
+    db_session.add(
+        SessionMove(
+            session_id=game_session.id,
+            move_number=1,
+            color="black",
+            move_san="x",
+            fen_after=blunder_fen,
+            segment="normal",
+        )
+    )
+    db_session.commit()
+
+    _compute_blunder_opportunity_events(
+        db_session,
+        session_id=game_session.id,
+        user_id=user_id,
+        player_color="white",
+    )
+
+    event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
+    assert event.occurred_at == normal_started_at.replace(tzinfo=None)
 
 
 def test_same_session_review_event_is_excluded_from_since_review(db_session):

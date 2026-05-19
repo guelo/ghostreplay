@@ -122,9 +122,33 @@ class GameSession(Base):
     __tablename__ = "game_sessions"
     __table_args__ = (
         CheckConstraint("player_color in ('white','black')", name="ck_game_sessions_player_color"),
+        CheckConstraint("session_mode in ('normal','drill')", name="ck_game_sessions_session_mode"),
+        CheckConstraint(
+            "drill_state is null or drill_state in ('active','failed','abandoned','converted')",
+            name="ck_game_sessions_drill_state",
+        ),
+        CheckConstraint(
+            "drill_strictness is null or drill_strictness in ('lenient','standard','strict')",
+            name="ck_game_sessions_drill_strictness",
+        ),
+        CheckConstraint(
+            "((session_mode = 'normal' and drill_state is null) "
+            "or (session_mode = 'drill' and drill_state is not null))",
+            name="ck_game_sessions_mode_drill_state",
+        ),
+        CheckConstraint("rated_start_ply is null or rated_start_ply >= 0", name="ck_game_sessions_rated_start_ply"),
+        CheckConstraint(
+            "session_mode = 'normal' "
+            "or (drill_state = 'converted' and is_rated = true and normal_started_at is not null "
+            "and converted_at is not null and rated_start_ply is not null) "
+            "or (drill_state in ('active','failed','abandoned') and is_rated = false and rated_start_ply is null)",
+            name="ck_game_sessions_drill_rating_boundary",
+        ),
         Index("idx_game_sessions_user", "user_id"),
         Index("idx_game_sessions_status", "status"),
         Index("idx_game_sessions_user_started", "user_id", "started_at"),
+        Index("idx_game_sessions_user_mode_status", "user_id", "session_mode", "status"),
+        Index("idx_game_sessions_drill_state", "drill_state"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -138,6 +162,13 @@ class GameSession(Base):
     is_rated: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     player_color: Mapped[str] = mapped_column(String(5), nullable=False, server_default="white")
     pgn: Mapped[str | None] = mapped_column(Text)
+    session_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
+    drill_state: Mapped[str | None] = mapped_column(String(12))
+    drill_opening_key: Mapped[str | None] = mapped_column(Text)
+    drill_strictness: Mapped[str | None] = mapped_column(String(12))
+    normal_started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    converted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    rated_start_ply: Mapped[int | None] = mapped_column(Integer)
 
 
 class Move(Base):
@@ -190,8 +221,10 @@ class SessionMove(Base):
             "decision_source is null or decision_source in ('ghost_path','backend_engine','local_fallback')",
             name="ck_session_moves_decision_source",
         ),
+        CheckConstraint("segment in ('drill','normal')", name="ck_session_moves_segment"),
         UniqueConstraint("session_id", "move_number", "color", name="uq_session_moves_session_move_color"),
         Index("idx_session_moves_session", "session_id"),
+        Index("idx_session_moves_session_segment", "session_id", "segment"),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
@@ -214,6 +247,7 @@ class SessionMove(Base):
     best_move_uci: Mapped[str | None] = mapped_column(String(5))
     decision_source: Mapped[str | None] = mapped_column(String(20))
     target_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id"))
+    segment: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
 
 
 class AnalysisCache(Base):

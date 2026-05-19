@@ -98,12 +98,36 @@ def _insert_session(
     player_color: str = "white",
     started_at: str = "2026-01-01 10:00:00",
     ended_at: str | None = "2026-01-01 11:00:00",
+    session_mode: str = "normal",
+    drill_state: str | None = None,
+    normal_started_at: str | None = None,
+    converted_at: str | None = None,
+    rated_start_ply: int | None = None,
+    is_rated: bool = True,
 ) -> str:
     sid = session_id or str(uuid.uuid4())
     db.execute(text("""
-        INSERT INTO game_sessions (id, user_id, started_at, ended_at, status, engine_elo, player_color)
-        VALUES (:id, :uid, :sa, :ea, 'completed', 1500, :pc)
-    """), {"id": sid, "uid": user_id, "sa": started_at, "ea": ended_at, "pc": player_color})
+        INSERT INTO game_sessions (
+            id, user_id, started_at, ended_at, status, engine_elo, player_color,
+            is_rated, session_mode, drill_state, normal_started_at, converted_at, rated_start_ply
+        )
+        VALUES (
+            :id, :uid, :sa, :ea, 'completed', 1500, :pc,
+            :is_rated, :session_mode, :drill_state, :normal_started_at, :converted_at, :rated_start_ply
+        )
+    """), {
+        "id": sid,
+        "uid": user_id,
+        "sa": started_at,
+        "ea": ended_at,
+        "pc": player_color,
+        "is_rated": is_rated,
+        "session_mode": session_mode,
+        "drill_state": drill_state,
+        "normal_started_at": normal_started_at,
+        "converted_at": converted_at,
+        "rated_start_ply": rated_start_ply,
+    })
     db.commit()
     return sid
 
@@ -265,7 +289,7 @@ class TestLiveMoves:
         assert node.live_passes == 1
         assert node.live_fails == 2
 
-    def test_last_live_at_uses_ended_at(self, db_session, branching_graph):
+    def test_last_live_at_uses_started_at(self, db_session, branching_graph):
         _insert_user(db_session)
         sid1 = _insert_session(db_session, started_at="2026-01-01 10:00:00", ended_at="2026-01-01 11:00:00")
         sid2 = _insert_session(db_session, started_at="2026-01-05 10:00:00", ended_at="2026-01-05 15:00:00")
@@ -275,9 +299,30 @@ class TestLiveMoves:
 
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
         node = ov.nodes[FEN_ROOT]
-        # Should use the later ended_at.
+        # Evidence timestamps are anchored to the normal-play start boundary.
         assert node.last_live_at.year == 2026
         assert node.last_live_at.day == 5
+
+    def test_last_live_at_uses_converted_drill_normal_started_at(self, db_session, branching_graph):
+        _insert_user(db_session)
+        sid = _insert_session(
+            db_session,
+            started_at="2026-01-01 10:00:00",
+            ended_at="2026-01-10 12:00:00",
+            session_mode="drill",
+            drill_state="converted",
+            normal_started_at="2026-01-08 09:30:00",
+            converted_at="2026-01-08 09:30:00",
+            rated_start_ply=0,
+            is_rated=True,
+        )
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.last_live_at is not None
+        assert node.last_live_at.day == 8
+        assert node.last_live_at.hour == 9
 
     def test_last_live_at_falls_back_to_started_at(self, db_session, branching_graph):
         _insert_user(db_session)
@@ -304,7 +349,7 @@ class TestLiveMoves:
         node = ov.nodes[FEN_ROOT]
         assert node.last_live_at is not None
         assert node.last_live_at.day == 15
-        assert node.last_live_at.hour == 11
+        assert node.last_live_at.hour == 10
 
 
 class TestBranching:

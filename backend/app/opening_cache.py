@@ -193,6 +193,8 @@ def list_opening_score_candidate_pairs(
             FROM session_moves sm
             JOIN game_sessions gs ON gs.id = sm.session_id
             WHERE sm.fen_before IS NOT NULL
+              AND sm.segment = 'normal'
+              AND (gs.session_mode = 'normal' OR gs.drill_state = 'converted')
 
             UNION
 
@@ -207,6 +209,7 @@ def list_opening_score_candidate_pairs(
             FROM blunders b
             LEFT JOIN game_sessions gs ON gs.id = b.source_session_id
             WHERE gs.player_color IS NOT NULL
+              AND (gs.session_mode = 'normal' OR gs.drill_state = 'converted')
         ) pairs
     """
     ]

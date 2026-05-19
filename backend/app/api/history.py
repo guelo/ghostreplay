@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import GameSession, SessionMove
 from app.security import TokenPayload, get_current_user
+from app.session_contracts import normal_segment_filter, visible_session_filter
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
@@ -48,6 +49,7 @@ def get_history(
         .filter(
             GameSession.user_id == user.user_id,
             GameSession.status == "ended",
+            visible_session_filter(),
         )
         .order_by(GameSession.ended_at.desc())
         .limit(limit)
@@ -68,7 +70,7 @@ def get_history(
             func.sum(case((SessionMove.classification == "inaccuracy", 1), else_=0)).label("inaccuracies"),
             func.avg(SessionMove.eval_delta).label("avg_cpl"),
         )
-        .filter(SessionMove.session_id.in_(session_ids))
+        .filter(SessionMove.session_id.in_(session_ids), normal_segment_filter())
         .group_by(SessionMove.session_id)
         .all()
     )

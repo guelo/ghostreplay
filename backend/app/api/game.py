@@ -19,6 +19,7 @@ from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
 from app.rating_scores import compute_rating_tracks, latest_rating_order, rating_score, scores_for_row
 from app.security import TokenPayload, get_current_user
+from app.session_contracts import DRILL_SESSION_MODE, VISIBLE_DRILL_STATE, utcnow
 from app.srs_math import (
     OPPORTUNITY_POWER,
     calculate_opportunity_overdue,
@@ -181,6 +182,8 @@ def _same_fen_recent_ghost_moves(db: Session, user_id: int, fen: str) -> list[st
             WHERE gs.user_id = :user_id
               AND sm.decision_source = 'ghost_path'
               AND sm.fen_before IS NOT NULL
+              AND sm.segment = 'normal'
+              AND (gs.session_mode = 'normal' OR gs.drill_state = 'converted')
             ORDER BY gs.started_at DESC, sm.id DESC
             LIMIT :limit
         """),
@@ -525,6 +528,7 @@ def start_game(
         engine_elo=request.engine_elo,
         blunder_recorded=False,
         player_color=request.player_color.value,
+        session_mode="normal",
     )
 
     db.add(session)
@@ -566,17 +570,23 @@ def end_game(
             status_code=400,
             detail=f"Game session is already {session.status}"
         )
+    if session.session_mode == DRILL_SESSION_MODE and session.drill_state != VISIBLE_DRILL_STATE:
+        raise HTTPException(
+            status_code=400,
+            detail="Use the drill abandon or continue endpoint before ending this drill",
+        )
 
     # Update session
     session.status = "ended"
     session.result = request.result.value
-    session.ended_at = datetime.now(timezone.utc)
+    session.ended_at = utcnow()
     session.pgn = request.pgn
-    session.is_rated = request.is_rated
+    effective_is_rated = session.is_rated if session.session_mode == DRILL_SESSION_MODE else request.is_rated
+    session.is_rated = effective_is_rated
 
     # Compute rating change for rated results
     rating_change = None
-    if request.is_rated and request.result.value in RESULT_SCORES:
+    if effective_is_rated and request.result.value in RESULT_SCORES:
         latest = (
             db.query(RatingHistory)
             .filter(RatingHistory.user_id == user.user_id)
@@ -684,6 +694,8 @@ def get_next_opponent_move(
 
     if session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
+    if session.session_mode == DRILL_SESSION_MODE and session.drill_state != VISIBLE_DRILL_STATE:
+        raise HTTPException(status_code=400, detail="Opponent moves are unavailable for unconverted drills")
 
     # Validate FEN and check it's the opponent's turn
     try:

@@ -39,6 +39,7 @@ def backfill_glicko_ratings(db, *, recompute_elo: bool = False) -> tuple[int, in
             GameSession.status == "ended",
             GameSession.is_rated.is_(True),
             GameSession.result.in_(tuple(RESULT_SCORES.keys())),
+            ((GameSession.session_mode == "normal") | (GameSession.drill_state == "converted")),
         )
         .order_by(
             GameSession.user_id.asc(),

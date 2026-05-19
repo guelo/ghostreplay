@@ -47,7 +47,34 @@ def _create_test_schema(conn) -> None:
             blunder_recorded BOOLEAN NOT NULL DEFAULT 0,
             is_rated BOOLEAN NOT NULL DEFAULT 1,
             player_color VARCHAR(5) NOT NULL DEFAULT 'white',
-            pgn TEXT
+            pgn TEXT,
+            session_mode VARCHAR(10) NOT NULL DEFAULT 'normal',
+            drill_state VARCHAR(12),
+            drill_opening_key TEXT,
+            drill_strictness VARCHAR(12),
+            normal_started_at TIMESTAMP,
+            converted_at TIMESTAMP,
+            rated_start_ply INTEGER,
+            CHECK (session_mode IN ('normal','drill')),
+            CHECK (drill_state IS NULL OR drill_state IN ('active','failed','abandoned','converted')),
+            CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
+            CHECK ((session_mode = 'normal' AND drill_state IS NULL) OR (session_mode = 'drill' AND drill_state IS NOT NULL)),
+            CHECK (rated_start_ply IS NULL OR rated_start_ply >= 0),
+            CHECK (
+                session_mode = 'normal'
+                OR (
+                    drill_state = 'converted'
+                    AND is_rated = true
+                    AND normal_started_at IS NOT NULL
+                    AND converted_at IS NOT NULL
+                    AND rated_start_ply IS NOT NULL
+                )
+                OR (
+                    drill_state IN ('active','failed','abandoned')
+                    AND is_rated = false
+                    AND rated_start_ply IS NULL
+                )
+            )
         )
     """))
     conn.execute(text("""
@@ -121,9 +148,11 @@ def _create_test_schema(conn) -> None:
             best_move_uci VARCHAR(5),
             decision_source VARCHAR(20),
             target_blunder_id INTEGER,
+            segment VARCHAR(10) NOT NULL DEFAULT 'normal',
             UNIQUE(session_id, move_number, color),
             FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE,
             FOREIGN KEY (target_blunder_id) REFERENCES blunders(id),
+            CHECK (segment IN ('drill', 'normal')),
             CHECK (decision_source IS NULL OR decision_source IN ('ghost_path', 'backend_engine', 'local_fallback'))
         )
     """))
