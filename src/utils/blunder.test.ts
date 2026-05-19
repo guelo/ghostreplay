@@ -44,10 +44,23 @@ describe('shouldRecordBlunder', () => {
       pgn: '1. d4 d5 2. e4',
       fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
       userMove: 'e4', // SAN format for API
-      bestMove: 'd2d4',
+      bestMove: 'd4',
       evalBefore: 50,
       evalAfter: -150,
     })
+  })
+
+  it('falls back to the analysis best move when UCI cannot be converted to SAN', () => {
+    const result = shouldRecordBlunder({
+      analysis: makeAnalysis({ bestMove: 'not-a-move' }),
+      context: makeContext(),
+      sessionId: 'session-123',
+      isGameActive: true,
+      alreadyRecorded: false,
+    })
+
+    expect(result).not.toBeNull()
+    expect(result!.bestMove).toBe('not-a-move')
   })
 
   it('returns null when analysis is null', () => {

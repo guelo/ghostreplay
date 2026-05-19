@@ -1,3 +1,4 @@
+import { Chess } from 'chess.js'
 import { isWithinRecordingMoveCap } from '../workers/analysisUtils'
 
 /**
@@ -28,6 +29,24 @@ export type BlunderCheckParams = {
   sessionId: string | null
   isGameActive: boolean
   alreadyRecorded: boolean
+}
+
+const uciToSan = (fen: string, uciMove: string): string | null => {
+  if (!uciMove || uciMove === '(none)' || uciMove.length < 4) {
+    return null
+  }
+
+  try {
+    const board = new Chess(fen)
+    const move = board.move({
+      from: uciMove.slice(0, 2),
+      to: uciMove.slice(2, 4),
+      promotion: uciMove.slice(4) || undefined,
+    })
+    return move?.san ?? null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -88,7 +107,7 @@ export const shouldRecordBlunder = (
     pgn: context.pgn,
     fen: context.fen,
     userMove: context.moveSan, // API expects SAN format
-    bestMove: analysis.bestMove,
+    bestMove: uciToSan(context.fen, analysis.bestMove) ?? analysis.bestMove,
     evalBefore: analysis.bestEval ?? 0,
     evalAfter: analysis.playedEval ?? 0,
   }

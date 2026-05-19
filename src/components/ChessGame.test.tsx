@@ -830,7 +830,7 @@ describe("ChessGame blunder recording", () => {
         expect.any(String),
         expect.any(String),
         "Nf3",
-        "c2c4",
+        "c4",
         50,
         -150,
       );
