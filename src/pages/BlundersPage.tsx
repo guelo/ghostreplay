@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { Link } from "react-router-dom";
 import {
@@ -10,6 +11,7 @@ import {
 import { normalize_fen } from "../utils/fen";
 import AnalysisBoard from "../components/AnalysisBoard";
 import AppNav from "../components/AppNav";
+import { lookupOpeningByFen, type OpeningLookupResult } from "../openings/openingBook";
 import "../App.css";
 
 function formatDate(iso: string): string {
@@ -34,7 +36,41 @@ function evalLossDisplay(cp: number): string {
   return `\u2212${(cp / 100).toFixed(1)}`;
 }
 
+function isUciMove(notation: string): boolean {
+  return /^[a-h][1-8][a-h][1-8][qrbn]?$/i.test(notation);
+}
+
+function displayBestMove(fen: string, bestMove: string): string {
+  if (!isUciMove(bestMove)) {
+    return bestMove;
+  }
+
+  try {
+    const board = new Chess(fen);
+    const move = board.move({
+      from: bestMove.slice(0, 2),
+      to: bestMove.slice(2, 4),
+      promotion: bestMove.slice(4) || undefined,
+    });
+    return move?.san ?? bestMove;
+  } catch {
+    return bestMove;
+  }
+}
+
+function formatOpeningLabel(
+  opening: OpeningLookupResult | null | undefined,
+  fallbackFamily?: string | null,
+): string | null {
+  if (opening) {
+    return `${opening.eco} ${opening.name}`;
+  }
+  return fallbackFamily ?? null;
+}
+
 const BLUNDER_PAGE_SIZE = 50;
+const STARTING_FEN =
+  "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 /**
  * Determine board orientation from the FEN (whose turn it is = the blunderer's
@@ -43,6 +79,10 @@ const BLUNDER_PAGE_SIZE = 50;
 function orientationFromFen(fen: string): "white" | "black" {
   const parts = fen.split(" ");
   return parts[1] === "w" ? "white" : "black";
+}
+
+function fenBeforeMove(analysis: SessionAnalysis, moveIndex: number): string {
+  return moveIndex === 0 ? STARTING_FEN : analysis.moves[moveIndex - 1].fen_after;
 }
 
 /**
@@ -59,11 +99,7 @@ function findBlunderMoveIndex(
 
   for (let i = 0; i < analysis.moves.length; i++) {
     const move = analysis.moves[i];
-    // The FEN before this move is the previous move's fen_after, or starting position
-    const fenBefore =
-      i === 0
-        ? "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-        : analysis.moves[i - 1].fen_after;
+    const fenBefore = fenBeforeMove(analysis, i);
 
     if (normalize_fen(fenBefore) === targetNorm && move.move_san === badMoveSan) {
       return i;
@@ -71,6 +107,34 @@ function findBlunderMoveIndex(
   }
 
   return undefined;
+}
+
+async function deriveOpeningFromAnalysis(
+  analysis: SessionAnalysis,
+  blunder: BlunderListItem,
+): Promise<OpeningLookupResult | null> {
+  const targetNorm = normalize_fen(blunder.fen);
+  let lastKnown: OpeningLookupResult | null = null;
+
+  for (let i = 0; i < analysis.moves.length; i++) {
+    const move = analysis.moves[i];
+    const fenBefore = fenBeforeMove(analysis, i);
+
+    try {
+      const opening = await lookupOpeningByFen(fenBefore);
+      if (opening) {
+        lastKnown = opening;
+      }
+    } catch {
+      // Missing opening assets should not block the blunder library.
+    }
+
+    if (normalize_fen(fenBefore) === targetNorm && move.move_san === blunder.bad_move) {
+      return lastKnown;
+    }
+  }
+
+  return lastKnown;
 }
 
 function BlundersPage() {
@@ -82,10 +146,14 @@ function BlundersPage() {
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [dueOnly, setDueOnly] = useState(false);
+  const [openingByBlunderId, setOpeningByBlunderId] = useState<
+    Record<number, OpeningLookupResult | null>
+  >({});
 
   const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const requestGenerationRef = useRef(0);
+  const openingAnalysisLookupRef = useRef<Set<number>>(new Set());
 
   const handleToggleDueOnly = () => {
     setDueOnly((v) => !v);
@@ -121,6 +189,11 @@ function BlundersPage() {
   }, [dueOnly]);
 
   const selected = blunders.find((b) => b.id === selectedId) ?? null;
+  const selectedAnalysisSessionId =
+    selected?.source_session_id ?? selected?.last_session_id ?? null;
+  const selectedOpeningLabel = selected
+    ? formatOpeningLabel(openingByBlunderId[selected.id], selected.opening_family)
+    : null;
 
   const handleLoadMore = () => {
     if (loadingMore || blunders.length >= total) return;
@@ -148,13 +221,13 @@ function BlundersPage() {
   // Fetch full game analysis when a blunder with a session is selected
   useEffect(() => {
     setAnalysis(null);
-    setAnalysisLoading(!!selected?.last_session_id);
-    if (!selected?.last_session_id) {
+    setAnalysisLoading(!!selectedAnalysisSessionId);
+    if (!selectedAnalysisSessionId) {
       return;
     }
 
     let cancelled = false;
-    fetchAnalysis(selected.last_session_id)
+    fetchAnalysis(selectedAnalysisSessionId)
       .then((data) => {
         if (!cancelled) setAnalysis(data);
       })
@@ -167,7 +240,119 @@ function BlundersPage() {
     return () => {
       cancelled = true;
     };
-  }, [selected?.id, selected?.last_session_id]);
+  }, [selected?.id, selectedAnalysisSessionId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const blundersToLookup = blunders.filter(
+      (blunder) => openingByBlunderId[blunder.id] === undefined,
+    );
+    if (blundersToLookup.length === 0) {
+      return;
+    }
+
+    Promise.all(
+      blundersToLookup.map(async (blunder) => {
+        try {
+          return [blunder.id, await lookupOpeningByFen(blunder.fen)] as const;
+        } catch {
+          return [blunder.id, null] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setOpeningByBlunderId((current) => {
+        const next = { ...current };
+        for (const [id, opening] of entries) {
+          next[id] = opening;
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [blunders, openingByBlunderId]);
+
+  useEffect(() => {
+    if (!selected || !analysis || openingByBlunderId[selected.id]) {
+      return;
+    }
+
+    let cancelled = false;
+    deriveOpeningFromAnalysis(analysis, selected).then((opening) => {
+      if (cancelled || !opening) return;
+      setOpeningByBlunderId((current) => ({
+        ...current,
+        [selected.id]: opening,
+      }));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [analysis, selected, openingByBlunderId]);
+
+  useEffect(() => {
+    const candidates = blunders.filter(
+      (blunder) =>
+        openingByBlunderId[blunder.id] === null &&
+        !blunder.opening_family &&
+        !!blunder.source_session_id &&
+        !openingAnalysisLookupRef.current.has(blunder.id),
+    );
+    if (candidates.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    for (const blunder of candidates) {
+      openingAnalysisLookupRef.current.add(blunder.id);
+    }
+
+    const bySession = new Map<string, BlunderListItem[]>();
+    for (const blunder of candidates) {
+      const sessionId = blunder.source_session_id;
+      if (!sessionId) continue;
+      bySession.set(sessionId, [...(bySession.get(sessionId) ?? []), blunder]);
+    }
+
+    Promise.all(
+      Array.from(bySession.entries()).map(async ([sessionId, sessionBlunders]) => {
+        try {
+          const sourceAnalysis = await fetchAnalysis(sessionId);
+          const entries = await Promise.all(
+            sessionBlunders.map(async (blunder) => [
+              blunder.id,
+              await deriveOpeningFromAnalysis(sourceAnalysis, blunder),
+            ] as const),
+          );
+          return entries;
+        } catch {
+          return [] as (readonly [number, OpeningLookupResult | null])[];
+        }
+      }),
+    ).then((groups) => {
+      if (cancelled) return;
+      const entries = groups.flat().filter((entry): entry is readonly [number, OpeningLookupResult] => entry[1] !== null);
+      if (entries.length === 0) return;
+      setOpeningByBlunderId((current) => {
+        const next = { ...current };
+        for (const [id, opening] of entries) {
+          next[id] = opening;
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      for (const blunder of candidates) {
+        openingAnalysisLookupRef.current.delete(blunder.id);
+      }
+    };
+  }, [blunders, openingByBlunderId]);
 
   const boardOrientation = useMemo(
     () => (selected ? orientationFromFen(selected.fen) : "white"),
@@ -252,7 +437,7 @@ function BlundersPage() {
                           </span>
                           <span className="blunder-card__arrow">{"\u2192"}</span>
                           <span className="blunder-card__best">
-                            {b.best_move}
+                            {displayBestMove(b.fen, b.best_move)}
                           </span>
                         </div>
                         <div className="blunder-card__meta">
@@ -269,9 +454,14 @@ function BlundersPage() {
                             {b.srs_priority > 1.0 ? "Due" : "Not due"}
                           </span>
                         </div>
+                        {formatOpeningLabel(openingByBlunderId[b.id], b.opening_family) && (
+                          <span className="blunder-card__opening">
+                            {formatOpeningLabel(openingByBlunderId[b.id], b.opening_family)}
+                          </span>
+                        )}
                         {b.last_played_at && (
                           <span className="blunder-card__date">
-                            {formatRelative(b.last_played_at)}
+                            Last Played: {formatRelative(b.last_played_at)}
                           </span>
                         )}
                       </div>
@@ -322,6 +512,12 @@ function BlundersPage() {
                     </div>
 
                     <div className="blunder-detail__metadata">
+                      <div className="blunder-detail__stat">
+                        <span className="blunder-detail__stat-label">Opening</span>
+                        <span className="blunder-detail__stat-value blunder-detail__stat-value--compact">
+                          {selectedOpeningLabel ?? "Unknown"}
+                        </span>
+                      </div>
                       <div className="blunder-detail__stat">
                         <span className="blunder-detail__stat-label">Eval loss</span>
                         <span className="blunder-detail__stat-value blunder-detail__stat-value--loss">

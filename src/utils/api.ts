@@ -600,10 +600,12 @@ export interface BlunderListItem {
   bad_move: string
   best_move: string
   eval_loss_cp: number
+  opening_family: string | null
   pass_streak: number
   last_reviewed_at: string | null
   created_at: string
   srs_priority: number
+  source_session_id?: string | null
   last_session_id: string | null
   last_played_at: string | null
   opportunities_since_review: number

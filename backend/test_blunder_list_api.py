@@ -22,6 +22,7 @@ def _create_blunder(
     last_reviewed_at: datetime | None = None,
     created_at: datetime | None = None,
     source_session_id: uuid.UUID | None = None,
+    opening_family: str | None = None,
     fen_hash_suffix: str = "",
 ) -> Blunder:
     position = Position(
@@ -42,6 +43,7 @@ def _create_blunder(
         "pass_streak": pass_streak,
         "last_reviewed_at": last_reviewed_at,
         "source_session_id": source_session_id,
+        "opening_family": opening_family,
     }
     if created_at is not None:
         blunder_kwargs["created_at"] = created_at
@@ -107,6 +109,7 @@ def test_list_blunders_includes_expected_fields(client, auth_headers, db_session
         eval_loss_cp=200,
         pass_streak=3,
         last_reviewed_at=now - timedelta(hours=1),
+        opening_family="Italian Game",
         fen_hash_suffix="fields",
     )
 
@@ -119,6 +122,7 @@ def test_list_blunders_includes_expected_fields(client, auth_headers, db_session
     assert item["bad_move"] == "d5"
     assert item["best_move"] == "e5"
     assert item["eval_loss_cp"] == 200
+    assert item["opening_family"] == "Italian Game"
     assert item["pass_streak"] == 3
     assert item["last_reviewed_at"] is not None
     assert item["created_at"] is not None
@@ -205,7 +209,13 @@ def test_list_blunders_paginates_with_stable_last_played_order(client, auth_head
 
 def test_list_blunders_latest_review_tie_uses_highest_review_id(client, auth_headers, db_session):
     now = datetime.now(timezone.utc)
-    blunder = _create_blunder(db_session, user_id=123, fen_hash_suffix="tie-review")
+    source_session = _create_session(db_session, ended_at=now - timedelta(days=3))
+    blunder = _create_blunder(
+        db_session,
+        user_id=123,
+        source_session_id=source_session.id,
+        fen_hash_suffix="tie-review",
+    )
     older_session = _create_session(db_session, ended_at=now - timedelta(days=2))
     newer_session = _create_session(db_session, ended_at=now - timedelta(days=1))
     reviewed_at = now - timedelta(hours=1)
@@ -234,6 +244,7 @@ def test_list_blunders_latest_review_tie_uses_highest_review_id(client, auth_hea
     response = client.get("/api/blunder", headers=auth_headers(user_id=123))
     assert response.status_code == 200
     item = response.json()["items"][0]
+    assert item["source_session_id"] == str(source_session.id)
     assert item["last_session_id"] == str(newer_session.id)
     assert item["last_played_at"].startswith(newer_session.ended_at.isoformat()[:19])
 

@@ -403,6 +403,7 @@ class BlunderListItem(BaseModel):
     bad_move: str
     best_move: str
     eval_loss_cp: int
+    opening_family: str | None = None
     pass_streak: int
     last_reviewed_at: datetime | None
     created_at: datetime
@@ -411,6 +412,7 @@ class BlunderListItem(BaseModel):
     opportunities_30d: int = 0
     reached_30d: int = 0
     p_reach: float = 0.5
+    source_session_id: str | None = None
     last_session_id: str | None = None
     last_played_at: datetime | None = None
 
@@ -464,9 +466,11 @@ def _blunder_list_query(db: Session, user_id: int):
             Blunder.bad_move_san.label("bad_move"),
             Blunder.best_move_san.label("best_move"),
             Blunder.eval_loss_cp.label("eval_loss_cp"),
+            Blunder.opening_family.label("opening_family"),
             Blunder.pass_streak.label("pass_streak"),
             Blunder.last_reviewed_at.label("last_reviewed_at"),
             Blunder.created_at.label("created_at"),
+            Blunder.source_session_id.label("source_session_id"),
             last_session_id,
             last_played_at,
         )
@@ -486,6 +490,7 @@ def _build_blunder_item(row, counters, priority: float) -> BlunderListItem:
         bad_move=row.bad_move,
         best_move=row.best_move,
         eval_loss_cp=row.eval_loss_cp,
+        opening_family=row.opening_family,
         pass_streak=row.pass_streak,
         last_reviewed_at=row.last_reviewed_at,
         created_at=row.created_at,
@@ -494,6 +499,7 @@ def _build_blunder_item(row, counters, priority: float) -> BlunderListItem:
         opportunities_30d=counters.opportunities_30d if counters else 0,
         reached_30d=counters.reached_30d if counters else 0,
         p_reach=round(counters.p_reach, 4) if counters else 0.5,
+        source_session_id=str(row.source_session_id) if row.source_session_id else None,
         last_session_id=str(row.last_session_id) if row.last_session_id else None,
         last_played_at=row.last_played_at,
     )

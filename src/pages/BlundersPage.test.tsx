@@ -21,9 +21,10 @@ beforeAll(() => {
 });
 
 // Mock the API module
-const { mockFetchBlunders, mockFetchAnalysis, mockAnalysisBoard } = vi.hoisted(() => ({
+const { mockFetchBlunders, mockFetchAnalysis, mockLookupOpeningByFen, mockAnalysisBoard } = vi.hoisted(() => ({
   mockFetchBlunders: vi.fn(),
   mockFetchAnalysis: vi.fn(),
+  mockLookupOpeningByFen: vi.fn(),
   mockAnalysisBoard: vi.fn(
     ({ initialMoveIndex }: { initialMoveIndex?: number }) => (
     <div
@@ -48,6 +49,10 @@ vi.mock('../components/AnalysisBoard', () => ({
   default: mockAnalysisBoard,
 }));
 
+vi.mock('../openings/openingBook', () => ({
+  lookupOpeningByFen: (...args: unknown[]) => mockLookupOpeningByFen(...args),
+}));
+
 vi.mock('react-chessboard', () => ({
   Chessboard: () => <div data-testid="chessboard" />,
 }));
@@ -64,7 +69,9 @@ const BLUNDERS_RESPONSE = [
     bad_move: 'Bc4',
     best_move: 'Bb5',
     eval_loss_cp: 100,
+    opening_family: 'Italian Game' as string | null,
     srs_priority: 1.5,
+    source_session_id: 'session-123' as string | null,
     last_session_id: 'session-123',
     pass_streak: 0,
     last_reviewed_at: null,
@@ -103,6 +110,7 @@ const ANALYSIS_RESPONSE = {
 describe('BlundersPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockLookupOpeningByFen.mockResolvedValue(null);
   });
 
   it('passes correct initialMoveIndex when move is found in analysis', async () => {
@@ -116,6 +124,7 @@ describe('BlundersPage', () => {
     );
 
     await screen.findByText('Bc4');
+    expect(screen.getByText(/Last Played:/)).toBeInTheDocument();
     expect(mockFetchAnalysis).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole('option', { selected: false }));
@@ -126,6 +135,214 @@ describe('BlundersPage', () => {
     // The blunder FEN matches the position BEFORE Bc4 (index 4)
     expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
       expect.objectContaining({ initialMoveIndex: 4 }),
+      undefined,
+    );
+  });
+
+  it('displays UCI best moves as algebraic notation on blunder cards', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          best_move: 'f1b5',
+        },
+      ]),
+    );
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bb5');
+    expect(screen.queryByText('f1b5')).not.toBeInTheDocument();
+  });
+
+  it('displays resolved opening names on blunder cards and details', async () => {
+    mockFetchBlunders.mockResolvedValue(blunderEnvelope());
+    mockLookupOpeningByFen.mockResolvedValue({
+      eco: 'C50',
+      name: 'Italian Game',
+      source: 'eco',
+    });
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('C50 Italian Game');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    expect(await screen.findAllByText('C50 Italian Game')).toHaveLength(2);
+    expect(mockLookupOpeningByFen).toHaveBeenCalledWith(BLUNDERS_RESPONSE[0].fen);
+  });
+
+  it('falls back to stored opening family when exact lookup misses', async () => {
+    mockFetchBlunders.mockResolvedValue(blunderEnvelope());
+    mockLookupOpeningByFen.mockResolvedValue(null);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Italian Game');
+  });
+
+  it('derives the selected opening from source game history when the blunder position is off-book', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          opening_family: null,
+        },
+      ]),
+    );
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockLookupOpeningByFen.mockImplementation((fen: string) => {
+      if (fen === ANALYSIS_RESPONSE.moves[2].fen_after) {
+        return Promise.resolve({
+          eco: 'C50',
+          name: 'Italian Game',
+          source: 'eco',
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    await screen.findByText('C50 Italian Game');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    expect(await screen.findAllByText('C50 Italian Game')).toHaveLength(2);
+  });
+
+  it('loads the source session when a later review session exists', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          source_session_id: 'source-session',
+          last_session_id: 'review-session',
+        },
+      ]),
+    );
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledWith('source-session'));
+    await waitFor(() => expect(mockAnalysisBoard).toHaveBeenCalled());
+    expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
+      expect.objectContaining({ initialMoveIndex: 4 }),
+      undefined,
+    );
+  });
+
+  it('loads review session analysis for the study board when source session is missing', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          source_session_id: null,
+          last_session_id: 'review-session',
+        },
+      ]),
+    );
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledWith('review-session'));
+    await waitFor(() => expect(mockAnalysisBoard).toHaveBeenCalled());
+  });
+
+  it('retries cancelled background opening derivation requests', async () => {
+    let resolveFirstAnalysis: (value: unknown) => void = () => {};
+    const unresolved = {
+      ...BLUNDERS_RESPONSE[0],
+      opening_family: null,
+    };
+    mockFetchBlunders
+      .mockResolvedValueOnce(blunderEnvelope([unresolved], 1))
+      .mockResolvedValueOnce({
+        ...blunderEnvelope([unresolved], 1, 1),
+        due: true,
+      });
+    mockFetchAnalysis
+      .mockReturnValueOnce(new Promise((resolve) => { resolveFirstAnalysis = resolve; }))
+      .mockResolvedValueOnce(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Due only' }));
+    await screen.findByText('1 of 1 due');
+
+    await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledTimes(2));
+    expect(mockFetchAnalysis).toHaveBeenNthCalledWith(1, 'session-123');
+    expect(mockFetchAnalysis).toHaveBeenNthCalledWith(2, 'session-123');
+
+    resolveFirstAnalysis(ANALYSIS_RESPONSE);
+  });
+
+  it('matches blunder positions when only a non-legal en passant field differs', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          fen: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
+          bad_move: 'Nf3',
+        },
+      ]),
+    );
+    mockFetchAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      moves: ANALYSIS_RESPONSE.moves.slice(0, 3),
+    });
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Nf3');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    await waitFor(() => expect(mockAnalysisBoard).toHaveBeenCalled());
+    expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
+      expect.objectContaining({ initialMoveIndex: 2 }),
       undefined,
     );
   });

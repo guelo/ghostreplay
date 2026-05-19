@@ -3852,6 +3852,15 @@
     font-size: 0.75rem;
 }
 
+.blunder-card__opening {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .blunder-list__load-more {
     display: flex;
     justify-content: center;
@@ -3901,6 +3910,11 @@
     font-size: 1rem;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+.blunder-detail__stat-value--compact {
+    font-size: 0.9rem;
+    line-height: 1.25;
 }
 
 .blunder-detail__stat-value--loss {
