@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ApiError,
+  resolveApiBaseUrl,
   startGame,
   endGame,
   uploadSessionMoves,
@@ -43,6 +44,44 @@ const mockResponse = (
     json: () => Promise.resolve(data),
   })
 }
+
+describe('resolveApiBaseUrl', () => {
+  it('uses localhost backend by default during local development', () => {
+    expect(
+      resolveApiBaseUrl(undefined, {
+        hostname: 'localhost',
+        origin: 'http://localhost:5173',
+      }),
+    ).toBe('http://localhost:8000')
+  })
+
+  it('uses same-origin api path by default on deployed frontend origins', () => {
+    expect(
+      resolveApiBaseUrl(undefined, {
+        hostname: 'ghostreplay.vercel.app',
+        origin: 'https://ghostreplay.vercel.app',
+      }),
+    ).toBe('/api')
+  })
+
+  it('rewrites absolute cross-origin config to same-origin api path on Vercel', () => {
+    expect(
+      resolveApiBaseUrl('https://ghostreplay-production.up.railway.app', {
+        hostname: 'ghostreplay.vercel.app',
+        origin: 'https://ghostreplay.vercel.app',
+      }),
+    ).toBe('/api')
+  })
+
+  it('keeps explicit same-origin-relative config intact', () => {
+    expect(
+      resolveApiBaseUrl('/api', {
+        hostname: 'ghostreplay.vercel.app',
+        origin: 'https://ghostreplay.vercel.app',
+      }),
+    ).toBe('/api')
+  })
+})
 
 describe('startGame', () => {
   beforeEach(() => {

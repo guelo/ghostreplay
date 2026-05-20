@@ -1,5 +1,9 @@
 {
   "rewrites": [
+    {
+      "source": "/api/:match*",
+      "destination": "https://ghostreplay-production.up.railway.app/api/:match*"
+    },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

@@ -2,7 +2,50 @@
  * API client for Ghost Replay backend
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const isLocalHostname = (hostname: string): boolean =>
+  hostname === 'localhost' || hostname === '127.0.0.1'
+
+const isVercelHostname = (hostname: string): boolean =>
+  hostname === 'vercel.app' || hostname.endsWith('.vercel.app')
+
+export const resolveApiBaseUrl = (
+  configuredUrl?: string,
+  locationOverride?: { hostname: string; origin: string },
+): string => {
+  const currentLocation =
+    locationOverride ??
+    (typeof window === 'undefined'
+      ? null
+      : {
+          hostname: window.location.hostname,
+          origin: window.location.origin,
+        })
+
+  if (!currentLocation) {
+    return configuredUrl || 'http://localhost:8000'
+  }
+
+  if (configuredUrl) {
+    if (isVercelHostname(currentLocation.hostname)) {
+      try {
+        const parsed = new URL(configuredUrl, currentLocation.origin)
+        if (parsed.origin !== currentLocation.origin) {
+          return '/api'
+        }
+      } catch {
+        // Non-URL values such as "/api" are already safe to use as-is.
+      }
+    }
+
+    return configuredUrl
+  }
+
+  return isLocalHostname(currentLocation.hostname)
+    ? 'http://localhost:8000'
+    : '/api'
+}
+
+const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL)
 const RETRY_BASE_DELAY_MS = 200
 
 /**
