@@ -51,6 +51,7 @@ import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
+import DrillStopActions from "./chess-game/ui/DrillStopActions";
 import MaterialDisplay from "./MaterialDisplay";
 import type { MoveMessage, SrsFailDetail } from "./MoveList";
 import {
@@ -209,6 +210,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
   const drillState = useGameStore((s) => s.drillState);
   const isRootReachedDrill = drillOpeningKey !== null && drillState === "root_reached";
+  const isStoppedDrill = drillOpeningKey !== null && drillState === "failed";
+  const drillTerminalReason = useGameStore((s) => s.drillTerminalReason);
   // -------------------------------------------------------------------
 
   // Blunder tracking: only record the first blunder per session
@@ -508,7 +511,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           played_uci: result.moveUci,
         });
         if (route.status === "failed") {
+          const reason = route.failure?.reason ?? null;
           useGameStore.getState().setDrillState("failed");
+          useGameStore.getState().setDrillTerminalReason(reason);
           setDrillFailInfo({
             playedMoveUci: route.failure?.played_move_uci ?? result.moveUci,
             suggestionUcis: route.suggestions.map((suggestion) => suggestion.uci),
@@ -598,6 +603,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isContinuingDrillRef.current = true;
     setIsContinuingDrill(true);
     try {
+      setDrillFailInfo(null);
+      useGameStore.getState().setViewIndex(null);
       const contract = await convertRootReachedDrill();
       if (!contract || contract.drill_state !== "converted") {
         return;
@@ -1218,9 +1225,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   ]);
 
   const handleNewDrillSticky = useCallback(() => {
-    const s = useGameStore.getState();
-    s.setIsGameActive(false);
-    s.setGameResult(null);
+    // Intentionally do NOT setIsGameActive(false) here:
+    // - For natural-end during drill, finishLocalGame has already cleared it.
+    // - For mid-board route-check failed, we want isGameActive=true so that
+    //   handleNewDrill's guard runs abandonDrill on the previous session.
+    useGameStore.getState().setGameResult(null);
 
     try {
       const raw = localStorage.getItem("ghostreplay_drill_prefs");
@@ -1319,6 +1328,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             gameStatusBadge={gameStatusBadge}
             isRated={isRated}
             isPracticeContinuation={isPracticeContinuation}
+            isStoppedDrill={isStoppedDrill}
             isGameActive={isGameActive}
             playerColorChoice={playerColorChoice}
             playerColor={playerColor}
@@ -1426,6 +1436,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 showPostGamePrompt={showPostGamePrompt}
                 gameResult={gameResult}
                 drillOpeningKey={drillOpeningKey}
+                drillState={drillState}
                 onNewDrill={handleNewDrillSticky}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
@@ -1440,7 +1451,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
           <div className="moves-column">
             <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
-            {isGameActive && drillOpeningKey && engineMessage && (
+            {isGameActive && isStoppedDrill && !gameResult && (
+              <DrillStopActions
+                terminalReason={drillTerminalReason}
+                onAnotherDrill={handleNewDrillSticky}
+                onContinueAsNormal={handleContinueDrill}
+              />
+            )}
+            {isGameActive && drillOpeningKey && engineMessage && !isStoppedDrill && (
               <div className="chess-start-error" role="alert">
                 <p>{engineMessage}</p>
                 <div className="chess-post-game-actions">

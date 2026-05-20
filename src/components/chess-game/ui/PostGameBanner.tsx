@@ -1,5 +1,10 @@
 import { memo } from "react";
-import type { RatingChange, RatingScoreKey, RatingScores } from "../../../utils/api";
+import type {
+  DrillSessionState,
+  RatingChange,
+  RatingScoreKey,
+  RatingScores,
+} from "../../../utils/api";
 import { getRatingDisplayLabel } from "../../../stores/useGameStore";
 import type { GameResult } from "../domain/status";
 
@@ -9,6 +14,7 @@ type PostGameBannerProps = {
   showPostGamePrompt: boolean;
   gameResult: GameResult | null;
   drillOpeningKey?: string | null;
+  drillState?: DrillSessionState | null;
   onNewDrill?: () => void;
   ratingChange: RatingChange | null;
   scoreChanges?: RatingScores | null;
@@ -24,6 +30,7 @@ const PostGameBanner = ({
   showPostGamePrompt,
   gameResult,
   drillOpeningKey,
+  drillState,
   onNewDrill,
   ratingChange,
   scoreChanges,
@@ -37,6 +44,30 @@ const PostGameBanner = ({
     scoreChanges?.[ratingDisplayType] ? ratingDisplayType : "elo",
   );
   const selectedDelta = selectedChange?.rating;
+  const isStoppedDrill = Boolean(drillOpeningKey) && drillState === "failed";
+
+  if (showPostGamePrompt && gameResult && isStoppedDrill) {
+    return (
+      <div
+        className="game-end-banner"
+        role="region"
+        aria-label="Post-game options"
+      >
+        <p className="game-end-banner-message">{gameResult.message}</p>
+        <div className="chess-post-game-actions">
+          {onNewDrill && (
+            <button
+              className="chess-button primary"
+              type="button"
+              onClick={onNewDrill}
+            >
+              Another drill
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (showPostGamePrompt && gameResult) {
     return (

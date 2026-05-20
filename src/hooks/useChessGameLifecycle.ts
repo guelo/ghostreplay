@@ -16,6 +16,7 @@ import {
   continueDrill,
   endGame,
   fetchCurrentRating,
+  naturalEndDrill,
   startDrill,
   startGame,
   uploadSessionMoves,
@@ -263,6 +264,42 @@ export const useChessGameLifecycle = ({
           playEndGameAudio: false,
           finalizingSessionId,
         });
+        return;
+      }
+
+      if (
+        store.drillOpeningKey &&
+        (store.drillState === "active" || store.drillState === "root_reached") &&
+        (result.type === "checkmate_win" ||
+          result.type === "checkmate_loss" ||
+          result.type === "draw")
+      ) {
+        try {
+          coordinator.flushPendingUploads().catch((err) =>
+            console.error("[SessionMoves] Flush failed:", err),
+          );
+          const contract = await naturalEndDrill(
+            store.sessionId,
+            result.type,
+            chess.pgn(),
+          );
+          if (useGameStore.getState().sessionId !== finalizingSessionId) {
+            return;
+          }
+          const s = useGameStore.getState();
+          s.setDrillState(contract.drill_state);
+          s.setDrillTerminalReason(contract.terminal_reason ?? null);
+          s.setIsRated(false);
+          finishLocalGame(result, {
+            preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
+            playEndGameAudio: true,
+            finalizingSessionId,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Failed to end drill.";
+          setEngineMessage(message);
+        }
         return;
       }
 
@@ -623,6 +660,7 @@ export const useChessGameLifecycle = ({
         s.setDrillOpeningKey(options.openingKey);
         s.setDrillState(response.drill_state);
         s.setDrillStrictness(options.strictness);
+        s.setDrillTerminalReason(null);
         s.setLiveFen(tempChess.fen());
         s.setMoveHistory(records);
 
@@ -908,7 +946,10 @@ export const useChessGameLifecycle = ({
     DrillSessionContract | undefined
   > => {
     const store = useGameStore.getState();
-    if (!store.sessionId || store.drillState !== "root_reached") {
+    if (
+      !store.sessionId ||
+      (store.drillState !== "root_reached" && store.drillState !== "failed")
+    ) {
       return;
     }
     try {

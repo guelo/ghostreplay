@@ -111,4 +111,29 @@ describe("PostGameBanner", () => {
 
     expect(screen.queryByRole("button", { name: /new drill/i })).not.toBeInTheDocument();
   });
+
+  it("natural-end during drill renders only 'Another drill' (no rating delta, no analysis)", () => {
+    const props = makeProps();
+    const onNewDrill = vi.fn();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        drillState="failed"
+        onNewDrill={onNewDrill}
+      />,
+    );
+
+    expect(screen.getByText("Checkmate! You won!")).toBeInTheDocument();
+    // No rating delta even though ratingChange is set
+    expect(screen.queryByText("+16")).not.toBeInTheDocument();
+    // No View Analysis / New Game / History buttons in stopped-drill branch
+    expect(screen.queryByRole("button", { name: /view analysis/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /new game/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /history/i })).not.toBeInTheDocument();
+
+    const btn = screen.getByRole("button", { name: /another drill/i });
+    fireEvent.click(btn);
+    expect(onNewDrill).toHaveBeenCalledTimes(1);
+  });
 });

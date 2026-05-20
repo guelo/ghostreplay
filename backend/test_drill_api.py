@@ -421,7 +421,7 @@ def test_converted_drill_next_opponent_move_uses_backend_engine_fallback(
     assert data["target_blunder_id"] is None
 
 
-def test_continue_drill_requires_root_reached(client, auth_headers):
+def test_continue_drill_rejects_active_only(client, auth_headers):
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
 
@@ -431,21 +431,66 @@ def test_continue_drill_requires_root_reached(client, auth_headers):
         headers=auth_headers(),
     )
 
+    assert active.status_code == 400
+    assert active.json()["detail"] == "Drill must be at root or stopped before continuing"
+
+
+def test_continue_drill_accepts_failed(client, auth_headers, db_session):
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+
     failed = client.post(
         f"/api/drills/{session_id}/fail",
         headers=auth_headers(),
     )
     assert failed.status_code == 200
-    failed_continue = client.post(
-        f"/api/drills/{session_id}/continue",
-        json={"current_ply": 0},
-        headers=auth_headers(),
-    )
 
-    assert active.status_code == 400
-    assert active.json()["detail"] == "Drill root must be reached before continuing"
-    assert failed_continue.status_code == 400
-    assert failed_continue.json()["detail"] == "Drill root must be reached before continuing"
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        cont = client.post(
+            f"/api/drills/{session_id}/continue",
+            json={"current_ply": 3},
+            headers=auth_headers(),
+        )
+    assert cont.status_code == 200
+    data = cont.json()
+    assert data["drill_state"] == "converted"
+    assert data["rated_start_ply"] == 3
+    assert data["is_rated"] is True
+    assert data["normal_started_at"] is not None
+    assert data["converted_at"] is not None
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.is_rated is True
+    assert session.drill_state == "converted"
+    assert session.rated_start_ply == 3
+    assert session.normal_started_at is not None
+    assert session.converted_at is not None
+
+
+def test_natural_end_marks_session_failed(client, auth_headers, db_session):
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        response = client.post(
+            f"/api/drills/{session_id}/natural-end",
+            json={"result": "checkmate_loss", "pgn": "1. e4 e5"},
+            headers=auth_headers(),
+        )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["drill_state"] == "failed"
+    assert data["terminal_reason"] == "natural_end"
+    assert data["is_rated"] is False
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "failed"
+    assert session.drill_terminal_reason == "natural_end"
+    assert session.status == "ended"
+    assert session.result == "checkmate_loss"
+    assert session.ended_at is not None
+    assert session.is_rated is False
+    assert db_session.query(RatingHistory).filter(RatingHistory.game_session_id == session.id).count() == 0
 
 
 def test_unconverted_drill_rejects_game_end_and_stays_unrated(client, auth_headers, db_session):
@@ -645,6 +690,7 @@ def test_route_check_accuracy_failure(client, auth_headers, db_session):
 
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.drill_state == "failed"
+    assert session.drill_terminal_reason == "accuracy"
 
 
 def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, db_session):
@@ -668,6 +714,8 @@ def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, 
     data = response.json()
     assert data["status"] == "failed"
     assert data["failure"]["reason"] == "accuracy"
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_terminal_reason == "accuracy"
 
 
 def test_route_check_cache_miss_best_effort_pass(client, auth_headers, db_session):
@@ -887,3 +935,5 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
     data = response.json()
     assert data["status"] == "failed"
     assert data["failure"]["reason"] == "off_route"
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_terminal_reason == "off_route"

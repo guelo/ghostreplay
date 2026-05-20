@@ -149,6 +149,7 @@ class DrillSessionContract(BaseModel):
     rated_start_ply: int | None
     normal_started_at: datetime | None
     converted_at: datetime | None
+    terminal_reason: str | None = None
 
 
 def _get_drill_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -200,6 +201,7 @@ def _contract(session: GameSession) -> DrillSessionContract:
         rated_start_ply=session.rated_start_ply,
         normal_started_at=session.normal_started_at,
         converted_at=session.converted_at,
+        terminal_reason=session.drill_terminal_reason,
     )
 
 
@@ -277,8 +279,8 @@ def continue_drill(
         if session.rated_start_ply == request.current_ply:
             return _contract(session)
         raise HTTPException(status_code=409, detail="Drill already converted with a different rated_start_ply")
-    if session.drill_state != "root_reached":
-        raise HTTPException(status_code=400, detail="Drill root must be reached before continuing")
+    if session.drill_state not in ("root_reached", "failed"):
+        raise HTTPException(status_code=400, detail="Drill must be at root or stopped before continuing")
 
     now = utcnow()
     session.drill_state = "converted"
@@ -355,6 +357,7 @@ def check_drill_route(
                 suggestions_raw = route_preserving_moves(graph, route_map, previous_fen)
                 suggestions_filtered = _filter_suggestions(db, suggestions_raw, previous_fen, threshold)
                 session.drill_state = "failed"
+                session.drill_terminal_reason = "accuracy"
                 db.commit()
                 return DrillRouteCheckResponse(
                     status="failed",
@@ -404,6 +407,7 @@ def check_drill_route(
         else suggestions_raw
     )
     session.drill_state = "failed"
+    session.drill_terminal_reason = "off_route"
     db.commit()
     # reason="off_route" even if the move also exceeds the centipawn threshold —
     # leaving the route is the primary signal; staying on route is the first correction.
@@ -421,6 +425,38 @@ def check_drill_route(
     )
 
 
+class DrillNaturalEndRequest(BaseModel):
+    result: str
+    pgn: str | None = None
+
+
+@router.post("/{session_id}/natural-end", response_model=DrillSessionContract)
+def natural_end_drill(
+    session_id: uuid.UUID,
+    request: DrillNaturalEndRequest,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> DrillSessionContract:
+    session = _get_drill_or_404(db, session_id)
+    _ensure_owner(session, user)
+    if session.session_mode != DRILL_SESSION_MODE:
+        raise HTTPException(status_code=400, detail="Session is not a drill")
+    if session.drill_state not in ("active", "root_reached"):
+        raise HTTPException(status_code=400, detail="Drill cannot end naturally from its current state")
+    if request.result not in ("checkmate_win", "checkmate_loss", "draw"):
+        raise HTTPException(status_code=400, detail="Invalid natural-end result")
+    session.drill_state = "failed"
+    session.drill_terminal_reason = "natural_end"
+    session.status = "ended"
+    session.result = request.result
+    session.ended_at = utcnow()
+    if request.pgn:
+        session.pgn = request.pgn
+    db.commit()
+    db.refresh(session)
+    return _contract(session)
+
+
 @router.post("/{session_id}/abandon", response_model=DrillSessionContract)
 def abandon_drill(
     session_id: uuid.UUID,
@@ -435,7 +471,9 @@ def abandon_drill(
         raise HTTPException(status_code=400, detail="Use /api/game/end to abandon a converted drill")
     if session.drill_state not in {"active", "root_reached", "failed", "abandoned"}:
         raise HTTPException(status_code=400, detail="Drill cannot be abandoned from its current state")
-    if session.drill_state != "abandoned":
+    # Already-ended drills (e.g. natural-end finished the session) are no-ops:
+    # don't overwrite session.result or ended_at.
+    if session.drill_state != "abandoned" and session.status != "ended":
         session.drill_state = "abandoned"
         session.status = "ended"
         session.result = "drill_abandon"

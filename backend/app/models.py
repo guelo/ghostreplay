@@ -136,6 +136,10 @@ class GameSession(Base):
             name="ck_game_sessions_drill_strictness_cp",
         ),
         CheckConstraint(
+            "drill_terminal_reason is null or drill_terminal_reason in ('off_route','accuracy','natural_end')",
+            name="ck_game_sessions_drill_terminal_reason",
+        ),
+        CheckConstraint(
             "((session_mode = 'normal' and drill_state is null) "
             "or (session_mode = 'drill' and drill_state is not null))",
             name="ck_game_sessions_mode_drill_state",
@@ -171,6 +175,7 @@ class GameSession(Base):
     drill_opening_key: Mapped[str | None] = mapped_column(Text)
     drill_strictness: Mapped[str | None] = mapped_column(String(12))
     drill_strictness_cp: Mapped[int | None] = mapped_column(Integer)
+    drill_terminal_reason: Mapped[str | None] = mapped_column(String(20))
     normal_started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     converted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     rated_start_ply: Mapped[int | None] = mapped_column(Integer)

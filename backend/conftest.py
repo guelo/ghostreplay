@@ -53,6 +53,7 @@ def _create_test_schema(conn) -> None:
             drill_opening_key TEXT,
             drill_strictness VARCHAR(12),
             drill_strictness_cp INTEGER,
+            drill_terminal_reason VARCHAR(20),
             normal_started_at TIMESTAMP,
             converted_at TIMESTAMP,
             rated_start_ply INTEGER,
@@ -60,6 +61,7 @@ def _create_test_schema(conn) -> None:
             CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
             CHECK (drill_strictness_cp IS NULL OR (drill_strictness_cp >= 0 AND drill_strictness_cp <= 50)),
+            CHECK (drill_terminal_reason IS NULL OR drill_terminal_reason IN ('off_route','accuracy','natural_end')),
             CHECK ((session_mode = 'normal' AND drill_state IS NULL) OR (session_mode = 'drill' AND drill_state IS NOT NULL)),
             CHECK (rated_start_ply IS NULL OR rated_start_ply >= 0),
             CHECK (

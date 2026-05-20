@@ -169,6 +169,7 @@ export interface DrillSessionContract {
   rated_start_ply: number | null
   normal_started_at: string | null
   converted_at: string | null
+  terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
 }
 
 export type DrillRouteStatus = 'on_route' | 'root_reached' | 'failed'
@@ -463,6 +464,25 @@ export const checkDrillRoute = async (
       body: JSON.stringify(request),
     },
     { fallbackMessage: 'Failed to check drill route' },
+  )
+}
+
+/**
+ * End drill via natural game-over (checkmate/stalemate/draw).
+ */
+export const naturalEndDrill = async (
+  sessionId: string,
+  result: 'checkmate_win' | 'checkmate_loss' | 'draw',
+  pgn: string,
+): Promise<DrillSessionContract> => {
+  return requestJson<DrillSessionContract>(
+    `${API_BASE_URL}/api/drills/${sessionId}/natural-end`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ result, pgn }),
+    },
+    { fallbackMessage: 'Failed to end drill' },
   )
 }
 

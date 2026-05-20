@@ -14,6 +14,7 @@ type GameInfoPanelProps = {
   gameStatusBadge: { label: string; className: string } | null;
   isRated: boolean;
   isPracticeContinuation: boolean;
+  isStoppedDrill?: boolean;
   isGameActive: boolean;
   playerColorChoice: BoardOrientation | "random";
   playerColor: BoardOrientation;
@@ -213,6 +214,7 @@ const GameInfoPanel = ({
   gameStatusBadge,
   isRated,
   isPracticeContinuation,
+  isStoppedDrill = false,
   isGameActive,
   playerColorChoice: _playerColorChoice,
   playerColor: _playerColor,
@@ -258,10 +260,10 @@ const GameInfoPanel = ({
           {gameStatusBadge.label}
         </span>
       )}
-      {isPracticeContinuation && isGameActive && (
+      {(isPracticeContinuation || isStoppedDrill) && (
         <span className="unrated-badge">Practice</span>
       )}
-      {!isPracticeContinuation && !isRated && isGameActive && (
+      {!isPracticeContinuation && !isStoppedDrill && !isRated && isGameActive && (
         <span className="unrated-badge">Unrated</span>
       )}
       <div
