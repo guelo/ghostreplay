@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: ghostreplay-api
+    runtime: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r backend/requirements.txt
+    preDeployCommand: cd backend && alembic upgrade head
+    startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ghostreplay-db
+          property: connectionString
+      - key: JWT_SECRET
+        sync: false
+      - key: LOG_HTTP_BODY
+        value: "false"
+
+databases:
+  - name: ghostreplay-db
+    region: oregon
+    plan: basic-256mb
