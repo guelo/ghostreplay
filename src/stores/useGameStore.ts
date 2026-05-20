@@ -1,6 +1,6 @@
 import type { SetStateAction } from "react";
 import { create } from "zustand";
-import type { DrillStrictness, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
+import type { DrillSessionState, DrillStrictness, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
 
@@ -52,6 +52,7 @@ export type GameState = {
   isRated: boolean;
   isPracticeContinuation: boolean;
   drillOpeningKey: string | null;
+  drillState: DrillSessionState | null;
   drillStrictness: DrillStrictness | null;
   playerRating: number;
   isProvisional: boolean;
@@ -77,6 +78,7 @@ export type GameActions = {
   setIsRated: (update: SetStateAction<boolean>) => void;
   setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
   setDrillOpeningKey: (update: SetStateAction<string | null>) => void;
+  setDrillState: (update: SetStateAction<DrillSessionState | null>) => void;
   setDrillStrictness: (
     update: SetStateAction<DrillStrictness | null>,
   ) => void;
@@ -106,6 +108,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   isRated: true,
   isPracticeContinuation: false,
   drillOpeningKey: null,
+  drillState: null,
   drillStrictness: null,
   playerRating: 1200,
   isProvisional: true,
@@ -142,6 +145,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     })),
   setDrillOpeningKey: (u) =>
     set((s) => ({ drillOpeningKey: resolve(u, s.drillOpeningKey) })),
+  setDrillState: (u) =>
+    set((s) => ({ drillState: resolve(u, s.drillState) })),
   setDrillStrictness: (u) =>
     set((s) => ({ drillStrictness: resolve(u, s.drillStrictness) })),
   setPlayerRating: (u) =>

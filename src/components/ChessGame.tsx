@@ -7,11 +7,12 @@ import type { PieceDropHandlerArgs } from "react-chessboard";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
 import { useChessGameController } from "../hooks/useChessGameController";
+import type { PlayerMoveApplyResult } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useGameStore } from "../stores/useGameStore";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel";
 import type { OpeningRootItem } from "../utils/api";
-import { getOpeningRoots } from "../utils/api";
+import { checkDrillRoute, getOpeningRoots } from "../utils/api";
 import {
   gameAnalysisStore,
   AnalysisStoreProvider,
@@ -26,6 +27,7 @@ import {
   deriveBlunderArrows,
   deriveLastMoveSquares,
   type BlunderAlert,
+  type DrillFailInfo,
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
 import { deriveDisplayedOpening } from "./chess-game/domain/opening";
@@ -120,7 +122,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [coordinator],
   );
 
-  const [, setEngineMessage] = useState<string | null>(null);
+  const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const sessionId = useGameStore((s) => s.sessionId);
   const isGameActive = useGameStore((s) => s.isGameActive);
   const [liveOpening, setLiveOpening] = useState<OpeningLookupResult | null>(
@@ -144,6 +146,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(
     null,
   );
+  const [drillFailInfo, setDrillFailInfo] = useState<DrillFailInfo | null>(null);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const [analysisMapSnapshot, setAnalysisMapSnapshot] = useState(
     () => analysisStore.getState().analysisMap,
@@ -202,6 +205,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [isLoadingOpenings, setIsLoadingOpenings] = useState(false);
   const pendingDrillSetupRef = useRef<{ openingKey: string; playerColor: string } | null>(null);
   const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
+  const drillState = useGameStore((s) => s.drillState);
+  const isRootReachedDrill = drillOpeningKey !== null && drillState === "root_reached";
   // -------------------------------------------------------------------
 
   // Blunder tracking: only record the first blunder per session
@@ -252,7 +257,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [moveHistory.length, viewIndex]);
   const displayedIndexRef = useRef(displayedIndex);
   displayedIndexRef.current = displayedIndex;
-  const isBlunderBoardOverrideActive = blunderAlert !== null;
+  const isBlunderBoardOverrideActive = blunderAlert !== null || drillFailInfo !== null;
 
   const clearBlunderBoardOverride = useCallback(() => {
     for (const timer of blunderBoardTimerRefs.current) {
@@ -267,8 +272,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Compute arrows from review fail modal or blunder alert
   const blunderArrows = useMemo(() => {
-    return deriveBlunderArrows(reviewFailModal, blunderAlert);
-  }, [reviewFailModal, blunderAlert]);
+    return deriveBlunderArrows(reviewFailModal, blunderAlert, drillFailInfo);
+  }, [reviewFailModal, blunderAlert, drillFailInfo]);
 
   // Opening label that tracks with move navigation
   const displayedOpening = useMemo(() => {
@@ -332,6 +337,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // Clear blunder alert when navigating to a non-blunder move
       clearBlunderBoardOverride();
       setBlunderAlert(null);
+      setDrillFailInfo(null);
     },
     [analysisStore, clearBlunderBoardOverride, clearMoveHighlights, isPlayerMoveIndex, pendingPromotion],
   );
@@ -477,7 +483,57 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         await applyEngineMove();
       }
     },
+    shouldUseLocalFallback: () => {
+      const store = useGameStore.getState();
+      return !(store.drillOpeningKey && store.drillState === "active");
+    },
+    onBackendFailure: async () => {
+      setEngineMessage("Drill steering is unavailable. Try again or abandon the drill.");
+    },
   });
+
+  const checkPostPlayerDrillRoute = useCallback(
+    async (result: Extract<PlayerMoveApplyResult, { applied: true }>) => {
+      const store = useGameStore.getState();
+      if (!store.sessionId || !store.drillOpeningKey || store.drillState !== "active") {
+        return true;
+      }
+
+      try {
+        const route = await checkDrillRoute(store.sessionId, {
+          current_fen: result.fenAfter,
+          previous_fen: result.fenBefore,
+          played_uci: result.moveUci,
+        });
+        if (route.status === "failed") {
+          useGameStore.getState().setDrillState("failed");
+          setDrillFailInfo({
+            playedMoveUci: route.failure?.played_move_uci ?? result.moveUci,
+            suggestionUcis: route.suggestions.map((suggestion) => suggestion.uci),
+            correctionFen: route.failure?.correction_fen ?? result.fenBefore,
+            moveIndex: result.moveIndex,
+          });
+          setEngineMessage("That move leaves the selected opening route.");
+          setViewIndex(result.moveIndex - 1);
+          return false;
+        }
+        if (route.status === "root_reached") {
+          setDrillFailInfo(null);
+          useGameStore.getState().setDrillState("root_reached");
+          setEngineMessage("Opening root reached. Continue when ready.");
+          return false;
+        }
+        setDrillFailInfo(null);
+        return true;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to check drill route.";
+        setEngineMessage(message);
+        return false;
+      }
+    },
+    [setEngineMessage, setViewIndex],
+  );
 
   const {
     handleGameEnd,
@@ -493,6 +549,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleShowStartOverlay,
     handleViewAnalysis,
     handleViewHistory,
+    handleContinueDrill,
   } = useChessGameLifecycle({
     chess,
     coordinator,
@@ -735,12 +792,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (result.gameOver) {
         void handleGameEnd();
       } else if (!isRevertPending) {
-        void applyOpponentMove(result.fenAfter, result.uciHistory);
+        void (async () => {
+          if (await checkPostPlayerDrillRoute(result)) {
+            await applyOpponentMove(result.fenAfter, result.uciHistory);
+          }
+        })();
       }
 
       return true;
     },
-    [applyOpponentMove, applyPlayerMove, handleGameEnd, isRevertPending],
+    [applyOpponentMove, applyPlayerMove, checkPostPlayerDrillRoute, handleGameEnd, isRevertPending],
   );
 
   // Clear move messages when a new game starts
@@ -748,6 +809,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (moveHistory.length === 0) {
       moveMessagesRef.current = new Map();
       setMoveMessagesVersion((v) => v + 1);
+      setDrillFailInfo(null);
     }
   }, [moveHistory.length]);
 
@@ -771,7 +833,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return; // picker is open, ignore board clicks (backdrop handles cancel)
       }
 
-      if (isRevertPending || isBlunderBoardOverrideActive) {
+      if (isRevertPending || isBlunderBoardOverrideActive || isRootReachedDrill) {
         clearMoveHighlights();
         return;
       }
@@ -812,6 +874,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       chess,
       isGameActive,
       isBlunderBoardOverrideActive,
+      isRootReachedDrill,
       isRevertPending,
       isViewingLive,
       pendingPromotion,
@@ -1006,12 +1069,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (result.gameOver) {
         void handleGameEnd();
       } else if (!isRevertPending) {
-        void applyOpponentMove(result.fenAfter, result.uciHistory);
+        void (async () => {
+          if (await checkPostPlayerDrillRoute(result)) {
+            await applyOpponentMove(result.fenAfter, result.uciHistory);
+          }
+        })();
       }
 
       return true;
     },
-    [applyOpponentMove, handleDrop, handleGameEnd, isBlunderBoardOverrideActive, isRevertPending],
+    [applyOpponentMove, checkPostPlayerDrillRoute, handleDrop, handleGameEnd, isBlunderBoardOverrideActive, isRevertPending],
   );
 
   const handlePromotionPick = useCallback(
@@ -1171,11 +1238,28 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     () => setShowRehookToast(false),
     [],
   );
+  const canRetryDrillSteering =
+    Boolean(engineMessage) &&
+    drillOpeningKey !== null &&
+    drillState === "active" &&
+    isGameActive &&
+    !isPlayersTurn &&
+    !isRevertPending &&
+    isViewingLive;
+  const handleRetryDrillSteering = useCallback(() => {
+    if (!canRetryDrillSteering) return;
+    setEngineMessage(null);
+    void applyOpponentMove(
+      chess.fen(),
+      useGameStore.getState().moveHistory.map((m) => m.uci),
+    );
+  }, [applyOpponentMove, canRetryDrillSteering, chess, setEngineMessage]);
 
   const allowDragging =
     isGameActive &&
     engineStatus === "ready" &&
     isPlayersTurn &&
+    !isRootReachedDrill &&
     !isRevertPending &&
     !isThinking &&
     isViewingLive &&
@@ -1274,6 +1358,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onDrillStrictnessChange={setDrillStrictnessCp}
                 onStartDrill={handleStartDrill}
                 isLoadingOpenings={isLoadingOpenings}
+                drillState={drillState}
+                onContinueDrill={handleContinueDrill}
+                onAbandonDrill={handleResignClick}
               />
             </div>
           </div>
@@ -1309,6 +1396,31 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
           <div className="moves-column">
             <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
+            {isGameActive && drillOpeningKey && engineMessage && (
+              <div className="chess-start-error" role="alert">
+                <p>{engineMessage}</p>
+                <div className="chess-post-game-actions">
+                  {canRetryDrillSteering && (
+                    <button
+                      className="chess-button primary"
+                      type="button"
+                      onClick={handleRetryDrillSteering}
+                    >
+                      Retry
+                    </button>
+                  )}
+                  {drillState !== "converted" && (
+                    <button
+                      className="chess-button"
+                      type="button"
+                      onClick={handleResignClick}
+                    >
+                      Abandon
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
             {isGameActive && !isPlayersTurn && (
               <span className="turn-label">Waiting for opponent</span>
             )}

@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.models import GameSession, SessionMove
 
 SessionMode = Literal["normal", "drill"]
-DrillState = Literal["active", "failed", "abandoned", "converted"]
+DrillState = Literal["active", "root_reached", "failed", "abandoned", "converted"]
 MoveSegment = Literal["normal", "drill"]
 
 NORMAL_SESSION_MODE = "normal"

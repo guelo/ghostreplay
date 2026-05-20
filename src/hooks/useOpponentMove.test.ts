@@ -29,6 +29,7 @@ const backendResponse = (
   target_blunder_srs: targetBlunderSrs,
   target_fen: targetFen,
   decision_source: decisionSource,
+  drill_route: null,
 });
 
 describe("determineOpponentMove", () => {
@@ -50,6 +51,7 @@ describe("determineOpponentMove", () => {
       targetBlunderSrs: null,
       targetFen: null,
       decisionSource: "ghost_path",
+      drillRoute: null,
     });
     expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
       "session-123",
@@ -72,6 +74,7 @@ describe("determineOpponentMove", () => {
       targetBlunderSrs: null,
       targetFen: null,
       decisionSource: "backend_engine",
+      drillRoute: null,
     });
   });
 
@@ -122,7 +125,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("ghost");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", "ghost_path", 42, null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith("Nf3", "ghost_path", 42, null, null, null);
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 
@@ -147,7 +150,7 @@ describe("useOpponentMove", () => {
     });
 
     expect(result.current.opponentMode).toBe("engine");
-    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", "backend_engine", null, null, null);
+    expect(onApplyBackendMove).toHaveBeenCalledWith("e4", "backend_engine", null, null, null, null);
     expect(onApplyLocalFallback).not.toHaveBeenCalled();
   });
 

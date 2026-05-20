@@ -32,6 +32,13 @@ export type ReviewFailInfo = {
   moveIndex: number;
 };
 
+export type DrillFailInfo = {
+  playedMoveUci: string;
+  suggestionUcis: string[];
+  correctionFen: string;
+  moveIndex: number;
+};
+
 export type MoveArrow = {
   startSquare: string;
   endSquare: string;
@@ -125,7 +132,23 @@ export const deriveAnnotatedMoves = (
 export const deriveBlunderArrows = (
   reviewFailModal: ReviewFailInfo | null,
   blunderAlert: BlunderAlert | null,
+  drillFailInfo: DrillFailInfo | null = null,
 ): MoveArrow[] => {
+  if (drillFailInfo) {
+    return [
+      {
+        startSquare: drillFailInfo.playedMoveUci.slice(0, 2),
+        endSquare: drillFailInfo.playedMoveUci.slice(2, 4),
+        color: "rgba(248, 113, 113, 0.8)",
+      },
+      ...drillFailInfo.suggestionUcis.map((uci) => ({
+        startSquare: uci.slice(0, 2),
+        endSquare: uci.slice(2, 4),
+        color: "rgba(52, 211, 153, 0.8)",
+      })),
+    ];
+  }
+
   if (reviewFailModal) {
     return [
       {

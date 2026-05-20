@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getNextOpponentMove,
+  type DrillRouteMetadata,
   type SessionDecisionSource,
   type TargetBlunderSrs,
 } from "../utils/api";
@@ -14,6 +15,7 @@ export type OpponentMoveResult = {
   targetBlunderSrs: TargetBlunderSrs | null;
   targetFen: string | null;
   decisionSource: Exclude<SessionDecisionSource, "local_fallback">;
+  drillRoute: DrillRouteMetadata | null;
 };
 
 /**
@@ -35,6 +37,7 @@ export const determineOpponentMove = async (
       targetBlunderSrs: response.target_blunder_srs,
       targetFen: response.target_fen,
       decisionSource: response.decision_source,
+      drillRoute: response.drill_route ?? null,
     };
   } catch (error) {
     console.error("[OpponentMove] Backend unavailable:", error);
@@ -51,8 +54,11 @@ type UseOpponentMoveOptions = {
     targetBlunderId: number | null,
     targetBlunderSrs: TargetBlunderSrs | null,
     targetFen: string | null,
+    drillRoute: DrillRouteMetadata | null,
   ) => Promise<void>;
   onApplyLocalFallback: () => Promise<void>;
+  shouldUseLocalFallback?: () => boolean;
+  onBackendFailure?: () => Promise<void>;
 };
 
 /**
@@ -64,11 +70,15 @@ export const useOpponentMove = ({
   canApplyResult,
   onApplyBackendMove,
   onApplyLocalFallback,
+  shouldUseLocalFallback,
+  onBackendFailure,
 }: UseOpponentMoveOptions) => {
   const [opponentMode, setOpponentMode] = useState<OpponentMode>("engine");
   const canApplyResultRef = useRef(canApplyResult);
   const onApplyBackendMoveRef = useRef(onApplyBackendMove);
   const onApplyLocalFallbackRef = useRef(onApplyLocalFallback);
+  const shouldUseLocalFallbackRef = useRef(shouldUseLocalFallback);
+  const onBackendFailureRef = useRef(onBackendFailure);
 
   useEffect(() => {
     canApplyResultRef.current = canApplyResult;
@@ -81,6 +91,14 @@ export const useOpponentMove = ({
   useEffect(() => {
     onApplyLocalFallbackRef.current = onApplyLocalFallback;
   }, [onApplyLocalFallback]);
+
+  useEffect(() => {
+    shouldUseLocalFallbackRef.current = shouldUseLocalFallback;
+  }, [shouldUseLocalFallback]);
+
+  useEffect(() => {
+    onBackendFailureRef.current = onBackendFailure;
+  }, [onBackendFailure]);
 
   const applyOpponentMove = useCallback(
     async (fen: string, moves: string[] = []) => {
@@ -113,10 +131,15 @@ export const useOpponentMove = ({
           result.targetBlunderId,
           result.targetBlunderSrs,
           result.targetFen,
+          result.drillRoute,
         );
       } else {
         setOpponentMode("engine");
-        await onApplyLocalFallbackRef.current();
+        if (shouldUseLocalFallbackRef.current?.() ?? true) {
+          await onApplyLocalFallbackRef.current();
+        } else {
+          await onBackendFailureRef.current?.();
+        }
       }
     },
     [sessionId]

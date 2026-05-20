@@ -135,6 +135,12 @@ interface StartGameRequest {
 
 // ---- Drill types --------------------------------------------------
 export type DrillStrictness = 'lenient' | 'standard' | 'strict'
+export type DrillSessionState =
+  | 'active'
+  | 'root_reached'
+  | 'failed'
+  | 'abandoned'
+  | 'converted'
 
 export interface DrillStartRequest {
   opening_key: string
@@ -146,7 +152,7 @@ export interface DrillStartRequest {
 export interface DrillSessionContract {
   session_id: string
   mode: string
-  drill_state: string
+  drill_state: DrillSessionState
   opening_key: string
   opening_name: string
   opening_family: string
@@ -159,6 +165,36 @@ export interface DrillSessionContract {
   rated_start_ply: number | null
   normal_started_at: string | null
   converted_at: string | null
+}
+
+export type DrillRouteStatus = 'on_route' | 'root_reached' | 'failed'
+
+export interface DrillRouteSuggestion {
+  uci: string
+  san: string
+  resulting_fen: string
+  plies_to_target: number
+}
+
+export interface DrillRouteFailure {
+  played_move_uci: string | null
+  played_move_san: string | null
+  correction_fen: string
+}
+
+export interface DrillRouteCheckResponse {
+  status: DrillRouteStatus
+  current_fen: string
+  target_fen: string
+  suggestions: DrillRouteSuggestion[]
+  failure: DrillRouteFailure | null
+}
+
+export interface DrillRouteMetadata {
+  status: Exclude<DrillRouteStatus, 'failed'>
+  target_fen: string
+  resulting_fen: string
+  plies_to_target: number
 }
 
 export interface OpeningRootItem {
@@ -320,6 +356,7 @@ interface NextOpponentMoveResponse {
   target_blunder_srs: TargetBlunderSrs | null
   target_fen: string | null
   decision_source: Exclude<SessionDecisionSource, 'local_fallback'>
+  drill_route: DrillRouteMetadata | null
 }
 
 interface SrsReviewRequest {
@@ -402,6 +439,25 @@ export const failDrill = async (sessionId: string): Promise<DrillSessionContract
     `${API_BASE_URL}/api/drills/${sessionId}/fail`,
     { method: 'POST', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to record drill failure' },
+  )
+}
+
+export const checkDrillRoute = async (
+  sessionId: string,
+  request: {
+    current_fen: string
+    previous_fen?: string
+    played_uci?: string
+  },
+): Promise<DrillRouteCheckResponse> => {
+  return requestJson<DrillRouteCheckResponse>(
+    `${API_BASE_URL}/api/drills/${sessionId}/route-check`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(request),
+    },
+    { fallbackMessage: 'Failed to check drill route' },
   )
 }
 

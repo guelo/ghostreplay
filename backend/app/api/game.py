@@ -13,8 +13,10 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.drill_steering import get_drill_route_map, route_preserving_moves
 from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory
+from app.opening_graph import get_opening_graph
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
 from app.rating_scores import compute_rating_tracks, latest_rating_order, rating_score, scores_for_row
@@ -481,6 +483,13 @@ class TargetBlunderSrs(BaseModel):
     p_reach: float = Field(0.5, description="Smoothed 30-day reach probability")
 
 
+class DrillRouteMetadata(BaseModel):
+    status: str
+    target_fen: str
+    resulting_fen: str
+    plies_to_target: int
+
+
 class NextOpponentMoveResponse(BaseModel):
     """Response for next opponent move (unified ghost + engine endpoint)."""
     mode: OpponentMoveMode = Field(
@@ -507,6 +516,7 @@ class NextOpponentMoveResponse(BaseModel):
         ...,
         description="Backend decision branch used to produce the move",
     )
+    drill_route: DrillRouteMetadata | None = None
 
 
 @router.post("/start", response_model=GameStartResponse, status_code=201)
@@ -694,8 +704,15 @@ def get_next_opponent_move(
 
     if session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
-    if session.session_mode == DRILL_SESSION_MODE and session.drill_state != VISIBLE_DRILL_STATE:
-        raise HTTPException(status_code=400, detail="Opponent moves are unavailable for unconverted drills")
+    is_active_preroot_drill = (
+        session.session_mode == DRILL_SESSION_MODE and session.drill_state == "active"
+    )
+    if (
+        session.session_mode == DRILL_SESSION_MODE
+        and session.drill_state != VISIBLE_DRILL_STATE
+        and not is_active_preroot_drill
+    ):
+        raise HTTPException(status_code=400, detail="Opponent moves are unavailable for this drill state")
 
     # Validate FEN and check it's the opponent's turn
     try:
@@ -707,6 +724,41 @@ def get_next_opponent_move(
         raise HTTPException(
             status_code=400,
             detail="Cannot get opponent move when it's the player's turn",
+        )
+
+    if is_active_preroot_drill:
+        if not session.drill_opening_key:
+            raise HTTPException(status_code=400, detail="Drill is missing an opening root")
+        graph = get_opening_graph()
+        route_map = get_drill_route_map(graph, session.drill_opening_key)
+        if not route_map.plies_by_fen:
+            raise HTTPException(status_code=400, detail="Drill opening root is not in the opening graph")
+        if route_map.is_target(request.fen):
+            session.drill_state = "root_reached"
+            db.commit()
+            raise HTTPException(status_code=400, detail="Drill root already reached")
+        suggestions = route_preserving_moves(graph, route_map, request.fen)
+        if not suggestions:
+            raise HTTPException(status_code=400, detail="Current drill position is off route")
+
+        move = suggestions[0]
+        if move.resulting_fen == route_map.target_fen:
+            session.drill_state = "root_reached"
+            db.commit()
+
+        return NextOpponentMoveResponse(
+            mode=OpponentMoveMode.GHOST,
+            move=MoveDetails(uci=move.uci, san=move.san),
+            target_blunder_id=None,
+            target_blunder_srs=None,
+            target_fen=route_map.target_fen,
+            decision_source=DecisionSource.GHOST_PATH,
+            drill_route=DrillRouteMetadata(
+                status="root_reached" if move.resulting_fen == route_map.target_fen else "on_route",
+                target_fen=route_map.target_fen,
+                resulting_fen=move.resulting_fen,
+                plies_to_target=move.plies_to_target,
+            ),
         )
 
     # Step 1: Ghost-first path traversal

@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import type { Chess } from "chess.js";
 import type { Square } from "chess.js";
 import type { Dispatch, MutableRefObject, SetStateAction } from "react";
-import type { SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
+import type { DrillRouteMetadata, SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
 import {
   canArmReviewTarget,
@@ -33,10 +33,12 @@ export type PlayerMoveApplyResult =
   | {
     applied: true;
     fenAfter: string;
+    fenBefore: string;
     uciHistory: string[];
     gameOver: boolean;
     moveIndex: number;
     moveSan: string;
+    moveUci: string;
   };
 
 type AnalyzeMoveFn = (
@@ -240,10 +242,12 @@ export const useChessGameController = ({
       return {
         applied: true,
         fenAfter: committed.fenAfter,
+        fenBefore: fenBeforeMove,
         uciHistory: committed.uciHistory,
         gameOver: chess.isGameOver(),
         moveIndex: committed.moveIndex,
         moveSan: committed.moveSan,
+        moveUci: committed.uciMove,
       };
     },
     [
@@ -353,6 +357,7 @@ export const useChessGameController = ({
       targetBlunderId: number | null,
       targetBlunderSrs: TargetBlunderSrs | null,
       targetFen: string | null,
+      drillRoute?: DrillRouteMetadata | null,
     ) => {
       try {
         const fenBeforeMove = chess.fen();
@@ -388,7 +393,10 @@ export const useChessGameController = ({
           setShowGhostInfo(false);
         }
 
-        if (chess.isGameOver()) {
+        if (drillRoute?.status === "root_reached") {
+          useGameStore.getState().setDrillState("root_reached");
+          setEngineMessage("Opening root reached. Continue when ready.");
+        } else if (chess.isGameOver()) {
           await handleGameEnd();
         }
       } catch (error) {

@@ -124,7 +124,7 @@ class GameSession(Base):
         CheckConstraint("player_color in ('white','black')", name="ck_game_sessions_player_color"),
         CheckConstraint("session_mode in ('normal','drill')", name="ck_game_sessions_session_mode"),
         CheckConstraint(
-            "drill_state is null or drill_state in ('active','failed','abandoned','converted')",
+            "drill_state is null or drill_state in ('active','root_reached','failed','abandoned','converted')",
             name="ck_game_sessions_drill_state",
         ),
         CheckConstraint(
@@ -141,7 +141,7 @@ class GameSession(Base):
             "session_mode = 'normal' "
             "or (drill_state = 'converted' and is_rated = true and normal_started_at is not null "
             "and converted_at is not null and rated_start_ply is not null) "
-            "or (drill_state in ('active','failed','abandoned') and is_rated = false and rated_start_ply is null)",
+            "or (drill_state in ('active','root_reached','failed','abandoned') and is_rated = false and rated_start_ply is null)",
             name="ck_game_sessions_drill_rating_boundary",
         ),
         Index("idx_game_sessions_user", "user_id"),

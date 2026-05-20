@@ -56,7 +56,7 @@ def _create_test_schema(conn) -> None:
             converted_at TIMESTAMP,
             rated_start_ply INTEGER,
             CHECK (session_mode IN ('normal','drill')),
-            CHECK (drill_state IS NULL OR drill_state IN ('active','failed','abandoned','converted')),
+            CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
             CHECK ((session_mode = 'normal' AND drill_state IS NULL) OR (session_mode = 'drill' AND drill_state IS NOT NULL)),
             CHECK (rated_start_ply IS NULL OR rated_start_ply >= 0),
@@ -70,7 +70,7 @@ def _create_test_schema(conn) -> None:
                     AND rated_start_ply IS NOT NULL
                 )
                 OR (
-                    drill_state IN ('active','failed','abandoned')
+                    drill_state IN ('active','root_reached','failed','abandoned')
                     AND is_rated = false
                     AND rated_start_ply IS NULL
                 )

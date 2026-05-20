@@ -12,6 +12,8 @@ const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
 const startDrillMock = vi.fn();
+const continueDrillMock = vi.fn();
+const abandonDrillMock = vi.fn();
 const getOpeningRootsMock = vi.fn();
 const audioCtorMock = vi.fn();
 const audioPlayMock = vi.fn();
@@ -22,6 +24,8 @@ vi.mock("../utils/api", () => ({
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   startDrill: (...args: unknown[]) => startDrillMock(...args),
+  continueDrill: (...args: unknown[]) => continueDrillMock(...args),
+  abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
   getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
 }));
 
@@ -185,6 +189,7 @@ const setup = ({
     setShowStartOverlay,
     setResolvedReview,
     pendingSrsReviewRef,
+    coordinator,
     getResolvedReview: () => currentResolvedReview,
   };
 };
@@ -201,6 +206,8 @@ beforeEach(() => {
   endGameMock.mockReset();
   uploadSessionMovesMock.mockReset();
   startDrillMock.mockReset();
+  continueDrillMock.mockReset();
+  abandonDrillMock.mockReset();
   getOpeningRootsMock.mockReset();
   getOpeningBookMock.mockReset();
   uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
@@ -1197,6 +1204,60 @@ describe("useChessGameLifecycle", () => {
     expect(audioCtorMock).not.toHaveBeenCalled();
   });
 
+  it("abandons an unconverted drill instead of ending it as a game", async () => {
+    const { result } = setup({
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+    useGameStore.setState({
+      sessionId: "drill-session-123",
+      drillOpeningKey: "target-fen",
+      drillState: "failed",
+      drillStrictness: "standard",
+    });
+    abandonDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-123",
+      mode: "drill",
+      drill_state: "abandoned",
+      opening_key: "target-fen",
+      opening_name: "Target",
+      opening_family: "Target",
+      eco: null,
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1000,
+      strictness: "standard",
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() =>
+      expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-123"),
+    );
+    expect(endGameMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        isGameActive: false,
+        drillState: "abandoned",
+        isRated: false,
+        gameResult: {
+          type: "resign",
+          message: "Drill abandoned.",
+        },
+      }),
+    );
+    expect(audioCtorMock).not.toHaveBeenCalled();
+  });
+
   it("handleNewDrill calls startDrill API and sets store correctly", async () => {
     const { result } = setup();
 
@@ -1249,11 +1310,12 @@ describe("useChessGameLifecycle", () => {
     expect(store.isGameActive).toBe(true);
     expect(store.sessionId).toBe("drill-session-123");
     expect(store.drillOpeningKey).toBe("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+    expect(store.drillState).toBe("active");
     expect(store.drillStrictness).toBe("standard");
     expect(store.isRated).toBe(false);
   });
 
-  it("handleNewDrill replays opening PGN and sets moveHistory", async () => {
+  it("handleNewDrill starts from the initial position without replaying the root", async () => {
     const { result } = setup();
 
     startDrillMock.mockResolvedValueOnce({
@@ -1274,15 +1336,6 @@ describe("useChessGameLifecycle", () => {
       converted_at: null,
     });
 
-    getOpeningBookMock.mockResolvedValueOnce({
-      byEpd: new Map([
-        [
-          "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
-          { eco: "C00", name: "French Defense", pgn: "1. e4 e6", uci: "e2e4 e7e6", epd: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2" },
-        ],
-      ]),
-    });
-
     await act(async () => {
       await result.current.handleNewDrill({
         openingKey: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
@@ -1300,12 +1353,12 @@ describe("useChessGameLifecycle", () => {
     });
 
     const store = useGameStore.getState();
-    expect(store.moveHistory).toHaveLength(2);
-    expect(store.moveHistory[0]?.san).toBe("e4");
-    expect(store.moveHistory[1]?.san).toBe("e6");
+    expect(store.liveFen).toBe("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+    expect(store.moveHistory).toEqual([]);
+    expect(getOpeningBookMock).not.toHaveBeenCalled();
   });
 
-  it("handleNewDrill falls back to direct FEN load when PGN parse fails", async () => {
+  it("handleNewDrill keeps the target root as metadata while the board stays at start", async () => {
     const { result } = setup();
 
     startDrillMock.mockResolvedValueOnce({
@@ -1326,15 +1379,6 @@ describe("useChessGameLifecycle", () => {
       converted_at: null,
     });
 
-    getOpeningBookMock.mockResolvedValueOnce({
-      byEpd: new Map([
-        [
-          "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-          { eco: "", name: "Unknown", pgn: "invalid pgn!!!", uci: "", epd: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1" },
-        ],
-      ]),
-    });
-
     await act(async () => {
       await result.current.handleNewDrill({
         openingKey: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
@@ -1352,7 +1396,61 @@ describe("useChessGameLifecycle", () => {
     });
 
     const store = useGameStore.getState();
-    expect(store.liveFen).toBe("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+    expect(store.liveFen).toBe("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     expect(store.moveHistory).toEqual([]);
+    expect(store.drillOpeningKey).toBe("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1");
+    expect(getOpeningBookMock).not.toHaveBeenCalled();
+  });
+
+  it("handleContinueDrill converts only after root_reached", async () => {
+    const { result, coordinator } = setup({
+      isGameActive: true,
+      isRated: false,
+      moveHistory: [
+        {
+          san: "e4",
+          fen: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+          uci: "e2e4",
+        },
+      ],
+    });
+    useGameStore.setState({
+      sessionId: "drill-session-123",
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictness: "standard",
+    });
+    continueDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-123",
+      mode: "drill",
+      drill_state: "converted",
+      opening_key: "target-fen",
+      opening_name: "Target",
+      opening_family: "Target",
+      eco: null,
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1000,
+      strictness: "standard",
+      is_rated: true,
+      rated_start_ply: 1,
+      normal_started_at: "2026-05-20T00:00:00Z",
+      converted_at: "2026-05-20T00:00:00Z",
+    });
+
+    await act(async () => {
+      await result.current.handleContinueDrill();
+    });
+
+    expect(coordinator.flushPendingUploads).toHaveBeenCalledTimes(1);
+    expect(continueDrillMock).toHaveBeenCalledWith("drill-session-123", 1);
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        drillState: "converted",
+        isRated: true,
+        isPracticeContinuation: false,
+      }),
+    );
+    expect(coordinator.startSession).not.toHaveBeenCalled();
   });
 });

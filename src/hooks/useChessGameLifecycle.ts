@@ -9,13 +9,13 @@ import type { OpeningLookupResult } from "../openings/openingBook";
 import type { DrillStrictness, TargetBlunderSrs } from "../utils/api";
 import {
   abandonDrill,
+  continueDrill,
   endGame,
   fetchCurrentRating,
   startDrill,
   startGame,
   uploadSessionMoves,
 } from "../utils/api";
-import { getOpeningBook } from "../openings/openingBook";
 import type {
   BlunderAlert,
   MoveRecord,
@@ -389,6 +389,7 @@ export const useChessGameLifecycle = ({
         const s = useGameStore.getState();
         s.setIsRated(false);
         s.setIsPracticeContinuation(true);
+        s.setDrillState(null);
         coordinator.stopSessionUploads();
       }
 
@@ -516,6 +517,7 @@ export const useChessGameLifecycle = ({
         s2.setIsRated(true);
         s2.setIsPracticeContinuation(false);
         s2.setDrillOpeningKey(null);
+        s2.setDrillState(null);
         s2.setDrillStrictness(null);
         setShowRevertWarning(false);
         setShowResignWarning(false);
@@ -601,42 +603,8 @@ export const useChessGameLifecycle = ({
           strictness: options.strictness,
         });
 
-        let entry = null;
-        try {
-          const book = await getOpeningBook();
-          entry = book.byEpd.get(options.openingKey) ?? null;
-        } catch {
-          entry = null;
-        }
-
         const tempChess = new Chess();
         const records: MoveRecord[] = [];
-        if (entry?.pgn) {
-          try {
-            const sanTokens = entry.pgn
-              .replace(/\d+\./g, " ")
-              .trim()
-              .split(/\s+/)
-              .filter((t: string) => t.length > 0);
-            for (const san of sanTokens) {
-              tempChess.move(san);
-              const lastMove = tempChess.history({ verbose: true }).at(-1);
-              if (lastMove) {
-                records.push({
-                  san: lastMove.san,
-                  uci: lastMove.from + lastMove.to + (lastMove.promotion || ""),
-                  fen: tempChess.fen(),
-                });
-              }
-            }
-          } catch {
-            console.warn("[Drill] Failed to replay opening PGN, falling back to direct FEN load");
-            tempChess.load(options.openingKey);
-            records.length = 0;
-          }
-        } else {
-          tempChess.load(options.openingKey);
-        }
 
         const s = useGameStore.getState();
         s.setSessionId(response.session_id);
@@ -647,19 +615,12 @@ export const useChessGameLifecycle = ({
         s.setIsRated(false);
         s.setIsPracticeContinuation(false);
         s.setDrillOpeningKey(options.openingKey);
+        s.setDrillState(response.drill_state);
         s.setDrillStrictness(options.strictness);
         s.setLiveFen(tempChess.fen());
         s.setMoveHistory(records);
 
-        // Sync the live Chess instance so move validation / turn() operate on the drill root.
-        if (records.length > 0) {
-          chess.reset();
-          for (const record of records) {
-            chess.move(record.san);
-          }
-        } else {
-          chess.load(tempChess.fen());
-        }
+        chess.reset();
 
         s.setViewIndex(null);
         s.setGameResult(null);
@@ -778,6 +739,21 @@ export const useChessGameLifecycle = ({
         console.error("[SessionMoves] Flush failed:", err),
       );
 
+      if (store.drillOpeningKey && store.drillState !== "converted") {
+        const contract = await abandonDrill(store.sessionId);
+        if (useGameStore.getState().sessionId !== finalizingSessionId) {
+          return;
+        }
+        const s = useGameStore.getState();
+        s.setDrillState(contract.drill_state);
+        s.setIsRated(false);
+        finishLocalGame(
+          { type: "resign", message: "Drill abandoned." },
+          { playEndGameAudio: false, finalizingSessionId },
+        );
+        return;
+      }
+
       const endResponse = await endGame(
         store.sessionId,
         "resign",
@@ -858,6 +834,9 @@ export const useChessGameLifecycle = ({
     setPendingPromotion(null);
     store.setIsRated(true);
     store.setIsPracticeContinuation(false);
+    store.setDrillOpeningKey(null);
+    store.setDrillState(null);
+    store.setDrillStrictness(null);
     setShowRevertWarning(false);
     setShowResignWarning(false);
     clearMoveHighlights();
@@ -919,6 +898,28 @@ export const useChessGameLifecycle = ({
     onOpenHistory?.({ select: "latest", source: "post_game_history", sessionId: sid });
   }, [onOpenHistory, setShowPostGamePrompt]);
 
+  const handleContinueDrill = useCallback(async () => {
+    const store = useGameStore.getState();
+    if (!store.sessionId || store.drillState !== "root_reached") {
+      return;
+    }
+    try {
+      setEngineMessage(null);
+      await coordinator.flushPendingUploads();
+      const contract = await continueDrill(store.sessionId, store.moveHistory.length);
+      const next = useGameStore.getState();
+      next.setDrillState(contract.drill_state);
+      next.setIsRated(contract.is_rated);
+      next.setIsPracticeContinuation(false);
+      setShowPostGamePrompt(false);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to continue drill.";
+      setEngineMessage(message);
+      setStartError(message);
+    }
+  }, [coordinator, setEngineMessage, setShowPostGamePrompt, setStartError]);
+
   return {
     handleGameEnd,
     executeRevert,
@@ -933,6 +934,7 @@ export const useChessGameLifecycle = ({
     handleShowStartOverlay,
     handleViewAnalysis,
     handleViewHistory,
+    handleContinueDrill,
     showRevertWarning,
   };
 };
