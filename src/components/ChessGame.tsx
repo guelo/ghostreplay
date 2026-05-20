@@ -185,6 +185,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   >({});
   const [boardInstanceKey, setBoardInstanceKey] = useState(0);
   const isRevertPendingRef = useRef(isRevertPendingState);
+  const isContinuingDrillRef = useRef(false);
   const setIsRevertPending = useCallback((update: SetStateAction<boolean>) => {
     const nextValue =
       typeof update === "function"
@@ -199,6 +200,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const location = useLocation();
   const navigate = useNavigate();
   const [isDrillMode, setIsDrillMode] = useState(false);
+  const [isContinuingDrill, setIsContinuingDrill] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
   const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
   const [openingFamilies, setOpeningFamilies] = useState<Array<{ family_name: string; roots: OpeningRootItem[] }> | null>(null);
@@ -549,7 +551,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleShowStartOverlay,
     handleViewAnalysis,
     handleViewHistory,
-    handleContinueDrill,
+    handleContinueDrill: convertRootReachedDrill,
   } = useChessGameLifecycle({
     chess,
     coordinator,
@@ -584,6 +586,42 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setPendingPromotion,
     clearBlunderBoardOverride,
   });
+
+  const handleContinueDrill = useCallback(async () => {
+    if (isContinuingDrillRef.current) {
+      return;
+    }
+    isContinuingDrillRef.current = true;
+    setIsContinuingDrill(true);
+    try {
+      const contract = await convertRootReachedDrill();
+      if (!contract || contract.drill_state !== "converted") {
+        return;
+      }
+
+      const store = useGameStore.getState();
+      if (
+        !store.isGameActive ||
+        store.viewIndex !== null ||
+        isRevertPendingRef.current
+      ) {
+        return;
+      }
+
+      const turnColor = chess.turn() === "w" ? "white" : "black";
+      if (turnColor !== opponentColor) {
+        return;
+      }
+
+      await applyOpponentMove(
+        chess.fen(),
+        store.moveHistory.map((move) => move.uci),
+      );
+    } finally {
+      isContinuingDrillRef.current = false;
+      setIsContinuingDrill(false);
+    }
+  }, [applyOpponentMove, chess, convertRootReachedDrill, opponentColor]);
 
   useEffect(() => {
     handleGameEndRef.current = handleGameEnd;
@@ -1359,6 +1397,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onStartDrill={handleStartDrill}
                 isLoadingOpenings={isLoadingOpenings}
                 drillState={drillState}
+                isContinuingDrill={isContinuingDrill}
                 onContinueDrill={handleContinueDrill}
                 onAbandonDrill={handleResignClick}
               />

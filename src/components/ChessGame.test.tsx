@@ -9,6 +9,10 @@ const startGameMock = vi.fn();
 const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
 const getNextOpponentMoveMock = vi.fn();
+const continueDrillMock = vi.fn();
+const checkDrillRouteMock = vi.fn();
+const startDrillMock = vi.fn();
+const getOpeningRootsMock = vi.fn();
 const recordBlunderMock = vi.fn();
 const recordManualBlunderMock = vi.fn();
 const reviewSrsBlunderMock = vi.fn();
@@ -22,6 +26,10 @@ vi.mock("../utils/api", () => ({
   endGame: (...args: unknown[]) => endGameMock(...args),
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
+  continueDrill: (...args: unknown[]) => continueDrillMock(...args),
+  checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
+  startDrill: (...args: unknown[]) => startDrillMock(...args),
+  getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
   fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
   getStatsAchievements: (...args: unknown[]) => getStatsAchievementsMock(...args),
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
@@ -127,6 +135,10 @@ describe("ChessGame start flow", () => {
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
+    continueDrillMock.mockReset();
+    checkDrillRouteMock.mockReset();
+    startDrillMock.mockReset();
+    getOpeningRootsMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
     lookupOpeningByFenMock.mockReset();
@@ -208,6 +220,10 @@ describe("ChessGame characterization safeguards", () => {
     endGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
+    continueDrillMock.mockReset();
+    checkDrillRouteMock.mockReset();
+    startDrillMock.mockReset();
+    getOpeningRootsMock.mockReset();
     recordBlunderMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
@@ -254,6 +270,143 @@ describe("ChessGame characterization safeguards", () => {
       expect(startGameMock).toHaveBeenCalled();
     });
   };
+
+  const convertedDrillContract = (overrides: Record<string, unknown> = {}) => ({
+    session_id: "session-characterization",
+    mode: "drill",
+    drill_state: "converted",
+    opening_key: "target-fen",
+    opening_name: "Target",
+    opening_family: "Target",
+    eco: null,
+    depth: 1,
+    player_color: "white",
+    engine_elo: 1500,
+    strictness: "standard",
+    is_rated: true,
+    rated_start_ply: 1,
+    normal_started_at: "2026-05-20T00:00:00Z",
+    converted_at: "2026-05-20T00:00:00Z",
+    ...overrides,
+  });
+
+  it("continues a player-reached drill root before requesting the next opponent move", async () => {
+    await startGameAsWhite();
+
+    const line = new Chess();
+    line.move("e4");
+    const rootFen = line.fen();
+    useGameStore.setState({
+      drillOpeningKey: rootFen,
+      drillState: "active",
+    });
+    checkDrillRouteMock.mockResolvedValueOnce({
+      status: "root_reached",
+      current_fen: rootFen,
+      target_fen: rootFen,
+      suggestions: [],
+    });
+    let resolveContinue:
+      | ((contract: ReturnType<typeof convertedDrillContract>) => void)
+      | undefined;
+    continueDrillMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveContinue = resolve;
+      }),
+    );
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: /opening reached/i }),
+      ).toBeInTheDocument();
+    });
+
+    const continueButton = screen.getByRole("button", { name: /^continue$/i });
+    fireEvent.click(continueButton);
+    await waitFor(() => {
+      expect(continueDrillMock).toHaveBeenCalledWith(
+        "session-characterization",
+        1,
+      );
+    });
+    expect(continueButton).toBeDisabled();
+    fireEvent.click(continueButton);
+    expect(continueDrillMock).toHaveBeenCalledTimes(1);
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveContinue?.(convertedDrillContract());
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
+        "session-characterization",
+        rootFen,
+        ["e2e4"],
+      );
+    });
+  });
+
+  it("continues an opponent-reached drill root without an immediate opponent move", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      engine_elo: 1500,
+      player_color: "black",
+    });
+    getNextOpponentMoveMock.mockResolvedValueOnce({
+      mode: "ghost",
+      move: { uci: "e2e4", san: "e4" },
+      target_blunder_id: null,
+      decision_source: "ghost_path",
+      drill_route: {
+        status: "root_reached",
+        target_fen: "target-fen",
+        resulting_fen: "target-fen",
+        plies_to_target: 0,
+      },
+    });
+    continueDrillMock.mockResolvedValueOnce(
+      convertedDrillContract({ player_color: "black" }),
+    );
+
+    render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play black/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("dialog", { name: /opening reached/i }),
+      ).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
+    await waitFor(() => {
+      expect(continueDrillMock).toHaveBeenCalledWith(
+        "session-characterization",
+        1,
+      );
+    });
+    expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+
+    getNextOpponentMoveMock.mockResolvedValueOnce({
+      mode: "engine",
+      move: { uci: "g1f3", san: "Nf3" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e7", targetSquare: "e5" });
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
+    });
+  });
 
   it("records resignation on revert, then continues in practice mode", async () => {
     await startGameAsWhite();

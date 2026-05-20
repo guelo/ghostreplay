@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import chess
 
-from app.models import GameSession, RatingHistory, SessionMove
+from app.models import Blunder, GameSession, RatingHistory, SessionMove
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
 
@@ -298,6 +299,126 @@ def test_continue_drill_sets_boundary_and_resegments(client, auth_headers, db_se
         )
     assert repeated.status_code == 200
     assert conflict.status_code == 409
+
+
+def test_converted_drill_next_opponent_move_uses_ghost_srs_metadata(
+    client,
+    auth_headers,
+    create_game_session,
+    db_session,
+):
+    user_id = 123
+    source_session_id = create_game_session(user_id=user_id, player_color="white")
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    blunder_response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": source_session_id,
+            "pgn": "1. e4 e5 2. Qh5",
+            "fen": fen_before_blunder,
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert blunder_response.status_code == 201
+    blunder_id = blunder_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
+
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+    assert start.status_code == 201
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    now = datetime.now(timezone.utc)
+    session.drill_state = "converted"
+    session.is_rated = True
+    session.rated_start_ply = 1
+    session.normal_started_at = now
+    session.converted_at = now
+    db_session.commit()
+
+    response = client.post(
+        "/api/game/next-opponent-move",
+        json={
+            "session_id": session_id,
+            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            "moves": ["e2e4"],
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "ghost"
+    assert data["decision_source"] == "ghost_path"
+    assert data["move"] == {"uci": "e7e5", "san": "e5"}
+    assert data["target_blunder_id"] == blunder_id
+    assert data["target_blunder_srs"]["pass_streak"] == 0
+
+
+def test_converted_drill_next_opponent_move_uses_backend_engine_fallback(
+    client,
+    auth_headers,
+    db_session,
+):
+    from app.opponent_move_controller import ControllerMove
+
+    user_id = 123
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+    assert start.status_code == 201
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    now = datetime.now(timezone.utc)
+    session.drill_state = "converted"
+    session.is_rated = True
+    session.rated_start_ply = 1
+    session.normal_started_at = now
+    session.converted_at = now
+    db_session.commit()
+
+    fake_move = ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+    with patch("app.opponent_move_controller.choose_move", return_value=fake_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "moves": ["e2e4"],
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "engine"
+    assert data["decision_source"] == "backend_engine"
+    assert data["move"] == {"uci": "e7e5", "san": "e5"}
+    assert data["target_blunder_id"] is None
 
 
 def test_continue_drill_requires_root_reached(client, auth_headers):

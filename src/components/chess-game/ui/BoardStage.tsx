@@ -61,6 +61,7 @@ type BoardStageProps = {
   onStartDrill?: () => void;
   isLoadingOpenings?: boolean;
   drillState?: DrillSessionState | null;
+  isContinuingDrill?: boolean;
   onContinueDrill?: () => void;
   onAbandonDrill?: () => void;
 };
@@ -137,6 +138,7 @@ const BoardStage = ({
   onStartDrill,
   isLoadingOpenings = false,
   drillState = null,
+  isContinuingDrill = false,
   onContinueDrill,
   onAbandonDrill,
 }: BoardStageProps) => {
@@ -388,6 +390,7 @@ const BoardStage = ({
                   <button
                     className="chess-button primary"
                     type="button"
+                    disabled={isContinuingDrill}
                     onClick={onContinueDrill}
                   >
                     Continue

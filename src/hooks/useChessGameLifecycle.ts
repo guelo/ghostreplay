@@ -6,7 +6,11 @@ import type {
 } from "react";
 import { Chess } from "chess.js";
 import type { OpeningLookupResult } from "../openings/openingBook";
-import type { DrillStrictness, TargetBlunderSrs } from "../utils/api";
+import type {
+  DrillSessionContract,
+  DrillStrictness,
+  TargetBlunderSrs,
+} from "../utils/api";
 import {
   abandonDrill,
   continueDrill,
@@ -898,7 +902,9 @@ export const useChessGameLifecycle = ({
     onOpenHistory?.({ select: "latest", source: "post_game_history", sessionId: sid });
   }, [onOpenHistory, setShowPostGamePrompt]);
 
-  const handleContinueDrill = useCallback(async () => {
+  const handleContinueDrill = useCallback(async (): Promise<
+    DrillSessionContract | undefined
+  > => {
     const store = useGameStore.getState();
     if (!store.sessionId || store.drillState !== "root_reached") {
       return;
@@ -912,6 +918,7 @@ export const useChessGameLifecycle = ({
       next.setIsRated(contract.is_rated);
       next.setIsPracticeContinuation(false);
       setShowPostGamePrompt(false);
+      return contract;
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Failed to continue drill.";
