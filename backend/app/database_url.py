@@ -48,9 +48,14 @@ def resolve_database_url() -> str:
     if pg_database_url:
         return pg_database_url
 
-    if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PROJECT_ID"):
+    if (
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+    ):
         raise RuntimeError(
-            "Database configuration is missing. Set DATABASE_URL or attach Railway "
+            "Database configuration is missing. Set DATABASE_URL or attach managed "
             "Postgres variables to this service."
         )
 

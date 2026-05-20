@@ -19,6 +19,8 @@ DATABASE_ENV_NAMES = (
     "POSTGRES_PASSWORD",
     "RAILWAY_ENVIRONMENT",
     "RAILWAY_PROJECT_ID",
+    "RENDER",
+    "RENDER_SERVICE_ID",
 )
 
 
@@ -100,6 +102,13 @@ def test_resolve_database_url_brackets_ipv6_pg_host(monkeypatch):
 
 def test_resolve_database_url_fails_in_railway_without_database(monkeypatch):
     monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+
+    with pytest.raises(RuntimeError, match="Database configuration is missing"):
+        resolve_database_url()
+
+
+def test_resolve_database_url_fails_in_render_without_database(monkeypatch):
+    monkeypatch.setenv("RENDER", "true")
 
     with pytest.raises(RuntimeError, match="Database configuration is missing"):
         resolve_database_url()
