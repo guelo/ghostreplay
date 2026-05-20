@@ -147,6 +147,9 @@ export interface DrillStartRequest {
   player_color: 'white' | 'black'
   engine_elo: number
   strictness: DrillStrictness
+  // Always required on new drills — the slider always produces a value.
+  // The response type has strictness_cp? because legacy sessions may lack it.
+  strictness_cp: number
 }
 
 export interface DrillSessionContract {
@@ -161,6 +164,7 @@ export interface DrillSessionContract {
   player_color: string
   engine_elo: number
   strictness: string
+  strictness_cp?: number
   is_rated: boolean
   rated_start_ply: number | null
   normal_started_at: string | null
@@ -180,6 +184,7 @@ export interface DrillRouteFailure {
   played_move_uci: string | null
   played_move_san: string | null
   correction_fen: string
+  reason?: 'off_route' | 'accuracy'
 }
 
 export interface DrillRouteCheckResponse {

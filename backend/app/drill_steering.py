@@ -147,6 +147,14 @@ def route_move_for_uci(
     )
 
 
+def safe_san_for_uci(fen: str, uci: str) -> str | None:
+    """Return SAN for uci from fen, or None if the move is illegal or the FEN is invalid."""
+    try:
+        return _san_for_uci(fen, uci)
+    except ValueError:
+        return None
+
+
 def apply_uci_normalized(fen: str, uci: str) -> str:
     return _resulting_fen(fen, uci)
 

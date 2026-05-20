@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import chess
 
-from app.models import Blunder, GameSession, RatingHistory, SessionMove
+from app.models import AnalysisCache, Blunder, GameSession, RatingHistory, SessionMove
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
 
@@ -549,3 +549,341 @@ def test_abandoned_drill_hidden_from_history_stats_and_analysis(client, auth_hea
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.result == "drill_abandon"
     assert session.is_rated is False
+
+
+# ---------------------------------------------------------------------------
+# strictness_cp tests
+# ---------------------------------------------------------------------------
+
+D4_FEN = "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -"
+
+
+def _start_drill_cp(client, auth_headers, strictness_cp: int, *, root_fen: str = ROOT_FEN, user_id: int = 123):
+    with patch("app.api.drills.get_opening_roots", return_value=_roots_for(root_fen)):
+        return client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": root_fen,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+                "strictness_cp": strictness_cp,
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+
+
+def _seed_cache(db_session, fen_before: str, move_uci: str, *, eval_delta: int | None, played_eval: int | None = None, best_eval: int | None = None) -> None:
+    entry = AnalysisCache(
+        fen_before=fen_before,
+        move_uci=move_uci,
+        move_san="x",
+        eval_delta=eval_delta,
+        played_eval=played_eval,
+        best_eval=best_eval,
+    )
+    db_session.add(entry)
+    db_session.commit()
+
+
+def test_start_drill_persists_strictness_cp(client, auth_headers, db_session):
+    response = _start_drill_cp(client, auth_headers, strictness_cp=10)
+    assert response.status_code == 201
+    data = response.json()
+    assert data["strictness_cp"] == 10
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(data["session_id"])).one()
+    assert session.drill_strictness_cp == 10
+
+
+def test_start_drill_null_strictness_cp_persists(client, auth_headers, db_session):
+    # No strictness_cp passed → null in DB, null in response
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        response = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "black",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+    assert response.status_code == 201
+    data = response.json()
+    assert data["strictness_cp"] is None
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(data["session_id"])).one()
+    assert session.drill_strictness_cp is None
+
+
+def test_route_check_accuracy_failure(client, auth_headers, db_session):
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=30)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=15, root_fen=E4_E5_FEN)
+        assert start.status_code == 201
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["failure"]["reason"] == "accuracy"
+    assert data["failure"]["played_move_uci"] == "e2e4"
+    assert data["failure"]["played_move_san"] == "e4"
+    assert data["failure"]["correction_fen"] == START_FEN
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "failed"
+
+
+def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, db_session):
+    # Target-reaching move that also exceeds threshold should fail with reason=accuracy
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=20)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(ROOT_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=10, root_fen=ROOT_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["failure"]["reason"] == "accuracy"
+
+
+def test_route_check_cache_miss_best_effort_pass(client, auth_headers, db_session):
+    # No cache entry → fall through to route check → on_route
+    graph = _steering_graph()
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=0, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "on_route"
+
+
+def test_route_check_tier_fallback_strict(client, auth_headers, db_session):
+    # Without strictness_cp, strict tier threshold = 15
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=20)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        with patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)):
+            start = client.post(
+                "/api/drills/start",
+                json={
+                    "opening_key": E4_E5_FEN,
+                    "player_color": "white",
+                    "engine_elo": 1500,
+                    "strictness": "strict",
+                },
+                headers=auth_headers(),
+            )
+        assert start.status_code == 201
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    # eval_delta=20 > strict threshold=15 → accuracy failure
+    assert data["status"] == "failed"
+    assert data["failure"]["reason"] == "accuracy"
+
+
+def test_route_check_onthefly_eval_both_evals_present(client, auth_headers, db_session):
+    # eval_delta=None, played_eval=100, best_eval=130 (white to move → delta=30)
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=None, played_eval=100, best_eval=130)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=20, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    # on-the-fly delta=30 > threshold=20 → failure
+    assert data["status"] == "failed"
+    assert data["failure"]["reason"] == "accuracy"
+
+
+def test_route_check_onthefly_eval_null_fallthrough_both_null(client, auth_headers, db_session):
+    # Both played_eval and best_eval null → mate position → best-effort pass
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=None, played_eval=None, best_eval=None)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=0, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "on_route"
+
+
+def test_route_check_onthefly_eval_null_fallthrough_asymmetric(client, auth_headers, db_session):
+    # played_eval present, best_eval null → cannot compute delta → best-effort pass
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=None, played_eval=50, best_eval=None)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=0, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "on_route"
+
+
+def test_route_check_suggestion_filtering_threshold_keeps_passing_move(client, auth_headers, db_session):
+    # Off-route failure; suggestion e2e4 has delta=5 (passes threshold=20), is returned
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=5)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=20, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "failed"
+    suggestion_ucis = [s["uci"] for s in data["suggestions"]]
+    assert suggestion_ucis == ["e2e4"]
+
+
+def test_route_check_suggestion_filtering_all_exceed_returns_unfiltered(client, auth_headers, db_session):
+    # Off-route failure; only suggestion e2e4 has delta=60 (exceeds threshold=20)
+    # All suggestions exceed → unfiltered fallback → e2e4 still returned
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=60)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=20, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "failed"
+    suggestion_ucis = [s["uci"] for s in data["suggestions"]]
+    assert suggestion_ucis == ["e2e4"]
+
+
+def test_route_check_accuracy_failure_populates_all_failure_fields(client, auth_headers, db_session):
+    graph = _steering_graph()
+    _seed_cache(db_session, START_FEN, "e2e4", eval_delta=30)
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=15, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": ROOT_FEN, "previous_fen": START_FEN, "played_uci": "e2e4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    failure = data["failure"]
+    assert failure["played_move_uci"] is not None
+    assert failure["played_move_san"] is not None
+    assert failure["correction_fen"] is not None
+    assert failure["reason"] == "accuracy"
+
+
+def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers, db_session):
+    graph = _steering_graph()
+
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(E4_E5_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = _start_drill_cp(client, auth_headers, strictness_cp=50, root_fen=E4_E5_FEN)
+        session_id = start.json()["session_id"]
+
+        response = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": D4_FEN, "previous_fen": START_FEN, "played_uci": "d2d4"},
+            headers=auth_headers(),
+        )
+
+    data = response.json()
+    assert data["status"] == "failed"
+    assert data["failure"]["reason"] == "off_route"

@@ -575,6 +575,7 @@ export const useChessGameLifecycle = ({
       playerColor: "white" | "black";
       engineElo: number;
       strictness: DrillStrictness;
+      strictnessCp: number;
       selectedOpening: OpeningRootItem;
     }) => {
       try {
@@ -605,6 +606,7 @@ export const useChessGameLifecycle = ({
           player_color: options.playerColor,
           engine_elo: options.engineElo,
           strictness: options.strictness,
+          strictness_cp: options.strictnessCp,
         });
 
         const tempChess = new Chess();

@@ -515,7 +515,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             correctionFen: route.failure?.correction_fen ?? result.fenBefore,
             moveIndex: result.moveIndex,
           });
-          setEngineMessage("That move leaves the selected opening route.");
+          setEngineMessage(
+            route.failure?.reason === "accuracy"
+              ? "That move exceeds the allowed centipawn loss."
+              : "That move leaves the selected opening route.",
+          );
           setViewIndex(result.moveIndex - 1);
           return false;
         }
@@ -1196,6 +1200,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       playerColor: resolvedPlayerColor,
       engineElo: engineElo,
       strictness: strictnessFromCp(drillStrictnessCp),
+      strictnessCp: drillStrictnessCp,
       selectedOpening: selectedDrillOpening,
     });
 
