@@ -6,8 +6,9 @@ import {
   type ReactNode,
 } from 'react'
 import { AuthContext, type AuthState } from './authContextShared'
+import { resolveApiEndpointBaseUrl } from '../utils/api'
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
 
 const STORAGE_KEYS = {
   credentials: 'ghost_replay_credentials',

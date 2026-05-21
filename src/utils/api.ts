@@ -45,7 +45,15 @@ export const resolveApiBaseUrl = (
     : '/api'
 }
 
-const API_BASE_URL = resolveApiBaseUrl(import.meta.env.VITE_API_URL)
+export const resolveApiEndpointBaseUrl = (
+  configuredUrl?: string,
+  locationOverride?: { hostname: string; origin: string },
+): string => {
+  const baseUrl = resolveApiBaseUrl(configuredUrl, locationOverride).replace(/\/+$/, '')
+  return baseUrl.endsWith('/api') ? baseUrl.slice(0, -4) : baseUrl
+}
+
+const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
 const RETRY_BASE_DELAY_MS = 200
 
 /**

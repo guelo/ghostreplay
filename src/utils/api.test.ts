@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ApiError,
   resolveApiBaseUrl,
+  resolveApiEndpointBaseUrl,
   startGame,
   endGame,
   uploadSessionMoves,
@@ -80,6 +81,41 @@ describe('resolveApiBaseUrl', () => {
         origin: 'https://ghostreplay.vercel.app',
       }),
     ).toBe('/api')
+  })
+})
+
+describe('resolveApiEndpointBaseUrl', () => {
+  it('strips same-origin api path before endpoint paths are appended', () => {
+    expect(
+      resolveApiEndpointBaseUrl(undefined, {
+        hostname: 'ghostreplay.vercel.app',
+        origin: 'https://ghostreplay.vercel.app',
+      }),
+    ).toBe('')
+  })
+
+  it('strips explicit api path configs with optional trailing slash', () => {
+    expect(
+      resolveApiEndpointBaseUrl('/api/', {
+        hostname: 'ghostreplay.vercel.app',
+        origin: 'https://ghostreplay.vercel.app',
+      }),
+    ).toBe('')
+    expect(
+      resolveApiEndpointBaseUrl('https://api.example.com/api/', {
+        hostname: 'localhost',
+        origin: 'http://localhost:5173',
+      }),
+    ).toBe('https://api.example.com')
+  })
+
+  it('keeps local backend origin before endpoint paths are appended', () => {
+    expect(
+      resolveApiEndpointBaseUrl(undefined, {
+        hostname: 'localhost',
+        origin: 'http://localhost:5173',
+      }),
+    ).toBe('http://localhost:8000')
   })
 })
 
