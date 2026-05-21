@@ -161,6 +161,7 @@ def _reverse_ancestor_position_ids(
     player_color: str,
     radius_ply: int = OPPORTUNITY_ANCESTOR_RADIUS_PLY,
 ) -> set[int]:
+    opponent_color = "black" if player_color == "white" else "white"
     frontier = {start_position_id}
     visited = {start_position_id}
     ancestors: set[int] = set()
@@ -182,7 +183,7 @@ def _reverse_ancestor_position_ids(
         matching_ids = {
             row[0]
             for row in db.query(Position.id)
-            .filter(Position.id.in_(parent_ids), Position.active_color == player_color)
+            .filter(Position.id.in_(parent_ids), Position.active_color == opponent_color)
             .all()
         }
         ancestors.update(matching_ids)

@@ -7,7 +7,7 @@ from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
 from app.fen import normalize_fen
-from app.models import BlunderOpportunityEvent, BlunderReview
+from app.models import Blunder, BlunderOpportunityEvent, BlunderReview
 from app.opening_roots import get_opening_roots
 from app.srs_math import (
     as_utc,
@@ -84,16 +84,21 @@ def load_opportunity_counters(
     )
 
     event_time = func.coalesce(BlunderOpportunityEvent.occurred_at, BlunderOpportunityEvent.created_at)
+    blunder_created_at = func.coalesce(Blunder.created_at, BlunderOpportunityEvent.created_at)
+    event_after_blunder_created = event_time >= blunder_created_at
     opportunity_30d = and_(
         BlunderOpportunityEvent.opportunity.is_(True),
         event_time >= cutoff,
+        event_after_blunder_created,
     )
     reached_30d = and_(
         BlunderOpportunityEvent.reached.is_(True),
         event_time >= cutoff,
+        event_after_blunder_created,
     )
     opportunity_since_review = and_(
         BlunderOpportunityEvent.opportunity.is_(True),
+        event_after_blunder_created,
         or_(
             latest_review.c.reviewed_at.is_(None),
             and_(
@@ -114,6 +119,7 @@ def load_opportunity_counters(
             func.coalesce(func.sum(case((reached_30d, 1), else_=0)), 0).label("reached_30d"),
         )
         .outerjoin(latest_review, BlunderOpportunityEvent.blunder_id == latest_review.c.blunder_id)
+        .join(Blunder, Blunder.id == BlunderOpportunityEvent.blunder_id)
         .filter(BlunderOpportunityEvent.blunder_id.in_(unique_blunder_ids))
         .group_by(BlunderOpportunityEvent.blunder_id)
         .all()

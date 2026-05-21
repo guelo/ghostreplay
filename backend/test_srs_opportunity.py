@@ -160,6 +160,46 @@ def test_session_upload_records_reached_as_opportunity_and_replay_deletes_stale_
     assert db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).count() == 0
 
 
+def test_player_turn_ancestor_without_steer_point_is_not_opportunity(db_session):
+    user_id = 123
+    ancestor_fen = "8/8/8/8/8/8/8/K6k w - - 0 1"
+    steer_fen = "8/8/8/8/8/8/8/1K5k b - - 0 1"
+    diverged_fen = "8/8/8/8/8/8/8/K5k1 b - - 0 1"
+    blunder_fen = "8/8/8/8/8/8/8/2K4k w - - 0 2"
+
+    ancestor = _position(db_session, user_id=user_id, fen=ancestor_fen, active_color="white")
+    steer = _position(db_session, user_id=user_id, fen=steer_fen, active_color="black")
+    diverged = _position(db_session, user_id=user_id, fen=diverged_fen, active_color="black")
+    blunder_position = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
+    db_session.add_all([
+        Move(from_position_id=ancestor.id, move_san="a", to_position_id=steer.id),
+        Move(from_position_id=ancestor.id, move_san="h", to_position_id=diverged.id),
+        Move(from_position_id=steer.id, move_san="b", to_position_id=blunder_position.id),
+    ])
+    blunder = _blunder(db_session, user_id=user_id, position=blunder_position)
+    game_session = _session(db_session, user_id=user_id)
+    db_session.add(
+        SessionMove(
+            session_id=game_session.id,
+            move_number=1,
+            color="white",
+            move_san="h",
+            fen_before=ancestor_fen,
+            fen_after=diverged_fen,
+        )
+    )
+    db_session.commit()
+
+    _compute_blunder_opportunity_events(
+        db_session,
+        session_id=game_session.id,
+        user_id=user_id,
+        player_color="white",
+    )
+
+    assert db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).count() == 0
+
+
 def test_reached_position_counts_as_denominator_opportunity(db_session):
     user_id = 123
     blunder_fen = "8/8/8/8/8/8/K7/7k w - - 0 1"
@@ -259,6 +299,38 @@ def test_same_session_review_event_is_excluded_from_since_review(db_session):
     assert counters.reached_30d == 1
 
 
+def test_opportunity_counters_ignore_events_before_blunder_creation(db_session):
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    pos = _position(db_session, user_id=user_id, fen="8/8/8/8/8/8/K7/6k1 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=pos)
+    blunder.created_at = now - timedelta(days=5)
+    old_session = _session(db_session, user_id=user_id, started_at=now - timedelta(days=10))
+    recent_session = _session(db_session, user_id=user_id, started_at=now - timedelta(days=2))
+    db_session.add_all([
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=old_session.id,
+            occurred_at=old_session.started_at,
+            opportunity=True,
+            reached=True,
+        ),
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=recent_session.id,
+            occurred_at=recent_session.started_at,
+            opportunity=True,
+            reached=True,
+        ),
+    ])
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    assert counters.opportunities_since_review == 1
+    assert counters.opportunities_30d == 1
+    assert counters.reached_30d == 1
+
+
 def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_session):
     from app.api.game import find_ghost_move
 
@@ -276,6 +348,8 @@ def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_sess
     ])
     rare = _blunder(db_session, user_id=user_id, position=rare_pos, eval_loss_cp=200)
     frequent = _blunder(db_session, user_id=user_id, position=frequent_pos, eval_loss_cp=200)
+    rare.created_at = now - timedelta(days=2)
+    frequent.created_at = now - timedelta(days=2)
 
     for idx in range(100):
         _opportunity_event(
