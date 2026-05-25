@@ -459,3 +459,76 @@ class TestSelectionScore:
             created_at=None,
         )
         assert c.score(NOW) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _ghost_eligible — reached-since-review gate and low-p_reach backstop
+# ---------------------------------------------------------------------------
+
+from app.api.game import P_REACH_FLOOR, P_REACH_MIN_SAMPLE, _ghost_eligible
+
+
+class TestGhostEligibleOpportunityGate:
+    def _call(self, **kwargs):
+        defaults = dict(
+            has_opportunity_events=True,
+            reached_since_review=1,
+            pass_streak=0,
+            last_reviewed_at=None,
+            created_at=None,
+            now=NOW,
+            opportunities_30d=0,
+            reached_30d=0,
+        )
+        defaults.update(kwargs)
+        return _ghost_eligible(**defaults)
+
+    def test_reached_since_review_one_pass_streak_zero_is_eligible(self):
+        # priority = 1 / expected_opportunities(0) = 1/1 = 1.0; gate is < 1.0
+        assert self._call(reached_since_review=1, pass_streak=0) is True
+
+    def test_zero_reached_since_review_not_eligible(self):
+        assert self._call(reached_since_review=0) is False
+
+    def test_high_reached_since_review_eligible(self):
+        assert self._call(reached_since_review=2) is True
+
+    def test_backstop_fires_when_p_reach_below_floor_with_sufficient_samples(self):
+        # 0 reached over 183 opps → p_reach ≈ 2/187 ≈ 0.0107 < 0.03
+        assert self._call(
+            reached_since_review=5,
+            opportunities_30d=183,
+            reached_30d=0,
+        ) is False
+
+    def test_backstop_does_not_fire_below_sample_floor(self):
+        assert P_REACH_MIN_SAMPLE == 30
+        assert self._call(
+            reached_since_review=5,
+            opportunities_30d=20,
+            reached_30d=0,
+        ) is True
+
+    def test_backstop_does_not_fire_when_p_reach_above_floor(self):
+        # 10 reached over 100 opps → p_reach ≈ 12/104 ≈ 0.115 >= 0.03
+        assert self._call(
+            reached_since_review=5,
+            opportunities_30d=100,
+            reached_30d=10,
+        ) is True
+
+    def test_backstop_does_not_fire_without_opportunity_events(self):
+        reviewed_at = NOW - timedelta(hours=8)
+        assert _ghost_eligible(
+            has_opportunity_events=False,
+            reached_since_review=0,
+            pass_streak=0,
+            last_reviewed_at=reviewed_at,
+            created_at=None,
+            now=NOW,
+            opportunities_30d=183,  # ignored without events
+            reached_30d=0,
+        ) is True
+
+    def test_floor_constant_is_three_percent(self):
+        assert P_REACH_FLOOR == 0.03

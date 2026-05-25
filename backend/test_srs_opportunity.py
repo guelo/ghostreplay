@@ -381,3 +381,120 @@ def test_ghost_move_downweights_rare_branch_vs_frequently_reached_branch(db_sess
 
     assert move_san == "freq"
     assert target_blunder_id == frequent.id
+
+
+def test_reached_since_review_counts_only_post_review_reaches(db_session):
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    pos = _position(db_session, user_id=user_id, fen="8/8/8/8/8/8/K7/5k2 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=pos)
+
+    # 183 ancestor-only opportunities (not reached) — should not count toward reached_since_review
+    for idx in range(183):
+        _opportunity_event(
+            db_session,
+            user_id=user_id,
+            blunder=blunder,
+            opportunity=True,
+            reached=False,
+            occurred_at=now - timedelta(minutes=idx + 1),
+        )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    assert counters.opportunities_since_review == 183
+    assert counters.reached_since_review == 0
+    assert counters.reached_30d == 0
+
+
+def test_reached_since_review_excludes_pre_review_and_same_session_reaches(db_session):
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    pos = _position(db_session, user_id=user_id, fen="8/8/8/8/8/8/K7/4k3 w - - 0 1", active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=pos)
+
+    # Pre-review reach
+    pre_session = _session(db_session, user_id=user_id, started_at=now - timedelta(hours=5))
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=pre_session.id,
+            occurred_at=now - timedelta(hours=5),
+            opportunity=True,
+            reached=True,
+        )
+    )
+
+    # Review session — its reach is excluded by same-session filter
+    review_session = _session(db_session, user_id=user_id, started_at=now - timedelta(hours=2))
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=review_session.id,
+            occurred_at=now - timedelta(hours=2),
+            opportunity=True,
+            reached=True,
+        )
+    )
+    db_session.add(
+        BlunderReview(
+            blunder_id=blunder.id,
+            session_id=review_session.id,
+            reviewed_at=now - timedelta(hours=2),
+            passed=True,
+            move_played_san="good",
+            eval_delta_cp=0,
+        )
+    )
+
+    # Post-review reach in new session — counts
+    post_session = _session(db_session, user_id=user_id, started_at=now - timedelta(minutes=10))
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=post_session.id,
+            occurred_at=now - timedelta(minutes=10),
+            opportunity=True,
+            reached=True,
+        )
+    )
+    db_session.commit()
+
+    counters = load_opportunity_counters(db_session, [blunder.id], now=now)[blunder.id]
+    assert counters.reached_since_review == 1
+
+
+def test_find_ghost_move_suppresses_high_opportunity_zero_reach_blunder(db_session):
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    start_fen = "8/8/8/8/8/8/8/K6k b - - 0 1"
+    blunder_fen = "8/8/8/8/8/8/8/1K5k w - - 0 2"
+    start = _position(db_session, user_id=user_id, fen=start_fen, active_color="black")
+    blunder_pos = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
+    db_session.add(Move(from_position_id=start.id, move_san="step", to_position_id=blunder_pos.id))
+    blunder = _blunder(db_session, user_id=user_id, position=blunder_pos, eval_loss_cp=200)
+    blunder.created_at = now - timedelta(days=5)
+
+    # 183 ancestor-only opportunities, zero reaches — matches blunder 578 scenario
+    for idx in range(183):
+        _opportunity_event(
+            db_session,
+            user_id=user_id,
+            blunder=blunder,
+            opportunity=True,
+            reached=False,
+            occurred_at=now - timedelta(minutes=idx + 1),
+        )
+    db_session.commit()
+
+    move_san, target_blunder_id, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=start_fen,
+        player_color="white",
+        _rng_seed=1,
+    )
+    assert move_san is None
+    assert target_blunder_id is None

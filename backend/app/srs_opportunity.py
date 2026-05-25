@@ -22,6 +22,7 @@ class OpportunityCounters:
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
+    reached_since_review: int = 0
     event_count: int = 0
 
     @property
@@ -107,6 +108,17 @@ def load_opportunity_counters(
             ),
         ),
     )
+    reached_since_review = and_(
+        BlunderOpportunityEvent.reached.is_(True),
+        event_after_blunder_created,
+        or_(
+            latest_review.c.reviewed_at.is_(None),
+            and_(
+                BlunderOpportunityEvent.session_id != latest_review.c.session_id,
+                event_time > latest_review.c.reviewed_at,
+            ),
+        ),
+    )
 
     rows = (
         db.query(
@@ -117,6 +129,9 @@ def load_opportunity_counters(
             ),
             func.coalesce(func.sum(case((opportunity_30d, 1), else_=0)), 0).label("opportunities_30d"),
             func.coalesce(func.sum(case((reached_30d, 1), else_=0)), 0).label("reached_30d"),
+            func.coalesce(func.sum(case((reached_since_review, 1), else_=0)), 0).label(
+                "reached_since_review"
+            ),
         )
         .outerjoin(latest_review, BlunderOpportunityEvent.blunder_id == latest_review.c.blunder_id)
         .join(Blunder, Blunder.id == BlunderOpportunityEvent.blunder_id)
@@ -130,6 +145,7 @@ def load_opportunity_counters(
             opportunities_since_review=int(row.opportunities_since_review or 0),
             opportunities_30d=int(row.opportunities_30d or 0),
             reached_30d=int(row.reached_30d or 0),
+            reached_since_review=int(row.reached_since_review or 0),
             event_count=int(row.event_count or 0),
         )
     return counters

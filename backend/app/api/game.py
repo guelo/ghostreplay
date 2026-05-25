@@ -42,6 +42,8 @@ SELECTION_WEIGHT_POWER = 0.5
 REPEAT_HISTORY_SCAN_LIMIT = 200
 REPEAT_PENALTY_LOOKBACK = 3
 REPEAT_PENALTY_FACTORS = (0.35, 0.60, 0.80)
+P_REACH_FLOOR = 0.03
+P_REACH_MIN_SAMPLE = 30
 T = TypeVar("T")
 
 
@@ -57,6 +59,7 @@ class GhostMoveCandidate:
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
+    reached_since_review: int = 0
     has_opportunity_events: bool = False
     opening_family: str | None = None
 
@@ -69,7 +72,7 @@ class GhostMoveCandidate:
         )
         if self.has_opportunity_events:
             urgency = calculate_opportunity_overdue(
-                opportunities_since_review=self.opportunities_since_review,
+                opportunities_since_review=self.reached_since_review,
                 pass_streak=self.pass_streak,
             )
         severity = math.log1p(max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
@@ -220,6 +223,40 @@ def _isoformat_optional(value: datetime | str | None) -> str | None:
     return value
 
 
+def _ghost_eligible(
+    *,
+    has_opportunity_events: bool,
+    reached_since_review: int,
+    pass_streak: int,
+    last_reviewed_at: datetime | None,
+    created_at: datetime | None,
+    now: datetime,
+    opportunities_30d: int,
+    reached_30d: int,
+) -> bool:
+    if has_opportunity_events:
+        priority = calculate_opportunity_overdue(
+            opportunities_since_review=reached_since_review,
+            pass_streak=pass_streak,
+        )
+    else:
+        priority = calculate_priority(
+            pass_streak=pass_streak,
+            last_reviewed_at=last_reviewed_at,
+            created_at=created_at,
+            now=now,
+        )
+    if priority < 1.0:
+        return False
+    if (
+        has_opportunity_events
+        and opportunities_30d >= P_REACH_MIN_SAMPLE
+        and compute_p_reach(reached_30d, opportunities_30d) < P_REACH_FLOOR
+    ):
+        return False
+    return True
+
+
 def find_ghost_move(
     db: Session,
     user_id: int,
@@ -331,22 +368,20 @@ def find_ghost_move(
             opportunities_since_review=counters.opportunities_since_review if counters else 0,
             opportunities_30d=counters.opportunities_30d if counters else 0,
             reached_30d=counters.reached_30d if counters else 0,
+            reached_since_review=counters.reached_since_review if counters else 0,
             has_opportunity_events=bool(counters and counters.event_count > 0),
             opening_family=row[7],
         )
-        if candidate.has_opportunity_events:
-            priority = calculate_opportunity_overdue(
-                opportunities_since_review=candidate.opportunities_since_review,
-                pass_streak=candidate.pass_streak,
-            )
-        else:
-            priority = calculate_priority(
-                pass_streak=candidate.pass_streak,
-                last_reviewed_at=candidate.last_reviewed_at,
-                created_at=candidate.created_at,
-                now=now,
-            )
-        if priority < 1.0:
+        if not _ghost_eligible(
+            has_opportunity_events=candidate.has_opportunity_events,
+            reached_since_review=candidate.reached_since_review,
+            pass_streak=candidate.pass_streak,
+            last_reviewed_at=candidate.last_reviewed_at,
+            created_at=candidate.created_at,
+            now=now,
+            opportunities_30d=candidate.opportunities_30d,
+            reached_30d=candidate.reached_30d,
+        ):
             continue
         scored.append((candidate, candidate.score(now, current_opening_family)))
 

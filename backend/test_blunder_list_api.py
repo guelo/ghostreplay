@@ -7,7 +7,7 @@ from sqlalchemy import event
 
 from conftest import engine
 
-from app.models import Blunder, BlunderReview, GameSession, Position
+from app.models import Blunder, BlunderOpportunityEvent, BlunderReview, GameSession, Position
 
 
 def _create_blunder(
@@ -159,6 +159,49 @@ def test_list_blunders_due_filter(client, auth_headers, db_session):
     assert data["total"] == 1
     assert data["due_total"] == 1
     assert data["items"][0]["srs_priority"] > 1.0
+
+
+def test_list_blunders_due_includes_high_opportunity_zero_reach(client, auth_headers, db_session):
+    """A blunder with many ancestor opportunities but zero reaches must still appear
+    in /api/blunder?due=true so explicit review remains possible, even though normal
+    ghost steering suppresses it."""
+    now = datetime.now(timezone.utc)
+    blunder = _create_blunder(
+        db_session,
+        user_id=123,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=now - timedelta(days=5),
+        fen_hash_suffix="low-reach",
+    )
+    # 183 ancestor-only opportunity events with reached=False
+    for idx in range(183):
+        session = GameSession(
+            id=uuid.uuid4(),
+            user_id=123,
+            started_at=now - timedelta(minutes=idx + 1),
+            status="ended",
+            engine_elo=1500,
+            player_color="white",
+        )
+        db_session.add(session)
+        db_session.flush()
+        db_session.add(
+            BlunderOpportunityEvent(
+                blunder_id=blunder.id,
+                session_id=session.id,
+                occurred_at=now - timedelta(minutes=idx + 1),
+                opportunity=True,
+                reached=False,
+            )
+        )
+    db_session.commit()
+
+    response = client.get("/api/blunder?due=true", headers=auth_headers(user_id=123))
+    assert response.status_code == 200
+    data = response.json()
+    ids = {item["id"] for item in data["items"]}
+    assert blunder.id in ids
 
 
 def test_list_blunders_paginates_with_stable_last_played_order(client, auth_headers, db_session):
