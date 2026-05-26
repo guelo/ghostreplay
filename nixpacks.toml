@@ -11,7 +11,11 @@ cmds = [
 ]
 
 [phases.build]
-cmds = ["true"]
+cmds = [
+  # Nixpacks Python provider treats backend/ as project root, dropping repo-root
+  # siblings; copy opening data into backend/ so it lands at /app/public/.
+  "if [ -d backend ]; then if [ ! -d public/data/openings ]; then echo \"ERROR: backend/ deploy but public/data/openings missing\" >&2; exit 1; fi; mkdir -p backend/public/data/openings && cp -R public/data/openings/. backend/public/data/openings/; fi",
+]
 
 [start]
 cmd = "if [ -d backend ]; then cd backend; fi; /opt/venv/bin/python -m alembic upgrade head && /opt/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT"

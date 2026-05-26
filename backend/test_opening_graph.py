@@ -12,6 +12,7 @@ import chess
 import pytest
 
 from app.fen import normalize_fen
+import app.opening_graph as opening_graph_module
 from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_graph import (
     OpeningGraph,
@@ -19,6 +20,7 @@ from app.opening_graph import (
     _build_from_scratch,
     _fen_from_board,
     _load_or_build,
+    _resolve_default_opening_paths,
     _reset_opening_graph_for_testing,
     build_opening_graph,
     get_opening_graph,
@@ -103,10 +105,90 @@ def _write_synthetic_data(tmp: Path) -> tuple[Path, Path]:
     return eco_path, bypos_path
 
 
+def _write_minimal_opening_data_dir(data_dir: Path) -> None:
+    data_dir.mkdir(parents=True)
+    (data_dir / "eco.json").write_text("{}")
+    (data_dir / "eco.byPosition.json").write_text("{}")
+
+
+def _assert_resolves_to(data_dir: Path) -> None:
+    eco_path, bypos_path = _resolve_default_opening_paths()
+    assert eco_path == data_dir / "eco.json"
+    assert bypos_path == data_dir / "eco.byPosition.json"
+
+
 # -- Construction tests (real data) --
 
 
 class TestConstruction:
+    def test_default_paths_resolve_from_opening_data_dir_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        env_data_dir = tmp_path / "env" / "openings"
+        cwd_data_dir = tmp_path / "public" / "data" / "openings"
+        _write_minimal_opening_data_dir(env_data_dir)
+        _write_minimal_opening_data_dir(cwd_data_dir)
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENING_DATA_DIR", str(env_data_dir))
+
+        _assert_resolves_to(env_data_dir)
+
+    def test_default_paths_prefer_module_ancestors_over_cwd(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        cwd_root = tmp_path / "cwd"
+        deployed_root = tmp_path / "deploy"
+        cwd_data_dir = cwd_root / "public" / "data" / "openings"
+        ancestor_data_dir = deployed_root / "public" / "data" / "openings"
+        _write_minimal_opening_data_dir(cwd_data_dir)
+        _write_minimal_opening_data_dir(ancestor_data_dir)
+        deployed_app_file = deployed_root / "app" / "opening_graph.py"
+        deployed_app_file.parent.mkdir()
+        deployed_app_file.write_text("")
+
+        monkeypatch.chdir(cwd_root)
+        monkeypatch.setattr(opening_graph_module, "__file__", str(deployed_app_file))
+
+        _assert_resolves_to(ancestor_data_dir)
+
+    def test_default_paths_fall_back_to_runtime_cwd_layout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        with tempfile.TemporaryDirectory(dir="/private/tmp") as temp_dir:
+            temp_root = Path(temp_dir)
+            cwd_root = temp_root / "cwd"
+            module_root = temp_root / "module"
+            data_dir = cwd_root / "public" / "data" / "openings"
+            _write_minimal_opening_data_dir(data_dir)
+            deployed_app_file = module_root / "app" / "opening_graph.py"
+            deployed_app_file.parent.mkdir(parents=True)
+            deployed_app_file.write_text("")
+
+            monkeypatch.chdir(cwd_root)
+            monkeypatch.setattr(opening_graph_module, "__file__", str(deployed_app_file))
+
+            _assert_resolves_to(data_dir)
+
+    def test_default_paths_error_lists_candidate_dirs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        missing_data_dir = tmp_path / "missing" / "public" / "data" / "openings"
+        monkeypatch.setattr(
+            opening_graph_module,
+            "_default_opening_data_dir_candidates",
+            lambda: [missing_data_dir],
+        )
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            _resolve_default_opening_paths()
+
+        message = str(exc_info.value)
+        assert "Opening data files not found" in message
+        assert "eco.json" in message
+        assert "eco.byPosition.json" in message
+        assert str(missing_data_dir) in message
+
     def test_node_count_matches_position_count_plus_root(
         self, real_graph: OpeningGraph, bypos_position_count: int
     ):

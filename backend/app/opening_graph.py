@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import pickle
 from pathlib import Path
 from types import MappingProxyType
@@ -25,12 +26,47 @@ logger = logging.getLogger(__name__)
 
 CACHE_VERSION = 1
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-_DEFAULT_ECO_PATH = _PROJECT_ROOT / "public" / "data" / "openings" / "eco.json"
-_DEFAULT_BYPOS_PATH = (
-    _PROJECT_ROOT / "public" / "data" / "openings" / "eco.byPosition.json"
-)
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent / ".opening_graph_cache"
+
+
+def _opening_data_dir_has_files(data_dir: Path) -> bool:
+    return (
+        (data_dir / "eco.json").is_file()
+        and (data_dir / "eco.byPosition.json").is_file()
+    )
+
+
+def _default_opening_data_dir_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    env_data_dir = os.environ.get("OPENING_DATA_DIR")
+    if env_data_dir:
+        candidates.append(Path(env_data_dir))
+
+    for base in Path(__file__).resolve().parents:
+        candidates.append(base / "public" / "data" / "openings")
+    candidates.append(Path.cwd() / "public" / "data" / "openings")
+
+    seen: set[Path] = set()
+    unique_candidates: list[Path] = []
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_candidates.append(resolved)
+    return unique_candidates
+
+
+def _resolve_default_opening_paths() -> tuple[Path, Path]:
+    for data_dir in _default_opening_data_dir_candidates():
+        if _opening_data_dir_has_files(data_dir):
+            return data_dir / "eco.json", data_dir / "eco.byPosition.json"
+
+    searched = ", ".join(str(path) for path in _default_opening_data_dir_candidates())
+    raise FileNotFoundError(
+        "Opening data files not found. Expected eco.json and "
+        f"eco.byPosition.json in one of: {searched}"
+    )
 
 
 def _fen_from_board(board: chess.Board) -> str:
@@ -276,8 +312,15 @@ def build_opening_graph(
     by_position_path: Path | None = None,
 ) -> OpeningGraph:
     """Build the opening graph, using disk cache when default paths are used."""
-    eco = eco_path or _DEFAULT_ECO_PATH
-    bypos = by_position_path or _DEFAULT_BYPOS_PATH
+    default_eco: Path | None = None
+    default_bypos: Path | None = None
+    if eco_path is None or by_position_path is None:
+        default_eco, default_bypos = _resolve_default_opening_paths()
+
+    eco = eco_path if eco_path is not None else default_eco
+    bypos = by_position_path if by_position_path is not None else default_bypos
+    if eco is None or bypos is None:
+        raise RuntimeError("Opening graph paths were not resolved")
 
     # Custom paths bypass cache (used for testing with synthetic data)
     if eco_path is not None or by_position_path is not None:
