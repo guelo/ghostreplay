@@ -200,6 +200,44 @@ describe('GameAnalysisCoordinator', () => {
     })
   })
 
+  describe('drill upload response handling', () => {
+    it('marks the active drill failed when upload response reports accuracy failure', async () => {
+      coordinator.startSession('session-drill')
+      useGameStore.setState({
+        sessionId: 'session-drill',
+        drillState: 'active',
+        drillTerminalReason: null,
+        moveHistory: makeMoveHistory(1),
+      })
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([
+        ['fen-0::uci-0', {
+          move_san: 'm0', best_move_uci: 'best-0', best_move_san: 'b0',
+          played_eval: 10, best_eval: 50, eval_delta: 40, classification: 'mistake',
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      uploadSessionMovesMock.mockResolvedValueOnce({
+        moves_inserted: 1,
+        drill_state: 'failed',
+        drill_terminal_reason: 'accuracy',
+      })
+      vi.advanceTimersByTime(3000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(useGameStore.getState().drillState).toBe('failed')
+      expect(useGameStore.getState().drillTerminalReason).toBe('accuracy')
+    })
+  })
+
   // ---------------------------------------------------------------
   // Issue #3: startSession resets sticky error status
   // ---------------------------------------------------------------

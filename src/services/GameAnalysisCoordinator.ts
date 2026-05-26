@@ -130,7 +130,7 @@ export class GameAnalysisCoordinator {
   private idleTimer: ReturnType<typeof setTimeout> | null = null
 
   // Listeners for analysis resolution (used by AnalysisEffects etc.)
-  private onAnalysisResolved: ((moveIndex: number, result: AnalysisResult) => void) | null = null
+  private analysisResolvedListeners = new Set<(moveIndex: number, result: AnalysisResult) => void>()
 
   get store() {
     return gameAnalysisStore
@@ -140,8 +140,11 @@ export class GameAnalysisCoordinator {
     return this.activeSessionId
   }
 
-  setOnAnalysisResolved(cb: ((moveIndex: number, result: AnalysisResult) => void) | null) {
-    this.onAnalysisResolved = cb
+  addAnalysisResolvedListener(cb: (moveIndex: number, result: AnalysisResult) => void) {
+    this.analysisResolvedListeners.add(cb)
+    return () => {
+      this.analysisResolvedListeners.delete(cb)
+    }
   }
 
   private cancelWorkerAnalysis(requestId: string) {
@@ -475,7 +478,9 @@ export class GameAnalysisCoordinator {
       }
     }
 
-    this.onAnalysisResolved?.(moveIndex, result)
+    for (const listener of this.analysisResolvedListeners) {
+      listener(moveIndex, result)
+    }
   }
 
   // --- Cache lookups ---
@@ -597,7 +602,20 @@ export class GameAnalysisCoordinator {
     state.uploadInFlight = true
 
     uploadSessionMoves(state.sessionId, payload)
-      .then(() => {
+      .then((response) => {
+        if (response.drill_state === 'failed') {
+          const gameStore = useGameStore.getState()
+          if (
+            gameStore.sessionId === state.sessionId &&
+            gameStore.drillState === 'active'
+          ) {
+            if (response.drill_terminal_reason === null || response.drill_terminal_reason === undefined) {
+              console.warn('[Coordinator] Drill upload reported failed without terminal reason')
+            }
+            gameStore.setDrillState('failed')
+            gameStore.setDrillTerminalReason(response.drill_terminal_reason ?? null)
+          }
+        }
         for (const idx of indicesToUpload) {
           state.uploadedIndices.add(idx)
         }
@@ -670,6 +688,7 @@ export class GameAnalysisCoordinator {
       clearTimeout(this.idleTimer)
     }
     this.terminateWorker()
+    this.analysisResolvedListeners.clear()
     this.uploadState = null
     this.activeSessionId = null
   }

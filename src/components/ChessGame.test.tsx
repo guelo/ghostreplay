@@ -4,6 +4,7 @@ import { render, screen, fireEvent, waitFor, act } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
 import { STARTING_FEN } from "./chess-game/config";
+import type { AnalysisResult } from "../hooks/useMoveAnalysis";
 
 const startGameMock = vi.fn();
 const endGameMock = vi.fn();
@@ -63,6 +64,9 @@ vi.mock("react-router-dom", () => ({
 import { gameAnalysisStore } from "../stores/createAnalysisStore";
 
 const mockAnalyzeMove = vi.fn();
+let capturedAnalysisResolvedListener:
+  | ((moveIndex: number, result: AnalysisResult) => void)
+  | null = null;
 
 const mockCoordinator = {
   analyzeMove: mockAnalyzeMove,
@@ -73,7 +77,16 @@ const mockCoordinator = {
   stopSessionUploads: vi.fn(),
   sessionId: null,
   store: gameAnalysisStore,
-  setOnAnalysisResolved: vi.fn(),
+  addAnalysisResolvedListener: vi.fn(
+    (listener: (moveIndex: number, result: AnalysisResult) => void) => {
+      capturedAnalysisResolvedListener = listener;
+      return () => {
+        if (capturedAnalysisResolvedListener === listener) {
+          capturedAnalysisResolvedListener = null;
+        }
+      };
+    },
+  ),
 };
 
 vi.mock("../contexts/GameAnalysisCoordinatorContext", () => ({
@@ -106,6 +119,8 @@ const initialGameStoreState = useGameStore.getInitialState();
 
 beforeEach(() => {
   useGameStore.setState(initialGameStoreState, true);
+  capturedAnalysisResolvedListener = null;
+  mockCoordinator.addAnalysisResolvedListener.mockClear();
   gameAnalysisStore.getState().clearAll();
   gameAnalysisStore.getState().setStatus("ready");
   class MockAudio {
@@ -406,6 +421,53 @@ describe("ChessGame characterization safeguards", () => {
     await waitFor(() => {
       expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("stops an active drill when resolved player analysis exceeds captured strictness", async () => {
+    const line = new Chess();
+    line.move("e4");
+    const fenAfterE4 = line.fen();
+
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillOpeningKey: "target-fen",
+      drillState: "active",
+      drillStrictnessCp: 25,
+      moveHistory: [{ san: "e4", uci: "e2e4", fen: fenAfterE4 }],
+      liveFen: fenAfterE4,
+    });
+
+    render(<ChessGame />);
+
+    await waitFor(() => {
+      expect(capturedAnalysisResolvedListener).not.toBeNull();
+    });
+
+    act(() => {
+      capturedAnalysisResolvedListener?.(0, {
+        id: "analysis-e4",
+        move: "e2e4",
+        bestMove: "d2d4",
+        bestEval: 40,
+        playedEval: 10,
+        currentPositionEval: 10,
+        moveIndex: 0,
+        delta: 30,
+        classification: "mistake",
+        blunder: false,
+        recordable: false,
+      });
+    });
+
+    expect(useGameStore.getState().drillState).toBe("failed");
+    expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
+    expect(useGameStore.getState().viewIndex).toBe(-1);
+    expect(
+      screen.getByRole("region", { name: /drill stopped/i }),
+    ).toHaveTextContent("That move exceeds the allowed centipawn loss.");
   });
 
   it("records resignation on revert, then continues in practice mode", async () => {

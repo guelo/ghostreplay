@@ -431,6 +431,7 @@ export const useChessGameLifecycle = ({
         s.setIsRated(false);
         s.setIsPracticeContinuation(true);
         s.setDrillState(null);
+        s.setDrillStrictnessCp(null);
         coordinator.stopSessionUploads();
       }
 
@@ -560,6 +561,7 @@ export const useChessGameLifecycle = ({
         s2.setDrillOpeningKey(null);
         s2.setDrillState(null);
         s2.setDrillStrictness(null);
+        s2.setDrillStrictnessCp(null);
         setShowRevertWarning(false);
         setShowResignWarning(false);
         clearMoveHighlights();
@@ -660,6 +662,7 @@ export const useChessGameLifecycle = ({
         s.setDrillOpeningKey(options.openingKey);
         s.setDrillState(response.drill_state);
         s.setDrillStrictness(options.strictness);
+        s.setDrillStrictnessCp(response.strictness_cp ?? options.strictnessCp);
         s.setDrillTerminalReason(null);
         s.setLiveFen(tempChess.fen());
         s.setMoveHistory(records);
@@ -881,6 +884,7 @@ export const useChessGameLifecycle = ({
     store.setDrillOpeningKey(null);
     store.setDrillState(null);
     store.setDrillStrictness(null);
+    store.setDrillStrictnessCp(null);
     setShowRevertWarning(false);
     setShowResignWarning(false);
     clearMoveHighlights();

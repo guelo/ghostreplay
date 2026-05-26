@@ -475,6 +475,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return (
         store.isGameActive &&
         store.sessionId === requestSessionId &&
+        store.drillState !== "failed" &&
         !isRevertPendingRef.current
       );
     },
@@ -545,6 +546,46 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     [setEngineMessage, setViewIndex],
   );
+
+  useEffect(() => {
+    return coordinator.addAnalysisResolvedListener((moveIndex, result) => {
+      const store = useGameStore.getState();
+      if (
+        !store.sessionId ||
+        !store.drillOpeningKey ||
+        store.drillState !== "active" ||
+        isRevertPendingRef.current ||
+        typeof store.drillStrictnessCp !== "number" ||
+        result.delta === null ||
+        result.delta <= store.drillStrictnessCp
+      ) {
+        return;
+      }
+
+      const isPlayerMove =
+        store.playerColor === "white" ? moveIndex % 2 === 0 : moveIndex % 2 === 1;
+      if (!isPlayerMove) {
+        return;
+      }
+
+      const move = store.moveHistory[moveIndex];
+      if (!move || move.uci !== result.move) {
+        return;
+      }
+      const correctionFen =
+        moveIndex === 0 ? STARTING_FEN : store.moveHistory[moveIndex - 1]?.fen;
+      store.setDrillState("failed");
+      store.setDrillTerminalReason("accuracy");
+      setDrillFailInfo({
+        playedMoveUci: move.uci,
+        suggestionUcis: result.bestMove ? [result.bestMove] : [],
+        correctionFen: correctionFen ?? STARTING_FEN,
+        moveIndex,
+      });
+      setEngineMessage("That move exceeds the allowed centipawn loss.");
+      setViewIndex(moveIndex - 1);
+    });
+  }, [coordinator, setEngineMessage, setViewIndex]);
 
   const {
     handleGameEnd,

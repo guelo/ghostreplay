@@ -215,7 +215,7 @@ export interface DrillSessionContract {
   player_color: string
   engine_elo: number
   strictness: string
-  strictness_cp?: number
+  strictness_cp: number | null
   is_rated: boolean
   rated_start_ply: number | null
   normal_started_at: string | null
@@ -369,6 +369,8 @@ interface SessionMovesRequest {
 
 interface SessionMovesResponse {
   moves_inserted: number
+  drill_state?: DrillSessionState | null
+  drill_terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
 }
 
 interface BlunderRequest {

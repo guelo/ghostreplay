@@ -54,6 +54,7 @@ export type GameState = {
   drillOpeningKey: string | null;
   drillState: DrillSessionState | null;
   drillStrictness: DrillStrictness | null;
+  drillStrictnessCp: number | null;
   drillTerminalReason: 'off_route' | 'accuracy' | 'natural_end' | null;
   playerRating: number;
   isProvisional: boolean;
@@ -83,6 +84,7 @@ export type GameActions = {
   setDrillStrictness: (
     update: SetStateAction<DrillStrictness | null>,
   ) => void;
+  setDrillStrictnessCp: (update: SetStateAction<number | null>) => void;
   setDrillTerminalReason: (
     update: SetStateAction<'off_route' | 'accuracy' | 'natural_end' | null>,
   ) => void;
@@ -114,6 +116,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   drillOpeningKey: null,
   drillState: null,
   drillStrictness: null,
+  drillStrictnessCp: null,
   drillTerminalReason: null,
   playerRating: 1200,
   isProvisional: true,
@@ -154,6 +157,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ drillState: resolve(u, s.drillState) })),
   setDrillStrictness: (u) =>
     set((s) => ({ drillStrictness: resolve(u, s.drillStrictness) })),
+  setDrillStrictnessCp: (u) =>
+    set((s) => ({ drillStrictnessCp: resolve(u, s.drillStrictnessCp) })),
   setDrillTerminalReason: (u) =>
     set((s) => ({ drillTerminalReason: resolve(u, s.drillTerminalReason) })),
   setPlayerRating: (u) =>

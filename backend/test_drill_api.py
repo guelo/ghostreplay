@@ -693,6 +693,89 @@ def test_route_check_accuracy_failure(client, auth_headers, db_session):
     assert session.drill_terminal_reason == "accuracy"
 
 
+def test_session_move_upload_accuracy_failure_stops_active_drill(client, auth_headers, db_session):
+    start = _start_drill_cp(client, auth_headers, strictness_cp=15, root_fen=E4_E5_FEN)
+    assert start.status_code == 201
+    session_id = start.json()["session_id"]
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": ROOT_FEN,
+                    "eval_cp": 20,
+                    "eval_mate": None,
+                    "best_move_san": "d4",
+                    "best_move_eval_cp": 50,
+                    "eval_delta": 30,
+                    "classification": "mistake",
+                    "fen_before": START_FEN,
+                    "move_uci": "e2e4",
+                    "best_move_uci": "d2d4",
+                    "decision_source": None,
+                    "target_blunder_id": None,
+                }
+            ]
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["moves_inserted"] == 1
+    assert data["drill_state"] == "failed"
+    assert data["drill_terminal_reason"] == "accuracy"
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "failed"
+    assert session.drill_terminal_reason == "accuracy"
+
+
+def test_session_move_upload_ignores_opponent_accuracy_for_active_drill(client, auth_headers, db_session):
+    start = _start_drill_cp(client, auth_headers, strictness_cp=15, root_fen=E4_E5_FEN)
+    assert start.status_code == 201
+    session_id = start.json()["session_id"]
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "black",
+                    "move_san": "e5",
+                    "fen_after": E4_E5_FEN,
+                    "eval_cp": -20,
+                    "eval_mate": None,
+                    "best_move_san": "c5",
+                    "best_move_eval_cp": 50,
+                    "eval_delta": 80,
+                    "classification": "blunder",
+                    "fen_before": ROOT_FEN,
+                    "move_uci": "e7e5",
+                    "best_move_uci": "c7c5",
+                    "decision_source": "backend_engine",
+                    "target_blunder_id": None,
+                }
+            ]
+        },
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["drill_state"] == "active"
+    assert data.get("drill_terminal_reason") is None
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "active"
+    assert session.drill_terminal_reason is None
+
+
 def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, db_session):
     # Target-reaching move that also exceeds threshold should fail with reason=accuracy
     graph = _steering_graph()

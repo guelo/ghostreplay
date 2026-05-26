@@ -26,20 +26,12 @@ from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
     resegment_session_moves,
+    resolve_drill_threshold,
     utcnow,
 )
 
 router = APIRouter(prefix="/api/drills", tags=["drills"])
 _logger = logging.getLogger(__name__)
-
-_STRICTNESS_TIER_THRESHOLDS: dict[str, int] = {"strict": 15, "standard": 35, "lenient": 50}
-
-
-def _get_threshold(session: GameSession) -> int | None:
-    if session.drill_strictness_cp is not None:
-        return session.drill_strictness_cp
-    return _STRICTNESS_TIER_THRESHOLDS.get(session.drill_strictness or "standard")
-
 
 def _resolve_eval_delta(entry: AnalysisCache, is_white_to_move: bool) -> int | None:
     if entry.eval_delta is not None:
@@ -331,7 +323,7 @@ def check_drill_route(
             suggestions=[],
         )
 
-    threshold = _get_threshold(session)
+    threshold = resolve_drill_threshold(session)
     if threshold is None:
         _logger.warning(
             "Drill session %s has no resolvable threshold (drill_strictness=%r, drill_strictness_cp=%r); accuracy check skipped",

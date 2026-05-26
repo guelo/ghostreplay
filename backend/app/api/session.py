@@ -22,6 +22,7 @@ from app.session_contracts import (
     is_visible_game_session,
     normal_segment_filter,
     normal_play_started_at,
+    resolve_drill_threshold,
     segment_for_move,
 )
 from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
@@ -74,6 +75,8 @@ class SessionMovesRequest(BaseModel):
 
 class SessionMovesResponse(BaseModel):
     moves_inserted: int
+    drill_state: str | None = None
+    drill_terminal_reason: str | None = None
 
 
 class SessionAnalysisMove(BaseModel):
@@ -388,7 +391,39 @@ def _upsert_analysis_cache(
     db.commit()
 
 
-@router.post("/{session_id}/moves", response_model=SessionMovesResponse)
+def _maybe_fail_active_drill_on_accuracy(
+    db: Session,
+    session: GameSession,
+    moves: list[SessionMoveInput],
+) -> None:
+    if session.session_mode != DRILL_SESSION_MODE or session.drill_state != "active":
+        return
+
+    threshold = resolve_drill_threshold(session)
+    if threshold is None:
+        logger.warning(
+            "Drill session %s has no resolvable threshold (drill_strictness=%r, drill_strictness_cp=%r); upload accuracy check skipped",
+            session.id,
+            session.drill_strictness,
+            session.drill_strictness_cp,
+        )
+        return
+
+    for move in moves:
+        if move.color.value != session.player_color:
+            continue
+        if move.eval_delta is not None and move.eval_delta > threshold:
+            session.drill_state = "failed"
+            session.drill_terminal_reason = "accuracy"
+            db.commit()
+            return
+
+
+@router.post(
+    "/{session_id}/moves",
+    response_model=SessionMovesResponse,
+    response_model_exclude_none=True,
+)
 def upsert_session_moves(
     session_id: uuid.UUID,
     request: SessionMovesRequest,
@@ -459,6 +494,7 @@ def upsert_session_moves(
                 db.add(SessionMove(**value))
 
         db.commit()
+        _maybe_fail_active_drill_on_accuracy(db, game_session, request.moves)
         if normal_moves:
             _compute_blunder_opportunity_events(
                 db,
@@ -468,7 +504,11 @@ def upsert_session_moves(
             )
             _upsert_analysis_cache(db, normal_moves)
             _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
-        return SessionMovesResponse(moves_inserted=len(values))
+        return SessionMovesResponse(
+            moves_inserted=len(values),
+            drill_state=game_session.drill_state,
+            drill_terminal_reason=game_session.drill_terminal_reason,
+        )
 
     statement = statement.on_conflict_do_update(
         index_elements=[
@@ -494,6 +534,7 @@ def upsert_session_moves(
     )
     db.execute(statement)
     db.commit()
+    _maybe_fail_active_drill_on_accuracy(db, game_session, request.moves)
 
     if normal_moves:
         _compute_blunder_opportunity_events(
@@ -505,7 +546,11 @@ def upsert_session_moves(
         _upsert_analysis_cache(db, normal_moves)
         _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
 
-    return SessionMovesResponse(moves_inserted=len(values))
+    return SessionMovesResponse(
+        moves_inserted=len(values),
+        drill_state=game_session.drill_state,
+        drill_terminal_reason=game_session.drill_terminal_reason,
+    )
 
 
 @router.get("/{session_id}/analysis", response_model=SessionAnalysisResponse)

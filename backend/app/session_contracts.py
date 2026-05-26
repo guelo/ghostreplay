@@ -17,6 +17,11 @@ DRILL_SESSION_MODE = "drill"
 VISIBLE_DRILL_STATE = "converted"
 NORMAL_MOVE_SEGMENT = "normal"
 DRILL_MOVE_SEGMENT = "drill"
+DRILL_STRICTNESS_TIER_THRESHOLDS: dict[str, int] = {
+    "strict": 15,
+    "standard": 35,
+    "lenient": 50,
+}
 
 
 def visible_session_filter():
@@ -32,6 +37,12 @@ def normal_segment_filter():
 
 def is_visible_game_session(session: GameSession) -> bool:
     return session.session_mode == NORMAL_SESSION_MODE or session.drill_state == VISIBLE_DRILL_STATE
+
+
+def resolve_drill_threshold(session: GameSession) -> int | None:
+    if session.drill_strictness_cp is not None:
+        return session.drill_strictness_cp
+    return DRILL_STRICTNESS_TIER_THRESHOLDS.get(session.drill_strictness or "standard")
 
 
 def normal_play_started_at(session: GameSession) -> datetime:
