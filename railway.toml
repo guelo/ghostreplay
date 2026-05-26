@@ -4,7 +4,9 @@
 [build]
 builder = "nixpacks"
 # Keep the backend service build independent from the root frontend package.
-buildCommand = "true"
+# Railway's Python/Nixpacks build flattens backend/ into /app, so copy the
+# repo-root opening data into backend/ before that flattening happens.
+buildCommand = "if [ -d backend ]; then if [ ! -d public/data/openings ]; then echo \"ERROR: backend/ deploy but public/data/openings missing\" >&2; exit 1; fi; mkdir -p backend/public/data/openings && cp -R public/data/openings/. backend/public/data/openings/; fi"
 
 [deploy]
 # Run Alembic migrations before starting the server
