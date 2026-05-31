@@ -1,7 +1,7 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo } from "react";
-import type { DrillSessionState, OpeningRootItem } from "../../../utils/api";
+import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
 import OpponentAvatar from "./OpponentAvatar";
 import DrillSetupPanel from "./DrillSetupPanel";
@@ -60,10 +60,6 @@ type BoardStageProps = {
   onDrillStrictnessChange?: (cp: number) => void;
   onStartDrill?: () => void;
   isLoadingOpenings?: boolean;
-  drillState?: DrillSessionState | null;
-  isContinuingDrill?: boolean;
-  onContinueDrill?: () => void;
-  onAbandonDrill?: () => void;
 };
 
 const WarningTriangleIcon = () => (
@@ -137,10 +133,6 @@ const BoardStage = ({
   onDrillStrictnessChange,
   onStartDrill,
   isLoadingOpenings = false,
-  drillState = null,
-  isContinuingDrill = false,
-  onContinueDrill,
-  onAbandonDrill,
 }: BoardStageProps) => {
   return (
       <div className="chessboard-board-area">
@@ -370,42 +362,6 @@ const BoardStage = ({
             </div>
           )}
           {showEndedScrim && <div className="chessboard-ended-scrim" />}
-          {isGameActive && drillState === "root_reached" && (
-            <div className="chessboard-overlay">
-              <div
-                className="revert-warning-dialog"
-                role="dialog"
-                aria-labelledby="drill-root-reached-title"
-              >
-                <p
-                  id="drill-root-reached-title"
-                  className="revert-warning-dialog__title"
-                >
-                  Opening reached
-                </p>
-                <p className="revert-warning-dialog__body">
-                  Continue from this position to start the rated portion.
-                </p>
-                <div className="revert-warning-dialog__actions">
-                  <button
-                    className="chess-button primary"
-                    type="button"
-                    disabled={isContinuingDrill}
-                    onClick={onContinueDrill}
-                  >
-                    Continue
-                  </button>
-                  <button
-                    className="chess-button"
-                    type="button"
-                    onClick={onAbandonDrill}
-                  >
-                    Abandon
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
           {showFlash && <div className="blunder-flash" />}
           {pendingPromotion && !showRevertWarning && !showResignWarning && (
             <PromotionPicker

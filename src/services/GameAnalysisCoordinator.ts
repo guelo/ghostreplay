@@ -46,6 +46,12 @@ type PendingCacheLookup = {
   legalMoveCount: number | undefined
 }
 
+type AnalysisWaiter = {
+  generation: number
+  resolve: (result: AnalysisResult) => void
+  reject: (error: Error) => void
+}
+
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
 
 const toPlayerPerspective = (
@@ -131,6 +137,7 @@ export class GameAnalysisCoordinator {
 
   // Listeners for analysis resolution (used by AnalysisEffects etc.)
   private analysisResolvedListeners = new Set<(moveIndex: number, result: AnalysisResult) => void>()
+  private analysisWaiters = new Map<number, Set<AnalysisWaiter>>()
 
   get store() {
     return gameAnalysisStore
@@ -163,6 +170,15 @@ export class GameAnalysisCoordinator {
     s.setIsAnalyzing(false)
     s.setAnalyzingMove(null)
     s.setStreamingEval(null)
+  }
+
+  private rejectAnalysisWaiters(error: Error) {
+    for (const waiters of this.analysisWaiters.values()) {
+      for (const waiter of waiters) {
+        waiter.reject(error)
+      }
+    }
+    this.analysisWaiters.clear()
   }
 
   // --- Worker lifecycle ---
@@ -215,6 +231,7 @@ export class GameAnalysisCoordinator {
 
     this.activeSessionId = sessionId
     this.sessionGeneration++
+    this.rejectAnalysisWaiters(new Error('Analysis session changed'))
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
@@ -254,6 +271,7 @@ export class GameAnalysisCoordinator {
     this.finalizeOldSession()
     this.activeSessionId = null
     this.sessionGeneration++
+    this.rejectAnalysisWaiters(new Error('Analysis session cleared'))
     this.store.getState().clearAll()
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
@@ -333,6 +351,44 @@ export class GameAnalysisCoordinator {
 
     this.resetIdleTimer()
     return id
+  }
+
+  restartAnalysisWorker() {
+    this.currentAnalyzingRequestId = null
+    this.lastStreamingUpdateMs = 0
+    this.terminateWorker()
+    const s = this.store.getState()
+    s.setStatus('booting')
+    s.setError(null)
+    s.setIsAnalyzing(false)
+    s.setAnalyzingMove(null)
+    s.setStreamingEval(null)
+    this.ensureWorker()
+  }
+
+  waitForAnalysis(moveIndex: number): Promise<AnalysisResult> {
+    const existing = this.store.getState().analysisMap.get(moveIndex)
+    if (existing) {
+      return Promise.resolve(existing)
+    }
+    if (this.store.getState().status === 'error') {
+      return Promise.reject(new Error(this.store.getState().error ?? 'Analysis worker unavailable'))
+    }
+    const requestId = this.latestRequestIds.get(moveIndex)
+    if (!requestId) {
+      return Promise.reject(new Error('Analysis was not scheduled for this move'))
+    }
+    if (!this.pendingMoveIndices.has(requestId) && !this.pendingMeta.has(requestId)) {
+      return Promise.reject(new Error('Analysis is not pending for this move'))
+    }
+
+    const generation = this.sessionGeneration
+    return new Promise((resolve, reject) => {
+      const waiter: AnalysisWaiter = { generation, resolve, reject }
+      const waiters = this.analysisWaiters.get(moveIndex) ?? new Set<AnalysisWaiter>()
+      waiters.add(waiter)
+      this.analysisWaiters.set(moveIndex, waiters)
+    })
   }
 
   clearAnalysis() {
@@ -442,6 +498,7 @@ export class GameAnalysisCoordinator {
         s.setIsAnalyzing(false)
         s.setAnalyzingMove(null)
         s.setStreamingEval(null)
+        this.rejectAnalysisWaiters(new Error(message.error))
         break
       case 'log':
         console.log(`[Analyst] ${message.message}`)
@@ -455,6 +512,7 @@ export class GameAnalysisCoordinator {
     const s = this.store.getState()
     s.setStatus('error')
     s.setError(event.message)
+    this.rejectAnalysisWaiters(new Error(event.message || 'Analysis worker error'))
   }
 
   // --- Resolution ---
@@ -464,6 +522,17 @@ export class GameAnalysisCoordinator {
     if (this.resolvedIndices.has(moveIndex)) return
     this.resolvedIndices.add(moveIndex)
     this.store.getState().resolveAnalysis(moveIndex, result)
+    const waiters = this.analysisWaiters.get(moveIndex)
+    if (waiters) {
+      this.analysisWaiters.delete(moveIndex)
+      for (const waiter of waiters) {
+        if (waiter.generation === this.sessionGeneration) {
+          waiter.resolve(result)
+        } else {
+          waiter.reject(new Error('Analysis session changed'))
+        }
+      }
+    }
 
     // Mark dirty for incremental upload
     if (
@@ -602,20 +671,7 @@ export class GameAnalysisCoordinator {
     state.uploadInFlight = true
 
     uploadSessionMoves(state.sessionId, payload)
-      .then((response) => {
-        if (response.drill_state === 'failed') {
-          const gameStore = useGameStore.getState()
-          if (
-            gameStore.sessionId === state.sessionId &&
-            gameStore.drillState === 'active'
-          ) {
-            if (response.drill_terminal_reason === null || response.drill_terminal_reason === undefined) {
-              console.warn('[Coordinator] Drill upload reported failed without terminal reason')
-            }
-            gameStore.setDrillState('failed')
-            gameStore.setDrillTerminalReason(response.drill_terminal_reason ?? null)
-          }
-        }
+      .then(() => {
         for (const idx of indicesToUpload) {
           state.uploadedIndices.add(idx)
         }

@@ -201,7 +201,7 @@ describe('GameAnalysisCoordinator', () => {
   })
 
   describe('drill upload response handling', () => {
-    it('marks the active drill failed when upload response reports accuracy failure', async () => {
+    it('does not mutate drill state from upload response failure metadata', async () => {
       coordinator.startSession('session-drill')
       useGameStore.setState({
         sessionId: 'session-drill',
@@ -233,8 +233,61 @@ describe('GameAnalysisCoordinator', () => {
       vi.advanceTimersByTime(3000)
       await vi.advanceTimersByTimeAsync(0)
 
-      expect(useGameStore.getState().drillState).toBe('failed')
-      expect(useGameStore.getState().drillTerminalReason).toBe('accuracy')
+      expect(useGameStore.getState().drillState).toBe('active')
+      expect(useGameStore.getState().drillTerminalReason).toBeNull()
+    })
+  })
+
+  describe('waitForAnalysis', () => {
+    it('resolves immediately from cached analysis', async () => {
+      coordinator.startSession('session-wait')
+      coordinator.store.getState().resolveAnalysis(0, {
+        id: 'cached',
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 10,
+        playedEval: 10,
+        currentPositionEval: 10,
+        moveIndex: 0,
+        delta: 0,
+        classification: 'best',
+        blunder: false,
+        recordable: false,
+      })
+
+      await expect(coordinator.waitForAnalysis(0)).resolves.toMatchObject({ id: 'cached' })
+    })
+
+    it('resolves when the pending worker result arrives', async () => {
+      coordinator.startSession('session-wait')
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const pending = coordinator.waitForAnalysis(0)
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'e2e4',
+          bestMove: 'e2e4',
+          bestEval: 20,
+          playedEval: 20,
+          delta: 0,
+          classification: 'best',
+        },
+      })
+
+      await expect(pending).resolves.toMatchObject({ id: requestId, move: 'e2e4' })
+    })
+
+    it('rejects when analysis is unavailable or the session changes', async () => {
+      coordinator.startSession('session-wait')
+      await expect(coordinator.waitForAnalysis(4)).rejects.toThrow(/not scheduled/i)
+
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const pending = coordinator.waitForAnalysis(0)
+      coordinator.startSession('session-next')
+
+      await expect(pending).rejects.toThrow(/session changed/i)
     })
   })
 
@@ -258,6 +311,23 @@ describe('GameAnalysisCoordinator', () => {
 
       // Status should no longer be 'error'
       expect(coordinator.store.getState().status).not.toBe('error')
+      expect(coordinator.store.getState().error).toBeNull()
+    })
+  })
+
+  describe('restartAnalysisWorker', () => {
+    it('clears worker error state so analysis can be scheduled again', () => {
+      coordinator.startSession('session-A')
+      coordinator.store.getState().setStatus('error')
+      coordinator.store.getState().setError('WASM init failed')
+
+      expect(coordinator.analyzeMove('fen', 'e2e4', 'white', 0)).toBeUndefined()
+
+      coordinator.restartAnalysisWorker()
+      const id = coordinator.analyzeMove('fen', 'e2e4', 'white', 0)
+
+      expect(id).toBeTruthy()
+      expect(coordinator.store.getState().status).toBe('booting')
       expect(coordinator.store.getState().error).toBeNull()
     })
   })

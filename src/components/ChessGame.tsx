@@ -12,7 +12,7 @@ import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useGameStore } from "../stores/useGameStore";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel";
 import type { OpeningRootItem } from "../utils/api";
-import { checkDrillRoute, getOpeningRoots } from "../utils/api";
+import { checkDrillRoute, failDrill, getOpeningRoots } from "../utils/api";
 import {
   gameAnalysisStore,
   AnalysisStoreProvider,
@@ -60,12 +60,28 @@ import {
   ConnectedMoveList,
 } from "./chess-game/AnalysisConnectors";
 import AnalysisEffects from "./chess-game/AnalysisEffects";
+import type { AnalysisResult } from "../hooks/useMoveAnalysis";
 
 type ChessGameProps = {
   onOpenHistory?: (options: OpenHistoryOptions) => void;
 };
 
 const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
+
+const STRICTNESS_TIER_THRESHOLDS = {
+  strict: 15,
+  standard: 35,
+  lenient: 50,
+} as const;
+
+const resolveStrictnessCp = (
+  strictnessCp: number | null,
+  strictness: "strict" | "standard" | "lenient" | null,
+) => strictnessCp ?? STRICTNESS_TIER_THRESHOLDS[strictness ?? "standard"];
+
+type DrillRecovery =
+  | { kind: "analysis"; result: Extract<PlayerMoveApplyResult, { applied: true }> }
+  | { kind: "opponent"; fen: string; uciHistory: string[] };
 
 const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Reconstruct Chess from store state so it stays in sync after remounts.
@@ -201,15 +217,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const location = useLocation();
   const navigate = useNavigate();
   const [isDrillMode, setIsDrillMode] = useState(false);
-  const [isContinuingDrill, setIsContinuingDrill] = useState(false);
+  const [, setIsContinuingDrill] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
   const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
   const [openingFamilies, setOpeningFamilies] = useState<Array<{ family_name: string; roots: OpeningRootItem[] }> | null>(null);
   const [isLoadingOpenings, setIsLoadingOpenings] = useState(false);
+  const [drillRecovery, setDrillRecovery] = useState<DrillRecovery | null>(null);
   const pendingDrillSetupRef = useRef<{ openingKey: string; playerColor: string } | null>(null);
   const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
   const drillState = useGameStore((s) => s.drillState);
-  const isRootReachedDrill = drillOpeningKey !== null && drillState === "root_reached";
   const isStoppedDrill = drillOpeningKey !== null && drillState === "failed";
   const drillTerminalReason = useGameStore((s) => s.drillTerminalReason);
   // -------------------------------------------------------------------
@@ -491,9 +507,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     shouldUseLocalFallback: () => {
       const store = useGameStore.getState();
-      return !(store.drillOpeningKey && store.drillState === "active");
+      return !(store.drillOpeningKey && (store.drillState === "active" || store.drillState === "root_reached"));
     },
     onBackendFailure: async () => {
+      const store = useGameStore.getState();
+      if (store.drillOpeningKey && store.drillState === "root_reached") {
+        setDrillRecovery({
+          kind: "opponent",
+          fen: chess.fen(),
+          uciHistory: store.moveHistory.map((move) => move.uci),
+        });
+        setEngineMessage("Opponent move is unavailable. Try again or abandon the drill.");
+        return;
+      }
       setEngineMessage("Drill steering is unavailable. Try again or abandon the drill.");
     },
   });
@@ -512,6 +538,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           played_uci: result.moveUci,
         });
         if (route.status === "failed") {
+          setDrillRecovery(null);
           const reason = route.failure?.reason ?? null;
           useGameStore.getState().setDrillState("failed");
           useGameStore.getState().setDrillTerminalReason(reason);
@@ -531,11 +558,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         }
         if (route.status === "root_reached") {
           setDrillFailInfo(null);
+          setDrillRecovery(null);
           useGameStore.getState().setDrillState("root_reached");
-          setEngineMessage("Opening root reached. Continue when ready.");
-          return false;
+          setEngineMessage("Opening root reached. Drill is live.");
+          return true;
         }
         setDrillFailInfo(null);
+        setDrillRecovery(null);
         return true;
       } catch (error) {
         const message =
@@ -546,46 +575,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     [setEngineMessage, setViewIndex],
   );
-
-  useEffect(() => {
-    return coordinator.addAnalysisResolvedListener((moveIndex, result) => {
-      const store = useGameStore.getState();
-      if (
-        !store.sessionId ||
-        !store.drillOpeningKey ||
-        store.drillState !== "active" ||
-        isRevertPendingRef.current ||
-        typeof store.drillStrictnessCp !== "number" ||
-        result.delta === null ||
-        result.delta <= store.drillStrictnessCp
-      ) {
-        return;
-      }
-
-      const isPlayerMove =
-        store.playerColor === "white" ? moveIndex % 2 === 0 : moveIndex % 2 === 1;
-      if (!isPlayerMove) {
-        return;
-      }
-
-      const move = store.moveHistory[moveIndex];
-      if (!move || move.uci !== result.move) {
-        return;
-      }
-      const correctionFen =
-        moveIndex === 0 ? STARTING_FEN : store.moveHistory[moveIndex - 1]?.fen;
-      store.setDrillState("failed");
-      store.setDrillTerminalReason("accuracy");
-      setDrillFailInfo({
-        playedMoveUci: move.uci,
-        suggestionUcis: result.bestMove ? [result.bestMove] : [],
-        correctionFen: correctionFen ?? STARTING_FEN,
-        moveIndex,
-      });
-      setEngineMessage("That move exceeds the allowed centipawn loss.");
-      setViewIndex(moveIndex - 1);
-    });
-  }, [coordinator, setEngineMessage, setViewIndex]);
 
   const {
     handleGameEnd,
@@ -644,12 +633,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isContinuingDrillRef.current = true;
     setIsContinuingDrill(true);
     try {
-      setDrillFailInfo(null);
-      useGameStore.getState().setViewIndex(null);
       const contract = await convertRootReachedDrill();
       if (!contract || contract.drill_state !== "converted") {
         return;
       }
+      setDrillFailInfo(null);
+      setDrillRecovery(null);
+      useGameStore.getState().setViewIndex(null);
 
       const store = useGameStore.getState();
       if (
@@ -868,6 +858,125 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [openingFamilies]);
   // -------------------------------------------------------------------
 
+  const isPostRootMoveStillCurrent = useCallback(
+    (
+      capturedSessionId: string,
+      result: Extract<PlayerMoveApplyResult, { applied: true }>,
+    ) => {
+      const store = useGameStore.getState();
+      return (
+        store.sessionId === capturedSessionId &&
+        store.moveHistory[result.moveIndex]?.uci === result.moveUci &&
+        store.drillState === "root_reached" &&
+        !isRevertPendingRef.current
+      );
+    },
+    [],
+  );
+
+  const stopPostRootDrillForAccuracy = useCallback(
+    async (
+      sessionId: string,
+      result: Extract<PlayerMoveApplyResult, { applied: true }>,
+      analysis: AnalysisResult,
+    ) => {
+      await failDrill(sessionId, "accuracy");
+      if (!isPostRootMoveStillCurrent(sessionId, result)) {
+        return;
+      }
+      const store = useGameStore.getState();
+      store.setDrillState("failed");
+      store.setDrillTerminalReason("accuracy");
+      setDrillFailInfo({
+        playedMoveUci: result.moveUci,
+        suggestionUcis: analysis.bestMove ? [analysis.bestMove] : [],
+        correctionFen: result.fenBefore,
+        moveIndex: result.moveIndex,
+      });
+      setEngineMessage("That move exceeds the allowed centipawn loss.");
+      setViewIndex(result.moveIndex - 1);
+      setDrillRecovery(null);
+    },
+    [isPostRootMoveStillCurrent, setEngineMessage, setViewIndex],
+  );
+
+  const continueAfterPlayerMove = useCallback(
+    async (result: Extract<PlayerMoveApplyResult, { applied: true }>) => {
+      const captured = useGameStore.getState();
+      const capturedSessionId = captured.sessionId;
+      const capturedDrillState = captured.drillState;
+
+      if (!capturedSessionId) {
+        if (result.gameOver) {
+          await handleGameEnd();
+        } else if (!isRevertPendingRef.current) {
+          await applyOpponentMove(result.fenAfter, result.uciHistory);
+        }
+        return;
+      }
+
+      if (captured.drillOpeningKey && capturedDrillState === "root_reached") {
+        let analysis: AnalysisResult;
+        try {
+          analysis = await coordinator.waitForAnalysis(result.moveIndex);
+        } catch (error) {
+          if (!isPostRootMoveStillCurrent(capturedSessionId, result)) {
+            return;
+          }
+          setDrillRecovery({ kind: "analysis", result });
+          const message =
+            error instanceof Error ? error.message : "Move analysis is unavailable.";
+          setEngineMessage(`${message}. Try again or abandon the drill.`);
+          return;
+        }
+
+        if (!isPostRootMoveStillCurrent(capturedSessionId, result)) {
+          return;
+        }
+
+        const threshold = resolveStrictnessCp(
+          useGameStore.getState().drillStrictnessCp,
+          useGameStore.getState().drillStrictness,
+        );
+        if (analysis.delta !== null && analysis.delta > threshold) {
+          try {
+            await stopPostRootDrillForAccuracy(capturedSessionId, result, analysis);
+          } catch (error) {
+            if (!isPostRootMoveStillCurrent(capturedSessionId, result)) {
+              return;
+            }
+            setDrillRecovery({ kind: "analysis", result });
+            const message =
+              error instanceof Error ? error.message : "Failed to record drill failure.";
+            setEngineMessage(`${message}. Try again or abandon the drill.`);
+          }
+          return;
+        }
+      } else if (captured.drillOpeningKey && capturedDrillState === "active") {
+        const canContinue = await checkPostPlayerDrillRoute(result);
+        if (!canContinue) {
+          return;
+        }
+      }
+
+      if (result.gameOver) {
+        await handleGameEnd();
+      } else if (!isRevertPendingRef.current) {
+        setDrillRecovery(null);
+        await applyOpponentMove(result.fenAfter, result.uciHistory);
+      }
+    },
+    [
+      applyOpponentMove,
+      checkPostPlayerDrillRoute,
+      coordinator,
+      handleGameEnd,
+      isPostRootMoveStillCurrent,
+      stopPostRootDrillForAccuracy,
+      setEngineMessage,
+    ],
+  );
+
   const applyPlayerMoveAndAdvance = useCallback(
     (sourceSquare: string, targetSquare: string, promotion?: string): boolean => {
       const result = applyPlayerMove(sourceSquare, targetSquare, promotion);
@@ -879,19 +988,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return false;
       }
 
-      if (result.gameOver) {
-        void handleGameEnd();
-      } else if (!isRevertPending) {
-        void (async () => {
-          if (await checkPostPlayerDrillRoute(result)) {
-            await applyOpponentMove(result.fenAfter, result.uciHistory);
-          }
-        })();
+      if (!isRevertPending) {
+        void continueAfterPlayerMove(result);
       }
 
       return true;
     },
-    [applyOpponentMove, applyPlayerMove, checkPostPlayerDrillRoute, handleGameEnd, isRevertPending],
+    [applyPlayerMove, continueAfterPlayerMove, isRevertPending],
   );
 
   // Clear move messages when a new game starts
@@ -923,7 +1026,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return; // picker is open, ignore board clicks (backdrop handles cancel)
       }
 
-      if (isRevertPending || isBlunderBoardOverrideActive || isRootReachedDrill) {
+      if (isRevertPending || isBlunderBoardOverrideActive) {
         clearMoveHighlights();
         return;
       }
@@ -964,7 +1067,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       chess,
       isGameActive,
       isBlunderBoardOverrideActive,
-      isRootReachedDrill,
       isRevertPending,
       isViewingLive,
       pendingPromotion,
@@ -1156,19 +1258,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return false; // piece snaps back in both cases
       }
 
-      if (result.gameOver) {
-        void handleGameEnd();
-      } else if (!isRevertPending) {
-        void (async () => {
-          if (await checkPostPlayerDrillRoute(result)) {
-            await applyOpponentMove(result.fenAfter, result.uciHistory);
-          }
-        })();
+      if (!isRevertPending) {
+        void continueAfterPlayerMove(result);
       }
 
       return true;
     },
-    [applyOpponentMove, checkPostPlayerDrillRoute, handleDrop, handleGameEnd, isBlunderBoardOverrideActive, isRevertPending],
+    [continueAfterPlayerMove, handleDrop, isBlunderBoardOverrideActive, isRevertPending],
   );
 
   const handlePromotionPick = useCallback(
@@ -1334,7 +1430,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const canRetryDrillSteering =
     Boolean(engineMessage) &&
     drillOpeningKey !== null &&
-    drillState === "active" &&
+    (drillState === "active" || (drillState === "root_reached" && drillRecovery !== null)) &&
     isGameActive &&
     !isPlayersTurn &&
     !isRevertPending &&
@@ -1342,17 +1438,36 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const handleRetryDrillSteering = useCallback(() => {
     if (!canRetryDrillSteering) return;
     setEngineMessage(null);
+    if (drillRecovery?.kind === "analysis") {
+      const result = drillRecovery.result;
+      coordinator.restartAnalysisWorker();
+      coordinator.analyzeMove(result.fenBefore, result.moveUci, playerColor, result.moveIndex);
+      void continueAfterPlayerMove(result);
+      return;
+    }
+    if (drillRecovery?.kind === "opponent") {
+      void applyOpponentMove(drillRecovery.fen, drillRecovery.uciHistory);
+      return;
+    }
     void applyOpponentMove(
       chess.fen(),
       useGameStore.getState().moveHistory.map((m) => m.uci),
     );
-  }, [applyOpponentMove, canRetryDrillSteering, chess, setEngineMessage]);
+  }, [
+    applyOpponentMove,
+    canRetryDrillSteering,
+    chess,
+    continueAfterPlayerMove,
+    coordinator,
+    drillRecovery,
+    playerColor,
+    setEngineMessage,
+  ]);
 
   const allowDragging =
     isGameActive &&
     engineStatus === "ready" &&
     isPlayersTurn &&
-    !isRootReachedDrill &&
     !isRevertPending &&
     !isThinking &&
     isViewingLive &&
@@ -1452,10 +1567,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onDrillStrictnessChange={setDrillStrictnessCp}
                 onStartDrill={handleStartDrill}
                 isLoadingOpenings={isLoadingOpenings}
-                drillState={drillState}
-                isContinuingDrill={isContinuingDrill}
-                onContinueDrill={handleContinueDrill}
-                onAbandonDrill={handleResignClick}
               />
             </div>
           </div>

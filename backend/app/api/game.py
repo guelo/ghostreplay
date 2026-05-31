@@ -739,13 +739,17 @@ def get_next_opponent_move(
 
     if session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
+    is_active_drill = (
+        session.session_mode == DRILL_SESSION_MODE
+        and session.drill_state in {"active", "root_reached"}
+    )
     is_active_preroot_drill = (
         session.session_mode == DRILL_SESSION_MODE and session.drill_state == "active"
     )
     if (
         session.session_mode == DRILL_SESSION_MODE
         and session.drill_state != VISIBLE_DRILL_STATE
-        and not is_active_preroot_drill
+        and not is_active_drill
     ):
         raise HTTPException(status_code=400, detail="Opponent moves are unavailable for this drill state")
 

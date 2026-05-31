@@ -435,12 +435,61 @@ def test_continue_drill_rejects_active_only(client, auth_headers):
     assert active.json()["detail"] == "Drill must be at root or stopped before continuing"
 
 
-def test_continue_drill_accepts_failed(client, auth_headers, db_session):
+def test_fail_drill_accepts_accuracy_only_from_root_reached(client, auth_headers, db_session):
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+
+    response = client.post(
+        f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "accuracy"},
+        headers=auth_headers(),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["drill_state"] == "failed"
+    assert data["terminal_reason"] == "accuracy"
+
+    db_session.refresh(session)
+    assert session.drill_state == "failed"
+    assert session.drill_terminal_reason == "accuracy"
+
+
+def test_fail_drill_rejects_active_and_non_accuracy_reason(client, auth_headers, db_session):
     start = _start_drill(client, auth_headers)
     session_id = start.json()["session_id"]
 
+    active = client.post(
+        f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "accuracy"},
+        headers=auth_headers(),
+    )
+    assert active.status_code == 400
+
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+    bad_reason = client.post(
+        f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "off_route"},
+        headers=auth_headers(),
+    )
+    assert bad_reason.status_code == 422
+
+
+def test_continue_drill_accepts_failed(client, auth_headers, db_session):
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+
     failed = client.post(
         f"/api/drills/{session_id}/fail",
+        json={"terminal_reason": "accuracy"},
         headers=auth_headers(),
     )
     assert failed.status_code == 200
@@ -662,7 +711,7 @@ def test_start_drill_null_strictness_cp_persists(client, auth_headers, db_sessio
     assert session.drill_strictness_cp is None
 
 
-def test_route_check_accuracy_failure(client, auth_headers, db_session):
+def test_route_check_ignores_accuracy_before_root(client, auth_headers, db_session):
     graph = _steering_graph()
     _seed_cache(db_session, START_FEN, "e2e4", eval_delta=30)
 
@@ -682,18 +731,15 @@ def test_route_check_accuracy_failure(client, auth_headers, db_session):
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "failed"
-    assert data["failure"]["reason"] == "accuracy"
-    assert data["failure"]["played_move_uci"] == "e2e4"
-    assert data["failure"]["played_move_san"] == "e4"
-    assert data["failure"]["correction_fen"] == START_FEN
+    assert data["status"] == "on_route"
+    assert data["failure"] is None
 
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.drill_state == "failed"
-    assert session.drill_terminal_reason == "accuracy"
+    assert session.drill_state == "active"
+    assert session.drill_terminal_reason is None
 
 
-def test_session_move_upload_accuracy_failure_stops_active_drill(client, auth_headers, db_session):
+def test_session_move_upload_does_not_stop_active_drill_for_accuracy(client, auth_headers, db_session):
     start = _start_drill_cp(client, auth_headers, strictness_cp=15, root_fen=E4_E5_FEN)
     assert start.status_code == 201
     session_id = start.json()["session_id"]
@@ -727,12 +773,12 @@ def test_session_move_upload_accuracy_failure_stops_active_drill(client, auth_he
     assert response.status_code == 200
     data = response.json()
     assert data["moves_inserted"] == 1
-    assert data["drill_state"] == "failed"
-    assert data["drill_terminal_reason"] == "accuracy"
+    assert data["drill_state"] == "active"
+    assert data.get("drill_terminal_reason") is None
 
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.drill_state == "failed"
-    assert session.drill_terminal_reason == "accuracy"
+    assert session.drill_state == "active"
+    assert session.drill_terminal_reason is None
 
 
 def test_session_move_upload_ignores_opponent_accuracy_for_active_drill(client, auth_headers, db_session):
@@ -777,7 +823,7 @@ def test_session_move_upload_ignores_opponent_accuracy_for_active_drill(client, 
 
 
 def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, db_session):
-    # Target-reaching move that also exceeds threshold should fail with reason=accuracy
+    # Target-reaching pre-root moves start the drill even when cached eval is over threshold.
     graph = _steering_graph()
     _seed_cache(db_session, START_FEN, "e2e4", eval_delta=20)
 
@@ -795,10 +841,10 @@ def test_route_check_accuracy_failure_before_root_reached(client, auth_headers, 
         )
 
     data = response.json()
-    assert data["status"] == "failed"
-    assert data["failure"]["reason"] == "accuracy"
+    assert data["status"] == "root_reached"
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
-    assert session.drill_terminal_reason == "accuracy"
+    assert session.drill_state == "root_reached"
+    assert session.drill_terminal_reason is None
 
 
 def test_route_check_cache_miss_best_effort_pass(client, auth_headers, db_session):
@@ -822,8 +868,9 @@ def test_route_check_cache_miss_best_effort_pass(client, auth_headers, db_sessio
     assert data["status"] == "on_route"
 
 
-def test_route_check_tier_fallback_strict(client, auth_headers, db_session):
-    # Without strictness_cp, strict tier threshold = 15
+def test_route_check_tier_fallback_strict_does_not_fail_preroot(client, auth_headers, db_session):
+    # Without strictness_cp, strict tier threshold would be 15, but pre-root
+    # accuracy is no longer a terminal route-check condition.
     graph = _steering_graph()
     _seed_cache(db_session, START_FEN, "e2e4", eval_delta=20)
 
@@ -852,13 +899,13 @@ def test_route_check_tier_fallback_strict(client, auth_headers, db_session):
         )
 
     data = response.json()
-    # eval_delta=20 > strict threshold=15 → accuracy failure
-    assert data["status"] == "failed"
-    assert data["failure"]["reason"] == "accuracy"
+    assert data["status"] == "on_route"
+    assert data["failure"] is None
 
 
-def test_route_check_onthefly_eval_both_evals_present(client, auth_headers, db_session):
-    # eval_delta=None, played_eval=100, best_eval=130 (white to move → delta=30)
+def test_route_check_onthefly_eval_both_evals_present_does_not_fail_preroot(client, auth_headers, db_session):
+    # eval_delta=None, played_eval=100, best_eval=130 (white to move -> delta=30),
+    # but route-check no longer performs accuracy failure before the root.
     graph = _steering_graph()
     _seed_cache(db_session, START_FEN, "e2e4", eval_delta=None, played_eval=100, best_eval=130)
 
@@ -876,9 +923,8 @@ def test_route_check_onthefly_eval_both_evals_present(client, auth_headers, db_s
         )
 
     data = response.json()
-    # on-the-fly delta=30 > threshold=20 → failure
-    assert data["status"] == "failed"
-    assert data["failure"]["reason"] == "accuracy"
+    assert data["status"] == "on_route"
+    assert data["failure"] is None
 
 
 def test_route_check_onthefly_eval_null_fallthrough_both_null(client, auth_headers, db_session):
@@ -974,7 +1020,7 @@ def test_route_check_suggestion_filtering_all_exceed_returns_unfiltered(client, 
     assert suggestion_ucis == ["e2e4"]
 
 
-def test_route_check_accuracy_failure_populates_all_failure_fields(client, auth_headers, db_session):
+def test_route_check_preroot_accuracy_does_not_populate_failure(client, auth_headers, db_session):
     graph = _steering_graph()
     _seed_cache(db_session, START_FEN, "e2e4", eval_delta=30)
 
@@ -992,11 +1038,8 @@ def test_route_check_accuracy_failure_populates_all_failure_fields(client, auth_
         )
 
     data = response.json()
-    failure = data["failure"]
-    assert failure["played_move_uci"] is not None
-    assert failure["played_move_san"] is not None
-    assert failure["correction_fen"] is not None
-    assert failure["reason"] == "accuracy"
+    assert data["status"] == "on_route"
+    assert data["failure"] is None
 
 
 def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers, db_session):

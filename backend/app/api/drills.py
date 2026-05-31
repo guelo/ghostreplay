@@ -4,8 +4,6 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-import logging
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -18,59 +16,18 @@ from app.drill_steering import (
     route_preserving_moves,
     safe_san_for_uci,
 )
-from app.fen import active_color, normalize_fen
-from app.models import AnalysisCache, GameSession
+from app.fen import normalize_fen
+from app.models import GameSession
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
     resegment_session_moves,
-    resolve_drill_threshold,
     utcnow,
 )
 
 router = APIRouter(prefix="/api/drills", tags=["drills"])
-_logger = logging.getLogger(__name__)
-
-def _resolve_eval_delta(entry: AnalysisCache, is_white_to_move: bool) -> int | None:
-    if entry.eval_delta is not None:
-        return entry.eval_delta
-    if entry.played_eval is not None and entry.best_eval is not None:
-        if is_white_to_move:
-            return max(entry.best_eval - entry.played_eval, 0)
-        return max(entry.played_eval - entry.best_eval, 0)
-    return None
-
-
-def _filter_suggestions(
-    db: Session,
-    suggestions: list[DrillRouteMove],
-    previous_fen: str,
-    threshold: int,
-) -> list[DrillRouteMove]:
-    if not suggestions:
-        return suggestions
-    candidate_ucis = [m.uci for m in suggestions]
-    cache_entries = (
-        db.query(AnalysisCache)
-        .filter(
-            AnalysisCache.fen_before == previous_fen,
-            AnalysisCache.move_uci.in_(candidate_ucis),
-        )
-        .all()
-    )
-    is_white = active_color(previous_fen) == "white"
-    delta_by_uci: dict[str, int] = {}
-    for entry in cache_entries:
-        delta = _resolve_eval_delta(entry, is_white)
-        if delta is not None:
-            delta_by_uci[entry.move_uci] = delta
-    # Cache-miss defaults to delta=0 (pass). Matches played-move policy: opening book
-    # positions are expected to be pre-analyzed, so unanalyzed suggestions are rare and
-    # silently passing is safer than hiding a valid green arrow.
-    filtered = [m for m in suggestions if delta_by_uci.get(m.uci, 0) <= threshold]
-    return filtered if filtered else suggestions
 
 
 class PlayerColor(str, Enum):
@@ -94,6 +51,10 @@ class DrillStartRequest(BaseModel):
 
 class DrillContinueRequest(BaseModel):
     current_ply: int = Field(..., ge=0)
+
+
+class DrillFailRequest(BaseModel):
+    terminal_reason: str
 
 
 class DrillRouteCheckRequest(BaseModel):
@@ -239,6 +200,7 @@ def get_drill(
 @router.post("/{session_id}/fail", response_model=DrillSessionContract)
 def fail_drill(
     session_id: uuid.UUID,
+    request: DrillFailRequest,
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
@@ -246,9 +208,12 @@ def fail_drill(
     _ensure_owner(session, user)
     if session.session_mode != DRILL_SESSION_MODE:
         raise HTTPException(status_code=400, detail="Session is not a drill")
-    if session.status != "active" or session.drill_state != "active":
+    if request.terminal_reason != "accuracy":
+        raise HTTPException(status_code=422, detail="terminal_reason must be accuracy")
+    if session.status != "active" or session.drill_state != "root_reached":
         raise HTTPException(status_code=400, detail="Drill cannot be failed from its current state")
     session.drill_state = "failed"
+    session.drill_terminal_reason = "accuracy"
     db.commit()
     db.refresh(session)
     return _contract(session)
@@ -323,47 +288,6 @@ def check_drill_route(
             suggestions=[],
         )
 
-    threshold = resolve_drill_threshold(session)
-    if threshold is None:
-        _logger.warning(
-            "Drill session %s has no resolvable threshold (drill_strictness=%r, drill_strictness_cp=%r); accuracy check skipped",
-            session.id,
-            session.drill_strictness,
-            session.drill_strictness_cp,
-        )
-
-    # Accuracy check before route check
-    if previous_fen is not None and request.played_uci is not None and threshold is not None:
-        is_white = active_color(previous_fen) == "white"
-        cache_entry = (
-            db.query(AnalysisCache)
-            .filter(
-                AnalysisCache.fen_before == previous_fen,
-                AnalysisCache.move_uci == request.played_uci,
-            )
-            .first()
-        )
-        if cache_entry is not None:
-            eval_delta = _resolve_eval_delta(cache_entry, is_white)
-            if eval_delta is not None and eval_delta > threshold:
-                suggestions_raw = route_preserving_moves(graph, route_map, previous_fen)
-                suggestions_filtered = _filter_suggestions(db, suggestions_raw, previous_fen, threshold)
-                session.drill_state = "failed"
-                session.drill_terminal_reason = "accuracy"
-                db.commit()
-                return DrillRouteCheckResponse(
-                    status="failed",
-                    current_fen=current_fen,
-                    target_fen=route_map.target_fen,
-                    suggestions=[_suggestion(m) for m in suggestions_filtered],
-                    failure=DrillRouteFailure(
-                        reason="accuracy",
-                        played_move_uci=request.played_uci,
-                        played_move_san=safe_san_for_uci(previous_fen, request.played_uci),
-                        correction_fen=previous_fen,
-                    ),
-                )
-
     if route_map.is_target(current_fen):
         session.drill_state = "root_reached"
         db.commit()
@@ -392,12 +316,7 @@ def check_drill_route(
         )
 
     played_move = route_move_for_uci(graph, route_map, previous_fen, request.played_uci)
-    suggestions_raw = route_preserving_moves(graph, route_map, previous_fen)
-    suggestions_filtered = (
-        _filter_suggestions(db, suggestions_raw, previous_fen, threshold)
-        if threshold is not None
-        else suggestions_raw
-    )
+    suggestions = route_preserving_moves(graph, route_map, previous_fen)
     session.drill_state = "failed"
     session.drill_terminal_reason = "off_route"
     db.commit()
@@ -407,7 +326,7 @@ def check_drill_route(
         status="failed",
         current_fen=current_fen,
         target_fen=route_map.target_fen,
-        suggestions=[_suggestion(move) for move in suggestions_filtered],
+        suggestions=[_suggestion(move) for move in suggestions],
         failure=DrillRouteFailure(
             reason="off_route",
             played_move_uci=request.played_uci,

@@ -491,12 +491,19 @@ export const continueDrill = async (
 }
 
 /**
- * Mark drill as failed (user deviated from accepted lines).
+ * Mark a post-root drill as failed after an accuracy mistake.
  */
-export const failDrill = async (sessionId: string): Promise<DrillSessionContract> => {
+export const failDrill = async (
+  sessionId: string,
+  terminalReason: 'accuracy' = 'accuracy',
+): Promise<DrillSessionContract> => {
   return requestJson<DrillSessionContract>(
     `${API_BASE_URL}/api/drills/${sessionId}/fail`,
-    { method: 'POST', headers: getAuthHeaders() },
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ terminal_reason: terminalReason }),
+    },
     { fallbackMessage: 'Failed to record drill failure' },
   )
 }

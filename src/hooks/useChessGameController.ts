@@ -395,7 +395,7 @@ export const useChessGameController = ({
 
         if (drillRoute?.status === "root_reached") {
           useGameStore.getState().setDrillState("root_reached");
-          setEngineMessage("Opening root reached. Continue when ready.");
+          setEngineMessage("Opening root reached. Drill is live.");
         } else if (chess.isGameOver()) {
           await handleGameEnd();
         }

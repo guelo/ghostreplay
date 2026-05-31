@@ -22,7 +22,6 @@ from app.session_contracts import (
     is_visible_game_session,
     normal_segment_filter,
     normal_play_started_at,
-    resolve_drill_threshold,
     segment_for_move,
 )
 from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
@@ -390,35 +389,6 @@ def _upsert_analysis_cache(
     db.execute(stmt)
     db.commit()
 
-
-def _maybe_fail_active_drill_on_accuracy(
-    db: Session,
-    session: GameSession,
-    moves: list[SessionMoveInput],
-) -> None:
-    if session.session_mode != DRILL_SESSION_MODE or session.drill_state != "active":
-        return
-
-    threshold = resolve_drill_threshold(session)
-    if threshold is None:
-        logger.warning(
-            "Drill session %s has no resolvable threshold (drill_strictness=%r, drill_strictness_cp=%r); upload accuracy check skipped",
-            session.id,
-            session.drill_strictness,
-            session.drill_strictness_cp,
-        )
-        return
-
-    for move in moves:
-        if move.color.value != session.player_color:
-            continue
-        if move.eval_delta is not None and move.eval_delta > threshold:
-            session.drill_state = "failed"
-            session.drill_terminal_reason = "accuracy"
-            db.commit()
-            return
-
-
 @router.post(
     "/{session_id}/moves",
     response_model=SessionMovesResponse,
@@ -494,7 +464,6 @@ def upsert_session_moves(
                 db.add(SessionMove(**value))
 
         db.commit()
-        _maybe_fail_active_drill_on_accuracy(db, game_session, request.moves)
         if normal_moves:
             _compute_blunder_opportunity_events(
                 db,
@@ -534,7 +503,6 @@ def upsert_session_moves(
     )
     db.execute(statement)
     db.commit()
-    _maybe_fail_active_drill_on_accuracy(db, game_session, request.moves)
 
     if normal_moves:
         _compute_blunder_opportunity_events(

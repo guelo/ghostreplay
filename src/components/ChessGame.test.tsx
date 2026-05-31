@@ -11,6 +11,7 @@ const endGameMock = vi.fn();
 const uploadSessionMovesMock = vi.fn();
 const getNextOpponentMoveMock = vi.fn();
 const continueDrillMock = vi.fn();
+const failDrillMock = vi.fn();
 const checkDrillRouteMock = vi.fn();
 const startDrillMock = vi.fn();
 const getOpeningRootsMock = vi.fn();
@@ -28,6 +29,7 @@ vi.mock("../utils/api", () => ({
   uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
   getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
   continueDrill: (...args: unknown[]) => continueDrillMock(...args),
+  failDrill: (...args: unknown[]) => failDrillMock(...args),
   checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
   startDrill: (...args: unknown[]) => startDrillMock(...args),
   getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
@@ -70,6 +72,13 @@ let capturedAnalysisResolvedListener:
 
 const mockCoordinator = {
   analyzeMove: mockAnalyzeMove,
+  waitForAnalysis: vi.fn((moveIndex: number) => {
+    const analysis = gameAnalysisStore.getState().analysisMap.get(moveIndex);
+    return analysis
+      ? Promise.resolve(analysis)
+      : Promise.reject(new Error("Analysis was not scheduled for this move"));
+  }),
+  restartAnalysisWorker: vi.fn(),
   clearAnalysis: vi.fn(),
   startSession: vi.fn(),
   clearSession: vi.fn(),
@@ -151,7 +160,16 @@ describe("ChessGame start flow", () => {
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
     continueDrillMock.mockReset();
+    failDrillMock.mockReset();
     checkDrillRouteMock.mockReset();
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.restartAnalysisWorker.mockReset();
+    mockCoordinator.waitForAnalysis.mockImplementation((moveIndex: number) => {
+      const analysis = gameAnalysisStore.getState().analysisMap.get(moveIndex);
+      return analysis
+        ? Promise.resolve(analysis)
+        : Promise.reject(new Error("Analysis was not scheduled for this move"));
+    });
     startDrillMock.mockReset();
     getOpeningRootsMock.mockReset();
     recordManualBlunderMock.mockReset();
@@ -159,6 +177,25 @@ describe("ChessGame start flow", () => {
     lookupOpeningByFenMock.mockReset();
     gameAnalysisStore.getState().clearAll();
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
+    failDrillMock.mockResolvedValue({
+      session_id: "session-characterization",
+      mode: "drill",
+      drill_state: "failed",
+      opening_key: "target-fen",
+      opening_name: "Target",
+      opening_family: "Target",
+      eco: null,
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1500,
+      strictness: "standard",
+      strictness_cp: 25,
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+      terminal_reason: "accuracy",
+    });
     // Default: backend returns engine-mode move
     getNextOpponentMoveMock.mockResolvedValue({
       mode: "engine",
@@ -286,26 +323,7 @@ describe("ChessGame characterization safeguards", () => {
     });
   };
 
-  const convertedDrillContract = (overrides: Record<string, unknown> = {}) => ({
-    session_id: "session-characterization",
-    mode: "drill",
-    drill_state: "converted",
-    opening_key: "target-fen",
-    opening_name: "Target",
-    opening_family: "Target",
-    eco: null,
-    depth: 1,
-    player_color: "white",
-    engine_elo: 1500,
-    strictness: "standard",
-    is_rated: true,
-    rated_start_ply: 1,
-    normal_started_at: "2026-05-20T00:00:00Z",
-    converted_at: "2026-05-20T00:00:00Z",
-    ...overrides,
-  });
-
-  it("continues a player-reached drill root before requesting the next opponent move", async () => {
+  it("starts live drill play after a player-reached root before requesting the next opponent move", async () => {
     await startGameAsWhite();
 
     const line = new Chess();
@@ -321,41 +339,11 @@ describe("ChessGame characterization safeguards", () => {
       target_fen: rootFen,
       suggestions: [],
     });
-    let resolveContinue:
-      | ((contract: ReturnType<typeof convertedDrillContract>) => void)
-      | undefined;
-    continueDrillMock.mockReturnValueOnce(
-      new Promise((resolve) => {
-        resolveContinue = resolve;
-      }),
-    );
+    getNextOpponentMoveMock.mockReturnValueOnce(new Promise(() => undefined));
 
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
-    await waitFor(() => {
-      expect(
-        screen.getByRole("dialog", { name: /opening reached/i }),
-      ).toBeInTheDocument();
-    });
-
-    const continueButton = screen.getByRole("button", { name: /^continue$/i });
-    fireEvent.click(continueButton);
-    await waitFor(() => {
-      expect(continueDrillMock).toHaveBeenCalledWith(
-        "session-characterization",
-        1,
-      );
-    });
-    expect(continueButton).toBeDisabled();
-    fireEvent.click(continueButton);
-    expect(continueDrillMock).toHaveBeenCalledTimes(1);
-    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
-
-    await act(async () => {
-      resolveContinue?.(convertedDrillContract());
-    });
-
     await waitFor(() => {
       expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
         "session-characterization",
@@ -363,9 +351,11 @@ describe("ChessGame characterization safeguards", () => {
         ["e2e4"],
       );
     });
+    expect(screen.queryByRole("button", { name: /^retry$/i })).not.toBeInTheDocument();
+    expect(continueDrillMock).not.toHaveBeenCalled();
   });
 
-  it("continues an opponent-reached drill root without an immediate opponent move", async () => {
+  it("starts live drill play after an opponent-reached root without an immediate opponent move", async () => {
     startGameMock.mockResolvedValueOnce({
       session_id: "session-characterization",
       engine_elo: 1500,
@@ -383,35 +373,35 @@ describe("ChessGame characterization safeguards", () => {
         plies_to_target: 0,
       },
     });
-    continueDrillMock.mockResolvedValueOnce(
-      convertedDrillContract({ player_color: "black" }),
-    );
-
     render(<ChessGame />);
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play black/i }));
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("dialog", { name: /opening reached/i }),
-      ).toBeInTheDocument();
-    });
-
-    fireEvent.click(screen.getByRole("button", { name: /^continue$/i }));
-    await waitFor(() => {
-      expect(continueDrillMock).toHaveBeenCalledWith(
-        "session-characterization",
-        1,
-      );
+      expect(useGameStore.getState().drillState).toBe("root_reached");
     });
     expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(1);
+    expect(continueDrillMock).not.toHaveBeenCalled();
 
     getNextOpponentMoveMock.mockResolvedValueOnce({
       mode: "engine",
       move: { uci: "g1f3", san: "Nf3" },
       target_blunder_id: null,
       decision_source: "backend_engine",
+    });
+    (mockCoordinator.waitForAnalysis as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: "analysis-e5",
+      move: "e7e5",
+      bestMove: "e7e5",
+      bestEval: 10,
+      playedEval: 10,
+      currentPositionEval: 10,
+      moveIndex: 1,
+      delta: 0,
+      classification: "best",
+      blunder: false,
+      recordable: false,
     });
 
     await act(async () => {
@@ -423,51 +413,102 @@ describe("ChessGame characterization safeguards", () => {
     });
   });
 
-  it("stops an active drill when resolved player analysis exceeds captured strictness", async () => {
-    const line = new Chess();
-    line.move("e4");
-    const fenAfterE4 = line.fen();
-
+  it("stops a post-root drill when player analysis exceeds strictness", async () => {
     useGameStore.setState({
       sessionId: "session-characterization",
       isGameActive: true,
       playerColor: "white",
       boardOrientation: "white",
-      drillOpeningKey: "target-fen",
-      drillState: "active",
       drillStrictnessCp: 25,
-      moveHistory: [{ san: "e4", uci: "e2e4", fen: fenAfterE4 }],
-      liveFen: fenAfterE4,
+      liveFen: STARTING_FEN,
     });
 
     render(<ChessGame />);
-
-    await waitFor(() => {
-      expect(capturedAnalysisResolvedListener).not.toBeNull();
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
     });
 
-    act(() => {
-      capturedAnalysisResolvedListener?.(0, {
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis.mockResolvedValue({
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "d2d4",
+      bestEval: 40,
+      playedEval: 10,
+      currentPositionEval: 10,
+      moveIndex: 0,
+      delta: 30,
+      classification: "mistake",
+      blunder: false,
+      recordable: false,
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(failDrillMock).toHaveBeenCalledWith("session-characterization", "accuracy");
+      expect(useGameStore.getState().drillState).toBe("failed");
+      expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
+      expect(useGameStore.getState().viewIndex).toBe(-1);
+    });
+  });
+
+  it("restarts analysis worker before retrying a post-root analysis failure", async () => {
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 25,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
+    });
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis
+      .mockRejectedValueOnce(new Error("Analysis worker unavailable"))
+      .mockResolvedValueOnce({
         id: "analysis-e4",
         move: "e2e4",
-        bestMove: "d2d4",
-        bestEval: 40,
+        bestMove: "e2e4",
+        bestEval: 10,
         playedEval: 10,
         currentPositionEval: 10,
         moveIndex: 0,
-        delta: 30,
-        classification: "mistake",
+        delta: 0,
+        classification: "best",
         blunder: false,
         recordable: false,
       });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    const retry = await screen.findByRole("button", { name: /^retry$/i });
+
+    await act(async () => {
+      fireEvent.click(retry);
     });
 
-    expect(useGameStore.getState().drillState).toBe("failed");
-    expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
-    expect(useGameStore.getState().viewIndex).toBe(-1);
-    expect(
-      screen.getByRole("region", { name: /drill stopped/i }),
-    ).toHaveTextContent("That move exceeds the allowed centipawn loss.");
+    await waitFor(() => {
+      expect(mockCoordinator.restartAnalysisWorker).toHaveBeenCalledTimes(1);
+      expect(mockAnalyzeMove.mock.calls).toContainEqual([
+        STARTING_FEN,
+        "e2e4",
+        "white",
+        0,
+      ]);
+      expect(getNextOpponentMoveMock).toHaveBeenCalled();
+    });
   });
 
   it("records resignation on revert, then continues in practice mode", async () => {
