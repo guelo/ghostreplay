@@ -409,7 +409,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     isViewingLive &&
     !chess.isGameOver();
   const blocksStreakToast =
-    (showStartOverlay && !isGameActive) ||
+    (showStartOverlay && (!isGameActive || isStoppedDrill)) ||
     showRevertWarning ||
     showResignWarning ||
     pendingPromotion !== null ||
@@ -1527,6 +1527,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 arrows={blunderArrows}
                 showStartOverlay={showStartOverlay}
                 isGameActive={isGameActive}
+                isStoppedDrill={isStoppedDrill}
                 isStartingGame={isStartingGame}
                 onCloseStartOverlay={handleCloseStartOverlay}
                 maiaEloBins={MAIA_ELO_BINS}

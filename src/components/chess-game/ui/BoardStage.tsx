@@ -19,6 +19,9 @@ type BoardStageProps = {
   arrows: { startSquare: string; endSquare: string; color: string }[];
   showStartOverlay: boolean;
   isGameActive: boolean;
+  // Allows the start overlay to open over a stopped drill (isGameActive stays
+  // true so handleNewDrill can abandon the failed session when a new drill starts).
+  isStoppedDrill?: boolean;
   isStartingGame: boolean;
   onCloseStartOverlay: () => void;
   maiaEloBins: readonly number[];
@@ -93,6 +96,7 @@ const BoardStage = ({
   arrows,
   showStartOverlay,
   isGameActive,
+  isStoppedDrill = false,
   isStartingGame,
   onCloseStartOverlay,
   maiaEloBins,
@@ -150,7 +154,7 @@ const BoardStage = ({
               <span className="streak-toast__detail">⭐ Perfect streak</span>
             </div>
           )}
-          {showStartOverlay && !isGameActive && (
+          {showStartOverlay && (!isGameActive || isStoppedDrill) && (
             <div className="chessboard-overlay">
               <div className="chess-start-panel">
                 <button

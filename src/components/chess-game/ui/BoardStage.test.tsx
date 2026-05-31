@@ -271,6 +271,18 @@ describe("BoardStage", () => {
     expect(props.onPromotionPick).toHaveBeenCalledWith("q");
   });
 
+  it("hides the start overlay during an active game", () => {
+    const props = makeProps();
+    render(<BoardStage {...props} isGameActive />);
+    expect(screen.queryByRole("button", { name: /close/i })).not.toBeInTheDocument();
+  });
+
+  it("opens the start overlay over a stopped drill even while isGameActive is true", () => {
+    const props = makeProps();
+    render(<BoardStage {...props} isGameActive isStoppedDrill />);
+    expect(screen.getByRole("button", { name: /close/i })).toBeInTheDocument();
+  });
+
   it("calls onPromotionCancel when the backdrop is clicked", () => {
     const props = makeProps();
     const { container } = render(<BoardStage {...props} pendingPromotion={{ from: "e7", to: "e8" }} playerColor="white" />);
