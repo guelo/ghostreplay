@@ -8,10 +8,10 @@ type DrillStopActionsProps = {
 
 const subtitleFor = (reason: DrillStopActionsProps["terminalReason"]): string => {
   if (reason === "accuracy") {
-    return "That move exceeds the allowed centipawn loss.";
+    return "Bad move";
   }
   if (reason === "off_route") {
-    return "That move leaves the selected opening route.";
+    return "That's not how you get to the opening";
   }
   return "Drill stopped.";
 };
@@ -30,7 +30,7 @@ const DrillStopActions = ({
           type="button"
           onClick={onAnotherDrill}
         >
-          Another drill
+          Again
         </button>
         <button
           className="chess-button"

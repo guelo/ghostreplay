@@ -550,8 +550,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           });
           setEngineMessage(
             route.failure?.reason === "accuracy"
-              ? "That move exceeds the allowed centipawn loss."
-              : "That move leaves the selected opening route.",
+              ? "Bad move"
+              : "That's not how you get to the opening.",
           );
           setViewIndex(result.moveIndex - 1);
           return false;
