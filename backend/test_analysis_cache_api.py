@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from app.models import AnalysisCache
+import uuid
+
+from app.models import AnalysisCache, GameSession
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -246,6 +248,83 @@ def test_session_moves_without_cache_fields_skips_cache(
     assert response.status_code == 200
     count = db_session.query(AnalysisCache).count()
     assert count == 0
+
+
+def test_session_moves_active_drill_populates_cache(
+    client, auth_headers, create_game_session, db_session
+):
+    """Amended drill policy (2026-06-01): pre-continue uploads from an unconverted
+    (active) drill feed the regular analysis-cache side effect like a normal game."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.session_mode = "drill"
+    session.drill_state = "active"
+    session.is_rated = False
+    db_session.commit()
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": AFTER_E4_FEN,
+                    "eval_cp": 20,
+                    "best_move_san": "e4",
+                    "best_move_eval_cp": 20,
+                    "eval_delta": 0,
+                    "classification": "best",
+                    "fen_before": STARTING_FEN,
+                    "move_uci": "e2e4",
+                    "best_move_uci": "e2e4",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 200
+    cached = db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == STARTING_FEN,
+        AnalysisCache.move_uci == "e2e4",
+    ).first()
+    assert cached is not None
+    assert cached.classification == "best"
+
+
+def test_session_moves_active_drill_refreshes_opening_scores(
+    client, auth_headers, create_game_session, db_session
+):
+    """The opening-score refresh side effect fires for active-drill uploads too."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.session_mode = "drill"
+    session.drill_state = "active"
+    session.is_rated = False
+    db_session.commit()
+
+    with patch("app.api.session.recompute_opening_scores_if_needed", return_value=None) as refresh:
+        response = client.post(
+            f"/api/session/{session_id}/moves",
+            json={
+                "moves": [
+                    {
+                        "move_number": 1, "color": "white", "move_san": "e4",
+                        "fen_after": AFTER_E4_FEN, "eval_delta": 0, "classification": "best",
+                        "fen_before": STARTING_FEN, "move_uci": "e2e4",
+                    },
+                ]
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert response.status_code == 200
+    refresh.assert_called_once()
+    _, args, _kwargs = refresh.mock_calls[0]
+    assert args[1] == 123
+    assert args[2] == "white"
 
 
 def test_lookup_returns_classification_when_present(client, auth_headers, db_session):

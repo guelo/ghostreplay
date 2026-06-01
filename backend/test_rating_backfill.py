@@ -150,3 +150,47 @@ def test_backfill_orders_null_ended_at_by_started_at(create_game_session, db_ses
     assert rows[first].games_played == 1
     assert rows[middle_null_ended].games_played == 2
     assert rows[last].games_played == 3
+
+
+def _make_drill(db_session, session_id, *, drill_state, is_rated, result, ended_at):
+    session = db_session.get(GameSession, uuid.UUID(session_id))
+    session.session_mode = "drill"
+    session.drill_state = drill_state
+    session.status = "ended"
+    session.result = result
+    session.ended_at = ended_at
+    session.is_rated = is_rated
+    if drill_state == "converted":
+        session.normal_started_at = session.started_at
+        session.converted_at = session.started_at
+        session.rated_start_ply = 0
+    db_session.commit()
+
+
+def test_backfill_ignores_uncontinued_drills_and_includes_converted(
+    create_game_session, db_session
+):
+    # Amended drill policy (2026-06-01): an uncontinued drill stays unrated and must
+    # never receive a RatingHistory row, while a converted drill is one full normal
+    # game and is backfilled like any rated session.
+    now = datetime.now(timezone.utc)
+    converted = create_game_session(user_id=123)
+    uncontinued = create_game_session(user_id=123)
+    _make_drill(
+        db_session, converted,
+        drill_state="converted", is_rated=True, result="checkmate_win", ended_at=now,
+    )
+    _make_drill(
+        db_session, uncontinued,
+        drill_state="active", is_rated=False, result="checkmate_loss",
+        ended_at=now + timedelta(minutes=1),
+    )
+
+    backfill_glicko_ratings(db_session)
+
+    rows = {
+        str(row.game_session_id): row
+        for row in db_session.query(RatingHistory).all()
+    }
+    assert converted in rows
+    assert uncontinued not in rows

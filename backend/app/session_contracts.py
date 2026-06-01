@@ -31,10 +31,6 @@ def visible_session_filter():
     )
 
 
-def normal_segment_filter():
-    return SessionMove.segment == NORMAL_MOVE_SEGMENT
-
-
 def is_visible_game_session(session: GameSession) -> bool:
     return session.session_mode == NORMAL_SESSION_MODE or session.drill_state == VISIBLE_DRILL_STATE
 

@@ -545,6 +545,62 @@ def test_stats_summary_converted_drill_uses_started_at_for_duration(
     assert data["games"]["avg_duration_seconds"] == 720
 
 
+def _convert_to_drill(db_session, session_id, rated_start_ply):
+    from sqlalchemy import text
+
+    db_session.execute(
+        text("""
+            UPDATE game_sessions
+            SET session_mode = 'drill',
+                drill_state = 'converted',
+                is_rated = true,
+                normal_started_at = started_at,
+                converted_at = started_at,
+                rated_start_ply = :rsp
+            WHERE id = :sid
+        """),
+        {"sid": session_id, "rsp": rated_start_ply},
+    )
+    db_session.commit()
+
+
+def test_stats_summary_converted_drill_move_metrics_include_drill_prefix(
+    client, auth_headers, create_game_session, db_session
+):
+    # Amended drill policy (2026-06-01): a converted drill is one full normal game,
+    # so CPL / mistake / blunder move metrics span the full line — including the
+    # pre-continue drill-prefix moves — not only the moves after continue.
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id, user_id=123, result="draw")
+    # ply boundary 2: move 1 white is drill-prefix, move 2 white is normal.
+    _convert_to_drill(db_session, session_id, rated_start_ply=2)
+
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            # Drill-prefix blunder — must still count toward move metrics.
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 200, "classification": "blunder",
+        },
+        {
+            # Normal-segment mistake.
+            "move_number": 2, "color": "white", "move_san": "Nf3",
+            "fen_after": "fen-2w", "eval_delta": 40, "classification": "mistake",
+        },
+    ])
+
+    response = client.get(
+        "/api/stats/summary?window_days=0",
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 200
+    moves = response.json()["moves"]
+    assert moves["player_moves"] == 2
+    assert moves["avg_cpl"] == 120.0
+    assert moves["mistakes_per_100_moves"] == 50.0
+    assert moves["blunders_per_100_moves"] == 50.0
+
+
 def test_stats_summary_zero_denominator_with_sessions(client, auth_headers, create_game_session):
     session_id = create_game_session(user_id=123, player_color="white")
     _end_game(client, auth_headers, session_id, user_id=123, result="draw")
