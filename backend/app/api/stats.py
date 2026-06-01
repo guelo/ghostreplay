@@ -13,7 +13,7 @@ from app.models import Blunder, GameSession, Move, Position, RatingHistory, Sess
 from app.rating import DEFAULT_RATING
 from app.rating_scores import latest_rating_order, scores_for_row
 from app.security import TokenPayload, get_current_user
-from app.session_contracts import normal_play_started_at, normal_play_started_at_expr, normal_segment_filter, visible_session_filter
+from app.session_contracts import normal_play_started_at, normal_play_started_at_expr, visible_session_filter
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
@@ -232,7 +232,6 @@ def _perfect_streak_summary(db: Session, user_id: int) -> StatsAchievementsSumma
         .filter(
             GameSession.user_id == user_id,
             SessionMove.color == GameSession.player_color,
-            normal_segment_filter(),
             visible_session_filter(),
         )
         .order_by(
@@ -301,7 +300,7 @@ def get_stats_summary(
     if session_ids:
         move_count_rows = (
             db.query(SessionMove.session_id, func.count(SessionMove.id))
-            .filter(SessionMove.session_id.in_(session_ids), normal_segment_filter())
+            .filter(SessionMove.session_id.in_(session_ids))
             .group_by(SessionMove.session_id)
             .all()
         )
@@ -374,7 +373,6 @@ def get_stats_summary(
             .filter(
                 GameSession.id.in_(session_ids),
                 SessionMove.color == GameSession.player_color,
-                normal_segment_filter(),
             )
             .all()
         )

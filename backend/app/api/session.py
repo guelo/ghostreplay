@@ -20,7 +20,6 @@ from app.session_contracts import (
     DRILL_SESSION_MODE,
     NORMAL_MOVE_SEGMENT,
     is_visible_game_session,
-    normal_segment_filter,
     normal_play_started_at,
     segment_for_move,
 )
@@ -253,7 +252,7 @@ def _compute_blunder_opportunity_events(
 
     session_moves = (
         db.query(SessionMove)
-        .filter(SessionMove.session_id == session_id, normal_segment_filter())
+        .filter(SessionMove.session_id == session_id)
         .all()
     )
     session_hashes: set[str] = set()
@@ -428,11 +427,10 @@ def upsert_session_moves(
         }
         for move in request.moves
     ]
-    normal_moves = [
-        move
-        for move, value in zip(request.moves, values)
-        if value["segment"] == NORMAL_MOVE_SEGMENT
-    ]
+    # Amended drill policy (2026-06-01): pre-continue drill-prefix moves feed the
+    # same regular evidence side effects as normal moves, so every uploaded move
+    # drives blunder opportunity, analysis-cache, and opening-score refresh.
+    evidence_moves = list(request.moves)
 
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":
@@ -464,14 +462,14 @@ def upsert_session_moves(
                 db.add(SessionMove(**value))
 
         db.commit()
-        if normal_moves:
+        if evidence_moves:
             _compute_blunder_opportunity_events(
                 db,
                 session_id=session_id,
                 user_id=user.user_id,
                 player_color=game_session.player_color,
             )
-            _upsert_analysis_cache(db, normal_moves)
+            _upsert_analysis_cache(db, evidence_moves)
             _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
         return SessionMovesResponse(
             moves_inserted=len(values),
@@ -504,14 +502,14 @@ def upsert_session_moves(
     db.execute(statement)
     db.commit()
 
-    if normal_moves:
+    if evidence_moves:
         _compute_blunder_opportunity_events(
             db,
             session_id=session_id,
             user_id=user.user_id,
             player_color=game_session.player_color,
         )
-        _upsert_analysis_cache(db, normal_moves)
+        _upsert_analysis_cache(db, evidence_moves)
         _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
 
     return SessionMovesResponse(
@@ -539,7 +537,9 @@ def get_session_analysis(
         .order_by(SessionMove.move_number.asc(), color_order.asc())
         .all()
     )
-    normal_summary_filter = [SessionMove.session_id == session_id, normal_segment_filter()]
+    # Amended drill policy (2026-06-01): summary spans the full line, including
+    # pre-continue drill-prefix moves.
+    summary_filter = [SessionMove.session_id == session_id]
 
     summary_row = (
         db.query(
@@ -554,7 +554,7 @@ def get_session_analysis(
             ).label("inaccuracies"),
             func.avg(SessionMove.eval_delta).label("average_centipawn_loss"),
         )
-        .filter(*normal_summary_filter)
+        .filter(*summary_filter)
         .one()
     )
 

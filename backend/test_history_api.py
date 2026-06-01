@@ -128,3 +128,58 @@ def test_history_limit_validation(client, auth_headers):
 
     response = client.get("/api/history?limit=101", headers=auth_headers(user_id=123))
     assert response.status_code == 422
+
+
+def _convert_to_drill(db_session, session_id, rated_start_ply):
+    from sqlalchemy import text
+
+    db_session.execute(
+        text("""
+            UPDATE game_sessions
+            SET session_mode = 'drill',
+                drill_state = 'converted',
+                is_rated = true,
+                normal_started_at = started_at,
+                converted_at = started_at,
+                rated_start_ply = :rsp
+            WHERE id = :sid
+        """),
+        {"sid": session_id, "rsp": rated_start_ply},
+    )
+    db_session.commit()
+
+
+def test_history_converted_drill_summary_includes_drill_prefix(
+    client, auth_headers, create_game_session, db_session
+):
+    # Amended drill policy (2026-06-01): a converted drill is one full normal game,
+    # so segment='drill' prefix moves count toward history CPL/blunder/mistake stats.
+    session_id = create_game_session(user_id=123)
+    _end_game(client, auth_headers, session_id)
+    # ply boundary 2: move 1 (white+black) is drill-prefix, move 2 onward is normal.
+    _convert_to_drill(db_session, session_id, rated_start_ply=2)
+
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 0, "classification": "best",
+        },
+        {
+            # Drill-prefix blunder — must still be counted.
+            "move_number": 1, "color": "black", "move_san": "e5",
+            "fen_after": "fen-1b", "eval_delta": 200, "classification": "blunder",
+        },
+        {
+            # Normal-segment mistake.
+            "move_number": 2, "color": "white", "move_san": "Nf3",
+            "fen_after": "fen-2w", "eval_delta": 40, "classification": "mistake",
+        },
+    ])
+
+    response = client.get("/api/history", headers=auth_headers(user_id=123))
+    game = response.json()["games"][0]
+    assert game["session_id"] == session_id
+    assert game["summary"]["total_moves"] == 3
+    assert game["summary"]["blunders"] == 1
+    assert game["summary"]["mistakes"] == 1
+    assert game["summary"]["average_centipawn_loss"] == round((0 + 200 + 40) / 3)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 
-from sqlalchemy import case, func, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models import GameSession, SessionMove
@@ -46,19 +46,14 @@ def resolve_drill_threshold(session: GameSession) -> int | None:
 
 
 def normal_play_started_at(session: GameSession) -> datetime:
-    if session.session_mode == DRILL_SESSION_MODE and session.drill_state == VISIBLE_DRILL_STATE:
-        return session.normal_started_at or session.started_at
+    # Amended drill policy (2026-06-01): a converted drill is one full normal
+    # game whose timeline anchors to the drill's actual start, not conversion
+    # time. Pre-continue moves count, so recency/window/duration use started_at.
     return session.started_at
 
 
 def normal_play_started_at_expr():
-    return case(
-        (
-            GameSession.drill_state == VISIBLE_DRILL_STATE,
-            func.coalesce(GameSession.normal_started_at, GameSession.started_at),
-        ),
-        else_=GameSession.started_at,
-    )
+    return GameSession.started_at
 
 
 def ply_after(move_number: int, color: str) -> int:

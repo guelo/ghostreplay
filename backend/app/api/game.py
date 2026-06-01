@@ -187,8 +187,7 @@ def _same_fen_recent_ghost_moves(db: Session, user_id: int, fen: str) -> list[st
             WHERE gs.user_id = :user_id
               AND sm.decision_source = 'ghost_path'
               AND sm.fen_before IS NOT NULL
-              AND sm.segment = 'normal'
-              AND (gs.session_mode = 'normal' OR gs.drill_state = 'converted')
+              AND (gs.session_mode = 'normal' OR sm.target_blunder_id IS NOT NULL)
             ORDER BY gs.started_at DESC, sm.id DESC
             LIMIT :limit
         """),

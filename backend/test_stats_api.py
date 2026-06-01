@@ -488,9 +488,12 @@ def test_stats_summary_window_filtering(client, auth_headers, create_game_sessio
     assert data_all["library"]["new_blunders_in_window"] == 2
 
 
-def test_stats_summary_converted_drill_uses_normal_started_at_for_window_and_duration(
+def test_stats_summary_converted_drill_anchors_window_to_started_at(
     client, auth_headers, create_game_session, db_session
 ):
+    # Amended drill policy (2026-06-01): a converted drill is one full normal game
+    # anchored to its actual started_at, not conversion time. A drill STARTED
+    # outside the window but CONVERTED inside it must NOT count.
     now = datetime.now(timezone.utc)
     session_id = create_game_session(user_id=123, player_color="white")
     _end_game(client, auth_headers, session_id, user_id=123, result="draw")
@@ -501,6 +504,33 @@ def test_stats_summary_converted_drill_uses_normal_started_at_for_window_and_dur
         started_at=now - timedelta(days=40),
         normal_started_at=normal_started_at,
         ended_at=normal_started_at + timedelta(minutes=12),
+    )
+
+    response = client.get(
+        "/api/stats/summary?window_days=30",
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["games"]["played"] == 0
+
+
+def test_stats_summary_converted_drill_uses_started_at_for_duration(
+    client, auth_headers, create_game_session, db_session
+):
+    # Converted drill within the window counts as one full game; duration spans
+    # from the drill's started_at (not conversion time) to ended_at.
+    now = datetime.now(timezone.utc)
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id, user_id=123, result="draw")
+    started_at = now - timedelta(days=2)
+    _set_session_times(
+        db_session,
+        session_id,
+        started_at=started_at,
+        normal_started_at=started_at + timedelta(minutes=5),
+        ended_at=started_at + timedelta(minutes=12),
     )
 
     response = client.get(

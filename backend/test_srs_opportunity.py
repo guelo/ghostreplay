@@ -229,7 +229,9 @@ def test_reached_position_counts_as_denominator_opportunity(db_session):
     assert event.reached is True
 
 
-def test_converted_drill_opportunity_event_uses_normal_started_at(db_session):
+def test_converted_drill_opportunity_event_uses_started_at(db_session):
+    # Amended drill policy (2026-06-01): a converted drill is one full normal game
+    # whose opportunity timeline anchors to started_at, not conversion time.
     user_id = 123
     old_started_at = datetime.now(timezone.utc) - timedelta(days=40)
     normal_started_at = datetime.now(timezone.utc) - timedelta(days=2)
@@ -263,7 +265,54 @@ def test_converted_drill_opportunity_event_uses_normal_started_at(db_session):
     )
 
     event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
-    assert event.occurred_at == normal_started_at.replace(tzinfo=None)
+    assert event.occurred_at == old_started_at.replace(tzinfo=None)
+
+
+def test_unconverted_drill_segment_move_creates_opportunity_event(db_session):
+    # Amended drill policy (2026-06-01): pre-continue drill uploads (segment='drill',
+    # unconverted session) feed regular SRS opportunity creation. This guards against
+    # reintroducing the old normal-segment filter.
+    user_id = 123
+    started_at = datetime.now(timezone.utc) - timedelta(days=1)
+    blunder_fen = "8/8/8/8/8/8/K7/7k w - - 0 1"
+    blunder_position = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
+    blunder = _blunder(db_session, user_id=user_id, position=blunder_position)
+
+    game_session = GameSession(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        started_at=started_at,
+        status="active",
+        engine_elo=1500,
+        player_color="white",
+        session_mode="drill",
+        drill_state="active",
+        is_rated=False,
+    )
+    db_session.add(game_session)
+    db_session.flush()
+    db_session.add(
+        SessionMove(
+            session_id=game_session.id,
+            move_number=1,
+            color="black",
+            move_san="x",
+            fen_after=blunder_fen,
+            segment="drill",
+        )
+    )
+    db_session.commit()
+
+    _compute_blunder_opportunity_events(
+        db_session,
+        session_id=game_session.id,
+        user_id=user_id,
+        player_color="white",
+    )
+
+    event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
+    assert event.reached is True
+    assert event.occurred_at == started_at.replace(tzinfo=None)
 
 
 def test_same_session_review_event_is_excluded_from_since_review(db_session):

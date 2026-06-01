@@ -1590,6 +1590,63 @@ def test_same_fen_recent_ghost_moves_bounded_and_defensive(db_session, monkeypat
     assert game_api._same_fen_recent_ghost_moves(db_session, user_id, current_fen) == ["e5"]
 
 
+def test_same_fen_recent_ghost_moves_scopes_drill_to_srs_targets(db_session):
+    # Amended drill policy (2026-06-01): drill ghost moves contribute to repeat
+    # selection ONLY when they are actual SRS-target replays (target_blunder_id set).
+    # Pre-root drill ROUTE steering moves (target_blunder_id NULL) must not pollute it.
+    from app.api import game as game_api
+    from app.fen import fen_hash
+    from app.models import Blunder, GameSession, Position, SessionMove
+
+    user_id = 321
+    current_fen = "8/8/8/8/K7/8/8/7k b - - 0 1"
+
+    pos = Position(user_id=user_id, fen_hash=fen_hash(current_fen), fen_raw=current_fen, active_color="black")
+    db_session.add(pos)
+    db_session.flush()
+    blunder = Blunder(
+        user_id=user_id,
+        position_id=pos.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+    )
+    db_session.add(blunder)
+    db_session.flush()
+
+    def add_drill_ghost(started_at, move_san, target_blunder_id):
+        session = GameSession(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            started_at=started_at,
+            status="ended",
+            engine_elo=1500,
+            player_color="white",
+            session_mode="drill",
+            drill_state="active",
+            is_rated=False,
+        )
+        db_session.add(session)
+        db_session.flush()
+        db_session.add(SessionMove(
+            session_id=session.id,
+            move_number=1,
+            color="black",
+            move_san=move_san,
+            fen_before=current_fen,
+            fen_after=current_fen,
+            decision_source="ghost_path",
+            target_blunder_id=target_blunder_id,
+        ))
+
+    now = datetime.now(timezone.utc)
+    add_drill_ghost(now, "route", None)          # route steering — excluded
+    add_drill_ghost(now - timedelta(minutes=1), "target", blunder.id)  # SRS replay — included
+    db_session.commit()
+
+    assert game_api._same_fen_recent_ghost_moves(db_session, user_id, current_fen) == ["target"]
+
+
 # === Next Opponent Move Endpoint Tests ===
 
 

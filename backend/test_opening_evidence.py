@@ -223,6 +223,21 @@ class TestLiveMoves:
         assert edge.live_passes == 1
         assert edge.uci == "e2e4"
 
+    def test_unconverted_drill_contributes_live_evidence(self, db_session, branching_graph):
+        # Amended drill policy (2026-06-01): pre-continue drill uploads feed the
+        # same regular opening-evidence path as normal games.
+        _insert_user(db_session)
+        sid = _insert_session(
+            db_session, session_mode="drill", drill_state="active", is_rated=False
+        )
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        node = ov.nodes[FEN_ROOT]
+        assert node.live_attempts == 1
+        assert node.live_passes == 1
+
     def test_single_fail(self, db_session, branching_graph):
         _insert_user(db_session)
         sid = _insert_session(db_session)
@@ -303,7 +318,9 @@ class TestLiveMoves:
         assert node.last_live_at.year == 2026
         assert node.last_live_at.day == 5
 
-    def test_last_live_at_uses_converted_drill_normal_started_at(self, db_session, branching_graph):
+    def test_last_live_at_uses_converted_drill_started_at(self, db_session, branching_graph):
+        # Amended drill policy (2026-06-01): a converted drill is one full normal
+        # game anchored to the drill's actual started_at, not conversion time.
         _insert_user(db_session)
         sid = _insert_session(
             db_session,
@@ -321,8 +338,8 @@ class TestLiveMoves:
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
         node = ov.nodes[FEN_ROOT]
         assert node.last_live_at is not None
-        assert node.last_live_at.day == 8
-        assert node.last_live_at.hour == 9
+        assert node.last_live_at.day == 1
+        assert node.last_live_at.hour == 10
 
     def test_last_live_at_falls_back_to_started_at(self, db_session, branching_graph):
         _insert_user(db_session)

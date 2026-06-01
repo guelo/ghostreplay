@@ -1063,3 +1063,43 @@ def test_route_check_off_route_failure_has_off_route_reason(client, auth_headers
     assert data["failure"]["reason"] == "off_route"
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.drill_terminal_reason == "off_route"
+
+
+def test_unconverted_drill_records_automatic_blunder(client, auth_headers, db_session):
+    """Amended drill policy (2026-06-01): pre-continue drill flows (e.g. strictness
+    failures) record blunders through regular logic — no unconverted-drill 400."""
+    user_id = 123
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    # Still an unconverted drill.
+    assert session.drill_state == "active"
+
+    response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4 e5 2. Qh5",
+            "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 201
+    blunder_id = response.json()["blunder_id"]
+    assert blunder_id is not None
+    assert db_session.get(Blunder, blunder_id) is not None
