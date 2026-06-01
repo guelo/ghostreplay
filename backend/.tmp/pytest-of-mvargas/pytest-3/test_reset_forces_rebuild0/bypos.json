@@ -1,0 +1,1 @@
+{"dataset": "test", "source_commit": "abc", "position_count": 2, "by_position": {"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -": {"eco": "A00", "name": "Test Opening B"}, "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -": {"eco": "B00", "name": "Test Opening C"}}}
