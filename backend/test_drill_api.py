@@ -1160,3 +1160,151 @@ def test_strictness_failure_records_blunder_then_marks_failed(client, auth_heade
     assert session.drill_terminal_reason == "accuracy"
     # Blunder/SRS evidence survives the failure marking.
     assert db_session.get(Blunder, blunder_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# transposition reaching target root
+# ---------------------------------------------------------------------------
+
+# A clean two-ply transposition: 1.d4 d5 2.Nf3 and 1.Nf3 d5 2.d4 reach the
+# same position (black to move). The target root therefore has two parents,
+# and either move order must be recognised as on-route and reach the root.
+TRANSPOSE_TARGET_FEN = "rnbqkbnr/ppp1pppp/8/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -"
+_D4_FEN = "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -"
+_D4_D5_FEN = "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -"
+_NF3_FEN = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq -"
+_NF3_D5_FEN = "rnbqkbnr/ppp1pppp/8/3p4/8/5N2/PPPPPPPP/RNBQKB1R w KQkq -"
+
+
+def _transposition_graph() -> OpeningGraph:
+    nodes = {
+        START_FEN: OpeningGraphNode(START_FEN, "white"),
+        _D4_FEN: OpeningGraphNode(_D4_FEN, "black"),
+        _D4_D5_FEN: OpeningGraphNode(_D4_D5_FEN, "white"),
+        _NF3_FEN: OpeningGraphNode(_NF3_FEN, "black"),
+        _NF3_D5_FEN: OpeningGraphNode(_NF3_D5_FEN, "white"),
+        TRANSPOSE_TARGET_FEN: OpeningGraphNode(TRANSPOSE_TARGET_FEN, "black"),
+    }
+    # Order A: 1.d4 d5 2.Nf3
+    nodes[START_FEN].children["d2d4"] = _D4_FEN
+    nodes[_D4_FEN].parents.add((START_FEN, "d2d4"))
+    nodes[_D4_FEN].children["d7d5"] = _D4_D5_FEN
+    nodes[_D4_D5_FEN].parents.add((_D4_FEN, "d7d5"))
+    nodes[_D4_D5_FEN].children["g1f3"] = TRANSPOSE_TARGET_FEN
+    nodes[TRANSPOSE_TARGET_FEN].parents.add((_D4_D5_FEN, "g1f3"))
+    # Order B: 1.Nf3 d5 2.d4 (transposes into the same target)
+    nodes[START_FEN].children["g1f3"] = _NF3_FEN
+    nodes[_NF3_FEN].parents.add((START_FEN, "g1f3"))
+    nodes[_NF3_FEN].children["d7d5"] = _NF3_D5_FEN
+    nodes[_NF3_D5_FEN].parents.add((_NF3_FEN, "d7d5"))
+    nodes[_NF3_D5_FEN].children["d2d4"] = TRANSPOSE_TARGET_FEN
+    nodes[TRANSPOSE_TARGET_FEN].parents.add((_NF3_D5_FEN, "d2d4"))
+
+    graph = OpeningGraph(nodes, START_FEN)
+    graph.freeze()
+    return graph
+
+
+def test_transposition_into_target_root_is_on_route_and_reaches_root(
+    client, auth_headers, db_session
+):
+    """A position reached by a transposed move order (1.Nf3 d5 ... instead of the
+    canonical 1.d4 d5 ...) is still recognised as on-route, and the move that
+    transposes into the target marks the drill root_reached."""
+    from app.drill_steering import _reset_drill_route_cache_for_testing
+
+    _reset_drill_route_cache_for_testing()
+    graph = _transposition_graph()
+    with (
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(TRANSPOSE_TARGET_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": TRANSPOSE_TARGET_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+        assert start.status_code == 201
+        session_id = start.json()["session_id"]
+
+        # The transposed parent (reached via 1.Nf3 d5) is on the route, and the
+        # route map suggests the transposing move d2d4 even though d4-first is the
+        # "canonical" order.
+        on_route = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": _NF3_D5_FEN},
+            headers=auth_headers(),
+        )
+        assert on_route.status_code == 200
+        on_route_data = on_route.json()
+        assert on_route_data["status"] == "on_route"
+        assert "d2d4" in [s["uci"] for s in on_route_data["suggestions"]]
+
+        # Playing d2d4 from that transposed parent reaches the target root.
+        reached = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={
+                "current_fen": TRANSPOSE_TARGET_FEN,
+                "previous_fen": _NF3_D5_FEN,
+                "played_uci": "d2d4",
+            },
+            headers=auth_headers(),
+        )
+
+    assert reached.status_code == 200
+    assert reached.json()["status"] == "root_reached"
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "root_reached"
+
+
+def test_unconverted_drill_blunder_feeds_srs_review_queue(client, auth_headers, db_session):
+    """Regular evidence side effect: a blunder recorded during pre-continue drill
+    play feeds the SRS review queue (GET /api/blunder) like any normal game, even
+    while the drill is still unconverted."""
+    user_id = 4242
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "active"
+
+    blunder_resp = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": "1. e4 e5 2. Qh5",
+            "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            "eval_before": 50,
+            "eval_after": -100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert blunder_resp.status_code == 201
+    blunder_id = blunder_resp.json()["blunder_id"]
+
+    # The SRS review queue surfaces the blunder despite the drill being unconverted.
+    listing = client.get("/api/blunder", headers=auth_headers(user_id=user_id))
+    assert listing.status_code == 200
+    body = listing.json()
+    ids = [item["id"] for item in body["items"]]
+    assert blunder_id in ids
+    item = next(item for item in body["items"] if item["id"] == blunder_id)
+    # Fresh evidence carries SRS scheduling fields and points back to the drill session.
+    assert item["pass_streak"] == 0
+    assert item["source_session_id"] == session_id
