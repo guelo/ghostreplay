@@ -29,7 +29,7 @@ function GameOpeningLineage({ playerColor, lineage }: GameOpeningLineageProps) {
 
   return (
     <section className="game-opening-lineage" aria-label="Openings played">
-      <p className="game-opening-lineage__label">Openings</p>
+      <p className="game-opening-lineage__label">Your Opening Scores</p>
       <ol className="game-opening-lineage__list">
         {lineage.map((item, index) => {
           const tone = getPriorityTone(item.score);
