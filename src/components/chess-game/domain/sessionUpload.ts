@@ -54,6 +54,7 @@ const buildUploadForIndex = (
     fen_before: fenBeforeMove,
     move_uci: move.uci,
     best_move_uci: analysis?.bestMove ?? null,
+    best_line_uci: analysis?.bestLine ?? null,
     decision_source: move.decisionSource ?? null,
     target_blunder_id: move.targetBlunderId ?? null,
   };

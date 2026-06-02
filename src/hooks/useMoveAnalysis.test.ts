@@ -697,6 +697,55 @@ describe('useMoveAnalysis', () => {
     })
   })
 
+  it('threads best_line_uci from a cache hit into the resolved analysis bestLine', async () => {
+    vi.useFakeTimers()
+
+    let resolveLookup!: (value: Map<string, unknown>) => void
+    lookupAnalysisCacheMock.mockReturnValueOnce(
+      new Promise((resolve) => { resolveLookup = resolve }),
+    )
+
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    act(() => {
+      result.current.analyzeMove('fen', 'e2e4', 'white', 0, 20)
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+
+    act(() => {
+      resolveLookup(new Map([
+        ['fen::e2e4', {
+          move_san: 'e4',
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5', 'g1f3'],
+          played_eval: 25,
+          best_eval: 25,
+          eval_delta: 0,
+          classification: 'best',
+        }],
+      ]))
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(store.getState().analysisMap.get(0)).toEqual(
+      expect.objectContaining({
+        bestMove: 'e2e4',
+        bestLine: ['e2e4', 'e7e5', 'g1f3'],
+      }),
+    )
+  })
+
   it('ignores incomplete cache hits and waits for the worker result', async () => {
     vi.useFakeTimers()
 

@@ -19,6 +19,21 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
 
+def encode_uci_line(line: list[str] | None) -> str | None:
+    """Serialize a UCI move list to the space-joined storage form."""
+    if not line:
+        return None
+    return " ".join(line)
+
+
+def decode_uci_line(value: str | None) -> list[str] | None:
+    """Deserialize the space-joined storage form back to a UCI move list."""
+    if not value:
+        return None
+    moves = value.split()
+    return moves or None
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -255,6 +270,8 @@ class SessionMove(Base):
     classification: Mapped[str | None] = mapped_column(String(20))
     fen_before: Mapped[str | None] = mapped_column(Text)
     best_move_uci: Mapped[str | None] = mapped_column(String(5))
+    # Space-joined UCI moves of the root best-move principal variation.
+    best_line_uci: Mapped[str | None] = mapped_column(Text)
     decision_source: Mapped[str | None] = mapped_column(String(20))
     target_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id"))
     segment: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
@@ -273,6 +290,8 @@ class AnalysisCache(Base):
     move_san: Mapped[str] = mapped_column(String(10), nullable=False)
     best_move_uci: Mapped[str | None] = mapped_column(String(5))
     best_move_san: Mapped[str | None] = mapped_column(String(10))
+    # Space-joined UCI moves of the root best-move principal variation.
+    best_line_uci: Mapped[str | None] = mapped_column(Text)
     played_eval: Mapped[int | None] = mapped_column(Integer)
     best_eval: Mapped[int | None] = mapped_column(Integer)
     eval_delta: Mapped[int | None] = mapped_column(Integer)

@@ -21,6 +21,8 @@ export type AnalysisResult = {
   id: string
   move: string
   bestMove: string
+  /** Root best-move principal variation (UCI). Starts with bestMove. */
+  bestLine?: string[] | null
   bestEval: number | null
   playedEval: number | null
   currentPositionEval: number | null
@@ -82,6 +84,7 @@ const fromCachedAnalysis = (
     id: createRequestId(),
     move,
     bestMove: cached.best_move_uci ?? move,
+    bestLine: cached.best_line_uci ?? null,
     bestEval,
     playedEval,
     currentPositionEval: playedEval,
@@ -240,6 +243,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             id: message.id,
             move: message.move,
             bestMove: message.bestMove,
+            bestLine: message.bestLine,
             bestEval: message.bestEval,
             playedEval: message.playedEval,
             currentPositionEval: message.playedEval,

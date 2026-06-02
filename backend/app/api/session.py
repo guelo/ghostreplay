@@ -26,7 +26,17 @@ from app.opening_cache import (
 )
 from app.opening_graph import _fen_from_board, get_opening_graph
 from app.opening_roots import get_opening_roots
-from app.models import AnalysisCache, Blunder, BlunderOpportunityEvent, GameSession, Move, Position, SessionMove
+from app.models import (
+    AnalysisCache,
+    Blunder,
+    BlunderOpportunityEvent,
+    GameSession,
+    Move,
+    Position,
+    SessionMove,
+    decode_uci_line,
+    encode_uci_line,
+)
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
@@ -75,6 +85,7 @@ class SessionMoveInput(BaseModel):
     fen_before: str | None = Field(None, min_length=1)
     move_uci: str | None = Field(None, min_length=2, max_length=5)
     best_move_uci: str | None = Field(None, max_length=5)
+    best_line_uci: list[str] | None = None
     decision_source: SessionDecisionSource | None = None
     target_blunder_id: int | None = Field(None, ge=1)
 
@@ -114,6 +125,7 @@ class PositionAnalysis(BaseModel):
     best_move_uci: str
     best_move_san: str | None = None
     best_move_eval_cp: int | None = None  # side-to-move-relative
+    best_line_uci: list[str] | None = None
 
 
 class SessionAnalysisResponse(BaseModel):
@@ -384,6 +396,7 @@ def _upsert_analysis_cache(
             "move_san": move.move_san,
             "best_move_uci": move.best_move_uci,
             "best_move_san": move.best_move_san,
+            "best_line_uci": encode_uci_line(move.best_line_uci),
             "played_eval": played_eval,
             "best_eval": best_eval,
             "eval_delta": eval_delta,
@@ -420,6 +433,7 @@ def _upsert_analysis_cache(
             "move_san": stmt.excluded.move_san,
             "best_move_uci": stmt.excluded.best_move_uci,
             "best_move_san": stmt.excluded.best_move_san,
+            "best_line_uci": stmt.excluded.best_line_uci,
             "played_eval": stmt.excluded.played_eval,
             "best_eval": stmt.excluded.best_eval,
             "eval_delta": stmt.excluded.eval_delta,
@@ -463,6 +477,7 @@ def upsert_session_moves(
             "classification": move.classification.value if move.classification else None,
             "fen_before": move.fen_before,
             "best_move_uci": move.best_move_uci,
+            "best_line_uci": encode_uci_line(move.best_line_uci),
             "decision_source": move.decision_source.value if move.decision_source else None,
             "target_blunder_id": move.target_blunder_id,
             "segment": segment_for_move(game_session, move.move_number, move.color.value),
@@ -497,6 +512,7 @@ def upsert_session_moves(
                 existing_row.classification = value["classification"]
                 existing_row.fen_before = value["fen_before"]
                 existing_row.best_move_uci = value["best_move_uci"]
+                existing_row.best_line_uci = value["best_line_uci"]
                 existing_row.decision_source = value["decision_source"]
                 existing_row.target_blunder_id = value["target_blunder_id"]
                 existing_row.segment = value["segment"]
@@ -536,6 +552,7 @@ def upsert_session_moves(
             "classification": statement.excluded.classification,
             "fen_before": statement.excluded.fen_before,
             "best_move_uci": statement.excluded.best_move_uci,
+            "best_line_uci": statement.excluded.best_line_uci,
             "decision_source": statement.excluded.decision_source,
             "target_blunder_id": statement.excluded.target_blunder_id,
             "segment": statement.excluded.segment,
@@ -613,6 +630,7 @@ def get_session_analysis(
                 best_move_uci=move.best_move_uci,
                 best_move_san=move.best_move_san,
                 best_move_eval_cp=move.best_move_eval_cp,
+                best_line_uci=decode_uci_line(move.best_line_uci),
             )
 
     # Completion metadata: derive expected_total_moves from stored PGN

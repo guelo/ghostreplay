@@ -543,7 +543,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     if (!useRestrictedSearch || !cachedBest) return activeEngineLines;
 
     const cachedLine: EngineInfo = {
-      pv: [cachedBest.best_move_uci],
+      // Prefer the stored root PV (validated to start with best_move_uci) so the
+      // popup can render a full continuation; legacy rows fall back to one move.
+      pv:
+        cachedBest.best_line_uci && cachedBest.best_line_uci.length > 0
+          ? cachedBest.best_line_uci
+          : [cachedBest.best_move_uci],
       score:
         cachedBest.best_move_eval_cp != null
           ? { type: "cp" as const, value: cachedBest.best_move_eval_cp }

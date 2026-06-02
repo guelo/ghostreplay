@@ -9,8 +9,8 @@ import type {
   AnalyzeMoveMessage,
 } from "./analysisMessages";
 import type { EngineScore } from "./stockfishMessages";
+import { parseUciInfoLine } from "./parseInfo";
 import {
-  parseScoreInfo,
   getSideToMove,
   computeAnalysisResult,
   scoreForPlayer,
@@ -23,10 +23,16 @@ const ctx = self as DedicatedWorkerGlobalScope;
 
 let engineReady = false;
 let engine: Worker | null = null;
+type SearchResult = {
+  bestmove: string;
+  score: EngineScore | null;
+  pv: string[] | null;
+};
 let activeSearch: {
-  resolve: (value: { bestmove: string; score: EngineScore | null }) => void;
+  resolve: (value: SearchResult) => void;
   reject: (error: Error) => void;
   lastScore: EngineScore | null;
+  lastPv: string[] | null;
   onInfo?: (score: EngineScore, depth: number) => void;
 } | null = null;
 let activeAnalysisId: string | null = null;
@@ -100,9 +106,9 @@ const runSearch = async (
     sendEngineCommand("stop");
   }
 
-  return new Promise<{ bestmove: string; score: EngineScore | null }>(
+  return new Promise<SearchResult>(
     (resolve, reject) => {
-      activeSearch = { resolve, reject, lastScore: null, onInfo };
+      activeSearch = { resolve, reject, lastScore: null, lastPv: null, onInfo };
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
       sendEngineCommand("go depth 17");
@@ -183,18 +189,27 @@ const handleEngineLine = (line: string) => {
 
     const parts = line.split(" ");
     const move = parts[1] ?? "";
-    current.resolve({ bestmove: move, score: current.lastScore });
+    current.resolve({
+      bestmove: move,
+      score: current.lastScore,
+      pv: current.lastPv,
+    });
     return;
   }
 
-  const info = parseScoreInfo(line);
-  if (info?.score && activeSearch) {
-    activeSearch.lastScore = info.score;
-    if (activeSearch.onInfo) {
-      const tokens = line.split(" ");
-      const depthIdx = tokens.indexOf("depth");
-      const depth = depthIdx >= 0 ? Number(tokens[depthIdx + 1]) : 0;
-      activeSearch.onInfo(info.score, depth);
+  const info = parseUciInfoLine(line);
+  if (info && activeSearch) {
+    if (info.score) {
+      activeSearch.lastScore = info.score;
+      if (activeSearch.onInfo) {
+        activeSearch.onInfo(info.score, info.depth ?? 0);
+      }
+    }
+    // Retain the principal variation for the primary line so the root best
+    // search can surface a full continuation. multipv > 1 lines belong to
+    // restricted searches and must not overwrite the main PV.
+    if (info.pv && (info.multipv === undefined || info.multipv === 1)) {
+      activeSearch.lastPv = info.pv;
     }
   }
 };
@@ -293,6 +308,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       id: request.id,
       move: request.move,
       bestMove: bestMove || "(none)",
+      bestLine: [],
       bestEval: null,
       playedEval: null,
       delta: null,
@@ -363,11 +379,19 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     classification = classifyMove(delta);
   }
 
+  // Only persist a PV that actually begins with the final bestmove — an
+  // invalid/mismatched tail would be silently truncated by AnalysisBoard's
+  // replay, so fall back to a single-move line instead.
+  const rootPv = bestSearch.pv ?? [];
+  const bestLine =
+    rootPv.length > 0 && rootPv[0] === bestMove ? rootPv : [bestMove];
+
   ctx.postMessage({
     type: "analysis",
     id: request.id,
     move: request.move,
     bestMove,
+    bestLine,
     bestEval,
     playedEval,
     delta,

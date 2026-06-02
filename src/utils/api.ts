@@ -359,6 +359,8 @@ export interface SessionMoveUpload {
   fen_before: string | null
   move_uci: string | null
   best_move_uci: string | null
+  /** Root best-move principal variation (UCI). Starts with best_move_uci. */
+  best_line_uci?: string[] | null
   decision_source: SessionDecisionSource | null
   target_blunder_id: number | null
 }
@@ -640,6 +642,7 @@ export interface CachedAnalysis {
   move_san: string
   best_move_uci: string | null
   best_move_san: string | null
+  best_line_uci: string[] | null
   played_eval: number | null
   best_eval: number | null
   eval_delta: number | null
@@ -792,6 +795,8 @@ export interface PositionAnalysis {
   best_move_uci: string
   best_move_san: string | null
   best_move_eval_cp: number | null  // side-to-move-relative
+  /** Root best-move principal variation (UCI). Starts with best_move_uci. */
+  best_line_uci?: string[] | null
 }
 
 export interface SessionAnalysis {

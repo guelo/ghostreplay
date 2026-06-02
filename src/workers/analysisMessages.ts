@@ -24,6 +24,12 @@ export type AnalysisWorkerResponse =
       id: string
       move: string
       bestMove: string
+      /**
+       * Root best-move principal variation as UCI moves. Validated to start
+       * with `bestMove`; falls back to `[bestMove]` when the captured PV is
+       * empty or does not begin with the final bestmove.
+       */
+      bestLine: string[]
       bestEval: number | null
       playedEval: number | null
       delta: number | null

@@ -360,4 +360,105 @@ describe('analysisWorker', () => {
       )
     })
   })
+
+  it('captures the root best-move PV and reports it as bestLine', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-pv',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      )
+    })
+
+    // Root best search emits a multipv-1 PV starting with the bestmove.
+    engineMessageHandler?.('info depth 17 multipv 1 score cp 30 pv e2e4 e7e5 g1f3')
+    engineMessageHandler?.('bestmove e2e4')
+
+    // Post-played search (best === played here, so no separate best search).
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        expect.stringContaining('moves e2e4'),
+      )
+    })
+    engineMessageHandler?.('info depth 17 score cp -25 pv e7e5')
+    engineMessageHandler?.('bestmove e7e5')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-pv',
+          bestMove: 'e2e4',
+          bestLine: ['e2e4', 'e7e5', 'g1f3'],
+        }),
+      )
+    })
+  })
+
+  it('falls back to a single-move line when the root PV does not start with bestmove', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-bad-pv',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      )
+    })
+
+    // Stale PV from a prior depth whose head no longer matches the final bestmove.
+    engineMessageHandler?.('info depth 16 multipv 1 score cp 30 pv d2d4 d7d5')
+    engineMessageHandler?.('bestmove e2e4')
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        expect.stringContaining('moves e2e4'),
+      )
+    })
+    engineMessageHandler?.('info depth 17 score cp -25 pv e7e5')
+    engineMessageHandler?.('bestmove e7e5')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-bad-pv',
+          bestMove: 'e2e4',
+          bestLine: ['e2e4'],
+        }),
+      )
+    })
+  })
 })

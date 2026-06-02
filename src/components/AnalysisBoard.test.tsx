@@ -497,6 +497,105 @@ describe('AnalysisBoard MoveList', () => {
     expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(true)
   })
 
+  it('renders the cached best line popup with its full stored PV continuation', async () => {
+    // Restricted live search returns a non-best line; the cached best line is
+    // merged in as slot 1 and must replay its full stored PV, not one move.
+    mockEngineInfoRef.current = [
+      { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 10 }, depth: 18, multipv: 2 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [moves[1].fen_after]: {
+            best_move_uci: 'g1f3',
+            best_move_san: 'Nf3',
+            best_move_eval_cp: 42,
+            best_line_uci: ['g1f3', 'd7d6', 'd2d4'],
+          },
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+    expect(dialog).toHaveTextContent('Nf3')
+    expect(dialog).toHaveTextContent('d6')
+    expect(dialog).toHaveTextContent('d4')
+  })
+
+  it('requests a restricted search that excludes the cached best move', () => {
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard
+          moves={moves}
+          boardOrientation="white"
+          positionAnalysis={{
+            [moves[1].fen_after]: {
+              best_move_uci: 'g1f3',
+              best_move_san: 'Nf3',
+              best_move_eval_cp: 42,
+              best_line_uci: ['g1f3', 'd7d6', 'd2d4'],
+            },
+          }}
+        />,
+      )
+
+      act(() => {
+        vi.advanceTimersByTime(120)
+      })
+
+      expect(mockEvaluatePosition).toHaveBeenCalledWith(
+        moves[1].fen_after,
+        expect.objectContaining({
+          depth: 21,
+          multipv: 2,
+          searchmoves: expect.not.arrayContaining(['g1f3']),
+        }),
+      )
+      // The restricted search must still offer the other legal replies.
+      const calls = mockEvaluatePosition.mock.calls as unknown as Array<
+        [string, { searchmoves?: string[] }]
+      >
+      const call = calls.find(([fen]) => fen === moves[1].fen_after)
+      expect(call?.[1].searchmoves?.length).toBeGreaterThan(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('falls back to a single-move cached best line when no stored PV is present', async () => {
+    mockEngineInfoRef.current = [
+      { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 10 }, depth: 18, multipv: 2 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [moves[1].fen_after]: {
+            best_move_uci: 'g1f3',
+            best_move_san: 'Nf3',
+            best_move_eval_cp: 42,
+          },
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+    expect(dialog).toHaveTextContent('Nf3')
+    expect(dialog).not.toHaveTextContent('d6')
+  })
+
   it('updates only the preview board when clicking PV moves or using arrow keys', async () => {
     mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6', 'd2d4'], score: { type: 'cp', value: 42 }, depth: 18 }]
     mockEngineInfoFenRef.current = moves[1].fen_after

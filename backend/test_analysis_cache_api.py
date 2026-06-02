@@ -352,3 +352,123 @@ def test_lookup_returns_classification_when_present(client, auth_headers, db_ses
     key = f"{STARTING_FEN}::e2e4"
     result = response.json()["results"][key]
     assert result["classification"] == "best"
+
+
+def test_best_line_uci_round_trips_through_cache_and_lookup(
+    client, auth_headers, create_game_session, db_session
+):
+    """best_line_uci is stored on both session_moves and analysis_cache and
+    served back through the /lookup cache hit path as a UCI move list."""
+    from app.models import SessionMove
+
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": AFTER_E4_FEN,
+                    "eval_cp": 20,
+                    "best_move_san": "e4",
+                    "best_move_eval_cp": 20,
+                    "eval_delta": 0,
+                    "classification": "best",
+                    "fen_before": STARTING_FEN,
+                    "move_uci": "e2e4",
+                    "best_move_uci": "e2e4",
+                    "best_line_uci": ["e2e4", "e7e5", "g1f3"],
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 200
+
+    move_row = db_session.query(SessionMove).filter(
+        SessionMove.session_id == uuid.UUID(str(session_id)),
+        SessionMove.move_number == 1,
+    ).first()
+    assert move_row is not None
+    assert move_row.best_line_uci == "e2e4 e7e5 g1f3"
+
+    cached = db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == STARTING_FEN,
+        AnalysisCache.move_uci == "e2e4",
+    ).first()
+    assert cached is not None
+    assert cached.best_line_uci == "e2e4 e7e5 g1f3"
+
+    lookup = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(user_id=123),
+    )
+    assert lookup.status_code == 200
+    result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
+    assert result["best_line_uci"] == ["e2e4", "e7e5", "g1f3"]
+
+
+def test_session_analysis_position_analysis_includes_best_line_uci(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": AFTER_E4_FEN,
+                    "eval_cp": 20,
+                    "best_move_san": "e4",
+                    "best_move_eval_cp": 20,
+                    "eval_delta": 0,
+                    "classification": "best",
+                    "fen_before": STARTING_FEN,
+                    "move_uci": "e2e4",
+                    "best_move_uci": "e2e4",
+                    "best_line_uci": ["e2e4", "e7e5", "g1f3"],
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    analysis = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert analysis.status_code == 200
+    position_analysis = analysis.json()["position_analysis"]
+    assert position_analysis[STARTING_FEN]["best_line_uci"] == ["e2e4", "e7e5", "g1f3"]
+
+
+def test_lookup_best_line_uci_null_for_legacy_rows(client, auth_headers, db_session):
+    _seed_cache(db_session, [
+        {
+            "fen_before": STARTING_FEN,
+            "move_uci": "e2e4",
+            "move_san": "e4",
+            "best_move_uci": "e2e4",
+            "best_move_san": "e4",
+            "played_eval": 20,
+            "best_eval": 20,
+            "eval_delta": 0,
+        },
+    ])
+
+    response = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(),
+    )
+    assert response.status_code == 200
+    result = response.json()["results"][f"{STARTING_FEN}::e2e4"]
+    assert result["best_line_uci"] is None

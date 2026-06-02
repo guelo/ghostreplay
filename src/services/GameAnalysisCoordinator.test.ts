@@ -518,6 +518,39 @@ describe('GameAnalysisCoordinator', () => {
       expect(coordinator.store.getState().streamingEval).toBeNull()
     })
 
+    it('threads best_line_uci from a cache hit into the resolved analysis bestLine', async () => {
+      coordinator.startSession('session-A')
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4',
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5', 'g1f3'],
+          played_eval: 25,
+          best_eval: 25,
+          eval_delta: 0,
+          classification: 'best',
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)).toEqual(
+        expect.objectContaining({
+          bestMove: 'e2e4',
+          bestLine: ['e2e4', 'e7e5', 'g1f3'],
+        }),
+      )
+    })
+
     it('ignores incomplete cache hits and lets the worker finish the analysis', async () => {
       coordinator.startSession('session-A')
 

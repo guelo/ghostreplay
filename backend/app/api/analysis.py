@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import AnalysisCache
+from app.models import AnalysisCache, decode_uci_line
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -28,6 +28,7 @@ class CachedAnalysisResult(BaseModel):
     move_san: str
     best_move_uci: str | None = None
     best_move_san: str | None = None
+    best_line_uci: list[str] | None = None
     played_eval: int | None = None
     best_eval: int | None = None
     eval_delta: int | None = None
@@ -69,6 +70,7 @@ def lookup_analysis(
                 move_san=row.move_san,
                 best_move_uci=row.best_move_uci,
                 best_move_san=row.best_move_san,
+                best_line_uci=decode_uci_line(row.best_line_uci),
                 played_eval=row.played_eval,
                 best_eval=row.best_eval,
                 eval_delta=row.eval_delta,
