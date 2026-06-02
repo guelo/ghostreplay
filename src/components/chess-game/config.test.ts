@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { GHOST_AVATAR_SRC, getOpponentAvatarSrc } from "./config";
+import {
+  GHOST_AVATAR_SRC,
+  getOpponentAvatarSrc,
+  getOpponentResultAvatarSrc,
+} from "./config";
 
 describe("getOpponentAvatarSrc", () => {
   it("returns the exact asset for on-bin values", () => {
@@ -29,5 +33,25 @@ describe("getOpponentAvatarSrc", () => {
 
   it("exposes the ghost replay avatar path", () => {
     expect(GHOST_AVATAR_SRC).toBe("/branding/ghost-logo-option-1-buddy.svg");
+  });
+});
+
+describe("getOpponentResultAvatarSrc", () => {
+  it("returns the bin-keyed victorious/defeated images for on-bin values", () => {
+    expect(getOpponentResultAvatarSrc(600, "victorious")).toBe(
+      "/images/victorious/600.png",
+    );
+    expect(getOpponentResultAvatarSrc(2600, "defeated")).toBe(
+      "/images/defeated/2600.png",
+    );
+  });
+
+  it("snaps off-bin values down to the nearest supported bin", () => {
+    expect(getOpponentResultAvatarSrc(1250, "victorious")).toBe(
+      "/images/victorious/1200.png",
+    );
+    expect(getOpponentResultAvatarSrc(400, "defeated")).toBe(
+      "/images/defeated/600.png",
+    );
   });
 });

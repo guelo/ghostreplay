@@ -1496,6 +1496,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             opponentMode={opponentMode}
             opponentName={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
             engineElo={engineElo}
+            gameResult={gameResult}
             blunderReviewId={blunderReviewId}
             showGhostInfo={showGhostInfo}
             onToggleGhostInfo={handleToggleGhostInfo}

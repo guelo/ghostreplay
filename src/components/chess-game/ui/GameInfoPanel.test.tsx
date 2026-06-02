@@ -32,6 +32,7 @@ const makeProps = () => {
     opponentMode: "engine" as const,
     opponentName: "Ghost Master 2000",
     engineElo: 2000,
+    gameResult: null,
     blunderReviewId: null,
     showGhostInfo: false,
     onToggleGhostInfo,
@@ -62,6 +63,51 @@ describe("GameInfoPanel", () => {
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
     expect(avatar).not.toBeNull();
+    expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(2000));
+  });
+
+  it("keeps the opponent visible and shows the result avatar after a game ends", () => {
+    const props = {
+      ...makeProps(),
+      isGameActive: false,
+      gameResult: { type: "checkmate_loss" as const, message: "You lost." },
+    };
+    const { container } = render(<GameInfoPanel {...props} />);
+
+    expect(screen.getByText("Ghost Master 2000")).toBeInTheDocument();
+    expect(screen.queryByText("Click New game to start")).toBeNull();
+
+    const avatar = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(avatar?.getAttribute("src")).toBe("/images/victorious/2000.png");
+  });
+
+  it("shows the defeated avatar when the player wins", () => {
+    const props = {
+      ...makeProps(),
+      isGameActive: false,
+      gameResult: { type: "checkmate_win" as const, message: "You won!" },
+    };
+    const { container } = render(<GameInfoPanel {...props} />);
+
+    const avatar = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
+    expect(avatar?.getAttribute("src")).toBe("/images/defeated/2000.png");
+  });
+
+  it("leaves the avatar unchanged on a draw", () => {
+    const props = {
+      ...makeProps(),
+      isGameActive: false,
+      gameResult: { type: "draw" as const, message: "Draw." },
+    };
+    const { container } = render(<GameInfoPanel {...props} />);
+
+    const avatar = container.querySelector(
+      "img.opponent-avatar",
+    ) as HTMLImageElement | null;
     expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(2000));
   });
 

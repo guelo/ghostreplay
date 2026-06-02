@@ -11,7 +11,11 @@ import {
 } from "./movePresentation";
 import { deriveDisplayedOpening } from "./opening";
 import { buildSessionMoveUploads, parseUciToSan } from "./sessionUpload";
-import { deriveGameStatusBadge, deriveStatusText } from "./status";
+import {
+  deriveGameStatusBadge,
+  deriveOpponentAvatarMood,
+  deriveStatusText,
+} from "./status";
 
 describe("chess-game domain helpers", () => {
   it("derives status text from chess state", () => {
@@ -51,6 +55,20 @@ describe("chess-game domain helpers", () => {
       label: "Resigned",
       className: "game-status-badge--other",
     });
+  });
+
+  it("derives the opponent avatar mood from the game result", () => {
+    expect(deriveOpponentAvatarMood(null)).toBeNull();
+    expect(
+      deriveOpponentAvatarMood({ type: "checkmate_win", message: "" }),
+    ).toBe("defeated");
+    expect(
+      deriveOpponentAvatarMood({ type: "checkmate_loss", message: "" }),
+    ).toBe("victorious");
+    expect(deriveOpponentAvatarMood({ type: "resign", message: "" })).toBe(
+      "victorious",
+    );
+    expect(deriveOpponentAvatarMood({ type: "draw", message: "" })).toBeNull();
   });
 
   it("derives move highlights and annotations", () => {

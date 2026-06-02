@@ -3,6 +3,27 @@ export type GameResult = {
   message: string;
 };
 
+/**
+ * Opponent avatar mood for a finished game. The opponent is "victorious" when
+ * the player lost (checkmate loss or resignation) and "defeated" when the
+ * player won. Draws return null — the avatar image is left unchanged.
+ */
+export const deriveOpponentAvatarMood = (
+  gameResult: GameResult | null,
+): "victorious" | "defeated" | null => {
+  if (!gameResult) return null;
+  switch (gameResult.type) {
+    case "checkmate_win":
+      return "defeated";
+    case "checkmate_loss":
+    case "resign":
+      return "victorious";
+    case "draw":
+    default:
+      return null;
+  }
+};
+
 type ChessStatusSource = {
   isCheckmate: () => boolean;
   isDraw: () => boolean;

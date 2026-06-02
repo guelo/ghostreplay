@@ -4,6 +4,7 @@ import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { RatingScoreKey, RatingScores, TargetBlunderSrs } from "../../../utils/api";
 import { getRatingDisplayLabel, resolveDisplayScore } from "../../../stores/useGameStore";
 import type { ResolvedReview } from "../types";
+import { deriveOpponentAvatarMood, type GameResult } from "../domain/status";
 import OpponentAvatar from "./OpponentAvatar";
 
 type BoardOrientation = "white" | "black";
@@ -26,6 +27,7 @@ type GameInfoPanelProps = {
   opponentMode: OpponentMode;
   opponentName: string;
   engineElo: number;
+  gameResult: GameResult | null;
   blunderReviewId: number | null;
   showGhostInfo: boolean;
   onToggleGhostInfo: () => void;
@@ -226,6 +228,7 @@ const GameInfoPanel = ({
   opponentMode,
   opponentName,
   engineElo,
+  gameResult,
   blunderReviewId,
   showGhostInfo,
   onToggleGhostInfo,
@@ -312,8 +315,10 @@ const GameInfoPanel = ({
             )}
           </span>
         </p>
-        {!isGameActive && <p className="chess-meta">Click New game to start</p>}
-        {isGameActive && (
+        {!isGameActive && !gameResult && (
+          <p className="chess-meta">Click New game to start</p>
+        )}
+        {(isGameActive || gameResult !== null) && (
           <div
             className={`chess-meta chess-panel__opponent${
               opponentMode === "ghost"
@@ -404,6 +409,7 @@ const GameInfoPanel = ({
                   mode="engine"
                   engineElo={engineElo}
                   size={70}
+                  mood={isGameActive ? null : deriveOpponentAvatarMood(gameResult)}
                 />{" "}
                 <span className="chess-meta-strong">{opponentName}</span>
               </>

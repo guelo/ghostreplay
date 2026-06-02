@@ -68,9 +68,9 @@ export const MAIA_OPPONENT_AVATARS: Record<
 const isMaiaBin = (elo: number): elo is (typeof MAIA_ELO_BINS)[number] =>
   (MAIA_ELO_BINS as readonly number[]).includes(elo);
 
-export const getOpponentAvatarSrc = (engineElo: number): string => {
+const resolveMaiaBin = (engineElo: number): (typeof MAIA_ELO_BINS)[number] => {
   if (isMaiaBin(engineElo)) {
-    return MAIA_OPPONENT_AVATARS[engineElo];
+    return engineElo;
   }
   let best: (typeof MAIA_ELO_BINS)[number] = MAIA_ELO_BINS[0];
   for (const bin of MAIA_ELO_BINS) {
@@ -78,8 +78,23 @@ export const getOpponentAvatarSrc = (engineElo: number): string => {
       best = bin;
     }
   }
-  return MAIA_OPPONENT_AVATARS[best];
+  return best;
 };
+
+export const getOpponentAvatarSrc = (engineElo: number): string =>
+  MAIA_OPPONENT_AVATARS[resolveMaiaBin(engineElo)];
+
+/** Mood of the opponent avatar shown at the end of a game. */
+export type OpponentAvatarMood = "victorious" | "defeated";
+
+/**
+ * End-of-game opponent avatar. Images are keyed by ELO bin and live in
+ * /images/victorious and /images/defeated (file name = bin).
+ */
+export const getOpponentResultAvatarSrc = (
+  engineElo: number,
+  mood: OpponentAvatarMood,
+): string => `/images/${mood}/${resolveMaiaBin(engineElo)}.png`;
 
 export const STARTING_FEN =
   "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
