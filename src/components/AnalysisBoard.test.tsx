@@ -1099,3 +1099,116 @@ describe('AnalysisBoard — handleDrop behavior', () => {
     expect(capturedMoveListProps.currentIndex).toBeNull()
   })
 })
+
+describe('AnalysisBoard — click-to-move behavior', () => {
+  const invokeClick = (square: string): void => {
+    const onClick = capturedChessboardProps.onSquareClick as (args: { square: string }) => void
+    act(() => {
+      onClick({ square })
+    })
+  }
+
+  it('selecting an own-side piece highlights it and dots its legal destinations', () => {
+    // Latest view: after 1. e4 c5, white to move. Click the e4 pawn.
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    invokeClick('e4')
+
+    const styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    // Selected square highlighted yellow
+    expect(styles.e4?.background).toBe('rgba(255, 255, 0, 0.4)')
+    // e5 is a quiet legal destination → radial-gradient dot
+    expect(styles.e5?.background).toContain('radial-gradient')
+    expect(styles.e5?.borderRadius).toBe('50%')
+  })
+
+  it('tints capture destinations red', () => {
+    // Position after 1. e4 d5 — white to move, e4 pawn can capture on d5.
+    const captureMoves: AnalysisMove[] = [
+      moves[0],
+      {
+        move_number: 1,
+        color: 'black',
+        move_san: 'd5',
+        fen_after: 'rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
+        eval_cp: 20,
+        eval_mate: null,
+        best_move_san: 'd5',
+        best_move_eval_cp: 20,
+        eval_delta: 0,
+        classification: 'best',
+      },
+    ]
+    render(<AnalysisBoard moves={captureMoves} boardOrientation="white" />)
+
+    invokeClick('e4')
+
+    const styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    // exd5 is a capture → red tint
+    expect(styles.d5?.background).toBe('rgba(255, 0, 0, 0.4)')
+  })
+
+  it('clicking a dotted destination makes the move (creates a variation)', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    // Navigate to move 0 (after e4), white... actually after e4 it is black to move.
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    // After 1. e4, black to move. Select c7 pawn then click c5 (matches main line).
+    invokeClick('c7')
+    let styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    expect(styles.c7?.background).toBe('rgba(255, 255, 0, 0.4)')
+    // c6 is a quiet legal destination → radial-gradient dot
+    expect(styles.c6?.background).toContain('radial-gradient')
+
+    // Click c5 — main-line continuation, advances cursor without addMove
+    invokeClick('c5')
+    expect(mockAddMove).not.toHaveBeenCalled()
+    // Option dots cleared after the move (c6 no longer dotted)
+    styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    expect(styles.c6).toBeUndefined()
+  })
+
+  it('clicking an alternate destination branches a variation', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+
+    // After 1. e4, select d7 then click d5 (not the main-line c5) → variation
+    invokeClick('d7')
+    invokeClick('d5')
+
+    expect(mockAddMove).toHaveBeenCalledTimes(1)
+    expect(mockAddMove.mock.calls[0]![0].san).toBe('d5')
+  })
+
+  it('clicking an empty square clears option dots', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    invokeClick('e4')
+    expect((capturedChessboardProps.squareStyles as Record<string, unknown>).e4).toBeDefined()
+
+    invokeClick('e3') // empty square, no own piece
+    const styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    // option dots cleared; only last-move highlights (if any) remain
+    expect(styles.e4?.background).not.toBe('rgba(255, 255, 0, 0.4)')
+  })
+
+  it('navigating clears option dots', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    invokeClick('e4')
+    expect((capturedChessboardProps.squareStyles as Record<string, unknown>).e4).toBeDefined()
+
+    // Navigate via MoveList → clearMoveHints should fire
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+    const styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    expect(styles.e5).toBeUndefined()
+  })
+
+  it('clicking the opponent piece (not side-to-move) selects nothing', () => {
+    // Latest: white to move. Click a black piece (d7 pawn) → no selection/dots.
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    invokeClick('d7')
+    const styles = capturedChessboardProps.squareStyles as Record<string, React.CSSProperties>
+    // No yellow selection and no option dots for the opponent piece
+    expect(styles.d7).toBeUndefined()
+    expect(styles.d6).toBeUndefined()
+  })
+})

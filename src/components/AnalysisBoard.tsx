@@ -1,8 +1,9 @@
 import { forwardRef, memo, Profiler, useCallback, useEffect, useId, useImperativeHandle, useMemo, useRef, useState } from "react";
 import type { ProfilerOnRenderCallback } from "react";
 import { Chess } from "chess.js";
+import type { Square } from "chess.js";
 import { Chessboard } from "react-chessboard";
-import type { PieceDropHandlerArgs } from "react-chessboard";
+import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, PositionAnalysis } from "../utils/api";
 import type { EngineInfo } from "../workers/stockfishMessages";
 import type { VariationNodeId } from "../types/variationTree";
@@ -56,6 +57,8 @@ const uciToSquares = (uci: string) => ({
   startSquare: uci.slice(0, 2),
   endSquare: uci.slice(2, 4),
 });
+
+const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
 
 /** Extract side-to-move from a FEN string without constructing a Chess instance. */
 const fenSideToMove = (fen: string): "w" | "b" => {
@@ -267,6 +270,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const [selectedEngineLineIndex, setSelectedEngineLineIndex] = useState<number | null>(null);
   const [selectedEnginePlyIndex, setSelectedEnginePlyIndex] = useState(0);
   const [enginePopupPosition, setEnginePopupPosition] = useState<React.CSSProperties | null>(null);
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [optionSquares, setOptionSquares] = useState<Record<string, React.CSSProperties>>({});
+  const clearMoveHints = useCallback(() => {
+    setSelectedSquare(null);
+    setOptionSquares({});
+  }, []);
   const boardRootRef = useRef<HTMLDivElement>(null);
   const boardFrameRef = useRef<HTMLDivElement>(null);
   const engineLineRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -618,8 +627,9 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     if (previousDisplayedFenRef.current !== displayedFen) {
       previousDisplayedFenRef.current = displayedFen;
       closeEnginePopup();
+      clearMoveHints();
     }
-  }, [displayedFen, closeEnginePopup]);
+  }, [displayedFen, closeEnginePopup, clearMoveHints]);
 
   useEffect(() => {
     if (!showEngineArrows) {
@@ -840,6 +850,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     mainLineMoveDetails,
   ]);
 
+  // Merge last-move highlight with click-to-select option dots (option styles win)
+  const squareStyles = useMemo(
+    (): Record<string, React.CSSProperties> => ({ ...lastMoveSquares, ...optionSquares }),
+    [lastMoveSquares, optionSquares],
+  );
+
   // Resolve pending variation analysis when lastAnalysis fires
   useEffect(() => {
     if (!lastAnalysis) return;
@@ -850,10 +866,11 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const handleNavigate = useCallback(
     (index: number | null) => {
       traceNavigation(index);
+      clearMoveHints();
       setSelectedVarNode(null);
       setCurrentIndex(index);
     },
-    [setSelectedVarNode, traceNavigation],
+    [setSelectedVarNode, traceNavigation, clearMoveHints],
   );
 
   useImperativeHandle(ref, () => ({
@@ -874,14 +891,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   // Handle variation node selection from MoveList
   const handleVarSelect = useCallback(
     (nodeId: VariationNodeId | null) => {
+      clearMoveHints();
       setSelectedVarNode(nodeId);
     },
-    [setSelectedVarNode],
+    [setSelectedVarNode, clearMoveHints],
   );
 
-  // Handle piece drop for what-if exploration
-  const handleDrop = useCallback(
-    ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
+  // Shared move-execution core for both drag-drop and click-to-move
+  const tryMove = useCallback(
+    (sourceSquare: string, targetSquare: string | null): boolean => {
       // Determine the FEN to play from
       const baseFen = isInVariation && selectedVarNode
         ? selectedVarNode.fen
@@ -957,6 +975,114 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     ],
   );
 
+  // Handle piece drop for what-if exploration
+  const handleDrop = useCallback(
+    ({ sourceSquare, targetSquare }: PieceDropHandlerArgs) => {
+      const moved = tryMove(sourceSquare, targetSquare);
+      if (moved) clearMoveHints();
+      return moved;
+    },
+    [tryMove, clearMoveHints],
+  );
+
+  // Build legal-move hint styles for a clicked piece; mirrors ChessGame.getMoveOptions
+  const getMoveOptions = useCallback(
+    (square: string): boolean => {
+      if (!isSquare(square)) {
+        return false;
+      }
+
+      const baseFen = isInVariation && selectedVarNode
+        ? selectedVarNode.fen
+        : displayedFen;
+
+      let moves;
+      let chess;
+      try {
+        chess = new Chess(baseFen);
+        moves = chess.moves({ square, verbose: true });
+      } catch {
+        return false;
+      }
+      if (moves.length === 0) {
+        return false;
+      }
+
+      const sourcePiece = chess.get(square);
+      const newSquares: Record<string, React.CSSProperties> = {};
+      for (const move of moves) {
+        const target = chess.get(move.to);
+        const isCapture =
+          sourcePiece != null &&
+          target != null &&
+          target.color !== sourcePiece.color;
+        newSquares[move.to] = {
+          background: isCapture
+            ? "rgba(255, 0, 0, 0.4)"
+            : "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
+          borderRadius: "50%",
+        };
+      }
+
+      newSquares[square] = {
+        background: "rgba(255, 255, 0, 0.4)",
+      };
+
+      setOptionSquares(newSquares);
+      return true;
+    },
+    [isInVariation, selectedVarNode, displayedFen],
+  );
+
+  // Click-to-select / click-to-move on the analysis board
+  const handleSquareClick = useCallback(
+    ({ square }: SquareHandlerArgs) => {
+      // If a square is already selected, try to make the move
+      if (selectedSquare) {
+        const moved = tryMove(selectedSquare, square);
+        if (moved) {
+          clearMoveHints();
+          return;
+        }
+        // Illegal — fall through to (re)selection
+      }
+
+      if (!isSquare(square)) {
+        clearMoveHints();
+        return;
+      }
+
+      const baseFen = isInVariation && selectedVarNode
+        ? selectedVarNode.fen
+        : displayedFen;
+      let piece;
+      try {
+        piece = new Chess(baseFen).get(square);
+      } catch {
+        clearMoveHints();
+        return;
+      }
+
+      if (piece && piece.color === sideToMove) {
+        if (getMoveOptions(square)) {
+          setSelectedSquare(square);
+          return;
+        }
+      }
+      clearMoveHints();
+    },
+    [
+      selectedSquare,
+      tryMove,
+      clearMoveHints,
+      isInVariation,
+      selectedVarNode,
+      displayedFen,
+      sideToMove,
+      getMoveOptions,
+    ],
+  );
+
   const handleToggleEngineArrows = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const next = e.target.checked;
@@ -1002,9 +1128,10 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                   position: displayedFen,
                   boardOrientation,
                   onPieceDrop: handleDrop,
+                  onSquareClick: handleSquareClick,
                   allowDragging: true,
                   animationDurationInMs: 200,
-                  squareStyles: lastMoveSquares,
+                  squareStyles,
                   arrows: allArrows,
                   boardStyle: {
                     borderRadius: "0",
