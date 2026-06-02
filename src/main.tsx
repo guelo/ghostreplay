@@ -5,6 +5,10 @@ import './index.css'
 import AppRoutes from './AppRoutes.tsx'
 import { AuthProvider } from './contexts/AuthContext.tsx'
 import { GameAnalysisCoordinatorProvider } from './contexts/GameAnalysisCoordinatorContext.tsx'
+import DebugOverlay from './components/DebugOverlay.tsx'
+import { installConsoleCapture } from './utils/debugLog.ts'
+
+installConsoleCapture()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -15,5 +19,6 @@ createRoot(document.getElementById('root')!).render(
         </GameAnalysisCoordinatorProvider>
       </BrowserRouter>
     </AuthProvider>
+    <DebugOverlay />
   </StrictMode>,
 )

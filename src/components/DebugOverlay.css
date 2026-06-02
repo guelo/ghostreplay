@@ -1,0 +1,142 @@
+/* Debug overlay (g-0oow). Component-local styles so the overlay is styled on
+   every route, including auth routes that don't load App.css. */
+
+.debug-hotspot {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  z-index: 2147483646;
+}
+
+.debug-overlay {
+  position: fixed;
+  inset: auto 8px 8px 8px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: #14161c;
+  color: #e6e6e6;
+  border: 1px solid #2c2f3a;
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  z-index: 2147483647;
+}
+
+.debug-overlay__header,
+.debug-overlay__filters {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #2c2f3a;
+  flex-wrap: wrap;
+}
+
+.debug-overlay__title {
+  font-weight: 600;
+}
+
+.debug-overlay__count {
+  margin-right: auto;
+  opacity: 0.7;
+}
+
+.debug-overlay__header button,
+.debug-chip {
+  background: #232634;
+  color: #e6e6e6;
+  border: 1px solid #343849;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.debug-overlay__header button:hover,
+.debug-chip:hover {
+  background: #2c3142;
+}
+
+.debug-chip {
+  text-transform: uppercase;
+  font-size: 10px;
+  opacity: 0.45;
+}
+
+.debug-chip.is-active {
+  opacity: 1;
+}
+
+.debug-chip--warn.is-active {
+  border-color: #b58900;
+  color: #e0b341;
+}
+
+.debug-chip--error.is-active {
+  border-color: #b03a3a;
+  color: #ef6b6b;
+}
+
+.debug-overlay__search {
+  flex: 1;
+  min-width: 80px;
+  background: #0e1014;
+  color: #e6e6e6;
+  border: 1px solid #343849;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font: inherit;
+}
+
+.debug-overlay__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.debug-entry {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid #1d2029;
+}
+
+.debug-entry__ts {
+  opacity: 0.5;
+  white-space: nowrap;
+}
+
+.debug-entry__level {
+  text-transform: uppercase;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.debug-entry__args {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+}
+
+.debug-entry--warn {
+  color: #e0b341;
+}
+
+.debug-entry--error {
+  color: #ef6b6b;
+}
+
+.debug-entry--debug {
+  opacity: 0.7;
+}
