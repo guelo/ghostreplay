@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Chessboard } from "react-chessboard";
 import AppNav from "../components/AppNav";
+import OpeningFamilyCard from "../components/OpeningFamilyCard";
 import { getOpeningBook } from "../openings/openingBook";
+import { buildOpeningsSearchParams, type OpeningRoute } from "../openings/route";
+import {
+  formatGames,
+  formatPercent,
+  formatScore,
+  getPriorityTone,
+} from "../openings/format";
 import {
   getOpeningChildren,
   type ChildrenResponse,
@@ -17,105 +24,8 @@ const COLOR_OPTIONS: Array<{ label: string; value: OpeningPlayerColor }> = [
 
 const LOADING_CARD_COUNT = 3;
 
-type OpeningRoute = {
-  playerColor: OpeningPlayerColor;
-  openingKey?: string;
-  path?: string[];
-};
-
-function buildOpeningsSearchParams(route: OpeningRoute): URLSearchParams {
-  const params = new URLSearchParams({
-    color: route.playerColor,
-  });
-
-  if (route.openingKey) {
-    params.set("opening", route.openingKey);
-
-    for (const pathKey of route.path ?? []) {
-      params.append("path", pathKey);
-    }
-  }
-
-  return params;
-}
-
 function getColorLabel(playerColor: OpeningPlayerColor): string {
   return playerColor === "white" ? "White" : "Black";
-}
-
-function formatScore(value: number | null): string {
-  if (value === null) {
-    return "—";
-  }
-
-  return String(Math.round(value));
-}
-
-function normalizePercentValue(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-
-  const normalizedValue = value <= 1 ? value * 100 : value;
-  return Math.min(100, Math.max(0, normalizedValue));
-}
-
-function formatPercent(value: number | null): string {
-  if (value === null) {
-    return "—";
-  }
-
-  return `${Math.round(normalizePercentValue(value))}%`;
-}
-
-function formatGames(value: number | null): string {
-  if (value === null) {
-    return "—";
-  }
-
-  return value.toLocaleString();
-}
-
-function getPriorityTone(
-  score: number | null,
-): "alert" | "watch" | "steady" | "muted" {
-  if (score === null) {
-    return "muted";
-  }
-
-  if (score < 45) {
-    return "alert";
-  }
-
-  if (score < 65) {
-    return "watch";
-  }
-
-  return "steady";
-}
-
-function getPriorityLabel(score: number | null): string {
-  if (score === null) {
-    return "No Data";
-  }
-
-  if (score >= 85) {
-    return "A";
-  }
-
-  if (score >= 70) {
-    return "B";
-  }
-
-  if (score >= 55) {
-    return "C";
-  }
-
-  if (score >= 45) {
-    return "D";
-  }
-
-  return "F";
 }
 
 function formatChildCount(childCount: number): string {
@@ -604,133 +514,50 @@ function OpeningsPage() {
                   child.opening_key,
                   moveLinesByFen,
                 );
-                const statusLabel = getPriorityLabel(child.subtree_score);
                 const cardClassName = `opening-family-card opening-family-card--${tone}${canDrillDown ? " opening-family-card--interactive" : ""}`;
-                const headline = (
-                  <>
-                    <div className="opening-family-card__headline">
-                      <h2 className="opening-family-card__title">
-                        {child.opening_name}
-                      </h2>
-                      <p className="opening-family-card__hint">
-                        Moves:{" "}
-                        <strong>
-                          {openingMoveLine ?? "Line unavailable."}
-                        </strong>
-                      </p>
-                      {isUnscored && (
-                        <p className="opening-family-card__subhint">
-                          No scored roots in this subtree yet.
-                        </p>
-                      )}
-                    </div>
-
-                    <div className="opening-family-card__overview">
-                      <div
-                        className="opening-family-card__board"
-                        aria-hidden="true"
-                      >
-                        <Chessboard
-                          options={{
-                            position: child.opening_key,
-                            boardOrientation: playerColor,
-                            allowDragging: false,
-                            animationDurationInMs: 0,
-                            boardStyle: {
-                              borderRadius: "10px",
-                              pointerEvents: "none",
-                            },
-                          }}
-                        />
-                      </div>
-                      <dl className="opening-family-card__score-panel">
-                        <div className="opening-family-card__score-metric">
-                          <dt>Score</dt>
-                          <dd>{formatScore(child.subtree_score)}</dd>
-                        </div>
-                        <div
-                          aria-label={`Status ${statusLabel}`}
-                          className="opening-family-card__grade"
-                        >
-                          {statusLabel}
-                        </div>
-                      </dl>
-                    </div>
-
-                    <dl className="opening-family-card__metrics">
-                      <div className="opening-family-card__metric">
-                        <dt>Coverage</dt>
-                        <dd>{formatPercent(child.subtree_coverage)}</dd>
-                      </div>
-                      <div className="opening-family-card__metric">
-                        <dt>Games</dt>
-                        <dd>{formatGames(child.subtree_sample_size)}</dd>
-                      </div>
-                      <div className="opening-family-card__metric">
-                        <dt>Confidence</dt>
-                        <dd>{formatPercent(child.subtree_confidence)}</dd>
-                      </div>
-                    </dl>
-
-                    <div className="opening-family-card__footer">
-                      <span className="opening-family-card__footer-note">
-                        {formatChildCount(child.child_count)}
-                      </span>
-                      <div className="opening-family-card__footer-actions">
-                        {canDrillDown && (
-                          <span className="opening-family-card__drilldown">
-                            Drill down
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          className="opening-family-card__drill-button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            navigate("/play", {
-                              state: {
-                                drillSetup: {
-                                  openingKey: child.opening_key,
-                                  playerColor,
-                                },
-                              },
-                            });
-                          }}
-                        >
-                          Start Drill
-                        </button>
-                      </div>
-                    </div>
-                  </>
-                );
-
-                if (canDrillDown) {
-                  return (
-                    <button
-                      key={child.opening_key}
-                      type="button"
-                      className={cardClassName}
-                      onClick={() => {
-                        navigateToRoute({
-                          playerColor,
-                          openingKey: child.opening_key,
-                          path: response.canonical_opening_key
-                            ? [
-                                ...response.canonical_path,
-                                response.canonical_opening_key,
-                              ]
-                            : [],
-                        });
-                      }}
-                    >
-                      {headline}
-                    </button>
-                  );
-                }
 
                 return (
                   <article key={child.opening_key} className={cardClassName}>
-                    {headline}
+                    <OpeningFamilyCard
+                      variant="full"
+                      openingName={child.opening_name}
+                      openingKey={child.opening_key}
+                      playerColor={playerColor}
+                      score={child.subtree_score}
+                      coverage={child.subtree_coverage}
+                      sampleSize={child.subtree_sample_size}
+                      confidence={child.subtree_confidence}
+                      isUnscored={isUnscored}
+                      moveLine={openingMoveLine}
+                      footerNote={formatChildCount(child.child_count)}
+                      drillDownLabel={canDrillDown ? "Drill down" : undefined}
+                      onDrillDown={
+                        canDrillDown
+                          ? () => {
+                              navigateToRoute({
+                                playerColor,
+                                openingKey: child.opening_key,
+                                path: response.canonical_opening_key
+                                  ? [
+                                      ...response.canonical_path,
+                                      response.canonical_opening_key,
+                                    ]
+                                  : [],
+                              });
+                            }
+                          : undefined
+                      }
+                      onStartDrill={() => {
+                        navigate("/play", {
+                          state: {
+                            drillSetup: {
+                              openingKey: child.opening_key,
+                              playerColor,
+                            },
+                          },
+                        });
+                      }}
+                    />
                   </article>
                 );
               })}

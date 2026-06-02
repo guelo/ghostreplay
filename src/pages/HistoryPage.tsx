@@ -3,12 +3,15 @@ import { Link, useLocation } from "react-router-dom";
 import {
   fetchHistory,
   fetchAnalysis,
+  fetchSessionOpenings,
   type HistoryGame,
   type SessionAnalysis,
+  type OpeningLineageItem,
 } from "../utils/api";
 import type { OpenHistoryOptions } from "../components/chess-game/types";
 import AnalysisBoard, { type AnalysisBoardRef } from "../components/AnalysisBoard";
 import GameReviewStats from "../components/GameReviewStats";
+import GameOpeningLineage from "../components/GameOpeningLineage";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
 import "../App.css";
@@ -51,6 +54,7 @@ function HistoryPage() {
   const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisProcessing, setAnalysisProcessing] = useState(false);
+  const [openingLineage, setOpeningLineage] = useState<OpeningLineageItem[]>([]);
   const pollCountRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -140,6 +144,29 @@ function HistoryPage() {
     };
   }, [selectedId]);
 
+  // Fetch the opening lineage once analysis exists / when its move set grows.
+  // Keyed off analysis.moves.length (not selectedId alone) so a one-shot fetch
+  // does not return [] while session moves are still arriving.
+  const analysisMoveCount = analysis?.moves.length ?? 0;
+  useEffect(() => {
+    if (!selectedId || analysisMoveCount === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    fetchSessionOpenings(selectedId)
+      .then((data) => {
+        if (!cancelled) setOpeningLineage(data.lineage);
+      })
+      .catch(() => {
+        if (!cancelled) setOpeningLineage([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, analysisMoveCount]);
+
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
   const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
 
@@ -171,6 +198,7 @@ function HistoryPage() {
                   if (id && id !== selectedId) {
                     setAnalysisLoading(true);
                     setAnalysis(null);
+                    setOpeningLineage([]);
                     setSelectedId(id);
                   }
                 }}
@@ -238,14 +266,20 @@ function HistoryPage() {
                     highlightedMoves={highlightedMoves}
                     onGraphMoveClick={handleGraphMoveClick}
                     footer={
-                      <GameReviewStats
-                        sideStats={sideStats}
-                        activeStat={activeStat}
-                        pinnedStat={pinnedStat}
-                        totalMoves={analysis.moves.length}
-                        onStatHover={handleStatHover}
-                        onStatClick={handleStatClick}
-                      />
+                      <>
+                        <GameReviewStats
+                          sideStats={sideStats}
+                          activeStat={activeStat}
+                          pinnedStat={pinnedStat}
+                          totalMoves={analysis.moves.length}
+                          onStatHover={handleStatHover}
+                          onStatClick={handleStatClick}
+                        />
+                        <GameOpeningLineage
+                          playerColor={playerColor}
+                          lineage={openingLineage}
+                        />
+                      </>
                     }
                   />
                 )}

@@ -4309,7 +4309,6 @@ button.openings-shell__crumb:hover {
 .opening-family-card--interactive {
     width: 100%;
     text-align: left;
-    cursor: pointer;
     transition:
         transform 180ms ease,
         box-shadow 180ms ease,
@@ -4322,9 +4321,32 @@ button.openings-shell__crumb:hover {
     border-color: color-mix(in srgb, var(--opening-card-accent) 30%, var(--border-color));
 }
 
-.opening-family-card--interactive:focus-visible {
+/* Stretched-link button: fills the card so the whole surface drills down, while
+   keeping the Start Drill button as a separate sibling control (no nested
+   buttons). */
+.opening-family-card__drill-nav {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    z-index: 0;
+}
+
+.opening-family-card__drill-nav:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--opening-card-accent) 60%, transparent);
     outline-offset: 2px;
+}
+
+/* Keep the action footer above the stretched drill-nav so its controls stay
+   clickable. */
+.opening-family-card__footer {
+    position: relative;
+    z-index: 1;
 }
 
 .opening-family-card::before {
@@ -5554,4 +5576,153 @@ button.openings-shell__crumb:hover {
         padding: 0.25rem 0.5rem;
         font-size: 0.75rem;
     }
+}
+
+/* Game opening lineage (compact chips on /history analysis footer) */
+.game-opening-lineage {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.75rem;
+}
+
+.game-opening-lineage__label {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+
+.game-opening-lineage__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+}
+
+.game-opening-lineage__item {
+    padding-left: calc(var(--lineage-depth, 0) * 0.65rem);
+}
+
+.game-opening-chip {
+    --chip-accent: var(--text-tertiary);
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.45rem;
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--bg-secondary) 60%, var(--card-bg));
+    border-left: 3px solid var(--chip-accent);
+}
+
+.game-opening-chip--alert {
+    --chip-accent: var(--error);
+}
+.game-opening-chip--watch {
+    --chip-accent: var(--warning-dark);
+}
+.game-opening-chip--steady {
+    --chip-accent: var(--success-dark);
+}
+.game-opening-chip--muted {
+    --chip-accent: var(--text-tertiary);
+}
+
+.game-opening-chip__connector {
+    color: var(--text-tertiary);
+    font-size: 0.75rem;
+    line-height: 1;
+}
+
+.game-opening-chip__nav {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0;
+    background: none;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+    font-size: 0.76rem;
+    color: var(--text-primary);
+    text-decoration: none;
+}
+
+.game-opening-chip__nav:hover .game-opening-chip__name,
+.game-opening-chip__nav:focus-visible .game-opening-chip__name {
+    text-decoration: underline;
+}
+
+.game-opening-chip__tone {
+    flex: 0 0 auto;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--chip-accent);
+}
+
+.game-opening-chip__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.game-opening-chip__score {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+}
+
+.game-opening-chip__grade {
+    flex: 0 0 auto;
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: var(--chip-accent);
+}
+
+.game-opening-chip__expand {
+    flex: 0 0 auto;
+    padding: 0 0.25rem;
+    background: none;
+    border: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    line-height: 1;
+}
+
+/* Compact card revealed when a lineage chip is expanded */
+.opening-family-card--analysis {
+    min-height: 0;
+    gap: 0.55rem;
+    padding: 0.65rem;
+    margin-top: 0.35rem;
+    border-radius: 0.75rem;
+    background: color-mix(in srgb, var(--bg-secondary) 50%, var(--card-bg));
+    box-shadow: none;
+    font-size: 0.78rem;
+}
+
+.opening-family-card--analysis .opening-family-card__title {
+    font-size: 0.92rem;
+}
+
+/* Compact: stack board above the score panel so it fits the 200-280px footer. */
+.opening-family-card--analysis .opening-family-card__overview {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45rem;
+}
+
+.opening-family-card--analysis .opening-family-card__board {
+    width: 130px;
+    height: 130px;
+    max-width: 100%;
 }

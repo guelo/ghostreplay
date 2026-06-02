@@ -820,6 +820,37 @@ export const fetchAnalysis = async (
   )
 }
 
+export interface OpeningLineageItem {
+  opening_key: string
+  opening_name: string
+  opening_family: string
+  eco: string | null
+  depth: number
+  score: number | null
+  confidence: number | null
+  coverage: number | null
+  sample_size: number | null
+  path: string[]
+}
+
+export interface SessionOpeningsResponse {
+  player_color: OpeningPlayerColor
+  lineage: OpeningLineageItem[]
+}
+
+/**
+ * Fetch the opening lineage (broadest -> deepest) actually played in a session.
+ */
+export const fetchSessionOpenings = async (
+  sessionId: string,
+): Promise<SessionOpeningsResponse> => {
+  return requestJson<SessionOpeningsResponse>(
+    `${API_BASE_URL}/api/session/${sessionId}/openings`,
+    { method: 'GET', headers: getAuthHeaders() },
+    { fallbackMessage: 'Failed to load session openings' },
+  )
+}
+
 /**
  * Get next opponent move via unified backend pipeline (ghost + engine).
  */

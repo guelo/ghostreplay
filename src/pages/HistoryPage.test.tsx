@@ -23,23 +23,36 @@ beforeAll(() => {
 // Mock the API module
 const mockFetchHistory = vi.fn();
 const mockFetchAnalysis = vi.fn();
+const mockFetchSessionOpenings = vi.fn();
 vi.mock('../utils/api', async () => {
   const actual = await vi.importActual('../utils/api');
   return {
     ...actual,
     fetchHistory: (...args: unknown[]) => mockFetchHistory(...args),
     fetchAnalysis: (...args: unknown[]) => mockFetchAnalysis(...args),
+    fetchSessionOpenings: (...args: unknown[]) => mockFetchSessionOpenings(...args),
   };
 });
 
-// Mock AnalysisBoard to avoid pulling in chess rendering
+// Mock AnalysisBoard to avoid pulling in chess rendering. Render the footer so
+// the opening lineage block (passed via footer) is exercised.
 vi.mock('../components/AnalysisBoard', () => ({
-  default: ({ boardOrientation, initialMoveIndex }: { boardOrientation: string; initialMoveIndex?: number }) => (
+  default: ({
+    boardOrientation,
+    initialMoveIndex,
+    footer,
+  }: {
+    boardOrientation: string;
+    initialMoveIndex?: number;
+    footer?: React.ReactNode;
+  }) => (
     <div
       data-testid="analysis-board"
       data-orientation={boardOrientation}
       data-initial-move={initialMoveIndex}
-    />
+    >
+      {footer}
+    </div>
   ),
 }));
 
@@ -72,6 +85,7 @@ const ANALYSIS_RESPONSE = {
 describe('HistoryPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockFetchSessionOpenings.mockResolvedValue({ player_color: 'white', lineage: [] });
   });
 
   it('fetches history and analysis, then renders board with initialMoveIndex=0 for non-empty game', async () => {
@@ -108,6 +122,58 @@ describe('HistoryPage', () => {
     });
 
     expect(screen.getByTestId('analysis-board')).not.toHaveAttribute('data-initial-move');
+  });
+
+  it('fetches and renders the opening lineage once analysis moves arrive', async () => {
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockFetchSessionOpenings.mockResolvedValue({
+      player_color: 'white',
+      lineage: [
+        {
+          opening_key: 'key-ruy',
+          opening_name: 'Ruy Lopez',
+          opening_family: 'Ruy Lopez',
+          eco: 'C60',
+          depth: 0,
+          score: 72,
+          confidence: 0.8,
+          coverage: 0.5,
+          sample_size: 10,
+          path: [],
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Ruy Lopez')).toBeInTheDocument();
+    });
+
+    expect(mockFetchSessionOpenings).toHaveBeenCalledWith('abc-123');
+    expect(screen.getByRole('region', { name: 'Openings played' })).toBeInTheDocument();
+  });
+
+  it('does not fetch openings when analysis has no moves (avoids stale-empty race)', async () => {
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue({ ...ANALYSIS_RESPONSE, moves: [] });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+    });
+
+    expect(mockFetchSessionOpenings).not.toHaveBeenCalled();
   });
 
   it('shows empty state when no games played', async () => {
