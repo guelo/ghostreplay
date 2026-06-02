@@ -13,7 +13,19 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.fen import fen_hash
-from app.opening_cache import recompute_opening_scores_if_needed
+from app.opening_aggregate import (
+    _aggregate_branch_rows,
+    _collect_branch_rows,
+    _refresh_cached_scores_if_stale,
+    _snapshot_cached_rows,
+)
+from app.opening_cache import (
+    ensure_opening_scores,
+    opening_score_inputs_fingerprint,
+    recompute_opening_scores_if_needed,
+)
+from app.opening_graph import _fen_from_board, get_opening_graph
+from app.opening_roots import get_opening_roots
 from app.models import AnalysisCache, Blunder, BlunderOpportunityEvent, GameSession, Move, Position, SessionMove
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
@@ -116,6 +128,36 @@ class SessionAnalysisResponse(BaseModel):
     analyzed_moves: int = 0
     is_complete: bool = False
     rated_start_ply: int | None = None
+
+
+class OpeningLineageItem(BaseModel):
+    opening_key: str
+    opening_name: str
+    opening_family: str
+    eco: str | None
+    depth: int
+    score: float | None
+    confidence: float | None
+    coverage: float | None
+    sample_size: int | None
+    path: list[str]
+
+
+class SessionOpeningsResponse(BaseModel):
+    player_color: str
+    lineage: list[OpeningLineageItem]
+
+
+def _normalize_opening_key(fen: str | None) -> str | None:
+    """Normalize a stored FEN to the 4-field opening_key form."""
+    if not fen:
+        return None
+    try:
+        import chess
+
+        return _fen_from_board(chess.Board(fen))
+    except (ValueError, KeyError):
+        return None
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -624,3 +666,84 @@ def get_session_analysis(
         is_complete=is_complete,
         rated_start_ply=game_session.rated_start_ply if game_session.session_mode == DRILL_SESSION_MODE else None,
     )
+
+
+@router.get("/{session_id}/openings", response_model=SessionOpeningsResponse)
+def get_session_openings(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> SessionOpeningsResponse:
+    game_session = _get_session_or_404(db, session_id)
+    _ensure_session_owned_by_user(game_session, user)
+    if not is_visible_game_session(game_session):
+        raise HTTPException(status_code=404, detail="Game session not found")
+
+    player_color = game_session.player_color
+
+    color_order = case((SessionMove.color == MoveColor.WHITE.value, 0), else_=1)
+    session_moves = (
+        db.query(SessionMove)
+        .filter(SessionMove.session_id == session_id)
+        .order_by(SessionMove.move_number.asc(), color_order.asc())
+        .all()
+    )
+
+    roots_registry = get_opening_roots()
+
+    # Walk played positions in move order; whenever a position is a boundary
+    # opening root, append it to the chain (dedup consecutive). The order roots
+    # are crossed in is broadest -> deepest along this game's DAG path.
+    chain: list = []
+    for move in session_moves:
+        opening_key = _normalize_opening_key(move.fen_after)
+        if opening_key is None:
+            continue
+        root = roots_registry.get_root(opening_key)
+        if root is None:
+            continue
+        if chain and chain[-1].opening_key == root.opening_key:
+            continue
+        chain.append(root)
+
+    if not chain:
+        return SessionOpeningsResponse(player_color=player_color, lineage=[])
+
+    # Subtree aggregates (matching the /openings card) require cached scores.
+    # Refresh stale batches the same way /api/openings/children does, so the
+    # lineage score matches what the user sees after clicking through.
+    graph = get_opening_graph()
+    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
+    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
+    batch, rows = _refresh_cached_scores_if_stale(
+        db,
+        user.user_id,
+        player_color,
+        current_fingerprint,
+        roots_registry,
+        batch,
+        rows,
+    )
+    rows_by_key = {row.opening_key: row for row in _snapshot_cached_rows(rows)}
+
+    lineage: list[OpeningLineageItem] = []
+    for index, root in enumerate(chain):
+        subtree_rows = _collect_branch_rows(rows_by_key, root.opening_key, roots_registry)
+        aggregate = _aggregate_branch_rows(subtree_rows)
+        scored = aggregate.root_count > 0
+        lineage.append(
+            OpeningLineageItem(
+                opening_key=root.opening_key,
+                opening_name=root.opening_name,
+                opening_family=root.opening_family,
+                eco=root.eco,
+                depth=root.depth,
+                score=aggregate.score if scored else None,
+                confidence=aggregate.confidence if scored else None,
+                coverage=aggregate.coverage if scored else None,
+                sample_size=aggregate.sample_size if scored else None,
+                path=[prev.opening_key for prev in chain[:index]],
+            )
+        )
+
+    return SessionOpeningsResponse(player_color=player_color, lineage=lineage)

@@ -233,8 +233,10 @@ _FAMILIES_URL = "/api/openings/families/scores"
 
 # Patch targets for cache functions in the openings module namespace
 _PATCH_ENSURE = "app.api.openings.ensure_opening_scores"
-_PATCH_LIST_CACHED = "app.api.openings.list_cached_opening_scores"
-_PATCH_RECOMPUTE = "app.api.openings.recompute_opening_scores"
+# recompute/list_cached are invoked by _refresh_cached_scores_if_stale, which
+# now lives in app.opening_aggregate, so patch them in that namespace.
+_PATCH_LIST_CACHED = "app.opening_aggregate.list_cached_opening_scores"
+_PATCH_RECOMPUTE = "app.opening_aggregate.recompute_opening_scores"
 
 
 def _make_batch(batch_id: int = 1, user_id: int = 123, player_color: str = "white",
@@ -876,7 +878,7 @@ def test_family_scores_cache_only_read_path(client, auth_headers, db_session):
     # but ensure_opening_scores resolves recompute_opening_scores in its own module.
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.api.openings.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
+        patch("app.opening_aggregate.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
         patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
         patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
         patch("app.api.openings.compute_root_score", side_effect=AssertionError("should not compute")),
@@ -1719,7 +1721,7 @@ def test_family_drill_cache_only_read_path(client, auth_headers, db_session):
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.api.openings.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
+        patch("app.opening_aggregate.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
         patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
         patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
         patch("app.opening_cache.overlay_evidence", side_effect=AssertionError("should not overlay via cache")),
