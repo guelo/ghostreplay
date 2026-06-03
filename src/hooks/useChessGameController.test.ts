@@ -6,12 +6,17 @@ import type { TargetBlunderSrs } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
+import { playMoveSound } from "../utils/moveSound";
 import {
   useChessGameController,
   type PendingAnalysisContext,
   type PlayerMoveApplyResult,
   type PendingSrsReview,
 } from "./useChessGameController";
+
+vi.mock("../utils/moveSound", () => ({
+  playMoveSound: vi.fn(),
+}));
 
 const initialStoreState = useGameStore.getInitialState();
 
@@ -106,6 +111,7 @@ const createSetup = ({
 
 beforeEach(() => {
   useGameStore.setState(initialStoreState, true);
+  vi.mocked(playMoveSound).mockReset();
 });
 
 describe("useChessGameController", () => {
@@ -483,5 +489,94 @@ describe("useChessGameController", () => {
     if (moveResult.applied) {
       expect(moveResult.moveSan).toMatch(/R/);
     }
+  });
+
+  it("plays a non-capture move sound for a player move", () => {
+    const { result } = createSetup();
+
+    act(() => {
+      result.current.applyPlayerMove("e2", "e4");
+    });
+
+    expect(playMoveSound).toHaveBeenCalledTimes(1);
+    expect(playMoveSound).toHaveBeenCalledWith(false);
+  });
+
+  it("plays a capture move sound for a capturing player move", () => {
+    // 1. e4 d5 2. exd5 — the third move is a capture.
+    const chess = new Chess();
+    chess.move("e4");
+    chess.move("d5");
+    useGameStore.setState({
+      ...initialStoreState,
+      playerColor: "white",
+      liveFen: chess.fen(),
+      moveHistory: [
+        { san: "e4", fen: chess.fen(), uci: "e2e4" },
+        { san: "d5", fen: chess.fen(), uci: "d7d5" },
+      ],
+    });
+    const { result } = createSetup({ chess });
+    vi.mocked(playMoveSound).mockReset();
+
+    act(() => {
+      result.current.applyPlayerMove("e4", "d5");
+    });
+
+    expect(playMoveSound).toHaveBeenCalledTimes(1);
+    expect(playMoveSound).toHaveBeenCalledWith(true);
+  });
+
+  it("plays a move sound for an engine move", async () => {
+    const chess = new Chess();
+    const whiteMove = chess.move("e4");
+    if (!whiteMove) {
+      throw new Error("Unable to initialize engine test position");
+    }
+    const previousMove: MoveRecord = {
+      san: whiteMove.san,
+      fen: chess.fen(),
+      uci: `${whiteMove.from}${whiteMove.to}${whiteMove.promotion ?? ""}`,
+    };
+
+    const { result, evaluatePosition } = createSetup({
+      chess,
+      moveHistory: [previousMove],
+    });
+    evaluatePosition.mockResolvedValueOnce({ move: "d7d5", raw: "bestmove d7d5" });
+    vi.mocked(playMoveSound).mockReset();
+
+    await act(async () => {
+      await result.current.applyEngineMove();
+    });
+
+    expect(playMoveSound).toHaveBeenCalledTimes(1);
+    expect(playMoveSound).toHaveBeenCalledWith(false);
+  });
+
+  it("plays a move sound for a ghost move", async () => {
+    const chess = new Chess();
+    const whiteMove = chess.move("e4");
+    if (!whiteMove) {
+      throw new Error("Unable to initialize ghost test position");
+    }
+    const previousMove: MoveRecord = {
+      san: whiteMove.san,
+      fen: chess.fen(),
+      uci: `${whiteMove.from}${whiteMove.to}${whiteMove.promotion ?? ""}`,
+    };
+
+    const { result } = createSetup({
+      chess,
+      moveHistory: [previousMove],
+    });
+    vi.mocked(playMoveSound).mockReset();
+
+    await act(async () => {
+      await result.current.applyGhostMove("e5", "ghost_path", 77, null, "target-fen");
+    });
+
+    expect(playMoveSound).toHaveBeenCalledTimes(1);
+    expect(playMoveSound).toHaveBeenCalledWith(false);
   });
 });

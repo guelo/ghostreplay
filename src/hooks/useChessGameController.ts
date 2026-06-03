@@ -10,6 +10,7 @@ import {
 } from "../components/chess-game/domain/reviewState";
 import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
+import { playMoveSound } from "../utils/moveSound";
 
 export type PendingAnalysisContext = {
   fen: string;
@@ -122,6 +123,8 @@ export const useChessGameController = ({
         targetBlunderId?: number | null;
       },
     ) => {
+      playMoveSound(Boolean(appliedMove.captured));
+
       const store = useGameStore.getState();
       const newFen = chess.fen();
       const moveIndex = store.moveHistory.length;
