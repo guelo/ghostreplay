@@ -273,6 +273,7 @@ function HistoryPage() {
                           pinnedStat={pinnedStat}
                           totalMoves={analysis.moves.length}
                           accuracy={analysis.summary.accuracy}
+                          accuracyPending={analysisProcessing}
                           onStatHover={handleStatHover}
                           onStatClick={handleStatClick}
                         />

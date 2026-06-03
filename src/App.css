@@ -1626,6 +1626,12 @@
     grid-column: 2;
 }
 
+.history-stats-pane__value--pending {
+    font-size: 0.78em;
+    font-style: italic;
+    opacity: 0.6;
+}
+
 /* Analysis graph highlight dots */
 .analysis-graph__highlight-dot {
     stroke: white;

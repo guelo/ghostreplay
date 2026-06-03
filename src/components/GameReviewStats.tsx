@@ -6,11 +6,13 @@ interface GameReviewStatsProps {
   pinnedStat: StatSelection;
   totalMoves: number;
   accuracy: number | null;
+  /** True while analysis is still processing and accuracy is not yet available. */
+  accuracyPending?: boolean;
   onStatHover: (sel: StatSelection) => void;
   onStatClick: (sel: StatSelection) => void;
 }
 
-function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accuracy, onStatHover, onStatClick }: GameReviewStatsProps) {
+function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accuracy, accuracyPending = false, onStatHover, onStatClick }: GameReviewStatsProps) {
   return (
     <div className="history-stats-pane">
       <div className="history-stats-pane__grid">
@@ -70,7 +72,11 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
         {/* Accuracy row (user only) */}
         <div className="history-stats-pane__label">Accuracy</div>
         <div className="history-stats-pane__value history-stats-pane__value--you">
-          {accuracy != null ? `${accuracy}%` : '—'}
+          {accuracy != null
+            ? `${accuracy}%`
+            : accuracyPending
+              ? <span className="history-stats-pane__value--pending">computing{'…'}</span>
+              : '—'}
         </div>
         <div className="history-stats-pane__value" aria-hidden="true" />
 
