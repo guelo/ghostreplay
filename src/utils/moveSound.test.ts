@@ -73,9 +73,12 @@ describe("playMoveSound", () => {
 
   it("does not throw when play() throws synchronously", async () => {
     class AudioMock {
+      src: string;
       preload = "";
       currentTime = 0;
-      constructor(public src: string) {}
+      constructor(src: string) {
+        this.src = src;
+      }
       play() {
         throw new Error("boom");
       }
@@ -88,10 +91,13 @@ describe("playMoveSound", () => {
   it("swallows an async play() rejection", async () => {
     const play = vi.fn().mockRejectedValue(new Error("blocked"));
     class AudioMock {
+      src: string;
       preload = "";
       currentTime = 0;
       play = play;
-      constructor(public src: string) {}
+      constructor(src: string) {
+        this.src = src;
+      }
     }
     vi.stubGlobal("Audio", AudioMock);
     const { playMoveSound } = await import("./moveSound");
