@@ -98,6 +98,8 @@ type NavigationTrace = {
 type EngineLinePreview = {
   sourceSlot: number;
   sanMoves: string[];
+  /** Move-number prefix per ply (e.g. "2." or "26...") or "" for trailing black moves. */
+  movePrefixes: string[];
   fenAfterPly: string[];
   uciMoves: string[];
   evalText: string;
@@ -167,8 +169,16 @@ const buildEngineLinePreview = (
 
   const tempChess = new Chess(displayedFen);
   const sanMoves: string[] = [];
+  const movePrefixes: string[] = [];
   const fenAfterPly: string[] = [];
   const uciMoves: string[] = [];
+
+  // Track move numbering from the displayed FEN's fullmove/side-to-move state.
+  const fenParts = displayedFen.split(" ");
+  let turn: "w" | "b" = fenParts[1] === "b" ? "b" : "w";
+  let fullmove = Number.parseInt(fenParts[5] ?? "1", 10);
+  if (!Number.isFinite(fullmove) || fullmove < 1) fullmove = 1;
+  let isFirstPly = true;
 
   for (const uci of line.pv) {
     try {
@@ -178,8 +188,21 @@ const buildEngineLinePreview = (
       const result = tempChess.move({ from, to, promotion });
       if (!result) break;
       sanMoves.push(result.san);
+
+      if (turn === "w") {
+        movePrefixes.push(`${fullmove}.`);
+      } else if (isFirstPly) {
+        movePrefixes.push(`${fullmove}...`);
+      } else {
+        movePrefixes.push("");
+      }
+
       fenAfterPly.push(tempChess.fen());
       uciMoves.push(uci);
+
+      if (turn === "b") fullmove += 1;
+      turn = turn === "w" ? "b" : "w";
+      isFirstPly = false;
     } catch {
       break;
     }
@@ -202,6 +225,7 @@ const buildEngineLinePreview = (
   return {
     sourceSlot,
     sanMoves,
+    movePrefixes,
     fenAfterPly,
     uciMoves,
     evalText,
@@ -1281,9 +1305,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                 key={`${san}-${index}`}
                 type="button"
                 className="analysis-board__engine-popup-move"
+                aria-label={san}
                 aria-current={index === selectedEnginePlyRenderIndex ? "step" : undefined}
                 onClick={() => setSelectedEnginePlyIndex(index)}
               >
+                {selectedEngineLine.movePrefixes[index] ? (
+                  <span className="analysis-board__engine-popup-move-number" aria-hidden="true">
+                    {selectedEngineLine.movePrefixes[index]}
+                  </span>
+                ) : null}
                 {san}
               </button>
             ))}

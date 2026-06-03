@@ -1936,6 +1936,12 @@
     cursor: pointer;
 }
 
+.analysis-board__engine-popup-move-number {
+    margin-right: 0.2rem;
+    color: var(--text-tertiary, #64748b);
+    opacity: 0.8;
+}
+
 .analysis-board__engine-popup-move:hover,
 .analysis-board__engine-popup-move[aria-current="step"] {
     border-color: rgba(59, 130, 246, 0.35);

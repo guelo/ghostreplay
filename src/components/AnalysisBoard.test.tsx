@@ -497,6 +497,46 @@ describe('AnalysisBoard MoveList', () => {
     expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(true)
   })
 
+  it('annotates the PV with move numbers from a white-to-move FEN', async () => {
+    const pv = ['g1f3', 'd7d6', 'd2d4']
+    mockEngineInfoRef.current = [{ pv, score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after // white to move, fullmove 2
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+
+    // White moves are prefixed with "<n>.", black follow-up moves have no prefix.
+    expect(dialog).toHaveTextContent('2.Nf3')
+    expect(dialog).toHaveTextContent('3.d4')
+    // Clicking a numbered token still updates the preview board for that ply.
+    const chess = new Chess(moves[1].fen_after)
+    chess.move({ from: 'g1', to: 'f3' })
+    chess.move({ from: 'd7', to: 'd6' })
+    chess.move({ from: 'd2', to: 'd4' })
+    const thirdFen = chess.fen()
+    fireEvent.click(screen.getByRole('button', { name: 'd4' }))
+    await waitFor(() => {
+      const lastPreview = capturedChessboardRenders.filter((r) => r.kind === 'preview').at(-1)
+      expect(lastPreview?.options.position).toBe(thirdFen)
+    })
+  })
+
+  it('annotates a black-to-move starting PV with ellipsis notation', async () => {
+    const pv = ['g8f6', 'd2d4']
+    mockEngineInfoRef.current = [{ pv, score: { type: 'cp', value: 12 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[0].fen_after // black to move, fullmove 1
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    // Navigate to the black-to-move position so the engine line is shown there.
+    fireEvent.click(screen.getByRole('button', { name: 'Move 1' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Show engine line 1' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Engine line preview' })
+
+    expect(dialog).toHaveTextContent('1...Nf6')
+    expect(dialog).toHaveTextContent('2.d4')
+  })
+
   it('renders the cached best line popup with its full stored PV continuation', async () => {
     // Restricted live search returns a non-best line; the cached best line is
     // merged in as slot 1 and must replay its full stored PV, not one move.
