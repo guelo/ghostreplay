@@ -360,6 +360,7 @@ def test_session_analysis_success(client, auth_headers, create_game_session):
         "mistakes": 1,
         "inaccuracies": 1,
         "average_centipawn_loss": 15,
+        "accuracy": 100,
     }
     assert [move["move_san"] for move in data["moves"]] == ["e4", "e5", "Nf3", "Nc6"]
 
@@ -378,6 +379,7 @@ def test_session_analysis_empty_moves_returns_zero_summary(client, auth_headers,
         "mistakes": 0,
         "inaccuracies": 0,
         "average_centipawn_loss": 0,
+        "accuracy": None,
     }
 
 

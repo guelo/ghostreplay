@@ -119,6 +119,7 @@ def test_history_game_without_moves_has_zero_summary(client, auth_headers, creat
         "mistakes": 0,
         "inaccuracies": 0,
         "average_centipawn_loss": 0,
+        "accuracy": None,
     }
 
 

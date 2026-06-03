@@ -143,6 +143,7 @@ function GameAnalysisPage() {
                       activeStat={activeStat}
                       pinnedStat={pinnedStat}
                       totalMoves={analysis.moves.length}
+                      accuracy={analysis.summary.accuracy}
                       onStatHover={handleStatHover}
                       onStatClick={handleStatClick}
                     />

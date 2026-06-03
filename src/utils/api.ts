@@ -744,6 +744,7 @@ export interface GameSummary {
   mistakes: number
   inaccuracies: number
   average_centipawn_loss: number
+  accuracy: number | null
 }
 
 export interface HistoryGame {

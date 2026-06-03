@@ -97,7 +97,7 @@ const ANALYSIS_RESPONSE = {
       classification: null,
     },
   ],
-  summary: { blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 2 },
+  summary: { blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 2, accuracy: 91 },
   position_analysis: {},
   expected_total_moves: 2,
   analyzed_moves: 2,

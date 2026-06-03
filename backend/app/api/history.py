@@ -8,6 +8,11 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.accuracy import (
+    AccuracyMove,
+    compute_game_accuracy,
+    expected_total_moves_from_pgn,
+)
 from app.db import get_db
 from app.models import GameSession, SessionMove
 from app.security import TokenPayload, get_current_user
@@ -22,6 +27,7 @@ class GameSummary(BaseModel):
     mistakes: int
     inaccuracies: int
     average_centipawn_loss: int
+    accuracy: int | None = None
 
 
 class HistoryGame(BaseModel):
@@ -75,15 +81,44 @@ def get_history(
         .all()
     )
 
+    # Ordered per-move evals per session, for accuracy (counts come from the
+    # GROUP BY above; accuracy needs the full ordered eval series).
+    color_order = case((SessionMove.color == "white", 0), else_=1)
+    move_rows = (
+        db.query(
+            SessionMove.session_id,
+            SessionMove.color,
+            SessionMove.eval_cp,
+            SessionMove.eval_mate,
+        )
+        .filter(SessionMove.session_id.in_(session_ids))
+        .order_by(SessionMove.move_number.asc(), color_order.asc())
+        .all()
+    )
+    moves_by_session: dict[uuid.UUID, list[AccuracyMove]] = {}
+    for row in move_rows:
+        moves_by_session.setdefault(row.session_id, []).append(
+            AccuracyMove(color=row.color, eval_cp=row.eval_cp, eval_mate=row.eval_mate)
+        )
+
+    player_color_by_session = {s.id: s.player_color for s in sessions}
+    expected_by_session = {s.id: expected_total_moves_from_pgn(s.pgn) for s in sessions}
+
     stats_by_session: dict[uuid.UUID, GameSummary] = {}
     for row in stats_rows:
         avg_cpl = int(round(row.avg_cpl)) if row.avg_cpl is not None else 0
+        accuracy = compute_game_accuracy(
+            moves_by_session.get(row.session_id, []),
+            player_color=player_color_by_session.get(row.session_id, "white"),
+            expected_total_moves=expected_by_session.get(row.session_id),
+        )
         stats_by_session[row.session_id] = GameSummary(
             total_moves=int(row.total_moves),
             blunders=int(row.blunders or 0),
             mistakes=int(row.mistakes or 0),
             inaccuracies=int(row.inaccuracies or 0),
             average_centipawn_loss=avg_cpl,
+            accuracy=accuracy,
         )
 
     empty_summary = GameSummary(

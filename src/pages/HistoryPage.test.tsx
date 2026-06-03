@@ -68,7 +68,7 @@ const HISTORY_RESPONSE = [
     result: 'checkmate_win',
     engine_elo: 1500,
     ended_at: '2026-04-20T12:00:00Z',
-    summary: { total_moves: 20, blunders: 0, mistakes: 1, inaccuracies: 2, average_centipawn_loss: 15 },
+    summary: { total_moves: 20, blunders: 0, mistakes: 1, inaccuracies: 2, average_centipawn_loss: 15, accuracy: 88 },
   },
 ];
 
@@ -80,6 +80,7 @@ const ANALYSIS_RESPONSE = {
   ],
   position_analysis: {},
   is_complete: true,
+  summary: { total_moves: 1, blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 0, accuracy: 88 },
 };
 
 describe('HistoryPage', () => {

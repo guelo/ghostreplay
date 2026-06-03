@@ -12,6 +12,11 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.accuracy import (
+    AccuracyMove,
+    compute_game_accuracy,
+    expected_total_moves_from_pgn,
+)
 from app.fen import fen_hash
 from app.opening_aggregate import (
     _aggregate_branch_rows,
@@ -119,6 +124,7 @@ class SessionAnalysisSummary(BaseModel):
     mistakes: int
     inaccuracies: int
     average_centipawn_loss: int
+    accuracy: int | None = None
 
 
 class PositionAnalysis(BaseModel):
@@ -634,21 +640,25 @@ def get_session_analysis(
             )
 
     # Completion metadata: derive expected_total_moves from stored PGN
-    expected_total_moves: int | None = None
-    if game_session.pgn:
-        try:
-            import chess.pgn
-            import io
-            pgn_game = chess.pgn.read_game(io.StringIO(game_session.pgn))
-            if pgn_game is not None:
-                expected_total_moves = sum(1 for _ in pgn_game.mainline_moves())
-        except Exception:
-            pass
+    expected_total_moves = expected_total_moves_from_pgn(game_session.pgn)
 
     analyzed_moves = len(session_moves)
     is_complete = (
         expected_total_moves is not None
         and analyzed_moves >= expected_total_moves
+    )
+
+    accuracy = compute_game_accuracy(
+        [
+            AccuracyMove(
+                color=move.color.value if hasattr(move.color, "value") else str(move.color),
+                eval_cp=move.eval_cp,
+                eval_mate=move.eval_mate,
+            )
+            for move in session_moves
+        ],
+        player_color=game_session.player_color,
+        expected_total_moves=expected_total_moves,
     )
 
     return SessionAnalysisResponse(
@@ -677,6 +687,7 @@ def get_session_analysis(
             mistakes=int(summary_row.mistakes or 0),
             inaccuracies=int(summary_row.inaccuracies or 0),
             average_centipawn_loss=average_centipawn_loss,
+            accuracy=accuracy,
         ),
         position_analysis=position_analysis,
         expected_total_moves=expected_total_moves,
