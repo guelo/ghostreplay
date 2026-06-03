@@ -382,3 +382,93 @@ describe('AnalysisGraph — incremental geometry', () => {
     expect(cy).toBeLessThanOrEqual(116)
   })
 })
+
+describe('AnalysisGraph — variation (what-if) overlay', () => {
+  it('renders the dashed variation polyline and pending dots', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, -20]}
+        currentIndex={3}
+        onSelectMove={onSelectMove}
+        variationLine={{
+          anchor: { index: 1, cp: 50 },
+          points: [
+            { index: 2, cp: 120, pending: false },
+            { index: 3, cp: 0, pending: true },
+          ],
+          streaming: null,
+        }}
+      />,
+    )
+
+    const line = container.querySelector('.analysis-graph__line--variation') as SVGPathElement | null
+    expect(line).toBeTruthy()
+    // anchor + 2 points = 3 vertices
+    const verts = (line!.getAttribute('d') ?? '').match(/[ML]/g) ?? []
+    expect(verts.length).toBe(3)
+
+    // One pending dot for the unanalysed ply
+    const pendingDots = container.querySelectorAll('.analysis-graph__pending-dot--variation')
+    expect(pendingDots.length).toBe(1)
+  })
+
+  it('renders a dashed streaming segment + live dot when streaming present', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        variationLine={{
+          anchor: { index: 1, cp: 50 },
+          points: [{ index: 2, cp: 0, pending: false }],
+          streaming: { index: 3, cp: 200 },
+        }}
+      />,
+    )
+
+    const dot = container.querySelector('.analysis-graph__streaming-dot--variation')
+    expect(dot).toBeTruthy()
+    // Two variation paths: the polyline and the streaming dash
+    const varPaths = container.querySelectorAll('.analysis-graph__line--variation')
+    expect(varPaths.length).toBe(2)
+  })
+
+  it('still renders a start-position what-if line when there are no main moves', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[]}
+        currentIndex={0}
+        onSelectMove={onSelectMove}
+        variationLine={{
+          anchor: null,
+          points: [{ index: 0, cp: 30, pending: false }],
+          streaming: null,
+        }}
+      />,
+    )
+
+    expect(container.querySelector('svg')).toBeTruthy()
+    // A lone resolved point can't paint as a polyline, so a visible dot is drawn.
+    expect(container.querySelector('.analysis-graph__streaming-dot--variation')).toBeTruthy()
+  })
+
+  it('omits the anchor when the branch departs the starting position', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={0}
+        onSelectMove={onSelectMove}
+        variationLine={{
+          anchor: null,
+          points: [{ index: 0, cp: 30, pending: false }],
+          streaming: null,
+        }}
+      />,
+    )
+
+    const line = container.querySelector('.analysis-graph__line--variation') as SVGPathElement | null
+    expect(line).toBeTruthy()
+    const verts = (line!.getAttribute('d') ?? '').match(/[ML]/g) ?? []
+    expect(verts.length).toBe(1)
+  })
+})

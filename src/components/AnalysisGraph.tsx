@@ -15,6 +15,13 @@ type AnalysisGraphProps = {
   streamingEval?: { index: number; cp: number } | null;
   pendingIndices?: number[];
   highlightedMoves?: HighlightedMoves | null;
+  variationLine?: VariationLine | null;
+};
+
+type VariationLine = {
+  anchor: { index: number; cp: number } | null;
+  points: { index: number; cp: number; pending: boolean }[];
+  streaming: { index: number; cp: number } | null;
 };
 
 const SVG_WIDTH = 600;
@@ -79,6 +86,7 @@ const AnalysisGraph = ({
   streamingEval,
   pendingIndices,
   highlightedMoves,
+  variationLine,
 }: AnalysisGraphProps) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = useId();
@@ -86,10 +94,21 @@ const AnalysisGraph = ({
   const n = evals.length;
   // Total moves includes pending ones for x-axis spacing
   const totalMoves = useMemo(() => {
-    if (!pendingIndices || pendingIndices.length === 0) return n;
-    const maxPending = Math.max(...pendingIndices);
-    return Math.max(n, maxPending + 1);
-  }, [n, pendingIndices]);
+    let max = n;
+    if (pendingIndices && pendingIndices.length > 0) {
+      max = Math.max(max, Math.max(...pendingIndices) + 1);
+    }
+    if (variationLine) {
+      const varIndices: number[] = [];
+      if (variationLine.anchor) varIndices.push(variationLine.anchor.index);
+      for (const p of variationLine.points) varIndices.push(p.index);
+      if (variationLine.streaming) varIndices.push(variationLine.streaming.index);
+      if (varIndices.length > 0) {
+        max = Math.max(max, Math.max(...varIndices) + 1);
+      }
+    }
+    return max;
+  }, [n, pendingIndices, variationLine]);
 
   const chartW = SVG_WIDTH - PAD_X - PAD_X_RIGHT;
   const chartH = SVG_HEIGHT - PAD_Y * 2;
@@ -161,6 +180,48 @@ const AnalysisGraph = ({
       }));
   }, [pendingIndices, streamingEval, stepX, midY]);
 
+  // What-if (variation) overlay geometry: dashed polyline + pending/streaming dots
+  const variationGeometry = useMemo(() => {
+    if (!variationLine) return null;
+    const toPoint = (index: number, cp: number): [number, number] => [
+      PAD_X + index * stepX,
+      cpToY(cp),
+    ];
+    const linePts: [number, number][] = [];
+    if (variationLine.anchor) {
+      linePts.push(toPoint(variationLine.anchor.index, variationLine.anchor.cp));
+    }
+    for (const p of variationLine.points) {
+      linePts.push(toPoint(p.index, p.cp));
+    }
+    const pendingDots = variationLine.points
+      .filter((p) => p.pending)
+      .map((p) => {
+        const [cx, cy] = toPoint(p.index, p.cp);
+        return { cx, cy };
+      });
+    const streamingPt = variationLine.streaming
+      ? toPoint(variationLine.streaming.index, variationLine.streaming.cp)
+      : null;
+    const path =
+      linePts.length > 0
+        ? linePts
+            .map(([x, y], i) => (i === 0 ? `M${x},${y}` : `L${x},${y}`))
+            .join(" ")
+        : "";
+    const streamingDash =
+      streamingPt && linePts.length > 0
+        ? `M${linePts[linePts.length - 1][0]},${linePts[linePts.length - 1][1]} L${streamingPt[0]},${streamingPt[1]}`
+        : "";
+    // A single-vertex polyline ("M..." only) does not paint. When the line has
+    // just one resolved point and nothing extends it, draw a dot so it shows.
+    const soloDot =
+      linePts.length === 1 && !streamingDash && pendingDots.length === 0
+        ? { cx: linePts[0][0], cy: linePts[0][1] }
+        : null;
+    return { path, pendingDots, streamingPt, streamingDash, soloDot };
+  }, [variationLine, stepX, cpToY]);
+
   // X position of the current-move indicator
   const indicatorX = useMemo(() => {
     if (totalMoves === 0) return null;
@@ -188,7 +249,17 @@ const AnalysisGraph = ({
   const topLabel = playerColor === "black" ? "Ghost" : "You";
   const bottomLabel = playerColor === "black" ? "You" : "Ghost";
 
-  if (n === 0 && (!pendingIndices || pendingIndices.length === 0)) return null;
+  const hasVariation =
+    !!variationLine &&
+    (variationLine.anchor != null ||
+      variationLine.points.length > 0 ||
+      variationLine.streaming != null);
+  if (
+    n === 0 &&
+    (!pendingIndices || pendingIndices.length === 0) &&
+    !hasVariation
+  )
+    return null;
 
   // Dynamic vertical position for the eval badge within the y-axis.
   // The y-axis stretches to match the SVG height, so we use the full
@@ -251,6 +322,48 @@ const AnalysisGraph = ({
 
         {/* Eval curve line */}
         <path d={linePath} className="analysis-graph__line" />
+
+        {/* What-if (variation) overlay */}
+        {variationGeometry && variationGeometry.path && (
+          <path
+            d={variationGeometry.path}
+            className="analysis-graph__line analysis-graph__line--variation"
+            strokeDasharray="5 3"
+          />
+        )}
+        {variationGeometry && variationGeometry.streamingDash && (
+          <path
+            d={variationGeometry.streamingDash}
+            className="analysis-graph__line analysis-graph__line--variation"
+            strokeDasharray="4 3"
+            opacity={0.7}
+          />
+        )}
+        {variationGeometry?.streamingPt && (
+          <circle
+            cx={variationGeometry.streamingPt[0]}
+            cy={variationGeometry.streamingPt[1]}
+            r={3}
+            className="analysis-graph__streaming-dot analysis-graph__streaming-dot--variation"
+          />
+        )}
+        {variationGeometry?.pendingDots.map((c) => (
+          <circle
+            key={`var-${c.cx}`}
+            cx={c.cx}
+            cy={c.cy}
+            r={2.5}
+            className="analysis-graph__pending-dot analysis-graph__pending-dot--variation"
+          />
+        ))}
+        {variationGeometry?.soloDot && (
+          <circle
+            cx={variationGeometry.soloDot.cx}
+            cy={variationGeometry.soloDot.cy}
+            r={3}
+            className="analysis-graph__streaming-dot--variation"
+          />
+        )}
 
         {/* Dashed line to streaming eval */}
         {dashedPath && (

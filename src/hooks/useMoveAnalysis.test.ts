@@ -213,6 +213,48 @@ describe('useMoveAnalysis', () => {
     )
   })
 
+  it('clears variation streaming state on worker error message', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id, move: 'e7e5', cp: 40 })
+    })
+    expect(store.getState().variationStreamingEval).toEqual({ ply: 2, fen, cp: 40 })
+
+    act(() => {
+      simulateMessage({ type: 'error', error: 'Engine crashed' })
+    })
+    expect(store.getState().variationStreamingEval).toBeNull()
+  })
+
+  it('clears variation streaming state on worker ErrorEvent', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id, move: 'e7e5', cp: 40 })
+    })
+    expect(store.getState().variationStreamingEval).not.toBeNull()
+
+    act(() => {
+      simulateError('Worker script failed')
+    })
+    expect(store.getState().variationStreamingEval).toBeNull()
+  })
+
   it('does not post to worker when status is error', () => {
     const { result } = renderHook(() => useMoveAnalysis(store))
 

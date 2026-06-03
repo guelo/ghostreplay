@@ -2027,6 +2027,24 @@
     opacity: 0.5;
 }
 
+.analysis-graph__line--variation {
+    fill: none;
+    stroke: #b07cff;
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+    opacity: 0.85;
+}
+
+.analysis-graph__streaming-dot--variation {
+    fill: #b07cff;
+    opacity: 0.9;
+}
+
+.analysis-graph__pending-dot--variation {
+    stroke: #b07cff;
+    opacity: 0.7;
+}
+
 .analysis-graph__indicator {
     stroke: var(--error);
     stroke-width: 2;

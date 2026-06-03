@@ -102,6 +102,8 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
   const pendingMoveIndices = useRef<Map<string, number>>(new Map())
   // Maps request IDs to metadata needed for deriving recordable/blunder in the response handler
   const pendingMeta = useRef<Map<string, { moveIndex: number; legalMoveCount: number | undefined }>>(new Map())
+  // Maps request IDs to the absolute ply + FEN of an in-flight what-if analysis
+  const pendingVariationPlies = useRef<Map<string, { ply: number; fen: string }>>(new Map())
   // Throttle streaming eval updates to avoid excessive rerenders
   const lastStreamingUpdateMs = useRef(0)
 
@@ -212,6 +214,20 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
               lastStreamingUpdateMs.current = now
               store.getState().setStreamingEval({ moveIndex: streamIdx, cp: message.cp })
             }
+            break
+          }
+          // What-if (variation) analyses are tracked by ply + FEN, not moveIndex
+          const streamVar = pendingVariationPlies.current.get(message.id)
+          if (streamVar !== undefined) {
+            const now = performance.now()
+            if (now - lastStreamingUpdateMs.current >= 250) {
+              lastStreamingUpdateMs.current = now
+              store.getState().setVariationStreamingEval({
+                ply: streamVar.ply,
+                fen: streamVar.fen,
+                cp: message.cp,
+              })
+            }
           }
           break
         }
@@ -220,6 +236,12 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           s.setAnalyzingMove(null)
           s.setStreamingEval(null)
           lastStreamingUpdateMs.current = 0
+          // Clear any in-flight variation streaming for this request; the
+          // resolved result now lives in the variation analysis cache.
+          if (pendingVariationPlies.current.has(message.id)) {
+            pendingVariationPlies.current.delete(message.id)
+            s.setVariationStreamingEval(null)
+          }
           const moveIndex = pendingMoveIndices.current.get(message.id)
           if (moveIndex !== undefined) {
             pendingMoveIndices.current.delete(message.id)
@@ -272,6 +294,11 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           s.setError(message.error)
           s.setIsAnalyzing(false)
           s.setAnalyzingMove(null)
+          // Drop any in-flight streaming state so no stale dot/segment lingers.
+          s.setStreamingEval(null)
+          s.setVariationStreamingEval(null)
+          lastStreamingUpdateMs.current = 0
+          pendingVariationPlies.current.clear()
           break
         case 'log':
           console.log(`[Analyst] ${message.message}`)
@@ -285,6 +312,11 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       const s = store.getState()
       s.setStatus('error')
       s.setError(event.message)
+      // Drop any in-flight streaming state so no stale dot/segment lingers.
+      s.setStreamingEval(null)
+      s.setVariationStreamingEval(null)
+      lastStreamingUpdateMs.current = 0
+      pendingVariationPlies.current.clear()
     }
 
     worker.addEventListener('message', handleMessage)
@@ -300,7 +332,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
   }, [])
 
   const analyzeMove = useCallback(
-    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number): string | undefined => {
+    (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number, variationPly?: number, variationFen?: string): string | undefined => {
       if (store.getState().status === 'error') {
         return
       }
@@ -313,6 +345,8 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       if (moveIndex !== undefined) {
         pendingMoveIndices.current.set(id, moveIndex)
         pendingMeta.current.set(id, { moveIndex, legalMoveCount })
+      } else if (variationPly !== undefined && variationFen !== undefined) {
+        pendingVariationPlies.current.set(id, { ply: variationPly, fen: variationFen })
       }
 
       // Fire the worker (existing path)
@@ -342,6 +376,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
     lastStreamingUpdateMs.current = 0
     pendingMoveIndices.current.clear()
     pendingMeta.current.clear()
+    pendingVariationPlies.current.clear()
     resolvedIndices.current.clear()
     pendingCacheLookups.current.length = 0
     if (cacheFlushTimer.current !== null) {

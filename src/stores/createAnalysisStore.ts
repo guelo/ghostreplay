@@ -8,6 +8,11 @@ export type AnalysisStoreState = {
   analysisMap: Map<number, AnalysisResult>;
   lastAnalysis: AnalysisResult | null;
   streamingEval: { moveIndex: number; cp: number } | null;
+  /**
+   * Live streaming eval for an in-flight what-if (variation) move. Keyed by FEN
+   * (sibling variations can share an absolute ply). `cp` is player-perspective.
+   */
+  variationStreamingEval: { ply: number; fen: string; cp: number } | null;
   status: AnalysisStatus;
   error: string | null;
   isAnalyzing: boolean;
@@ -19,6 +24,9 @@ export type AnalysisStoreState = {
   setLastAnalysis: (result: AnalysisResult | null) => void;
   setStreamingEval: (
     value: { moveIndex: number; cp: number } | null,
+  ) => void;
+  setVariationStreamingEval: (
+    value: { ply: number; fen: string; cp: number } | null,
   ) => void;
   setStatus: (status: AnalysisStatus) => void;
   setError: (error: string | null) => void;
@@ -39,6 +47,7 @@ export const createAnalysisStore = () =>
     analysisMap: new Map(),
     lastAnalysis: null,
     streamingEval: null,
+    variationStreamingEval: null,
     status: "booting",
     error: null,
     isAnalyzing: false,
@@ -75,6 +84,7 @@ export const createAnalysisStore = () =>
       }),
     setLastAnalysis: (result) => set({ lastAnalysis: result }),
     setStreamingEval: (value) => set({ streamingEval: value }),
+    setVariationStreamingEval: (value) => set({ variationStreamingEval: value }),
     setStatus: (status) => set({ status }),
     setError: (error) => set({ error }),
     setIsAnalyzing: (value) => set({ isAnalyzing: value }),
@@ -95,6 +105,7 @@ export const createAnalysisStore = () =>
       set({
         lastAnalysis: null,
         streamingEval: null,
+        variationStreamingEval: null,
         status: "booting",
         error: null,
         isAnalyzing: false,
@@ -106,6 +117,7 @@ export const createAnalysisStore = () =>
         analysisMap: new Map(),
         lastAnalysis: null,
         streamingEval: null,
+        variationStreamingEval: null,
         isAnalyzing: false,
         analyzingMove: null,
         error: null,

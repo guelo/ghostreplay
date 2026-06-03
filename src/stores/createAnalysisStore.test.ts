@@ -93,4 +93,24 @@ describe("createAnalysisStore — freshlyResolved", () => {
     expect(store.getState().analysisMap.has(4)).toBe(false);
     expect(store.getState().streamingEval).toBeNull();
   });
+
+  it("setVariationStreamingEval stores and clears the in-flight what-if eval", () => {
+    store.getState().setVariationStreamingEval({ ply: 7, fen: "fen-a", cp: 42 });
+    expect(store.getState().variationStreamingEval).toEqual({ ply: 7, fen: "fen-a", cp: 42 });
+
+    store.getState().setVariationStreamingEval(null);
+    expect(store.getState().variationStreamingEval).toBeNull();
+  });
+
+  it("resetTransient clears variationStreamingEval", () => {
+    store.getState().setVariationStreamingEval({ ply: 3, fen: "fen-x", cp: 12 });
+    store.getState().resetTransient();
+    expect(store.getState().variationStreamingEval).toBeNull();
+  });
+
+  it("clearAll clears variationStreamingEval", () => {
+    store.getState().setVariationStreamingEval({ ply: 3, fen: "fen-x", cp: 12 });
+    store.getState().clearAll();
+    expect(store.getState().variationStreamingEval).toBeNull();
+  });
 });

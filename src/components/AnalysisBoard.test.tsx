@@ -258,6 +258,100 @@ describe('AnalysisBoard — MaterialDisplays', () => {
   })
 })
 
+describe('AnalysisBoard — what-if graph', () => {
+  const makeNode = (overrides: Partial<VarNode>): VarNode => ({
+    id: 'var-1',
+    san: 'Bc4',
+    fen: 'rnbqkbnr/pp1ppppp/8/2p5/2B1P3/8/PPPP1PPP/RNBQKNR b KQkq - 1 2',
+    fenBefore: moves[0].fen_after,
+    uci: 'f1c4',
+    parentId: null,
+    parentGameIndex: 1,
+    branchPlyOffset: 0,
+    children: [],
+    nestingLevel: 0,
+    ...overrides,
+  })
+
+  it('keeps the graph and footer mounted in what-if mode', () => {
+    const node = makeNode({})
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        footer={<div data-testid="footer-stats">stats</div>}
+      />,
+    )
+
+    expect(screen.getByTestId('analysis-graph')).toBeTruthy()
+    expect(screen.getByTestId('footer-stats')).toBeTruthy()
+  })
+
+  it('builds a variationLine with an anchor at the departure move and a pending tip', () => {
+    const node = makeNode({})
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+    mockGetAbsolutePly.mockReturnValue(2)
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const variationLine = capturedGraphProps.variationLine as {
+      anchor: { index: number } | null
+      points: Array<{ index: number; pending: boolean }>
+      streaming: unknown
+    }
+    expect(variationLine.anchor).toEqual({ index: 1, cp: expect.any(Number) })
+    expect(variationLine.points).toEqual([{ index: 2, cp: 0, pending: true }])
+    // Red indicator sits at the selected ply even though it is unanalysed
+    expect(capturedGraphProps.currentIndex).toBe(2)
+  })
+
+  it('omits the anchor when the variation departs the starting position', () => {
+    const node = makeNode({ parentGameIndex: -1 })
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[-1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+    mockGetAbsolutePly.mockReturnValue(0)
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const variationLine = capturedGraphProps.variationLine as {
+      anchor: unknown
+      points: Array<{ index: number }>
+    }
+    expect(variationLine.anchor).toBeNull()
+    expect(variationLine.points[0].index).toBe(0)
+  })
+
+  it('truncates the variationLine to the selected ancestor when stepping back', () => {
+    const parent = makeNode({ id: 'var-1', children: ['var-2'] })
+    const child = makeNode({
+      id: 'var-2',
+      san: 'Nf6',
+      parentId: 'var-1',
+      parentGameIndex: 1,
+    })
+    mockTree = {
+      nodes: new Map([['var-1', parent], ['var-2', child]]),
+      rootBranches: new Map([[1, ['var-1']]]),
+    }
+    // Select the parent, not the deeper child
+    mockSelectedVarNodeId = 'var-1'
+    mockGetAbsolutePly.mockReturnValue(2)
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const variationLine = capturedGraphProps.variationLine as {
+      points: Array<{ index: number }>
+    }
+    // Only the selected ancestor is plotted — the deeper child is excluded
+    expect(variationLine.points).toHaveLength(1)
+    expect(variationLine.points[0].index).toBe(2)
+  })
+})
+
 describe('AnalysisBoard MoveList', () => {
   it('passes player color to MoveList from board orientation', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="black" />)
@@ -947,14 +1041,14 @@ describe('AnalysisBoard — variation tree integration', () => {
     expect(capturedEvalBarProps.whitePerspectiveCp).toBe(120)
   })
 
-  it('hides analysis graph when in variation', () => {
+  it('keeps the analysis graph mounted when in variation', () => {
     const node = makeVarNode()
     mockTree = { nodes: new Map([['var-node-1', node]]), rootBranches: new Map([[1, ['var-node-1']]]) }
     mockSelectedVarNodeId = 'var-node-1'
 
     render(<AnalysisBoard moves={moves} boardOrientation="white" />)
 
-    expect(screen.queryByTestId('analysis-graph')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('analysis-graph')).toBeInTheDocument()
   })
 
   it('passes variation tree props to MoveList', () => {

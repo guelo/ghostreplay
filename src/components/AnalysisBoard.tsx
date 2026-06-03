@@ -6,7 +6,7 @@ import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, PositionAnalysis } from "../utils/api";
 import type { EngineInfo } from "../workers/stockfishMessages";
-import type { VariationNodeId } from "../types/variationTree";
+import type { VariationNodeId, VarNode } from "../types/variationTree";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useVariationTree } from "../hooks/useVariationTree";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
@@ -290,6 +290,10 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const [analysisStore] = useState(() => createAnalysisStore());
   const { analyzeMove } = useMoveAnalysis(analysisStore);
   const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
+  const variationStreamingEval = useStore(
+    analysisStore,
+    (s) => s.variationStreamingEval,
+  );
   const [showEngineArrows, setShowEngineArrows] = useState(true);
   const [selectedEngineLineIndex, setSelectedEngineLineIndex] = useState<number | null>(null);
   const [selectedEnginePlyIndex, setSelectedEnginePlyIndex] = useState(0);
@@ -317,6 +321,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     navigateDown,
     getAbsolutePly,
     getVarAnalysis,
+    analysisCacheVersion,
     registerPending,
     resolvePending,
     pendingRequestsRef,
@@ -835,21 +840,89 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
   // Variation eval for eval bar (white perspective)
   const varEvalCp = useMemo(() => {
+    // getVarAnalysis reads a ref; depend on the cache version so this re-runs
+    // when an analysis resolves.
+    void analysisCacheVersion;
     if (!isInVariation || !selectedVarNode) return null;
     const cached = getVarAnalysis(selectedVarNode.fen);
     if (!cached || cached.playedEval == null) return null;
     return playerToWhite(cached.playedEval, boardOrientation);
-  }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation]);
+  }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation, analysisCacheVersion]);
 
   // Variation header eval for MoveList
   const varHeaderEval = useMemo((): string | null => {
+    void analysisCacheVersion;
     if (!isInVariation || !selectedVarNode) return null;
     const cached = getVarAnalysis(selectedVarNode.fen);
     if (!cached || cached.playedEval == null) return null;
     const wp = playerToWhite(cached.playedEval, boardOrientation);
     if (wp == null) return null;
     return formatEval(wp);
-  }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation]);
+  }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation, analysisCacheVersion]);
+
+  // What-if line for the graph overlay: dotted path tracing the selected
+  // variation up to (and including) the selected move. Future/deselected moves
+  // are excluded by walking only the ancestor chain of the selected node.
+  const variationLine = useMemo(() => {
+    void analysisCacheVersion; // re-run when a variation analysis resolves
+    if (!isInVariation || !selectedVarNode || !selectedVarNodeId) return null;
+
+    // Walk parentId chain to build ancestors root→selected.
+    const chain: VarNode[] = [];
+    let current: VarNode | undefined = selectedVarNode;
+    while (current) {
+      chain.unshift(current);
+      current = current.parentId
+        ? tree.nodes.get(current.parentId)
+        : undefined;
+    }
+    if (chain.length === 0) return null;
+
+    const rootNode = chain[0];
+    const baseIndex = rootNode.parentGameIndex;
+    const selectedPly = getAbsolutePly(selectedVarNodeId);
+
+    // In-flight streaming tip: match on the selected node's FEN (not just ply —
+    // sibling variations can share an absolute ply). Worker cp is
+    // player-perspective, so convert to white-perspective for the graph.
+    const streaming =
+      variationStreamingEval &&
+      variationStreamingEval.fen === selectedVarNode.fen
+        ? {
+            index: selectedPly,
+            cp: playerToWhite(variationStreamingEval.cp, boardOrientation) ?? 0,
+          }
+        : null;
+
+    const anchor =
+      baseIndex >= 0 ? { index: baseIndex, cp: evals[baseIndex] ?? 0 } : null;
+
+    const points = chain
+      .map((node, depth) => ({ node, index: baseIndex + 1 + depth }))
+      // Exclude the in-flight tip; it is drawn as the streaming segment instead.
+      .filter(({ index }) => !(streaming && index === streaming.index))
+      .map(({ node, index }) => {
+        const cached = getVarAnalysis(node.fen);
+        const cp =
+          cached && cached.playedEval != null
+            ? playerToWhite(cached.playedEval, boardOrientation) ?? 0
+            : 0;
+        return { index, cp, pending: cached == null };
+      });
+
+    return { anchor, points, streaming };
+  }, [
+    isInVariation,
+    selectedVarNode,
+    selectedVarNodeId,
+    tree,
+    evals,
+    getVarAnalysis,
+    getAbsolutePly,
+    variationStreamingEval,
+    boardOrientation,
+    analysisCacheVersion,
+  ]);
 
   // Highlight from/to squares of the last move
   const lastMoveSquares = useMemo((): Record<string, React.CSSProperties> => {
@@ -971,7 +1044,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
         const alreadyCached = !!getVarAnalysis(resultFen);
         const alreadyPending = hasPendingForFen(pendingRequestsRef.current, resultFen);
         if (!alreadyCached && !alreadyPending) {
-          const reqId = analyzeMove(baseFen, uciMove, boardOrientation);
+          const reqId = analyzeMove(
+            baseFen,
+            uciMove,
+            boardOrientation,
+            undefined,
+            undefined,
+            getAbsolutePly(nodeId),
+            resultFen,
+          );
           if (reqId) {
             registerPending(reqId, resultFen);
           }
@@ -996,6 +1077,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
       analyzeMove,
       boardOrientation,
       registerPending,
+      getAbsolutePly,
     ],
   );
 
@@ -1321,16 +1403,25 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
         </div>
       )}
 
-      {!isInVariation && evals.length > 0 && (
+      {(evals.length > 0 || variationLine) && (
         <div className="analysis-board__graph-row">
           <AnalysisGraph
             evals={evals}
-            currentIndex={currentIndex}
+            currentIndex={
+              isInVariation && selectedVarNodeId
+                ? getAbsolutePly(selectedVarNodeId)
+                : currentIndex
+            }
             onSelectMove={handleGraphSelect}
             playerColor={boardOrientation}
             highlightedMoves={highlightedMoves}
-            evalCp={currentEvalCp ?? evals[effectiveIndex] ?? null}
-            isCheckmate={currentEvalMate === 0}
+            evalCp={
+              isInVariation
+                ? varEvalCp
+                : currentEvalCp ?? evals[effectiveIndex] ?? null
+            }
+            isCheckmate={!isInVariation && currentEvalMate === 0}
+            variationLine={variationLine}
           />
           {footer && (
             <div className="analysis-board__graph-footer">{footer}</div>

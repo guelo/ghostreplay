@@ -47,8 +47,9 @@ export const useVariationTree = () => {
   // Request ID → FEN mapping for in-flight analysis
   const pendingRequestsRef = useRef<Map<string, string>>(new Map())
 
-  // Analysis cache version — incremented to trigger re-render when cache changes
-  const [, setAnalysisCacheVersion] = useState(0)
+  // Analysis cache version — incremented to trigger re-render when cache changes.
+  // Exposed so memoized cache reads can list it as a dependency.
+  const [analysisCacheVersion, setAnalysisCacheVersion] = useState(0)
 
   const publishTree = useCallback(() => {
     setTree(snapshotTree(treeRef.current))
@@ -226,6 +227,7 @@ export const useVariationTree = () => {
     getAbsolutePly,
     collectBranchNodes,
     getVarAnalysis,
+    analysisCacheVersion,
     registerPending,
     resolvePending,
     clearTree,
