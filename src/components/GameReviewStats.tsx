@@ -67,15 +67,17 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
         <div className="history-stats-pane__value">{sideStats.player.avgCpl}</div>
         <div className="history-stats-pane__value">{sideStats.opponent.avgCpl}</div>
 
+        {/* Accuracy row (user only) */}
+        <div className="history-stats-pane__label">Accuracy</div>
+        <div className="history-stats-pane__value history-stats-pane__value--you">
+          {accuracy != null ? `${accuracy}%` : '—'}
+        </div>
+        <div className="history-stats-pane__value" aria-hidden="true" />
+
         {/* Moves row */}
         <div className="history-stats-pane__label">Moves</div>
         <div className="history-stats-pane__value history-stats-pane__value--span">{totalMoves}</div>
 
-        {/* Accuracy row (user only) */}
-        <div className="history-stats-pane__label">Accuracy</div>
-        <div className="history-stats-pane__value history-stats-pane__value--span">
-          {accuracy != null ? `${accuracy}` : '—'}
-        </div>
       </div>
     </div>
   );

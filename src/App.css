@@ -1622,6 +1622,10 @@
     grid-column: 2 / -1;
 }
 
+.history-stats-pane__value--you {
+    grid-column: 2;
+}
+
 /* Analysis graph highlight dots */
 .analysis-graph__highlight-dot {
     stroke: white;
