@@ -657,27 +657,7 @@
     }
 }
 
-/* Blunder toast */
-.blunder-toast {
-    position: absolute;
-    bottom: 0.75rem;
-    right: 0.75rem;
-    z-index: 8;
-    padding: 0.75rem 1rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--error-light);
-    background: var(--overlay-bg);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-xl);
-    color: var(--text-primary);
-    font-size: 0.85rem;
-    cursor: pointer;
-    animation: blunder-toast-in 250ms ease-out;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-}
-
+/* Shared toast entrance animation (used by .streak-toast, .rehook-toast, etc.) */
 @keyframes blunder-toast-in {
     0% {
         opacity: 0;
@@ -689,64 +669,6 @@
     }
 }
 
-.blunder-toast__header {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 700;
-    font-size: 0.95rem;
-    color: var(--error);
-}
-
-.blunder-toast__delta {
-    font-weight: 600;
-    font-size: 0.85rem;
-    color: var(--error-light);
-}
-
-.blunder-toast__detail {
-    margin: 0;
-    color: var(--text-tertiary);
-    font-size: 0.8rem;
-}
-
-.blunder-toast__detail strong {
-    color: var(--text-primary);
-    font-weight: 600;
-}
-
-.blunder-toast__best {
-    color: var(--success);
-    font-weight: 600;
-}
-
-/* Review pass toast */
-.review-pass-toast {
-    position: absolute;
-    bottom: 0.75rem;
-    right: 0.75rem;
-    z-index: 8;
-    padding: 0.75rem 1rem;
-    border-radius: 0.75rem;
-    border: 1px solid var(--success-light);
-    background: var(--overlay-bg);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-xl);
-    color: var(--text-primary);
-    font-size: 0.85rem;
-    cursor: pointer;
-    animation: blunder-toast-in 250ms ease-out;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-}
-
-.review-pass-toast__label {
-    font-weight: 700;
-    font-size: 0.95rem;
-    color: var(--success);
-}
-
 .streak-toast {
     position: absolute;
     bottom: 0.75rem;
@@ -756,8 +678,7 @@
     border-radius: 0.75rem;
     border: 1px solid color-mix(in srgb, var(--success) 55%, var(--warning));
     background: var(--overlay-bg);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-xl);
+    box-shadow: var(--shadow-md);
     color: var(--text-primary);
     font-size: 0.85rem;
     animation: blunder-toast-in 250ms ease-out;
@@ -782,12 +703,6 @@
 }
 
 .streak-toast__detail {
-    color: var(--text-tertiary);
-    font-size: 0.8rem;
-}
-
-.review-pass-toast__detail {
-    margin: 0;
     color: var(--text-tertiary);
     font-size: 0.8rem;
 }
