@@ -515,79 +515,78 @@ The Ghost Move Library can contain cycles (threefold repetition, transpositions)
 1. **Input:** Current FEN Hash + `session_id` (to scope to `player_color`).
 2. **Search:** Find all downstream positions connected to this FEN (up to 5 moves, avoiding cycles).
 3. **Filter:** Join with `blunders` table to find positions where user has a recorded target.
-4. **Scoring:** For each reachable target, calculate:
+4. **Eligibility:** A blunder is eligible (due) when `srs_priority > 1.0`:
    ```
-   expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)
-   hours_since_review = (NOW - last_reviewed_at) in hours
+   expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)   -- hours
    srs_priority = hours_since_review / expected_interval
-
-   -- Weight by severity (bigger mistakes surface first)
-   -- Adjust for distance (closer blunders slightly preferred)
-   score = srs_priority * (eval_loss_cp / 50) / (1 + 0.1 * distance)
    ```
-5. **Selection:** Pick the path leading to the highest `score` blunder.
-6. **Output:** The immediate next move (SAN) on that path.
+5. **Scoring:** For each eligible blunder, compute a composite score in Python after the SQL fetch:
+   ```
+   urgency       = 1 + log2(1 + overdue)
+                   where overdue = hours_since_review / expected_interval
+
+   severity      = log1p(eval_loss_cp / 50)          -- logarithmic; 200cp ≈ 1.61, 50cp ≈ 0.69
+
+   distance_weight = exp(-0.35 * depth)               -- exponential decay; depth=1 → 0.70, depth=5 → 0.17
+
+   score = urgency × severity × distance_weight
+   ```
+6. **Selection:** Weighted random from top-5 first-move groups (see §6.1.2).
+7. **Output:** The immediate next move (SAN) on the chosen path.
 
 **Color Scope Rule:** Only consider blunders where the **position side-to-move** equals the session's `player_color`. This prevents mixing blunders made as White with those made as Black. Use `positions.active_color` for efficient filtering.
 
-**Reference Implementation (PostgreSQL):**
+**Reference Implementation (SQLite-compatible):**
 
 ```sql
-WITH RECURSIVE scent_path AS (
-    -- BASE CASE: Starting moves from current position
+WITH RECURSIVE reachable(position_id, depth, path, first_move) AS (
+    -- Base case: current position (depth 0, no first_move yet)
     SELECT
-        m.from_position_id,
-        m.to_position_id,
-        m.move_san AS root_move,
-        1 AS depth,
-        ARRAY[m.from_position_id] as path_history
-    FROM moves m
-    JOIN positions p ON p.id = m.from_position_id
-    WHERE p.fen_hash = :current_fen_hash
-      AND p.user_id = :user_id
+        CAST(:start_position_id AS BIGINT),
+        0,
+        ',' || :start_position_id || ',',
+        CAST(NULL AS TEXT)
 
     UNION ALL
 
-    -- RECURSIVE STEP
+    -- Recursive case: follow moves up to steering radius
     SELECT
-        child.from_position_id,
-        child.to_position_id,
-        parent.root_move,
-        parent.depth + 1,
-        parent.path_history || child.from_position_id
-    FROM moves child
-    JOIN scent_path parent ON parent.to_position_id = child.from_position_id
-    WHERE
-        parent.depth < 5                                           -- Depth limit: 5-move steering radius
-        AND NOT (child.to_position_id = ANY(parent.path_history))  -- Cycle detection
+        m.to_position_id,
+        r.depth + 1,
+        r.path || m.to_position_id || ',',
+        COALESCE(r.first_move, m.move_san)
+    FROM reachable r
+    JOIN moves m ON m.from_position_id = r.position_id
+    WHERE r.depth < :steering_radius                                    -- Depth limit: 5-move steering radius
+      AND r.path NOT LIKE '%,' || CAST(m.to_position_id AS TEXT) || ',%'  -- Cycle detection
 )
 SELECT
-    sp.root_move,
-    MAX(
-        (EXTRACT(EPOCH FROM NOW() - b.last_reviewed_at) / 3600)
-        / (1.0 * POWER(2, b.pass_streak))
-        * (b.eval_loss_cp / 50.0)
-        / (1.0 + 0.1 * sp.depth)
-    ) as best_score
-FROM scent_path sp
-JOIN blunders b ON b.position_id = sp.to_position_id
-JOIN positions bp ON bp.id = b.position_id
-JOIN game_sessions gs ON gs.id = :session_id AND gs.user_id = :user_id
+    r.first_move,
+    b.id AS blunder_id,
+    r.depth,
+    b.eval_loss_cp,
+    b.pass_streak,
+    b.last_reviewed_at,
+    b.created_at,
+    b.opening_family
+FROM reachable r
+JOIN positions p ON p.id = r.position_id
+JOIN blunders b ON b.position_id = r.position_id
 WHERE b.user_id = :user_id
-  AND bp.active_color = gs.player_color
-GROUP BY sp.root_move
-ORDER BY best_score DESC
-LIMIT 1;
+  AND p.active_color = :player_color
+  AND r.first_move IS NOT NULL;
 ```
+
+Scoring and selection are computed in Python after this query returns (see `GhostMoveCandidate.score()` in `backend/app/api/game.py`).
 
 **Key Safeguards:**
 - `depth < 5`: Steering radius—only considers blunders reachable within 5 moves, where the Ghost can reliably steer
-- `path_history` array: Accumulates visited position IDs along each path
-- `NOT ... = ANY(path_history)`: Prevents following edges that would create a cycle in the current traversal path
+- `path` string: Accumulates visited position IDs as a comma-delimited string along each traversal path
+- `path NOT LIKE '%,<id>,%'`: SQLite-compatible cycle guard; prevents following edges that revisit a position already in the current path
 
 ### 6.1.1 Re-Hooking Logic (Transposition Detection)
 
-When the user deviates from the Ghost path, backend engine mode takes over. However, the user may later transpose into a known position that has a due blunder downstream. The Ghost should reactivate in this case.
+When the user deviates from the Ghost path, backend engine mode takes over. However, the user may later transpose into a known position that has a due blunder downstream. The Ghost reactivates automatically on every move.
 
 **When to Check:** Every user move. The `POST /api/game/next-opponent-move` endpoint is called after each move regardless of current mode.
 
@@ -599,30 +598,61 @@ When the user deviates from the Ghost path, backend engine mode takes over. Howe
 
 ```
 POST /api/game/next-opponent-move
-After a user move, backend returns exactly one opponent move. It first tries Ghost steering; if no due path exists, it falls back to backend engine inference.
-
+After a user move, backend returns exactly one opponent move. It first tries Ghost steering; if no due path exists, it falls back to the remote Maia3 API.
 
 1. Validate session ownership and that it's the opponent's turn for `fen`.
 2. Compute normalized FEN hash.
 3. Look up position by `fen_hash` in `positions` table (for this user).
 4. If found:
-   → Run downstream blunder query (recursive CTE joining `blunders` table, depth ≤ 5).
-   → Filter for blunders with `srs_priority > 1.0`.
+   → Run downstream blunder query (recursive CTE, depth ≤ 5).
+   → Filter for blunders with srs_priority > 1.0.
 5. If due blunder(s) reachable:
-   → Select highest-priority path.
-   → return:
-     `{ "mode": "ghost", "move": { "uci": "...", "san": "..." }, "target_blunder_id": <id>, "decision_source": "ghost_path" }`
+   → Score candidates; select via weighted random from top-5 first-move groups.
+   → Return:
+     { "mode": "ghost", "move": { "uci": "...", "san": "..." },
+       "target_blunder_id": <id>, "decision_source": "ghost_path" }
 6. If no due blunders reachable:
-   → call remote Maia3 API for engine move.
-   → return:
-     `{ "mode": "engine", "move": { "uci": "...", "san": "..." }, "target_blunder_id": null, "decision_source": "backend_engine" }`
+   → Call remote Maia3 API for engine move.
+   → Return:
+     { "mode": "engine", "move": { "uci": "...", "san": "..." },
+       "target_blunder_id": null, "decision_source": "backend_engine" }
 ```
 
-**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200-500ms network latency per engine fallback call.
+**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200–500ms network latency per engine fallback call.
 
 **Caching Consideration (Post-MVP):** Position lookups are hot-path. Consider caching:
 - FEN hash → position existence (simple boolean)
 - Position ID → downstream blunder count (invalidate on new blunder insertion)
+
+### 6.1.2 First-Move Group Selection
+
+After scoring all eligible candidates, the Ghost selects its move via a two-stage weighted random process to add natural variety and avoid mechanical repetition.
+
+**Stage 1 — Group by first move:**
+Candidates are grouped by `first_move` (the immediate opponent move the Ghost would play). Each group gets an aggregate score:
+```
+aggregate_score = best_candidate_score + 0.15 × sum(remaining_candidate_scores)
+```
+
+**Stage 2 — Top-K weighted random:**
+1. Sort groups by `penalized_score` (aggregate × repeat penalty, see below).
+2. Keep top `TOP_K = 5` groups.
+3. Weight each group by `penalized_score ^ 0.5` (square-root flattening reduces winner-take-all dominance).
+4. Sample one group using `random.choices` seeded by a stable, deterministic seed.
+5. Within the chosen group, sample one candidate using the same weight formula.
+
+**Stable seeding:**
+```
+seed = SHA-256(user_id | fen_hash | session_id)[:8]   -- big-endian int
+```
+The seed is stable across Python restarts and equivalent FENs (normalized by `fen_hash`), producing consistent results for the same position within a session while varying across sessions.
+
+**Repeat penalties:**
+To avoid showing the same ghost move repeatedly from the same position, the Ghost looks back at the 3 most recent ghost moves played from this FEN and penalizes their first moves:
+```
+factors = (0.35, 0.60, 0.80)   -- most-recent to least-recent
+```
+A move seen twice incurs both factors multiplicatively.
 
 ### 6.2 Ghost Move Library Capture Logic
 
@@ -672,49 +702,67 @@ Ghost Move Library targets enter the system through two capture paths.
 
 #### 6.3.1 Replay Priority Score
 
-Each blunder record has an SRS priority that tracks how overdue it is, combined with severity weighting for selection:
+Each blunder record has an SRS priority that tracks how overdue it is. A blunder is **due** when `srs_priority > 1.0`:
 
 ```
-expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)
-hours_since_review = (NOW - last_reviewed_at) in hours
-srs_priority = hours_since_review / expected_interval
+expected_interval = BASE_INTERVAL * (BACKOFF_FACTOR ^ pass_streak)   -- hours, capped at MAX_INTERVAL
+srs_priority      = hours_since_review / expected_interval
 ```
 
-A blunder is **due** when `srs_priority > 1.0` (overdue for review).
+`last_reviewed_at` falls back to `created_at` when the blunder has never been reviewed.
 
-When selecting which blunder to steer toward during a game, severity and distance are factored in:
+When selecting which blunder to steer toward, the Ghost uses a composite score that combines urgency (saturating), severity (logarithmic), and distance (exponential decay):
 
 ```
-score = srs_priority * (eval_loss_cp / 50) / (1 + 0.1 * distance)
+overdue         = hours_since_review / expected_interval
+urgency         = 1 + log2(1 + overdue)            -- saturating; grows slowly once very overdue
+
+severity        = log1p(eval_loss_cp / 50)          -- 50cp → 0.69, 100cp → 1.10, 200cp → 1.61
+
+distance_weight = exp(-0.35 × depth)                -- depth=1 → 0.70, depth=3 → 0.35, depth=5 → 0.17
+
+score = urgency × severity × distance_weight
 ```
 
-- `eval_loss_cp / 50`: Severity weight — a 200cp blunder scores 4× higher than a 50cp inaccuracy at the same overdue-ness
-- `1 + 0.1 * distance`: Distance tiebreaker — closer blunders slightly preferred within the 5-move steering radius
-
-**Constants (MVP defaults):**
-- `BASE_INTERVAL = 1` (hour)
-- `BACKOFF_FACTOR = 2.0` (exponential backoff)
-- `MAX_INTERVAL = 4320` (180 days in hours, cap)
-- `STEERING_RADIUS = 5` (max moves to steer toward a blunder)
-- `RECORDING_MOVE_CAP = 10` (only record mistakes in the first 10 moves)
+**Constants:**
+| Constant | Value | Purpose |
+|----------|-------|---------|
+| `BASE_INTERVAL` | 4 hours | Minimum review interval (first attempt) |
+| `BACKOFF_FACTOR` | 2.0 | Exponential interval growth per pass |
+| `MAX_INTERVAL` | 4320 hours (180 days) | Interval cap |
+| `STEERING_RADIUS` | 5 moves | Max depth for ghost path traversal |
+| `SEVERITY_NORMALIZER_CP` | 50 cp | Denominator in log1p severity formula |
+| `DISTANCE_DECAY_RATE` | 0.35 | Exponential decay rate for distance weight |
+| `TOP_K` | 5 | Number of first-move groups considered for weighted random selection |
+| `RECORDING_MOVE_CAP` | 10 | Only record blunders in the first 10 moves |
 
 **SRS Priority Examples (before severity/distance weighting):**
-| pass_streak | expected_interval | After 1hr | After 24hr | After 7 days |
+| pass_streak | expected_interval | After 4hr | After 24hr | After 7 days |
 |-------------|-------------------|-----------|------------|--------------|
-| 0 (new)     | 1 hr              | 1.0       | 24.0       | 168.0        |
-| 1           | 2 hr              | 0.5       | 12.0       | 84.0         |
-| 3           | 8 hr              | 0.125     | 3.0        | 21.0         |
-| 5           | 32 hr             | 0.03      | 0.75       | 5.25         |
-| 10          | 1024 hr (~43 days)| 0.001     | 0.02       | 0.16         |
+| 0 (new)     | 4 hr              | 1.0       | 6.0        | 42.0         |
+| 1           | 8 hr              | 0.5       | 3.0        | 21.0         |
+| 3           | 32 hr             | 0.125     | 0.75       | 5.25         |
+| 5           | 128 hr            | 0.03      | 0.19       | 1.31         |
+| 10          | 4096 hr (~171 days, capped at 4320) | 0.001 | 0.006 | 0.04 |
 
-**Selection Score Examples (srs_priority=2.0, distance=1):**
-| eval_loss_cp | Severity Weight | Score |
-|--------------|-----------------|-------|
-| 50cp         | 1.0×            | 1.82  |
-| 100cp        | 2.0×            | 3.64  |
-| 200cp        | 4.0×            | 7.27  |
+**Urgency vs. overdue:**
+| overdue (hours_since / expected) | urgency = 1 + log2(1 + overdue) |
+|----------------------------------|----------------------------------|
+| 0.5 (half-due)                   | 1.58                             |
+| 1.0 (exactly due)                | 2.00                             |
+| 3.0                              | 3.00                             |
+| 7.0                              | 4.00                             |
+| 15.0                             | 5.00                             |
 
-Higher score = more likely to be selected when Ghost chooses a path.
+**Severity examples (log1p scale):**
+| eval_loss_cp | severity = log1p(cp/50) |
+|--------------|-------------------------|
+| 50cp         | 0.69                    |
+| 100cp        | 1.10                    |
+| 200cp        | 1.61                    |
+| 400cp        | 2.20                    |
+
+Higher composite score = more likely to be selected when Ghost chooses a path.
 
 #### 6.3.2 Update Rules
 
