@@ -5804,6 +5804,11 @@ button.openings-shell__crumb:hover {
     display: flex;
     align-items: center;
     gap: 0.6rem;
+    padding: 0.6rem 1rem;
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.62);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(2px);
     transform: translateX(-50%);
     transform-origin: top center;
     animation: srs-fail-content-in 220ms ease-out;
