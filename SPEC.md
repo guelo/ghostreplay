@@ -950,20 +950,15 @@ A session begins when the user clicks "New Game" and ends when the game terminat
  ┌─────────┐     New Game     ┌─────────┐     Terminal Event     ┌─────────┐
  │  IDLE   │ ───────────────► │  ACTIVE │ ─────────────────────► │  ENDED  │
  └─────────┘                  └─────────┘                        └─────────┘
-                                    │                                     │
-                                    │ Browser close/refresh               │
-                                    ▼                                     │
-                              ┌───────────┐                               │
-                              │ ABANDONED │ ◄─────────────────────────────┘
-                              └───────────┘   (timeout after disconnect)
 ```
 
 **State Transitions:**
 | From | To | Trigger |
 |------|------|---------|
 | IDLE | ACTIVE | User clicks "New Game" |
-| ACTIVE | ENDED | Checkmate, stalemate, resignation, draw agreement |
-| ACTIVE | ABANDONED | Browser disconnect + timeout (5 minutes) |
+| ACTIVE | ENDED | Checkmate, stalemate, resignation, draw, or explicit abandon |
+
+There is no background-job abandonment or `abandoned` status. If the user closes the browser without calling `/api/game/end`, the session remains `active` indefinitely.
 
 ### 7.3 Session Schema
 
@@ -973,7 +968,7 @@ CREATE TABLE game_sessions (
     user_id BIGINT NOT NULL REFERENCES users(id),
     started_at TIMESTAMP NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMP,
-    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- 'active', 'ended', 'abandoned'
+    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- 'active', 'ended'
     result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
     engine_elo INTEGER NOT NULL,  -- Bot difficulty selected for this game
     player_color VARCHAR(5) NOT NULL DEFAULT 'white', -- 'white' or 'black' (user side for this session)
@@ -988,6 +983,8 @@ CREATE INDEX idx_game_sessions_user ON game_sessions(user_id);
 CREATE INDEX idx_game_sessions_status ON game_sessions(status);
 CREATE INDEX idx_game_sessions_user_started ON game_sessions(user_id, started_at);
 ```
+
+**`is_rated` flag:** Passed by the client in `POST /api/game/end`. When `true` and the result is `checkmate_win`, `checkmate_loss`, `resign`, or `draw`, the server computes a rating change and appends a `rating_history` row. Results of `abandon` never affect rating regardless of `is_rated`. The flag defaults to `true`; clients set it to `false` for practice games.
 
 ### 7.4 Move Analysis Storage
 
@@ -1072,6 +1069,10 @@ POST /api/blunder called
 4. If `TRUE`: Skip insertion, return `200 OK` with `{ "recorded": false, "reason": "session_limit" }`
 5. `POST /api/blunder/manual` is not subject to this flag (manual capture is allowed in active and ended sessions).
 
+**Additional constraints on auto-recording (`POST /api/blunder` only):**
+- **First-move exemption:** A blunder on the very first move (only 1 move in the PGN) is silently skipped and not recorded. Ghost mode can never steer back to the starting position, so recording the first move is meaningless.
+- **10-move cap:** Auto-recording is restricted to blunders occurring within the first 10 full moves. Blunders after move 10 return HTTP 400. Manual capture (`/api/blunder/manual`) has no move-count restriction.
+
 ### 7.6 Game Termination
 
 **Resignation:**
@@ -1084,11 +1085,12 @@ POST /api/blunder called
 - Frontend sends `POST /api/game/end` with `{ "session_id": "{id}", "result": "<outcome>" }`
 - Session marked as ended
 
-**Abandonment (MVP):**
-- User closes browser or navigates away
-- Session remains `active`
-- Background job marks sessions as `abandoned` if no activity for 5+ minutes
-- Abandoned sessions are treated as ended for all purposes
+**Abandonment:**
+- User explicitly abandons (e.g., clicks "New Game" mid-game)
+- Frontend sends `POST /api/game/end` with `{ "session_id": "{id}", "result": "abandon" }`
+- Session marked as ended (`status = 'ended'`, `result = 'abandon'`)
+- `abandon` result does not affect rating (excluded from `RESULT_SCORES`)
+- If the user closes the browser without calling this endpoint, the session remains `active` indefinitely (no background cleanup job)
 
 ### 7.7 Session Persistence
 
@@ -1098,10 +1100,10 @@ POST /api/blunder called
 - Per-move engine analysis (eval, best move, classification)
 - Ghost Move Library targets: auto blunders and manually selected MoveList decisions (anchored to the `positions` + `moves` graph)
 
-**Browser Refresh Behavior (MVP):**
+**Browser Refresh Behavior:**
 - Refreshing mid-game loses the current game state
 - User must start a new game
-- Previous session auto-abandoned after timeout
+- Previous session remains `active` in the DB (no cleanup job runs)
 - *Future enhancement: LocalStorage-based state recovery*
 
 ---
