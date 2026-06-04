@@ -1,7 +1,6 @@
 # Agent Instructions
 
-The initial project and architecture is described in SPEC.md but we are now in a post-SPEC environment, changes have been made that are beyond the spec.
-The spec will become more and more outdated over time. It might still be useful to get an idea of the overall project.
+The overall project and architecture is described in SPEC.md.
 
 When running python and related commands you need to activate the venv in backend/.venv `cd backend && source .venv/bin/activate`
 If pytests fail due to temp dir, use TMPDIR=/Users/mvargas/src/ghostreplay/backend/.tmp or another valid temp path.

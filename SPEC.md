@@ -1,4 +1,4 @@
-This was the initial **SPEC** for the "Ghost Replay" Chess Application. It will become increasingly outdated as development continues. But it is still useful for describing the ideas and architecture. 
+This began as the initial **SPEC** for the "Ghost Replay" Chess Application. It has since been updated to track the current codebase and is now maintained as the **living design document** — describing the ideas, architecture, and behavior as actually implemented. Some forward-looking notes remain (marked "post-MVP" / "deferred") to capture roadmap intent.
 
 ---
 
@@ -8,22 +8,21 @@ This was the initial **SPEC** for the "Ghost Replay" Chess Application. It will 
 
 1. Product Description
 2. User Stories & Features
-3. High-Level Architecture (MVP)
+3. High-Level Architecture
 4. Tech Stack
 5. Database Schema
 6. Data & Logic Flow
 7. Game Sessions & Lifecycle
-8. MVP Constraints & Scope
-9. API Specification
-10. After-Game Analysis Display
-11. Game History View
-12. Testing Strategy
-13. Rating System
-14. Opening Weakness Tracking
-15. Analysis Cache
-16. Local Fallback
-17. Practice Continuation
-18. Drill Mode
+8. API Specification
+9. After-Game Analysis Display
+10. Game History View
+11. Testing Strategy
+12. Rating System
+13. Opening Weakness Tracking
+14. Analysis Cache
+15. Local Fallback
+16. Practice Continuation
+17. Drill Mode
 
 ---
 
@@ -76,7 +75,7 @@ This was the initial **SPEC** for the "Ghost Replay" Chess Application. It will 
 
 ---
 
-## 3. High-Level Architecture (MVP)
+## 3. High-Level Architecture
 
 The system uses a **Client-Coordinator-Memory** architecture. Opponent move selection is centralized in the backend, while tactical blunder analysis remains client-side.
 
@@ -153,6 +152,7 @@ graph TD
 | **State management** | Zustand | Lightweight, minimal boilerplate; narrow stores per concern. |
 | **Chess UI** | `react-chessboard` | Robust wrapper for chessboard.js. |
 | **Chess Logic** | `chess.js` | Standard library for move generation/validation. |
+| **Charts** | `recharts` | Rating history graph and score visualizations. |
 | **Opponent Engine** | Maia3 (remote API via maiachess.com) | Backend proxies move requests to the Maia3 API, selecting the appropriate ELO model (600–2600). No local model files or GPU required. |
 | **Analysis Engine** | `stockfish.js` (WASM) | Browser-side analyst worker for blunder detection/SRS grading. |
 | **Backend** | Python (FastAPI) | High performance, excellent libraries (`python-chess`). |
@@ -892,7 +892,7 @@ normalized_eval = raw_eval * (1 if white_to_move else -1)
 
 **Delta calculation:** Always computed as `best_move_eval - played_move_eval` using player-perspective values. A positive delta means the played move was worse.
 
-**Move classification:** Delta is used only for the recording threshold (≥ 50cp → recordable). The quality label (blunder/mistake/inaccuracy/good/excellent/best) is produced by `classifyMoveAdvanced`, which uses a Lichess-style logistic win-chance model instead of raw cp (see §10.2.2).
+**Move classification:** Delta is used only for the recording threshold (≥ 50cp → recordable). The quality label (blunder/mistake/inaccuracy/good/excellent/best) is produced by `classifyMoveAdvanced`, which uses a Lichess-style logistic win-chance model instead of raw cp (see §9.2.2).
 
 **Storage:** The `session_moves.eval_cp` column stores the **normalized** (side-to-move) value.
 
@@ -1160,24 +1160,17 @@ POST /api/blunder called
 
 ---
 
-## 8. MVP Constraints & Scope
-
-* **Single Variation per Game:** The system only records the *first* blunder of a session to keep the Ghost Move Library manageable initially.
-* **No Redis:** All state checks go directly to PostgreSQL (acceptable performance for turn-based MVP).
-
----
-
-## 9. API Specification
+## 8. API Specification
 
 All endpoints use JSON request/response bodies. The API is RESTful.
 
-### 9.1 Base URL
+### 8.1 Base URL
 
 ```
 /api
 ```
 
-### 9.2 Authentication
+### 8.2 Authentication
 
 All endpoints except `/api/auth/*` require authentication via Bearer token.
 
@@ -1283,7 +1276,7 @@ Upgrades an anonymous account to a claimed (permanent) account. Allows user to c
 - Return new JWT with updated claims
 - Frontend updates localStorage with new credentials
 
-### 9.3 Game Flow
+### 8.3 Game Flow
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -1450,7 +1443,7 @@ Bulk-ingests the analyzed move data collected during the session. The request mi
 - Endpoint is called once per completed game; repeat calls replace the existing move set for idempotency.
 - Any PGN string is still sent to `/api/game/end` (stored in `game_sessions.pgn`), while this endpoint remains JSON so downstream analytics don't need to re-parse PGN comments.
 
-### 9.4 Blunders / Ghost Move Library Targets
+### 8.4 Blunders / Ghost Move Library Targets
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -1566,7 +1559,7 @@ Lists the user's recorded Ghost Move Library targets (auto blunders + manual Mov
 - `last_played_at` is the most recent timestamp at which the blunder position was reached in a game session.
 - `last_session_id` is the session UUID for the most recent play.
 
-### 9.5 SRS (Spaced Repetition)
+### 8.5 SRS (Spaced Repetition)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -1603,7 +1596,7 @@ Records whether the user passed or failed a blunder review.
 - Recalculate priority / due logic using the updated SRS state
 - Call `recompute_opening_scores_if_needed()` for the blunder's player color to keep opening score cache fresh
 
-### 9.6 Error Responses
+### 8.6 Error Responses
 
 All errors follow a consistent format:
 
@@ -1640,7 +1633,7 @@ All errors follow a consistent format:
 }
 ```
 
-### 9.7 Design Decisions
+### 8.7 Design Decisions
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
@@ -1651,11 +1644,11 @@ All errors follow a consistent format:
 
 ---
 
-## 10. After-Game Analysis Display
+## 9. After-Game Analysis Display
 
 When a game ends, users are presented with an analysis view showing their performance with engine evaluations.
 
-### 10.1 Screen Layout
+### 9.1 Screen Layout
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -1692,15 +1685,15 @@ When a game ends, users are presented with an analysis view showing their perfor
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### 10.2 Components
+### 9.2 Components
 
-#### 10.2.1 Chessboard
+#### 9.2.1 Chessboard
 
 - Displays the position at the currently selected move
 - Arrows can optionally show the best move (toggle)
 - Highlights the last move played (from/to squares)
 
-#### 10.2.2 Evaluation Graph
+#### 9.2.2 Evaluation Graph
 
 - **X-axis:** Move number (1 to N)
 - **Y-axis:** Engine evaluation in pawns (-5 to +5, clamped)
@@ -1712,14 +1705,14 @@ When a game ends, users are presented with an analysis view showing their perfor
 - **Interaction:** Clicking on the graph jumps to that move
 - **Current position:** Vertical line indicator shows selected move
 
-#### 10.2.3 Evaluation Bar
+#### 9.2.3 Evaluation Bar
 
 - Vertical or horizontal bar showing current position advantage
 - Filled portion represents winning probability (based on eval)
 - Numerical eval displayed: `+1.2` or `M3` (mate in 3)
 - Color: White fill for white advantage, black fill for black advantage
 
-#### 10.2.4 Navigation Controls
+#### 9.2.4 Navigation Controls
 
 | Button | Action |
 |--------|--------|
@@ -1733,7 +1726,7 @@ When a game ends, users are presented with an analysis view showing their perfor
 - `Home` / `End` : Jump to start/end
 - `↑` / `↓` : Jump to previous/next critical moment (blunder/mistake)
 
-#### 10.2.5 Move List
+#### 9.2.5 Move List
 
 - Standard two-column format (white move | black move)
 - Current move highlighted
@@ -1746,7 +1739,7 @@ When a game ends, users are presented with an analysis view showing their perfor
   - `⭐` — Best move (played move matches engine's top choice)
 - Clicking a move navigates to that position
 
-#### 10.2.6 Position Analysis Panel
+#### 9.2.6 Position Analysis Panel
 
 Shows details for the currently selected move:
 
@@ -1755,7 +1748,7 @@ Shows details for the currently selected move:
 - **Eval delta:** Difference in centipawns
 - **Classification:** Blunder/Mistake/Inaccuracy/Good/Excellent/Best
 
-### 10.3 Data Source
+### 9.3 Data Source
 
 Analysis data comes from two sources:
 - `session_moves` table — populated during gameplay by `GameAnalysisCoordinator` (Worker B) via `POST /api/session/{id}/moves` on game end
@@ -1778,7 +1771,7 @@ interface MoveAnalysis {
 }
 ```
 
-### 10.4 API Endpoint
+### 9.4 API Endpoint
 
 #### GET /api/session/:id/analysis
 
@@ -1827,7 +1820,7 @@ Returns full analysis for a completed game session.
 }
 ```
 
-### 10.5 Entry Points
+### 9.5 Entry Points
 
 The analysis screen (`/game?id=<session_id>`) is accessible from:
 
@@ -1847,7 +1840,7 @@ The analysis screen (`/game?id=<session_id>`) is accessible from:
 - `/openings` — Opening performance
 - `/stats` — Overall stats and rating graph
 
-### 10.6 MVP Constraints
+### 9.6 MVP Constraints
 
 - **No engine lines:** MVP shows only the single best move, not multiple variations
 - **No local analysis:** Display only the analysis captured during gameplay (no re-analysis)
@@ -1856,11 +1849,11 @@ The analysis screen (`/game?id=<session_id>`) is accessible from:
 
 ---
 
-## 11. Game History View
+## 10. Game History View
 
 The Game History view allows users to browse their past games and access analysis for any completed game.
 
-### 11.1 Entry Points
+### 10.1 Entry Points
 
 ```
 ┌─────────────────────┐
@@ -1881,7 +1874,7 @@ The Game History view allows users to browse their past games and access analysi
 └─────────────────────┘
 ```
 
-### 11.2 Screen Layout
+### 10.2 Screen Layout
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -1917,7 +1910,7 @@ The Game History view allows users to browse their past games and access analysi
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 11.3 Game Card Data
+### 10.3 Game Card Data
 
 Each game in the list displays:
 
@@ -1942,7 +1935,7 @@ Each game in the list displays:
 | `draw` | Draw |
 | `abandon` | Abandoned |
 
-### 11.4 Interaction Flow
+### 10.4 Interaction Flow
 
 ```
 User clicks game card
@@ -1957,13 +1950,13 @@ User clicks game card
           ▼
 ┌───────────────────┐
 │  Analysis Screen  │
-│  (Section 10)     │
+│  (Section 9)     │
 └───────────────────┘
 ```
 
-**Click behavior:** Clicking anywhere on a game card opens the analysis view for that game (Section 10).
+**Click behavior:** Clicking anywhere on a game card opens the analysis view for that game (Section 9).
 
-### 11.5 API Endpoint
+### 10.5 API Endpoint
 
 #### GET /api/history
 
@@ -1997,7 +1990,7 @@ Returns list of user's completed games (newest first).
 }
 ```
 
-### 11.6 Empty State
+### 10.6 Empty State
 
 When user has no completed games:
 
@@ -2017,7 +2010,7 @@ When user has no completed games:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 11.7 MVP Constraints
+### 10.7 MVP Constraints
 
 - **No sorting:** Games always shown newest first
 - **No filtering:** All games shown (filter by date/result/blunders deferred)
@@ -2027,9 +2020,9 @@ When user has no completed games:
 
 ---
 
-## 12. Testing Strategy
+## 11. Testing Strategy
 
-### 12.1 Tooling
+### 11.1 Tooling
 
 | Layer | Tooling | Scope |
 | --- | --- | --- |
@@ -2039,7 +2032,7 @@ When user has no completed games:
 | Integration (Backend) | pytest + httpx | API endpoints, DB interactions, SRS updates |
 | E2E | Playwright | Full user journeys in the browser |
 
-### 12.2 Coverage Priorities (MVP)
+### 11.2 Coverage Priorities (MVP)
 
 **SRS & Ghost Logic**
 - Priority score calculation (pass streak + time since last review)
@@ -2064,7 +2057,7 @@ When user has no completed games:
 - Resume flow after correction
 - UI state when backend response switches between `ghost` and `engine` mode
 
-### 12.3 Key Test Cases
+### 11.3 Key Test Cases
 
 | Area | Test Case | Expectation |
 | --- | --- | --- |
@@ -2076,7 +2069,7 @@ When user has no completed games:
 | Analysis | first auto blunder only | later mistakes ignored unless manually added |
 | Manual add | duplicate position capture | `is_new=false` and UI shows "already in library" |
 
-### 12.4 Test Data & Determinism
+### 11.4 Test Data & Determinism
 
 - Use fixed PGNs with known engine evals for replay scenarios.
 - Seed any probabilistic SRS selection to make tests deterministic.
@@ -2084,11 +2077,11 @@ When user has no completed games:
 
 ---
 
-## 13. Rating System
+## 12. Rating System
 
 Ghost Replay uses an Elo-style rating system to track player strength against the engine.
 
-### 13.1 Constants
+### 12.1 Constants
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
@@ -2097,7 +2090,7 @@ Ghost Replay uses an Elo-style rating system to track player strength against th
 | `K_PROVISIONAL` | 40 | K-factor during provisional period |
 | `K_STABLE` | 20 | K-factor once rating is stable |
 
-### 13.2 Formula
+### 12.2 Formula
 
 ```
 expected = 1 / (1 + 10^((engine_elo - player_rating) / 400))
@@ -2106,7 +2099,7 @@ new_rating = round(player_rating + K * (score - expected))
 
 The opponent rating is `engine_elo` from the game session (the bot difficulty setting).
 
-### 13.3 Result Scores
+### 12.3 Result Scores
 
 | Result | Score |
 |--------|-------|
@@ -2116,13 +2109,13 @@ The opponent rating is `engine_elo` from the game session (the bot difficulty se
 | `draw` | 0.5 |
 | `abandon` | not rated |
 
-### 13.4 When Rating Is Computed
+### 12.4 When Rating Is Computed
 
 A `rating_history` row is inserted at `POST /api/game/end` when `is_rated=true` and the result is one of the four rated outcomes above. `abandon` results are never rated regardless of `is_rated`.
 
 The `is_provisional` flag is `true` when `games_played < PROVISIONAL_THRESHOLD` at the time of the game.
 
-### 13.5 Post-Game Display
+### 12.5 Post-Game Display
 
 The `/api/game/end` response includes a `rating` field:
 
@@ -2142,17 +2135,17 @@ DB reference: §5.5
 
 ---
 
-## 14. Opening Weakness Tracking
+## 13. Opening Weakness Tracking
 
 The opening weakness system computes per-user performance scores for each opening line and surfaces them on the `/openings` page.
 
-### 14.1 Trigger Points
+### 13.1 Trigger Points
 
 - **After move uploads:** `recompute_opening_scores_if_needed()` is called at the end of `POST /api/session/:id/moves`. If the user's inputs (game history or opening registry) have changed since the last batch, a new batch is computed.
 - **After SRS reviews:** `recompute_opening_scores_if_needed()` is called after each SRS review submission, since a review pass can change per-opening accuracy.
 - **On openings page load:** `ensure_opening_scores()` is called when serving `GET /api/openings`. It calls `recompute_opening_scores` if no valid batch exists yet.
 
-### 14.2 Batch/Cursor Pattern
+### 13.2 Batch/Cursor Pattern
 
 Computation runs are not overwritten in-place. Instead:
 
@@ -2165,7 +2158,7 @@ This ensures the current scores are always available atomically and reads never 
 
 `registry_fingerprint` captures a hash of the opening registry at compute time. If the fingerprint changes (e.g. new openings added to the registry), the next trigger forces a full recompute.
 
-### 14.3 Score Semantics
+### 13.3 Score Semantics
 
 - `opening_score`: composite weakness metric — 0 = perfect play, higher = weaker performance
 - `confidence` and `sample_size`: let the frontend de-emphasize scores backed by sparse data
@@ -2175,25 +2168,25 @@ DB reference: §5.7
 
 ---
 
-## 15. Analysis Cache
+## 14. Analysis Cache
 
 The analysis cache avoids re-running Stockfish on positions that have already been evaluated in prior games.
 
-### 15.1 Key Structure
+### 14.1 Key Structure
 
 Each entry is keyed by `(fen_before, move_uci)` — the exact position before a move and the move played in UCI notation. This pair uniquely identifies an analysis result.
 
-### 15.2 Frontend Lookup
+### 14.2 Frontend Lookup
 
 `lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned).
 
 Used in `GameAnalysisCoordinator` and `useMoveAnalysis` before dispatching Stockfish analysis tasks. Cache hits bypass the local engine for those positions entirely.
 
-### 15.3 Staleness
+### 14.3 Staleness
 
 No explicit invalidation. Analysis entries are immutable — the same FEN + move always yields the same Stockfish evaluation at the stored depth. Entries are only written, never updated.
 
-### 15.4 `source` Field
+### 14.4 `source` Field
 
 | Value | Meaning |
 |-------|---------|
@@ -2204,11 +2197,11 @@ DB reference: §5.6
 
 ---
 
-## 16. Local Fallback
+## 15. Local Fallback
 
 When the backend is unreachable, the frontend uses local Stockfish to generate opponent moves rather than blocking gameplay.
 
-### 16.1 `decision_source: 'local_fallback'`
+### 15.1 `decision_source: 'local_fallback'`
 
 The `decision_source` column on `session_moves` accepts three values:
 
@@ -2220,7 +2213,7 @@ The `decision_source` column on `session_moves` accepts three values:
 
 `local_fallback` is set exclusively by the frontend in `applyLocalFallbackMove()` (`useChessGameController.ts`). The backend never produces this value — it is excluded from the `NextOpponentMoveResponse` type.
 
-### 16.2 Behavior
+### 15.2 Behavior
 
 - Ghost path steering is unavailable in fallback mode (no backend response to provide path data).
 - The locally-generated move is committed with `decisionSource: "local_fallback"` and the game continues normally.
@@ -2229,11 +2222,11 @@ The `decision_source` column on `session_moves` accepts three values:
 
 ---
 
-## 17. Practice Continuation
+## 16. Practice Continuation
 
 Practice Continuation is the local free-play state a session enters when the user rewinds the board to a prior position mid-game.
 
-### 17.1 Trigger Flow
+### 16.1 Trigger Flow
 
 1. User clicks the Revert button to select an earlier position.
 2. If the current game is rated (`isRated=true`), a confirmation modal is shown (`showRevertWarning=true`).
@@ -2241,7 +2234,7 @@ Practice Continuation is the local free-play state a session enters when the use
 4. The board rewinds locally to the selected position.
 5. `isPracticeContinuation = true`, `isRated = false`, drill state cleared, session move uploads halted.
 
-### 17.2 Behavior While Active
+### 16.2 Behavior While Active
 
 | Aspect | Normal game | Practice continuation |
 |--------|-------------|----------------------|
@@ -2252,21 +2245,21 @@ Practice Continuation is the local free-play state a session enters when the use
 | Ghost / drill | Active | Disabled |
 | Resign button | `POST /api/game/end` | `finishLocalGame()` locally |
 
-### 17.3 Reset
+### 16.3 Reset
 
 `isPracticeContinuation` resets to `false` when a new game session is started.
 
 ---
 
-## 18. Drill Mode
+## 17. Drill Mode
 
 Drill Mode is a structured opening practice feature. The user plays toward a specific target position from the opening graph, then optionally converts the session into a rated game from that point forward.
 
-### 18.1 Session Type
+### 17.1 Session Type
 
 Drill sessions use `session_mode = 'drill'` in `game_sessions`. They start unrated (`is_rated = false`) and can become rated upon conversion.
 
-### 18.2 Drill States
+### 17.2 Drill States
 
 | State | Meaning |
 |-------|---------|
@@ -2278,7 +2271,7 @@ Drill sessions use `session_mode = 'drill'` in `game_sessions`. They start unrat
 
 Only `converted` drill sessions appear in game history alongside normal games; all other states are hidden.
 
-### 18.3 Strictness
+### 17.3 Strictness
 
 Strictness controls the centipawn threshold for accuracy failures after `root_reached`.
 
@@ -2290,7 +2283,7 @@ Strictness controls the centipawn threshold for accuracy failures after `root_re
 
 A custom `strictness_cp` integer (0–50) overrides the tier value.
 
-### 18.4 Route Check
+### 17.4 Route Check
 
 `POST /api/drills/:id/route-check` is called after each move. The backend uses `DrillRouteMap` (a BFS-derived map from the opening graph) to classify the current position:
 
@@ -2300,7 +2293,7 @@ A custom `strictness_cp` integer (0–50) overrides the tier value.
 | `root_reached` | Target FEN reached; `drill_state` advances to `root_reached` |
 | `failed` | Position left the route (`off_route`) or an accuracy threshold was exceeded (`accuracy`) |
 
-### 18.5 Conversion
+### 17.5 Conversion
 
 `POST /api/drills/:id/continue` converts a `root_reached` drill into a rated game:
 
@@ -2309,7 +2302,7 @@ A custom `strictness_cp` integer (0–50) overrides the tier value.
 3. `resegment_session_moves()` retroactively labels prior moves `segment = 'drill'` and future moves `segment = 'normal'`
 4. Normal game flow continues; game ends via `POST /api/game/end` with rating impact
 
-### 18.6 Terminal Reasons
+### 17.6 Terminal Reasons
 
 | Reason | Cause |
 |--------|-------|
@@ -2317,7 +2310,7 @@ A custom `strictness_cp` integer (0–50) overrides the tier value.
 | `accuracy` | Post-root move exceeded the centipawn strictness threshold |
 | `natural_end` | Game ended by checkmate/draw before root was reached |
 
-### 18.7 API Endpoints
+### 17.7 API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
