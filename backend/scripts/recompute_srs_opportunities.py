@@ -69,11 +69,27 @@ def _session_position_ids(db, *, session_id, user_id: int) -> set[int]:
     }
 
 
+def _cached_session_position_ids(
+    db,
+    *,
+    session_id,
+    user_id: int,
+    cache: dict | None,
+) -> set[int]:
+    if cache is not None and session_id in cache:
+        return cache[session_id]
+    position_ids = _session_position_ids(db, session_id=session_id, user_id=user_id)
+    if cache is not None:
+        cache[session_id] = position_ids
+    return position_ids
+
+
 def recompute_one_blunder(
     db,
     *,
     blunder_id: int,
     progress_every: int = 100,
+    session_position_cache: dict | None = None,
 ) -> tuple[int, int, int]:
     blunder = db.query(Blunder).filter(Blunder.id == blunder_id).first()
     if blunder is None:
@@ -104,35 +120,33 @@ def recompute_one_blunder(
         player_color=blunder_position.active_color,
     )
 
+    existing_events = {
+        event.session_id: event
+        for event in db.query(BlunderOpportunityEvent)
+        .filter(BlunderOpportunityEvent.blunder_id == blunder.id)
+        .all()
+    }
+
     opportunities = 0
     reached_count = 0
     for index, session in enumerate(sessions, start=1):
         occurred_at = normal_play_started_at(session)
         if blunder.created_at and as_utc(occurred_at) < as_utc(blunder.created_at):
-            existing = (
-                db.query(BlunderOpportunityEvent)
-                .filter(
-                    BlunderOpportunityEvent.session_id == session.id,
-                    BlunderOpportunityEvent.blunder_id == blunder.id,
-                )
-                .first()
-            )
+            existing = existing_events.get(session.id)
             if existing is not None:
                 db.delete(existing)
             continue
 
-        position_ids = _session_position_ids(db, session_id=session.id, user_id=blunder.user_id)
+        position_ids = _cached_session_position_ids(
+            db,
+            session_id=session.id,
+            user_id=blunder.user_id,
+            cache=session_position_cache,
+        )
         reached = blunder.position_id in position_ids
         opportunity = reached or bool(position_ids.intersection(ancestor_ids))
 
-        existing = (
-            db.query(BlunderOpportunityEvent)
-            .filter(
-                BlunderOpportunityEvent.session_id == session.id,
-                BlunderOpportunityEvent.blunder_id == blunder.id,
-            )
-            .first()
-        )
+        existing = existing_events.get(session.id)
         if opportunity:
             opportunities += 1
             reached_count += 1 if reached else 0
@@ -217,11 +231,15 @@ def recompute_all_blunders(
     total_sessions = 0
     total_opportunities = 0
     total_reached = 0
+    # Session position-id sets are independent of the blunder, so compute each
+    # one lazily on first scan and reuse it across all blunders.
+    session_position_cache: dict = {}
     for index, blunder_id in enumerate(blunder_ids, start=1):
         sessions, opportunities, reached = recompute_one_blunder(
             db,
             blunder_id=blunder_id,
             progress_every=0,
+            session_position_cache=session_position_cache,
         )
         total_sessions += sessions
         total_opportunities += opportunities
