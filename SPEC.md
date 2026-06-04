@@ -1088,7 +1088,6 @@ All endpoints except `/api/auth/*` require authentication via Bearer token.
 | POST | `/api/auth/register` | Create anonymous account (auto-generated credentials) |
 | POST | `/api/auth/login` | Authenticate and get token (optional, cross-device) |
 | POST | `/api/auth/claim` | Upgrade anonymous account to claimed account |
-| POST | `/api/auth/logout` | Invalidate token (optional for stateless JWT) |
 
 #### POST /api/auth/register
 
@@ -1107,13 +1106,12 @@ Creates an anonymous user account with auto-generated credentials. Called automa
 {
   "user_id": "integer",
   "username": "string",
-  "is_anonymous": true,
   "token": "string (JWT)"
 }
 ```
 
 **Implementation Notes:**
-- Creates user with `is_anonymous = TRUE`
+- Creates user with `is_anonymous = TRUE` (not returned in response)
 - Username should be auto-generated format (e.g., `ghost_<random>`)
 - No email validation or CAPTCHA for MVP
 
@@ -1134,7 +1132,6 @@ Authenticates existing user and returns JWT. Optional endpoint - mainly for cros
 {
   "user_id": "integer",
   "username": "string",
-  "is_anonymous": "boolean",
   "token": "string (JWT)"
 }
 ```
@@ -1214,6 +1211,10 @@ Creates a new game session. The session tracks which game the blunders belong to
 }
 ```
 
+**Implementation Notes:**
+- Session is created with `status = 'active'`
+- `session_mode` defaults to `'normal'`
+
 #### POST /api/game/next-opponent-move
 
 Given a position, returns the next opponent move from Ghost-path traversal if available, otherwise from the remote Maia3 API.
@@ -1238,13 +1239,27 @@ Given a position, returns the next opponent move from Ghost-path traversal if av
     "san": "string"
   },
   "target_blunder_id": "integer | null",
+  "target_fen": "string | null",
+  "target_blunder_srs": {
+    "last_reviewed_at": "timestamp | null",
+    "created_at": "timestamp | null",
+    "pass_count": "integer",
+    "fail_count": "integer",
+    "pass_streak": "integer",
+    "opportunities_since_review": "integer",
+    "opportunities_30d": "integer",
+    "reached_30d": "integer",
+    "p_reach": "float"
+  },
   "decision_source": "ghost_path | backend_engine"
 }
 ```
 
 - `mode: "ghost"` - Ghost is steering toward a blunder; `move` contains the next move.
 - `mode: "engine"` - No blunder path found; `move` is produced by the remote Maia3 API.
-- `target_blunder_id` - ID of the blunder being targeted (for debugging/display), or `null` in engine mode.
+- `target_blunder_id` - ID of the blunder being targeted, or `null` in engine mode.
+- `target_fen` - FEN of the blunder position the ghost is steering toward (ghost mode only), or `null`.
+- `target_blunder_srs` - SRS metadata for the targeted blunder (ghost mode only), or `null`.
 - `decision_source` - Backend decision branch used to produce the move.
 
 #### POST /api/game/end
@@ -1255,7 +1270,9 @@ Ends the current game session.
 ```json
 {
   "session_id": "uuid",
-  "result": "checkmate_win | checkmate_loss | resign | draw | abandon"
+  "result": "checkmate_win | checkmate_loss | resign | draw | abandon",
+  "pgn": "string (full game PGN)",
+  "is_rated": "boolean (default: true)"
 }
 ```
 
@@ -1263,10 +1280,17 @@ Ends the current game session.
 ```json
 {
   "session_id": "uuid",
-  "blunders_recorded": "integer",
-  "blunders_reviewed": "integer"
+  "result": "string",
+  "ended_at": "timestamp",
+  "rating": {
+    "rating_before": "integer",
+    "rating_after": "integer",
+    "is_provisional": "boolean"
+  }
 }
 ```
+
+- `rating` is `null` when the game is unrated or the result has no rating impact (e.g., `abandon`).
 
 `result` values match `game_sessions.result` exactly:
 - `checkmate_win` – user delivered mate
@@ -1295,7 +1319,13 @@ Bulk-ingests the analyzed move data collected during the session. The request mi
       "best_move_san": "e4",
       "best_move_eval_cp": 20,
       "eval_delta": 0,
-      "classification": "best"
+      "classification": "best",
+      "fen_before": "string | null",
+      "move_uci": "string | null",
+      "best_move_uci": "string | null",
+      "best_line_uci": ["string"] ,
+      "decision_source": "ghost_path | backend_engine | local_fallback | null",
+      "target_blunder_id": "integer | null"
     }
   ]
 }
@@ -1304,6 +1334,8 @@ Bulk-ingests the analyzed move data collected during the session. The request mi
 - `session_id` comes from the path parameter.
 - `eval_cp` / `best_move_eval_cp` use the normalized centipawn scale described in §7.4.
 - `classification` must be one of `best|excellent|good|inaccuracy|mistake|blunder`.
+- `decision_source` applies to opponent moves only; use `null` for player moves.
+- `target_blunder_id` links the move to the blunder being targeted in ghost mode.
 
 **Response (200):**
 ```json
@@ -1323,12 +1355,13 @@ Bulk-ingests the analyzed move data collected during the session. The request mi
 | POST | `/api/blunder` | Record an auto-detected blunder (analysis-triggered) |
 | POST | `/api/blunder/manual` | Manually add a MoveList decision to the Ghost Move Library |
 | GET | `/api/blunders` | List user's Ghost Move Library targets |
-| GET | `/api/blunders/:id` | Get single Ghost Move Library target details |
 
 #### POST /api/blunder
 
 Records a mistake detected by the client-side engine (delta >= 50cp, within first 10 moves). Stores the full path from game start to the target position in the Ghost Move Library.
 This endpoint enforces the first-auto-blunder-per-session rule and the 10-move recording cap.
+
+**First-move exemption:** When the PGN contains only a single move (`len(moves_data) == 1`), the blunder is silently skipped and a no-op response is returned. Ghost mode cannot steer back to the starting position, so recording this case is pointless.
 
 **Request:**
 ```json
@@ -1419,38 +1452,17 @@ Lists the user's recorded Ghost Move Library targets (auto blunders + manual Mov
       "pass_streak": "integer",
       "priority": "float",
       "last_reviewed_at": "timestamp | null",
+      "last_session_id": "uuid | null",
+      "last_played_at": "timestamp | null",
       "created_at": "timestamp"
     }
   ]
 }
 ```
 
-#### GET /api/blunders/:id
-
-**Response (200):**
-```json
-{
-  "id": "integer",
-  "position_id": "integer",
-  "fen": "string (the decision point position)",
-  "bad_move": "string (SAN captured when target was added)",
-  "best_move": "string (SAN of engine's recommendation)",
-  "eval_loss_cp": "integer",
-  "pass_streak": "integer",
-  "priority": "float",
-  "last_reviewed_at": "timestamp | null",
-  "created_at": "timestamp",
-  "review_history": [
-    {
-      "reviewed_at": "timestamp",
-      "passed": "boolean",
-      "move_played": "string (SAN)"
-    }
-  ]
-}
-```
-
-`review_history` is sourced from the most recent entries in `blunder_reviews` (ordered `reviewed_at DESC`). Include every recorded attempt for now; pagination can be added later if needed.
+- Results are sorted by `last_played_at` DESC (nulls last).
+- `last_played_at` is the most recent timestamp at which the blunder position was reached in a game session.
+- `last_session_id` is the session UUID for the most recent play.
 
 ### 9.5 SRS (Spaced Repetition)
 
@@ -1487,6 +1499,7 @@ Records whether the user passed or failed a blunder review.
 - Insert a row into `blunder_reviews` capturing `{blunder_id, session_id, reviewed_at, passed, move_played_san, eval_delta_cp}`
 - Update the parent `blunders` row: `pass_streak` (reset or increment) and `last_reviewed_at = reviewed_at`
 - Recalculate priority / due logic using the updated SRS state
+- Call `recompute_opening_scores_if_needed()` for the blunder's player color to keep opening score cache fresh
 
 ### 9.6 Error Responses
 
@@ -1668,8 +1681,9 @@ Returns full analysis for a completed game session.
 ```json
 {
   "session_id": "uuid",
-  "pgn": "string",
-  "result": "checkmate_win | checkmate_loss | resign | draw",
+  "pgn": "string | null",
+  "result": "checkmate_win | checkmate_loss | resign | draw | abandon | null",
+  "player_color": "white | black",
   "moves": [
     {
       "move_number": 1,
@@ -1681,15 +1695,28 @@ Returns full analysis for a completed game session.
       "best_move_san": "e4",
       "best_move_eval_cp": 30,
       "eval_delta": 0,
-      "classification": "best"
+      "classification": "best",
+      "segment": "string"
     }
   ],
   "summary": {
     "blunders": 2,
     "mistakes": 3,
     "inaccuracies": 5,
-    "average_centipawn_loss": 24
-  }
+    "average_centipawn_loss": 24,
+    "accuracy": "integer | null"
+  },
+  "position_analysis": {
+    "<fen_after>": {
+      "best_move_uci": "string",
+      "best_move_san": "string | null",
+      "best_move_eval_cp": "integer | null",
+      "best_line_uci": ["string"] 
+    }
+  },
+  "expected_total_moves": "integer | null",
+  "analyzed_moves": "integer",
+  "is_complete": "boolean"
 }
 ```
 
