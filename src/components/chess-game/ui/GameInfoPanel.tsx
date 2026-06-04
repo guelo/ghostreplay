@@ -1,5 +1,5 @@
-import { Chessboard } from "react-chessboard";
 import { memo, useState, type RefObject } from "react";
+import StaticMiniBoard from "./StaticMiniBoard";
 import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { RatingScoreKey, RatingScores, TargetBlunderSrs } from "../../../utils/api";
 import { getRatingDisplayLabel, resolveDisplayScore } from "../../../stores/useGameStore";
@@ -368,14 +368,9 @@ const GameInfoPanel = ({
                         </div>
                         {blunderTargetFen && (
                           <div className="ghost-info-box__board">
-                            <Chessboard
-                              options={{
-                                position: blunderTargetFen,
-                                boardOrientation,
-                                allowDragging: false,
-                                animationDurationInMs: 0,
-                                boardStyle: { borderRadius: "4px" },
-                              }}
+                            <StaticMiniBoard
+                              fen={blunderTargetFen}
+                              orientation={boardOrientation}
                             />
                           </div>
                         )}

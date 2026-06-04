@@ -5,16 +5,6 @@ import type { TargetBlunderSrs } from "../../../utils/api";
 import GameInfoPanel from "./GameInfoPanel";
 import { getOpponentAvatarSrc } from "../config";
 
-vi.mock("react-chessboard", () => ({
-  Chessboard: ({ options }: { options: Record<string, unknown> }) => (
-    <div
-      data-testid="ghost-board"
-      data-position={options.position as string}
-      data-orientation={options.boardOrientation as string}
-    />
-  ),
-}));
-
 const makeProps = () => {
   const onToggleGhostInfo = vi.fn();
   const onCloseGhostInfo = vi.fn();

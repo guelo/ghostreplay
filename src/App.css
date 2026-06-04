@@ -2898,6 +2898,58 @@
     margin: 0 auto 0.4rem;
 }
 
+.static-mini-board {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    grid-template-rows: repeat(8, 1fr);
+    width: 100%;
+    height: 100%;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.static-mini-board__sq {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #f0d9b5;
+}
+
+.static-mini-board__sq--dark {
+    background: #b58863;
+}
+
+.static-mini-board__piece {
+    position: relative;
+    font-size: 1.45rem;
+    line-height: 1;
+    user-select: none;
+    /* Nudge up so the glyph sits centered within the square. */
+    transform: translateY(-8%);
+}
+
+/* White backdrop copy of the glyph fills the otherwise see-through interior. */
+.static-mini-board__piece::before {
+    content: attr(data-glyph);
+    position: absolute;
+    inset: 0;
+    color: #fff;
+    z-index: -1;
+}
+
+.static-mini-board__piece--white {
+    color: #fff;
+    text-shadow:
+        -1px -1px 0 #000,
+        1px -1px 0 #000,
+        -1px 1px 0 #000,
+        1px 1px 0 #000;
+}
+
+.static-mini-board__piece--black {
+    color: #000;
+}
+
 .ghost-info-box__srs {
     display: flex;
     flex-direction: column;
