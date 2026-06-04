@@ -13,11 +13,12 @@ import {
   sanForUciMove,
   type BlunderAlert,
 } from "./domain/movePresentation";
-import type { MoveMessage } from "../MoveList";
+import type { MoveMessage, SrsFailDetail } from "../MoveList";
 import { BLUNDER_AUDIO_CLIPS } from "./config";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
 import { playBling } from "../../utils/blingSound";
+import { playBuzzer } from "../../utils/buzzerSound";
 import type { AnalysisResult } from "../../hooks/useMoveAnalysis";
 
 type PendingAnalysisContext = {
@@ -45,6 +46,7 @@ type AnalysisEffectsProps = {
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
   setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
+  onSrsFail: (detail: SrsFailDetail, moveIndex: number) => void;
 };
 
 const playRandomBlunderAudio = () => {
@@ -65,6 +67,7 @@ const AnalysisEffects = ({
   setBlunderAlert,
   setShowFlash,
   setResolvedReview,
+  onSrsFail,
 }: AnalysisEffectsProps) => {
   const analysisStoreApi = useAnalysisStoreApi();
   const lastAnalysis = useAnalysisStore((s) => s.lastAnalysis);
@@ -175,16 +178,17 @@ const AnalysisEffects = ({
       const bestMoveSan = sanForUciMove(sourceFen, analysis.bestMove);
 
       const srs = pendingReview.srs;
+      const srsFailDetail: SrsFailDetail = {
+        userMoveSan: pendingReview.userMoveSan,
+        bestMoveSan,
+        userMoveUci: analysis.move,
+        bestMoveUci: analysis.bestMove,
+      };
       appendMoveMessage(analysis.moveIndex, {
         key: `srs-${analysis.id}`,
         text: "You made this mistake again!",
         variant: "srs-fail",
-        srsFailDetail: {
-          userMoveSan: pendingReview.userMoveSan,
-          bestMoveSan,
-          userMoveUci: analysis.move,
-          bestMoveUci: analysis.bestMove,
-        },
+        srsFailDetail,
         srsStats: srs
           ? {
               passCount: srs.pass_count,
@@ -193,6 +197,11 @@ const AnalysisEffects = ({
             }
           : undefined,
       });
+
+      // Promote the repeat mistake to a full-screen spotlight (auto-reveals the
+      // arrows) and sound the buzzer. Best-effort — never throws.
+      onSrsFail(srsFailDetail, analysis.moveIndex);
+      playBuzzer();
     }
 
     const postReview = async () => {
@@ -210,7 +219,7 @@ const AnalysisEffects = ({
     };
 
     void postReview();
-  }, [pendingSrsReviewRef, appendMoveMessage, setResolvedReview]);
+  }, [pendingSrsReviewRef, appendMoveMessage, setResolvedReview, onSrsFail]);
 
   // Covers synchronous cache hits that resolve before the pending review entry
   // can be inserted after analyzeMove returns.

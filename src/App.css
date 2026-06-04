@@ -5760,3 +5760,105 @@ button.openings-shell__crumb:hover {
     height: 130px;
     max-width: 100%;
 }
+
+/* ---- SRS repeat-mistake spotlight (full-screen, board stays lit) ---- */
+/* Wrapper that lets us measure the live board square for the clip-path hole.
+   Sizes to the square board (a block box the same size as the board). */
+.chessboard-square-measure {
+    line-height: 0;
+}
+
+/* Scrim dims the whole viewport except the board (clip-path hole set inline). */
+.srs-fail-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0, 0, 0, 0.6);
+    opacity: 1;
+    cursor: pointer;
+    animation: srs-fail-scrim-in 200ms ease;
+}
+
+.srs-fail-scrim--shrink {
+    opacity: 0;
+    transition: opacity 500ms ease;
+}
+
+@keyframes srs-fail-scrim-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* Glyph + headline pinned to the top of the board, centered, no background. */
+.srs-fail-content {
+    position: fixed;
+    z-index: 51;
+    cursor: pointer;
+}
+
+.srs-fail-content__inner {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    transform: translateX(-50%);
+    transform-origin: top center;
+    animation: srs-fail-content-in 220ms ease-out;
+}
+
+.srs-fail-content__inner--shrink {
+    transform: translateX(-50%) scale(0.12);
+    opacity: 0;
+    transition: transform 500ms cubic-bezier(0.5, 0, 0.75, 0), opacity 500ms ease;
+}
+
+.srs-fail-content__glyph {
+    flex: 0 0 auto;
+    width: clamp(40px, 8vw, 58px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: #b91c1c;
+    color: #fff;
+    font-weight: 800;
+    font-size: clamp(24px, 5vw, 34px);
+    display: grid;
+    place-items: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+}
+
+.srs-fail-content__headline {
+    margin: 0;
+    font-size: clamp(18px, 3.2vw, 26px);
+    font-weight: 800;
+    color: #fff;
+    text-shadow: 0 2px 6px rgba(0, 0, 0, 0.95), 0 0 2px rgba(0, 0, 0, 0.9);
+}
+
+@keyframes srs-fail-content-in {
+    from {
+        opacity: 0;
+        transform: translateX(-50%) scale(0.92);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(-50%) scale(1);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .srs-fail-scrim,
+    .srs-fail-scrim--shrink {
+        animation: none;
+        transition: opacity 300ms ease;
+    }
+    .srs-fail-content__inner {
+        animation: none;
+    }
+    .srs-fail-content__inner--shrink {
+        transform: translateX(-50%);
+        transition: opacity 300ms ease;
+    }
+}

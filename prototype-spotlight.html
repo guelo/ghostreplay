@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Spotlight prototype — g-warning-5s-shrink</title>
+<style>
+  :root { --bg:#1b1d24; --panel:#242730; --text:#e7e9ee; --muted:#9aa0ac; --scrim:rgba(0,0,0,.6); }
+  * { box-sizing:border-box; }
+  body{ margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui,sans-serif; }
+  .toolbar{ position:sticky; top:0; z-index:5; display:flex; gap:.75rem; align-items:center; flex-wrap:wrap;
+    padding:.6rem 1rem; background:#14161c; border-bottom:1px solid #2c2f38; }
+  .toolbar button{ background:#3b82f6; color:#fff; border:0; border-radius:6px; padding:.5rem .9rem; font-weight:600; cursor:pointer; }
+  .toolbar .hint{ color:var(--muted); font-size:13px; }
+
+  .layout{ display:grid; grid-template-columns:220px minmax(0,1fr) 280px;
+    grid-template-areas:"panel board moves"; gap:1.5rem; align-items:start;
+    max-width:1100px; margin:1.5rem auto; padding:0 1rem; }
+  @media (max-width:760px){ .layout{ grid-template-columns:1fr; grid-template-areas:"board" "moves" "panel"; } }
+  .panel{ grid-area:panel; } .moves{ grid-area:moves; } .board-area{ grid-area:board; position:relative; }
+  .panel,.moves{ background:var(--panel); border-radius:10px; padding:1rem; color:var(--muted); min-height:120px; }
+  .moves .bubble{ margin-top:.6rem; background:#2f2230; border:1px solid #5b3b52; border-radius:8px; padding:.5rem .65rem; color:#f3c7da; font-size:13px; }
+
+  .board{ width:100%; aspect-ratio:1/1; max-width:560px; margin:0 auto; display:grid; grid-template-columns:repeat(8,1fr); border-radius:8px; overflow:hidden; position:relative; }
+  .sq{ width:100%; height:100%; } .sq.light{ background:#ebecd0; } .sq.dark{ background:#779556; }
+  .arrows{ position:absolute; inset:0; pointer-events:none; }
+
+  /* ---- scrim: dims everything except the board (clip-path hole set in JS) ---- */
+  .spot{ position:fixed; inset:0; z-index:50; background:var(--scrim);
+    opacity:0; transition:opacity .2s ease; cursor:pointer; }
+  .spot.show{ opacity:1; }
+  .spot.shrink{ opacity:0; transition:opacity .5s ease; }
+
+  /* ---- content: glyph + headline pinned to TOP of the board, NO background ---- */
+  .ovc{ position:fixed; z-index:51; display:flex; align-items:center; gap:.6rem;
+    transform-origin:top center; cursor:pointer; animation:ov-in .22s ease-out; }
+  .ovc.shrink{ transition:transform .5s cubic-bezier(.5,0,.75,0), opacity .5s ease;
+    transform:scale(.12); opacity:0; }
+  .ovc .glyph{ width:clamp(40px,8vw,58px); aspect-ratio:1; border-radius:50%;
+    background:#b91c1c; color:#fff; font-weight:800; font-size:clamp(24px,5vw,34px);
+    display:grid; place-items:center; box-shadow:0 4px 16px rgba(0,0,0,.6); flex:0 0 auto; }
+  .ovc h2{ margin:0; font-size:clamp(18px,3.2vw,26px); font-weight:800; color:#fff;
+    text-shadow:0 2px 6px rgba(0,0,0,.95), 0 0 2px rgba(0,0,0,.9); }
+  @keyframes ov-in{ from{ opacity:0; transform:scale(.92);} to{ opacity:1; } }
+  @media (prefers-reduced-motion:reduce){
+    .ovc{ animation:none; } .ovc.shrink{ transition:opacity .3s ease; transform:none; }
+    .spot,.spot.shrink{ transition:opacity .3s ease; }
+  }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="trigger">Trigger "mistake again!" (5s)</button>
+    <span class="hint">Rest of page dims; board stays lit. Glyph+headline at top of board. Click dim to skip.</span>
+  </div>
+
+  <div class="layout">
+    <div class="panel">Left panel<br><small>(opponent, rating…)</small></div>
+    <div class="board-area">
+      <div class="board" id="board">
+        <svg class="arrows" id="arrows" viewBox="0 0 8 8" preserveAspectRatio="none">
+          <defs>
+            <marker id="rh" markerWidth="3" markerHeight="3" refX="1.6" refY="1.5" orient="auto"><path d="M0,0 L3,1.5 L0,3 z" fill="rgba(248,113,113,.95)"/></marker>
+            <marker id="gh" markerWidth="3" markerHeight="3" refX="1.6" refY="1.5" orient="auto"><path d="M0,0 L3,1.5 L0,3 z" fill="rgba(52,211,153,.95)"/></marker>
+          </defs>
+          <line x1="4.5" y1="6.5" x2="4.5" y2="4.5" stroke="rgba(248,113,113,.9)" stroke-width=".22" marker-end="url(#rh)"/>
+          <line x1="3.5" y1="6.5" x2="3.5" y2="4.5" stroke="rgba(52,211,153,.9)" stroke-width=".22" marker-end="url(#gh)"/>
+        </svg>
+      </div>
+    </div>
+    <div class="moves">
+      Move list
+      <div class="bubble">! You made this mistake again!<br><small>played Nf3?? · best was Bxe5</small></div>
+    </div>
+  </div>
+
+<script>
+const board=document.getElementById('board');
+for(let r=0;r<8;r++)for(let c=0;c<8;c++){ const d=document.createElement('div'); d.className='sq '+((r+c)%2?'dark':'light'); board.insertBefore(d, board.firstChild); }
+board.appendChild(document.getElementById('arrows'));
+
+let spot, ovc, hideT, killT, active=false;
+const rect=()=>board.getBoundingClientRect();
+
+function holeClip(r){
+  const pad=8;
+  const x1=r.left-pad, y1=r.top-pad, x2=r.right+pad, y2=r.bottom+pad;
+  return `polygon(evenodd, 0 0, 100vw 0, 100vw 100vh, 0 100vh, 0 0,
+    ${x1}px ${y1}px, ${x1}px ${y2}px, ${x2}px ${y2}px, ${x2}px ${y1}px, ${x1}px ${y1}px)`;
+}
+function position(){
+  if(!active) return;
+  const r=rect();
+  const cp=holeClip(r); spot.style.clipPath=cp; spot.style.webkitClipPath=cp;
+  // pin content to top of board, centered, slightly inset down from the top edge
+  ovc.style.left=(r.left+r.width/2)+'px';
+  ovc.style.transform='translateX(-50%)';
+  ovc.style.top=(r.top + Math.min(18, r.height*0.04))+'px';
+}
+function onMove(){ position(); }
+
+function open(){
+  if(active) return; active=true;
+  spot=document.createElement('div'); spot.className='spot';
+  ovc=document.createElement('div'); ovc.className='ovc';
+  ovc.innerHTML=`<div class="glyph">!</div><h2>You made this mistake again!</h2>`;
+  document.body.append(spot, ovc);
+  requestAnimationFrame(()=>{ position(); spot.classList.add('show'); });
+  spot.addEventListener('click', startShrink);
+  ovc.addEventListener('click', startShrink);
+  window.addEventListener('resize', onMove);
+  window.addEventListener('scroll', onMove, true);
+  hideT=setTimeout(startShrink, 4500);
+}
+function startShrink(){ if(!active) return; clearTimeout(hideT); spot.classList.add('shrink'); ovc.classList.add('shrink'); killT=setTimeout(close, 520); }
+function close(){ active=false; window.removeEventListener('resize', onMove); window.removeEventListener('scroll', onMove, true); spot?.remove(); ovc?.remove(); spot=ovc=null; }
+
+document.getElementById('trigger').addEventListener('click', ()=>{ if(!active) open(); });
+</script>
+</body>
+</html>

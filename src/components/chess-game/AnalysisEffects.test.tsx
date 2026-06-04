@@ -10,10 +10,14 @@ import type { AnalysisResult } from "../../hooks/useMoveAnalysis";
 import { createRef } from "react";
 
 const mockPlayBling = vi.fn();
+const mockPlayBuzzer = vi.fn();
 const recordBlunderMock = vi.fn();
 const reviewSrsBlunderMock = vi.fn();
 vi.mock("../../utils/blingSound", () => ({
   playBling: () => mockPlayBling(),
+}));
+vi.mock("../../utils/buzzerSound", () => ({
+  playBuzzer: () => mockPlayBuzzer(),
 }));
 vi.mock("../../utils/api", () => ({
   recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
@@ -44,6 +48,7 @@ describe("AnalysisEffects — best-move bling", () => {
 
   beforeEach(() => {
     mockPlayBling.mockClear();
+    mockPlayBuzzer.mockClear();
     recordBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
     recordBlunderMock.mockResolvedValue({});
@@ -67,6 +72,7 @@ describe("AnalysisEffects — best-move bling", () => {
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
           setResolvedReview={vi.fn()}
+          onSrsFail={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );
@@ -160,6 +166,7 @@ describe("AnalysisEffects — best-move bling", () => {
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
           setResolvedReview={vi.fn()}
+          onSrsFail={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );
@@ -225,6 +232,7 @@ describe("AnalysisEffects — best-move bling", () => {
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
           setResolvedReview={setResolvedReview}
+          onSrsFail={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );
@@ -253,6 +261,80 @@ describe("AnalysisEffects — best-move bling", () => {
     expect(appendMoveMessage).toHaveBeenCalledWith(
       0,
       expect.objectContaining({ variant: "srs-pass" }),
+    );
+  });
+
+  it("triggers the spotlight + buzzer and reveals the fail on a repeat mistake", async () => {
+    const analysisId = "analysis-fail";
+    useGameStore.setState({
+      sessionId: "session-fail",
+      playerColor: "white",
+      isGameActive: true,
+      isPracticeContinuation: false,
+      moveHistory: [
+        { san: "Nf3", fen: "fen-before-nf3", uci: "g1f3" },
+        { san: "e5", fen: "fen-after-e5", uci: "e7e5" },
+      ],
+    });
+
+    const pendingSrsReviewRef = createPendingSrsReviewRef([
+      [
+        analysisId,
+        {
+          sessionId: "session-fail",
+          analysisId,
+          blunderId: 7,
+          moveIndex: 1,
+          userMoveSan: "Nf3",
+          srs: null,
+        },
+      ],
+    ]);
+    const appendMoveMessage = vi.fn();
+    const onSrsFail = vi.fn();
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={createRef() as any}
+          blunderRecordedRef={createRef() as any}
+          pendingSrsReviewRef={pendingSrsReviewRef as any}
+          appendMoveMessage={appendMoveMessage}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={vi.fn()}
+          onSrsFail={onSrsFail}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().resolveAnalysis(1, makeResult({
+        id: analysisId,
+        move: "g1f3",
+        bestMove: "f1b5",
+        moveIndex: 1,
+        delta: 250,
+      }));
+    });
+
+    await waitFor(() => {
+      expect(reviewSrsBlunderMock).toHaveBeenCalledWith(
+        "session-fail",
+        7,
+        false,
+        "Nf3",
+        250,
+      );
+    });
+    expect(appendMoveMessage).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ variant: "srs-fail" }),
+    );
+    expect(mockPlayBuzzer).toHaveBeenCalled();
+    expect(onSrsFail).toHaveBeenCalledWith(
+      expect.objectContaining({ userMoveSan: "Nf3", userMoveUci: "g1f3" }),
+      1,
     );
   });
 
@@ -313,6 +395,7 @@ describe("AnalysisEffects — best-move bling", () => {
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
           setResolvedReview={setResolvedReview}
+          onSrsFail={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );
@@ -409,6 +492,7 @@ describe("AnalysisEffects — best-move bling", () => {
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
           setResolvedReview={vi.fn()}
+          onSrsFail={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );
@@ -490,6 +574,7 @@ describe("AnalysisEffects — best-move bling", () => {
           setBlunderAlert={vi.fn()}
           setShowFlash={vi.fn()}
           setResolvedReview={vi.fn()}
+          onSrsFail={vi.fn()}
         />
       </AnalysisStoreProvider>,
     );

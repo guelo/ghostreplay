@@ -1,10 +1,11 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
-import React, { memo } from "react";
+import React, { memo, useRef } from "react";
 import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
 import OpponentAvatar from "./OpponentAvatar";
 import DrillSetupPanel from "./DrillSetupPanel";
+import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 
 type BoardOrientation = "white" | "black";
 
@@ -63,6 +64,9 @@ type BoardStageProps = {
   onDrillStrictnessChange?: (cp: number) => void;
   onStartDrill?: () => void;
   isLoadingOpenings?: boolean;
+  // Repeat-mistake spotlight: nonce trigger + completion callback.
+  srsFailTrigger?: SrsFailTrigger | null;
+  onSrsFailDone?: (id: number) => void;
 };
 
 const WarningTriangleIcon = () => (
@@ -137,7 +141,10 @@ const BoardStage = ({
   onDrillStrictnessChange,
   onStartDrill,
   isLoadingOpenings = false,
+  srsFailTrigger = null,
+  onSrsFailDone,
 }: BoardStageProps) => {
+  const boardSquareRef = useRef<HTMLDivElement | null>(null);
   return (
       <div className="chessboard-board-area">
           {streakToast && (
@@ -376,22 +383,29 @@ const BoardStage = ({
               onCancel={onPromotionCancel}
             />
           )}
-          <Chessboard
-            key={boardInstanceKey}
-            options={{
-              position: displayedFen,
-              onPieceDrop,
-              onSquareClick,
-              boardOrientation,
-              animationDurationInMs: 200,
-              allowDragging,
-              squareStyles,
-              arrows: arrows.length > 0 ? arrows : undefined,
-              boardStyle: {
-                borderRadius: "0",
-                boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
-              },
-            }}
+          <div ref={boardSquareRef} className="chessboard-square-measure">
+            <Chessboard
+              key={boardInstanceKey}
+              options={{
+                position: displayedFen,
+                onPieceDrop,
+                onSquareClick,
+                boardOrientation,
+                animationDurationInMs: 200,
+                allowDragging,
+                squareStyles,
+                arrows: arrows.length > 0 ? arrows : undefined,
+                boardStyle: {
+                  borderRadius: "0",
+                  boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",
+                },
+              }}
+            />
+          </div>
+          <SrsFailSpotlight
+            trigger={srsFailTrigger}
+            targetRef={boardSquareRef}
+            onDone={onSrsFailDone ?? (() => {})}
           />
       </div>
   );

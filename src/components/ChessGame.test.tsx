@@ -1677,6 +1677,88 @@ describe("ChessGame blunder recording", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("spotlights a repeat mistake, auto-reveals arrows, then closes leaving the inline fail detail", async () => {
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "ghost",
+        move: { uci: "e7e5", san: "e5" },
+        target_blunder_id: 99,
+        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+        decision_source: "ghost_path",
+      })
+      .mockResolvedValue({
+        mode: "engine",
+        move: { uci: "b8c6", san: "Nc6" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      });
+
+    mockAnalyzeMove.mockImplementation(
+      (_fen: string, move: string, _color: string, moveIndex: number) => {
+        if (moveIndex === 2) {
+          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
+            id: "review-fail-spotlight",
+            move,
+            bestMove: "g1f3",
+            bestEval: 40,
+            playedEval: -10,
+            currentPositionEval: -10,
+            moveIndex: 2,
+            delta: 50,
+            classification: "good" as const,
+            blunder: false,
+            recordable: false,
+          });
+          return "review-fail-spotlight";
+        }
+      },
+    );
+
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+    });
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+
+    // Spotlight scrim + headline appear, board arrows are auto-revealed, and the
+    // inline fail bubble + revealed detail are present.
+    await waitFor(() => {
+      expect(document.querySelector(".srs-fail-scrim")).toBeInTheDocument();
+    });
+    expect(
+      document.querySelector(".srs-fail-content__headline")?.textContent,
+    ).toBe("You made this mistake again!");
+    const inlineBubble = document.querySelector(".move-bubble--srs-fail");
+    expect(inlineBubble?.textContent).toContain("You made this mistake again!");
+    expect(inlineBubble?.textContent).toContain("You played:");
+    expect(
+      screen.getByTestId("chessboard").getAttribute("data-arrow-count"),
+    ).toBe("2");
+
+    // Clicking the dimmed scrim skips to the shrink phase; the spotlight then
+    // unmounts while the inline fail detail + arrows persist.
+    await act(async () => {
+      fireEvent.click(document.querySelector(".srs-fail-scrim") as HTMLElement);
+    });
+    await waitFor(() => {
+      expect(document.querySelector(".srs-fail-scrim")).not.toBeInTheDocument();
+    });
+    const persistedBubble = document.querySelector(".move-bubble--srs-fail");
+    expect(persistedBubble?.textContent).toContain(
+      "You made this mistake again!",
+    );
+    expect(persistedBubble?.textContent).toContain("You played:");
+    expect(
+      screen.getByTestId("chessboard").getAttribute("data-arrow-count"),
+    ).toBe("2");
+  });
+
   it("shows SRS pass toast even if review submission fails", async () => {
     getNextOpponentMoveMock
       .mockResolvedValueOnce({

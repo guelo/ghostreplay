@@ -163,6 +163,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [reviewFailModal, setReviewFailModal] = useState<ReviewFailInfo | null>(
     null,
   );
+  const [srsFailTrigger, setSrsFailTrigger] = useState<{
+    id: number;
+    moveIndex: number;
+  } | null>(null);
+  const srsFailNonceRef = useRef(0);
   const [drillFailInfo, setDrillFailInfo] = useState<DrillFailInfo | null>(null);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const [analysisMapSnapshot, setAnalysisMapSnapshot] = useState(
@@ -1309,6 +1314,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [clearBlunderBoardOverride],
   );
 
+  // SRS fail spotlight: auto-reveal the blunder arrows + bubble (same path as a
+  // manual reveal) and bump the nonce trigger so the full-screen spotlight
+  // (re)starts cleanly even for back-to-back fails.
+  const triggerSrsFailSpotlight = useCallback(
+    (detail: SrsFailDetail, moveIndex: number) => {
+      handleRevealSrsFail(detail, moveIndex);
+      srsFailNonceRef.current += 1;
+      setSrsFailTrigger({ id: srsFailNonceRef.current, moveIndex });
+    },
+    [handleRevealSrsFail],
+  );
+
+  const handleSrsFailDone = useCallback((id: number) => {
+    setSrsFailTrigger((prev) => (prev?.id === id ? null : prev));
+  }, []);
+
   const flipBoard = () => {
     setBoardOrientation((current) => (current === "white" ? "black" : "white"));
   };
@@ -1569,6 +1590,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onDrillStrictnessChange={setDrillStrictnessCp}
                 onStartDrill={handleStartDrill}
                 isLoadingOpenings={isLoadingOpenings}
+                srsFailTrigger={srsFailTrigger}
+                onSrsFailDone={handleSrsFailDone}
               />
             </div>
           </div>
@@ -1669,6 +1692,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           setBlunderAlert={setBlunderAlert}
           setShowFlash={setShowFlash}
           setResolvedReview={setResolvedReview}
+          onSrsFail={triggerSrsFailSpotlight}
         />
       </section>
     </AnalysisStoreProvider>
