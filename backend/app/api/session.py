@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from enum import Enum
 
+import chess
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func
@@ -17,7 +19,7 @@ from app.accuracy import (
     compute_game_accuracy,
     expected_total_moves_from_pgn,
 )
-from app.fen import fen_hash
+from app.fen import active_color, fen_hash, normalize_fen
 from app.opening_aggregate import (
     _aggregate_branch_rows,
     _collect_branch_rows,
@@ -299,6 +301,113 @@ def _upsert_opportunity_event(
     db.execute(stmt)
 
 
+@dataclass
+class GhostGraphUpsertStats:
+    """Counts from a ghost-graph upsert; single source of truth for backfill reporting."""
+
+    valid_moves: int = 0
+    invalid_moves: int = 0
+    positions_created: int = 0
+    edges_created: int = 0
+    edges_existing: int = 0
+
+
+def _upsert_session_position_graph(
+    db: Session,
+    *,
+    user_id: int,
+    moves: list[SessionMoveInput],
+) -> GhostGraphUpsertStats:
+    """Teach the ghost graph from ordinary uploaded game moves."""
+    stats = GhostGraphUpsertStats()
+    hash_to_position_id: dict[str, int] = {}
+    # Edges added in this call but not yet flushed: the dedup query below cannot
+    # see them (session autoflush is off), so track them in-memory to avoid
+    # duplicate-key inserts when a game transposes back to the same edge.
+    pending_edges: set[tuple[int, str]] = set()
+
+    def move_matches_fens(move: SessionMoveInput) -> bool:
+        if not move.fen_before or not move.fen_after:
+            return False
+
+        try:
+            board = chess.Board(move.fen_before)
+            parsed_move = board.parse_san(move.move_san)
+            board.push(parsed_move)
+            return normalize_fen(board.fen()) == normalize_fen(move.fen_after)
+        except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError):
+            return False
+
+    def ensure_position(fen: str) -> int | None:
+        try:
+            hash_val = fen_hash(fen)
+            color = active_color(fen)
+        except (IndexError, ValueError):
+            return None
+
+        existing_id = hash_to_position_id.get(hash_val)
+        if existing_id is not None:
+            return existing_id
+
+        existing = (
+            db.query(Position)
+            .filter(Position.user_id == user_id, Position.fen_hash == hash_val)
+            .first()
+        )
+        if existing:
+            hash_to_position_id[hash_val] = existing.id
+            return existing.id
+
+        position = Position(
+            user_id=user_id,
+            fen_hash=hash_val,
+            fen_raw=fen,
+            active_color=color,
+        )
+        db.add(position)
+        db.flush()
+        hash_to_position_id[hash_val] = position.id
+        stats.positions_created += 1
+        return position.id
+
+    for move in moves:
+        if not move_matches_fens(move):
+            stats.invalid_moves += 1
+            continue
+        stats.valid_moves += 1
+
+        from_id = ensure_position(move.fen_before)
+        to_id = ensure_position(move.fen_after)
+        if from_id is None or to_id is None:
+            continue
+
+        edge_key = (from_id, move.move_san)
+        if edge_key in pending_edges:
+            stats.edges_existing += 1
+            continue
+
+        existing_move = (
+            db.query(Move)
+            .filter(Move.from_position_id == from_id, Move.move_san == move.move_san)
+            .first()
+        )
+        if existing_move:
+            stats.edges_existing += 1
+            continue
+
+        db.add(
+            Move(
+                from_position_id=from_id,
+                move_san=move.move_san,
+                to_position_id=to_id,
+            )
+        )
+        pending_edges.add(edge_key)
+        stats.edges_created += 1
+
+    return stats
+
+
 def _compute_blunder_opportunity_events(
     db: Session,
     *,
@@ -527,6 +636,11 @@ def upsert_session_moves(
 
         db.commit()
         if evidence_moves:
+            _upsert_session_position_graph(
+                db,
+                user_id=user.user_id,
+                moves=evidence_moves,
+            )
             _compute_blunder_opportunity_events(
                 db,
                 session_id=session_id,
@@ -568,6 +682,11 @@ def upsert_session_moves(
     db.commit()
 
     if evidence_moves:
+        _upsert_session_position_graph(
+            db,
+            user_id=user.user_id,
+            moves=evidence_moves,
+        )
         _compute_blunder_opportunity_events(
             db,
             session_id=session_id,

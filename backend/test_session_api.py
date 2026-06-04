@@ -1,10 +1,12 @@
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
 
-from app.models import SessionMove
+from app.fen import fen_hash
+from app.models import Blunder, Position, SessionMove
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +73,151 @@ def test_session_moves_bulk_insert_success(client, auth_headers, create_game_ses
     assert rows[1].color == "white"
     assert rows[1].move_san == "e4"
     assert rows[1].classification == "best"
+
+
+def test_session_moves_populate_ghost_graph(client, auth_headers, create_game_session, db_session):
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    fen_start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    fen_after_e5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    target_position = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_after_e5),
+        fen_raw=fen_after_e5,
+        active_color="white",
+    )
+    db_session.add(target_position)
+    db_session.flush()
+    db_session.add(
+        Blunder(
+            user_id=user_id,
+            position_id=target_position.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=200,
+            created_at=datetime.now(timezone.utc) - timedelta(hours=5),
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_before": fen_start,
+                    "fen_after": fen_after_e4,
+                    "eval_cp": 20,
+                    "best_move_san": "e4",
+                    "best_move_eval_cp": 20,
+                    "eval_delta": 0,
+                    "classification": "best",
+                },
+                {
+                    "move_number": 1,
+                    "color": "black",
+                    "move_san": "e5",
+                    "fen_before": fen_after_e4,
+                    "fen_after": fen_after_e5,
+                    "eval_cp": 12,
+                    "best_move_san": "e5",
+                    "best_move_eval_cp": 12,
+                    "eval_delta": 0,
+                    "classification": "excellent",
+                    "decision_source": "backend_engine",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+
+    move_san, target_blunder_id, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_after_e4,
+        player_color="white",
+    )
+
+    assert move_san == "e5"
+    assert target_blunder_id is not None
+
+
+def test_session_moves_skip_invalid_ghost_graph_edge(client, auth_headers, create_game_session, db_session):
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    forged_target_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+    target_position = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(forged_target_fen),
+        fen_raw=forged_target_fen,
+        active_color="white",
+    )
+    db_session.add(target_position)
+    db_session.flush()
+    db_session.add(
+        Blunder(
+            user_id=user_id,
+            position_id=target_position.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=200,
+            created_at=datetime.now(timezone.utc) - timedelta(hours=5),
+        )
+    )
+    db_session.commit()
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "black",
+                    "move_san": "c5",
+                    "fen_before": fen_after_e4,
+                    "fen_after": forged_target_fen,
+                    "eval_cp": 12,
+                    "best_move_san": "e5",
+                    "best_move_eval_cp": 12,
+                    "eval_delta": 0,
+                    "classification": "excellent",
+                    "decision_source": "backend_engine",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+
+    assert response.status_code == 200
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == uuid.UUID(session_id))
+        .count()
+        == 1
+    )
+
+    move_san, target_blunder_id, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_after_e4,
+        player_color="white",
+    )
+
+    assert move_san is None
+    assert target_blunder_id is None
 
 
 def test_session_moves_upsert_idempotent(client, auth_headers, create_game_session, db_session):

@@ -95,3 +95,5 @@
 {"id":"int-a5c465fd","kind":"field_change","created_at":"2026-06-03T20:19:55.90387Z","actor":"miguel","issue_id":"g-aqp6","extra":{"field":"priority","new_value":"4","old_value":"2"}}
 {"id":"int-0928eb78","kind":"field_change","created_at":"2026-06-03T20:24:48.090313Z","actor":"miguel","issue_id":"g-5a8","extra":{"field":"priority","new_value":"4","old_value":"3"}}
 {"id":"int-9031681d","kind":"field_change","created_at":"2026-06-03T23:23:21.363328Z","actor":"miguel","issue_id":"g-a6wi","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented move/capture sounds via playMoveSound in commitAppliedMove"}}
+{"id":"int-4ea2c6ef","kind":"field_change","created_at":"2026-06-04T04:08:15.191753Z","actor":"miguel","issue_id":"g-fix-srs-opps","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-c20834ea","kind":"field_change","created_at":"2026-06-04T04:53:13.801979Z","actor":"miguel","issue_id":"g-debug-ghost-steer","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Implemented and verified session-move ghost graph learning with SAN/FEN validation"}}
