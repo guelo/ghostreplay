@@ -18,6 +18,12 @@ This was the initial **SPEC** for the "Ghost Replay" Chess Application. It will 
 10. After-Game Analysis Display
 11. Game History View
 12. Testing Strategy
+13. Rating System
+14. Opening Weakness Tracking
+15. Analysis Cache
+16. Local Fallback
+17. Practice Continuation
+18. Drill Mode
 
 ---
 
@@ -104,10 +110,27 @@ graph TD
 ### 3.1 Frontend (The Smart Client)
 
 * **Responsibility:** UI, move validation, and analysis orchestration.
-* **Single Worker Pattern:**
-* **Worker B (Analyst):** Runs in the background at max strength (Skill 20). Analyzes every user move. If `(BestEval - UserEval) > Threshold`, it triggers a `POST /blunder`.
+* **State management:** Two Zustand stores per game:
+  * `useGameStore` — session/game state (FEN, move history, player color, ratings, drill state)
+  * `createAnalysisStore` — per-game analysis results (analysisMap, streaming evals, worker status)
+* **Analysis worker:** `analysisWorker.ts` runs Stockfish-18-lite in a dedicated Web Worker. Managed by `GameAnalysisCoordinator`, a singleton service that survives route navigation so in-flight analysis is never lost.
+* **Opponent engine:** `useStockfishEngine` drives a second Stockfish instance for ghost/engine move selection during play.
+* **Analysis cache:** Before dispatching to the worker, the coordinator queries `GET /api/analysis-cache` (lookupAnalysisCache). A cache hit resolves the analysis immediately; a miss waits for the worker result.
+* **Forced-move exemption:** When the position has ≤ 2 legal moves, the move is never classified as a blunder and never auto-recorded, regardless of eval delta.
+* **Key hooks:** `useChessGameController` (move application, promotion), `useChessGameLifecycle` (session lifecycle), `useOpponentMove` (ghost/engine reply), `useMoveAnalysis` (wraps coordinator for hook consumers).
+* **Routes** (`AppRoutes.tsx`):
 
-
+| Path | Component | Purpose |
+|------|-----------|---------|
+| `/` | `App` | Landing / home |
+| `/play` | `GamePage` | Live game |
+| `/game` | `GameAnalysisPage` | Post-game analysis |
+| `/history` | `HistoryPage` | Game history list |
+| `/blunders` | `BlundersPage` | Ghost Move Library (due blunders) |
+| `/openings` | `OpeningsPage` | Opening performance stats |
+| `/stats` | `StatsPage` | Overall stats / rating graph |
+| `/login` | `AuthForm` | Login |
+| `/register` | `AuthForm` | Registration |
 
 ### 3.2 Backend (The Coordinator)
 
@@ -126,7 +149,8 @@ graph TD
 
 | Component | Choice | Justification |
 | --- | --- | --- |
-| **Frontend** | React + Vite | Fast development, massive ecosystem for state management. |
+| **Frontend** | React 19 + Vite + TypeScript | Fast development, type safety. |
+| **State management** | Zustand | Lightweight, minimal boilerplate; narrow stores per concern. |
 | **Chess UI** | `react-chessboard` | Robust wrapper for chessboard.js. |
 | **Chess Logic** | `chess.js` | Standard library for move generation/validation. |
 | **Opponent Engine** | Maia3 (remote API via maiachess.com) | Backend proxies move requests to the Maia3 API, selecting the appropriate ELO model (600–2600). No local model files or GPU required. |
@@ -322,20 +346,27 @@ Tracks per-game rating changes for a user, enabling rating trend display and pro
 CREATE TABLE rating_history (
     id BIGSERIAL PRIMARY KEY,
     user_id BIGINT NOT NULL REFERENCES users(id),
-    game_session_id UUID NOT NULL REFERENCES game_sessions(id),
+    game_session_id UUID NOT NULL REFERENCES game_sessions(id) UNIQUE,
     rating INTEGER NOT NULL,              -- New rating after this game
-    is_provisional BOOLEAN NOT NULL,       -- TRUE if user has played < PROVISIONAL_GAMES threshold
-    games_played INTEGER NOT NULL,         -- Total games played at the time of this record
+    is_provisional BOOLEAN NOT NULL,       -- TRUE if user has played < PROVISIONAL_THRESHOLD games
+    games_played INTEGER NOT NULL,         -- Total rated games played at the time of this record
+    chesscom_rating FLOAT,                 -- Optional: imported Chess.com rating (nullable)
+    chesscom_rd FLOAT,                     -- Optional: Chess.com rating deviation
+    lichess_rating FLOAT,                  -- Optional: imported Lichess rating (nullable)
+    lichess_rd FLOAT,                      -- Optional: Lichess rating deviation
+    lichess_volatility FLOAT,              -- Optional: Lichess Glicko volatility parameter
     recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_rating_history_user_timestamp ON rating_history(user_id, recorded_at);
+CREATE UNIQUE INDEX uq_rating_history_game_session ON rating_history(game_session_id);
 ```
 
 **Key semantics:**
-- One row per completed rated game; inserted by `compute_new_rating()` after game end
+- One row per completed rated game; inserted by `POST /api/game/end` when `is_rated=true`
 - `is_provisional` tracks whether the rating is still considered provisional (based on games played count)
 - `games_played` enables the frontend to show progress toward a stable rating
+- `chesscom_*` and `lichess_*` fields are nullable; reserved for future cross-platform rating import
 
 ### 5.6 `analysis_cache` (Move Analysis Cache)
 
@@ -661,10 +692,12 @@ Ghost Move Library targets enter the system through two capture paths.
 #### 6.2.1 Automatic Capture (analysis-triggered blunder)
 
 1. User plays move M from position P_before, resulting in position P_after.
-2. **Worker B** (Frontend) calculates:
-   * E_best (Eval of engine's best move from P_before)
-   * E_user (Eval after user's move M)
-3. If delta ≥ 50cp (recording threshold) **and** the move is within the first 10 moves of the game:
+2. **Forced-move exemption:** If P_before has ≤ 2 legal moves, the move is never classified as a blunder and auto-capture is skipped entirely, regardless of eval delta.
+3. **Worker B** (Frontend) calculates (using two independent post-move searches to avoid depth-mismatch inflation):
+   * E_best (Eval of post-best-move position, from opponent's perspective)
+   * E_user (Eval of post-played-move position, from opponent's perspective)
+   * delta = E_best − E_user (player-perspective centipawns)
+4. If delta ≥ 50cp (recording threshold) **and** the move is within the first 10 full moves of the game:
    * Frontend sends `POST /api/blunder` with:
      * `pgn`: Full game history up to and including the bad move (e.g., `"1. e4 e5 2. Nf3 Nc6 3. Bb5 a6"`)
      * `fen`: The position BEFORE the bad move (P_before) — used as sanity check
@@ -817,31 +850,28 @@ Worker B (the Analyst) produces all engine evaluations used for blunder detectio
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| Depth | 18 (minimum) | Sufficient tactical accuracy; diminishing returns beyond |
-| Time limit | 2000ms | Upper bound to maintain UI responsiveness |
+| Depth | 17 | Sufficient tactical accuracy; diminishing returns beyond |
+| Time limit | None | Search runs until depth 17 is reached |
 | MultiPV | 1 | Only the best move needed for delta calculation |
+| Hash | 128 MB | Transposition table |
 | Threads | 1 | Web Worker constraint; WASM single-threaded |
 
-**Stopping condition:** Search terminates when EITHER depth 18 is reached OR 2000ms elapsed, whichever comes first. The evaluation from the final `info` line before `o` is used.
+**Stopping condition:** Search terminates when depth 17 is reached. The evaluation from the final `info` line before `bestmove` is used.
+
+**Dual-search protocol:** Each move triggers two independent searches (played-move position and best-move position). Using post-move positions for both avoids depth-mismatch inflation that occurs when comparing pre-move minimax against post-move searches.
 
 **Implementation (JavaScript):**
 ```javascript
-// Send to Stockfish worker
+// Send to Stockfish worker (on uciok)
+worker.postMessage('setoption name Hash value 128');
 worker.postMessage('setoption name MultiPV value 1');
-worker.postMessage(`position fen ${fen}`);
-worker.postMessage('go depth 18 movetime 2000');
 
-// Capture last info line before bestmove
-let lastEval = null;
-worker.onmessage = (e) => {
-  const line = e.data;
-  if (line.startsWith('info') && line.includes('score')) {
-    lastEval = parseInfoLine(line);
-  }
-  if (line.startsWith('bestmove')) {
-    onEvalComplete(lastEval);
-  }
-};
+// Per-move analysis: two searches
+worker.postMessage(`position fen ${fen} moves ${playedMove}`);
+worker.postMessage('go depth 17');
+// ... then after bestmove received:
+worker.postMessage(`position fen ${fen} moves ${bestMove}`);
+worker.postMessage('go depth 17');
 ```
 
 #### 6.4.2 Evaluation Perspective (Sign Convention)
@@ -860,7 +890,9 @@ normalized_eval = raw_eval * (1 if white_to_move else -1)
 | After 1.e4 e5 | +25 | White | +25 |
 | After 1.e4 e5 2.Qh5 | +45 | Black | -45 |
 
-**Delta calculation:** Always computed as `best_move_eval - played_move_eval` using normalized values. A positive delta means the played move was worse.
+**Delta calculation:** Always computed as `best_move_eval - played_move_eval` using player-perspective values. A positive delta means the played move was worse.
+
+**Move classification:** Delta is used only for the recording threshold (≥ 50cp → recordable). The quality label (blunder/mistake/inaccuracy/good/excellent/best) is produced by `classifyMoveAdvanced`, which uses a Lichess-style logistic win-chance model instead of raw cp (see §10.2.2).
 
 **Storage:** The `session_moves.eval_cp` column stores the **normalized** (side-to-move) value.
 
@@ -905,15 +937,14 @@ Constants:
 
 Engine evaluations fluctuate during iterative deepening. The protocol uses **depth-gated snapshots** rather than convergence detection.
 
-**Rule:** Use the evaluation reported at the stopping condition (depth 18 reached or 2000ms elapsed). Do not wait for successive identical evaluations.
+**Rule:** Use the evaluation reported when depth 17 is reached. Do not wait for successive identical evaluations.
 
 **Rationale:**
 - Convergence detection adds latency and implementation complexity
-- Depth 18 provides sufficient stability for tactically critical positions
-- Positions with high eval variance at depth 18 are typically near-equal (within ±50cp of 0.00)
-- The 2000ms timeout prevents pathological positions from blocking the UI
+- Depth 17 provides sufficient stability for tactically critical positions
+- Positions with high eval variance at depth 17 are typically near-equal (within ±50cp of 0.00)
 
-**Known limitation:** In rare positions (e.g., deep sacrificial lines, fortress detection), depth 18 may not capture the full picture. This is acceptable for MVP; users experiencing systematic false blunders can be addressed post-MVP with configurable depth.
+**Known limitation:** In rare positions (e.g., deep sacrificial lines, fortress detection), depth 17 may not capture the full picture. This is acceptable for MVP; users experiencing systematic false blunders can be addressed post-MVP with configurable depth.
 
 #### 6.4.5 Edge Cases
 
@@ -925,12 +956,19 @@ Engine evaluations fluctuate during iterative deepening. The protocol uses **dep
 | **50-move rule proximity** | Engine accounts internally; may report draw |
 | **Worker crash/timeout** | Skip evaluation for that move; log error; do not flag as blunder |
 | **Eval exactly at threshold** | ≥50cp = recorded and fails review (inclusive boundary) |
+| **Forced move (≤ 2 legal moves)** | Move is never classified as blunder and never auto-recorded, regardless of delta |
 
 #### 6.4.6 Frontend Implementation Notes
 
-**Batching:** Worker B evaluates moves asynchronously. During fast play, evaluations may queue. Process in order; never skip a move.
+**Coordinator:** Analysis is managed by `GameAnalysisCoordinator` (`src/services/GameAnalysisCoordinator.ts`), a singleton that outlives individual route renders. This ensures in-flight analysis is not lost when the user navigates between `/play` and `/game`.
 
-**Memory:** Each evaluation result is held in memory during the game and batch-uploaded on game end (see Section 7.4).
+**Analysis cache race:** On each move, the coordinator simultaneously dispatches to the analysis worker and queries `GET /api/analysis-cache`. If the cache responds first with a complete entry (`classification` or `eval_delta` present), it resolves immediately without waiting for the worker. Cache entries lacking both fields are treated as misses so the worker can produce a full result.
+
+**Classification model:** The worker uses `classifyMoveAdvanced` (Lichess logistic win-chance model, see §6.4.2) as the primary classifier. `classifyMove` (cp-based thresholds) is deprecated and used only as a fallback when a cache entry has `eval_delta` but no explicit `classification`.
+
+**Batching:** Worker B evaluates moves asynchronously. During fast play, evaluations queue; moves are processed in order. Each move index tracks its latest request ID so that stale results from retried analysis are discarded.
+
+**Memory:** Each evaluation result is stored in `createAnalysisStore.analysisMap` during the game and batch-uploaded on game end (see Section 7.4).
 
 **Error recovery:** If Worker B fails to initialize (WASM load failure), the game continues without analysis. The `session_moves` table will be empty for that game, and no automatic blunders can be recorded (manual MoveList capture is still available).
 
@@ -969,19 +1007,33 @@ CREATE TABLE game_sessions (
     started_at TIMESTAMP NOT NULL DEFAULT NOW(),
     ended_at TIMESTAMP,
     status VARCHAR(20) NOT NULL DEFAULT 'active',  -- 'active', 'ended'
-    result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon'
+    result VARCHAR(20),           -- 'checkmate_win', 'checkmate_loss', 'resign', 'draw', 'abandon', 'drill_abandon'
     engine_elo INTEGER NOT NULL,  -- Bot difficulty selected for this game
     player_color VARCHAR(5) NOT NULL DEFAULT 'white', -- 'white' or 'black' (user side for this session)
     blunder_recorded BOOLEAN NOT NULL DEFAULT FALSE,  -- First auto-blunder rule flag (manual captures bypass)
     is_rated BOOLEAN NOT NULL DEFAULT TRUE,  -- Whether this game affects the user's rating
     pgn TEXT,                     -- Full game in PGN format
 
-    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black'))
+    -- Drill mode columns (NULL for normal sessions)
+    session_mode VARCHAR(10) NOT NULL DEFAULT 'normal',  -- 'normal' or 'drill'
+    drill_state VARCHAR(12),      -- 'active', 'root_reached', 'failed', 'abandoned', 'converted'
+    drill_opening_key TEXT,       -- Opening key for drill target (e.g. "e4_e5_Nf3")
+    drill_strictness VARCHAR(12), -- 'lenient', 'standard', 'strict'
+    drill_strictness_cp INTEGER,  -- Custom centipawn threshold override (0–50)
+    drill_terminal_reason VARCHAR(20),  -- 'off_route', 'accuracy', 'natural_end'
+    normal_started_at TIMESTAMP,  -- When conversion to rated play occurred
+    converted_at TIMESTAMP,       -- Timestamp of the drill→normal conversion
+    rated_start_ply INTEGER,      -- Ply number where rated play began (post-conversion)
+
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
+    CONSTRAINT valid_session_mode CHECK (session_mode IN ('normal', 'drill')),
+    CONSTRAINT valid_drill_state CHECK (drill_state IS NULL OR drill_state IN ('active', 'root_reached', 'failed', 'abandoned', 'converted'))
 );
 
 CREATE INDEX idx_game_sessions_user ON game_sessions(user_id);
 CREATE INDEX idx_game_sessions_status ON game_sessions(status);
 CREATE INDEX idx_game_sessions_user_started ON game_sessions(user_id, started_at);
+CREATE INDEX idx_game_sessions_drill_state ON game_sessions(drill_state);
 ```
 
 **`is_rated` flag:** Passed by the client in `POST /api/game/end`. When `true` and the result is `checkmate_win`, `checkmate_loss`, `resign`, or `draw`, the server computes a rating change and appends a `rating_history` row. Results of `abandon` never affect rating regardless of `is_rated`. The flag defaults to `true`; clients set it to `false` for practice games.
@@ -1653,10 +1705,10 @@ When a game ends, users are presented with an analysis view showing their perfor
 - **X-axis:** Move number (1 to N)
 - **Y-axis:** Engine evaluation in pawns (-5 to +5, clamped)
 - **Line color:** Gradient from white's perspective (green = white advantage, red = black advantage)
-- **Markers:** Dots on the line at each move; colored by classification:
-  - Red dot: Blunder (≥150cp loss)
-  - Orange dot: Mistake (101-149cp loss)
-  - Yellow dot: Inaccuracy (51-100cp loss)
+- **Markers:** Dots on the line at each move; colored by classification (win-chance model):
+  - Red dot: Blunder (≥ 0.30 win-chance drop)
+  - Orange dot: Mistake (≥ 0.20 win-chance drop)
+  - Yellow dot: Inaccuracy (≥ 0.10 win-chance drop)
 - **Interaction:** Clicking on the graph jumps to that move
 - **Current position:** Vertical line indicator shows selected move
 
@@ -1685,12 +1737,13 @@ When a game ends, users are presented with an analysis view showing their perfor
 
 - Standard two-column format (white move | black move)
 - Current move highlighted
-- Color-coded annotations:
-  - `??` (blunder) - Red background
-  - `?` (mistake) - Orange background
-  - `?!` (inaccuracy) - Yellow background
-  - `!` (good move) - Light green background
-  - `!!` (brilliant) - Green background (if within 5cp of engine and non-obvious)
+- Classification icons per move (from `classifyMoveAdvanced`):
+  - `??` — Blunder (≥ 0.30 win-chance drop)
+  - `?` — Mistake (≥ 0.20 win-chance drop)
+  - `?!` — Inaccuracy (≥ 0.10 win-chance drop)
+  - `✓` — Good move (≥ 0.02 win-chance drop)
+  - `!` — Excellent move (< 0.02 win-chance drop, not best)
+  - `⭐` — Best move (played move matches engine's top choice)
 - Clicking a move navigates to that position
 
 #### 10.2.6 Position Analysis Panel
@@ -1704,7 +1757,11 @@ Shows details for the currently selected move:
 
 ### 10.3 Data Source
 
-Analysis data comes from the `session_moves` table, populated during gameplay by Worker B:
+Analysis data comes from two sources:
+- `session_moves` table — populated during gameplay by `GameAnalysisCoordinator` (Worker B) via `POST /api/session/{id}/moves` on game end
+- `analysis_cache` table — pre-computed results for known positions; queried in parallel with the worker to accelerate first-analysis
+
+Classifications are produced by `classifyMoveAdvanced` (win-chance model) during gameplay, stored alongside centipawn evals in `session_moves`.
 
 ```typescript
 interface MoveAnalysis {
@@ -1772,40 +1829,23 @@ Returns full analysis for a completed game session.
 
 ### 10.5 Entry Points
 
-The analysis screen is accessible from two locations:
-
-```
-                    ┌─────────────────┐
-                    │   Game Ends     │
-                    │                 │
-                    │ "View Analysis?"│
-                    │  [Yes]   [No]   │
-                    └────────┬────────┘
-                             │ Yes
-                             ▼
-┌─────────────────┐    ┌─────────────────┐
-│  Game History   │───►│ Analysis Screen │
-│  (select game)  │    │   (this spec)   │
-└─────────────────┘    └────────┬────────┘
-                                │
-                                ▼
-                    ┌─────────────────────┐
-                    │  [New Game]         │──► Start new game
-                    │  [Review Blunders]  │──► Blunders list
-                    │  [Game History]     │──► Past games
-                    │  [Dashboard]        │──► Main menu
-                    └─────────────────────┘
-```
+The analysis screen (`/game?id=<session_id>`) is accessible from:
 
 **Entry Point 1: Post-Game Prompt**
-- Immediately after a game ends, user is prompted "View Analysis?"
-- Selecting "Yes" opens analysis for the just-completed game
-- Selecting "No" returns to dashboard
+- Immediately after a game ends on `/play`, the game UI offers a link to view analysis
+- Navigates to `/game?id=<session_id>` for the just-completed game
 
 **Entry Point 2: Game History**
-- User navigates to Game History from dashboard
+- User navigates to `/history`
 - Selects any completed game from the list
-- Opens analysis screen for that historical game
+- Opens `/game?id=<session_id>` for that historical game
+
+**App navigation** (via `AppNav`):
+- `/play` — Start/continue a game
+- `/history` — Browse past games
+- `/blunders` — Due blunders (Ghost Move Library)
+- `/openings` — Opening performance
+- `/stats` — Overall stats and rating graph
 
 ### 10.6 MVP Constraints
 
@@ -2041,3 +2081,252 @@ When user has no completed games:
 - Use fixed PGNs with known engine evals for replay scenarios.
 - Seed any probabilistic SRS selection to make tests deterministic.
 - Pin Stockfish evaluation settings for unit/integration tests that rely on eval deltas.
+
+---
+
+## 13. Rating System
+
+Ghost Replay uses an Elo-style rating system to track player strength against the engine.
+
+### 13.1 Constants
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `DEFAULT_RATING` | 1200 | Starting rating for new users |
+| `PROVISIONAL_THRESHOLD` | 20 | Games played before rating stabilizes |
+| `K_PROVISIONAL` | 40 | K-factor during provisional period |
+| `K_STABLE` | 20 | K-factor once rating is stable |
+
+### 13.2 Formula
+
+```
+expected = 1 / (1 + 10^((engine_elo - player_rating) / 400))
+new_rating = round(player_rating + K * (score - expected))
+```
+
+The opponent rating is `engine_elo` from the game session (the bot difficulty setting).
+
+### 13.3 Result Scores
+
+| Result | Score |
+|--------|-------|
+| `checkmate_win` | 1.0 |
+| `checkmate_loss` | 0.0 |
+| `resign` | 0.0 |
+| `draw` | 0.5 |
+| `abandon` | not rated |
+
+### 13.4 When Rating Is Computed
+
+A `rating_history` row is inserted at `POST /api/game/end` when `is_rated=true` and the result is one of the four rated outcomes above. `abandon` results are never rated regardless of `is_rated`.
+
+The `is_provisional` flag is `true` when `games_played < PROVISIONAL_THRESHOLD` at the time of the game.
+
+### 13.5 Post-Game Display
+
+The `/api/game/end` response includes a `rating` field:
+
+```json
+{
+  "rating_before": 1200,
+  "rating_after": 1214,
+  "is_provisional": true
+}
+```
+
+The end-game banner uses these values to show the rating change. When `is_provisional=true`, a provisional indicator is shown alongside the rating.
+
+`rating` is `null` when the game is unrated or the result is `abandon`.
+
+DB reference: §5.5
+
+---
+
+## 14. Opening Weakness Tracking
+
+The opening weakness system computes per-user performance scores for each opening line and surfaces them on the `/openings` page.
+
+### 14.1 Trigger Points
+
+- **After move uploads:** `recompute_opening_scores_if_needed()` is called at the end of `POST /api/session/:id/moves`. If the user's inputs (game history or opening registry) have changed since the last batch, a new batch is computed.
+- **After SRS reviews:** `recompute_opening_scores_if_needed()` is called after each SRS review submission, since a review pass can change per-opening accuracy.
+- **On openings page load:** `ensure_opening_scores()` is called when serving `GET /api/openings`. It calls `recompute_opening_scores` if no valid batch exists yet.
+
+### 14.2 Batch/Cursor Pattern
+
+Computation runs are not overwritten in-place. Instead:
+
+1. A new `opening_score_batches` row is created with a monotonically increasing `generation`.
+2. `user_opening_scores` rows for the new batch are written.
+3. The `opening_score_cursors` row for `(user_id, player_color)` is updated to point to the new generation.
+4. Stale batches are pruned.
+
+This ensures the current scores are always available atomically and reads never see a partially-computed state.
+
+`registry_fingerprint` captures a hash of the opening registry at compute time. If the fingerprint changes (e.g. new openings added to the registry), the next trigger forces a full recompute.
+
+### 14.3 Score Semantics
+
+- `opening_score`: composite weakness metric — 0 = perfect play, higher = weaker performance
+- `confidence` and `sample_size`: let the frontend de-emphasize scores backed by sparse data
+- Branch fields: each score row includes `strongest_branch`, `weakest_branch`, and `underexposed_branch` sub-line details for targeted practice recommendations
+
+DB reference: §5.7
+
+---
+
+## 15. Analysis Cache
+
+The analysis cache avoids re-running Stockfish on positions that have already been evaluated in prior games.
+
+### 15.1 Key Structure
+
+Each entry is keyed by `(fen_before, move_uci)` — the exact position before a move and the move played in UCI notation. This pair uniquely identifies an analysis result.
+
+### 15.2 Frontend Lookup
+
+`lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned).
+
+Used in `GameAnalysisCoordinator` and `useMoveAnalysis` before dispatching Stockfish analysis tasks. Cache hits bypass the local engine for those positions entirely.
+
+### 15.3 Staleness
+
+No explicit invalidation. Analysis entries are immutable — the same FEN + move always yields the same Stockfish evaluation at the stored depth. Entries are only written, never updated.
+
+### 15.4 `source` Field
+
+| Value | Meaning |
+|-------|---------|
+| `game` | Entry written during a normal game session |
+| `worker` | Entry written by a dedicated background analysis pass |
+
+DB reference: §5.6
+
+---
+
+## 16. Local Fallback
+
+When the backend is unreachable, the frontend uses local Stockfish to generate opponent moves rather than blocking gameplay.
+
+### 16.1 `decision_source: 'local_fallback'`
+
+The `decision_source` column on `session_moves` accepts three values:
+
+| Value | Source |
+|-------|--------|
+| `ghost_path` | Backend served a Ghost Move Library move |
+| `backend_engine` | Backend served an engine move |
+| `local_fallback` | Frontend generated the move locally (backend unreachable) |
+
+`local_fallback` is set exclusively by the frontend in `applyLocalFallbackMove()` (`useChessGameController.ts`). The backend never produces this value — it is excluded from the `NextOpponentMoveResponse` type.
+
+### 16.2 Behavior
+
+- Ghost path steering is unavailable in fallback mode (no backend response to provide path data).
+- The locally-generated move is committed with `decisionSource: "local_fallback"` and the game continues normally.
+- Client-side blunder detection and analysis still run.
+- Move uploads proceed as normal once connectivity is restored.
+
+---
+
+## 17. Practice Continuation
+
+Practice Continuation is the local free-play state a session enters when the user rewinds the board to a prior position mid-game.
+
+### 17.1 Trigger Flow
+
+1. User clicks the Revert button to select an earlier position.
+2. If the current game is rated (`isRated=true`), a confirmation modal is shown (`showRevertWarning=true`).
+3. On confirm: the game is ended as `resign` via `POST /api/game/end`, and any rating change is applied.
+4. The board rewinds locally to the selected position.
+5. `isPracticeContinuation = true`, `isRated = false`, drill state cleared, session move uploads halted.
+
+### 17.2 Behavior While Active
+
+| Aspect | Normal game | Practice continuation |
+|--------|-------------|----------------------|
+| Game-over API call | `POST /api/game/end` | None — `finishLocalGame()` only |
+| Move uploads | Yes | No |
+| SRS reviews | Triggered | Not triggered |
+| Rating change | Yes (if rated) | No |
+| Ghost / drill | Active | Disabled |
+| Resign button | `POST /api/game/end` | `finishLocalGame()` locally |
+
+### 17.3 Reset
+
+`isPracticeContinuation` resets to `false` when a new game session is started.
+
+---
+
+## 18. Drill Mode
+
+Drill Mode is a structured opening practice feature. The user plays toward a specific target position from the opening graph, then optionally converts the session into a rated game from that point forward.
+
+### 18.1 Session Type
+
+Drill sessions use `session_mode = 'drill'` in `game_sessions`. They start unrated (`is_rated = false`) and can become rated upon conversion.
+
+### 18.2 Drill States
+
+| State | Meaning |
+|-------|---------|
+| `active` | Playing toward the target opening position |
+| `root_reached` | User successfully reached the target FEN |
+| `failed` | User deviated from route or made an accuracy mistake post-root |
+| `abandoned` | User quit the drill without converting |
+| `converted` | User elected to continue as a rated game after reaching root |
+
+Only `converted` drill sessions appear in game history alongside normal games; all other states are hidden.
+
+### 18.3 Strictness
+
+Strictness controls the centipawn threshold for accuracy failures after `root_reached`.
+
+| Tier | cp threshold |
+|------|-------------|
+| `strict` | 15 |
+| `standard` | 35 |
+| `lenient` | 50 |
+
+A custom `strictness_cp` integer (0–50) overrides the tier value.
+
+### 18.4 Route Check
+
+`POST /api/drills/:id/route-check` is called after each move. The backend uses `DrillRouteMap` (a BFS-derived map from the opening graph) to classify the current position:
+
+| Status | Meaning |
+|--------|---------|
+| `on_route` | Position is on the path to target; response includes route-preserving move suggestions |
+| `root_reached` | Target FEN reached; `drill_state` advances to `root_reached` |
+| `failed` | Position left the route (`off_route`) or an accuracy threshold was exceeded (`accuracy`) |
+
+### 18.5 Conversion
+
+`POST /api/drills/:id/continue` converts a `root_reached` drill into a rated game:
+
+1. `drill_state = 'converted'`, `is_rated = true`
+2. `rated_start_ply` records the ply at which normal play begins
+3. `resegment_session_moves()` retroactively labels prior moves `segment = 'drill'` and future moves `segment = 'normal'`
+4. Normal game flow continues; game ends via `POST /api/game/end` with rating impact
+
+### 18.6 Terminal Reasons
+
+| Reason | Cause |
+|--------|-------|
+| `off_route` | Player left the prescribed opening route |
+| `accuracy` | Post-root move exceeded the centipawn strictness threshold |
+| `natural_end` | Game ended by checkmate/draw before root was reached |
+
+### 18.7 API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/drills/start` | Create a new drill session |
+| GET | `/api/drills/:id` | Fetch the drill session contract |
+| POST | `/api/drills/:id/route-check` | Check current position against drill route |
+| POST | `/api/drills/:id/continue` | Convert to rated game after root reached |
+| POST | `/api/drills/:id/fail` | Mark drill failed (accuracy, post-root only) |
+| POST | `/api/drills/:id/natural-end` | Record natural game-over during drill phase |
+| POST | `/api/drills/:id/abandon` | Abandon drill (use `/api/game/end` for converted drills) |
+
+DB reference: §7.3 (`game_sessions` drill columns)
