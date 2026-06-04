@@ -1214,7 +1214,7 @@ def test_find_ghost_move_not_due_excluded_despite_urgency(db_session):
         db=db_session, user_id=user_id, fen=fen_start, player_color="white",
     )
 
-    # Must be excluded by the linear priority < 1.0 gate
+    # Must be excluded by the linear priority <= 1.0 gate
     assert move_san is None
     assert target_blunder_id is None
 

@@ -59,7 +59,6 @@ class GhostMoveCandidate:
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
-    reached_since_review: int = 0
     has_opportunity_events: bool = False
     opening_family: str | None = None
 
@@ -72,7 +71,7 @@ class GhostMoveCandidate:
         )
         if self.has_opportunity_events:
             urgency = calculate_opportunity_overdue(
-                opportunities_since_review=self.reached_since_review,
+                opportunities_since_review=self.opportunities_since_review,
                 pass_streak=self.pass_streak,
             )
         severity = math.log1p(max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
@@ -225,7 +224,7 @@ def _isoformat_optional(value: datetime | str | None) -> str | None:
 def _ghost_eligible(
     *,
     has_opportunity_events: bool,
-    reached_since_review: int,
+    opportunities_since_review: int,
     pass_streak: int,
     last_reviewed_at: datetime | None,
     created_at: datetime | None,
@@ -235,7 +234,7 @@ def _ghost_eligible(
 ) -> bool:
     if has_opportunity_events:
         priority = calculate_opportunity_overdue(
-            opportunities_since_review=reached_since_review,
+            opportunities_since_review=opportunities_since_review,
             pass_streak=pass_streak,
         )
     else:
@@ -245,7 +244,7 @@ def _ghost_eligible(
             created_at=created_at,
             now=now,
         )
-    if priority < 1.0:
+    if priority <= 1.0:
         return False
     if (
         has_opportunity_events
@@ -367,13 +366,12 @@ def find_ghost_move(
             opportunities_since_review=counters.opportunities_since_review if counters else 0,
             opportunities_30d=counters.opportunities_30d if counters else 0,
             reached_30d=counters.reached_30d if counters else 0,
-            reached_since_review=counters.reached_since_review if counters else 0,
             has_opportunity_events=bool(counters and counters.event_count > 0),
             opening_family=row[7],
         )
         if not _ghost_eligible(
             has_opportunity_events=candidate.has_opportunity_events,
-            reached_since_review=candidate.reached_since_review,
+            opportunities_since_review=candidate.opportunities_since_review,
             pass_streak=candidate.pass_streak,
             last_reviewed_at=candidate.last_reviewed_at,
             created_at=candidate.created_at,
@@ -387,7 +385,13 @@ def find_ghost_move(
     if not scored:
         return (None, None, None, None)
 
-    deduped = _dedupe_path_candidates(scored)
+    # A depth-1 candidate reaches the review position immediately after the
+    # ghost move. Prefer those over multi-ply steering routes, which still
+    # depend on the player following the stored line before a review can happen.
+    replay_ready = [item for item in scored if item[0].depth == 1]
+    selection_pool = replay_ready or scored
+
+    deduped = _dedupe_path_candidates(selection_pool)
     repeat_penalties = _repeat_penalties(_same_fen_recent_ghost_moves(db, user_id, fen))
     groups = _group_candidates_by_first_move(deduped, repeat_penalties)
     top_first_moves = groups[:TOP_K]

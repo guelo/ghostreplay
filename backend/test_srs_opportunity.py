@@ -547,3 +547,107 @@ def test_find_ghost_move_suppresses_high_opportunity_zero_reach_blunder(db_sessi
     )
     assert move_san is None
     assert target_blunder_id is None
+
+
+def test_find_ghost_move_uses_due_opportunities_with_supported_reach_rate(db_session):
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    start_fen = "8/8/8/8/8/8/K7/6k1 b - - 0 1"
+    blunder_fen = "8/8/8/8/8/8/1K6/6k1 w - - 0 2"
+    start = _position(db_session, user_id=user_id, fen=start_fen, active_color="black")
+    blunder_pos = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="white")
+    db_session.add(Move(from_position_id=start.id, move_san="step", to_position_id=blunder_pos.id))
+    blunder = _blunder(db_session, user_id=user_id, position=blunder_pos, eval_loss_cp=200)
+    blunder.created_at = now - timedelta(days=5)
+    blunder.pass_streak = 5
+
+    # 40 opportunities are due for pass_streak=5 (expected=32), while only
+    # 3 exact reaches would not pass the old reached_since_review gate.
+    for idx in range(40):
+        _opportunity_event(
+            db_session,
+            user_id=user_id,
+            blunder=blunder,
+            opportunity=True,
+            reached=idx < 3,
+            occurred_at=now - timedelta(minutes=idx + 1),
+        )
+    db_session.commit()
+
+    move_san, target_blunder_id, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=start_fen,
+        player_color="white",
+        _rng_seed=1,
+    )
+
+    assert move_san == "step"
+    assert target_blunder_id == blunder.id
+
+
+def test_find_ghost_move_prefers_immediate_review_over_deeper_route(db_session):
+    from app.api.game import find_ghost_move
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    start_fen = "8/8/8/8/8/8/K7/7k b - - 0 1"
+    immediate_fen = "8/8/8/8/8/8/1K6/7k w - - 0 2"
+    route_1_fen = "8/8/8/8/8/8/2K5/7k w - - 0 2"
+    route_2_fen = "8/8/8/8/8/3K4/8/7k b - - 0 2"
+    route_3_fen = "8/8/8/8/4K3/8/8/7k w - - 0 3"
+    route_4_fen = "8/8/8/5K2/8/8/8/7k b - - 0 3"
+    deep_fen = "8/8/6K1/8/8/8/8/7k w - - 0 4"
+
+    start = _position(db_session, user_id=user_id, fen=start_fen, active_color="black")
+    immediate_pos = _position(db_session, user_id=user_id, fen=immediate_fen, active_color="white")
+    route_1 = _position(db_session, user_id=user_id, fen=route_1_fen, active_color="white")
+    route_2 = _position(db_session, user_id=user_id, fen=route_2_fen, active_color="black")
+    route_3 = _position(db_session, user_id=user_id, fen=route_3_fen, active_color="white")
+    route_4 = _position(db_session, user_id=user_id, fen=route_4_fen, active_color="black")
+    deep_pos = _position(db_session, user_id=user_id, fen=deep_fen, active_color="white")
+    db_session.add_all([
+        Move(from_position_id=start.id, move_san="review", to_position_id=immediate_pos.id),
+        Move(from_position_id=start.id, move_san="route", to_position_id=route_1.id),
+        Move(from_position_id=route_1.id, move_san="u1", to_position_id=route_2.id),
+        Move(from_position_id=route_2.id, move_san="o2", to_position_id=route_3.id),
+        Move(from_position_id=route_3.id, move_san="u2", to_position_id=route_4.id),
+        Move(from_position_id=route_4.id, move_san="o3", to_position_id=deep_pos.id),
+    ])
+    immediate = _blunder(db_session, user_id=user_id, position=immediate_pos, eval_loss_cp=50)
+    deep = _blunder(db_session, user_id=user_id, position=deep_pos, eval_loss_cp=1000)
+    immediate.created_at = now - timedelta(days=5)
+    deep.created_at = now - timedelta(days=5)
+
+    for idx in range(2):
+        _opportunity_event(
+            db_session,
+            user_id=user_id,
+            blunder=immediate,
+            opportunity=True,
+            reached=True,
+            occurred_at=now - timedelta(minutes=idx + 1),
+        )
+    for idx in range(100):
+        _opportunity_event(
+            db_session,
+            user_id=user_id,
+            blunder=deep,
+            opportunity=True,
+            reached=idx < 20,
+            occurred_at=now - timedelta(minutes=idx + 2),
+        )
+    db_session.commit()
+
+    move_san, target_blunder_id, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=start_fen,
+        player_color="white",
+        _rng_seed=1,
+    )
+
+    assert move_san == "review"
+    assert target_blunder_id == immediate.id
