@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from app.fen import fen_hash
-from app.models import Blunder, Position, SessionMove
+from app.models import Blunder, BlunderOpportunityEvent, Position, SessionMove
 
 
 @pytest.fixture(autouse=True)
@@ -92,16 +92,15 @@ def test_session_moves_populate_ghost_graph(client, auth_headers, create_game_se
     )
     db_session.add(target_position)
     db_session.flush()
-    db_session.add(
-        Blunder(
-            user_id=user_id,
-            position_id=target_position.id,
-            bad_move_san="bad",
-            best_move_san="good",
-            eval_loss_cp=200,
-            created_at=datetime.now(timezone.utc) - timedelta(hours=5),
-        )
+    blunder = Blunder(
+        user_id=user_id,
+        position_id=target_position.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=5),
     )
+    db_session.add(blunder)
     db_session.commit()
 
     response = client.post(
@@ -139,6 +138,17 @@ def test_session_moves_populate_ghost_graph(client, auth_headers, create_game_se
     )
 
     assert response.status_code == 200
+    extra_session_id = create_game_session(user_id=user_id, player_color="white")
+    db_session.add(
+        BlunderOpportunityEvent(
+            blunder_id=blunder.id,
+            session_id=uuid.UUID(extra_session_id),
+            occurred_at=datetime.now(timezone.utc),
+            opportunity=True,
+            reached=True,
+        )
+    )
+    db_session.commit()
 
     move_san, target_blunder_id, _, _ = find_ghost_move(
         db=db_session,
