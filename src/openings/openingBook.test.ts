@@ -217,6 +217,37 @@ describe('lookupOpeningByFen', () => {
     })
   })
 
+  it('matches a canonical fen without re-parsing the board', async () => {
+    mockOpeningBookAndIndex(
+      [
+        {
+          eco: 'C20',
+          name: "King's Pawn Game",
+          pgn: '1. e4',
+          uci: 'e2e4',
+          epd: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -',
+        },
+      ],
+      {
+        'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -': {
+          eco: 'C20',
+          name: "King's Pawn Game",
+        },
+      },
+    )
+
+    const board = new Chess()
+    board.move('e4')
+
+    const opening = await lookupOpeningByFen(board.fen(), { canonical: true })
+
+    expect(opening).toEqual({
+      eco: 'C20',
+      name: "King's Pawn Game",
+      source: 'eco',
+    })
+  })
+
   it('returns null when no opening matches and memoizes lookups', async () => {
     mockOpeningBookAndIndex(
       [

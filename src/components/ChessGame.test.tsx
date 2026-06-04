@@ -56,6 +56,7 @@ vi.mock("../hooks/useStockfishEngine", () => ({
 
 vi.mock("../openings/openingBook", () => ({
   lookupOpeningByFen: (...args: unknown[]) => lookupOpeningByFenMock(...args),
+  prewarmOpeningBook: () => {},
 }));
 
 vi.mock("react-router-dom", () => ({

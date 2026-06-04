@@ -49,9 +49,12 @@ export type OpeningLookupResult = {
   source: string
 }
 
+const canonicalizeFen = (fen: string): string =>
+  fen.split(' ').slice(0, 4).join(' ')
+
 const normalizeFen = (fen: string): string => {
   const board = new Chess(fen)
-  return board.fen().split(' ').slice(0, 4).join(' ')
+  return canonicalizeFen(board.fen())
 }
 
 const parseVariation = (name: string): string | undefined => {
@@ -167,10 +170,19 @@ export const getOpeningBook = async (): Promise<OpeningBook> => {
   return openingBookPromise
 }
 
+export type OpeningLookupOptions = {
+  // When the caller already holds a canonical chess.js FEN (e.g. the live board
+  // state), skip the main-thread `new Chess(fen)` re-parse used to normalize it.
+  canonical?: boolean
+}
+
 export const lookupOpeningByFen = async (
   fen: string,
+  options?: OpeningLookupOptions,
 ): Promise<OpeningLookupResult | null> => {
-  const normalizedFen = normalizeFen(fen)
+  const normalizedFen = options?.canonical
+    ? canonicalizeFen(fen)
+    : normalizeFen(fen)
   if (openingLookupCache.has(normalizedFen)) {
     return openingLookupCache.get(normalizedFen) ?? null
   }
@@ -179,6 +191,13 @@ export const lookupOpeningByFen = async (
   const opening = book.byPosition.get(normalizedFen) ?? null
   openingLookupCache.set(normalizedFen, opening)
   return opening
+}
+
+// Trigger the opening book fetch ahead of the first lookup so live-play moves do
+// not block on the network round trip. Errors are swallowed; the next real
+// lookup will surface them.
+export const prewarmOpeningBook = (): void => {
+  void getOpeningBook().catch(() => {})
 }
 
 export const resetOpeningBookCacheForTests = (): void => {

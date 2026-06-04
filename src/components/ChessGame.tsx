@@ -19,7 +19,8 @@ import {
 } from "../stores/createAnalysisStore";
 import { useGameAnalysisCoordinator } from "../contexts/GameAnalysisCoordinatorContext";
 import type { OpeningLookupResult } from "../openings/openingBook";
-import { lookupOpeningByFen } from "../openings/openingBook";
+import { lookupOpeningByFen, prewarmOpeningBook } from "../openings/openingBook";
+import { scheduleIdle } from "../utils/scheduleIdle";
 import type { TargetBlunderSrs } from "../utils/api";
 import { getStatsAchievements } from "../utils/api";
 import {
@@ -1083,6 +1084,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     ],
   );
 
+  // Prewarm the opening book so the first live lookup does not block on the
+  // network round trip during play.
+  useEffect(() => {
+    if (isGameActive) {
+      prewarmOpeningBook();
+    }
+  }, [isGameActive]);
+
   useEffect(() => {
     if (!isGameActive) {
       openingLookupRequestIdRef.current += 1;
@@ -1094,32 +1103,42 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     const historyIdx = moveHistory.length;
     const requestId = openingLookupRequestIdRef.current + 1;
     openingLookupRequestIdRef.current = requestId;
-    void lookupOpeningByFen(fen)
-      .then((opening) => {
-        if (openingLookupRequestIdRef.current !== requestId) {
-          return;
-        }
-        const history = openingHistoryRef.current;
-        if (opening) {
-          history[historyIdx] = opening;
-        } else {
-          // Carry forward last known opening
-          let lastKnown: OpeningLookupResult | null = null;
-          for (let i = historyIdx - 1; i >= 0; i--) {
-            if (history[i]) {
-              lastKnown = history[i];
-              break;
-            }
+
+    // Defer the lookup off the live interaction path. `fen` is the canonical
+    // chess.js board state, so skip the main-thread re-parse during normalize.
+    const cancel = scheduleIdle(() => {
+      if (openingLookupRequestIdRef.current !== requestId) {
+        return;
+      }
+      void lookupOpeningByFen(fen, { canonical: true })
+        .then((opening) => {
+          if (openingLookupRequestIdRef.current !== requestId) {
+            return;
           }
-          history[historyIdx] = lastKnown;
-        }
-        setLiveOpening(history[historyIdx] ?? null);
-      })
-      .catch(() => {
-        if (openingLookupRequestIdRef.current !== requestId) {
-          return;
-        }
-      });
+          const history = openingHistoryRef.current;
+          if (opening) {
+            history[historyIdx] = opening;
+          } else {
+            // Carry forward last known opening
+            let lastKnown: OpeningLookupResult | null = null;
+            for (let i = historyIdx - 1; i >= 0; i--) {
+              if (history[i]) {
+                lastKnown = history[i];
+                break;
+              }
+            }
+            history[historyIdx] = lastKnown;
+          }
+          setLiveOpening(history[historyIdx] ?? null);
+        })
+        .catch(() => {
+          if (openingLookupRequestIdRef.current !== requestId) {
+            return;
+          }
+        });
+    });
+
+    return cancel;
   }, [fen, isGameActive, moveHistory.length]);
 
   useEffect(() => {
