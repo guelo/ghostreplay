@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -10,11 +11,26 @@ from app.fen import normalize_fen
 from app.models import Blunder, BlunderOpportunityEvent, BlunderReview
 from app.opening_roots import get_opening_roots
 from app.srs_math import (
+    OPPORTUNITY_POWER,
     as_utc,
     calculate_opportunity_overdue,
     calculate_priority,
+    calculate_urgency,
     compute_p_reach,
 )
+
+# ---------------------------------------------------------------------------
+# Shared ghost eligibility / practice priority policy
+#
+# These constants and helpers are the single source of truth for both the live
+# gameplay ghost selector (app.api.game.find_ghost_move) and the Blunders
+# library endpoint (app.api.blunder). Keeping them here prevents the two
+# surfaces from drifting on what counts as "ghost eligible" or how durable
+# practice priority is scored.
+# ---------------------------------------------------------------------------
+SEVERITY_NORMALIZER_CP = 50.0
+P_REACH_FLOOR = 0.03
+P_REACH_MIN_SAMPLE = 30
 
 
 @dataclass(frozen=True)
@@ -170,3 +186,103 @@ def opportunity_priority(
         created_at=created_at,
         now=now,
     )
+
+
+def srs_priority(
+    *,
+    counters: OpportunityCounters | None,
+    pass_streak: int,
+    last_reviewed_at: datetime | None,
+    created_at: datetime | None,
+    now: datetime,
+) -> float:
+    """Existing SRS due value (opportunity-aware), tolerant of missing counters.
+
+    This is the value used for the ``due`` filter (``srs_priority > 1.0``). It
+    keeps the original SRS semantics; it is NOT the practice ordering score.
+    """
+    if counters is not None:
+        return opportunity_priority(
+            counters=counters,
+            pass_streak=pass_streak,
+            last_reviewed_at=last_reviewed_at,
+            created_at=created_at,
+            now=now,
+        )
+    return calculate_priority(
+        pass_streak=pass_streak,
+        last_reviewed_at=last_reviewed_at,
+        created_at=created_at,
+        now=now,
+    )
+
+
+def ghost_eligible(
+    *,
+    counters: OpportunityCounters | None,
+    pass_streak: int,
+    last_reviewed_at: datetime | None,
+    created_at: datetime | None,
+    now: datetime,
+) -> bool:
+    """Same persistent eligibility rule used by ``find_ghost_move``.
+
+    A target is ghost eligible when it is SRS due (priority > 1.0) and, for
+    opportunity-tracked targets with enough samples, is reached often enough
+    that steering is likely to feel relevant (p_reach >= P_REACH_FLOOR). This
+    is position independent: actual in-game steerability still depends on the
+    current FEN and is owned by find_ghost_move.
+    """
+    has_events = counters is not None and counters.event_count > 0
+    priority = srs_priority(
+        counters=counters,
+        pass_streak=pass_streak,
+        last_reviewed_at=last_reviewed_at,
+        created_at=created_at,
+        now=now,
+    )
+    if priority <= 1.0:
+        return False
+    if (
+        has_events
+        and counters.opportunities_30d >= P_REACH_MIN_SAMPLE
+        and counters.p_reach < P_REACH_FLOOR
+    ):
+        return False
+    return True
+
+
+def practice_priority_score(
+    *,
+    counters: OpportunityCounters | None,
+    eval_loss_cp: int,
+    pass_streak: int,
+    last_reviewed_at: datetime | None,
+    created_at: datetime | None,
+    now: datetime,
+) -> float:
+    """Position-independent approximation of Ghost selection priority.
+
+    Mirrors the durable parts of GhostMoveCandidate.score (urgency, severity,
+    reach_weight) and deliberately omits current-position/session factors:
+    distance from the current FEN, first-move grouping, repeat penalties,
+    current opening-family match, and the session selection seed.
+    """
+    has_events = counters is not None and counters.event_count > 0
+    if has_events:
+        urgency = calculate_opportunity_overdue(
+            opportunities_since_review=counters.opportunities_since_review,
+            pass_streak=pass_streak,
+        )
+    else:
+        urgency = calculate_urgency(
+            pass_streak=pass_streak,
+            last_reviewed_at=last_reviewed_at,
+            created_at=created_at,
+            now=now,
+        )
+    severity = math.log1p(max(float(eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
+    reach_weight = 1.0
+    if has_events:
+        reach_weight = counters.p_reach ** OPPORTUNITY_POWER
+    return urgency * severity * reach_weight

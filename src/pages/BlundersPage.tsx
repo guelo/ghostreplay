@@ -140,12 +140,12 @@ async function deriveOpeningFromAnalysis(
 function BlundersPage() {
   const [blunders, setBlunders] = useState<BlunderListItem[]>([]);
   const [total, setTotal] = useState(0);
-  const [dueTotal, setDueTotal] = useState<number | null>(null);
+  const [practiceReadyTotal, setPracticeReadyTotal] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [dueOnly, setDueOnly] = useState(false);
+  const [readyOnly, setReadyOnly] = useState(false);
   const [openingByBlunderId, setOpeningByBlunderId] = useState<
     Record<number, OpeningLookupResult | null>
   >({});
@@ -155,8 +155,8 @@ function BlundersPage() {
   const requestGenerationRef = useRef(0);
   const openingAnalysisLookupRef = useRef<Set<number>>(new Set());
 
-  const handleToggleDueOnly = () => {
-    setDueOnly((v) => !v);
+  const handleToggleReadyOnly = () => {
+    setReadyOnly((v) => !v);
     setSelectedId(null);
     setAnalysis(null);
     setAnalysisLoading(false);
@@ -172,12 +172,12 @@ function BlundersPage() {
     setAnalysis(null);
     setAnalysisLoading(false);
 
-    fetchBlunders({ due: dueOnly, limit: BLUNDER_PAGE_SIZE, offset: 0 })
+    fetchBlunders({ practiceReady: readyOnly, limit: BLUNDER_PAGE_SIZE, offset: 0 })
       .then((data) => {
         if (requestGenerationRef.current !== generation) return;
         setBlunders(data.items);
         setTotal(data.total);
-        setDueTotal(data.due_total);
+        setPracticeReadyTotal(data.practice_ready_total);
       })
       .catch((err) => {
         if (requestGenerationRef.current !== generation) return;
@@ -186,7 +186,7 @@ function BlundersPage() {
       .finally(() => {
         if (requestGenerationRef.current === generation) setLoading(false);
       });
-  }, [dueOnly]);
+  }, [readyOnly]);
 
   const selected = blunders.find((b) => b.id === selectedId) ?? null;
   const selectedAnalysisSessionId =
@@ -202,12 +202,12 @@ function BlundersPage() {
     setLoadingMore(true);
     setError(null);
 
-    fetchBlunders({ due: dueOnly, limit: BLUNDER_PAGE_SIZE, offset })
+    fetchBlunders({ practiceReady: readyOnly, limit: BLUNDER_PAGE_SIZE, offset })
       .then((data) => {
         if (requestGenerationRef.current !== generation) return;
         setBlunders((current) => [...current, ...data.items]);
         setTotal(data.total);
-        setDueTotal(data.due_total);
+        setPracticeReadyTotal(data.practice_ready_total);
       })
       .catch((err) => {
         if (requestGenerationRef.current !== generation) return;
@@ -376,19 +376,19 @@ function BlundersPage() {
             <h1 className="blunders-shell__title">Blunder Library</h1>
             <div className="blunders-shell__summary">
               <span className="blunders-shell__count">
-                {dueOnly ? `${blunders.length} of ${total} due` : `${total} total`}
+                {readyOnly ? `${blunders.length} of ${total} ready` : `${total} total`}
               </span>
-              {!dueOnly && dueTotal !== null && (
+              {!readyOnly && practiceReadyTotal !== null && (
                 <span className="blunders-shell__count blunders-shell__count--due">
-                  {dueTotal} due
+                  {practiceReadyTotal} ready
                 </span>
               )}
               <button
                 type="button"
-                className={`chess-button toggle${dueOnly ? " active" : ""}`}
-                onClick={handleToggleDueOnly}
+                className={`chess-button toggle${readyOnly ? " active" : ""}`}
+                onClick={handleToggleReadyOnly}
               >
-                {dueOnly ? "Show all" : "Due only"}
+                {readyOnly ? "Show all" : "Practice-ready"}
               </button>
             </div>
           </div>
@@ -405,11 +405,11 @@ function BlundersPage() {
                 {"\u2654"}
               </span>
               <p className="blunders-shell__empty-title">
-                {dueOnly ? "No blunders due for review" : "No blunders recorded yet"}
+                {readyOnly ? "No practice-ready blunders" : "No blunders recorded yet"}
               </p>
               <p className="blunders-shell__placeholder">
-                {dueOnly
-                  ? "All caught up! Play more games to keep learning."
+                {readyOnly
+                  ? "Nothing the ghost can steer to right now. Play more games to keep learning."
                   : "Play games and your blunders will appear here for review."}
               </p>
               <Link to="/play" className="chess-button primary">
@@ -446,12 +446,12 @@ function BlundersPage() {
                           </span>
                           <span
                             className={`blunder-card__due ${
-                              b.srs_priority > 1.0
+                              b.ghost_eligible
                                 ? "blunder-card__due--urgent"
                                 : "blunder-card__due--ok"
                             }`}
                           >
-                            {b.srs_priority > 1.0 ? "Due" : "Not due"}
+                            {b.ghost_eligible ? "Ready" : "Off-radar"}
                           </span>
                         </div>
                         {formatOpeningLabel(openingByBlunderId[b.id], b.opening_family) && (
@@ -522,6 +522,18 @@ function BlundersPage() {
                         <span className="blunder-detail__stat-label">Eval loss</span>
                         <span className="blunder-detail__stat-value blunder-detail__stat-value--loss">
                           {evalLossDisplay(selected.eval_loss_cp)}
+                        </span>
+                      </div>
+                      <div className="blunder-detail__stat">
+                        <span className="blunder-detail__stat-label">Practice priority</span>
+                        <span className="blunder-detail__stat-value">
+                          {selected.practice_priority_score.toFixed(2)}
+                        </span>
+                      </div>
+                      <div className="blunder-detail__stat">
+                        <span className="blunder-detail__stat-label">SRS due</span>
+                        <span className="blunder-detail__stat-value">
+                          {selected.srs_due ? "Yes" : "No"}
                         </span>
                       </div>
                       <div className="blunder-detail__stat">

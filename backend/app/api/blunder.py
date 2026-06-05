@@ -23,11 +23,13 @@ from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
-from app.srs_math import calculate_priority
 from app.srs_opportunity import (
+    OpportunityCounters,
     detect_opening_family,
+    ghost_eligible,
     load_opportunity_counters,
-    opportunity_priority,
+    practice_priority_score,
+    srs_priority,
 )
 
 router = APIRouter(prefix="/api/blunder", tags=["blunder"])
@@ -410,9 +412,13 @@ class BlunderListItem(BaseModel):
     last_reviewed_at: datetime | None
     created_at: datetime
     srs_priority: float
+    srs_due: bool = False
+    ghost_eligible: bool = False
+    practice_priority_score: float = 0.0
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
+    reached_since_review: int = 0
     p_reach: float = 0.5
     source_session_id: str | None = None
     last_session_id: str | None = None
@@ -423,9 +429,11 @@ class BlunderListResponse(BaseModel):
     items: list[BlunderListItem]
     total: int
     due_total: int | None
+    practice_ready_total: int | None = None
     limit: int
     offset: int
     due: bool
+    practice_ready: bool = False
 
 
 def _latest_review_subquery(db: Session):
@@ -485,7 +493,33 @@ def _blunder_list_query(db: Session, user_id: int):
     return query, last_played_at
 
 
-def _build_blunder_item(row, counters, priority: float) -> BlunderListItem:
+def _build_blunder_item(
+    row,
+    counters: OpportunityCounters | None,
+    now: datetime,
+) -> BlunderListItem:
+    priority = srs_priority(
+        counters=counters,
+        pass_streak=row.pass_streak,
+        last_reviewed_at=row.last_reviewed_at,
+        created_at=row.created_at,
+        now=now,
+    )
+    practice_score = practice_priority_score(
+        counters=counters,
+        eval_loss_cp=row.eval_loss_cp,
+        pass_streak=row.pass_streak,
+        last_reviewed_at=row.last_reviewed_at,
+        created_at=row.created_at,
+        now=now,
+    )
+    is_ghost_eligible = ghost_eligible(
+        counters=counters,
+        pass_streak=row.pass_streak,
+        last_reviewed_at=row.last_reviewed_at,
+        created_at=row.created_at,
+        now=now,
+    )
     return BlunderListItem(
         id=row.id,
         fen=row.fen or "",
@@ -497,9 +531,16 @@ def _build_blunder_item(row, counters, priority: float) -> BlunderListItem:
         last_reviewed_at=row.last_reviewed_at,
         created_at=row.created_at,
         srs_priority=round(priority, 4),
+        srs_due=priority > 1.0,
+        ghost_eligible=is_ghost_eligible,
+        # Stored at full precision: this value is the default sort key, so
+        # rounding here would collapse distinct scores into recency tiebreaks.
+        # Display rounding is a client concern.
+        practice_priority_score=practice_score,
         opportunities_since_review=counters.opportunities_since_review if counters else 0,
         opportunities_30d=counters.opportunities_30d if counters else 0,
         reached_30d=counters.reached_30d if counters else 0,
+        reached_since_review=counters.reached_since_review if counters else 0,
         p_reach=round(counters.p_reach, 4) if counters else 0.5,
         source_session_id=str(row.source_session_id) if row.source_session_id else None,
         last_session_id=str(row.last_session_id) if row.last_session_id else None,
@@ -507,109 +548,111 @@ def _build_blunder_item(row, counters, priority: float) -> BlunderListItem:
     )
 
 
+_EPOCH = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _practice_sort_key(item: BlunderListItem) -> tuple:
+    """Default ordering: durable practice priority, recency as tiebreaker only."""
+    return (
+        item.practice_priority_score,
+        item.last_played_at is not None,
+        item.last_played_at or _EPOCH,
+        item.created_at,
+        item.id,
+    )
+
+
+def _recency_sort_key(item: BlunderListItem) -> tuple:
+    return (
+        item.last_played_at is not None,
+        item.last_played_at or _EPOCH,
+        item.created_at,
+        item.id,
+    )
+
+
 @router.get("", response_model=BlunderListResponse)
 def list_blunders(
-    due: bool = Query(False, description="If true, only return blunders with srs_priority > 1.0"),
+    due: bool = Query(
+        False,
+        description=(
+            "SRS due filter (srs_priority > 1.0). Legacy/secondary review path: a "
+            "due target deserves review but is not necessarily steerable in normal play."
+        ),
+    ),
+    practice_ready: bool = Query(
+        False,
+        description=(
+            "Gameplay-aligned filter: only return ghost-eligible targets, ordered by "
+            "practice_priority_score. This is the primary library path."
+        ),
+    ),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> BlunderListResponse:
-    """Return the authenticated user's blunders with calculated SRS priority."""
+    """Return the authenticated user's blunders.
+
+    Default and practice_ready ordering use practice_priority_score (a durable,
+    position-independent approximation of Ghost selection priority). The legacy
+    due filter retains SRS-due semantics and recency ordering for compatibility.
+    """
     now = datetime.now(timezone.utc)
 
-    query, last_played = _blunder_list_query(db, user.user_id)
-    total_all = (
-        db.query(sa_func.count(Blunder.id))
-        .filter(Blunder.user_id == user.user_id)
-        .scalar()
-        or 0
-    )
-
-    if not due:
-        rows = (
-            query.order_by(
-                last_played.is_(None),
-                last_played.desc(),
-                Blunder.created_at.desc(),
-                Blunder.id.desc(),
-            )
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
-        blunder_ids = [row.id for row in rows]
-        opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
-        items = []
-        for row in rows:
-            counters = opportunity_counters.get(row.id)
-            priority = (
-                opportunity_priority(
-                    counters=counters,
-                    pass_streak=row.pass_streak,
-                    last_reviewed_at=row.last_reviewed_at,
-                    created_at=row.created_at,
-                    now=now,
-                )
-                if counters is not None
-                else calculate_priority(
-                    pass_streak=row.pass_streak,
-                    last_reviewed_at=row.last_reviewed_at,
-                    created_at=row.created_at,
-                    now=now,
-                )
-            )
-            items.append(_build_blunder_item(row, counters, priority))
-        return BlunderListResponse(
-            items=items,
-            total=total_all,
-            due_total=None,
-            limit=limit,
-            offset=offset,
-            due=False,
-        )
-
+    query, _last_played = _blunder_list_query(db, user.user_id)
     rows = query.all()
     blunder_ids = [row.id for row in rows]
     opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
-    items: list[BlunderListItem] = []
-    for row in rows:
-        counters = opportunity_counters.get(row.id)
-        priority = (
-            opportunity_priority(
-                counters=counters,
-                pass_streak=row.pass_streak,
-                last_reviewed_at=row.last_reviewed_at,
-                created_at=row.created_at,
-                now=now,
-            )
-            if counters is not None
-            else calculate_priority(
-                pass_streak=row.pass_streak,
-                last_reviewed_at=row.last_reviewed_at,
-                created_at=row.created_at,
-                now=now,
-            )
-        )
-        if priority <= 1.0:
-            continue
-        items.append(_build_blunder_item(row, counters, priority))
 
-    items.sort(
-        key=lambda item: (
-            item.last_played_at is not None,
-            item.last_played_at or datetime.min.replace(tzinfo=timezone.utc),
-            item.created_at,
-            item.id,
-        ),
-        reverse=True,
-    )
-    due_total = len(items)
+    all_items = [
+        _build_blunder_item(row, opportunity_counters.get(row.id), now)
+        for row in rows
+    ]
+
+    total_all = len(all_items)
+    due_total = sum(1 for item in all_items if item.srs_due)
+    practice_ready_total = sum(1 for item in all_items if item.ghost_eligible)
+
+    if due:
+        items = [item for item in all_items if item.srs_due]
+        items.sort(key=_recency_sort_key, reverse=True)
+        return BlunderListResponse(
+            items=items[offset : offset + limit],
+            total=due_total,
+            due_total=due_total,
+            practice_ready_total=practice_ready_total,
+            limit=limit,
+            offset=offset,
+            due=True,
+            practice_ready=False,
+        )
+
+    if practice_ready:
+        items = [item for item in all_items if item.ghost_eligible]
+        items.sort(key=_practice_sort_key, reverse=True)
+        return BlunderListResponse(
+            items=items[offset : offset + limit],
+            total=practice_ready_total,
+            # due_total keeps its legacy sentinel: populated only in due mode.
+            due_total=None,
+            practice_ready_total=practice_ready_total,
+            limit=limit,
+            offset=offset,
+            due=False,
+            practice_ready=True,
+        )
+
+    all_items.sort(key=_practice_sort_key, reverse=True)
     return BlunderListResponse(
-        items=items[offset : offset + limit],
-        total=due_total,
-        due_total=due_total,
+        items=all_items[offset : offset + limit],
+        total=total_all,
+        # due_total keeps its legacy sentinel: null outside due mode so existing
+        # callers that read null as "not due mode" still behave correctly.
+        due_total=None,
+        practice_ready_total=practice_ready_total,
         limit=limit,
         offset=offset,
-        due=True,
+        due=False,
+        practice_ready=False,
     )

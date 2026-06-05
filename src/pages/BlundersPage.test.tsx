@@ -71,6 +71,9 @@ const BLUNDERS_RESPONSE = [
     eval_loss_cp: 100,
     opening_family: 'Italian Game' as string | null,
     srs_priority: 1.5,
+    srs_due: true,
+    ghost_eligible: true,
+    practice_priority_score: 2.3,
     source_session_id: 'session-123' as string | null,
     last_session_id: 'session-123',
     pass_streak: 0,
@@ -80,17 +83,24 @@ const BLUNDERS_RESPONSE = [
     opportunities_since_review: 0,
     opportunities_30d: 0,
     reached_30d: 0,
+    reached_since_review: 0,
     p_reach: 0.5,
   },
 ];
 
-const blunderEnvelope = (items = BLUNDERS_RESPONSE, total = items.length, dueTotal: number | null = null) => ({
+const blunderEnvelope = (
+  items = BLUNDERS_RESPONSE,
+  total = items.length,
+  practiceReadyTotal: number | null = null,
+) => ({
   items,
   total,
-  due_total: dueTotal,
+  due_total: null,
+  practice_ready_total: practiceReadyTotal,
   limit: 50,
   offset: 0,
   due: false,
+  practice_ready: false,
 });
 
 const ANALYSIS_RESPONSE = {
@@ -291,7 +301,7 @@ describe('BlundersPage', () => {
       .mockResolvedValueOnce(blunderEnvelope([unresolved], 1))
       .mockResolvedValueOnce({
         ...blunderEnvelope([unresolved], 1, 1),
-        due: true,
+        practice_ready: true,
       });
     mockFetchAnalysis
       .mockReturnValueOnce(new Promise((resolve) => { resolveFirstAnalysis = resolve; }))
@@ -306,8 +316,8 @@ describe('BlundersPage', () => {
     await screen.findByText('Bc4');
     await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(screen.getByRole('button', { name: 'Due only' }));
-    await screen.findByText('1 of 1 due');
+    fireEvent.click(screen.getByRole('button', { name: 'Practice-ready' }));
+    await screen.findByText('1 of 1 ready');
 
     await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledTimes(2));
     expect(mockFetchAnalysis).toHaveBeenNthCalledWith(1, 'session-123');
@@ -384,7 +394,7 @@ describe('BlundersPage', () => {
 
     await screen.findByText('Bc4');
 
-    expect(mockFetchBlunders).toHaveBeenCalledWith({ due: false, limit: 50, offset: 0 });
+    expect(mockFetchBlunders).toHaveBeenCalledWith({ practiceReady: false, limit: 50, offset: 0 });
     expect(mockFetchAnalysis).not.toHaveBeenCalled();
     expect(screen.getByText('Select a blunder to study.')).toBeTruthy();
   });
@@ -409,15 +419,15 @@ describe('BlundersPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
 
     await screen.findByText('Qh5');
-    expect(mockFetchBlunders).toHaveBeenLastCalledWith({ due: false, limit: 50, offset: 1 });
+    expect(mockFetchBlunders).toHaveBeenLastCalledWith({ practiceReady: false, limit: 50, offset: 1 });
   });
 
-  it('resets selection and count display when toggling due mode', async () => {
+  it('resets selection and count display when toggling practice-ready mode', async () => {
     mockFetchBlunders
-      .mockResolvedValueOnce(blunderEnvelope(BLUNDERS_RESPONSE, 4, null))
+      .mockResolvedValueOnce(blunderEnvelope(BLUNDERS_RESPONSE, 4, 1))
       .mockResolvedValueOnce({
         ...blunderEnvelope(BLUNDERS_RESPONSE, 1, 1),
-        due: true,
+        practice_ready: true,
       });
 
     render(
@@ -427,12 +437,12 @@ describe('BlundersPage', () => {
     );
 
     await screen.findByText('4 total');
-    expect(screen.queryByText('1 due')).toBeNull();
+    expect(screen.getByText('1 ready')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Due only' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Practice-ready' }));
 
-    await screen.findByText('1 of 1 due');
-    expect(mockFetchBlunders).toHaveBeenLastCalledWith({ due: true, limit: 50, offset: 0 });
+    await screen.findByText('1 of 1 ready');
+    expect(mockFetchBlunders).toHaveBeenLastCalledWith({ practiceReady: true, limit: 50, offset: 0 });
     expect(mockFetchAnalysis).not.toHaveBeenCalled();
   });
 
@@ -447,7 +457,7 @@ describe('BlundersPage', () => {
       .mockReturnValueOnce(new Promise((resolve) => { resolveLoadMore = resolve; }))
       .mockResolvedValueOnce({
         ...blunderEnvelope([dueItem], 1, 1),
-        due: true,
+        practice_ready: true,
       });
 
     render(
@@ -458,7 +468,7 @@ describe('BlundersPage', () => {
 
     await screen.findByText('Bc4');
     fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Due only' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Practice-ready' }));
     await screen.findByText('Nxd5');
 
     resolveLoadMore({

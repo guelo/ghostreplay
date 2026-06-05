@@ -488,23 +488,40 @@ class TestSelectionScore:
 # _ghost_eligible — opportunity gate and low-p_reach backstop
 # ---------------------------------------------------------------------------
 
-from app.api.game import P_REACH_FLOOR, P_REACH_MIN_SAMPLE, _ghost_eligible
+from app.srs_opportunity import (
+    P_REACH_FLOOR,
+    P_REACH_MIN_SAMPLE,
+    OpportunityCounters,
+    ghost_eligible,
+)
 
 
 class TestGhostEligibleOpportunityGate:
-    def _call(self, **kwargs):
-        defaults = dict(
-            has_opportunity_events=True,
-            opportunities_since_review=2,
-            pass_streak=0,
-            last_reviewed_at=None,
-            created_at=None,
-            now=NOW,
-            opportunities_30d=0,
-            reached_30d=0,
+    def _call(
+        self,
+        *,
+        has_opportunity_events=True,
+        opportunities_since_review=2,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=None,
+        now=NOW,
+        opportunities_30d=0,
+        reached_30d=0,
+    ):
+        counters = OpportunityCounters(
+            opportunities_since_review=opportunities_since_review,
+            opportunities_30d=opportunities_30d,
+            reached_30d=reached_30d,
+            event_count=1 if has_opportunity_events else 0,
         )
-        defaults.update(kwargs)
-        return _ghost_eligible(**defaults)
+        return ghost_eligible(
+            counters=counters,
+            pass_streak=pass_streak,
+            last_reviewed_at=last_reviewed_at,
+            created_at=created_at,
+            now=now,
+        )
 
     def test_exactly_one_opportunity_since_review_pass_streak_zero_is_not_eligible(self):
         # Matches the due list: priority must be strictly greater than 1.0.
@@ -550,7 +567,7 @@ class TestGhostEligibleOpportunityGate:
 
     def test_backstop_does_not_fire_without_opportunity_events(self):
         reviewed_at = NOW - timedelta(hours=8)
-        assert _ghost_eligible(
+        assert self._call(
             has_opportunity_events=False,
             opportunities_since_review=0,
             pass_streak=0,

@@ -90,6 +90,7 @@ def test_list_blunders_returns_all_for_user(client, auth_headers, db_session):
     assert data["limit"] == 50
     assert data["offset"] == 0
     assert data["due"] is False
+    assert data["practice_ready"] is False
 
 
 def test_list_blunders_empty(client, auth_headers):
@@ -204,50 +205,135 @@ def test_list_blunders_due_includes_high_opportunity_zero_reach(client, auth_hea
     assert blunder.id in ids
 
 
-def test_list_blunders_paginates_with_stable_last_played_order(client, auth_headers, db_session):
+def test_list_blunders_practice_ready_differs_from_srs_due(client, auth_headers, db_session):
+    """A high-opportunity, zero-reach target is SRS due but not ghost-eligible,
+    so it appears under due=true but not under practice_ready=true."""
+    now = datetime.now(timezone.utc)
+    blunder = _create_blunder(
+        db_session,
+        user_id=123,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=now - timedelta(days=5),
+        fen_hash_suffix="due-not-ready",
+    )
+    for idx in range(183):
+        session = GameSession(
+            id=uuid.uuid4(),
+            user_id=123,
+            started_at=now - timedelta(minutes=idx + 1),
+            status="ended",
+            engine_elo=1500,
+            player_color="white",
+        )
+        db_session.add(session)
+        db_session.flush()
+        db_session.add(
+            BlunderOpportunityEvent(
+                blunder_id=blunder.id,
+                session_id=session.id,
+                occurred_at=now - timedelta(minutes=idx + 1),
+                opportunity=True,
+                reached=False,
+            )
+        )
+    db_session.commit()
+
+    due = client.get("/api/blunder?due=true", headers=auth_headers(user_id=123)).json()
+    assert {item["id"] for item in due["items"]} == {blunder.id}
+    assert due["due_total"] == 1
+    assert due["items"][0]["srs_due"] is True
+    assert due["items"][0]["ghost_eligible"] is False
+
+    ready = client.get(
+        "/api/blunder?practice_ready=true", headers=auth_headers(user_id=123)
+    ).json()
+    assert ready["practice_ready"] is True
+    assert ready["due_total"] is None
+    assert blunder.id not in {item["id"] for item in ready["items"]}
+    assert ready["practice_ready_total"] == 0
+
+
+def test_list_blunders_exposes_practice_fields(client, auth_headers, db_session):
+    now = datetime.now(timezone.utc)
+    _create_blunder(
+        db_session,
+        user_id=123,
+        pass_streak=0,
+        last_reviewed_at=now - timedelta(hours=8),
+        fen_hash_suffix="practice-fields",
+    )
+    data = client.get("/api/blunder", headers=auth_headers(user_id=123)).json()
+    item = data["items"][0]
+    assert isinstance(item["practice_priority_score"], float)
+    assert isinstance(item["srs_due"], bool)
+    assert isinstance(item["ghost_eligible"], bool)
+    assert "reached_since_review" in item
+    assert data["practice_ready_total"] is not None
+
+
+def test_list_blunders_default_orders_by_practice_priority(client, auth_headers, db_session):
+    """Default ordering follows practice_priority_score, not recency or srs_priority."""
+    now = datetime.now(timezone.utc)
+    # Identical age and no reviews, so urgency is equal; severity (eval loss) drives
+    # the practice score. Higher eval loss must sort first regardless of recency.
+    recent_session = _create_session(db_session, ended_at=now - timedelta(hours=1))
+    low_severity = _create_blunder(
+        db_session,
+        user_id=123,
+        created_at=now - timedelta(days=2),
+        eval_loss_cp=60,
+        source_session_id=recent_session.id,
+        fen_hash_suffix="low-sev",
+    )
+    high_severity = _create_blunder(
+        db_session,
+        user_id=123,
+        created_at=now - timedelta(days=2),
+        eval_loss_cp=900,
+        fen_hash_suffix="high-sev",
+    )
+
+    response = client.get("/api/blunder", headers=auth_headers(user_id=123))
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total"] == 2
+    ids = [item["id"] for item in data["items"]]
+    # high_severity has a higher practice_priority_score even though low_severity
+    # was played more recently.
+    assert ids == [high_severity.id, low_severity.id]
+    assert (
+        data["items"][0]["practice_priority_score"]
+        > data["items"][1]["practice_priority_score"]
+    )
+
+
+def test_list_blunders_recency_is_tiebreaker_only(client, auth_headers, db_session):
+    """When practice scores tie, more recent last_played sorts first."""
     now = datetime.now(timezone.utc)
     newest = _create_session(db_session, ended_at=now - timedelta(hours=1))
-    tied_a = _create_session(db_session, ended_at=now - timedelta(hours=2))
-    tied_b = _create_session(db_session, ended_at=now - timedelta(hours=2))
+    older = _create_session(db_session, ended_at=now - timedelta(hours=5))
 
-    old = _create_blunder(
+    older_played = _create_blunder(
         db_session,
         user_id=123,
-        created_at=now - timedelta(days=4),
-        source_session_id=tied_a.id,
-        fen_hash_suffix="old",
-    )
-    newer_tie = _create_blunder(
-        db_session,
-        user_id=123,
-        created_at=now - timedelta(days=1),
-        source_session_id=tied_b.id,
-        fen_hash_suffix="newer-tie",
+        created_at=now - timedelta(days=2),
+        source_session_id=older.id,
+        fen_hash_suffix="older-played",
     )
     latest_played = _create_blunder(
         db_session,
         user_id=123,
-        created_at=now - timedelta(days=3),
+        created_at=now - timedelta(days=2),
         source_session_id=newest.id,
         fen_hash_suffix="latest-played",
     )
-    never_played = _create_blunder(
-        db_session,
-        user_id=123,
-        created_at=now,
-        fen_hash_suffix="never-played",
-    )
 
-    response = client.get("/api/blunder?limit=2&offset=0", headers=auth_headers(user_id=123))
+    response = client.get("/api/blunder", headers=auth_headers(user_id=123))
     assert response.status_code == 200
     data = response.json()
-    assert data["total"] == 4
-    assert [item["id"] for item in data["items"]] == [latest_played.id, newer_tie.id]
-
-    response = client.get("/api/blunder?limit=2&offset=2", headers=auth_headers(user_id=123))
-    assert response.status_code == 200
-    data = response.json()
-    assert [item["id"] for item in data["items"]] == [old.id, never_played.id]
+    # Equal practice score → recency tiebreak puts latest_played first.
+    assert [item["id"] for item in data["items"]] == [latest_played.id, older_played.id]
 
 
 def test_list_blunders_latest_review_tie_uses_highest_review_id(client, auth_headers, db_session):

@@ -907,12 +907,16 @@ export interface BlunderListItem {
   last_reviewed_at: string | null
   created_at: string
   srs_priority: number
+  srs_due: boolean
+  ghost_eligible: boolean
+  practice_priority_score: number
   source_session_id?: string | null
   last_session_id: string | null
   last_played_at: string | null
   opportunities_since_review: number
   opportunities_30d: number
   reached_30d: number
+  reached_since_review: number
   p_reach: number
 }
 
@@ -920,13 +924,16 @@ export interface BlunderListResponse {
   items: BlunderListItem[]
   total: number
   due_total: number | null
+  practice_ready_total: number | null
   limit: number
   offset: number
   due: boolean
+  practice_ready: boolean
 }
 
 export interface FetchBlundersParams {
   due?: boolean
+  practiceReady?: boolean
   limit?: number
   offset?: number
 }
@@ -939,6 +946,7 @@ export const fetchBlunders = async (
 ): Promise<BlunderListResponse> => {
   const searchParams = new URLSearchParams()
   if (params.due) searchParams.set('due', 'true')
+  if (params.practiceReady) searchParams.set('practice_ready', 'true')
   if (params.limit !== undefined) searchParams.set('limit', String(params.limit))
   if (params.offset !== undefined) searchParams.set('offset', String(params.offset))
   const qs = searchParams.toString()
