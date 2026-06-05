@@ -203,6 +203,7 @@ def _create_test_schema(conn) -> None:
             player_color VARCHAR(5) NOT NULL,
             generation INTEGER NOT NULL,
             registry_fingerprint TEXT,
+            inputs_fingerprint TEXT,
             computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, player_color, generation)
         )

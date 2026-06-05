@@ -17,11 +17,14 @@ from app.models import (
     UserOpeningScore,
 )
 from app.opening_cache import (
+    OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
     ensure_opening_scores,
     get_latest_opening_score_batch,
     list_cached_opening_scores,
     list_opening_score_candidate_pairs,
+    prune_old_opening_score_batches,
     recompute_opening_scores,
+    recompute_opening_scores_if_needed,
 )
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -606,3 +609,157 @@ def test_srs_review_refreshes_relevant_opening_snapshot(
     batch, rows = list_cached_opening_scores(db_session, 123, "black")
     assert batch is not None
     assert {row.opening_key for row in rows} == {KNIGHT_OPENING_FEN}
+
+
+def _count_batches(db_session, user_id: int, player_color: str) -> int:
+    return (
+        db_session.query(OpeningScoreBatch)
+        .filter(
+            OpeningScoreBatch.user_id == user_id,
+            OpeningScoreBatch.player_color == player_color,
+        )
+        .count()
+    )
+
+
+def test_repeated_recompute_retains_only_latest_batches(db_session):
+    _seed_black_opening_session(db_session)
+
+    for _ in range(5):
+        recompute_opening_scores(db_session, 123, "black")
+
+    batch, rows = list_cached_opening_scores(db_session, 123, "black")
+    remaining = (
+        db_session.query(OpeningScoreBatch)
+        .filter(OpeningScoreBatch.user_id == 123, OpeningScoreBatch.player_color == "black")
+        .order_by(OpeningScoreBatch.generation.desc())
+        .all()
+    )
+
+    # keep=2 retention: only the two newest generations survive.
+    assert len(remaining) == 2
+    assert batch.id == remaining[0].id
+    assert {row.opening_key for row in rows} == {KINGS_PAWN_FEN, KNIGHT_OPENING_FEN}
+    assert all(row.batch_id == batch.id for row in rows)
+
+    # Pruned batches' snapshot rows are gone via ON DELETE CASCADE.
+    kept_ids = {b.id for b in remaining}
+    orphan_scores = (
+        db_session.query(UserOpeningScore)
+        .filter(UserOpeningScore.batch_id.notin_(kept_ids))
+        .count()
+    )
+    assert orphan_scores == 0
+
+
+def test_pruning_scoped_per_user_and_color(db_session):
+    _seed_black_opening_session(db_session, user_id=123)
+    _seed_black_opening_session(db_session, user_id=456)
+
+    for _ in range(4):
+        recompute_opening_scores(db_session, 123, "black")
+    other_batch = recompute_opening_scores(db_session, 456, "black")
+
+    assert _count_batches(db_session, 123, "black") == 2
+    # The unrelated user is untouched by pruning of user 123.
+    assert _count_batches(db_session, 456, "black") == 1
+    assert get_latest_opening_score_batch(db_session, 456, "black").id == other_batch.id
+
+
+def test_prune_helper_recovers_from_failure_without_poisoning_session(db_session):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores(db_session, 123, "black")
+
+    with patch.object(db_session, "commit", side_effect=RuntimeError("boom")):
+        deleted = prune_old_opening_score_batches(db_session, 123, "black", keep=0)
+
+    assert deleted == 0
+    # Session is usable again (rolled back, not left in a failed transaction).
+    assert _count_batches(db_session, 123, "black") == 1
+
+
+def test_if_needed_reuses_batch_when_inputs_unchanged(db_session):
+    _seed_black_opening_session(db_session)
+
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert first is not None
+    assert second is not None
+    assert second.id == first.id
+    assert second.generation == first.generation
+    assert _count_batches(db_session, 123, "black") == 1
+
+
+def test_if_needed_recomputes_when_evidence_mutated_in_place(db_session):
+    session = _seed_black_opening_session(db_session)
+
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    # In-place upsert of a move's eval_delta (no updated_at bump) flips a pass to a
+    # fail, changing the consumed-evidence content fingerprint.
+    move = (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session.id, SessionMove.color == "black")
+        .first()
+    )
+    move.eval_delta = 500
+    db_session.commit()
+
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None
+    assert second.id != first.id
+    assert second.generation > first.generation
+    # Old batch pruned (keep=2 leaves both here; assert latest read is the new one).
+    assert get_latest_opening_score_batch(db_session, 123, "black").id == second.id
+
+
+def test_if_needed_reuses_empty_but_valid_batch(db_session):
+    # Evidence exists (candidate pair) but maps to no scoring roots → empty batch.
+    session = _create_session_row(db_session, user_id=777, player_color="white")
+    db_session.add(
+        SessionMove(
+            session_id=session.id,
+            move_number=1,
+            color="white",
+            move_san="e4",
+            fen_before=START_FULL,
+            fen_after=KINGS_PAWN_FULL,
+            eval_delta=0,
+        )
+    )
+    db_session.commit()
+
+    first = recompute_opening_scores_if_needed(db_session, 777, "white")
+    _, first_rows = list_cached_opening_scores(db_session, 777, "white")
+    assert first is not None
+    assert first_rows == []
+
+    second = recompute_opening_scores_if_needed(db_session, 777, "white")
+
+    assert second is not None
+    assert second.id == first.id
+    assert _count_batches(db_session, 777, "white") == 1
+
+
+def test_if_needed_recomputes_when_batch_stale_for_decay(db_session):
+    _seed_black_opening_session(db_session)
+
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    # Age the batch past the decay interval; fingerprint is unchanged.
+    stale_at = datetime.now(timezone.utc) - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL - timedelta(hours=1)
+    first.computed_at = stale_at
+    db_session.commit()
+
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None
+    assert second.id != first.id
+    assert second.generation > first.generation
+    # Freshly recomputed batch carries a current computed_at (not the stale one).
+    computed_at = second.computed_at
+    if computed_at.tzinfo is None:
+        computed_at = computed_at.replace(tzinfo=timezone.utc)
+    assert computed_at > stale_at + OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL

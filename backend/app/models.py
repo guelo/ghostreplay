@@ -315,6 +315,9 @@ class OpeningScoreBatch(Base):
     player_color: Mapped[str] = mapped_column(String(5), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     registry_fingerprint: Mapped[str | None] = mapped_column(Text)
+    # Content fingerprint over the consumed evidence + registry/config; used to skip
+    # recompute when scoring inputs are unchanged. NULL for pre-migration batches.
+    inputs_fingerprint: Mapped[str | None] = mapped_column(Text)
     computed_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
