@@ -190,16 +190,27 @@ export const classifyMove = (
 }
 
 /**
- * Cache hits must carry enough data to classify the move immediately.
- * Rows missing both explicit classification and eval_delta are treated as
- * misses so the worker can produce a complete result instead of freezing a
- * null classification into session uploads.
+ * Cache hits must carry enough data to classify the move immediately and to
+ * preserve the cached best-move PV. Rows missing either contract are treated
+ * as misses so the worker can produce a complete result instead of freezing
+ * incomplete analysis into session uploads.
  */
 export const canResolveCachedAnalysis = (input: {
+  best_move_uci?: string | null | undefined
+  best_line_uci?: string[] | null | undefined
   classification: MoveClassification | string | null | undefined
   eval_delta: number | null | undefined
 }): boolean => {
-  return input.classification != null || input.eval_delta != null
+  const hasClassification = input.classification != null || input.eval_delta != null
+  if (!hasClassification) return false
+
+  if (!input.best_move_uci) return false
+
+  return (
+    Array.isArray(input.best_line_uci) &&
+    input.best_line_uci.length > 1 &&
+    input.best_line_uci[0] === input.best_move_uci
+  )
 }
 
 // ── Win-chance classifier (Lichess logistic model) ──────────────────

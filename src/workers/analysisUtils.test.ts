@@ -13,6 +13,7 @@ import {
   isWithinRecordingMoveCap,
   classifyMove,
   classifyMoveAdvanced,
+  canResolveCachedAnalysis,
   calculateWinChance,
   checkMateEvents,
   WIN_CHANCE_MULTIPLIER,
@@ -727,5 +728,69 @@ describe('classifyMoveAdvanced', () => {
       isBestMove: false,
     })
     expect(result).toBe('blunder')
+  })
+})
+
+describe('canResolveCachedAnalysis', () => {
+  it('accepts a classified cache hit with a multi-move best line', () => {
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: 'e2e4',
+        best_line_uci: ['e2e4', 'e7e5'],
+        classification: 'best',
+        eval_delta: 0,
+      }),
+    ).toBe(true)
+  })
+
+  it('rejects cache hits with a best move but no usable best line', () => {
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: 'e2e4',
+        best_line_uci: null,
+        classification: 'best',
+        eval_delta: 0,
+      }),
+    ).toBe(false)
+
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: 'e2e4',
+        best_line_uci: ['e2e4'],
+        classification: 'best',
+        eval_delta: 0,
+      }),
+    ).toBe(false)
+
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: 'e2e4',
+        best_line_uci: ['d2d4', 'd7d5'],
+        classification: 'best',
+        eval_delta: 0,
+      }),
+    ).toBe(false)
+  })
+
+  it('still rejects rows missing both classification and eval delta', () => {
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: 'e2e4',
+        best_line_uci: ['e2e4', 'e7e5'],
+        classification: null,
+        eval_delta: null,
+      }),
+    ).toBe(false)
+  })
+
+  it('rejects rows that have no best move to avoid synthesizing a PV-less best line', () => {
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: null,
+        best_line_uci: null,
+        classification: null,
+        eval_delta: 0,
+      }),
+    ).toBe(false)
   })
 })

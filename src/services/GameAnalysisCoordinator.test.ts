@@ -154,6 +154,7 @@ describe('GameAnalysisCoordinator', () => {
       resolveLookup(new Map([
         ['fen-0::uci-0', {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
         }],
       ]))
@@ -220,6 +221,7 @@ describe('GameAnalysisCoordinator', () => {
       resolveLookup(new Map([
         ['fen-0::uci-0', {
           move_san: 'm0', best_move_uci: 'best-0', best_move_san: 'b0',
+          best_line_uci: ['best-0', 'reply-0'],
           played_eval: 10, best_eval: 50, eval_delta: 40, classification: 'mistake',
         }],
       ]))
@@ -314,6 +316,7 @@ describe('GameAnalysisCoordinator', () => {
             move_san: 'd5',
             best_move_uci: 'd7d5',
             best_move_san: 'd5',
+            best_line_uci: ['d7d5', 'g1f3'],
             played_eval: -9980,
             played_eval_mate: -2,
             best_eval: -9980,
@@ -409,6 +412,7 @@ describe('GameAnalysisCoordinator', () => {
       resolveLookup(new Map([
         ['fen-0::uci-0', {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
         }],
       ]))
@@ -525,6 +529,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'e4',
           best_move_uci: 'e2e4',
           best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5'],
           played_eval: 25,
           best_eval: 25,
           eval_delta: 0,
@@ -566,6 +571,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'e4',
           best_move_uci: 'e2e4',
           best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5'],
           played_eval: 25,
           best_eval: 25,
           eval_delta: 0,
@@ -612,7 +618,7 @@ describe('GameAnalysisCoordinator', () => {
       )
     })
 
-    it('ignores incomplete cache hits and lets the worker finish the analysis', async () => {
+    it('ignores cache hits without a usable best line and lets the worker finish the analysis', async () => {
       coordinator.startSession('session-A')
 
       let resolveLookup!: (v: Map<string, unknown>) => void
@@ -632,9 +638,9 @@ describe('GameAnalysisCoordinator', () => {
           best_move_uci: 'e2e4',
           best_move_san: 'e4',
           played_eval: 25,
-          best_eval: null,
-          eval_delta: null,
-          classification: null,
+          best_eval: 25,
+          eval_delta: 0,
+          classification: 'best',
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -651,6 +657,7 @@ describe('GameAnalysisCoordinator', () => {
           id: requestId,
           move: 'e2e4',
           bestMove: 'e2e4',
+          bestLine: ['e2e4', 'e7e5'],
           bestEval: 25,
           playedEval: 25,
           delta: 0,
@@ -691,10 +698,12 @@ describe('GameAnalysisCoordinator', () => {
       resolveLookup(new Map([
         ['fen-0::uci-0', {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
         }],
         ['fen-1::uci-1', {
           move_san: 'm1', best_move_uci: 'uci-1', best_move_san: 'm1',
+          best_line_uci: ['uci-1', 'reply-1'],
           played_eval: 5, best_eval: 5, eval_delta: 0, classification: 'best',
         }],
       ]))
@@ -723,6 +732,7 @@ describe('GameAnalysisCoordinator', () => {
       resolveLookup2(new Map([
         ['fen-2::uci-2', {
           move_san: 'm2', best_move_uci: 'uci-2', best_move_san: 'm2',
+          best_line_uci: ['uci-2', 'reply-2'],
           played_eval: 3, best_eval: 3, eval_delta: 0, classification: 'best',
         }],
       ]))
@@ -765,6 +775,7 @@ describe('GameAnalysisCoordinator', () => {
       resolveLookup(new Map([
         ['fen-0::e2e4', {
           move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5'],
           played_eval: 25, best_eval: 25, eval_delta: 0, classification: 'best',
         }],
       ]))

@@ -847,12 +847,13 @@ describe('useMoveAnalysis', () => {
       await vi.advanceTimersByTimeAsync(200)
     })
 
-    act(() => {
+    await act(async () => {
       resolveLookup(new Map([
         ['fen::d7d5', {
           move_san: 'd5',
           best_move_uci: 'd7d5',
           best_move_san: 'd5',
+          best_line_uci: ['d7d5', 'g1f3'],
           // White-relative mate -2 (white mates) → black player-relative +2.
           played_eval: -9980,
           played_eval_mate: -2,
@@ -863,19 +864,19 @@ describe('useMoveAnalysis', () => {
       ]))
     })
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(0)
-    })
+    await act(async () => {})
 
-    expect(store.getState().analysisMap.get(1)).toEqual(
-      expect.objectContaining({
-        playedEvalMate: 2,
-        currentPositionEvalMate: 2,
-      }),
-    )
+    await vi.waitFor(() => {
+      expect(store.getState().analysisMap.get(1)).toEqual(
+        expect.objectContaining({
+          playedEvalMate: 2,
+          currentPositionEvalMate: 2,
+        }),
+      )
+    })
   })
 
-  it('ignores incomplete cache hits and waits for the worker result', async () => {
+  it('ignores cache hits without a usable best line and waits for the worker result', async () => {
     vi.useFakeTimers()
 
     let resolveLookup!: (value: Map<string, unknown>) => void
@@ -906,9 +907,9 @@ describe('useMoveAnalysis', () => {
           best_move_uci: 'e2e4',
           best_move_san: 'e4',
           played_eval: 25,
-          best_eval: null,
-          eval_delta: null,
-          classification: null,
+          best_eval: 25,
+          eval_delta: 0,
+          classification: 'best',
         }],
       ]))
     })
@@ -930,6 +931,7 @@ describe('useMoveAnalysis', () => {
         id: requestId,
         move: 'e2e4',
         bestMove: 'e2e4',
+        bestLine: ['e2e4', 'e7e5'],
         bestEval: 25,
         playedEval: 25,
         delta: 0,

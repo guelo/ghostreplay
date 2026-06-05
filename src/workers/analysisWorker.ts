@@ -151,6 +151,22 @@ const terminalScoreAfterMove = (
   return { type: "cp", value: 0 };
 };
 
+const buildBestLine = (
+  bestMove: string,
+  rootPv: string[] | null,
+  continuationPv: string[] | null,
+): string[] => {
+  if (rootPv && rootPv.length > 1 && rootPv[0] === bestMove) {
+    return rootPv;
+  }
+
+  if (continuationPv && continuationPv.length > 0) {
+    return [bestMove, ...continuationPv];
+  }
+
+  return [bestMove];
+};
+
 const handleEngineError = (event: ErrorEvent) => {
   const message = event.message || "Failed to initialize Stockfish";
   ctx.postMessage({
@@ -323,8 +339,8 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   // Evaluate the position after the played move, streaming intermediate evals
   const opponentToMove = sideToMove === "w" ? "b" : "w";
   const terminalPlayedScore = terminalScoreAfterMove(request.fen, request.move);
-  const playedEvalSearch = terminalPlayedScore
-    ? { bestmove: "(terminal)", score: terminalPlayedScore }
+  const playedEvalSearch: SearchResult = terminalPlayedScore
+    ? { bestmove: "(terminal)", score: terminalPlayedScore, pv: null }
     : await runSearch(
         request.fen,
         [request.move],
@@ -349,10 +365,15 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   // comparison. The pre-move minimax eval is unreliable in WASM Stockfish because
   // independent searches reach different depths, inflating the delta.
   let postBestScore = playedEvalSearch.score;
+  let postBestSearch: SearchResult | null = null;
   if (request.move !== bestMove) {
     const terminalBestScore = terminalScoreAfterMove(request.fen, bestMove);
-    postBestScore =
-      terminalBestScore ?? (await runSearch(request.fen, [bestMove])).score;
+    if (terminalBestScore) {
+      postBestScore = terminalBestScore;
+    } else {
+      postBestSearch = await runSearch(request.fen, [bestMove]);
+      postBestScore = postBestSearch.score;
+    }
   }
   throwIfCanceled(request.id);
 
@@ -394,12 +415,12 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     classification = classifyMove(delta);
   }
 
-  // Only persist a PV that actually begins with the final bestmove — an
-  // invalid/mismatched tail would be silently truncated by AnalysisBoard's
-  // replay, so fall back to a single-move line instead.
-  const rootPv = bestSearch.pv ?? [];
-  const bestLine =
-    rootPv.length > 0 && rootPv[0] === bestMove ? rootPv : [bestMove];
+  // Prefer the root PV when it begins with the final bestmove. If Stockfish's
+  // last root PV is stale or short, reuse the already-run continuation search
+  // after the best move so new sessions do not persist one-move lines.
+  const continuationPv =
+    request.move === bestMove ? playedEvalSearch.pv : postBestSearch?.pv ?? null;
+  const bestLine = buildBestLine(bestMove, bestSearch.pv, continuationPv);
 
   ctx.postMessage({
     type: "analysis",

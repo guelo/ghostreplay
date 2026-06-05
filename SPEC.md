@@ -114,7 +114,7 @@ graph TD
   * `createAnalysisStore` — per-game analysis results (analysisMap, streaming evals, worker status)
 * **Analysis worker:** `analysisWorker.ts` runs Stockfish-18-lite in a dedicated Web Worker. Managed by `GameAnalysisCoordinator`, a singleton service that survives route navigation so in-flight analysis is never lost.
 * **Opponent engine:** `useStockfishEngine` drives a second Stockfish instance for ghost/engine move selection during play.
-* **Analysis cache:** Before dispatching to the worker, the coordinator queries `GET /api/analysis-cache` (lookupAnalysisCache). A cache hit resolves the analysis immediately; a miss waits for the worker result.
+* **Analysis cache:** The coordinator dispatches worker analysis and batches `POST /api/analysis/lookup` (`lookupAnalysisCache`) in parallel. A cache hit resolves the move only when it has classification data, a `best_move_uci`, and a multi-move `best_line_uci` beginning with that best move; incomplete hits fall through to the worker result.
 * **Forced-move exemption:** When the position has ≤ 2 legal moves, the move is never classified as a blunder and never auto-recorded, regardless of eval delta.
 * **Key hooks:** `useChessGameController` (move application, promotion), `useChessGameLifecycle` (session lifecycle), `useOpponentMove` (ghost/engine reply), `useMoveAnalysis` (wraps coordinator for hook consumers).
 * **Routes** (`AppRoutes.tsx`):
@@ -380,6 +380,7 @@ CREATE TABLE analysis_cache (
     move_san VARCHAR(10) NOT NULL,          -- Move in SAN notation (e.g., "e4")
     best_move_uci VARCHAR(5),               -- Engine's best move in UCI
     best_move_san VARCHAR(10),              -- Engine's best move in SAN
+    best_line_uci TEXT,                     -- Space-joined root best-move PV
     played_eval INTEGER,                    -- Eval after the played move (centipawns)
     best_eval INTEGER,                      -- Eval of best move (centipawns)
     eval_delta INTEGER,                     -- best_eval - played_eval (positive = lost advantage)
@@ -2184,7 +2185,7 @@ Each entry is keyed by `(fen_before, move_uci)` — the exact position before a 
 
 `lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned).
 
-Used in `GameAnalysisCoordinator` and `useMoveAnalysis` before dispatching Stockfish analysis tasks. Cache hits bypass the local engine for those positions entirely.
+Used in `GameAnalysisCoordinator` and `useMoveAnalysis` alongside Stockfish analysis tasks. Cache hits bypass the local engine only when `canResolveCachedAnalysis` can prove the row is complete: it must include classification data, `best_move_uci`, and a multi-move `best_line_uci` whose first move matches `best_move_uci`. Legacy, precomputed, eval-only, or one-token rows are treated as misses so the worker can backfill a full PV.
 
 ### 14.3 Staleness
 
