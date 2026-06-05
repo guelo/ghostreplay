@@ -23,6 +23,4 @@
 - [Plans in beads](feedback_plans_in_beads.md) — always update bead design field with plan content before exiting plan mode
 - [Full plans in beads](feedback_plans_in_beads_full.md) — bead design field must contain the full plan, not a condensed summary
 
-## Beads Workflow
-- Use `bd close --force` when closing issues with open blockers (if UI-only work is complete)
-- Always `bd sync` before and after commits
+
