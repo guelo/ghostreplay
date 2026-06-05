@@ -13,6 +13,23 @@ import AnalysisGraph from "../AnalysisGraph";
 import MoveList from "../MoveList";
 import type { MoveMessage, SrsFailDetail } from "../MoveList";
 
+// Walk back from selectedMoveIndex to the most recent move with a played eval
+// and return it in white's perspective, or null when none is available.
+function selectedEvalCpFromMap(
+  analysisMap: ReadonlyMap<number, { playedEval?: number | null }>,
+  selectedMoveIndex: number | null,
+): number | null {
+  if (selectedMoveIndex === null || selectedMoveIndex < 0) {
+    return null;
+  }
+  for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
+    const analysis = analysisMap.get(idx);
+    if (analysis?.playedEval == null) continue;
+    return toWhitePerspective(analysis.playedEval, idx);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // ConnectedEvalBar
 // ---------------------------------------------------------------------------
@@ -25,17 +42,7 @@ export const ConnectedEvalBar = memo(() => {
   const selectedMoveIndex =
     moveHistory.length === 0 ? null : (viewIndex ?? moveHistory.length - 1);
 
-  const selectedEvalCp = useMemo(() => {
-    if (selectedMoveIndex === null || selectedMoveIndex < 0) {
-      return null;
-    }
-    for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
-      const analysis = analysisMap.get(idx);
-      if (analysis?.playedEval == null) continue;
-      return toWhitePerspective(analysis.playedEval, idx);
-    }
-    return null;
-  }, [analysisMap, selectedMoveIndex]);
+  const selectedEvalCp = selectedEvalCpFromMap(analysisMap, selectedMoveIndex);
 
   return (
     <EvalBar
@@ -85,17 +92,10 @@ export const ConnectedAnalysisGraph = memo(
       return pending;
     }, [moveHistory, analysisMap]);
 
-    const selectedEvalCp = useMemo(() => {
-      if (selectedMoveIndex === null || selectedMoveIndex < 0) {
-        return null;
-      }
-      for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
-        const analysis = analysisMap.get(idx);
-        if (analysis?.playedEval == null) continue;
-        return toWhitePerspective(analysis.playedEval, idx);
-      }
-      return null;
-    }, [analysisMap, selectedMoveIndex]);
+    const selectedEvalCp = selectedEvalCpFromMap(
+      analysisMap,
+      selectedMoveIndex,
+    );
 
     const graphStreamingEval = useMemo(() => {
       if (!streamingEval) return null;
@@ -227,7 +227,8 @@ export const ConnectedMoveList = memo(
           old &&
           old.san === item.san &&
           old.classification === item.classification &&
-          old.eval === item.eval
+          old.eval === item.eval &&
+          old.evalMate === item.evalMate
         ) {
           return old;
         }
