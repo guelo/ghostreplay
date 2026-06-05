@@ -36,7 +36,7 @@ export type MoveMessage = {
 // Helpers (moved from MoveList.tsx)
 // ---------------------------------------------------------------------------
 
-const CLASSIFICATION_ICON: Partial<
+export const CLASSIFICATION_ICON: Partial<
   Record<MoveClassification, { icon: string; title: string }>
 > = {
   best: { icon: "⭐", title: "Best move" },

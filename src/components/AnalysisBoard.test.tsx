@@ -1,7 +1,7 @@
 import { Chess } from 'chess.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '../test/utils'
-import AnalysisBoard from './AnalysisBoard'
+import AnalysisBoard, { computeBoardEvalIcon } from './AnalysisBoard'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
 import { createEmptyTree } from '../types/variationTree'
@@ -1344,5 +1344,84 @@ describe('AnalysisBoard — click-to-move behavior', () => {
     // No yellow selection and no option dots for the opponent piece
     expect(styles.d7).toBeUndefined()
     expect(styles.d6).toBeUndefined()
+  })
+})
+
+describe('computeBoardEvalIcon', () => {
+  it('returns a badge for non-good classifications', () => {
+    for (const c of ['blunder', 'mistake', 'inaccuracy', 'best', 'excellent'] as const) {
+      const icon = computeBoardEvalIcon({
+        square: 'e4',
+        classification: c,
+        boardOrientation: 'white',
+      })
+      expect(icon).not.toBeNull()
+      expect(icon?.classification).toBe(c)
+      expect(icon?.icon).toBeTruthy()
+    }
+  })
+
+  it('skips "good", null, and undefined classifications', () => {
+    expect(
+      computeBoardEvalIcon({ square: 'e4', classification: 'good', boardOrientation: 'white' }),
+    ).toBeNull()
+    expect(
+      computeBoardEvalIcon({ square: 'e4', classification: null, boardOrientation: 'white' }),
+    ).toBeNull()
+    expect(
+      computeBoardEvalIcon({ square: 'e4', classification: undefined, boardOrientation: 'white' }),
+    ).toBeNull()
+  })
+
+  it('skips a null/invalid square', () => {
+    expect(
+      computeBoardEvalIcon({ square: null, classification: 'blunder', boardOrientation: 'white' }),
+    ).toBeNull()
+    expect(
+      computeBoardEvalIcon({ square: 'z9', classification: 'blunder', boardOrientation: 'white' }),
+    ).toBeNull()
+  })
+
+  it('positions the badge at the top-right of the square (white)', () => {
+    // e4: file=4, rank=4 → squareLeft=50%, squareTop=50%
+    const icon = computeBoardEvalIcon({
+      square: 'e4',
+      classification: 'mistake',
+      boardOrientation: 'white',
+    })
+    expect(icon?.left).toBe('61.5%') // 50 + 11.5
+    expect(icon?.top).toBe('51%') // 50 + 1
+  })
+
+  it('mirrors to top-left on the right edge (h-file, white)', () => {
+    // h4: file=7 → right edge; squareLeft=87.5%
+    const icon = computeBoardEvalIcon({
+      square: 'h4',
+      classification: 'blunder',
+      boardOrientation: 'white',
+    })
+    expect(icon?.left).toBe('88.5%') // 87.5 + 1
+    expect(icon?.top).toBe('51%')
+  })
+
+  it('clamps top to the badge radius on the top rank (white)', () => {
+    // e8: rank=8 → squareTop=0; centerY clamped to 2.5%
+    const icon = computeBoardEvalIcon({
+      square: 'e8',
+      classification: 'best',
+      boardOrientation: 'white',
+    })
+    expect(icon?.top).toBe('2.5%')
+  })
+
+  it('flips coordinates and edges for black orientation', () => {
+    // a1 black: file=0 → right edge; squareLeft=(7-0)*12.5=87.5; rank=1 → top edge
+    const icon = computeBoardEvalIcon({
+      square: 'a1',
+      classification: 'inaccuracy',
+      boardOrientation: 'black',
+    })
+    expect(icon?.left).toBe('88.5%') // mirrored to top-left of edge square
+    expect(icon?.top).toBe('2.5%') // clamped at top
   })
 })

@@ -17,7 +17,8 @@ import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
 import MaterialDisplay from "./MaterialDisplay";
-import { formatEval } from "./MoveRow";
+import { formatEval, CLASSIFICATION_ICON } from "./MoveRow";
+import type { MoveClassification } from "../workers/analysisUtils";
 import {
   isAnalysisBoardDiagnosticsEnabled,
   logAnalysisBoardDiagnostic,
@@ -252,6 +253,69 @@ const buildMainLineMoveDetails = (
       bestSquares,
     };
   });
+};
+
+export type BoardEvalIcon = {
+  icon: string;
+  title: string;
+  classification: MoveClassification;
+  left: string;
+  top: string;
+};
+
+/**
+ * Compute the on-board eval-icon badge for the current move's destination
+ * square. Pure (no DOM): positions are expressed as percentages of the board
+ * frame, where each square is 12.5%. Returns null when no badge should show
+ * ("good"/null classification, missing icon, or invalid square).
+ */
+export const computeBoardEvalIcon = ({
+  square,
+  classification,
+  boardOrientation,
+}: {
+  square: string | null;
+  classification: MoveClassification | null | undefined;
+  boardOrientation: "white" | "black";
+}): BoardEvalIcon | null => {
+  if (!square || classification == null || classification === "good") {
+    return null;
+  }
+  const iconData = CLASSIFICATION_ICON[classification];
+  if (!iconData) return null;
+
+  const file = square.charCodeAt(0) - 97; // a=0 … h=7
+  const rank = parseInt(square[1] ?? "", 10); // 1 … 8
+  if (file < 0 || file > 7 || !(rank >= 1 && rank <= 8)) return null;
+
+  let squareLeft: number;
+  let squareTop: number;
+  let isRightEdge: boolean;
+  if (boardOrientation === "white") {
+    squareLeft = file * 12.5;
+    squareTop = (8 - rank) * 12.5;
+    isRightEdge = file === 7;
+  } else {
+    squareLeft = (7 - file) * 12.5;
+    squareTop = (rank - 1) * 12.5;
+    isRightEdge = file === 0;
+  }
+
+  // Badge diameter is 5% of the board (≈40px at a 100px square). The center
+  // sits ~1% (≈8px) inward from the square's top-right corner so the badge
+  // protrudes "somewhat outside". On the visual right edge, mirror to the
+  // top-left corner. Clamp the center Y to the radius so the top row isn't
+  // clipped at the board's top.
+  const centerX = isRightEdge ? squareLeft + 1 : squareLeft + 11.5;
+  const centerY = Math.max(squareTop + 1, 2.5);
+
+  return {
+    icon: iconData.icon,
+    title: iconData.title,
+    classification,
+    left: `${centerX}%`,
+    top: `${centerY}%`,
+  };
 };
 
 /** Check whether a FEN already has a pending analysis request in flight. */
@@ -947,6 +1011,24 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     mainLineMoveDetails,
   ]);
 
+  // Eval-icon badge rendered on the board at the current move's destination.
+  // Skipped in variations (no classification) and for good/null moves.
+  const boardEvalIcon = useMemo((): BoardEvalIcon | null => {
+    if (isInVariation || effectiveIndex < 0) return null;
+    const square = mainLineMoveDetails[effectiveIndex]?.playedSquares?.to ?? null;
+    return computeBoardEvalIcon({
+      square,
+      classification: moves[effectiveIndex]?.classification ?? null,
+      boardOrientation,
+    });
+  }, [
+    isInVariation,
+    effectiveIndex,
+    mainLineMoveDetails,
+    moves,
+    boardOrientation,
+  ]);
+
   // Merge last-move highlight with click-to-select option dots (option styles win)
   const squareStyles = useMemo(
     (): Record<string, React.CSSProperties> => ({ ...lastMoveSquares, ...optionSquares }),
@@ -1245,6 +1327,17 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                   },
                 }}
               />
+              {boardEvalIcon && (
+                <div className="board-eval-icons" aria-hidden="true">
+                  <div
+                    className={`board-eval-icon move-icon--${boardEvalIcon.classification}`}
+                    style={{ left: boardEvalIcon.left, top: boardEvalIcon.top }}
+                    title={boardEvalIcon.title}
+                  >
+                    {boardEvalIcon.icon}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
