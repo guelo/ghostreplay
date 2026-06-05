@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import HistoryPage from './HistoryPage';
 
@@ -68,6 +69,7 @@ const HISTORY_RESPONSE = [
     result: 'checkmate_win',
     engine_elo: 1500,
     ended_at: '2026-04-20T12:00:00Z',
+    opening_name: 'Sicilian Defense',
     summary: { total_moves: 20, blunders: 0, mistakes: 1, inaccuracies: 2, average_centipawn_loss: 15, accuracy: 88 },
   },
 ];
@@ -175,6 +177,41 @@ describe('HistoryPage', () => {
     });
 
     expect(mockFetchSessionOpenings).not.toHaveBeenCalled();
+  });
+
+  it('selecting a different game in the dropdown updates the analysis', async () => {
+    const user = userEvent.setup();
+    mockFetchHistory.mockResolvedValue([
+      ...HISTORY_RESPONSE,
+      {
+        session_id: 'def-456',
+        player_color: 'black',
+        result: 'draw',
+        engine_elo: 1700,
+        ended_at: '2026-04-21T12:00:00Z',
+        opening_name: 'French Defense',
+        summary: { total_moves: 30, blunders: 1, mistakes: 0, inaccuracies: 1, average_centipawn_loss: 18, accuracy: 80 },
+      },
+    ]);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+    });
+    expect(mockFetchAnalysis).toHaveBeenCalledWith('abc-123');
+
+    await user.click(screen.getByRole('button', { name: /Win vs 1500/ }));
+    await user.click(screen.getByText('French Defense'));
+
+    await waitFor(() => {
+      expect(mockFetchAnalysis).toHaveBeenCalledWith('def-456');
+    });
   });
 
   it('shows empty state when no games played', async () => {

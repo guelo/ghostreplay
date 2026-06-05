@@ -10,35 +10,12 @@ import {
 } from "../utils/api";
 import type { OpenHistoryOptions } from "../components/chess-game/types";
 import AnalysisBoard, { type AnalysisBoardRef } from "../components/AnalysisBoard";
+import GameSelector from "../components/GameSelector";
 import GameReviewStats from "../components/GameReviewStats";
 import GameOpeningLineage from "../components/GameOpeningLineage";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
 import "../App.css";
-
-function resultLabel(result: string | null): string {
-  switch (result) {
-    case "checkmate_win":
-      return "Win";
-    case "checkmate_loss":
-      return "Loss";
-    case "resign":
-      return "Resigned";
-    case "draw":
-      return "Draw";
-    default:
-      return result ?? "Unknown";
-  }
-}
-
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
 
 const POLL_INTERVAL_MS = 2000;
 const POLL_MAX_ATTEMPTS = 60;
@@ -190,11 +167,10 @@ function HistoryPage() {
         <section className="history-shell">
           {games.length > 0 && (
             <div className="game-selector-row">
-              <select
-                className="game-selector"
-                value={selectedId ?? ""}
-                onChange={(e) => {
-                  const id = e.target.value;
+              <GameSelector
+                games={games}
+                selectedId={selectedId}
+                onChange={(id) => {
                   if (id && id !== selectedId) {
                     setAnalysisLoading(true);
                     setAnalysis(null);
@@ -202,15 +178,7 @@ function HistoryPage() {
                     setSelectedId(id);
                   }
                 }}
-              >
-                {games.map((g) => (
-                  <option key={g.session_id} value={g.session_id}>
-                    {resultLabel(g.result)} vs {g.engine_elo} —{" "}
-                    {g.ended_at ? formatDate(g.ended_at) : "In progress"} (
-                    {g.summary.total_moves} moves)
-                  </option>
-                ))}
-              </select>
+              />
               {selectedId && (
                 <Link to={`/game?id=${selectedId}`} className="game-share-link" aria-label="Open game analysis link">
                   &#x1F517;

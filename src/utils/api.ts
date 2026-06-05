@@ -754,6 +754,7 @@ export interface HistoryGame {
   result: string | null
   engine_elo: number
   player_color: string
+  opening_name: string | null
   summary: GameSummary
 }
 

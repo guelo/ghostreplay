@@ -14,9 +14,21 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 
-from app.opening_graph import OpeningGraph, get_opening_graph
+from app.opening_graph import OpeningGraph, _fen_from_board, get_opening_graph
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_opening_key(fen: str | None) -> str | None:
+    """Normalize a stored FEN to the 4-field opening_key form."""
+    if not fen:
+        return None
+    try:
+        import chess
+
+        return _fen_from_board(chess.Board(fen))
+    except (ValueError, KeyError):
+        return None
 
 # ---------------------------------------------------------------------------
 # Family derivation
@@ -430,3 +442,42 @@ def _reset_opening_roots_for_testing() -> None:
     """Clear the singleton so the next call rebuilds."""
     global _opening_roots
     _opening_roots = None
+
+
+# ---------------------------------------------------------------------------
+# Played-order opening chain
+# ---------------------------------------------------------------------------
+
+
+def played_opening_chain(
+    fens_in_move_order: list[str | None],
+    roots: OpeningRoots,
+) -> list[OpeningRoot]:
+    """Walk played positions in MOVE ORDER, appending each boundary opening
+    root crossed (deduping consecutive repeats).
+
+    Returns the broadest -> deepest chain of roots along this game's DAG path.
+    Order comes from the move-order walk, NOT from OpeningRoot.depth (which is
+    graph BFS depth, not authoritative played order).
+    """
+    chain: list[OpeningRoot] = []
+    for fen in fens_in_move_order:
+        opening_key = _normalize_opening_key(fen)
+        if opening_key is None:
+            continue
+        root = roots.get_root(opening_key)
+        if root is None:
+            continue
+        if chain and chain[-1].opening_key == root.opening_key:
+            continue
+        chain.append(root)
+    return chain
+
+
+def deepest_opening_name(
+    fens_in_move_order: list[str | None],
+    roots: OpeningRoots,
+) -> str | None:
+    """Return the name of the most-specific (deepest crossed) opening root."""
+    chain = played_opening_chain(fens_in_move_order, roots)
+    return chain[-1].opening_name if chain else None

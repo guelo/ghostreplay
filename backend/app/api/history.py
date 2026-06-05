@@ -15,6 +15,7 @@ from app.accuracy import (
 )
 from app.db import get_db
 from app.models import GameSession, SessionMove
+from app.opening_roots import deepest_opening_name, get_opening_roots
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import visible_session_filter
 
@@ -37,6 +38,7 @@ class HistoryGame(BaseModel):
     result: str | None
     engine_elo: int
     player_color: str
+    opening_name: str | None = None
     summary: GameSummary
 
 
@@ -90,16 +92,27 @@ def get_history(
             SessionMove.color,
             SessionMove.eval_cp,
             SessionMove.eval_mate,
+            SessionMove.fen_after,
         )
         .filter(SessionMove.session_id.in_(session_ids))
         .order_by(SessionMove.move_number.asc(), color_order.asc())
         .all()
     )
     moves_by_session: dict[uuid.UUID, list[AccuracyMove]] = {}
+    fens_by_session: dict[uuid.UUID, list[str | None]] = {}
     for row in move_rows:
         moves_by_session.setdefault(row.session_id, []).append(
             AccuracyMove(color=row.color, eval_cp=row.eval_cp, eval_mate=row.eval_mate)
         )
+        fens_by_session.setdefault(row.session_id, []).append(row.fen_after)
+
+    deepest_by_session: dict[uuid.UUID, str | None] = {}
+    if fens_by_session:
+        # Only cold-load the opening registry when there are moves to classify.
+        roots = get_opening_roots()
+        deepest_by_session = {
+            sid: deepest_opening_name(fens, roots) for sid, fens in fens_by_session.items()
+        }
 
     player_color_by_session = {s.id: s.player_color for s in sessions}
     expected_by_session = {s.id: expected_total_moves_from_pgn(s.pgn) for s in sessions}
@@ -138,6 +151,7 @@ def get_history(
                 result=s.result,
                 engine_elo=s.engine_elo,
                 player_color=s.player_color,
+                opening_name=deepest_by_session.get(s.id),
                 summary=stats_by_session.get(s.id, empty_summary),
             )
             for s in sessions

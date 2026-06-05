@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from app.models import GameSession
+from app.opening_roots import OpeningRoot, _normalize_opening_key
 
 
 def _end_game(client, auth_headers, session_id, user_id=123, result="checkmate_win"):
@@ -129,6 +131,73 @@ def test_history_limit_validation(client, auth_headers):
 
     response = client.get("/api/history?limit=101", headers=auth_headers(user_id=123))
     assert response.status_code == 422
+
+
+class _FakeRoots:
+    """Minimal roots registry stub exposing get_root for chain walking."""
+
+    def __init__(self, roots_by_key):
+        self._roots = roots_by_key
+
+    def get_root(self, opening_key):
+        return self._roots.get(opening_key)
+
+
+def _make_root(name):
+    return OpeningRoot(
+        opening_key="k",
+        opening_name=name,
+        opening_family=name,
+        eco=None,
+        depth=1,
+        parent_keys=frozenset(),
+        child_keys=frozenset(),
+    )
+
+
+def test_history_opening_name_populated_when_root_crossed(
+    client, auth_headers, create_game_session
+):
+    session_id = create_game_session(user_id=123)
+    _end_game(client, auth_headers, session_id)
+
+    # A real FEN after 1. e4, so _normalize_opening_key yields a valid key.
+    fen_after = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": fen_after, "eval_delta": 0, "classification": "best",
+        },
+    ])
+
+    key = _normalize_opening_key(fen_after)
+    fake = _FakeRoots({key: _make_root("King's Pawn Game")})
+
+    with patch("app.api.history.get_opening_roots", return_value=fake):
+        response = client.get("/api/history", headers=auth_headers(user_id=123))
+
+    game = response.json()["games"][0]
+    assert game["opening_name"] == "King's Pawn Game"
+
+
+def test_history_opening_name_null_for_unknown_positions(
+    client, auth_headers, create_game_session
+):
+    session_id = create_game_session(user_id=123)
+    _end_game(client, auth_headers, session_id)
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 0, "classification": "best",
+        },
+    ])
+
+    fake = _FakeRoots({})
+    with patch("app.api.history.get_opening_roots", return_value=fake):
+        response = client.get("/api/history", headers=auth_headers(user_id=123))
+
+    game = response.json()["games"][0]
+    assert game["opening_name"] is None
 
 
 def _convert_to_drill(db_session, session_id, rated_start_ply):

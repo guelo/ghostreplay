@@ -31,8 +31,8 @@ from app.opening_cache import (
     opening_score_inputs_fingerprint,
     recompute_opening_scores_if_needed,
 )
-from app.opening_graph import _fen_from_board, get_opening_graph
-from app.opening_roots import get_opening_roots
+from app.opening_graph import get_opening_graph
+from app.opening_roots import get_opening_roots, played_opening_chain
 from app.models import (
     AnalysisCache,
     Blunder,
@@ -166,18 +166,6 @@ class OpeningLineageItem(BaseModel):
 class SessionOpeningsResponse(BaseModel):
     player_color: str
     lineage: list[OpeningLineageItem]
-
-
-def _normalize_opening_key(fen: str | None) -> str | None:
-    """Normalize a stored FEN to the 4-field opening_key form."""
-    if not fen:
-        return None
-    try:
-        import chess
-
-        return _fen_from_board(chess.Board(fen))
-    except (ValueError, KeyError):
-        return None
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -842,17 +830,7 @@ def get_session_openings(
     # Walk played positions in move order; whenever a position is a boundary
     # opening root, append it to the chain (dedup consecutive). The order roots
     # are crossed in is broadest -> deepest along this game's DAG path.
-    chain: list = []
-    for move in session_moves:
-        opening_key = _normalize_opening_key(move.fen_after)
-        if opening_key is None:
-            continue
-        root = roots_registry.get_root(opening_key)
-        if root is None:
-            continue
-        if chain and chain[-1].opening_key == root.opening_key:
-            continue
-        chain.append(root)
+    chain = played_opening_chain([move.fen_after for move in session_moves], roots_registry)
 
     if not chain:
         return SessionOpeningsResponse(player_color=player_color, lineage=[])
