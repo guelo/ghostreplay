@@ -374,8 +374,9 @@ describe('MoveList auto-scroll', () => {
 
     frames.flushAll()
 
-    expect(scrollTo).toHaveBeenCalledWith({ top: 54, behavior: 'auto' })
-    expect(getScrollTop()).toBe(54)
+    // bottom-clip with a 2-row margin: targetBottom 174 + margin 48 - clientHeight 120
+    expect(scrollTo).toHaveBeenCalledWith({ top: 102, behavior: 'auto' })
+    expect(getScrollTop()).toBe(102)
   })
 
   it('auto-scrolls the latest message bubble with the shared helper', () => {
@@ -421,6 +422,104 @@ describe('MoveList auto-scroll', () => {
 
     expect(scrollTo).toHaveBeenCalledWith({ top: 70, behavior: 'smooth' })
     expect(getScrollTop()).toBe(70)
+  })
+
+  it('keeps a 2-row margin below the selected move when room exists', () => {
+    const frames = installAnimationFrameQueue()
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={noop}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 200,
+      headerHeight: 32,
+      initialScrollTop: 0,
+    })
+    const selectedMove = container.querySelector('.move-button.selected') as HTMLButtonElement
+    mockTargetRect(selectedMove, {
+      containerTop: 100,
+      contentTop: 190,
+      initialScrollTop: 0,
+      height: 24,
+    })
+
+    frames.flushAll()
+
+    // bottom-clip: targetBottom 214 + margin (2*24=48) - clientHeight 200
+    expect(scrollTo).toHaveBeenCalledWith({ top: 62, behavior: 'auto' })
+    expect(getScrollTop()).toBe(62)
+  })
+
+  it('collapses the margin on a short viewport so the selection stays visible', () => {
+    const frames = installAnimationFrameQueue()
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={noop}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 68, // header 32 + ~1.5 rows
+      headerHeight: 32,
+      initialScrollTop: 0,
+    })
+    const selectedMove = container.querySelector('.move-button.selected') as HTMLButtonElement
+    mockTargetRect(selectedMove, {
+      containerTop: 100,
+      contentTop: 50,
+      initialScrollTop: 0,
+      height: 24,
+    })
+
+    frames.flushAll()
+
+    // desiredMargin 48 clamps to visibleHeight(36) - height(24) = 12.
+    // targetBottom 74 + margin 12 - clientHeight 68 = 18.
+    expect(scrollTo).toHaveBeenCalledWith({ top: 18, behavior: 'auto' })
+    // After scrolling, the selected row's top (50) sits at the sticky inset (18 + 32).
+    expect(getScrollTop()).toBe(18)
+  })
+
+  it('top-aligns an oversized selected move without applying the margin', () => {
+    const frames = installAnimationFrameQueue()
+    const { container } = render(
+      <MoveList
+        moves={GAME_MOVES}
+        currentIndex={0}
+        onNavigate={noop}
+      />,
+    )
+
+    const scrollContainer = container.querySelector('.move-list-scroll') as HTMLDivElement
+    const { scrollTo, getScrollTop } = setMoveListScrollMetrics(scrollContainer, {
+      containerTop: 100,
+      clientHeight: 120,
+      headerHeight: 32,
+      initialScrollTop: 0,
+    })
+    const selectedMove = container.querySelector('.move-button.selected') as HTMLButtonElement
+    mockTargetRect(selectedMove, {
+      containerTop: 100,
+      contentTop: 50,
+      initialScrollTop: 0,
+      height: 100, // taller than visibleHeight (120 - 32 = 88)
+    })
+
+    frames.flushAll()
+
+    // oversized target: top-align below the sticky inset (targetTop 50 - 32)
+    expect(scrollTo).toHaveBeenCalledWith({ top: 18, behavior: 'auto' })
+    expect(getScrollTop()).toBe(18)
   })
 })
 

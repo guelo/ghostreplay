@@ -59,6 +59,7 @@ const EMPTY_MESSAGES: ReadonlyMap<number, MoveMessage[]> = new Map();
 const EMPTY_BUBBLES: MoveMessage[] = [];
 const NAVIGATION_SCROLL_BEHAVIOR: ScrollBehavior = "auto";
 const MESSAGE_SCROLL_BEHAVIOR: ScrollBehavior = "smooth";
+const MOVE_LIST_ROWS_BELOW_SELECTION = 2;
 
 const getMoveListStickyInset = (container: HTMLDivElement): number => {
   const containerRect = container.getBoundingClientRect();
@@ -90,6 +91,7 @@ const scrollMoveListTargetIntoView = (
   target: HTMLElement,
   stickyInset: number,
   behavior: ScrollBehavior,
+  rowsBelow = 0,
 ) => {
   const containerRect = container.getBoundingClientRect();
   const targetRect = target.getBoundingClientRect();
@@ -109,8 +111,13 @@ const scrollMoveListTargetIntoView = (
     return;
   }
 
-  if (targetBottom > visibleBottom) {
-    setMoveListScrollTop(container, targetBottom - container.clientHeight, behavior);
+  // Size-aware bottom margin: keep ~rowsBelow rows of context below the target,
+  // but never push the target's top above the visible top (selection visibility
+  // takes priority over the margin on short viewports).
+  const desiredMargin = targetRect.height * rowsBelow;
+  const margin = Math.min(desiredMargin, Math.max(0, visibleHeight - targetRect.height));
+  if (targetBottom + margin > visibleBottom) {
+    setMoveListScrollTop(container, targetBottom + margin - container.clientHeight, behavior);
   }
 };
 
@@ -282,6 +289,7 @@ const MoveList = ({
         target,
         getMoveListStickyInset(container),
         NAVIGATION_SCROLL_BEHAVIOR,
+        MOVE_LIST_ROWS_BELOW_SELECTION,
       );
     });
     return () => cancelAnimationFrame(id);
@@ -300,6 +308,7 @@ const MoveList = ({
         el,
         getMoveListStickyInset(container),
         NAVIGATION_SCROLL_BEHAVIOR,
+        MOVE_LIST_ROWS_BELOW_SELECTION,
       );
     });
     return () => cancelAnimationFrame(id);
