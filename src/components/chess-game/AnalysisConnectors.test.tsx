@@ -13,6 +13,8 @@ const makeAnalysis = (overrides: Partial<AnalysisResult> & Pick<AnalysisResult, 
   id: crypto.randomUUID(),
   move: 'e2e4',
   currentPositionEval: 0,
+  playedEvalMate: null,
+  currentPositionEvalMate: null,
   moveIndex: null,
   recordable: false,
   ...overrides,
@@ -159,6 +161,40 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
     const fresh = capturedMoveListProps.freshlyResolvedIndices as ReadonlySet<number>;
     expect(fresh.has(0)).toBe(true); // player move marked
     expect(fresh.has(1)).toBe(false); // engine move not marked
+  });
+
+  it("rerenders the annotated row when only the mate count changes", () => {
+    useGameStore.setState({
+      moveHistory: [makeMoveRecord(NORMAL_FEN)],
+      viewIndex: null,
+      playerColor: "white",
+    });
+
+    renderConnected();
+
+    act(() => {
+      store.getState().resolveAnalysis(
+        0,
+        makeAnalysis({ moveIndex: 0, playedEval: 30, playedEvalMate: null, bestEval: 30, bestMove: "e4", delta: 0, classification: "good", blunder: false }),
+      );
+    });
+
+    const before = (capturedMoveListProps.moves as { evalMate: number | null }[])[0];
+    expect(before.evalMate).toBeNull();
+
+    // Same eval/classification, mate count newly present: the stability memo
+    // must yield a fresh row object instead of reusing the old one.
+    act(() => {
+      store.setState({
+        analysisMap: new Map([
+          [0, makeAnalysis({ moveIndex: 0, playedEval: 30, playedEvalMate: 2, bestEval: 30, bestMove: "e4", delta: 0, classification: "good", blunder: false })],
+        ]),
+      });
+    });
+
+    const after = (capturedMoveListProps.moves as { evalMate: number | null }[])[0];
+    expect(after.evalMate).toBe(2);
+    expect(after).not.toBe(before);
   });
 
   it("does not include indices after resetTransient", () => {

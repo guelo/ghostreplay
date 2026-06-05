@@ -32,6 +32,10 @@ export type AnalysisWorkerResponse =
       bestLine: string[]
       bestEval: number | null
       playedEval: number | null
+      /** Player-relative mate count for the best move, null when not a mate. */
+      bestEvalMate: number | null
+      /** Player-relative mate count for the played move, null when not a mate. */
+      playedEvalMate: number | null
       delta: number | null
       classification: MoveClassification | null
     }

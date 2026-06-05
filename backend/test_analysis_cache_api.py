@@ -219,6 +219,57 @@ def test_session_moves_black_eval_flipped_for_cache(
     assert cached.classification == "best"
 
 
+def test_session_moves_mate_round_trips_through_cache_and_lookup(
+    client, auth_headers, create_game_session, db_session
+):
+    """eval_mate is player-relative on upload, stored white-relative, and
+    returned white-relative from the lookup endpoint."""
+    session_id = create_game_session(user_id=123, player_color="black")
+
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "black",
+                    "move_san": "Qh4#",
+                    "fen_after": "rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3",
+                    "eval_cp": 10000,
+                    "eval_mate": 1,
+                    "best_move_san": "Qh4#",
+                    "best_move_eval_cp": 10000,
+                    "eval_delta": 0,
+                    "classification": "best",
+                    "fen_before": AFTER_E4_FEN,
+                    "move_uci": "d8h4",
+                    "best_move_uci": "d8h4",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+
+    assert response.status_code == 200
+
+    cached = db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == AFTER_E4_FEN,
+        AnalysisCache.move_uci == "d8h4",
+    ).first()
+    assert cached is not None
+    # Black player mate in 1 → white-relative -1.
+    assert cached.played_eval_mate == -1
+
+    lookup = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": AFTER_E4_FEN, "move_uci": "d8h4"}]},
+        headers=auth_headers(user_id=123),
+    )
+    assert lookup.status_code == 200
+    result = lookup.json()["results"][f"{AFTER_E4_FEN}::d8h4"]
+    assert result["played_eval_mate"] == -1
+
+
 def test_session_moves_without_cache_fields_skips_cache(
     client, auth_headers, create_game_session, db_session
 ):

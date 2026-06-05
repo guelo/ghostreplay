@@ -1024,7 +1024,7 @@ describe('AnalysisBoard — variation tree integration', () => {
     mockSelectedVarNodeId = 'var-node-1'
     // Return cached analysis for this variation FEN
     mockGetVarAnalysis.mockImplementation((fen: string) => {
-      if (fen === varNodeFen) return { playedEval: 50, id: 'req-1', move: 'Bc4', bestMove: 'Nf3', bestEval: 30, currentPositionEval: null, moveIndex: null, delta: null, classification: null, blunder: false, recordable: false }
+      if (fen === varNodeFen) return { playedEval: 50, id: 'req-1', move: 'Bc4', bestMove: 'Nf3', bestEval: 30, currentPositionEval: null, playedEvalMate: null, currentPositionEvalMate: null, moveIndex: null, delta: null, classification: null, blunder: false, recordable: false }
       return undefined
     })
 
@@ -1135,7 +1135,7 @@ describe('AnalysisBoard — handleDrop behavior', () => {
     // Mock: getVarAnalysis returns a result for the FEN that d5 produces
     mockGetVarAnalysis.mockImplementation(() => ({
       playedEval: 10, id: 'old-req', move: 'd5', bestMove: 'e5',
-      bestEval: 20, currentPositionEval: null, moveIndex: null,
+      bestEval: 20, currentPositionEval: null, playedEvalMate: null, currentPositionEvalMate: null, moveIndex: null,
       delta: null, classification: null, blunder: false, recordable: false,
     }))
 

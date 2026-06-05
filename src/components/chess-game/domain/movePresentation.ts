@@ -1,7 +1,7 @@
 import type React from "react";
 import { Chess } from "chess.js";
 import type { AnalysisResult } from "../../../hooks/useMoveAnalysis";
-import { toWhitePerspective } from "../../../workers/analysisUtils";
+import { toWhitePerspective, toWhitePerspectiveMate } from "../../../workers/analysisUtils";
 import { STARTING_FEN } from "../config";
 
 export type MoveRecord = {
@@ -125,6 +125,10 @@ export const deriveAnnotatedMoves = (
         analysis?.playedEval != null
           ? toWhitePerspective(analysis.playedEval, i)
           : undefined,
+      evalMate:
+        analysis?.playedEvalMate != null
+          ? toWhitePerspectiveMate(analysis.playedEvalMate, i)
+          : null,
     };
   });
 };

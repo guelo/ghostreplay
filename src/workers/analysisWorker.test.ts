@@ -255,6 +255,8 @@ describe('analysisWorker', () => {
           bestMove: 'g6e8',
           playedEval: 10000,
           bestEval: 10000,
+          playedEvalMate: 0,
+          bestEvalMate: 0,
           delta: 0,
         }),
       )
@@ -407,6 +409,9 @@ describe('analysisWorker', () => {
           id: 'analysis-pv',
           bestMove: 'e2e4',
           bestLine: ['e2e4', 'e7e5', 'g1f3'],
+          // cp-only evals carry no mate count.
+          playedEvalMate: null,
+          bestEvalMate: null,
         }),
       )
     })
@@ -457,6 +462,55 @@ describe('analysisWorker', () => {
           id: 'analysis-bad-pv',
           bestMove: 'e2e4',
           bestLine: ['e2e4'],
+        }),
+      )
+    })
+  })
+
+  it('emits player-relative mate counts when the engine reports a mate score', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'analysis-mate-score',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        'position fen rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+      )
+    })
+    engineMessageHandler?.('bestmove e2e4')
+
+    // Post-played search: black to move and getting mated in 3 (mate -3 from
+    // the side-to-move/black perspective). White player delivers mate in 3.
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        expect.stringContaining('moves e2e4'),
+      )
+    })
+    engineMessageHandler?.('info depth 17 score mate -3 pv a7a6')
+    engineMessageHandler?.('bestmove a7a6')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'analysis',
+          id: 'analysis-mate-score',
+          playedEvalMate: 3,
+          bestEvalMate: 3,
         }),
       )
     })

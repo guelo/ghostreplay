@@ -4,7 +4,9 @@ import {
   mateToCp,
   normalizeScore,
   toWhitePerspective,
+  toWhitePerspectiveMate,
   scoreForPlayer,
+  mateForPlayer,
   getSideToMove,
   computeAnalysisResult,
   isRecordableFailure,
@@ -217,6 +219,52 @@ describe('scoreForPlayer', () => {
     expect(scoreForPlayer(mateIn2, 'w', 'white')).toBe(9980)
     // For black player: -9980
     expect(scoreForPlayer(mateIn2, 'w', 'black')).toBe(-9980)
+  })
+})
+
+describe('mateForPlayer', () => {
+  it('returns null for non-mate scores', () => {
+    expect(mateForPlayer({ type: 'cp', value: 100 }, 'w', 'white')).toBeNull()
+    expect(mateForPlayer(null, 'w', 'white')).toBeNull()
+  })
+
+  it('returns player-relative mate count when player is side to move', () => {
+    const mateIn2: EngineScore = { type: 'mate', value: 2 }
+    // White to move mates in 2; white player delivers it.
+    expect(mateForPlayer(mateIn2, 'w', 'white')).toBe(2)
+    // Same position from black player's view: white mates them.
+    expect(mateForPlayer(mateIn2, 'w', 'black')).toBe(-2)
+  })
+
+  it('flips sign when black is side to move', () => {
+    const mateIn3: EngineScore = { type: 'mate', value: 3 }
+    // Black to move mates in 3 → white-relative -3 → black player +3.
+    expect(mateForPlayer(mateIn3, 'b', 'white')).toBe(-3)
+    expect(mateForPlayer(mateIn3, 'b', 'black')).toBe(3)
+  })
+
+  it('preserves a getting-mated count (negative)', () => {
+    const gettingMated: EngineScore = { type: 'mate', value: -1 }
+    expect(mateForPlayer(gettingMated, 'w', 'white')).toBe(-1)
+    expect(mateForPlayer(gettingMated, 'w', 'black')).toBe(1)
+  })
+})
+
+describe('toWhitePerspectiveMate', () => {
+  it('keeps the count unchanged for white move indices', () => {
+    expect(toWhitePerspectiveMate(2, 0)).toBe(2)
+    expect(toWhitePerspectiveMate(-1, 2)).toBe(-1)
+  })
+
+  it('flips the count sign for black move indices', () => {
+    expect(toWhitePerspectiveMate(2, 1)).toBe(-2)
+    expect(toWhitePerspectiveMate(-1, 3)).toBe(1)
+  })
+
+  it('returns input unchanged for null count or unknown move index', () => {
+    expect(toWhitePerspectiveMate(null, 1)).toBeNull()
+    expect(toWhitePerspectiveMate(2, null)).toBe(2)
+    expect(toWhitePerspectiveMate(2, undefined)).toBe(2)
   })
 })
 

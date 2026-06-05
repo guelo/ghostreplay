@@ -293,6 +293,8 @@ class AnalysisCache(Base):
     # Space-joined UCI moves of the root best-move principal variation.
     best_line_uci: Mapped[str | None] = mapped_column(Text)
     played_eval: Mapped[int | None] = mapped_column(Integer)
+    # White-relative mate count for the played move (NULL when not a mate).
+    played_eval_mate: Mapped[int | None] = mapped_column(Integer)
     best_eval: Mapped[int | None] = mapped_column(Integer)
     eval_delta: Mapped[int | None] = mapped_column(Integer)
     classification: Mapped[str | None] = mapped_column(String(20))

@@ -106,7 +106,7 @@ describe('GameAnalysisCoordinator', () => {
       useGameStore.setState({ moveHistory: oldHistory })
       gameAnalysisStore.getState().resolveAnalysis(0, {
         id: 'a0', move: 'uci-0', bestMove: 'uci-0',
-        bestEval: 10, playedEval: 10, currentPositionEval: 10,
+        bestEval: 10, playedEval: 10, currentPositionEval: 10, playedEvalMate: null, currentPositionEvalMate: null,
         moveIndex: 0, delta: 0, classification: 'best',
         blunder: false, recordable: false,
       })
@@ -180,7 +180,7 @@ describe('GameAnalysisCoordinator', () => {
       useGameStore.setState({ moveHistory: makeMoveHistory(5) })
       gameAnalysisStore.getState().resolveAnalysis(0, {
         id: 'new-a0', move: 'DIFFERENT', bestMove: 'DIFFERENT',
-        bestEval: 99, playedEval: 99, currentPositionEval: 99,
+        bestEval: 99, playedEval: 99, currentPositionEval: 99, playedEvalMate: null, currentPositionEvalMate: null,
         moveIndex: 0, delta: 0, classification: 'best',
         blunder: false, recordable: false,
       })
@@ -248,6 +248,8 @@ describe('GameAnalysisCoordinator', () => {
         bestEval: 10,
         playedEval: 10,
         currentPositionEval: 10,
+        playedEvalMate: null,
+        currentPositionEvalMate: null,
         moveIndex: 0,
         delta: 0,
         classification: 'best',
@@ -277,6 +279,63 @@ describe('GameAnalysisCoordinator', () => {
       })
 
       await expect(pending).resolves.toMatchObject({ id: requestId, move: 'e2e4' })
+    })
+
+    it('propagates a worker mate count into the resolved analysis', async () => {
+      coordinator.startSession('session-mate')
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const pending = coordinator.waitForAnalysis(0)
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'e2e4',
+          bestMove: 'e2e4',
+          bestEval: 10000,
+          playedEval: 10000,
+          playedEvalMate: 2,
+          bestEvalMate: 2,
+          delta: 0,
+          classification: 'best',
+        },
+      })
+
+      await expect(pending).resolves.toMatchObject({
+        playedEvalMate: 2,
+        currentPositionEvalMate: 2,
+      })
+    })
+
+    it('flips a cached white-relative mate count to player-relative for black', async () => {
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        Promise.resolve(new Map([
+          ['fen-1::d7d5', {
+            move_san: 'd5',
+            best_move_uci: 'd7d5',
+            best_move_san: 'd5',
+            played_eval: -9980,
+            played_eval_mate: -2,
+            best_eval: -9980,
+            eval_delta: 0,
+            classification: 'best',
+          }],
+        ])),
+      )
+
+      coordinator.startSession('session-cached-mate')
+      // Black move at ply 1.
+      coordinator.analyzeMove('fen-1', 'd7d5', 'black', 1, 20)
+      const pending = coordinator.waitForAnalysis(1)
+
+      // Flush the debounced cache lookup + its resolution microtask.
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(pending).resolves.toMatchObject({
+        playedEvalMate: 2,
+        currentPositionEvalMate: 2,
+      })
     })
 
     it('rejects when analysis is unavailable or the session changes', async () => {
@@ -429,6 +488,8 @@ describe('GameAnalysisCoordinator', () => {
         bestEval: 10,
         playedEval: 10,
         currentPositionEval: 10,
+        playedEvalMate: null,
+        currentPositionEvalMate: null,
         moveIndex: 0,
         delta: 0,
         classification: 'best',

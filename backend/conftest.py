@@ -188,6 +188,7 @@ def _create_test_schema(conn) -> None:
             best_move_san VARCHAR(10),
             best_line_uci TEXT,
             played_eval INTEGER,
+            played_eval_mate INTEGER,
             best_eval INTEGER,
             eval_delta INTEGER,
             classification VARCHAR(20),

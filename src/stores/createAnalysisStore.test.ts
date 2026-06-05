@@ -8,6 +8,8 @@ const makeResult = (
   id: crypto.randomUUID(),
   move: "e2e4",
   currentPositionEval: 0,
+  playedEvalMate: null,
+  currentPositionEvalMate: null,
   moveIndex: 0,
   playedEval: 0,
   bestEval: 0,

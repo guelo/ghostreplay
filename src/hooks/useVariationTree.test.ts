@@ -10,6 +10,8 @@ const makeResult = (id: string, _fen: string): AnalysisResult => ({
   bestEval: 0,
   playedEval: 0,
   currentPositionEval: 0,
+  playedEvalMate: null,
+  currentPositionEvalMate: null,
   moveIndex: null,
   delta: 0,
   classification: null,

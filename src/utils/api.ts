@@ -644,6 +644,8 @@ export interface CachedAnalysis {
   best_move_san: string | null
   best_line_uci: string[] | null
   played_eval: number | null
+  /** White-relative mate count for the played move, null when not a mate. */
+  played_eval_mate: number | null
   best_eval: number | null
   eval_delta: number | null
   classification: MoveClassification | null

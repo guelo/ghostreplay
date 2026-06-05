@@ -140,6 +140,8 @@ describe('useMoveAnalysis', () => {
         bestMove: 'd2d4',
         bestEval: 50,
         playedEval: -150,
+        playedEvalMate: null,
+        bestEvalMate: null,
         delta: 200,
         classification: 'blunder',
       })
@@ -155,12 +157,46 @@ describe('useMoveAnalysis', () => {
       bestEval: 50,
       playedEval: -150,
       currentPositionEval: -150,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
       moveIndex: null,
       delta: 200,
       classification: 'blunder',
       blunder: true,
       recordable: false,
     })
+  })
+
+  it('propagates a worker mate count into the resolved analysis', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    let requestId: string | undefined
+    act(() => {
+      requestId = result.current.analyzeMove('fen', 'e2e4', 'white', 0)
+    })
+
+    act(() => {
+      simulateMessage({
+        type: 'analysis',
+        id: requestId,
+        move: 'e2e4',
+        bestMove: 'e2e4',
+        bestEval: 10000,
+        playedEval: 10000,
+        playedEvalMate: 2,
+        bestEvalMate: 2,
+        delta: 0,
+        classification: 'best',
+      })
+    })
+
+    const resolved = store.getState().analysisMap.get(0)
+    expect(resolved?.playedEvalMate).toBe(2)
+    expect(resolved?.currentPositionEvalMate).toBe(2)
   })
 
   it('sets blunder flag correctly for non-blunder analysis', () => {
@@ -784,6 +820,57 @@ describe('useMoveAnalysis', () => {
       expect.objectContaining({
         bestMove: 'e2e4',
         bestLine: ['e2e4', 'e7e5', 'g1f3'],
+      }),
+    )
+  })
+
+  it('flips a cached white-relative mate count to player-relative for black', async () => {
+    vi.useFakeTimers()
+
+    let resolveLookup!: (value: Map<string, unknown>) => void
+    lookupAnalysisCacheMock.mockReturnValueOnce(
+      new Promise((resolve) => { resolveLookup = resolve }),
+    )
+
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+    })
+
+    // Black move at ply 1.
+    act(() => {
+      result.current.analyzeMove('fen', 'd7d5', 'black', 1, 20)
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+
+    act(() => {
+      resolveLookup(new Map([
+        ['fen::d7d5', {
+          move_san: 'd5',
+          best_move_uci: 'd7d5',
+          best_move_san: 'd5',
+          // White-relative mate -2 (white mates) → black player-relative +2.
+          played_eval: -9980,
+          played_eval_mate: -2,
+          best_eval: -9980,
+          eval_delta: 0,
+          classification: 'best',
+        }],
+      ]))
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
+
+    expect(store.getState().analysisMap.get(1)).toEqual(
+      expect.objectContaining({
+        playedEvalMate: 2,
+        currentPositionEvalMate: 2,
       }),
     )
   })

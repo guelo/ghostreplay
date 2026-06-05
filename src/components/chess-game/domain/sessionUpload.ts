@@ -44,7 +44,7 @@ const buildUploadForIndex = (
     move_san: move.san,
     fen_after: move.fen,
     eval_cp: analysis?.playedEval ?? null,
-    eval_mate: null,
+    eval_mate: analysis?.playedEvalMate ?? null,
     best_move_san: analysis
       ? parseUciToSan(fenBeforeMove, analysis.bestMove)
       : null,

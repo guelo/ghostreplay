@@ -14,6 +14,7 @@ import {
   getSideToMove,
   computeAnalysisResult,
   scoreForPlayer,
+  mateForPlayer,
   classifyMove,
   classifyMoveAdvanced,
 } from "./analysisUtils";
@@ -311,6 +312,8 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       bestLine: [],
       bestEval: null,
       playedEval: null,
+      bestEvalMate: null,
+      playedEvalMate: null,
       delta: null,
       classification: null,
     } satisfies AnalysisWorkerResponse);
@@ -362,6 +365,18 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     playerColor: request.playerColor,
   });
 
+  // Mate counts are player-relative, mirroring playedEval/bestEval. Both post
+  // scores are from the opponent-to-move position.
+  const playedEvalMate = mateForPlayer(
+    playedEvalSearch.score,
+    opponentToMove,
+    request.playerColor,
+  );
+  const bestEvalMate =
+    bestMove === request.move
+      ? playedEvalMate
+      : mateForPlayer(postBestScore, opponentToMove, request.playerColor);
+
   const isBestMove = bestMove === request.move;
   const mover: "white" | "black" = sideToMove === "w" ? "white" : "black";
   const scorePov: "white" | "black" = sideToMove === "w" ? "black" : "white";
@@ -394,6 +409,8 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     bestLine,
     bestEval,
     playedEval,
+    bestEvalMate,
+    playedEvalMate,
     delta,
     classification,
   } satisfies AnalysisWorkerResponse);

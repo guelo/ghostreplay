@@ -62,6 +62,18 @@ const toPlayerPerspective = (
   return playerColor === 'white' ? whiteRelativeEval : -whiteRelativeEval
 }
 
+/**
+ * Convert a white-relative mate count to player-relative by sign-negating the
+ * count for black (mirrors `toPlayerPerspective` for the mate channel).
+ */
+const mateToPlayerPerspective = (
+  whiteRelativeMate: number | null,
+  playerColor: 'white' | 'black',
+): number | null => {
+  if (whiteRelativeMate === null) return null
+  return playerColor === 'white' ? whiteRelativeMate : -whiteRelativeMate
+}
+
 const fromCachedAnalysis = (
   requestId: string,
   cached: CachedAnalysis,
@@ -72,6 +84,7 @@ const fromCachedAnalysis = (
 ): AnalysisResult => {
   const playedEval = toPlayerPerspective(cached.played_eval, playerColor)
   const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
+  const playedEvalMate = mateToPlayerPerspective(cached.played_eval_mate, playerColor)
   const delta = cached.eval_delta
   const classification = (cached.classification as MoveClassification | null) ?? classifyMove(delta)
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
@@ -89,6 +102,8 @@ const fromCachedAnalysis = (
     bestEval,
     playedEval,
     currentPositionEval: playedEval,
+    playedEvalMate,
+    currentPositionEvalMate: playedEvalMate,
     moveIndex,
     delta,
     classification,
@@ -472,6 +487,8 @@ export class GameAnalysisCoordinator {
           bestEval: message.bestEval,
           playedEval: message.playedEval,
           currentPositionEval: message.playedEval,
+          playedEvalMate: message.playedEvalMate,
+          currentPositionEvalMate: message.playedEvalMate,
           moveIndex: moveIndex ?? null,
           delta: message.delta,
           classification: message.classification,

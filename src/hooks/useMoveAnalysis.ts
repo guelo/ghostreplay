@@ -26,6 +26,10 @@ export type AnalysisResult = {
   bestEval: number | null
   playedEval: number | null
   currentPositionEval: number | null
+  /** Player-relative mate count for the played move, null when not a mate. */
+  playedEvalMate: number | null
+  /** Player-relative mate count for the current position, null when not a mate. */
+  currentPositionEvalMate: number | null
   moveIndex: number | null
   delta: number | null
   classification: MoveClassification | null
@@ -57,6 +61,18 @@ const toPlayerPerspective = (
 }
 
 /**
+ * Convert a white-relative mate count to player-relative by sign-negating the
+ * count for black (mirrors `toPlayerPerspective` for the mate channel).
+ */
+const mateToPlayerPerspective = (
+  whiteRelativeMate: number | null,
+  playerColor: 'white' | 'black',
+): number | null => {
+  if (whiteRelativeMate === null) return null
+  return playerColor === 'white' ? whiteRelativeMate : -whiteRelativeMate
+}
+
+/**
  * Build an AnalysisResult from a cached entry, recomputing the blunder flag
  * from game context.
  */
@@ -69,6 +85,7 @@ const fromCachedAnalysis = (
 ): AnalysisResult => {
   const playedEval = toPlayerPerspective(cached.played_eval, playerColor)
   const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
+  const playedEvalMate = mateToPlayerPerspective(cached.played_eval_mate, playerColor)
   const delta = cached.eval_delta
 
   // Use classification from cache if available, fall back to legacy delta-based
@@ -88,6 +105,8 @@ const fromCachedAnalysis = (
     bestEval,
     playedEval,
     currentPositionEval: playedEval,
+    playedEvalMate,
+    currentPositionEvalMate: playedEvalMate,
     moveIndex,
     delta,
     classification,
@@ -269,6 +288,8 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             bestEval: message.bestEval,
             playedEval: message.playedEval,
             currentPositionEval: message.playedEval,
+            playedEvalMate: message.playedEvalMate,
+            currentPositionEvalMate: message.playedEvalMate,
             moveIndex: moveIndex ?? null,
             delta: message.delta,
             classification: message.classification,

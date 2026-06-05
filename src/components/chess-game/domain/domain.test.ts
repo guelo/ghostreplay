@@ -9,6 +9,7 @@ import {
   type MoveRecord,
   type ReviewFailInfo,
 } from "./movePresentation";
+import type { AnalysisResult } from "../../../hooks/useMoveAnalysis";
 import { deriveDisplayedOpening } from "./opening";
 import { buildSessionMoveUploads, parseUciToSan } from "./sessionUpload";
 import {
@@ -95,6 +96,8 @@ describe("chess-game domain helpers", () => {
           bestEval: 34,
           playedEval: 34,
           currentPositionEval: 34,
+          playedEvalMate: null,
+          currentPositionEvalMate: null,
           moveIndex: 0,
           delta: 0,
           classification: "best" as const,
@@ -111,6 +114,8 @@ describe("chess-game domain helpers", () => {
           bestEval: 20,
           playedEval: 12,
           currentPositionEval: 12,
+          playedEvalMate: null,
+          currentPositionEvalMate: null,
           moveIndex: 1,
           delta: 8,
           classification: "excellent" as const,
@@ -131,9 +136,59 @@ describe("chess-game domain helpers", () => {
 
     const annotatedMoves = deriveAnnotatedMoves(moveHistory, analysisMap);
     expect(annotatedMoves).toEqual([
-      { san: "e4", classification: "best", eval: 34 },
-      { san: "d5", classification: "excellent", eval: -12 },
+      { san: "e4", classification: "best", eval: 34, evalMate: null },
+      { san: "d5", classification: "excellent", eval: -12, evalMate: null },
     ]);
+  });
+
+  it("derives white-relative evalMate by ply parity", () => {
+    const moveHistory: MoveRecord[] = [
+      { san: "e4", fen: "fen-after-e4", uci: "e2e4" },
+      { san: "d5", fen: "fen-after-d5", uci: "d7d5" },
+    ];
+
+    const base = {
+      bestMove: "",
+      bestEval: null,
+      bestLine: null,
+      currentPositionEval: null,
+      currentPositionEvalMate: null,
+      delta: null,
+      classification: null,
+      blunder: false,
+      recordable: false,
+    };
+
+    const analysisMap = new Map<number, AnalysisResult>([
+      // White move at ply 0: player-relative +2 stays +2 white-relative.
+      [
+        0,
+        {
+          ...base,
+          id: "a0",
+          move: "e2e4",
+          playedEval: null,
+          playedEvalMate: 2,
+          moveIndex: 0,
+        },
+      ],
+      // Black move at ply 1: player-relative +1 flips to -1 white-relative.
+      [
+        1,
+        {
+          ...base,
+          id: "a1",
+          move: "d7d5",
+          playedEval: null,
+          playedEvalMate: 1,
+          moveIndex: 1,
+        },
+      ],
+    ]);
+
+    const annotated = deriveAnnotatedMoves(moveHistory, analysisMap);
+    expect(annotated[0].evalMate).toBe(2);
+    expect(annotated[1].evalMate).toBe(-1);
   });
 
   it("derives blunder arrows preferring review-fail arrows over toast arrows", () => {
@@ -259,6 +314,8 @@ describe("chess-game domain helpers", () => {
           bestEval: 25,
           playedEval: 25,
           currentPositionEval: 25,
+          playedEvalMate: null,
+          currentPositionEvalMate: null,
           moveIndex: 0,
           delta: 0,
           classification: "best" as const,
@@ -275,6 +332,8 @@ describe("chess-game domain helpers", () => {
           bestEval: 16,
           playedEval: 8,
           currentPositionEval: 8,
+          playedEvalMate: null,
+          currentPositionEvalMate: null,
           moveIndex: 1,
           delta: 8,
           classification: "excellent" as const,

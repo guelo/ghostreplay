@@ -490,6 +490,8 @@ def _upsert_analysis_cache(
         is_black = move.color == MoveColor.BLACK
         sign = -1 if is_black else 1
         played_eval = move.eval_cp * sign if move.eval_cp is not None else None
+        # Mate count flips perspective by sign-negation, same as cp.
+        played_eval_mate = move.eval_mate * sign if move.eval_mate is not None else None
         best_eval = move.best_move_eval_cp * sign if move.best_move_eval_cp is not None else None
         eval_delta = move.eval_delta  # already unsigned (best - played >= 0)
 
@@ -501,6 +503,7 @@ def _upsert_analysis_cache(
             "best_move_san": move.best_move_san,
             "best_line_uci": encode_uci_line(move.best_line_uci),
             "played_eval": played_eval,
+            "played_eval_mate": played_eval_mate,
             "best_eval": best_eval,
             "eval_delta": eval_delta,
             "classification": move.classification.value if move.classification else None,
@@ -538,6 +541,7 @@ def _upsert_analysis_cache(
             "best_move_san": stmt.excluded.best_move_san,
             "best_line_uci": stmt.excluded.best_line_uci,
             "played_eval": stmt.excluded.played_eval,
+            "played_eval_mate": stmt.excluded.played_eval_mate,
             "best_eval": stmt.excluded.best_eval,
             "eval_delta": stmt.excluded.eval_delta,
             "classification": stmt.excluded.classification,

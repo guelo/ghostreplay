@@ -72,6 +72,43 @@ export const scoreForPlayer = (
   return playerColor === 'white' ? whitePerspective : -whitePerspective
 }
 
+/**
+ * Player-relative mate count for a score, or null when the score is not a mate.
+ * Mirrors `scoreForPlayer` but flips perspective by sign-negating the move count
+ * (a positive count means the player delivers mate).
+ */
+export const mateForPlayer = (
+  score: EngineScore | null,
+  sideToMove: 'w' | 'b',
+  playerColor: 'white' | 'black',
+): number | null => {
+  if (!score || score.type !== 'mate') {
+    return null
+  }
+  const whiteRelative = sideToMove === 'w' ? score.value : -score.value
+  const playerRelative = playerColor === 'white' ? whiteRelative : -whiteRelative
+  // Normalize -0 to 0 so equality checks and serialized output stay stable.
+  return playerRelative === 0 ? 0 : playerRelative
+}
+
+/**
+ * Convert a mover-perspective mate count to white perspective, mirroring
+ * `toWhitePerspective` (parity-based, NOT playerColor) but sign-negating the
+ * count rather than the eval value.
+ */
+export const toWhitePerspectiveMate = (
+  moverPerspectiveMate: number | null,
+  moveIndex: number | null | undefined,
+): number | null => {
+  if (moverPerspectiveMate === null || moveIndex === null || moveIndex === undefined) {
+    return moverPerspectiveMate
+  }
+  if (moveIndex % 2 === 0 || moverPerspectiveMate === 0) {
+    return moverPerspectiveMate
+  }
+  return -moverPerspectiveMate
+}
+
 export const getSideToMove = (fen: string) => {
   const parts = fen.split(' ')
   const active = parts[1]

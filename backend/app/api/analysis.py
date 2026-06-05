@@ -30,6 +30,7 @@ class CachedAnalysisResult(BaseModel):
     best_move_san: str | None = None
     best_line_uci: list[str] | None = None
     played_eval: int | None = None
+    played_eval_mate: int | None = None
     best_eval: int | None = None
     eval_delta: int | None = None
     classification: str | None = None
@@ -72,6 +73,7 @@ def lookup_analysis(
                 best_move_san=row.best_move_san,
                 best_line_uci=decode_uci_line(row.best_line_uci),
                 played_eval=row.played_eval,
+                played_eval_mate=row.played_eval_mate,
                 best_eval=row.best_eval,
                 eval_delta=row.eval_delta,
                 classification=row.classification,

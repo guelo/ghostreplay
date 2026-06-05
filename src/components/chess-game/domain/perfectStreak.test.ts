@@ -24,6 +24,8 @@ const analysis = (
   bestEval: 0,
   playedEval: 0,
   currentPositionEval: 0,
+  playedEvalMate: null,
+  currentPositionEvalMate: null,
   moveIndex,
   delta: 0,
   classification,

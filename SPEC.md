@@ -928,10 +928,14 @@ Constants:
 | Had +200, blundered into M-5 | `200 - (-9950) = 10150cp` | Recorded (≥ 50cp) |
 | Had M-10, delayed to M-15 | `-9900 - (-9850) = -50cp` → abs = 50cp | Borderline pass |
 
-**Database storage:** When eval is a mate score:
-- `eval_cp` = NULL
+**Database storage:** When eval is a mate score, the mate count travels
+**alongside** the converted cp sibling rather than replacing it:
+- `eval_cp` = the mate-converted centipawn value (`mateToCp(N)`, e.g. ±~10000),
+  so cp-only consumers and delta math keep working unchanged
 - `eval_mate` = N (positive = winning, negative = losing)
-- Delta calculations use the converted value at comparison time
+- The analysis cache mirrors this: `played_eval` (white-relative cp) plus
+  `played_eval_mate` (white-relative mate count, NULL when not a mate)
+- Delta calculations use the converted cp value at comparison time
 
 #### 6.4.4 Evaluation Stability
 
