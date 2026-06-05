@@ -38,6 +38,7 @@ maia2_models/
 playwright-report/
 test-results/
 blob-report/
+e2e/screenshots/output/
 backend/.tmp/e2e.sqlite3
 backend/.opening_graph_cache/
 

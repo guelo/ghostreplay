@@ -105,14 +105,16 @@ class OpeningGraphNode:
         self.name: str | None = None
 
     def __setattr__(self, name: str, value: object) -> None:
-        if self._frozen:
+        # During unpickling, slots are restored without __init__ running, so
+        # _frozen may not exist yet — treat its absence as "not frozen".
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"OpeningGraphNode is frozen: cannot set '{name}'"
             )
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:
-        if self._frozen:
+        if getattr(self, "_frozen", False):
             raise AttributeError(
                 f"OpeningGraphNode is frozen: cannot delete '{name}'"
             )

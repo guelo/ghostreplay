@@ -216,7 +216,9 @@ def _seed_blunder_user(
         user_id=user.id,
         started_at=started_at,
         ended_at=ended_at,
-        status="completed",
+        # "ended" is the status the app's history/stats queries filter on
+        # (history.py, stats.py); "completed" makes seeded games invisible.
+        status="ended",
         result=result,
         engine_elo=1500,
         blunder_recorded=True,

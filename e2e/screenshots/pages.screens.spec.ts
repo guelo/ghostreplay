@@ -1,0 +1,609 @@
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/auth";
+import {
+  buildIndex,
+  captureState,
+  failRoute,
+  prepareDeterministicPage,
+  stallRoute,
+  viewportsFor,
+} from "./helpers";
+
+/**
+ * Screenshot gallery suite (g-tsyy). Captures a FIXED first-pass inventory of UI
+ * states per page across the app's real breakpoints. Output is a reviewable
+ * contact sheet (output/index.html), NOT pixel-diff assertions.
+ *
+ * Runs SERIAL because playwright.config has fullyParallel:true — parallel
+ * workers would race on the shared output dir and index generation.
+ */
+test.describe.configure({ mode: "serial", timeout: 180_000 });
+
+/** Capture one state across every viewport that page cares about. */
+const captureAcrossViewports = async (
+  page: Page,
+  testInfo: import("@playwright/test").TestInfo,
+  opts: {
+    pageKey: string;
+    state: string;
+    waitFor?: (page: Page) => import("@playwright/test").Locator;
+    fullPage?: boolean;
+  },
+): Promise<void> => {
+  for (const viewport of viewportsFor(opts.pageKey)) {
+    await captureState(page, testInfo, {
+      page: opts.pageKey,
+      state: opts.state,
+      viewport,
+      waitFor: opts.waitFor?.(page),
+      fullPage: opts.fullPage,
+    });
+  }
+};
+
+test.afterAll(() => {
+  buildIndex();
+});
+
+// --- Landing -------------------------------------------------------------
+
+test.describe("landing", () => {
+  test("anonymous + authed", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await page.goto("/");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "landing",
+      state: "anonymous",
+      waitFor: (p) => p.locator(".nav-bar"),
+    });
+
+    await loginAs(page, "stable");
+    await page.goto("/");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "landing",
+      state: "authed",
+      waitFor: (p) => p.locator(".nav-bar"),
+    });
+  });
+});
+
+// --- Auth ----------------------------------------------------------------
+
+test.describe("login", () => {
+  test("empty + validation error", async ({ page }) => {
+    await prepareDeterministicPage(page);
+    await page.goto("/login");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "login",
+      state: "empty",
+      waitFor: (p) => p.locator(".auth-form"),
+    });
+
+    // Submitting an empty form trips client-side validation.
+    await page.getByRole("button", { name: "Log in" }).click();
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "login",
+      state: "validation-error",
+      waitFor: (p) => p.locator(".auth-form__error"),
+    });
+  });
+});
+
+test.describe("register", () => {
+  test("empty + password mismatch", async ({ page }) => {
+    await prepareDeterministicPage(page);
+    await page.goto("/register");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "register",
+      state: "empty",
+      waitFor: (p) => p.locator(".auth-form"),
+    });
+
+    const inputs = page.locator(".auth-form__input");
+    await inputs.nth(0).fill("new_player_e2e");
+    await inputs.nth(1).fill("password-one");
+    await inputs.nth(2).fill("password-two");
+    await page.getByRole("button", { name: "Register" }).click();
+    await expect(page.locator(".auth-form__error")).toContainText(
+      "Passwords do not match",
+    );
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "register",
+      state: "password-mismatch",
+      waitFor: (p) => p.locator(".auth-form__error"),
+    });
+  });
+});
+
+// --- History -------------------------------------------------------------
+
+test.describe("history", () => {
+  test("loading / empty / populated / error", async ({ page, loginAs }) => {
+    // Loading: stall the history fetch so the placeholder persists.
+    await prepareDeterministicPage(page);
+    await loginAs(page, "stable");
+    await stallRoute(page, "**/api/history**");
+    await page.goto("/history");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "history",
+      state: "loading",
+      waitFor: (p) => p.locator(".history-shell"),
+    });
+    await page.unrouteAll();
+
+    // Empty: the empty seed user has no games.
+    await loginAs(page, "empty");
+    await page.goto("/history");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "history",
+      state: "empty",
+      waitFor: (p) => p.getByText("No games played yet"),
+    });
+
+    // Populated + selected analysis: the stable user has games and the page
+    // auto-selects the first one, so wait for the analysis board to render.
+    await loginAs(page, "stable");
+    await page.goto("/history");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "history",
+      state: "populated",
+      waitFor: (p) => p.locator(".analysis-board"),
+    });
+
+    // Error: force a 500 on the history fetch.
+    await failRoute(page, "**/api/history**");
+    await page.goto("/history");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "history",
+      state: "error",
+      waitFor: (p) => p.locator(".history-shell__error"),
+    });
+    await page.unrouteAll();
+  });
+});
+
+// --- Blunders ------------------------------------------------------------
+
+test.describe("blunders", () => {
+  test("loading / empty / populated / error", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await stallRoute(page, "**/api/blunder**");
+    await page.goto("/blunders");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "blunders",
+      state: "loading",
+      waitFor: (p) => p.getByText("Blunder Library"),
+    });
+    await page.unrouteAll();
+
+    await loginAs(page, "empty");
+    await page.goto("/blunders");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "blunders",
+      state: "empty",
+      waitFor: (p) => p.getByText("No blunders recorded yet"),
+    });
+
+    await loginAs(page, "due");
+    await page.goto("/blunders");
+    const blunderList = page.getByRole("listbox", { name: /blunder library/i });
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "blunders",
+      state: "populated",
+      waitFor: () => blunderList,
+    });
+
+    // Selected + analysis: click the first blunder and wait for its board.
+    await page.getByRole("option").first().click();
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "blunders",
+      state: "selected-analysis",
+      waitFor: (p) => p.locator(".blunder-detail .analysis-board"),
+    });
+
+    // Due-only filter: toggle the "Due only" button (due user has due items).
+    await page.getByRole("button", { name: "Due only" }).click();
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "blunders",
+      state: "due-only",
+      waitFor: (p) => p.getByRole("button", { name: "Show all" }),
+    });
+
+    await failRoute(page, "**/api/blunder**");
+    await page.goto("/blunders");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "blunders",
+      state: "error",
+      waitFor: (p) => p.locator(".blunders-shell__error"),
+    });
+    await page.unrouteAll();
+  });
+});
+
+// --- Openings ------------------------------------------------------------
+
+test.describe("openings", () => {
+  test("loading / empty / populated / error", async ({ page, loginAs }) => {
+    // The opening graph is a process-wide singleton with no build lock, so the
+    // first cold request can take ~30s+ (longer under concurrent rebuilds).
+    test.setTimeout(300_000);
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await stallRoute(page, "**/api/openings/**");
+    await page.goto("/openings");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "loading",
+      waitFor: (p) => p.locator(".openings-state--loading"),
+    });
+    await page.unrouteAll();
+
+    await loginAs(page, "empty");
+    await page.goto("/openings");
+    // First real request warms the singleton graph; allow a wide window.
+    await expect(page.locator(".openings-state--loading")).toBeHidden({
+      timeout: 180_000,
+    });
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "empty",
+      waitFor: (p) => p.locator(".openings-state--empty"),
+    });
+
+    await loginAs(page, "due");
+    await page.goto("/openings");
+    // Wait for the graph-backed snapshot to finish loading before capturing.
+    await expect(page.locator(".openings-state--loading")).toBeHidden({
+      timeout: 60_000,
+    });
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "populated",
+      waitFor: (p) => p.locator(".openings-shell"),
+    });
+
+    // Computed-snapshot empty: a snapshot exists (computed_at set) but no scored
+    // roots (root_count 0). Mock the children endpoint to force the branch.
+    await mockOpeningsChildren(page, {
+      computed_at: "2026-06-01T00:00:00Z",
+      current_branch_stats: emptyBranchStats(0),
+      children: [],
+      canonical_opening_key: null,
+    });
+    await page.goto("/openings");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "snapshot-empty",
+      waitFor: (p) =>
+        p.getByText(/No scored openings are available/i),
+    });
+    await page.unrouteAll();
+
+    // Structural leaf: scored branch (root_count > 0) with no deeper named
+    // children and a canonical key — the "structural leaf" empty state.
+    await mockOpeningsChildren(page, {
+      computed_at: "2026-06-01T00:00:00Z",
+      current_branch_stats: emptyBranchStats(2),
+      children: [],
+      canonical_opening_key: "leaf-key",
+      parent_name: "Ruy Lopez",
+    });
+    await page.goto("/openings");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "structural-leaf",
+      waitFor: (p) => p.getByText(/No deeper named openings/i),
+    });
+    await page.unrouteAll();
+
+    await failRoute(page, "**/api/openings/children**");
+    await page.goto("/openings");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "error",
+      waitFor: (p) => p.locator(".openings-state--error"),
+    });
+    await page.unrouteAll();
+  });
+});
+
+const emptyBranchStats = (rootCount: number) => ({
+  score: rootCount > 0 ? 0.5 : null,
+  confidence: null,
+  coverage: null,
+  sample_size: null,
+  root_count: rootCount,
+});
+
+/** Fulfill /api/openings/children with a synthetic ChildrenResponse. */
+const mockOpeningsChildren = (
+  page: Page,
+  overrides: Record<string, unknown>,
+): Promise<void> =>
+  page.route("**/api/openings/children**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        player_color: "white",
+        parent_key: null,
+        parent_name: null,
+        canonical_opening_key: null,
+        canonical_path: [],
+        breadcrumbs: [],
+        current_branch_stats: emptyBranchStats(0),
+        children: [],
+        total_children: 0,
+        computed_at: null,
+        ...overrides,
+      }),
+    }),
+  );
+
+// --- Stats ---------------------------------------------------------------
+
+test.describe("stats", () => {
+  test("loading / empty / populated / error", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    // Stall BOTH summary and rating history so the page stays in loading.
+    await stallRoute(page, "**/api/stats/summary**");
+    await stallRoute(page, "**/api/stats/rating-history**");
+    await page.goto("/stats");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "stats",
+      state: "loading",
+      waitFor: (p) => p.locator(".stats-shell__placeholder").first(),
+    });
+    await page.unrouteAll();
+
+    await loginAs(page, "empty");
+    await page.goto("/stats");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "stats",
+      state: "empty",
+      waitFor: (p) => p.locator(".stats-shell__empty"),
+    });
+
+    await loginAs(page, "due");
+    await page.goto("/stats");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "stats",
+      state: "populated",
+      waitFor: (p) => p.locator(".stats-section").first(),
+    });
+
+    // Error: fail BOTH endpoints so summary + graph both show error.
+    await failRoute(page, "**/api/stats/summary**");
+    await failRoute(page, "**/api/stats/rating-history**");
+    await page.goto("/stats");
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "stats",
+      state: "error",
+      waitFor: (p) => p.locator(".stats-shell__error"),
+    });
+    await page.unrouteAll();
+  });
+});
+
+// --- Game analysis -------------------------------------------------------
+
+test.describe("game", () => {
+  test("loading / processing / populated / errors", async ({
+    page,
+    loginAs,
+  }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "stable");
+
+    // Resolve a real session id from history to drive the populated state.
+    // loginAs seeds the token via addInitScript, so navigate once to apply it,
+    // then read it back and query the API directly. The history response shape
+    // is { games: [{ session_id }] } (see api.ts fetchHistory).
+    await page.goto("/history");
+    const token = await page.evaluate(() =>
+      localStorage.getItem("ghost_replay_token"),
+    );
+    const apiURL = process.env.E2E_API_URL ?? "http://127.0.0.1:8010";
+    const historyRes = await page.request.get(
+      `${apiURL}/api/history?limit=1`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    const historyData = (await historyRes.json()) as {
+      games?: { session_id?: string }[];
+    };
+    const sessionId = historyData?.games?.[0]?.session_id ?? null;
+    expect(sessionId, "seeded stable user must have a game in history").toBeTruthy();
+    const id = sessionId as string;
+
+    // Loading: stall the analysis fetch.
+    await stallRoute(page, "**/api/session/*/analysis**");
+    await page.goto(`/game?id=${id}`);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "game",
+      state: "loading",
+      waitFor: (p) => p.locator(".history-shell__placeholder"),
+    });
+    await page.unrouteAll();
+
+    // Populated: real analysis renders the board.
+    await page.goto(`/game?id=${id}`);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "game",
+      state: "populated",
+      waitFor: (p) => p.locator(".analysis-board"),
+    });
+
+    // Processing: analysis still computing (is_complete false).
+    await mockAnalysis(page, { is_complete: false, analyzed_moves: 2 });
+    await page.goto(`/game?id=${id}`);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "game",
+      state: "processing",
+      waitFor: (p) => p.locator(".analysis-pane__processing"),
+    });
+    await page.unrouteAll();
+
+    // Missing-color error: analysis response without a player color.
+    await mockAnalysis(page, { player_color: null });
+    await page.goto(`/game?id=${id}`);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "game",
+      state: "missing-color-error",
+      waitFor: (p) => p.getByText(/missing player color/i),
+    });
+    await page.unrouteAll();
+
+    // Terminal (non-retryable) error: GameAnalysisPage polls on retryable
+    // errors, so a 404 is required to hit the terminal error branch.
+    await failRoute(page, "**/api/session/*/analysis**", 404, {
+      detail: "Not found",
+    });
+    await page.goto(`/game?id=${id}`);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "game",
+      state: "terminal-error",
+      waitFor: (p) => p.locator(".history-shell__error"),
+    });
+    await page.unrouteAll();
+  });
+});
+
+/** Fulfill the session analysis endpoint with a synthetic SessionAnalysis. */
+const mockAnalysis = (
+  page: Page,
+  overrides: Record<string, unknown>,
+): Promise<void> =>
+  page.route("**/api/session/*/analysis**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session_id: "mock",
+        pgn: "1. e4 e5",
+        result: "1-0",
+        moves: [
+          {
+            move_number: 1,
+            color: "white",
+            move_san: "e4",
+            fen_after:
+              "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+            eval_cp: 20,
+            eval_mate: null,
+            best_move_san: "e4",
+            best_move_eval_cp: 20,
+            eval_delta: 0,
+            classification: "best",
+          },
+        ],
+        summary: {
+          total_moves: 1,
+          blunders: 0,
+          mistakes: 0,
+          inaccuracies: 0,
+          average_centipawn_loss: 0,
+          accuracy: 100,
+        },
+        position_analysis: {},
+        expected_total_moves: 2,
+        analyzed_moves: 1,
+        is_complete: true,
+        player_color: "white",
+        ...overrides,
+      }),
+    }),
+  );
+
+// --- Play (live board) ---------------------------------------------------
+
+const boardSquare = (page: Page, square: string) =>
+  page
+    .locator(".chessboard-board-area")
+    .locator(`[data-square="${square}"]`)
+    .first();
+
+const playMove = async (page: Page, from: string, to: string): Promise<void> => {
+  await boardSquare(page, from).click();
+  await boardSquare(page, to).click();
+};
+
+const waitForMoveCountAtLeast = async (
+  page: Page,
+  minimum: number,
+): Promise<void> => {
+  await expect
+    .poll(async () => page.locator(".move-list-grid .move-button").count())
+    .toBeGreaterThanOrEqual(minimum);
+};
+
+const startGameAsWhite = async (page: Page): Promise<void> => {
+  const playWhite = page.getByRole("button", { name: /play white/i });
+  if ((await playWhite.count()) > 0) {
+    await playWhite.click();
+    const playButton = page.getByRole("button", { name: /^play$/i });
+    if ((await playButton.count()) > 0 && (await playButton.first().isVisible())) {
+      await playButton.first().click();
+    }
+  }
+  await expect(page.locator(".game-status-badge--live")).toBeVisible({
+    timeout: 15_000,
+  });
+};
+
+test.describe("play", () => {
+  test("fresh board + review toast", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await page.goto("/play");
+
+    // Fresh board: start a new game as White.
+    await startGameAsWhite(page);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "fresh-board",
+      waitFor: (p) => p.locator(".chessboard-board-area"),
+    });
+
+    // Mid-game live + seeded review-warning toast (reuses the seeded review path
+    // from mobile-game-layout.spec.ts).
+    await page.setViewportSize({ width: 390, height: 844 });
+    await playMove(page, "e2", "e4");
+    await waitForMoveCountAtLeast(page, 2);
+    await playMove(page, "g1", "f3");
+    await waitForMoveCountAtLeast(page, 4);
+    await playMove(page, "f1", "c4");
+    await waitForMoveCountAtLeast(page, 6);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "review-warning-toast",
+      // Mobile + desktop warning stacks both render a toast; only the one for
+      // the active breakpoint is visible, so match on visibility.
+      waitFor: (p) => p.locator(".review-warning-toast:visible"),
+    });
+  });
+
+  test("mid-game (no toasts)", async ({ page, loginAs }) => {
+    // Captured in its own game so clearing the "Ghost reactivated" rehook toast
+    // (which ends ghost steering) can't interfere with the review-toast flow.
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await page.goto("/play");
+    await startGameAsWhite(page);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await playMove(page, "e2", "e4");
+    await waitForMoveCountAtLeast(page, 2);
+    // The rehook toast auto-dismisses after 3s (ChessGame.tsx) but the frozen
+    // clock blocks that timer — advance it so the board is toast-free.
+    await page.clock.runFor(3500);
+    await expect(page.locator(".rehook-toast:visible")).toHaveCount(0);
+    await expect(page.locator(".review-warning-toast:visible")).toHaveCount(0);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "mid-game",
+      waitFor: (p) => p.locator(".move-list-grid .move-button").first(),
+    });
+  });
+});
