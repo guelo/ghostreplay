@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
-import { toWhitePerspective } from "../../workers/analysisUtils";
+import { moverMateToWhiteCp, toWhitePerspective, toWhitePerspectiveMate } from "../../workers/analysisUtils";
 import {
   deriveAnnotatedMoves,
 } from "./domain/movePresentation";
@@ -15,19 +15,29 @@ import type { MoveMessage, SrsFailDetail } from "../MoveList";
 
 // Walk back from selectedMoveIndex to the most recent move with a played eval
 // and return it in white's perspective, or null when none is available.
-function selectedEvalCpFromMap(
-  analysisMap: ReadonlyMap<number, { playedEval?: number | null }>,
+function selectedEvalFromMap(
+  analysisMap: ReadonlyMap<
+    number,
+    { playedEval?: number | null; playedEvalMate?: number | null }
+  >,
   selectedMoveIndex: number | null,
-): number | null {
+): { cp: number | null; mate: number | null } {
   if (selectedMoveIndex === null || selectedMoveIndex < 0) {
-    return null;
+    return { cp: null, mate: null };
   }
   for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
     const analysis = analysisMap.get(idx);
-    if (analysis?.playedEval == null) continue;
-    return toWhitePerspective(analysis.playedEval, idx);
+    if (analysis?.playedEval == null && analysis?.playedEvalMate == null) continue;
+    const mate = toWhitePerspectiveMate(analysis.playedEvalMate ?? null, idx);
+    // Fall back to a correctly-signed, mate-derived cp so the bar/graph still
+    // position when only a mate score is available (the mate code itself takes
+    // display precedence; this also resolves the mate-0 winner via ply parity).
+    const cp =
+      toWhitePerspective(analysis.playedEval ?? null, idx) ??
+      moverMateToWhiteCp(analysis.playedEvalMate ?? null, idx);
+    return { cp, mate };
   }
-  return null;
+  return { cp: null, mate: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -42,11 +52,12 @@ export const ConnectedEvalBar = memo(() => {
   const selectedMoveIndex =
     moveHistory.length === 0 ? null : (viewIndex ?? moveHistory.length - 1);
 
-  const selectedEvalCp = selectedEvalCpFromMap(analysisMap, selectedMoveIndex);
+  const selectedEval = selectedEvalFromMap(analysisMap, selectedMoveIndex);
 
   return (
     <EvalBar
-      whitePerspectiveCp={selectedEvalCp}
+      whitePerspectiveCp={selectedEval.cp}
+      whitePerspectiveMate={selectedEval.mate}
       whiteOnBottom={boardOrientation === "white"}
     />
   );
@@ -75,9 +86,11 @@ export const ConnectedAnalysisGraph = memo(
     const evals = useMemo(() => {
       const raw = moveHistory.map((_, i) => {
         const a = analysisMap.get(i);
-        return a?.playedEval != null
-          ? toWhitePerspective(a.playedEval, i)
-          : null;
+        if (a?.playedEval != null) {
+          return toWhitePerspective(a.playedEval, i);
+        }
+        // Mate-only entries still plot a point via a correctly-signed mate cp.
+        return moverMateToWhiteCp(a?.playedEvalMate ?? null, i);
       });
       let end = raw.length;
       while (end > 0 && raw[end - 1] === null) end--;
@@ -92,10 +105,7 @@ export const ConnectedAnalysisGraph = memo(
       return pending;
     }, [moveHistory, analysisMap]);
 
-    const selectedEvalCp = selectedEvalCpFromMap(
-      analysisMap,
-      selectedMoveIndex,
-    );
+    const selectedEval = selectedEvalFromMap(analysisMap, selectedMoveIndex);
 
     const graphStreamingEval = useMemo(() => {
       if (!streamingEval) return null;
@@ -124,7 +134,8 @@ export const ConnectedAnalysisGraph = memo(
         currentIndex={selectedMoveIndex}
         onSelectMove={onSelectMove}
         playerColor={playerColor}
-        evalCp={selectedEvalCp}
+        evalCp={selectedEval.cp}
+        evalMate={selectedEval.mate}
         isCheckmate={isCheckmate}
         streamingEval={graphStreamingEval}
         pendingIndices={pendingIndices}

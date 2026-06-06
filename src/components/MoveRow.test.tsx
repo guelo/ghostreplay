@@ -12,6 +12,8 @@ const baseProps: MoveRowProps = {
   blackIdx: 1,
   prevWhiteEval: 0,
   prevBlackEval: 30,
+  prevWhiteEvalMate: null,
+  prevBlackEvalMate: null,
   isWhiteSelected: false,
   isBlackSelected: false,
   whiteBubbles: [],
@@ -142,6 +144,59 @@ describe("MoveRow — pop animation classes", () => {
     expect(onMoveClick).not.toHaveBeenCalled();
     expect(onIconTap).not.toHaveBeenCalled();
     expect(onRevealSrsFail).not.toHaveBeenCalled();
+  });
+
+  it("renders a mate code in the eval formula when the move is mate", () => {
+    const { container } = render(
+      <MoveRow
+        {...baseProps}
+        white={{ san: "Qh7#", classification: "best", eval: null, evalMate: 0 }}
+        prevWhiteEval={300}
+        prevWhiteEvalMate={1}
+      />,
+    );
+    const whiteEval = container.querySelector(".move-col-white .move-eval");
+    // Cross to mate-on-board: drop delta, show arrow from M1 to #
+    expect(whiteEval?.textContent).toBe("M1 → #");
+  });
+
+  it("renders an arrow across the cp↔mate boundary (no delta)", () => {
+    const { container } = render(
+      <MoveRow
+        {...baseProps}
+        white={{ san: "Rd8", classification: "best", eval: null, evalMate: 3 }}
+        prevWhiteEval={120}
+        prevWhiteEvalMate={null}
+      />,
+    );
+    const whiteEval = container.querySelector(".move-col-white .move-eval");
+    expect(whiteEval?.textContent).toBe("+1.2 → M3");
+  });
+
+  it("rerenders mounted rows when prevWhiteEvalMate changes", () => {
+    const { container, rerender } = render(
+      <MoveRow
+        {...baseProps}
+        white={{ san: "Rd8", classification: "best", eval: null, evalMate: 3 }}
+        prevWhiteEval={null}
+        prevWhiteEvalMate={5}
+      />,
+    );
+    expect(container.querySelector(".move-col-white .move-eval")?.textContent).toBe(
+      "M5 → M3",
+    );
+
+    rerender(
+      <MoveRow
+        {...baseProps}
+        white={{ san: "Rd8", classification: "best", eval: null, evalMate: 3 }}
+        prevWhiteEval={null}
+        prevWhiteEvalMate={2}
+      />,
+    );
+    expect(container.querySelector(".move-col-white .move-eval")?.textContent).toBe(
+      "M2 → M3",
+    );
   });
 
   it("rerenders mounted rows when interaction disabled changes", () => {

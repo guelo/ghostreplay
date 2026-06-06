@@ -12,12 +12,12 @@ import { useVariationTree } from "../hooks/useVariationTree";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { mateToCp, playerToWhite, toWhitePerspective } from "../workers/analysisUtils";
+import { mateToCp, moverMateToWhiteCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
 import MaterialDisplay from "./MaterialDisplay";
-import { formatEval, CLASSIFICATION_ICON } from "./MoveRow";
+import { formatWhiteEval, CLASSIFICATION_ICON } from "./MoveRow";
 import type { MoveClassification } from "../workers/analysisUtils";
 import {
   isAnalysisBoardDiagnosticsEnabled,
@@ -472,6 +472,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
         san: m.move_san,
         classification: m.classification,
         eval: toWhitePerspective(m.eval_cp, i),
+        evalMate: toWhitePerspectiveMate(m.eval_mate, i),
       })),
     [moves],
   );
@@ -479,12 +480,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   // Extract eval values for the graph, falling back to mateToCp for mate-only moves
   const evals = useMemo(
     () =>
-      moves.map((m, i) => {
-        // eval_cp is mover-perspective. mateToCp gives side-to-move (position)
-        // perspective, so negate it to get mover-perspective before converting.
-        const cp = m.eval_cp ?? (m.eval_mate != null ? -mateToCp(m.eval_mate) : null);
-        return toWhitePerspective(cp, i);
-      }),
+      moves.map((m, i) =>
+        // eval_cp and eval_mate are both mover-perspective. For mate-only moves,
+        // moverMateToWhiteCp derives a correctly-signed white cp (incl. the
+        // mate-0 winner via ply parity).
+        m.eval_cp != null
+          ? toWhitePerspective(m.eval_cp, i)
+          : moverMateToWhiteCp(m.eval_mate, i),
+      ),
     [moves],
   );
 
@@ -889,6 +892,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     return sideToMove === "w" ? topLine.score.value : -topLine.score.value;
   }, [showEngineArrows, mergedEngineLines, sideToMove]);
 
+  // When engine arrows are on AND the live search has produced a score, the eval
+  // bar should read both cp and mate from that single live source. Otherwise it
+  // falls back to the cached variation analysis (both channels). This keeps the
+  // cp/mate pair consistent so a stale cached mate can't override a live cp.
+  const useLiveEngineEval =
+    showEngineArrows &&
+    (liveEngineEvalCp !== null || liveEngineEvalMate !== null);
+
   const currentEvalCp = useMemo(() => {
     if (isInVariation || effectiveIndex < 0) return null;
     return toWhitePerspective(currentMove?.eval_cp ?? null, effectiveIndex);
@@ -913,16 +924,21 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     return playerToWhite(cached.playedEval, boardOrientation);
   }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation, analysisCacheVersion]);
 
-  // Variation header eval for MoveList
-  const varHeaderEval = useMemo((): string | null => {
+  // Variation mate-in-N for eval bar (white perspective)
+  const varEvalMate = useMemo(() => {
     void analysisCacheVersion;
     if (!isInVariation || !selectedVarNode) return null;
     const cached = getVarAnalysis(selectedVarNode.fen);
-    if (!cached || cached.playedEval == null) return null;
-    const wp = playerToWhite(cached.playedEval, boardOrientation);
-    if (wp == null) return null;
-    return formatEval(wp);
+    if (!cached) return null;
+    return playerToWhiteMate(cached.playedEvalMate, boardOrientation);
   }, [isInVariation, selectedVarNode, getVarAnalysis, boardOrientation, analysisCacheVersion]);
+
+  // Variation header eval for MoveList (mate code takes precedence over cp)
+  const varHeaderEval = useMemo((): string | null => {
+    if (!isInVariation) return null;
+    if (varEvalCp == null && varEvalMate == null) return null;
+    return formatWhiteEval(varEvalCp, varEvalMate);
+  }, [isInVariation, varEvalCp, varEvalMate]);
 
   // What-if line for the graph overlay: dotted path tracing the selected
   // variation up to (and including) the selected move. Future/deselected moves
@@ -1296,15 +1312,13 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             <EvalBar
               whitePerspectiveCp={
                 isInVariation
-                  ? ((showEngineArrows ? liveEngineEvalCp : null) ??
-                    varEvalCp)
-                  : currentEvalCp
+                  ? (useLiveEngineEval ? liveEngineEvalCp : varEvalCp)
+                  : (currentEvalCp ??
+                    (effectiveIndex >= 0 ? evals[effectiveIndex] ?? null : null))
               }
               whitePerspectiveMate={
                 isInVariation
-                  ? showEngineArrows
-                    ? liveEngineEvalMate
-                    : null
+                  ? (useLiveEngineEval ? liveEngineEvalMate : varEvalMate)
                   : currentEvalMate
               }
               whiteOnBottom={boardOrientation === "white"}
@@ -1513,7 +1527,11 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                 ? varEvalCp
                 : currentEvalCp ?? evals[effectiveIndex] ?? null
             }
-            isCheckmate={!isInVariation && currentEvalMate === 0}
+            evalMate={isInVariation ? varEvalMate : currentEvalMate}
+            isCheckmate={
+              (!isInVariation && currentEvalMate === 0) ||
+              (isInVariation && varEvalMate === 0)
+            }
             variationLine={variationLine}
           />
           {footer && (

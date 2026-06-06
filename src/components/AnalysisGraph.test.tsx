@@ -28,6 +28,58 @@ describe('AnalysisGraph — y-axis', () => {
     expect(cpToWinningChances(3000)).toBeCloseTo(cpToWinningChances(1000), 8)
   })
 
+  it('renders a mate code (M3) when evalMate is set', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, 9990]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={9990}
+        evalMate={3}
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval')
+    expect(evalEl!.textContent).toBe('M3')
+  })
+
+  it('renders the mate badge even when evalCp is null (mate-only)', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, 9990]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        evalCp={null}
+        evalMate={2}
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval') as HTMLElement | null
+    expect(evalEl).toBeTruthy()
+    expect(evalEl!.textContent).toBe('M2')
+    // Positioned high (white winning) via the mate-derived cp fallback
+    expect(parseFloat(evalEl!.style.top)).toBeLessThan(50)
+  })
+
+  it('inverts the mate code sign for black player', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, 9990]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        playerColor="black"
+        evalCp={9990}
+        evalMate={3}
+      />,
+    )
+
+    const evalEl = container.querySelector('.analysis-graph__y-eval')
+    // White mate-in-3 is a loss-in-3 for black
+    expect(evalEl!.textContent).toBe('−M3')
+  })
+
   it('renders "#" when isCheckmate is true', () => {
     const { container } = render(
       <AnalysisGraph
@@ -194,8 +246,8 @@ describe('AnalysisGraph — eval badge color', () => {
       />,
     )
     const el = container.querySelector('.analysis-graph__y-eval')
-    // White +1.5 shown as -1.5 from black perspective
-    expect(el!.textContent).toBe('-1.5')
+    // White +1.5 shown as −1.5 (unicode minus) from black perspective
+    expect(el!.textContent).toBe('−1.5')
   })
 
   it('clamps color at eval beyond +5 pawns', () => {

@@ -84,6 +84,29 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
     expect(capturedProps.isCheckmate).toBe(true);
   });
 
+  it("forwards a white-perspective evalMate for a mate-only analysis", () => {
+    const moves: MoveRecord[] = [makeMoveRecord(NORMAL_FEN)];
+    useGameStore.setState({
+      moveHistory: moves,
+      viewIndex: 0,
+      playerColor: "white",
+    });
+
+    // Mate-only entry at move index 0 (white move): playedEval null, mate set.
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: null, playedEvalMate: 3, bestEval: null, bestMove: "Qh5", delta: 0, classification: "best", blunder: false })],
+      ]),
+    });
+
+    renderConnected();
+
+    // index 0 is even → white perspective unchanged
+    expect(capturedProps.evalMate).toBe(3);
+    // cp falls back to a mate-derived value so the badge can position itself
+    expect(capturedProps.evalCp).not.toBeNull();
+  });
+
   it("forwards isCheckmate=false for a non-checkmate position", () => {
     const moves: MoveRecord[] = [makeMoveRecord(NORMAL_FEN)];
     useGameStore.setState({

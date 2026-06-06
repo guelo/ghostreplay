@@ -975,6 +975,56 @@ describe('AnalysisBoard — AnalysisGraph props', () => {
     const evals = capturedGraphProps.evals as (number | null)[]
     expect(evals[1]).toBeLessThan(0)
   })
+
+  it('plots nonzero mate-only moves with the correct (mover-relative) sign', () => {
+    // White move with mover-relative mate-in-3 (white mates) and no cp.
+    const whiteMateMoves: AnalysisMove[] = [
+      {
+        move_number: 1,
+        color: 'white',
+        move_san: 'Qd5',
+        fen_after: 'rnbqkbnr/pppppppp/8/3Q4/8/8/PPPPPPPP/RNB1KBNR b KQkq - 0 1',
+        eval_cp: null,
+        eval_mate: 3,
+        best_move_san: 'Qd5',
+        best_move_eval_cp: null,
+        eval_delta: 0,
+        classification: 'best',
+      },
+    ]
+
+    render(<AnalysisBoard moves={whiteMateMoves} boardOrientation="white" initialMoveIndex={0} />)
+
+    const evals = capturedGraphProps.evals as (number | null)[]
+    // White mates → white-perspective eval must be strongly positive (was
+    // previously sign-flipped to ~-9970 by the missing inner negation).
+    expect(evals[0]).toBeGreaterThan(0)
+    expect(capturedGraphProps.evalMate).toBe(3)
+  })
+
+  it('plots a black mover-relative mate as white-losing', () => {
+    const blackMateMoves: AnalysisMove[] = [
+      moves[0],
+      {
+        move_number: 1,
+        color: 'black',
+        move_san: 'Qh4',
+        fen_after: 'rnb1kbnr/pppp1ppp/4p3/8/6Pq/8/PPPPPP1P/RNBQKBNR w KQkq - 1 2',
+        eval_cp: null,
+        eval_mate: 2, // mover (black) mates in 2
+        best_move_san: 'Qh4',
+        best_move_eval_cp: null,
+        eval_delta: 0,
+        classification: 'best',
+      },
+    ]
+
+    render(<AnalysisBoard moves={blackMateMoves} boardOrientation="white" initialMoveIndex={1} />)
+
+    const evals = capturedGraphProps.evals as (number | null)[]
+    expect(evals[1]).toBeLessThan(0) // white is getting mated
+    expect(capturedGraphProps.evalMate).toBe(-2) // white-perspective: loss in 2
+  })
 })
 
 describe('AnalysisBoard — variation tree integration', () => {

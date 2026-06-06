@@ -1285,3 +1285,35 @@ describe('MoveList variation integration', () => {
     expect(container.querySelectorAll('.move-button').length).toBeGreaterThan(0)
   })
 })
+
+describe('MoveList — header eval mate codes', () => {
+  it('shows a mate code in the main-line header', () => {
+    const { container } = render(
+      <MoveList
+        moves={[
+          { san: 'e4', eval: 30 },
+          { san: 'e5', eval: null, evalMate: -2 },
+        ]}
+        currentIndex={1}
+        onNavigate={noop}
+      />,
+    )
+    const header = container.querySelector('.move-list-header-eval')
+    expect(header?.textContent).toBe('−M2')
+  })
+
+  it('shows "#" in the main-line header at checkmate', () => {
+    const { container } = render(
+      <MoveList
+        moves={[
+          { san: 'e4', eval: 30 },
+          { san: 'Qh4#', eval: null, evalMate: 0 },
+        ]}
+        currentIndex={1}
+        onNavigate={noop}
+      />,
+    )
+    const header = container.querySelector('.move-list-header-eval')
+    expect(header?.textContent).toBe('#')
+  })
+})

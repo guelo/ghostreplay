@@ -60,6 +60,17 @@ export const playerToWhite = (
   return playerColor === 'white' ? playerPerspectiveEval : -playerPerspectiveEval
 }
 
+/** Convert a player-perspective mate count to white perspective (sign-flip for black). */
+export const playerToWhiteMate = (
+  playerPerspectiveMate: number | null,
+  playerColor: 'white' | 'black',
+): number | null => {
+  if (playerPerspectiveMate === null) return null
+  const whiteRelative = playerColor === 'white' ? playerPerspectiveMate : -playerPerspectiveMate
+  // Normalize -0 to 0 so equality checks and serialized output stay stable.
+  return whiteRelative === 0 ? 0 : whiteRelative
+}
+
 export const scoreForPlayer = (
   score: EngineScore | null,
   sideToMove: 'w' | 'b',
@@ -107,6 +118,21 @@ export const toWhitePerspectiveMate = (
     return moverPerspectiveMate
   }
   return -moverPerspectiveMate
+}
+
+/**
+ * White-perspective centipawn value for a mover-perspective mate count at a
+ * given ply. `mateToCp` is side-to-move (post-move opponent) perspective, so we
+ * feed it the negated count and negate the result to land back in mover
+ * perspective, then convert mover→white by ply parity. This resolves the winner
+ * even for mate-0 (checkmate) where the count alone is sign-ambiguous.
+ */
+export const moverMateToWhiteCp = (
+  moverPerspectiveMate: number | null,
+  moveIndex: number | null | undefined,
+): number | null => {
+  if (moverPerspectiveMate === null) return null
+  return toWhitePerspective(-mateToCp(-moverPerspectiveMate), moveIndex)
 }
 
 export const getSideToMove = (fen: string) => {

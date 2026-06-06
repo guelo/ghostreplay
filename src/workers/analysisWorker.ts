@@ -386,8 +386,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     playerColor: request.playerColor,
   });
 
-  // Mate counts are player-relative, mirroring playedEval/bestEval. Both post
-  // scores are from the opponent-to-move position.
+  // Mate counts are mover-relative, mirroring playedEval/bestEval (callers pass
+  // the mover's color as request.playerColor). Both post scores are from the
+  // opponent-to-move position.
   const playedEvalMate = mateForPlayer(
     playedEvalSearch.score,
     opponentToMove,

@@ -1,4 +1,6 @@
 import { memo, useCallback, useId, useRef, useMemo } from "react";
+import { mateToCp } from "../workers/analysisUtils";
+import { formatWhiteEval } from "./MoveRow";
 
 type HighlightedMoves = {
   indices: number[];
@@ -11,6 +13,7 @@ type AnalysisGraphProps = {
   onSelectMove: (index: number) => void;
   playerColor?: "white" | "black";
   evalCp?: number | null;
+  evalMate?: number | null;
   isCheckmate?: boolean;
   streamingEval?: { index: number; cp: number } | null;
   pendingIndices?: number[];
@@ -71,17 +74,13 @@ function evalToColor(
   return `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`;
 }
 
-const formatEval = (cp: number) => {
-  const sign = cp > 0 ? "+" : "";
-  return `${sign}${(cp / 100).toFixed(1)}`;
-};
-
 const AnalysisGraph = ({
   evals,
   currentIndex,
   onSelectMove,
   playerColor,
   evalCp,
+  evalMate,
   isCheckmate,
   streamingEval,
   pendingIndices,
@@ -264,17 +263,22 @@ const AnalysisGraph = ({
   // Dynamic vertical position for the eval badge within the y-axis.
   // The y-axis stretches to match the SVG height, so we use the full
   // SVG coordinate space (0 → SVG_HEIGHT) for percentage positioning.
+  // For positioning/coloring, fall back to a mate-derived cp when only a mate
+  // score is available (e.g. mate-only cached variation analysis) so the badge
+  // still renders. The mate code itself takes precedence for the label.
+  const badgeCp = evalCp ?? (evalMate != null ? mateToCp(evalMate) : null);
+
   const evalYPercent = useMemo(() => {
-    if (evalCp == null) return null;
-    const y = cpToY(evalCp);
+    if (badgeCp == null) return null;
+    const y = cpToY(badgeCp);
     const pct = (y / SVG_HEIGHT) * 100;
     return Math.max(5, Math.min(95, pct));
-  }, [evalCp, cpToY]);
+  }, [badgeCp, cpToY]);
 
   const evalBgColor = useMemo(() => {
-    if (evalCp == null || !playerColor) return undefined;
-    return evalToColor(evalCp, playerColor);
-  }, [evalCp, playerColor]);
+    if (badgeCp == null || !playerColor) return undefined;
+    return evalToColor(badgeCp, playerColor);
+  }, [badgeCp, playerColor]);
 
   return (
     <div
@@ -451,8 +455,13 @@ const AnalysisGraph = ({
             >
               {isCheckmate
               ? "#"
-              : formatEval(
-                  playerColor === "black" ? -evalCp! : evalCp!,
+              : formatWhiteEval(
+                  evalCp != null
+                    ? (playerColor === "black" ? -evalCp : evalCp)
+                    : null,
+                  evalMate != null
+                    ? (playerColor === "black" ? -evalMate : evalMate)
+                    : null,
                 )}
             </div>
           )}

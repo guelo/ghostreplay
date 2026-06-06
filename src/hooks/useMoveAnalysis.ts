@@ -26,9 +26,16 @@ export type AnalysisResult = {
   bestEval: number | null
   playedEval: number | null
   currentPositionEval: number | null
-  /** Player-relative mate count for the played move, null when not a mate. */
+  // NOTE on perspective: despite the historical "player" naming, every eval
+  // below is MOVER-relative — relative to the side that played the analyzed
+  // move (callers pass the mover's color as `playerColor`/`analysisColor`, see
+  // useChessGameController.commitAppliedMove). This is why downstream code
+  // converts to white via parity-based `toWhitePerspective(_, moveIndex)` rather
+  // than `playerToWhite(_, userColor)`. Keep that contract when wiring new
+  // consumers, or the sign will flip on black moves.
+  /** Mover-relative mate count for the played move, null when not a mate. */
   playedEvalMate: number | null
-  /** Player-relative mate count for the current position, null when not a mate. */
+  /** Mover-relative mate count for the current position, null when not a mate. */
   currentPositionEvalMate: number | null
   moveIndex: number | null
   delta: number | null
@@ -50,7 +57,9 @@ type PendingCacheLookup = {
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
 
 /**
- * Convert a white-relative eval to player-relative.
+ * Convert a white-relative eval to the given color's perspective. Callers pass
+ * the MOVER's color (see AnalysisResult perspective note), so the result is
+ * mover-relative.
  */
 const toPlayerPerspective = (
   whiteRelativeEval: number | null,
@@ -61,8 +70,8 @@ const toPlayerPerspective = (
 }
 
 /**
- * Convert a white-relative mate count to player-relative by sign-negating the
- * count for black (mirrors `toPlayerPerspective` for the mate channel).
+ * Convert a white-relative mate count to the mover's perspective by sign-negating
+ * the count for black (mirrors `toPlayerPerspective` for the mate channel).
  */
 const mateToPlayerPerspective = (
   whiteRelativeMate: number | null,

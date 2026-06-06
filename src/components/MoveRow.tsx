@@ -9,6 +9,7 @@ type Move = {
   san: string;
   classification?: MoveClassification | null;
   eval?: number | null; // centipawns, white perspective
+  evalMate?: number | null; // mate-in-N, white perspective (positive = white mates)
 };
 
 export type SrsFailDetail = {
@@ -56,28 +57,60 @@ export const formatEval = (cp: number): string => {
   return `${value > 0 ? "+" : "\u2212"}${num}`;
 };
 
+/** Format a white-perspective eval as a compact string, preferring mate codes.
+ *  '#' for checkmate on the board (mate === 0), 'M{n}'/'-M{n}' for mate-in-N,
+ *  otherwise the centipawn string. Returns "" when neither is available. */
+export const formatWhiteEval = (
+  cp: number | null | undefined,
+  mate: number | null | undefined,
+): string => {
+  if (mate != null) {
+    if (mate === 0) return "#";
+    return mate > 0 ? `M${mate}` : `−M${Math.abs(mate)}`;
+  }
+  if (cp == null) return "";
+  return formatEval(cp);
+};
+
 /** Format the full eval formula: prevEval ±delta = newEval.
  *  Color reflects advantage for the player (not the side that moved):
- *  green = good for player, red = bad for player. */
+ *  green = good for player, red = bad for player.
+ *  When either endpoint is a mate score, the signed delta is meaningless, so we
+ *  drop it and render a 'prevEval → newEval' arrow instead. */
 const formatEvalFormula = (
-  prevCp: number,
-  currentCp: number,
+  prevCp: number | null | undefined,
+  prevMate: number | null | undefined,
+  currentCp: number | null | undefined,
+  currentMate: number | null | undefined,
   playerColor: "white" | "black",
 ): React.ReactNode => {
-  const deltaCp = currentCp - prevCp;
+  // Cross-mate-boundary (or mate↔mate): drop the delta, show an arrow.
+  if (prevMate != null || currentMate != null) {
+    return (
+      <>
+        {formatWhiteEval(prevCp, prevMate)}
+        {" → "}
+        {formatWhiteEval(currentCp, currentMate)}
+      </>
+    );
+  }
+  // Both endpoints are centipawn scores (guaranteed non-null by caller).
+  const prevCpVal = prevCp!;
+  const currentCpVal = currentCp!;
+  const deltaCp = currentCpVal - prevCpVal;
   const absDelta = Math.abs(deltaCp / 100);
   const deltaStr = absDelta % 1 === 0 ? absDelta.toFixed(0) : absDelta.toFixed(1);
   const sign = deltaCp >= 0 ? "+" : "\u2212";
   const goodForPlayer = playerColor === "white" ? deltaCp >= 0 : deltaCp <= 0;
   return (
     <>
-      {formatEval(prevCp)}
+      {formatEval(prevCpVal)}
       {" "}
       <span className={`eval-delta ${goodForPlayer ? "eval-delta--pos" : "eval-delta--neg"}`}>
         {sign}{deltaStr}
       </span>
       {" = "}
-      {formatEval(currentCp)}
+      {formatEval(currentCpVal)}
     </>
   );
 };
@@ -99,6 +132,8 @@ export type MoveRowProps = {
   blackIdx: number;
   prevWhiteEval: number | null | undefined;
   prevBlackEval: number | null | undefined;
+  prevWhiteEvalMate: number | null | undefined;
+  prevBlackEvalMate: number | null | undefined;
   isWhiteSelected: boolean;
   isBlackSelected: boolean;
   whiteBubbles: MoveMessage[];
@@ -129,6 +164,8 @@ const MoveRowInner = ({
   blackIdx,
   prevWhiteEval,
   prevBlackEval,
+  prevWhiteEvalMate,
+  prevBlackEvalMate,
   isWhiteSelected,
   isBlackSelected,
   whiteBubbles,
@@ -157,6 +194,7 @@ const MoveRowInner = ({
     isSelected: boolean,
     isAnalyzing: boolean,
     prevEval: number | null | undefined,
+    prevEvalMate: number | null | undefined,
     fresh: boolean,
   ) => {
     const colorClass = classificationClass(move.classification);
@@ -232,8 +270,15 @@ const MoveRowInner = ({
           {isAnalyzing && <span className="move-analyzing-spinner" />}
         </span>
         <span className="move-eval">
-          {move.eval != null && prevEval != null
-            ? formatEvalFormula(prevEval, move.eval, playerColor)
+          {(move.eval != null || move.evalMate != null) &&
+          (prevEval != null || prevEvalMate != null)
+            ? formatEvalFormula(
+                prevEval,
+                prevEvalMate,
+                move.eval,
+                move.evalMate,
+                playerColor,
+              )
             : ""}
         </span>
       </button>
@@ -325,7 +370,7 @@ const MoveRowInner = ({
     return (
       <React.Fragment key={pairNumber}>
         <span className="move-number">{pairNumber}</span>
-        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, freshWhite)}
+        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, prevWhiteEvalMate, freshWhite)}
         <span className="move-button-placeholder move-placeholder-dots">…</span>
         {whiteBubbles.length > 0 && renderBubbleMessages(whiteBubbles, whiteIdx, "white")}
       </React.Fragment>
@@ -337,7 +382,7 @@ const MoveRowInner = ({
         <span className="move-number" />
         <span className="move-button-placeholder" />
         {black ? (
-          renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, freshBlack)
+          renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, prevBlackEvalMate, freshBlack)
         ) : (
           <span className="move-button-placeholder" />
         )}
@@ -352,7 +397,7 @@ const MoveRowInner = ({
     return (
       <React.Fragment key={pairNumber}>
         <span className="move-number">{pairNumber}</span>
-        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, freshWhite)}
+        {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, prevWhiteEvalMate, freshWhite)}
         <span className="move-button-placeholder move-placeholder-dots">
           …
         </span>
@@ -362,7 +407,7 @@ const MoveRowInner = ({
           <>
             <span className="move-number" />
             <span className="move-button-placeholder" />
-            {renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, freshBlack)}
+            {renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, prevBlackEvalMate, freshBlack)}
             {blackBubbles.length > 0 &&
               renderBubbleMessages(blackBubbles, blackIdx, "black")}
           </>
@@ -375,9 +420,9 @@ const MoveRowInner = ({
   return (
     <React.Fragment key={pairNumber}>
       <span className="move-number">{pairNumber}</span>
-      {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, freshWhite)}
+      {renderMoveCell(white, whiteIdx, "white", isWhiteSelected, analyzingWhite, prevWhiteEval, prevWhiteEvalMate, freshWhite)}
       {black ? (
-        renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, freshBlack)
+        renderMoveCell(black, blackIdx, "black", isBlackSelected, analyzingBlack, prevBlackEval, prevBlackEvalMate, freshBlack)
       ) : (
         <span className="move-button-placeholder" />
       )}
@@ -425,6 +470,8 @@ function areEqual(prev: MoveRowProps, next: MoveRowProps): boolean {
   // Prev evals for formula
   if (prev.prevWhiteEval !== next.prevWhiteEval) return false;
   if (prev.prevBlackEval !== next.prevBlackEval) return false;
+  if (prev.prevWhiteEvalMate !== next.prevWhiteEvalMate) return false;
+  if (prev.prevBlackEvalMate !== next.prevBlackEvalMate) return false;
 
   // tappedIconIndex — only matters if it involves this row's indices
   const prevTapRelevant =

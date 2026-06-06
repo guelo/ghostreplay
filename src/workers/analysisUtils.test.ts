@@ -5,6 +5,8 @@ import {
   normalizeScore,
   toWhitePerspective,
   toWhitePerspectiveMate,
+  moverMateToWhiteCp,
+  playerToWhiteMate,
   scoreForPlayer,
   mateForPlayer,
   getSideToMove,
@@ -284,6 +286,43 @@ describe('toWhitePerspective', () => {
     expect(toWhitePerspective(45, null)).toBe(45)
     expect(toWhitePerspective(45, undefined)).toBe(45)
     expect(toWhitePerspective(null, 1)).toBeNull()
+  })
+})
+
+describe('moverMateToWhiteCp', () => {
+  it('returns a positive cp when the mover (white move) mates', () => {
+    expect(moverMateToWhiteCp(3, 0)).toBeGreaterThan(0)
+  })
+
+  it('returns a negative cp when the mover (black move) mates', () => {
+    // odd ply: black is the mover → white is losing
+    expect(moverMateToWhiteCp(2, 1)).toBeLessThan(0)
+  })
+
+  it('resolves the mate-0 winner via ply parity', () => {
+    expect(moverMateToWhiteCp(0, 0)).toBeGreaterThan(0) // white delivered mate
+    expect(moverMateToWhiteCp(0, 1)).toBeLessThan(0) // black delivered mate
+  })
+
+  it('returns null for a null mate count', () => {
+    expect(moverMateToWhiteCp(null, 0)).toBeNull()
+  })
+})
+
+describe('playerToWhiteMate', () => {
+  it('keeps the count for white player', () => {
+    expect(playerToWhiteMate(3, 'white')).toBe(3)
+    expect(playerToWhiteMate(-2, 'white')).toBe(-2)
+  })
+
+  it('flips the count sign for black player', () => {
+    expect(playerToWhiteMate(3, 'black')).toBe(-3)
+    expect(playerToWhiteMate(-2, 'black')).toBe(2)
+  })
+
+  it('normalizes -0 to 0 and passes through null', () => {
+    expect(Object.is(playerToWhiteMate(0, 'black'), 0)).toBe(true)
+    expect(playerToWhiteMate(null, 'black')).toBeNull()
   })
 })
 

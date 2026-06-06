@@ -54,6 +54,9 @@ type AnalysisWaiter = {
 
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
 
+// Callers pass the MOVER's color (the side that played the analyzed move), so
+// these produce mover-relative values consumed via parity-based
+// `toWhitePerspective`. See the perspective note on AnalysisResult.
 const toPlayerPerspective = (
   whiteRelativeEval: number | null,
   playerColor: 'white' | 'black',
@@ -63,8 +66,8 @@ const toPlayerPerspective = (
 }
 
 /**
- * Convert a white-relative mate count to player-relative by sign-negating the
- * count for black (mirrors `toPlayerPerspective` for the mate channel).
+ * Convert a white-relative mate count to the mover's perspective by sign-negating
+ * the count for black (mirrors `toPlayerPerspective` for the mate channel).
  */
 const mateToPlayerPerspective = (
   whiteRelativeMate: number | null,

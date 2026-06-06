@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { MoveClassification } from "../workers/analysisUtils";
 import type { VariationTree, VariationNodeId } from "../types/variationTree";
 import type { NavigateUpResult } from "../hooks/useVariationTree";
-import MoveRow, { formatEval } from "./MoveRow";
+import MoveRow, { formatWhiteEval } from "./MoveRow";
 import type { MoveMessage, SrsFailDetail } from "./MoveRow";
 import VariationLine from "./VariationLine";
 
@@ -13,6 +13,7 @@ type Move = {
   san: string;
   classification?: MoveClassification | null;
   eval?: number | null; // centipawns, white perspective
+  evalMate?: number | null; // mate-in-N, white perspective (positive = white mates)
 };
 
 type MoveListProps = {
@@ -426,8 +427,9 @@ const MoveList = ({
   // Header eval: use override when variation active, otherwise main-line eval
   const headerEval = isVariationActive
     ? (headerEvalOverride ?? "")
-    : (effectiveIndex >= 0 && moves[effectiveIndex]?.eval != null
-        ? formatEval(moves[effectiveIndex].eval!)
+    : (effectiveIndex >= 0 &&
+       (moves[effectiveIndex]?.eval != null || moves[effectiveIndex]?.evalMate != null)
+        ? formatWhiteEval(moves[effectiveIndex].eval, moves[effectiveIndex].evalMate)
         : "");
 
   return (
@@ -470,6 +472,8 @@ const MoveList = ({
               // Pre-compute previous evals to avoid cross-row dependency in MoveRow
               const prevWhiteEval = whiteIdx > 0 ? moves[whiteIdx - 1].eval : 0;
               const prevBlackEval = pair.black && whiteIdx >= 0 ? moves[whiteIdx].eval : undefined;
+              const prevWhiteEvalMate = whiteIdx > 0 ? moves[whiteIdx - 1].evalMate : null;
+              const prevBlackEvalMate = pair.black && whiteIdx >= 0 ? moves[whiteIdx].evalMate : undefined;
 
               // Is this row the target for message auto-scroll?
               const isLastBubbleRow =
@@ -487,6 +491,8 @@ const MoveList = ({
                   blackIdx={blackIdx}
                   prevWhiteEval={prevWhiteEval}
                   prevBlackEval={prevBlackEval}
+                  prevWhiteEvalMate={prevWhiteEvalMate}
+                  prevBlackEvalMate={prevBlackEvalMate}
                   isWhiteSelected={!isVariationActive && whiteIdx === effectiveIndex}
                   isBlackSelected={!isVariationActive && blackIdx === effectiveIndex}
                   whiteBubbles={whiteBubbles}

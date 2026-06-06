@@ -1,4 +1,5 @@
 import { memo } from "react"
+import { formatWhiteEval } from "./MoveRow"
 
 type EvalBarProps = {
   whitePerspectiveCp: number | null
@@ -12,14 +13,6 @@ const EVAL_BAR_CLAMP_CP = 1000
 const clampEvalCp = (cp: number) =>
   Math.max(-EVAL_BAR_CLAMP_CP, Math.min(EVAL_BAR_CLAMP_CP, cp))
 
-const formatEvalCp = (cp: number): string => {
-  const value = cp / 100
-  return `${value >= 0 ? '+' : ''}${value.toFixed(1)}`
-}
-
-const formatEvalMate = (mate: number): string =>
-  mate >= 0 ? `M${mate}` : `-M${Math.abs(mate)}`
-
 const toWhiteWinProbability = (cp: number) => {
   const clamped = clampEvalCp(cp)
   return 1 / (1 + 10 ** (-clamped / 400))
@@ -31,35 +24,35 @@ const EvalBar = ({
   whiteOnBottom,
   className = '',
 }: EvalBarProps) => {
+  // Label: '#' for checkmate (mate 0), 'M{n}'/'−M{n}' for mate-in-N, else cp.
   const evalLabel =
-    whitePerspectiveMate !== null
-      ? formatEvalMate(whitePerspectiveMate)
-      : whitePerspectiveCp !== null
-        ? formatEvalCp(whitePerspectiveCp)
-        : '--'
-  const evalTone =
-    whitePerspectiveMate !== null
-      ? whitePerspectiveMate > 0
+    whitePerspectiveMate !== null || whitePerspectiveCp !== null
+      ? formatWhiteEval(whitePerspectiveCp, whitePerspectiveMate)
+      : '--'
+
+  // A non-zero mate is decisive (full bar). Otherwise — a plain cp eval OR a
+  // mate-0 checkmate — fall back to the cp channel, which encodes the winner
+  // (mate-0 callers supply an extreme ±cp so the bar fills toward the winner).
+  const useMateSign =
+    whitePerspectiveMate !== null && whitePerspectiveMate !== 0
+  const signCp = useMateSign ? null : whitePerspectiveCp
+
+  const evalTone = useMateSign
+    ? whitePerspectiveMate! > 0
+      ? 'positive'
+      : 'negative'
+    : signCp === null
+      ? 'neutral'
+      : signCp > 0
         ? 'positive'
-        : whitePerspectiveMate < 0
+        : signCp < 0
           ? 'negative'
           : 'neutral'
-      : whitePerspectiveCp !== null
-        ? whitePerspectiveCp > 0
-          ? 'positive'
-          : whitePerspectiveCp < 0
-            ? 'negative'
-            : 'neutral'
-        : 'neutral'
 
   const whiteFillPercent = (() => {
-    if (whitePerspectiveMate !== null) {
-      if (whitePerspectiveMate > 0) return 100
-      if (whitePerspectiveMate < 0) return 0
-      return 50
-    }
-    if (whitePerspectiveCp === null) return 50
-    return toWhiteWinProbability(whitePerspectiveCp) * 100
+    if (useMateSign) return whitePerspectiveMate! > 0 ? 100 : 0
+    if (signCp === null) return 50
+    return toWhiteWinProbability(signCp) * 100
   })()
 
   return (
