@@ -7,6 +7,7 @@ import HistoryPage from "./pages/HistoryPage";
 import GamePage from "./pages/GamePage";
 import OpeningsPage from "./pages/OpeningsPage";
 import StatsPage from "./pages/StatsPage";
+import TreePrototypePage from "./pages/TreePrototypePage";
 
 function AppRoutes() {
   return (
@@ -20,6 +21,7 @@ function AppRoutes() {
       <Route path="/blunders" element={<BlundersPage />} />
       <Route path="/openings" element={<OpeningsPage />} />
       <Route path="/stats" element={<StatsPage />} />
+      <Route path="/tree-prototype" element={<TreePrototypePage />} />
     </Routes>
   );
 }
