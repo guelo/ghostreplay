@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -31,6 +31,21 @@ type TreeNode = {
 };
 
 const ROOT: TreeNode = { san: null, fen: STARTING_FEN, ply: 0 };
+
+/**
+ * A drawn elbow from the selected cell in one column to the next column's
+ * header. Coordinates are in tree-local space (relative to the `tree` element,
+ * so they survive horizontal scrolling). `off` is 0 when the origin cell is
+ * visible, or ±1 when it has scrolled above (-1) / below (+1) the column's
+ * viewport and the origin has been clamped to the edge.
+ */
+type Connector = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  off: -1 | 0 | 1;
+};
 
 /** Below this width the board and tree stack vertically. */
 const NARROW_QUERY = "(max-width: 720px)";
@@ -240,6 +255,90 @@ function TreePrototypePage() {
     el.scrollTo({ left: el.scrollWidth, behavior: "smooth" });
   }, [columnCount]);
 
+  // --- Cell → child-column-header connectors -------------------------------
+  // The tree is the positioned/measured frame. Everything (cells, headers, the
+  // SVG overlay) lives inside it, so a measurement of `elementRect - treeRect`
+  // is stable under both horizontal tree scroll and per-column vertical scroll.
+  const treeRef = useRef<HTMLDivElement>(null);
+  const columnRefs = useRef(new Map<number, HTMLDivElement>());
+  const nodesScrollRefs = useRef(new Map<number, HTMLDivElement>());
+  const headerRefs = useRef(new Map<number, HTMLButtonElement>());
+  const pathNodeRefs = useRef(new Map<number, HTMLElement>());
+  const setMapRef =
+    <T extends HTMLElement>(map: Map<number, T>, key: number) =>
+    (el: T | null) => {
+      if (el) map.set(key, el);
+      else map.delete(key);
+    };
+
+  const [connectors, setConnectors] = useState<Connector[]>([]);
+  useLayoutEffect(() => {
+    let frame = 0;
+    const measure = () => {
+      const treeEl = treeRef.current;
+      if (!treeEl) return;
+      const t = treeEl.getBoundingClientRect();
+      const next: Connector[] = [];
+      // path[c] is the selected node in column c and the parent of column c+1.
+      for (let c = 0; c < path.length; c++) {
+        const childNodes = nodesScrollRefs.current.get(c + 1);
+        const cell = pathNodeRefs.current.get(c);
+        const col = columnRefs.current.get(c);
+        const nodes = nodesScrollRefs.current.get(c);
+        if (!childNodes || !cell || !col || !nodes) continue;
+
+        const colR = col.getBoundingClientRect();
+        const cellR = cell.getBoundingClientRect();
+        const bandR = nodes.getBoundingClientRect();
+        const childR = childNodes.getBoundingClientRect();
+
+        // Origin x is the parent column's right edge (stable even when the
+        // cell itself is scrolled out of view). Origin y is the cell's center,
+        // clamped to the column's visible scroll band.
+        const x1 = colR.right - t.left;
+        const cellCenter = cellR.top + cellR.height / 2 - t.top;
+        const bandTop = bandR.top - t.top;
+        const bandBottom = bandR.bottom - t.top;
+        let y1 = cellCenter;
+        let off: Connector["off"] = 0;
+        if (cellCenter < bandTop) {
+          y1 = bandTop;
+          off = -1;
+        } else if (cellCenter > bandBottom) {
+          y1 = bandBottom;
+          off = 1;
+        }
+
+        // Aim at the vertical midpoint of the child column's scroll band.
+        const x2 = childR.left - t.left;
+        const y2 = childR.top + childR.height / 2 - t.top;
+        next.push({ x1, y1, x2, y2, off });
+      }
+      setConnectors(next);
+    };
+
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+
+    measure();
+    const treeScroll = treeScrollRef.current;
+    window.addEventListener("resize", schedule);
+    // capture: true so vertical scrolls inside individual columns also fire.
+    treeScroll?.addEventListener("scroll", schedule, true);
+    // The active column's card embeds a board that can resize after mount.
+    const ro = new ResizeObserver(schedule);
+    if (treeRef.current) ro.observe(treeRef.current);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      treeScroll?.removeEventListener("scroll", schedule, true);
+      ro.disconnect();
+    };
+  }, [path, columnCount, ecoNames]);
+
   // Select a node in a given column (columnIndex 0 = root column).
   const handleSelect = (columnIndex: number, node: TreeNode) => {
     if (columnIndex === 0) {
@@ -310,7 +409,60 @@ function TreePrototypePage() {
             ...(isNarrow ? styles.treeScrollNarrow : {}),
           }}
         >
-          <div style={styles.tree}>
+          <div ref={treeRef} style={styles.tree}>
+            <svg style={styles.connectorLayer} aria-hidden="true">
+              <defs>
+                <marker
+                  id="tree-arrowhead"
+                  markerUnits="userSpaceOnUse"
+                  markerWidth="10"
+                  markerHeight="10"
+                  refX="0"
+                  refY="5"
+                  orient="auto"
+                >
+                  <path d="M0,0 L9,5 L0,10 Z" fill="#0ea5e9" />
+                </marker>
+              </defs>
+              {connectors.map((c, i) => {
+                // End the stroke short of the column by the arrowhead length;
+                // the marker (refX=0, base at the line end) fills the gap so
+                // its tip lands on the column. The bezier's end tangent is
+                // horizontal, so shortening x keeps the tip on target.
+                const ARROW = 9;
+                const x2 = c.x2 - ARROW;
+                const dx = Math.max(16, (x2 - c.x1) / 2);
+                const d = `M ${c.x1} ${c.y1} C ${c.x1 + dx} ${c.y1}, ${
+                  x2 - dx
+                } ${c.y2}, ${x2} ${c.y2}`;
+                // When the origin cell is scrolled out, mark the clamped edge
+                // with a small triangle pointing the way to the selection.
+                const tip =
+                  c.off === -1
+                    ? `M ${c.x1 - 5} ${c.y1 + 5} L ${c.x1} ${c.y1 - 2} L ${
+                        c.x1 + 5
+                      } ${c.y1 + 5} Z`
+                    : c.off === 1
+                    ? `M ${c.x1 - 5} ${c.y1 - 5} L ${c.x1} ${c.y1 + 2} L ${
+                        c.x1 + 5
+                      } ${c.y1 - 5} Z`
+                    : null;
+                return (
+                  <g key={i}>
+                    <path
+                      d={d}
+                      fill="none"
+                      stroke="#0ea5e9"
+                      strokeWidth={2}
+                      markerEnd="url(#tree-arrowhead)"
+                      opacity={c.off ? 0.5 : 0.9}
+                      strokeDasharray={c.off ? "4 3" : undefined}
+                    />
+                    {tip && <path d={tip} fill="#0ea5e9" opacity={0.8} />}
+                  </g>
+                );
+              })}
+            </svg>
             {columns.map((col, colIndex) => {
               // The deepest selected node lives in column path.length - 1; its
               // cell expands into a compact /openings-style card.
@@ -318,6 +470,7 @@ function TreePrototypePage() {
               return (
                 <div
                   key={colIndex}
+                  ref={setMapRef(columnRefs.current, colIndex)}
                   style={{
                     ...styles.column,
                     ...(isActiveColumn ? styles.columnActive : {}),
@@ -325,6 +478,7 @@ function TreePrototypePage() {
                 >
                   <button
                     type="button"
+                    ref={setMapRef(headerRefs.current, colIndex)}
                     style={{
                       ...styles.columnHeader,
                       ...(path[colIndex] ? styles.columnHeaderActive : {}),
@@ -338,6 +492,7 @@ function TreePrototypePage() {
                       : "—"}
                   </button>
                   <div
+                    ref={setMapRef(nodesScrollRefs.current, colIndex)}
                     style={{
                       ...styles.columnNodes,
                       ...(isNarrow ? styles.columnNodesNarrow : {}),
@@ -348,15 +503,21 @@ function TreePrototypePage() {
                         colIndex === 0
                           ? path.length === 1
                           : node.san === col.selectedSan;
+                      // The node on the selected path (parent of column c+1) is
+                      // the connector's origin — distinct from `isSelected`,
+                      // which de-highlights the root once you move past it.
+                      const isPathNode =
+                        colIndex === 0 || node.san === col.selectedSan;
                       const name = openingName(node.fen);
 
                       if (isSelected && isActiveColumn) {
                         return (
-                          <OpeningCard
+                          <div
                             key={node.san ?? "root"}
-                            node={node}
-                            name={name}
-                          />
+                            ref={setMapRef(pathNodeRefs.current, colIndex)}
+                          >
+                            <OpeningCard node={node} name={name} />
+                          </div>
                         );
                       }
 
@@ -364,6 +525,11 @@ function TreePrototypePage() {
                         <button
                           key={node.san ?? "root"}
                           type="button"
+                          ref={
+                            isPathNode
+                              ? setMapRef(pathNodeRefs.current, colIndex)
+                              : undefined
+                          }
                           style={{
                             ...styles.node,
                             ...(isSelected ? styles.nodeSelected : {}),
@@ -418,7 +584,19 @@ const styles: Record<string, React.CSSProperties> = {
   boardColNarrow: { width: "100%", maxWidth: 360 },
   treeScroll: { flex: 1, overflowX: "auto", paddingBottom: 12 },
   treeScrollNarrow: { width: "100%" },
-  tree: { display: "flex", gap: 8, alignItems: "flex-start" },
+  tree: { position: "relative", display: "flex", gap: 36, alignItems: "flex-start" },
+  // SVG sits over the columns but ignores pointer events so cells stay
+  // clickable. overflow visible keeps arrowheads from being clipped.
+  connectorLayer: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    width: "100%",
+    height: "100%",
+    overflow: "visible",
+    pointerEvents: "none",
+    zIndex: 5,
+  },
   column: {
     minWidth: 100,
     display: "flex",
