@@ -119,6 +119,12 @@ function mockScore(fen: string): number {
   return 10 + (fenHash(fen) % 90);
 }
 
+/** Format a centipawn eval the way engines do: +1.23 / -0.40 / 0.00. */
+function formatEval(centipawns: number): string {
+  const pawns = centipawns / 100;
+  return `${pawns >= 0 ? "+" : ""}${pawns.toFixed(2)}`;
+}
+
 /** Mock /openings-card metrics, deterministic per position. */
 function mockStats(fen: string) {
   const score = mockScore(fen);
@@ -128,6 +134,8 @@ function mockStats(fen: string) {
     coverage: fenHash(fen, 7) % 101, // %
     games: 5 + (fenHash(fen, 13) % 400),
     confidence: 40 + (fenHash(fen, 23) % 60), // %
+    // Mock Stockfish eval in centipawns, roughly -3.00 … +3.00.
+    evalCp: (fenHash(fen, 31) % 601) - 300,
   };
 }
 
@@ -149,22 +157,17 @@ function OpeningCard({
         {name ?? (node.san ? moveLabel(node) : "Starting position")}
       </div>
 
-      <div style={styles.cardOverview}>
-        <div style={styles.cardBoard}>
-          <Chessboard
-            options={{
-              id: `tree-card-${node.fen}`,
-              position: node.fen,
-              allowDragging: false,
-              animationDurationInMs: 0,
-              boardStyle: { borderRadius: 6, pointerEvents: "none" },
-            }}
-          />
+      <div style={styles.cardStatRow}>
+        <div style={styles.cardStat}>
+          <div style={styles.cardStatLabel}>Your Score</div>
+          <div style={styles.cardScorePanel}>
+            <span style={styles.cardScoreValue}>{stats.score}</span>
+            <span style={styles.cardGrade}>{stats.grade}</span>
+          </div>
         </div>
-        <div style={styles.cardScorePanel}>
-          <div style={styles.cardScoreLabel}>Score</div>
-          <div style={styles.cardScoreValue}>{stats.score}</div>
-          <div style={styles.cardGrade}>{stats.grade}</div>
+        <div style={styles.cardStat}>
+          <div style={styles.cardStatLabel}>Engine Eval</div>
+          <span style={styles.cardEvalValue}>{formatEval(stats.evalCp)}</span>
         </div>
       </div>
 
@@ -683,7 +686,8 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#0b3a52",
     border: "1px solid #0ea5e9",
     borderRadius: 8,
-    padding: 10,
+    // Tight horizontal padding so the board can grow nearly card-wide.
+    padding: "10px 4px",
     display: "flex",
     flexDirection: "column",
     gap: 10,
@@ -693,32 +697,46 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     color: "#e0f2fe",
     lineHeight: 1.25,
+    minWidth: 0,
   },
-  cardOverview: { display: "flex", gap: 10, alignItems: "center" },
-  cardBoard: { width: 110, flexShrink: 0 },
-  cardScorePanel: {
+  // Your Score and Engine Eval sit side by side below the title.
+  cardStatRow: {
+    display: "flex",
+    gap: 10,
+    alignItems: "flex-start",
+  },
+  cardStat: {
     display: "flex",
     flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
     gap: 2,
     flex: 1,
   },
-  cardScoreLabel: {
+  cardStatLabel: {
     fontSize: 10,
     textTransform: "uppercase",
     letterSpacing: 0.5,
     color: "#7dd3fc",
   },
+  cardScorePanel: {
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  },
+  cardEvalValue: {
+    fontSize: 22,
+    fontWeight: 700,
+    fontVariantNumeric: "tabular-nums",
+    color: "#f0f9ff",
+    lineHeight: 1,
+  },
   cardScoreValue: {
-    fontSize: 26,
+    fontSize: 22,
     fontWeight: 700,
     fontVariantNumeric: "tabular-nums",
     color: "#f0f9ff",
     lineHeight: 1,
   },
   cardGrade: {
-    marginTop: 2,
     fontSize: 12,
     fontWeight: 700,
     color: "#0c4a6e",
