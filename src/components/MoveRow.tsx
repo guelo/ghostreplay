@@ -1,5 +1,6 @@
 import React, { type RefObject } from "react";
 import type { MoveClassification } from "../workers/analysisUtils";
+import MoveMessages from "./MoveMessages";
 
 // ---------------------------------------------------------------------------
 // Shared types (re-exported from MoveList.tsx too)
@@ -115,7 +116,7 @@ const formatEvalFormula = (
   );
 };
 
-const classificationClass = (c?: MoveClassification | null): string => {
+export const classificationClass = (c?: MoveClassification | null): string => {
   if (!c) return "";
   return `move-${c}`;
 };
@@ -289,81 +290,17 @@ const MoveRowInner = ({
     msgs: MoveMessage[],
     moveIndex: number,
     side: "white" | "black",
-  ) => {
-    const arrowClass = side === "black" ? "move-bubble--arrow-right" : "";
-    return msgs.map((msg) => {
-      const isRevealed = revealedSrsFailIndex === moveIndex;
-
-      if (msg.variant === "srs-fail" && msg.srsFailDetail) {
-        return (
-          <div
-            ref={isLastBubbleRow ? lastMessageRef : null}
-            key={msg.key}
-            className={`move-bubble move-bubble--srs-fail ${arrowClass}`}
-          >
-            <button
-              type="button"
-              className={`srs-fail-icon ${isRevealed ? "srs-fail-icon--revealed" : ""}`}
-              disabled={isInteractionDisabled}
-              onClick={() => {
-                if (isInteractionDisabled) {
-                  return;
-                }
-                if (!isRevealed && onRevealSrsFail && msg.srsFailDetail) {
-                  onRevealSrsFail(msg.srsFailDetail, moveIndex);
-                }
-              }}
-              title="Click to see what you should have played"
-            >
-              <span className="srs-fail-icon__symbol">!</span>
-            </button>
-            <div className="srs-fail-body">
-              <span className="srs-fail-body__label">{msg.text}</span>
-              {msg.srsStats && (
-                <span className="srs-stats">
-                  pass/fail: {msg.srsStats.passCount}/{msg.srsStats.failCount} ·
-                  streak {msg.srsStats.streak}
-                </span>
-              )}
-              {isRevealed && msg.srsFailDetail && (
-                <div className="srs-fail-body__detail">
-                  <p>
-                    You played:{" "}
-                    <strong className="srs-fail-body__bad">
-                      {msg.srsFailDetail.userMoveSan}
-                    </strong>
-                  </p>
-                  <p>
-                    Best was:{" "}
-                    <span className="srs-fail-body__best">
-                      {msg.srsFailDetail.bestMoveSan}
-                    </span>
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        );
-      }
-
-      return (
-        <div
-          ref={isLastBubbleRow ? lastMessageRef : null}
-          key={msg.key}
-          className={`move-bubble move-bubble--${msg.variant} ${arrowClass}`}
-        >
-          <span>{msg.text}</span>
-          {msg.srsStats && (
-            <span className="srs-stats">
-              pass/fail: {msg.srsStats.passCount}/{msg.srsStats.failCount}
-              <br />
-              streak {msg.srsStats.streak}
-            </span>
-          )}
-        </div>
-      );
-    });
-  };
+  ) => (
+    <MoveMessages
+      msgs={msgs}
+      moveIndex={moveIndex}
+      side={side}
+      revealedSrsFailIndex={revealedSrsFailIndex}
+      isInteractionDisabled={isInteractionDisabled}
+      onRevealSrsFail={onRevealSrsFail}
+      lastMessageRef={isLastBubbleRow ? lastMessageRef : undefined}
+    />
+  );
 
   // Case 0: Variation split — only render one side
   if (splitMode === "white-only") {

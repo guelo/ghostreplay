@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, act } from "../../test/utils";
+import { setMatchMedia } from "../../test/setup";
 import { ConnectedAnalysisGraph, ConnectedMoveList } from "./AnalysisConnectors";
 import { useGameStore } from "../../stores/useGameStore";
 import {
@@ -140,6 +141,13 @@ vi.mock("../MoveList", () => ({
   },
 }));
 
+vi.mock("../HorizontalMoveList", () => ({
+  default: (props: Record<string, unknown>) => {
+    capturedMoveListProps = props;
+    return <div data-testid="h-move-list" />;
+  },
+}));
+
 describe("ConnectedMoveList — freshlyResolvedIndices", () => {
   let store: ReturnType<typeof createAnalysisStore>;
 
@@ -242,5 +250,21 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
 
     const fresh = capturedMoveListProps.freshlyResolvedIndices as ReadonlySet<number>;
     expect(fresh.size).toBe(0);
+  });
+
+  it("renders HorizontalMoveList below the game's 767px breakpoint", () => {
+    useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "white" });
+    setMatchMedia("(max-width: 767px)", true);
+    const { queryByTestId } = renderConnected();
+    expect(queryByTestId("h-move-list")).not.toBeNull();
+    expect(queryByTestId("move-list")).toBeNull();
+  });
+
+  it("renders the vertical MoveList above the 767px breakpoint", () => {
+    useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "white" });
+    setMatchMedia("(max-width: 767px)", false);
+    const { queryByTestId } = renderConnected();
+    expect(queryByTestId("move-list")).not.toBeNull();
+    expect(queryByTestId("h-move-list")).toBeNull();
   });
 });

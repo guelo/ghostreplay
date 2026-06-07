@@ -9,14 +9,14 @@ import VariationLine from "./VariationLine";
 // Re-export types that other modules import from MoveList
 export type { SrsFailDetail, SrsStats, MoveMessage } from "./MoveRow";
 
-type Move = {
+export type Move = {
   san: string;
   classification?: MoveClassification | null;
   eval?: number | null; // centipawns, white perspective
   evalMate?: number | null; // mate-in-N, white perspective (positive = white mates)
 };
 
-type MoveListProps = {
+export type MoveListProps = {
   moves: Move[];
   currentIndex: number | null; // null means viewing latest position
   onNavigate: (index: number | null) => void;

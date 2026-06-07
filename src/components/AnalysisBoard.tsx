@@ -16,6 +16,8 @@ import { mateToCp, moverMateToWhiteCp, playerToWhite, playerToWhiteMate, toWhite
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
+import HorizontalMoveList from "./HorizontalMoveList";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 import MaterialDisplay from "./MaterialDisplay";
 import { formatWhiteEval, CLASSIFICATION_ICON } from "./MoveRow";
 import type { MoveClassification } from "../workers/analysisUtils";
@@ -341,6 +343,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   onGraphMoveClick,
 }, ref) => {
   const debugEnabled = useMemo(isAnalysisBoardDiagnosticsEnabled, []);
+  const isNarrow = useMediaQuery("(max-width: 720px)");
   const reactBoardId = useId();
   const chessboardId = useMemo(
     () => `analysis-board-${reactBoardId.replace(/[^a-zA-Z0-9_-]/g, "")}`,
@@ -1433,20 +1436,25 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             fen={displayedFen}
             perspective={boardOrientation === "white" ? "black" : "white"}
           />
-          <MoveList
-            moves={mappedMoves}
-            currentIndex={currentIndex}
-            onNavigate={handleNavigate}
-            playerColor={boardOrientation}
-            variationTree={tree}
-            selectedVarNodeId={selectedVarNodeId}
-            onVarSelect={handleVarSelect}
-            getAbsolutePly={getAbsolutePly}
-            navigateUp={navigateUp}
-            navigateDown={navigateDown}
-            headerEvalOverride={varHeaderEval}
-            suppressKeyboardNavigation={selectedEngineLine !== null}
-          />
+          {(() => {
+            const Component = isNarrow ? HorizontalMoveList : MoveList;
+            return (
+              <Component
+                moves={mappedMoves}
+                currentIndex={currentIndex}
+                onNavigate={handleNavigate}
+                playerColor={boardOrientation}
+                variationTree={tree}
+                selectedVarNodeId={selectedVarNodeId}
+                onVarSelect={handleVarSelect}
+                getAbsolutePly={getAbsolutePly}
+                navigateUp={navigateUp}
+                navigateDown={navigateDown}
+                headerEvalOverride={varHeaderEval}
+                suppressKeyboardNavigation={selectedEngineLine !== null}
+              />
+            );
+          })()}
           <MaterialDisplay
             fen={displayedFen}
             perspective={boardOrientation}

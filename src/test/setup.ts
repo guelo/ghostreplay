@@ -16,6 +16,8 @@ afterEach(() => {
   } catch {
     /* ignore */
   }
+  // Reset matchMedia state so query matches do not leak across tests.
+  for (const mql of __mqlRegistry.values()) mql._matches = false
 })
 
 // localStorage polyfill for JSDOM (not always a full Storage implementation here)
@@ -50,3 +52,51 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
 // Pointer capture stubs for JSDOM
 HTMLElement.prototype.setPointerCapture ??= () => {}
 HTMLElement.prototype.releasePointerCapture ??= () => {}
+
+// Reactive matchMedia mock. useSyncExternalStore-based hooks only re-render when
+// the registered `change` listener actually fires, so we keep real listener sets
+// per query and dispatch to them via setMatchMedia().
+type MockMQL = MediaQueryList & {
+  _matches: boolean
+  _listeners: Set<(e: MediaQueryListEvent) => void>
+}
+const __mqlRegistry = new Map<string, MockMQL>()
+
+function getOrCreateMql(query: string): MockMQL {
+  let mql = __mqlRegistry.get(query)
+  if (!mql) {
+    const listeners = new Set<(e: MediaQueryListEvent) => void>()
+    mql = {
+      _matches: false,
+      _listeners: listeners,
+      media: query,
+      get matches() {
+        return (this as MockMQL)._matches
+      },
+      onchange: null,
+      addEventListener: (_type: string, cb: (e: MediaQueryListEvent) => void) => {
+        listeners.add(cb)
+      },
+      removeEventListener: (_type: string, cb: (e: MediaQueryListEvent) => void) => {
+        listeners.delete(cb)
+      },
+      addListener: (cb: (e: MediaQueryListEvent) => void) => listeners.add(cb),
+      removeListener: (cb: (e: MediaQueryListEvent) => void) => listeners.delete(cb),
+      dispatchEvent: () => true,
+    } as unknown as MockMQL
+    __mqlRegistry.set(query, mql)
+  }
+  return mql
+}
+
+if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
+  window.matchMedia = ((query: string) => getOrCreateMql(query)) as typeof window.matchMedia
+}
+
+/** Test helper: set a media query's match state and notify subscribers. */
+export function setMatchMedia(query: string, matches: boolean): void {
+  const mql = getOrCreateMql(query)
+  mql._matches = matches
+  const event = { matches, media: query } as MediaQueryListEvent
+  for (const cb of mql._listeners) cb(event)
+}

@@ -11,6 +11,8 @@ import { STARTING_FEN } from "./config";
 import EvalBar from "../EvalBar";
 import AnalysisGraph from "../AnalysisGraph";
 import MoveList from "../MoveList";
+import HorizontalMoveList from "../HorizontalMoveList";
+import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { MoveMessage, SrsFailDetail } from "../MoveList";
 
 // Walk back from selectedMoveIndex to the most recent move with a played eval
@@ -180,6 +182,7 @@ export const ConnectedMoveList = memo(
     isInteractionDisabled,
   }: ConnectedMoveListProps) => {
     const analysisStoreApi = useAnalysisStoreApi();
+    const isNarrow = useMediaQuery("(max-width: 767px)");
     const analysisMap = useAnalysisStore((s) => s.analysisMap);
     const moveHistory = useGameStore((s) => s.moveHistory);
     const viewIndex = useGameStore((s) => s.viewIndex);
@@ -310,8 +313,9 @@ export const ConnectedMoveList = memo(
       [analysisStoreApi, isPlayerMoveIndex, sessionId],
     );
 
+    const Component = isNarrow ? HorizontalMoveList : MoveList;
     return (
-      <MoveList
+      <Component
         moves={annotatedMoves}
         currentIndex={viewIndex}
         onNavigate={onNavigate}

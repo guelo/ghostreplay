@@ -1,6 +1,7 @@
 import { Chess } from 'chess.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '../test/utils'
+import { setMatchMedia } from '../test/setup'
 import AnalysisBoard, { computeBoardEvalIcon } from './AnalysisBoard'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
@@ -150,6 +151,13 @@ vi.mock('./MoveList', () => ({
         </button>
       </div>
     )
+  },
+}))
+
+vi.mock('./HorizontalMoveList', () => ({
+  default: (props: { playerColor?: 'white' | 'black'; [key: string]: unknown }) => {
+    capturedMoveListProps = props
+    return <div data-testid="h-move-list" />
   },
 }))
 
@@ -357,6 +365,20 @@ describe('AnalysisBoard MoveList', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="black" />)
 
     expect(screen.getByTestId('move-list-player-color')).toHaveTextContent('black')
+  })
+
+  it('renders HorizontalMoveList below the analysis 720px breakpoint', () => {
+    setMatchMedia('(max-width: 720px)', true)
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    expect(screen.getByTestId('h-move-list')).toBeTruthy()
+    expect(screen.queryByTestId('move-list-player-color')).toBeNull()
+  })
+
+  it('renders the vertical MoveList above the 720px breakpoint', () => {
+    setMatchMedia('(max-width: 720px)', false)
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    expect(screen.getByTestId('move-list-player-color')).toBeTruthy()
+    expect(screen.queryByTestId('h-move-list')).toBeNull()
   })
 
   it('initializes to initialMoveIndex when provided', () => {
