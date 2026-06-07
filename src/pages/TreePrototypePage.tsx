@@ -33,11 +33,12 @@ type TreeNode = {
 const ROOT: TreeNode = { san: null, fen: STARTING_FEN, ply: 0 };
 
 /**
- * A drawn elbow from the selected cell in one column to the next column's
- * header. Coordinates are in tree-local space (relative to the `tree` element,
- * so they survive horizontal scrolling). `off` is 0 when the origin cell is
- * visible, or ±1 when it has scrolled above (-1) / below (+1) the column's
- * viewport and the origin has been clamped to the edge.
+ * A drawn elbow from the selected cell in one column to the selected cell in
+ * the next column (or, when the next column has no selection yet, its vertical
+ * midpoint). Coordinates are in tree-local space (relative to the `tree`
+ * element, so they survive horizontal scrolling). `off`/`off2` are 0 when the
+ * origin/target cell is visible, or ±1 when it has scrolled above (-1) / below
+ * (+1) its column's viewport and the endpoint has been clamped to the edge.
  */
 type Connector = {
   x1: number;
@@ -45,6 +46,7 @@ type Connector = {
   x2: number;
   y2: number;
   off: -1 | 0 | 1;
+  off2: -1 | 0 | 1;
 };
 
 /** Below this width the board and tree stack vertically. */
@@ -312,10 +314,33 @@ function TreePrototypePage() {
           off = 1;
         }
 
-        // Aim at the vertical midpoint of the child column's scroll band.
+        // Target x is the child column's left edge. Aim y at the selected
+        // cell's center in the child column (clamped to that column's scroll
+        // band, same technique as the origin). When the child column has no
+        // selection yet (the freshly-revealed replies column), fall back to
+        // the column's vertical midpoint.
         const x2 = childR.left - t.left;
-        const y2 = childR.top + childR.height / 2 - t.top;
-        next.push({ x1, y1, x2, y2, off });
+        const childCell = pathNodeRefs.current.get(c + 1);
+        let y2: number;
+        let off2: Connector["off2"] = 0;
+        if (childCell) {
+          const childCellR = childCell.getBoundingClientRect();
+          const childCellCenter =
+            childCellR.top + childCellR.height / 2 - t.top;
+          const childBandTop = childR.top - t.top;
+          const childBandBottom = childR.bottom - t.top;
+          y2 = childCellCenter;
+          if (childCellCenter < childBandTop) {
+            y2 = childBandTop;
+            off2 = -1;
+          } else if (childCellCenter > childBandBottom) {
+            y2 = childBandBottom;
+            off2 = 1;
+          }
+        } else {
+          y2 = childR.top + childR.height / 2 - t.top;
+        }
+        next.push({ x1, y1, x2, y2, off, off2 });
       }
       setConnectors(next);
     };
@@ -438,18 +463,24 @@ function TreePrototypePage() {
                 const d = `M ${c.x1} ${c.y1} C ${c.x1 + dx} ${c.y1}, ${
                   x2 - dx
                 } ${c.y2}, ${x2} ${c.y2}`;
-                // When the origin cell is scrolled out, mark the clamped edge
-                // with a small triangle pointing the way to the selection.
-                const tip =
-                  c.off === -1
-                    ? `M ${c.x1 - 5} ${c.y1 + 5} L ${c.x1} ${c.y1 - 2} L ${
-                        c.x1 + 5
-                      } ${c.y1 + 5} Z`
-                    : c.off === 1
-                    ? `M ${c.x1 - 5} ${c.y1 - 5} L ${c.x1} ${c.y1 + 2} L ${
-                        c.x1 + 5
-                      } ${c.y1 - 5} Z`
+                // When an endpoint's cell is scrolled out of its column, mark
+                // the clamped edge with a small triangle pointing the way to
+                // the selection. `cx` lets us draw the same glyph at either end
+                // (the origin sits at x1; the target a touch left of the arrow
+                // tip so it doesn't collide with the arrowhead).
+                const clampTip = (cx: number, cy: number, off: -1 | 0 | 1) =>
+                  off === -1
+                    ? `M ${cx - 5} ${cy + 5} L ${cx} ${cy - 2} L ${
+                        cx + 5
+                      } ${cy + 5} Z`
+                    : off === 1
+                    ? `M ${cx - 5} ${cy - 5} L ${cx} ${cy + 2} L ${
+                        cx + 5
+                      } ${cy - 5} Z`
                     : null;
+                const tip = clampTip(c.x1, c.y1, c.off);
+                const tip2 = clampTip(x2 - 7, c.y2, c.off2);
+                const clamped = c.off || c.off2;
                 return (
                   <g key={i}>
                     <path
@@ -458,10 +489,11 @@ function TreePrototypePage() {
                       stroke="#0ea5e9"
                       strokeWidth={2}
                       markerEnd="url(#tree-arrowhead)"
-                      opacity={c.off ? 0.5 : 0.9}
-                      strokeDasharray={c.off ? "4 3" : undefined}
+                      opacity={clamped ? 0.5 : 0.9}
+                      strokeDasharray={clamped ? "4 3" : undefined}
                     />
                     {tip && <path d={tip} fill="#0ea5e9" opacity={0.8} />}
+                    {tip2 && <path d={tip2} fill="#0ea5e9" opacity={0.8} />}
                   </g>
                 );
               })}
