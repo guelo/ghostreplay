@@ -46,6 +46,75 @@ class OpportunityCounters:
         return compute_p_reach(self.reached_30d, self.opportunities_30d)
 
 
+@dataclass(frozen=True)
+class ReviewCounters:
+    review_count: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    last_result: bool | None = None
+
+
+def load_review_counters(
+    db: Session,
+    blunder_ids: list[int],
+) -> dict[int, ReviewCounters]:
+    """Per-blunder pass/fail review summary counters.
+
+    Time-independent: these are lifetime counts, so this loader intentionally
+    takes no ``now``. Shared source for both the in-game ghost SRS response and
+    the Blunders library list so the two surfaces cannot drift.
+    """
+    if not blunder_ids:
+        return {}
+
+    unique_blunder_ids = list(dict.fromkeys(blunder_ids))
+    counters = {blunder_id: ReviewCounters() for blunder_id in unique_blunder_ids}
+
+    # Single statement so counts and last_result share one consistent snapshot:
+    # a concurrent insert cannot yield e.g. zero reviews with last_result set.
+    # The per-row aggregates (count / pass sum) and the latest-review flag are
+    # both window functions over the same partitioned scan; we then pick the
+    # latest row (rn == 1) per blunder, which carries the partition-wide totals.
+    ranked = (
+        db.query(
+            BlunderReview.blunder_id.label("blunder_id"),
+            BlunderReview.passed.label("last_result"),
+            func.count()
+            .over(partition_by=BlunderReview.blunder_id)
+            .label("review_count"),
+            func.sum(case((BlunderReview.passed, 1), else_=0))
+            .over(partition_by=BlunderReview.blunder_id)
+            .label("pass_count"),
+            func.row_number()
+            .over(
+                partition_by=BlunderReview.blunder_id,
+                order_by=(BlunderReview.reviewed_at.desc(), BlunderReview.id.desc()),
+            )
+            .label("rn"),
+        )
+        .filter(BlunderReview.blunder_id.in_(unique_blunder_ids))
+        .subquery()
+    )
+
+    rows = db.query(
+        ranked.c.blunder_id,
+        ranked.c.last_result,
+        ranked.c.review_count,
+        ranked.c.pass_count,
+    ).filter(ranked.c.rn == 1)
+
+    for row in rows:
+        review_count = int(row.review_count or 0)
+        pass_count = int(row.pass_count or 0)
+        counters[row.blunder_id] = ReviewCounters(
+            review_count=review_count,
+            pass_count=pass_count,
+            fail_count=review_count - pass_count,
+            last_result=row.last_result,
+        )
+    return counters
+
+
 def detect_opening_family(fen_raw: str) -> str | None:
     roots = get_opening_roots()
     owning_keys = roots.owning_root_keys(normalize_fen(fen_raw))

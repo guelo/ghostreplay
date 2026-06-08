@@ -7,7 +7,7 @@ import uuid
 import random
 from datetime import datetime, timedelta, timezone
 
-from app.models import Blunder, GameSession, RatingHistory
+from app.models import Blunder, BlunderReview, GameSession, RatingHistory
 
 
 def test_start_game_success(client, auth_headers):
@@ -625,6 +625,51 @@ def test_next_opponent_move_black_player(client, auth_headers, create_game_sessi
     assert data["move"]["uci"] == "g1f3"
     assert data["target_blunder_id"] is not None
     assert data["decision_source"] == "ghost_path"
+
+
+def test_next_opponent_move_target_srs_pass_fail_counts(client, auth_headers, create_game_session, db_session):
+    """Regression: target_blunder_srs pass/fail counts come from the shared loader."""
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="black")
+    pgn = "1. e4 e5 2. Nf3 Qh4"
+    fen_before_blunder = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2"
+    blunder_response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": session_id,
+            "pgn": pgn,
+            "fen": fen_before_blunder,
+            "user_move": "Qh4",
+            "best_move": "Nc6",
+            "eval_before": -50,
+            "eval_after": 100,
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert blunder_response.status_code == 201
+    blunder_id = blunder_response.json()["blunder_id"]
+    blunder = db_session.get(Blunder, blunder_id)
+    blunder.created_at = datetime.now(timezone.utc) - timedelta(hours=5)
+    db_session.commit()
+
+    now = datetime.now(timezone.utc)
+    db_session.add_all([
+        BlunderReview(blunder_id=blunder_id, session_id=uuid.UUID(str(session_id)), reviewed_at=now - timedelta(hours=2), passed=True, move_played_san="Nc6", eval_delta_cp=0),
+        BlunderReview(blunder_id=blunder_id, session_id=uuid.UUID(str(session_id)), reviewed_at=now - timedelta(hours=1), passed=False, move_played_san="Qh4", eval_delta_cp=150),
+    ])
+    db_session.commit()
+
+    new_session_id = create_game_session(user_id=user_id, player_color="black")
+    fen_after_e5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+    response = _post_next_opponent_move(
+        client, auth_headers, new_session_id, fen_after_e5, user_id=user_id
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["target_blunder_id"] == blunder_id
+    srs = data["target_blunder_srs"]
+    assert srs["pass_count"] == 1
+    assert srs["fail_count"] == 1
 
 
 def test_next_opponent_move_session_not_found(client, auth_headers):

@@ -25,9 +25,11 @@ from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.security import TokenPayload, get_current_user
 from app.srs_opportunity import (
     OpportunityCounters,
+    ReviewCounters,
     detect_opening_family,
     ghost_eligible,
     load_opportunity_counters,
+    load_review_counters,
     practice_priority_score,
     srs_priority,
 )
@@ -415,6 +417,10 @@ class BlunderListItem(BaseModel):
     srs_due: bool = False
     ghost_eligible: bool = False
     practice_priority_score: float = 0.0
+    review_count: int = 0
+    pass_count: int = 0
+    fail_count: int = 0
+    last_result: bool | None = None
     opportunities_since_review: int = 0
     opportunities_30d: int = 0
     reached_30d: int = 0
@@ -496,6 +502,7 @@ def _blunder_list_query(db: Session, user_id: int):
 def _build_blunder_item(
     row,
     counters: OpportunityCounters | None,
+    review_counters: ReviewCounters | None,
     now: datetime,
 ) -> BlunderListItem:
     priority = srs_priority(
@@ -537,6 +544,10 @@ def _build_blunder_item(
         # rounding here would collapse distinct scores into recency tiebreaks.
         # Display rounding is a client concern.
         practice_priority_score=practice_score,
+        review_count=review_counters.review_count if review_counters else 0,
+        pass_count=review_counters.pass_count if review_counters else 0,
+        fail_count=review_counters.fail_count if review_counters else 0,
+        last_result=review_counters.last_result if review_counters else None,
         opportunities_since_review=counters.opportunities_since_review if counters else 0,
         opportunities_30d=counters.opportunities_30d if counters else 0,
         reached_30d=counters.reached_30d if counters else 0,
@@ -604,9 +615,12 @@ def list_blunders(
     rows = query.all()
     blunder_ids = [row.id for row in rows]
     opportunity_counters = load_opportunity_counters(db, blunder_ids, now=now)
+    review_counters = load_review_counters(db, blunder_ids)
 
     all_items = [
-        _build_blunder_item(row, opportunity_counters.get(row.id), now)
+        _build_blunder_item(
+            row, opportunity_counters.get(row.id), review_counters.get(row.id), now
+        )
         for row in rows
     ]
 

@@ -35,6 +35,7 @@ from app.srs_opportunity import (
     detect_opening_family,
     ghost_eligible,
     load_opportunity_counters,
+    load_review_counters,
     opening_weight,
 )
 
@@ -788,17 +789,11 @@ def get_next_opponent_move(
             # Parse SAN to get the move object
             move = board.parse_san(move_san)
 
-            # Fetch SRS review counts for the targeted blunder
-            review_counts = db.execute(
-                text("""
-                    SELECT
-                        SUM(CASE WHEN passed THEN 1 ELSE 0 END) AS pass_count,
-                        SUM(CASE WHEN passed THEN 0 ELSE 1 END) AS fail_count
-                    FROM blunder_reviews
-                    WHERE blunder_id = :blunder_id
-                """),
-                {"blunder_id": target_blunder_id},
-            ).fetchone()
+            # Fetch SRS review counts for the targeted blunder (shared loader)
+            review_counters = load_review_counters(
+                db, [target_blunder_id] if target_blunder_id else []
+            )
+            review_counter = review_counters.get(target_blunder_id) if target_blunder_id else None
 
             blunder_row = db.execute(
                 text("""
@@ -815,8 +810,8 @@ def get_next_opponent_move(
             target_srs = TargetBlunderSrs(
                 last_reviewed_at=_isoformat_optional(blunder_last_reviewed),
                 created_at=_isoformat_optional(blunder_created_at),
-                pass_count=review_counts[0] or 0 if review_counts else 0,
-                fail_count=review_counts[1] or 0 if review_counts else 0,
+                pass_count=review_counter.pass_count if review_counter else 0,
+                fail_count=review_counter.fail_count if review_counter else 0,
                 pass_streak=blunder_row[0] if blunder_row else 0,
                 opportunities_since_review=counters.opportunities_since_review if counters else 0,
                 opportunities_30d=counters.opportunities_30d if counters else 0,

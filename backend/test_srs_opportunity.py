@@ -21,7 +21,7 @@ from app.srs_math import (
     compute_p_reach,
     expected_opportunities,
 )
-from app.srs_opportunity import load_opportunity_counters
+from app.srs_opportunity import load_opportunity_counters, load_review_counters
 
 
 def _session(
@@ -106,6 +106,10 @@ def test_opportunity_math_smoothed_and_bounded():
     assert calculate_opportunity_overdue(opportunities_since_review=4, pass_streak=2) == pytest.approx(1.0)
     assert compute_p_reach(1, 100) == pytest.approx(3 / 104)
     assert compute_p_reach(10, 0) == 1.0
+
+
+def test_load_review_counters_empty_short_circuits(db_session):
+    assert load_review_counters(db_session, []) == {}
 
 
 def test_session_upload_records_reached_as_opportunity_and_replay_deletes_stale_event(db_session):

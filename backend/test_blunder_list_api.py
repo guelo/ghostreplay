@@ -76,6 +76,84 @@ def _create_session(
     return session
 
 
+def _add_review(
+    db_session,
+    *,
+    blunder_id: int,
+    session_id: uuid.UUID,
+    passed: bool,
+    reviewed_at: datetime,
+    move_played_san: str = "Nf3",
+    eval_delta_cp: int = 0,
+) -> BlunderReview:
+    review = BlunderReview(
+        blunder_id=blunder_id,
+        session_id=session_id,
+        reviewed_at=reviewed_at,
+        passed=passed,
+        move_played_san=move_played_san,
+        eval_delta_cp=eval_delta_cp,
+    )
+    db_session.add(review)
+    db_session.commit()
+    db_session.refresh(review)
+    return review
+
+
+def test_list_blunders_review_counters_latest_passed(client, auth_headers, db_session):
+    now = datetime.now(timezone.utc)
+    session = _create_session(db_session, ended_at=now - timedelta(days=1))
+    blunder = _create_blunder(db_session, user_id=123, fen_hash_suffix="rc-pass")
+    _add_review(db_session, blunder_id=blunder.id, session_id=session.id, passed=True, reviewed_at=now - timedelta(hours=3))
+    _add_review(db_session, blunder_id=blunder.id, session_id=session.id, passed=False, reviewed_at=now - timedelta(hours=2))
+    _add_review(db_session, blunder_id=blunder.id, session_id=session.id, passed=True, reviewed_at=now - timedelta(hours=1))
+
+    item = client.get("/api/blunder", headers=auth_headers(user_id=123)).json()["items"][0]
+    assert item["review_count"] == 3
+    assert item["pass_count"] == 2
+    assert item["fail_count"] == 1
+    assert item["last_result"] is True
+
+
+def test_list_blunders_review_counters_latest_failed(client, auth_headers, db_session):
+    now = datetime.now(timezone.utc)
+    session = _create_session(db_session, ended_at=now - timedelta(days=1))
+    blunder = _create_blunder(db_session, user_id=123, fen_hash_suffix="rc-fail")
+    _add_review(db_session, blunder_id=blunder.id, session_id=session.id, passed=True, reviewed_at=now - timedelta(hours=2))
+    _add_review(db_session, blunder_id=blunder.id, session_id=session.id, passed=False, reviewed_at=now - timedelta(hours=1))
+
+    item = client.get("/api/blunder", headers=auth_headers(user_id=123)).json()["items"][0]
+    assert item["review_count"] == 2
+    assert item["pass_count"] == 1
+    assert item["fail_count"] == 1
+    assert item["last_result"] is False
+
+
+def test_list_blunders_review_counters_never_reviewed(client, auth_headers, db_session):
+    _create_blunder(db_session, user_id=123, fen_hash_suffix="rc-none")
+
+    item = client.get("/api/blunder", headers=auth_headers(user_id=123)).json()["items"][0]
+    assert item["review_count"] == 0
+    assert item["pass_count"] == 0
+    assert item["fail_count"] == 0
+    assert item["last_result"] is None
+
+
+def test_list_blunders_review_counters_tie_uses_highest_review_id(client, auth_headers, db_session):
+    now = datetime.now(timezone.utc)
+    older_session = _create_session(db_session, ended_at=now - timedelta(days=2))
+    newer_session = _create_session(db_session, ended_at=now - timedelta(days=1))
+    blunder = _create_blunder(db_session, user_id=123, fen_hash_suffix="rc-tie")
+    reviewed_at = now - timedelta(hours=1)
+    # Same timestamp, differing passed: higher review id (inserted second) wins.
+    _add_review(db_session, blunder_id=blunder.id, session_id=older_session.id, passed=True, reviewed_at=reviewed_at)
+    _add_review(db_session, blunder_id=blunder.id, session_id=newer_session.id, passed=False, reviewed_at=reviewed_at)
+
+    item = client.get("/api/blunder", headers=auth_headers(user_id=123)).json()["items"][0]
+    assert item["review_count"] == 2
+    assert item["last_result"] is False
+
+
 def test_list_blunders_returns_all_for_user(client, auth_headers, db_session):
     _create_blunder(db_session, user_id=123, fen_hash_suffix="a")
     _create_blunder(db_session, user_id=123, fen_hash_suffix="b")

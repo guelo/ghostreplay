@@ -543,6 +543,35 @@ function BlundersPage() {
                         </span>
                       </div>
                       <div className="blunder-detail__stat">
+                        <span className="blunder-detail__stat-label">Pass / Fail</span>
+                        <span className="blunder-detail__stat-value">
+                          {(selected.review_count ?? 0) > 0
+                            ? `${selected.pass_count ?? 0}/${selected.fail_count ?? 0}`
+                            : "—"}
+                        </span>
+                        <span className="blunder-detail__stat-subtext">
+                          {selected.review_count ?? 0} reviews
+                        </span>
+                      </div>
+                      <div className="blunder-detail__stat">
+                        <span className="blunder-detail__stat-label">Recent</span>
+                        <span
+                          className={`blunder-detail__result-chip ${
+                            (selected.last_result ?? null) === true
+                              ? "blunder-detail__result-chip--pass"
+                              : (selected.last_result ?? null) === false
+                                ? "blunder-detail__result-chip--fail"
+                                : "blunder-detail__result-chip--neutral"
+                          }`}
+                        >
+                          {(selected.last_result ?? null) === true
+                            ? "Pass"
+                            : (selected.last_result ?? null) === false
+                              ? "Fail"
+                              : "Not reviewed"}
+                        </span>
+                      </div>
+                      <div className="blunder-detail__stat">
                         <span className="blunder-detail__stat-label">Last reviewed</span>
                         <span className="blunder-detail__stat-value">
                           {selected.last_reviewed_at

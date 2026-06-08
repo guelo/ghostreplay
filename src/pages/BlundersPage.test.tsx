@@ -74,6 +74,10 @@ const BLUNDERS_RESPONSE = [
     srs_due: true,
     ghost_eligible: true,
     practice_priority_score: 2.3,
+    review_count: 0,
+    pass_count: 0,
+    fail_count: 0,
+    last_result: null as boolean | null,
     source_session_id: 'session-123' as string | null,
     last_session_id: 'session-123',
     pass_streak: 0,
@@ -397,6 +401,77 @@ describe('BlundersPage', () => {
     expect(mockFetchBlunders).toHaveBeenCalledWith({ practiceReady: false, limit: 50, offset: 0 });
     expect(mockFetchAnalysis).not.toHaveBeenCalled();
     expect(screen.getByText('Select a blunder to study.')).toBeTruthy();
+  });
+
+  it('shows pass/fail counters and recent pass chip for a reviewed blunder', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          review_count: 3,
+          pass_count: 2,
+          fail_count: 1,
+          last_result: true,
+        },
+      ]),
+    );
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    expect(await screen.findByText('2/1')).toBeInTheDocument();
+    expect(screen.getByText('3 reviews')).toBeInTheDocument();
+    expect(screen.getByText('Pass')).toBeInTheDocument();
+  });
+
+  it('shows a fail chip when the most recent review failed', async () => {
+    mockFetchBlunders.mockResolvedValue(
+      blunderEnvelope([
+        {
+          ...BLUNDERS_RESPONSE[0],
+          review_count: 2,
+          pass_count: 1,
+          fail_count: 1,
+          last_result: false,
+        },
+      ]),
+    );
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    expect(await screen.findByText('Fail')).toBeInTheDocument();
+  });
+
+  it('shows an em dash and "Not reviewed" for a never-reviewed blunder', async () => {
+    mockFetchBlunders.mockResolvedValue(blunderEnvelope());
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    expect(await screen.findByText('—')).toBeInTheDocument();
+    expect(screen.getByText('Not reviewed')).toBeInTheDocument();
   });
 
   it('appends more blunders when Load more is clicked', async () => {

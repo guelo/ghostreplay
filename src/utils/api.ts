@@ -912,6 +912,10 @@ export interface BlunderListItem {
   srs_due: boolean
   ghost_eligible: boolean
   practice_priority_score: number
+  review_count: number
+  pass_count: number
+  fail_count: number
+  last_result: boolean | null
   source_session_id?: string | null
   last_session_id: string | null
   last_played_at: string | null
