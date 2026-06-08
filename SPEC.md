@@ -2171,6 +2171,13 @@ This ensures the current scores are always available atomically and reads never 
 
 DB reference: §5.7
 
+### 13.4 Opening Lineage in `/history`
+
+The `/history` analysis footer renders an opening-lineage stack (`GameOpeningLineage`) showing the openings played in the selected game, broadest to deepest, each with its score and grade.
+
+- **Single-action chip:** Each chip is one button. Clicking it (1) toggles the inline `OpeningFamilyCard` (analysis variant) and (2) selects that opening's root position on the board/MoveList/graph by jumping to the game move whose `fen_after` matches the opening key. A second click on the same chip collapses its card. If no game move matches the opening key, the board selection is a no-op (the card still toggles).
+- **In-card actions:** The link to `/openings` ("View in Openings") and the **Start Drill** button live inside the expanded card. Start Drill is a new opening-drill entry point from history — it navigates to `/play` with `drillSetup: { openingKey, playerColor }`.
+
 ---
 
 ## 14. Analysis Cache

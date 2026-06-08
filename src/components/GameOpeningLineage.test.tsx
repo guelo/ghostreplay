@@ -27,12 +27,26 @@ function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
   };
 }
 
-function renderLineage(lineage: OpeningLineageItem[]) {
-  return render(
+function renderLineage(
+  lineage: OpeningLineageItem[],
+  handlers: {
+    onSelectRoot?: (item: OpeningLineageItem) => void;
+    onStartDrill?: (item: OpeningLineageItem) => void;
+  } = {},
+) {
+  const onSelectRoot = handlers.onSelectRoot ?? vi.fn();
+  const onStartDrill = handlers.onStartDrill ?? vi.fn();
+  const utils = render(
     <MemoryRouter>
-      <GameOpeningLineage playerColor="white" lineage={lineage} />
+      <GameOpeningLineage
+        playerColor="white"
+        lineage={lineage}
+        onSelectRoot={onSelectRoot}
+        onStartDrill={onStartDrill}
+      />
     </MemoryRouter>,
   );
+  return { ...utils, onSelectRoot, onStartDrill };
 }
 
 describe("GameOpeningLineage", () => {
@@ -60,7 +74,8 @@ describe("GameOpeningLineage", () => {
     ]);
   });
 
-  it("links to the opening page with correct color, opening, and repeated path", () => {
+  it("links to the opening page from inside the expanded card", async () => {
+    const user = userEvent.setup();
     renderLineage([
       makeItem({
         opening_key: "deep-key",
@@ -69,33 +84,66 @@ describe("GameOpeningLineage", () => {
       }),
     ]);
 
-    const link = screen.getByRole("link", { name: /^Berlin Defense/ });
+    // No link is visible until the card is expanded.
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /Select Berlin Defense/ }),
+    );
+
+    const link = screen.getByRole("link", { name: /View in Openings/ });
     expect(link).toHaveAttribute(
       "href",
       "/openings?color=white&opening=deep-key&path=k1&path=k2",
     );
   });
 
-  it("toggles the compact card via the expand button (sibling controls)", async () => {
+  it("single click expands the card AND fires onSelectRoot; 2nd click collapses", async () => {
     const user = userEvent.setup();
-    renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })]);
+    const item = makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" });
+    const onSelectRoot = vi.fn();
+    const { onStartDrill } = renderLineage([item], { onSelectRoot });
 
-    const expandButton = screen.getByRole("button", { name: /Show Ruy Lopez/ });
-    expect(expandButton).toHaveAttribute("aria-expanded", "false");
+    const toggle = screen.getByRole("button", { name: /Select Ruy Lopez/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("lineage-board")).not.toBeInTheDocument();
 
-    await user.click(expandButton);
+    await user.click(toggle);
 
-    expect(
-      screen.getByRole("button", { name: /Hide Ruy Lopez/ }),
-    ).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(onSelectRoot).toHaveBeenCalledTimes(1);
+    expect(onSelectRoot).toHaveBeenCalledWith(item);
     expect(screen.getByTestId("lineage-board")).toHaveAttribute(
       "data-position",
       "k1",
     );
+    // The link + Start Drill only exist inside the expanded card.
+    expect(
+      screen.getByRole("link", { name: /View in Openings/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Start Drill/ }),
+    ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Hide Ruy Lopez/ }));
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByTestId("lineage-board")).not.toBeInTheDocument();
+    // onSelectRoot fires on every click, including the collapsing one.
+    expect(onSelectRoot).toHaveBeenCalledTimes(2);
+    expect(onStartDrill).not.toHaveBeenCalled();
+  });
+
+  it("fires onStartDrill from the Start Drill button inside the card", async () => {
+    const user = userEvent.setup();
+    const item = makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" });
+    const onStartDrill = vi.fn();
+    renderLineage([item], { onStartDrill });
+
+    await user.click(screen.getByRole("button", { name: /Select Ruy Lopez/ }));
+    await user.click(screen.getByRole("button", { name: /Start Drill/ }));
+
+    expect(onStartDrill).toHaveBeenCalledTimes(1);
+    expect(onStartDrill).toHaveBeenCalledWith(item);
   });
 
   it("shows muted tone and em-dash score for a null-score opening", () => {

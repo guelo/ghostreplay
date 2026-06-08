@@ -1,8 +1,16 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { forwardRef, useImperativeHandle } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import HistoryPage from './HistoryPage';
+
+// Spy on navigation (Start Drill entry point) while keeping the rest of the router.
+const mockNavigate = vi.fn();
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return { ...actual, useNavigate: () => mockNavigate };
+});
 
 // jsdom doesn't have matchMedia — stub it for useTouchOnly
 beforeAll(() => {
@@ -36,30 +44,47 @@ vi.mock('../utils/api', async () => {
 });
 
 // Mock AnalysisBoard to avoid pulling in chess rendering. Render the footer so
-// the opening lineage block (passed via footer) is exercised.
+// the opening lineage block (passed via footer) is exercised. Use forwardRef +
+// useImperativeHandle so the HistoryPage ref's jumpToMove is observable.
+const mockJumpToMove = vi.fn();
 vi.mock('../components/AnalysisBoard', () => ({
-  default: ({
-    boardOrientation,
-    initialMoveIndex,
-    footer,
-  }: {
-    boardOrientation: string;
-    initialMoveIndex?: number;
-    footer?: React.ReactNode;
-  }) => (
-    <div
-      data-testid="analysis-board"
-      data-orientation={boardOrientation}
-      data-initial-move={initialMoveIndex}
-    >
-      {footer}
-    </div>
+  default: forwardRef(
+    (
+      {
+        boardOrientation,
+        initialMoveIndex,
+        footer,
+      }: {
+        boardOrientation: string;
+        initialMoveIndex?: number;
+        footer?: React.ReactNode;
+      },
+      ref: React.Ref<{ jumpToMove: (index: number) => void }>,
+    ) => {
+      useImperativeHandle(ref, () => ({ jumpToMove: mockJumpToMove }), []);
+      return (
+        <div
+          data-testid="analysis-board"
+          data-orientation={boardOrientation}
+          data-initial-move={initialMoveIndex}
+        >
+          {footer}
+        </div>
+      );
+    },
   ),
 }));
 
 // Mock AppNav
 vi.mock('../components/AppNav', () => ({
   default: () => <nav data-testid="app-nav" />,
+}));
+
+// Mock react-chessboard so expanding an opening card doesn't pull in real rendering.
+vi.mock('react-chessboard', () => ({
+  Chessboard: ({ options }: { options: Record<string, unknown> }) => (
+    <div data-testid="card-board" data-position={options.position as string} />
+  ),
 }));
 
 const HISTORY_RESPONSE = [
@@ -78,11 +103,13 @@ const ANALYSIS_RESPONSE = {
   session_id: 'abc-123',
   player_color: 'white',
   moves: [
-    { move_san: 'e4', fen_after: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1' }
+    { move_san: 'e4', fen_after: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1' },
+    { move_san: 'c5', fen_after: 'rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2' },
+    { move_san: 'Nf3', fen_after: 'rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2' },
   ],
   position_analysis: {},
   is_complete: true,
-  summary: { total_moves: 1, blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 0, accuracy: 88 },
+  summary: { total_moves: 3, blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 0, accuracy: 88 },
 };
 
 describe('HistoryPage', () => {
@@ -160,6 +187,122 @@ describe('HistoryPage', () => {
 
     expect(mockFetchSessionOpenings).toHaveBeenCalledWith('abc-123');
     expect(screen.getByRole('region', { name: 'Openings played' })).toBeInTheDocument();
+  });
+
+  it('clicking an opening chip jumps the board to the matching move index', async () => {
+    const user = userEvent.setup();
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockFetchSessionOpenings.mockResolvedValue({
+      player_color: 'white',
+      lineage: [
+        {
+          // opening_key normalizes to ANALYSIS_RESPONSE.moves[2].fen_after, so a
+          // correct lookup yields index 2 (guards against a hardcoded-zero jump).
+          opening_key: 'rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2',
+          opening_name: 'Open Game',
+          opening_family: 'Open Game',
+          eco: 'C20',
+          depth: 0,
+          score: 60,
+          confidence: 0.7,
+          coverage: 0.5,
+          sample_size: 8,
+          path: [],
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Open Game')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Select Open Game/ }));
+
+    expect(mockJumpToMove).toHaveBeenCalledWith(2);
+  });
+
+  it('clicking an opening chip with no matching move does not jump the board', async () => {
+    const user = userEvent.setup();
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockFetchSessionOpenings.mockResolvedValue({
+      player_color: 'white',
+      lineage: [
+        {
+          opening_key: 'unmatched-fen-key',
+          opening_name: 'Mystery Line',
+          opening_family: 'Mystery',
+          eco: null,
+          depth: 0,
+          score: 40,
+          confidence: 0.3,
+          coverage: 0.2,
+          sample_size: 2,
+          path: [],
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Mystery Line')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Select Mystery Line/ }));
+
+    expect(mockJumpToMove).not.toHaveBeenCalled();
+  });
+
+  it('Start Drill from an opening chip navigates to /play with drillSetup state', async () => {
+    const user = userEvent.setup();
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+    mockFetchSessionOpenings.mockResolvedValue({
+      player_color: 'white',
+      lineage: [
+        {
+          opening_key: 'key-ruy',
+          opening_name: 'Ruy Lopez',
+          opening_family: 'Ruy Lopez',
+          eco: 'C60',
+          depth: 0,
+          score: 72,
+          confidence: 0.8,
+          coverage: 0.5,
+          sample_size: 10,
+          path: [],
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Ruy Lopez')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: /Select Ruy Lopez/ }));
+    await user.click(screen.getByRole('button', { name: 'Start Drill' }));
+
+    expect(mockNavigate).toHaveBeenCalledWith('/play', {
+      state: { drillSetup: { openingKey: 'key-ruy', playerColor: 'white' } },
+    });
   });
 
   it('does not fetch openings when analysis has no moves (avoids stale-empty race)', async () => {

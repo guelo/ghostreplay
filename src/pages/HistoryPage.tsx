@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { normalize_fen } from "../utils/fen";
 import {
   fetchHistory,
   fetchAnalysis,
@@ -22,6 +23,7 @@ const POLL_MAX_ATTEMPTS = 60;
 
 function HistoryPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const navState = location.state as OpenHistoryOptions | null;
 
   const [games, setGames] = useState<HistoryGame[]>([]);
@@ -149,6 +151,34 @@ function HistoryPage() {
 
   const boardRef = useRef<AnalysisBoardRef>(null);
 
+  const handleSelectRoot = useCallback(
+    (item: OpeningLineageItem) => {
+      const moves = analysis?.moves ?? [];
+      const targetFen = normalize_fen(item.opening_key);
+      const idx = moves.findIndex(
+        (m) => normalize_fen(m.fen_after) === targetFen,
+      );
+      if (idx !== -1) {
+        boardRef.current?.jumpToMove(idx);
+      }
+    },
+    [analysis],
+  );
+
+  const handleStartDrill = useCallback(
+    (item: OpeningLineageItem) => {
+      navigate("/play", {
+        state: {
+          drillSetup: {
+            openingKey: item.opening_key,
+            playerColor,
+          },
+        },
+      });
+    },
+    [navigate, playerColor],
+  );
+
   const { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat } =
     useGameReviewStats({
       selectedId,
@@ -248,6 +278,8 @@ function HistoryPage() {
                         <GameOpeningLineage
                           playerColor={playerColor}
                           lineage={openingLineage}
+                          onSelectRoot={handleSelectRoot}
+                          onStartDrill={handleStartDrill}
                         />
                       </>
                     }

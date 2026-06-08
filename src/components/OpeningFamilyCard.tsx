@@ -1,4 +1,5 @@
 import { Chessboard } from "react-chessboard";
+import { Link } from "react-router-dom";
 import type { OpeningPlayerColor } from "../utils/api";
 import {
   formatGames,
@@ -27,8 +28,10 @@ export interface OpeningFamilyCardProps {
   drillDownLabel?: string;
   /** Full variant only: navigates into this opening's children (stretched link). */
   onDrillDown?: () => void;
-  /** Full variant only: handler for the "Start Drill" button. */
+  /** Handler for the "Start Drill" button (full + analysis variants). */
   onStartDrill?: () => void;
+  /** Analysis variant only: href to this opening's /openings page. */
+  openingsHref?: string;
 }
 
 /**
@@ -38,7 +41,8 @@ export interface OpeningFamilyCardProps {
  * - `variant="full"` (default): the /openings scoreboard card with move line,
  *   metrics, and drill footer.
  * - `variant="analysis"`: a compact card for the /history analysis lineage —
- *   smaller board, no move line, no drill footer.
+ *   smaller board, no move line, with a footer linking to /openings and a
+ *   Start Drill button.
  */
 function OpeningFamilyCard({
   variant = "full",
@@ -55,9 +59,11 @@ function OpeningFamilyCard({
   drillDownLabel,
   onDrillDown,
   onStartDrill,
+  openingsHref,
 }: OpeningFamilyCardProps) {
   const statusLabel = getPriorityLabel(score);
   const isFull = variant === "full";
+  const isAnalysis = variant === "analysis";
 
   return (
     <>
@@ -149,6 +155,31 @@ function OpeningFamilyCard({
               </button>
             )}
           </div>
+        </div>
+      )}
+
+      {isAnalysis && (
+        <div className="opening-family-card__analysis-footer">
+          {openingsHref && (
+            <Link
+              className="opening-family-card__analysis-link"
+              to={openingsHref}
+            >
+              View in Openings
+            </Link>
+          )}
+          {onStartDrill && (
+            <button
+              type="button"
+              className="opening-family-card__drill-button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onStartDrill();
+              }}
+            >
+              Start Drill
+            </button>
+          )}
         </div>
       )}
     </>

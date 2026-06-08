@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import OpeningFamilyCard from "./OpeningFamilyCard";
+
+function renderCard(ui: React.ReactElement) {
+  return render(<MemoryRouter>{ui}</MemoryRouter>);
+}
 
 vi.mock("react-chessboard", () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => (
@@ -22,7 +28,7 @@ const baseProps = {
 describe("OpeningFamilyCard", () => {
   it("renders the full variant with move line and drill button", () => {
     const onStartDrill = vi.fn();
-    render(
+    renderCard(
       <OpeningFamilyCard
         {...baseProps}
         variant="full"
@@ -42,14 +48,11 @@ describe("OpeningFamilyCard", () => {
     expect(screen.getByText("72")).toBeInTheDocument();
   });
 
-  it("renders the analysis variant without move line or drill footer", () => {
-    render(<OpeningFamilyCard {...baseProps} variant="analysis" />);
+  it("renders the analysis variant without the full move line", () => {
+    renderCard(<OpeningFamilyCard {...baseProps} variant="analysis" />);
 
     expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
     expect(screen.queryByText(/Moves:/)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Start Drill" }),
-    ).not.toBeInTheDocument();
     // Metrics + board still render.
     expect(screen.getByTestId("card-board")).toHaveAttribute(
       "data-position",
@@ -58,8 +61,28 @@ describe("OpeningFamilyCard", () => {
     expect(screen.getByText("Coverage")).toBeInTheDocument();
   });
 
+  it("renders the analysis footer link + Start Drill button", async () => {
+    const user = userEvent.setup();
+    const onStartDrill = vi.fn();
+    renderCard(
+      <OpeningFamilyCard
+        {...baseProps}
+        variant="analysis"
+        openingsHref="/openings?color=white&opening=ruy-key"
+        onStartDrill={onStartDrill}
+      />,
+    );
+
+    expect(
+      screen.getByRole("link", { name: /View in Openings/ }),
+    ).toHaveAttribute("href", "/openings?color=white&opening=ruy-key");
+
+    await user.click(screen.getByRole("button", { name: "Start Drill" }));
+    expect(onStartDrill).toHaveBeenCalledTimes(1);
+  });
+
   it("shows an em-dash grade and unscored note for a null score", () => {
-    render(
+    renderCard(
       <OpeningFamilyCard
         {...baseProps}
         variant="analysis"

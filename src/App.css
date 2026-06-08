@@ -554,6 +554,12 @@
     cursor: not-allowed;
 }
 
+.chess-button.icon {
+    padding: 0.6rem 0.75rem;
+    line-height: 1;
+    font-size: 1.05rem;
+}
+
 .chess-button:hover {
     border-color: var(--text-primary);
 }
@@ -6048,7 +6054,7 @@ button.openings-shell__crumb:hover {
     line-height: 1;
 }
 
-.game-opening-chip__nav {
+.game-opening-chip__toggle {
     flex: 1;
     min-width: 0;
     display: flex;
@@ -6064,8 +6070,8 @@ button.openings-shell__crumb:hover {
     text-decoration: none;
 }
 
-.game-opening-chip__nav:hover .game-opening-chip__name,
-.game-opening-chip__nav:focus-visible .game-opening-chip__name {
+.game-opening-chip__toggle:hover .game-opening-chip__name,
+.game-opening-chip__toggle:focus-visible .game-opening-chip__name {
     text-decoration: underline;
 }
 
@@ -6098,17 +6104,6 @@ button.openings-shell__crumb:hover {
     color: var(--chip-accent);
 }
 
-.game-opening-chip__expand {
-    flex: 0 0 auto;
-    padding: 0 0.25rem;
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    line-height: 1;
-}
-
 /* Compact card revealed when a lineage chip is expanded */
 .opening-family-card--analysis {
     min-height: 0;
@@ -6135,6 +6130,28 @@ button.openings-shell__crumb:hover {
     width: 130px;
     height: 130px;
     max-width: 100%;
+}
+
+/* Footer actions inside the expanded analysis card: link + Start Drill.
+   Wrap/stack so they don't overflow the 200-280px footer column. */
+.opening-family-card__analysis-footer {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem 0.6rem;
+    margin-top: 0.1rem;
+}
+
+.opening-family-card__analysis-link {
+    font-size: 0.74rem;
+    font-weight: 600;
+    color: var(--accent, var(--text-primary));
+    text-decoration: none;
+}
+
+.opening-family-card__analysis-link:hover,
+.opening-family-card__analysis-link:focus-visible {
+    text-decoration: underline;
 }
 
 /* ---- SRS repeat-mistake spotlight (full-screen, board stays lit) ---- */
