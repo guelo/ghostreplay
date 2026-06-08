@@ -2307,6 +2307,11 @@ A custom `strictness_cp` integer (0–50) overrides the tier value.
 3. `resegment_session_moves()` retroactively labels prior moves `segment = 'drill'` and future moves `segment = 'normal'`
 4. Normal game flow continues; game ends via `POST /api/game/end` with rating impact
 
+> **Note (g-a406):** Conversion via the `/continue` endpoint remains the path for a
+> `root_reached` drill the engine code may still drive, but the drill-end UI no longer
+> offers "Continue as normal game" — that action distorted ratings (drill until a strong
+> position, then play out an easy win). It is replaced by **Analyze** (§17.8).
+
 ### 17.6 Terminal Reasons
 
 | Reason | Cause |
@@ -2326,5 +2331,30 @@ A custom `strictness_cp` integer (0–50) overrides the tier value.
 | POST | `/api/drills/:id/fail` | Mark drill failed (accuracy, post-root only) |
 | POST | `/api/drills/:id/natural-end` | Record natural game-over during drill phase |
 | POST | `/api/drills/:id/abandon` | Abandon drill (use `/api/game/end` for converted drills) |
+
+### 17.8 Post-Drill Analysis (transient)
+
+When a drill stops (`failed`), the drill-end actions are **Again** and **Analyze**
+(replacing the removed "Continue as normal game"; see §17.5 note). **Analyze** opens an
+ephemeral, in-memory review of the just-played drill on the dedicated `/drill-analysis`
+route:
+
+1. While `ChessGame` + `AnalysisEffects` are still mounted, a targeted completion barrier
+   awaits only the failed move's analysis if it is still pending (off-route failures check
+   the route independently of engine analysis). Blunder/SRS and normal evidence side effects
+   are flushed *before* navigation so the fire-and-forget POSTs survive the unmount.
+2. The live `moveHistory` + analysis map are snapshotted into a narrow, non-persisted client
+   store (`drillAnalysisStore`). Plies whose analysis is still unresolved keep null fields.
+3. The drill is abandoned (`abandonStoppedDrill`): unrated, hidden, game inactive. The live
+   analysis session is cleared so it idle-shuts down.
+4. `/drill-analysis` renders the existing data-driven `AnalysisBoard` from the snapshot, with
+   a minimal "Drill review — not saved" footer (no `GameReviewStats` — accuracy is not
+   available for a transient snapshot).
+
+The review is ephemeral: refreshing or navigating directly to `/drill-analysis` finds no
+snapshot and redirects to `/play`. **No conversion, rating, history entry, or game statistics
+are created.** Abandoned/failed drills stay hidden from `/api/session/:id/analysis`, history,
+and normal game analysis via the existing visibility guard. Persisting a drill review would
+require a dedicated drill-analysis endpoint (future work).
 
 DB reference: §7.3 (`game_sessions` drill columns)

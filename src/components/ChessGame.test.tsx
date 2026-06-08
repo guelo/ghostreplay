@@ -13,6 +13,7 @@ const getNextOpponentMoveMock = vi.fn();
 const continueDrillMock = vi.fn();
 const failDrillMock = vi.fn();
 const checkDrillRouteMock = vi.fn();
+const abandonDrillMock = vi.fn();
 const startDrillMock = vi.fn();
 const getOpeningRootsMock = vi.fn();
 const recordBlunderMock = vi.fn();
@@ -31,6 +32,7 @@ vi.mock("../utils/api", () => ({
   continueDrill: (...args: unknown[]) => continueDrillMock(...args),
   failDrill: (...args: unknown[]) => failDrillMock(...args),
   checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
+  abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
   startDrill: (...args: unknown[]) => startDrillMock(...args),
   getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
   fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
@@ -65,6 +67,7 @@ vi.mock("react-router-dom", () => ({
 }));
 
 import { gameAnalysisStore } from "../stores/createAnalysisStore";
+import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
 
 const mockAnalyzeMove = vi.fn();
 let capturedAnalysisResolvedListener:
@@ -275,6 +278,10 @@ describe("ChessGame characterization safeguards", () => {
     getNextOpponentMoveMock.mockReset();
     continueDrillMock.mockReset();
     checkDrillRouteMock.mockReset();
+    abandonDrillMock.mockReset();
+    abandonDrillMock.mockResolvedValue({ drill_state: "abandoned" });
+    mockCoordinator.clearSession.mockClear();
+    useDrillAnalysisStore.getState().clear();
     startDrillMock.mockReset();
     getOpeningRootsMock.mockReset();
     recordBlunderMock.mockReset();
@@ -460,6 +467,115 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
       expect(useGameStore.getState().viewIndex).toBe(-1);
     });
+  });
+
+  const driveOffRouteFail = async () => {
+    await startGameAsWhite();
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "active",
+    });
+    checkDrillRouteMock.mockResolvedValueOnce({
+      status: "failed",
+      current_fen: STARTING_FEN,
+      target_fen: "target-fen",
+      suggestions: [{ uci: "d2d4" }],
+      failure: {
+        reason: "off_route",
+        played_move_uci: "e2e4",
+        correction_fen: STARTING_FEN,
+      },
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("failed");
+    });
+  };
+
+  it("Analyze awaits the pending failed-move analysis, then abandons and snapshots the drill", async () => {
+    // Off-route failures do not pre-resolve the failed move's analysis, so the
+    // targeted barrier must await it before snapshotting.
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis.mockImplementation(async (idx: number) => {
+      const result: AnalysisResult = {
+        id: "analysis-e4",
+        move: "e2e4",
+        bestMove: "d2d4",
+        bestEval: 40,
+        playedEval: 10,
+        currentPositionEval: 10,
+        playedEvalMate: null,
+        currentPositionEvalMate: null,
+        moveIndex: idx,
+        delta: 30,
+        classification: "mistake",
+        blunder: false,
+        recordable: false,
+      };
+      gameAnalysisStore.getState().resolveAnalysis(idx, result);
+      return result;
+    });
+
+    await driveOffRouteFail();
+
+    const analyze = await screen.findByRole("button", { name: "Analyze" });
+    await act(async () => {
+      fireEvent.click(analyze);
+    });
+
+    await waitFor(() => {
+      expect(useDrillAnalysisStore.getState().snapshot).not.toBeNull();
+    });
+
+    // Targeted barrier ran for the failed move index (0).
+    expect(mockCoordinator.waitForAnalysis).toHaveBeenCalledWith(0);
+    expect(abandonDrillMock).toHaveBeenCalledWith("session-characterization");
+    expect(mockCoordinator.clearSession).toHaveBeenCalled();
+    expect(useGameStore.getState().isGameActive).toBe(false);
+
+    const snapshot = useDrillAnalysisStore.getState().snapshot!;
+    // The late-resolved failed move's eval is included in the snapshot.
+    expect(snapshot.moves[0]).toMatchObject({ move_san: "e4", eval_cp: 10 });
+    expect(snapshot.initialMoveIndex).toBe(0);
+    expect(snapshot.warning).toBeNull();
+  });
+
+  it("keeps the stopped drill active and surfaces an error when abandon fails", async () => {
+    gameAnalysisStore.getState().resolveAnalysis(0, {
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "d2d4",
+      bestEval: 40,
+      playedEval: 10,
+      currentPositionEval: 10,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: 30,
+      classification: "mistake",
+      blunder: false,
+      recordable: false,
+    });
+    abandonDrillMock.mockRejectedValueOnce(new Error("network down"));
+
+    await driveOffRouteFail();
+
+    const analyze = await screen.findByRole("button", { name: "Analyze" });
+    await act(async () => {
+      fireEvent.click(analyze);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/couldn't end the drill/i)).toBeInTheDocument();
+    });
+    // Drill stays active; no snapshot, no session teardown, no navigation.
+    expect(useGameStore.getState().isGameActive).toBe(true);
+    expect(useDrillAnalysisStore.getState().snapshot).toBeNull();
+    expect(mockCoordinator.clearSession).not.toHaveBeenCalled();
   });
 
   it("restarts analysis worker before retrying a post-root analysis failure", async () => {
@@ -921,7 +1037,7 @@ describe("ChessGame eval bar behavior", () => {
   });
 
   it("keeps prior eval displayed while latest move analysis is pending", async () => {
-    const { rerender: _rerender } = render(<ChessGame />);
+    render(<ChessGame />);
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));

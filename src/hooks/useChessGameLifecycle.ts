@@ -766,6 +766,42 @@ export const useChessGameLifecycle = ({
     ],
   );
 
+  /**
+   * Finalize a stopped (failed) drill without rating, conversion, or history
+   * (g-a406). Used by the "Analyze" drill-end action: the drill is abandoned,
+   * marked unrated, and the local game is ended so /play shows no stale active
+   * drill. finishLocalGame is closure-private, so this is the only way ChessGame
+   * can finalize a stopped drill.
+   */
+  const abandonStoppedDrill = useCallback(async () => {
+    const store = useGameStore.getState();
+    if (!store.sessionId || !store.isGameActive) {
+      return;
+    }
+    const finalizingSessionId = store.sessionId;
+
+    // Let abandonDrill rejections propagate to the caller — finalizing locally
+    // on a backend failure would leave an active failed drill with no cleanup
+    // opportunity. The caller keeps the drill active and surfaces an error.
+    if (store.drillOpeningKey && store.drillState !== "converted") {
+      const contract = await abandonDrill(store.sessionId);
+      if (useGameStore.getState().sessionId !== finalizingSessionId) {
+        return;
+      }
+      const s = useGameStore.getState();
+      s.setDrillState(contract.drill_state);
+      s.setIsRated(false);
+    }
+
+    if (useGameStore.getState().sessionId !== finalizingSessionId) {
+      return;
+    }
+    finishLocalGame(
+      { type: "resign", message: "Drill abandoned." },
+      { playEndGameAudio: false, finalizingSessionId },
+    );
+  }, [finishLocalGame]);
+
   const handleResign = useCallback(async () => {
     const store = useGameStore.getState();
     if (!store.sessionId || !store.isGameActive) {
@@ -989,6 +1025,7 @@ export const useChessGameLifecycle = ({
     handleViewAnalysis,
     handleViewHistory,
     handleContinueDrill,
+    abandonStoppedDrill,
     showRevertWarning,
   };
 };

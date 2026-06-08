@@ -1680,6 +1680,21 @@
     opacity: 0.8;
 }
 
+.drill-stop-error {
+    margin: 0 0 0.5rem;
+    font-size: 0.85rem;
+    color: var(--danger, #c0392b);
+}
+
+.drill-analysis-footer {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-tertiary);
+    padding: 0.5rem 0;
+    text-align: center;
+    opacity: 0.8;
+}
+
 .analysis-pane__board-placeholder {
     margin: 1rem 0;
     padding: 2rem 1rem;
@@ -4280,6 +4295,34 @@
 
 .blunder-detail__stat-value--loss {
     color: var(--eval-blunder);
+}
+
+.blunder-detail__stat-subtext {
+    font-size: 0.7rem;
+    color: var(--text-tertiary);
+}
+
+.blunder-detail__result-chip {
+    align-self: flex-start;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.blunder-detail__result-chip--pass {
+    background: var(--success-bg);
+    color: var(--success-dark);
+}
+
+.blunder-detail__result-chip--fail {
+    background: var(--error-bg-subtle);
+    color: var(--error-dark);
+}
+
+.blunder-detail__result-chip--neutral {
+    background: var(--status-other-bg);
+    color: var(--text-tertiary);
 }
 
 .blunder-detail__placeholder {

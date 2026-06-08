@@ -53,6 +53,8 @@ import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import DrillStopActions from "./chess-game/ui/DrillStopActions";
+import { buildDrillAnalysisSnapshot } from "./chess-game/domain/sessionUpload";
+import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
 import MaterialDisplay from "./MaterialDisplay";
 import type { MoveMessage, SrsFailDetail } from "./MoveList";
 import {
@@ -208,7 +210,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   >({});
   const [boardInstanceKey, setBoardInstanceKey] = useState(0);
   const isRevertPendingRef = useRef(isRevertPendingState);
-  const isContinuingDrillRef = useRef(false);
+  const isPreparingAnalysisRef = useRef(false);
+  const [isPreparingAnalysis, setIsPreparingAnalysis] = useState(false);
+  // Error surfaced inside the stopped-drill actions (e.g. abandon failed).
+  // engineMessage is hidden while isStoppedDrill, so this needs its own slot.
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
+  // Failed-move index for a stopped drill. Held in a ref so it survives history
+  // navigation (which clears the transient drillFailInfo state) — the Analyze
+  // barrier and snapshot still target the right ply afterwards.
+  const drillFailedMoveIndexRef = useRef<number | null>(null);
   const setIsRevertPending = useCallback((update: SetStateAction<boolean>) => {
     const nextValue =
       typeof update === "function"
@@ -223,7 +233,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const location = useLocation();
   const navigate = useNavigate();
   const [isDrillMode, setIsDrillMode] = useState(false);
-  const [, setIsContinuingDrill] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
   const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
   const [openingFamilies, setOpeningFamilies] = useState<Array<{ family_name: string; roots: OpeningRootItem[] }> | null>(null);
@@ -548,6 +557,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           const reason = route.failure?.reason ?? null;
           useGameStore.getState().setDrillState("failed");
           useGameStore.getState().setDrillTerminalReason(reason);
+          drillFailedMoveIndexRef.current = result.moveIndex;
           setDrillFailInfo({
             playedMoveUci: route.failure?.played_move_uci ?? result.moveUci,
             suggestionUcis: route.suggestions.map((suggestion) => suggestion.uci),
@@ -596,7 +606,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleShowStartOverlay,
     handleViewAnalysis,
     handleViewHistory,
-    handleContinueDrill: convertRootReachedDrill,
+    abandonStoppedDrill,
   } = useChessGameLifecycle({
     chess,
     coordinator,
@@ -632,44 +642,89 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     clearBlunderBoardOverride,
   });
 
-  const handleContinueDrill = useCallback(async () => {
-    if (isContinuingDrillRef.current) {
+  // "Analyze" drill-end action (g-a406): snapshot the just-played drill while
+  // ChessGame + AnalysisEffects are still mounted, flush blunder/SRS/evidence
+  // side effects BEFORE navigation, abandon the drill (unrated, hidden), then
+  // open the ephemeral /drill-analysis surface. No conversion, rating, or
+  // history entry is created.
+  const handleAnalyzeDrill = useCallback(async () => {
+    if (isPreparingAnalysisRef.current) {
       return;
     }
-    isContinuingDrillRef.current = true;
-    setIsContinuingDrill(true);
+    isPreparingAnalysisRef.current = true;
+    setIsPreparingAnalysis(true);
+    setAnalyzeError(null);
+    // Pin the session this Analyze refers to. If the user starts a new drill
+    // mid-preparation, every awaited step bails out before snapshotting or
+    // abandoning the wrong session.
+    const originalSessionId = useGameStore.getState().sessionId;
+    const isStillOriginalSession = () =>
+      useGameStore.getState().sessionId === originalSessionId;
     try {
-      const contract = await convertRootReachedDrill();
-      if (!contract || contract.drill_state !== "converted") {
+      const failedMoveIndex = drillFailedMoveIndexRef.current;
+      let warning: string | null = null;
+
+      // Targeted barrier: only the off-route failed move may still be pending.
+      if (
+        failedMoveIndex !== null &&
+        !analysisStore.getState().analysisMap.has(failedMoveIndex)
+      ) {
+        try {
+          await coordinator.waitForAnalysis(failedMoveIndex);
+          // Let AnalysisEffects' blunder-recording React effect mount and fire
+          // its fire-and-forget POST before we unmount it via navigation.
+          await new Promise((resolve) =>
+            requestAnimationFrame(() => resolve(null)),
+          );
+        } catch {
+          warning = "Analysis unavailable; showing partial review.";
+        }
+        if (!isStillOriginalSession()) return;
+      }
+
+      // Flush normal evidence uploads before unmounting AnalysisEffects.
+      await coordinator.flushPendingUploads().catch((err) =>
+        console.error("[Drill] flushPendingUploads failed:", err),
+      );
+      if (!isStillOriginalSession()) return;
+
+      // Finalize the stopped drill: unrated, hidden, game inactive. If the
+      // backend abandon fails, abandonStoppedDrill throws — keep the drill
+      // active locally (do not clear/navigate) so cleanup can be retried.
+      try {
+        await abandonStoppedDrill();
+      } catch (err) {
+        console.error("[Drill] abandonStoppedDrill failed:", err);
+        setAnalyzeError("Couldn't end the drill. Try Analyze again.");
         return;
       }
-      setDrillFailInfo(null);
-      setDrillRecovery(null);
-      useGameStore.getState().setViewIndex(null);
+      if (!isStillOriginalSession()) return;
 
       const store = useGameStore.getState();
-      if (
-        !store.isGameActive ||
-        store.viewIndex !== null ||
-        isRevertPendingRef.current
-      ) {
-        return;
-      }
-
-      const turnColor = chess.turn() === "w" ? "white" : "black";
-      if (turnColor !== opponentColor) {
-        return;
-      }
-
-      await applyOpponentMove(
-        chess.fen(),
-        store.moveHistory.map((move) => move.uci),
+      const snapshot = buildDrillAnalysisSnapshot(
+        store.moveHistory,
+        analysisStore.getState().analysisMap,
+        STARTING_FEN,
+        playerColor,
+        failedMoveIndex,
       );
+      useDrillAnalysisStore.getState().setSnapshot({ ...snapshot, warning });
+
+      // Let the live analysis session idle-shut down; snapshot is already copied.
+      coordinator.clearSession();
+
+      navigate("/drill-analysis");
     } finally {
-      isContinuingDrillRef.current = false;
-      setIsContinuingDrill(false);
+      isPreparingAnalysisRef.current = false;
+      setIsPreparingAnalysis(false);
     }
-  }, [applyOpponentMove, chess, convertRootReachedDrill, opponentColor]);
+  }, [
+    abandonStoppedDrill,
+    analysisStore,
+    coordinator,
+    navigate,
+    playerColor,
+  ]);
 
   useEffect(() => {
     handleGameEndRef.current = handleGameEnd;
@@ -893,6 +948,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const store = useGameStore.getState();
       store.setDrillState("failed");
       store.setDrillTerminalReason("accuracy");
+      drillFailedMoveIndexRef.current = result.moveIndex;
       setDrillFailInfo({
         playedMoveUci: result.moveUci,
         suggestionUcis: analysis.bestMove ? [analysis.bestMove] : [],
@@ -1388,8 +1444,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       selectedOpening: selectedDrillOpening,
     });
 
-    if (result && chess.turn() !== (resolvedPlayerColor === "white" ? "w" : "b")) {
-      void applyOpponentMove(result.fen, result.uciHistory);
+    if (result) {
+      // Only discard the prior stopped drill's failed index once the
+      // replacement drill is actually live — a failed start returns to the
+      // old stopped drill, which still needs its targeted barrier/index.
+      drillFailedMoveIndexRef.current = null;
+      setAnalyzeError(null);
+      if (chess.turn() !== (resolvedPlayerColor === "white" ? "w" : "b")) {
+        void applyOpponentMove(result.fen, result.uciHistory);
+      }
     }
   }, [
     selectedDrillOpening,
@@ -1651,7 +1714,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               <DrillStopActions
                 terminalReason={drillTerminalReason}
                 onAnotherDrill={handleNewDrillSticky}
-                onContinueAsNormal={handleContinueDrill}
+                onAnalyze={handleAnalyzeDrill}
+                analyzeEnabled={moveHistory.length > 0}
+                isPreparing={isPreparingAnalysis}
+                errorMessage={analyzeError}
               />
             )}
             {isGameActive && drillOpeningKey && engineMessage && !isStoppedDrill && (

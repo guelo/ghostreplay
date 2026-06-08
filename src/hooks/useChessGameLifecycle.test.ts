@@ -1258,6 +1258,66 @@ describe("useChessGameLifecycle", () => {
     expect(audioCtorMock).not.toHaveBeenCalled();
   });
 
+  it("abandonStoppedDrill finalizes the failed drill unrated without ending it as a game", async () => {
+    const { result } = setup({
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+    useGameStore.setState({
+      sessionId: "drill-session-456",
+      drillOpeningKey: "target-fen",
+      drillState: "failed",
+    });
+    abandonDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-456",
+      drill_state: "abandoned",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await result.current.abandonStoppedDrill();
+    });
+
+    expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-456");
+    expect(endGameMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState()).toEqual(
+      expect.objectContaining({
+        isGameActive: false,
+        drillState: "abandoned",
+        isRated: false,
+        gameResult: { type: "resign", message: "Drill abandoned." },
+      }),
+    );
+  });
+
+  it("abandonStoppedDrill propagates abandon failure without finalizing locally", async () => {
+    const { result } = setup({
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+    useGameStore.setState({
+      sessionId: "drill-session-789",
+      drillOpeningKey: "target-fen",
+      drillState: "failed",
+    });
+    abandonDrillMock.mockRejectedValueOnce(new Error("network down"));
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+    await expect(
+      act(async () => {
+        await result.current.abandonStoppedDrill();
+      }),
+    ).rejects.toThrow("network down");
+
+    // Drill stays active; not finalized locally.
+    expect(useGameStore.getState().isGameActive).toBe(true);
+    expect(useGameStore.getState().gameResult).toBeNull();
+  });
+
   it("handleNewDrill calls startDrill API and sets store correctly", async () => {
     const { result } = setup();
 
