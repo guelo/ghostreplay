@@ -3,18 +3,25 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import GameReviewStats from './GameReviewStats';
 import type { SideStats } from '../utils/gameStats';
+import { accuracyColor, acplColor } from '../utils/statColor';
 
-const emptySide = (): SideStats => ({
+const emptySide = (over: Partial<SideStats> = {}): SideStats => ({
   blunder: { count: 0, indices: [] },
   mistake: { count: 0, indices: [] },
   inaccuracy: { count: 0, indices: [] },
   avgCpl: 0,
+  avgCplCount: 0,
+  ...over,
 });
 
-function renderStats(accuracy: number | null, accuracyPending = false) {
+function renderStats(
+  accuracy: number | null,
+  accuracyPending = false,
+  sides?: { player: SideStats; opponent: SideStats },
+) {
   return render(
     <GameReviewStats
-      sideStats={{ player: emptySide(), opponent: emptySide() }}
+      sideStats={sides ?? { player: emptySide(), opponent: emptySide() }}
       activeStat={null}
       pinnedStat={null}
       totalMoves={10}
@@ -50,6 +57,45 @@ describe('GameReviewStats accuracy row', () => {
     renderStats(87, true);
     expect(screen.getByText('87%')).toBeInTheDocument();
     expect(screen.queryByText('computing…')).not.toBeInTheDocument();
+  });
+});
+
+describe('GameReviewStats gradient colors', () => {
+  it('colors the accuracy value with accuracyColor', () => {
+    renderStats(87);
+    expect(screen.getByText('87%')).toHaveStyle({ color: accuracyColor(87) });
+  });
+
+  it('does not color accuracy when null', () => {
+    renderStats(null);
+    expect(screen.getByText('—')).not.toHaveStyle({ color: accuracyColor(80) });
+  });
+
+  it('colors the Avg CPL value with acplColor when analysis is complete', () => {
+    renderStats(80, false, {
+      player: emptySide({ avgCpl: 30, avgCplCount: 12 }),
+      opponent: emptySide({ avgCpl: 70, avgCplCount: 12 }),
+    });
+    expect(screen.getByText('30')).toHaveStyle({ color: acplColor(30) });
+    expect(screen.getByText('70')).toHaveStyle({ color: acplColor(70) });
+  });
+
+  it('leaves Avg CPL uncolored when no evaluated moves', () => {
+    renderStats(null, false, {
+      player: emptySide({ avgCpl: 0, avgCplCount: 0 }),
+      opponent: emptySide({ avgCpl: 0, avgCplCount: 0 }),
+    });
+    const zeros = screen.getAllByText('0');
+    for (const el of zeros) expect(el).not.toHaveStyle({ color: acplColor(0) });
+  });
+
+  it('colors Avg CPL immediately while accuracy is still computing', () => {
+    renderStats(null, true, {
+      player: emptySide({ avgCpl: 30, avgCplCount: 12 }),
+      opponent: emptySide({ avgCpl: 70, avgCplCount: 12 }),
+    });
+    expect(screen.getByText('30')).toHaveStyle({ color: acplColor(30) });
+    expect(screen.getByText('70')).toHaveStyle({ color: acplColor(70) });
   });
 });
 

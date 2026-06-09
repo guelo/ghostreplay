@@ -46,12 +46,26 @@ describe('computeSideStats', () => {
     const result = computeSideStats(moves, 'white');
     expect(result.player.avgCpl).toBe(15);
     expect(result.opponent.avgCpl).toBe(40);
+    expect(result.player.avgCplCount).toBe(2);
+    expect(result.opponent.avgCplCount).toBe(2);
+  });
+
+  it('reports avgCplCount of 0 when no moves carry eval_delta', () => {
+    const moves = makeMoves([
+      { color: 'white' },
+      { color: 'black' },
+    ]);
+    const result = computeSideStats(moves, 'white');
+    expect(result.player.avgCplCount).toBe(0);
+    expect(result.opponent.avgCplCount).toBe(0);
   });
 
   it('returns zero stats for empty moves', () => {
     const result = computeSideStats([], 'white');
     expect(result.player.avgCpl).toBe(0);
     expect(result.opponent.avgCpl).toBe(0);
+    expect(result.player.avgCplCount).toBe(0);
+    expect(result.opponent.avgCplCount).toBe(0);
     for (const cls of CLASS_KEYS) {
       expect(result.player[cls].count).toBe(0);
       expect(result.opponent[cls].count).toBe(0);

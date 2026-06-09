@@ -1,7 +1,7 @@
 import type { AnalysisMove } from './api';
 
 export type ClassKey = 'blunder' | 'mistake' | 'inaccuracy';
-export type SideStats = Record<ClassKey, { count: number; indices: number[] }> & { avgCpl: number };
+export type SideStats = Record<ClassKey, { count: number; indices: number[] }> & { avgCpl: number; avgCplCount: number };
 export type StatSelection = { side: 'player' | 'opponent'; cls: ClassKey } | null;
 
 export const CLASS_KEYS: ClassKey[] = ['blunder', 'mistake', 'inaccuracy'];
@@ -15,6 +15,7 @@ export function computeSideStats(
     mistake: { count: 0, indices: [] },
     inaccuracy: { count: 0, indices: [] },
     avgCpl: 0,
+    avgCplCount: 0,
   });
   const player = makeSide();
   const opponent = makeSide();
@@ -43,6 +44,8 @@ export function computeSideStats(
   }
   player.avgCpl = playerDeltaCount > 0 ? Math.round(playerDeltaSum / playerDeltaCount) : 0;
   opponent.avgCpl = opponentDeltaCount > 0 ? Math.round(opponentDeltaSum / opponentDeltaCount) : 0;
+  player.avgCplCount = playerDeltaCount;
+  opponent.avgCplCount = opponentDeltaCount;
 
   return { player, opponent };
 }

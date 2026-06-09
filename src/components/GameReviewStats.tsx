@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CLASS_KEYS, type SideStats, type StatSelection, type ClassKey } from '../utils/gameStats';
+import { accuracyColor, acplColor } from '../utils/statColor';
 
 const ACCURACY_INFO =
   'How closely your moves matched the engine\'s best moves across the game.\n\n 100% means perfect play. Lower scores reflect how much each move gave up.'
@@ -90,8 +91,19 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
 
         {/* Avg CPL row */}
         <div className="history-stats-pane__label">Avg CPL</div>
-        <div className="history-stats-pane__value">{sideStats.player.avgCpl}</div>
-        <div className="history-stats-pane__value">{sideStats.opponent.avgCpl}</div>
+        {(['player', 'opponent'] as const).map((side) => {
+          const s = sideStats[side];
+          const colored = s.avgCplCount > 0;
+          return (
+            <div
+              key={`avgcpl-${side}`}
+              className="history-stats-pane__value"
+              style={colored ? { color: acplColor(s.avgCpl) } : undefined}
+            >
+              {s.avgCpl}
+            </div>
+          );
+        })}
 
         {/* Accuracy row (user only) */}
         <div className="history-stats-pane__label history-stats-pane__label--accuracy" ref={infoRef}>
@@ -117,7 +129,10 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
             </div>
           )}
         </div>
-        <div className="history-stats-pane__value history-stats-pane__value--you">
+        <div
+          className="history-stats-pane__value history-stats-pane__value--you"
+          style={accuracy != null ? { color: accuracyColor(accuracy) } : undefined}
+        >
           {accuracy != null
             ? `${accuracy}%`
             : accuracyPending
