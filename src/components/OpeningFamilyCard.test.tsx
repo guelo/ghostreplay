@@ -81,6 +81,23 @@ describe("OpeningFamilyCard", () => {
     expect(onStartDrill).toHaveBeenCalledTimes(1);
   });
 
+  it("renders a collapse surface that fires onCollapse when clicked", async () => {
+    const user = userEvent.setup();
+    const onCollapse = vi.fn();
+    renderCard(
+      <OpeningFamilyCard
+        {...baseProps}
+        variant="analysis"
+        onCollapse={onCollapse}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Collapse Ruy Lopez details/ }),
+    );
+    expect(onCollapse).toHaveBeenCalledTimes(1);
+  });
+
   it("shows an em-dash grade and unscored note for a null score", () => {
     renderCard(
       <OpeningFamilyCard

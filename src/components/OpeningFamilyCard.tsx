@@ -32,6 +32,8 @@ export interface OpeningFamilyCardProps {
   onStartDrill?: () => void;
   /** Analysis variant only: href to this opening's /openings page. */
   openingsHref?: string;
+  /** Analysis variant only: collapses the card when its surface is clicked. */
+  onCollapse?: () => void;
 }
 
 /**
@@ -41,8 +43,9 @@ export interface OpeningFamilyCardProps {
  * - `variant="full"` (default): the /openings scoreboard card with move line,
  *   metrics, and drill footer.
  * - `variant="analysis"`: a compact card for the /history analysis lineage —
- *   smaller board, no move line, with a footer linking to /openings and a
- *   Start Drill button.
+ *   smaller board with the score/grade beside it, no move line, and a footer
+ *   linking to /openings and a Start Drill button. When `onCollapse` is set, the
+ *   card surface (everything but the footer controls) collapses the card.
  */
 function OpeningFamilyCard({
   variant = "full",
@@ -60,6 +63,7 @@ function OpeningFamilyCard({
   onDrillDown,
   onStartDrill,
   openingsHref,
+  onCollapse,
 }: OpeningFamilyCardProps) {
   const statusLabel = getPriorityLabel(score);
   const isFull = variant === "full";
@@ -67,6 +71,14 @@ function OpeningFamilyCard({
 
   return (
     <>
+      {onCollapse && (
+        <button
+          type="button"
+          className="opening-family-card__collapse-nav"
+          aria-label={`Collapse ${openingName} details`}
+          onClick={onCollapse}
+        />
+      )}
       {onDrillDown && (
         <button
           type="button"

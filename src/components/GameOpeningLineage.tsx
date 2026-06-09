@@ -56,52 +56,9 @@ function GameOpeningLineage({
               className="game-opening-lineage__item"
               style={{ "--lineage-depth": index } as React.CSSProperties}
             >
-              <div
-                className={`game-opening-chip game-opening-chip--${tone}`}
-                role="group"
-                aria-label={item.opening_name}
-              >
-                {index > 0 && (
-                  <span
-                    className="game-opening-chip__connector"
-                    aria-hidden="true"
-                  >
-                    {"└"}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  className="game-opening-chip__toggle"
-                  aria-expanded={isExpanded}
-                  aria-controls={cardId}
-                  aria-label={`Select ${item.opening_name} and toggle details`}
-                  onClick={() => {
-                    setExpandedKey((current) =>
-                      current === item.opening_key ? null : item.opening_key,
-                    );
-                    onSelectRoot(item);
-                  }}
-                >
-                  <span
-                    className={`game-opening-chip__tone game-opening-chip__tone--${tone}`}
-                    aria-hidden="true"
-                  />
-                  <span className="game-opening-chip__name">
-                    {item.opening_name}
-                  </span>
-                  <span className="game-opening-chip__score">
-                    {formatScore(item.score)}
-                  </span>
-                  <span
-                    className="game-opening-chip__grade"
-                    aria-label={`Status ${statusLabel}`}
-                  >
-                    {statusLabel}
-                  </span>
-                </button>
-              </div>
-
-              {isExpanded && (
+              {isExpanded ? (
+                // Expanded card replaces the collapsed chip. Clicking its surface
+                // (outside the link / Start Drill buttons) collapses it again.
                 <div
                   id={cardId}
                   className={`opening-family-card opening-family-card--analysis opening-family-card--${tone}`}
@@ -118,7 +75,51 @@ function GameOpeningLineage({
                     isUnscored={isUnscored}
                     openingsHref={openingsHref}
                     onStartDrill={() => onStartDrill(item)}
+                    onCollapse={() => setExpandedKey(null)}
                   />
+                </div>
+              ) : (
+                <div
+                  className={`game-opening-chip game-opening-chip--${tone}`}
+                  role="group"
+                  aria-label={item.opening_name}
+                >
+                  {index > 0 && (
+                    <span
+                      className="game-opening-chip__connector"
+                      aria-hidden="true"
+                    >
+                      {"└"}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="game-opening-chip__toggle"
+                    aria-expanded={isExpanded}
+                    aria-controls={cardId}
+                    aria-label={`Select ${item.opening_name} and toggle details`}
+                    onClick={() => {
+                      setExpandedKey(item.opening_key);
+                      onSelectRoot(item);
+                    }}
+                  >
+                    <span
+                      className={`game-opening-chip__tone game-opening-chip__tone--${tone}`}
+                      aria-hidden="true"
+                    />
+                    <span className="game-opening-chip__name">
+                      {item.opening_name}
+                    </span>
+                    <span className="game-opening-chip__score">
+                      {formatScore(item.score)}
+                    </span>
+                    <span
+                      className="game-opening-chip__grade"
+                      aria-label={`Status ${statusLabel}`}
+                    >
+                      {statusLabel}
+                    </span>
+                  </button>
                 </div>
               )}
             </li>

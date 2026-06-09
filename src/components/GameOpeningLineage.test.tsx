@@ -98,7 +98,7 @@ describe("GameOpeningLineage", () => {
     );
   });
 
-  it("single click expands the card AND fires onSelectRoot; 2nd click collapses", async () => {
+  it("expanding replaces the chip with the card and fires onSelectRoot once", async () => {
     const user = userEvent.setup();
     const item = makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" });
     const onSelectRoot = vi.fn();
@@ -110,9 +110,12 @@ describe("GameOpeningLineage", () => {
 
     await user.click(toggle);
 
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(onSelectRoot).toHaveBeenCalledTimes(1);
     expect(onSelectRoot).toHaveBeenCalledWith(item);
+    // The collapsed chip is gone, replaced by the expanded card.
+    expect(
+      screen.queryByRole("button", { name: /Select Ruy Lopez/ }),
+    ).not.toBeInTheDocument();
     expect(screen.getByTestId("lineage-board")).toHaveAttribute(
       "data-position",
       "k1",
@@ -125,11 +128,16 @@ describe("GameOpeningLineage", () => {
       screen.getByRole("button", { name: /Start Drill/ }),
     ).toBeInTheDocument();
 
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // Clicking the card surface (not the buttons) collapses it back to a chip.
+    await user.click(
+      screen.getByRole("button", { name: /Collapse Ruy Lopez details/ }),
+    );
     expect(screen.queryByTestId("lineage-board")).not.toBeInTheDocument();
-    // onSelectRoot fires on every click, including the collapsing one.
-    expect(onSelectRoot).toHaveBeenCalledTimes(2);
+    expect(
+      screen.getByRole("button", { name: /Select Ruy Lopez/ }),
+    ).toHaveAttribute("aria-expanded", "false");
+    // Collapsing does not re-fire onSelectRoot.
+    expect(onSelectRoot).toHaveBeenCalledTimes(1);
     expect(onStartDrill).not.toHaveBeenCalled();
   });
 
