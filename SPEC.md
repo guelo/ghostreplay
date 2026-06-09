@@ -49,6 +49,7 @@ This began as the initial **SPEC** for the "Ghost Replay" Chess Application. It 
 * **Seamless Deviation:** If the user plays a move that deviates from all known blunder paths, the backend automatically switches to engine-generated opponent moves for continuity.
 * **Re-Hooking:** If a user deviates but later transposes back into a known position with a downstream blunder, the Ghost reactivates.
 * **Player Side:** The user can play as **White or Black** per session; Ghost targeting only considers blunders made as that side.
+* **Game Settings:** A gear menu in the game panel header exposes persisted settings: **sound** (mute toggle + 0–100% volume slider, applied to all clips — move, capture, buzzer, best-move bling, end-game, and blunder audio) and **rating display** (Elo/Chess.com/Lichess). Both persist across sessions via localStorage.
 
 ### 2.2 Analysis & Blunder Detection
 
@@ -116,6 +117,7 @@ graph TD
 * **Opponent engine:** `useStockfishEngine` drives a second Stockfish instance for ghost/engine move selection during play.
 * **Analysis cache:** The coordinator dispatches worker analysis and batches `POST /api/analysis/lookup` (`lookupAnalysisCache`) in parallel. A cache hit resolves the move only when it has classification data, a `best_move_uci`, and a multi-move `best_line_uci` beginning with that best move; incomplete hits fall through to the worker result.
 * **Forced-move exemption:** When the position has ≤ 2 legal moves, the move is never classified as a blunder and never auto-recorded, regardless of eval delta.
+* **Sound settings:** `utils/soundSettings.ts` holds a three-layer source of truth — an in-memory snapshot (authoritative for playback, read by `applyAudioSettings` before every clip), localStorage (persistence only, seeded once at init, best-effort writes), and a `useGameStore` mirror (`soundMuted`/`soundVolume`) for the settings UI. Store setters store the canonical clamped value the snapshot setter returns, so storage failures can never desync playback from the UI.
 * **Key hooks:** `useChessGameController` (move application, promotion), `useChessGameLifecycle` (session lifecycle), `useOpponentMove` (ghost/engine reply), `useMoveAnalysis` (wraps coordinator for hook consumers).
 * **Routes** (`AppRoutes.tsx`):
 

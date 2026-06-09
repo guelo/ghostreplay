@@ -14,11 +14,11 @@ import {
   type BlunderAlert,
 } from "./domain/movePresentation";
 import type { MoveMessage, SrsFailDetail } from "../MoveList";
-import { BLUNDER_AUDIO_CLIPS } from "./config";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
 import { playBling } from "../../utils/blingSound";
 import { playBuzzer } from "../../utils/buzzerSound";
+import { playRandomBlunderAudio } from "./blunderAudio";
 import type { AnalysisResult } from "../../hooks/useMoveAnalysis";
 
 type PendingAnalysisContext = {
@@ -47,16 +47,6 @@ type AnalysisEffectsProps = {
   setShowFlash: Dispatch<SetStateAction<boolean>>;
   setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
   onSrsFail: (detail: SrsFailDetail, moveIndex: number) => void;
-};
-
-const playRandomBlunderAudio = () => {
-  if (typeof Audio === "undefined" || BLUNDER_AUDIO_CLIPS.length === 0) {
-    return;
-  }
-  const randomIndex = Math.floor(Math.random() * BLUNDER_AUDIO_CLIPS.length);
-  const clip = BLUNDER_AUDIO_CLIPS[randomIndex];
-  const audio = new Audio(clip);
-  void audio.play().catch(() => {});
 };
 
 const AnalysisEffects = ({

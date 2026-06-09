@@ -59,6 +59,34 @@ describe("endGameAudio", () => {
     expect(play).toHaveBeenCalledTimes(1);
   });
 
+  it("applies muted/volume from settings before play", async () => {
+    const play = vi.fn().mockResolvedValue(undefined);
+    const instances: Array<{ muted: boolean; volume: number }> = [];
+    class MockAudio {
+      muted = false;
+      volume = 1;
+      constructor() {
+        instances.push(this);
+      }
+      play() {
+        return play();
+      }
+    }
+    vi.stubGlobal("Audio", MockAudio);
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    const { setSoundMuted, setSoundVolume } = await import(
+      "../../utils/soundSettings"
+    );
+    setSoundMuted(true);
+    setSoundVolume(0.15);
+
+    playEndGameAudio({ type: "checkmate_loss", message: "lost" }, clips);
+
+    expect(instances[0]?.muted).toBe(true);
+    expect(instances[0]?.volume).toBe(0.15);
+  });
+
   it("stays silent for draws", () => {
     const audioCtor = vi.fn();
     vi.stubGlobal("Audio", audioCtor);

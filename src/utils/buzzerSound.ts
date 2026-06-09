@@ -1,3 +1,5 @@
+import { applyAudioSettings } from "./soundSettings";
+
 const BUZZER_AUDIO_CLIP = "/audio/buzzer.mp3";
 
 let buzzerAudio: HTMLAudioElement | null = null;
@@ -19,6 +21,7 @@ export function playBuzzer(): void {
     return;
   }
 
+  applyAudioSettings(audio);
   audio.currentTime = 0;
   void audio.play().catch(() => {});
 }

@@ -1,3 +1,5 @@
+import { applyAudioSettings } from "./soundSettings";
+
 const MOVE_AUDIO_CLIP = "/audio/move.m4a";
 const TAKE_AUDIO_CLIP = "/audio/take.m4a";
 
@@ -28,6 +30,7 @@ export function playMoveSound(isCapture: boolean): void {
     if (!audio) {
       return;
     }
+    applyAudioSettings(audio);
     audio.currentTime = 0;
     void audio.play()?.catch?.(() => {});
   } catch {

@@ -3,6 +3,12 @@ import { create } from "zustand";
 import type { DrillSessionState, DrillStrictness, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
+import {
+  getSoundMuted,
+  getSoundVolume,
+  setSoundMuted as persistSoundMuted,
+  setSoundVolume as persistSoundVolume,
+} from "../utils/soundSettings";
 
 type BoardOrientation = "white" | "black";
 
@@ -63,6 +69,8 @@ export type GameState = {
   ratingDisplayType: RatingScoreKey;
   ratingChange: RatingChange | null;
   scoreChanges: RatingScores | null;
+  soundMuted: boolean;
+  soundVolume: number;
 };
 
 export type GameActions = {
@@ -96,6 +104,8 @@ export type GameActions = {
   setRatingDisplayType: (update: SetStateAction<RatingScoreKey>) => void;
   setRatingChange: (update: SetStateAction<RatingChange | null>) => void;
   setScoreChanges: (update: SetStateAction<RatingScores | null>) => void;
+  setSoundMuted: (update: SetStateAction<boolean>) => void;
+  setSoundVolume: (update: SetStateAction<number>) => void;
 };
 
 const STARTING_FEN =
@@ -131,6 +141,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   ratingDisplayType: readRatingDisplayType(),
   ratingChange: null,
   scoreChanges: null,
+  soundMuted: getSoundMuted(),
+  soundVolume: getSoundVolume(),
 
   // --- Actions ---
   setLiveFen: (u) => set((s) => ({ liveFen: resolve(u, s.liveFen) })),
@@ -184,4 +196,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ ratingChange: resolve(u, s.ratingChange) })),
   setScoreChanges: (u) =>
     set((s) => ({ scoreChanges: resolve(u, s.scoreChanges) })),
+  setSoundMuted: (u) =>
+    set((s) => ({ soundMuted: persistSoundMuted(resolve(u, s.soundMuted)) })),
+  setSoundVolume: (u) =>
+    set((s) => ({ soundVolume: persistSoundVolume(resolve(u, s.soundVolume)) })),
 }));

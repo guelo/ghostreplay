@@ -1,9 +1,10 @@
 import { createRef } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
 import type { TargetBlunderSrs } from "../../../utils/api";
 import GameInfoPanel from "./GameInfoPanel";
 import { getOpponentAvatarSrc } from "../config";
+import { useGameStore } from "../../../stores/useGameStore";
 
 const makeProps = () => {
   const onToggleGhostInfo = vi.fn();
@@ -276,6 +277,74 @@ describe("GameInfoPanel", () => {
       "data-position",
       "8/8/8/8/8/8/8/8 w - - 0 1",
     );
+  });
+
+  describe("game settings popover", () => {
+    beforeEach(() => {
+      useGameStore.setState({ soundMuted: false, soundVolume: 1 });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("opens settings via the gear and flips aria-expanded", () => {
+      render(<GameInfoPanel {...makeProps()} />);
+      const gear = screen.getByRole("button", { name: /game settings/i });
+      expect(gear).toHaveAttribute("aria-expanded", "false");
+
+      fireEvent.click(gear);
+      expect(gear).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByRole("dialog", { name: /game settings/i })).toBeInTheDocument();
+    });
+
+    it("toggling mute calls setSoundMuted and disables the slider", () => {
+      const setSoundMuted = vi.spyOn(useGameStore.getState(), "setSoundMuted");
+      render(<GameInfoPanel {...makeProps()} />);
+      fireEvent.click(screen.getByRole("button", { name: /game settings/i }));
+
+      fireEvent.click(screen.getByLabelText("Mute"));
+      expect(setSoundMuted).toHaveBeenCalledWith(true);
+
+      useGameStore.setState({ soundMuted: true });
+      expect(screen.getByLabelText("Volume")).toBeDisabled();
+    });
+
+    it("moving the slider converts percent to a 0-1 value", () => {
+      const setSoundVolume = vi.spyOn(useGameStore.getState(), "setSoundVolume");
+      render(<GameInfoPanel {...makeProps()} />);
+      fireEvent.click(screen.getByRole("button", { name: /game settings/i }));
+
+      fireEvent.change(screen.getByLabelText("Volume"), {
+        target: { value: "40" },
+      });
+      expect(setSoundVolume).toHaveBeenCalledWith(0.4);
+    });
+
+    it("closes on Escape and restores focus to the gear", () => {
+      render(<GameInfoPanel {...makeProps()} />);
+      const gear = screen.getByRole("button", { name: /game settings/i });
+      fireEvent.click(gear);
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+      expect(gear).toHaveFocus();
+    });
+
+    it("still switches the rating display from the popover", () => {
+      const onRatingDisplayTypeChange = vi.fn();
+      render(
+        <GameInfoPanel
+          {...makeProps()}
+          onRatingDisplayTypeChange={onRatingDisplayTypeChange}
+        />,
+      );
+      fireEvent.click(screen.getByRole("button", { name: /game settings/i }));
+
+      fireEvent.click(screen.getByLabelText("Lichess"));
+      expect(onRatingDisplayTypeChange).toHaveBeenCalledWith("lichess");
+    });
   });
 
   it("shows a practice badge during post-revert continuation", () => {

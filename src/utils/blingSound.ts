@@ -1,3 +1,5 @@
+import { applyAudioSettings } from "./soundSettings";
+
 const BEST_MOVE_AUDIO_CLIP = "/audio/bestmove2.wav";
 
 let bestMoveAudio: HTMLAudioElement | null = null;
@@ -19,6 +21,7 @@ export function playBling(): void {
     return;
   }
 
+  applyAudioSettings(audio);
   audio.currentTime = 0;
   void audio.play().catch(() => {});
 }

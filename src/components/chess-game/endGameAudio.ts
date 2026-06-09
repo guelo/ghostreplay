@@ -1,4 +1,5 @@
 import type { GameResult } from "./domain/status";
+import { applyAudioSettings } from "../../utils/soundSettings";
 
 const winClipModules = import.meta.glob<string>(
   "../../assets/audio/win/*.{mp3,wav,m4a}",
@@ -61,6 +62,7 @@ export const playEndGameAudio = (
 
   try {
     const audio = new Audio(clip);
+    applyAudioSettings(audio);
     void audio.play()?.catch?.(() => {});
   } catch {
     // Audio playback is best-effort and should never affect game finalization.

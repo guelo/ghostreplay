@@ -4702,6 +4702,73 @@
     white-space: nowrap;
 }
 
+.panel-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 24px;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.panel-settings {
+    position: relative;
+    display: inline-flex;
+}
+
+/* Compound selector to outrank the generic .rating-settings-popover rule
+   (defined later) for the anchoring/sizing the panel popover needs. */
+.rating-settings-popover.panel-settings__popover {
+    right: 0;
+    left: auto;
+    min-width: 12rem;
+    max-width: min(16rem, calc(100vw - 2rem));
+}
+
+.panel-settings__section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.25rem 0;
+}
+
+.panel-settings__section + .panel-settings__section {
+    border-top: 1px solid var(--border-color);
+    margin-top: 0.2rem;
+    padding-top: 0.4rem;
+}
+
+.panel-settings__heading {
+    padding: 0.1rem 0.4rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+}
+
+.panel-settings__volume {
+    gap: 0.5rem;
+}
+
+.panel-settings__volume input[type="range"] {
+    flex: 1 1 auto;
+    width: 100%;
+    accent-color: var(--accent, #7c6fe0);
+    cursor: pointer;
+}
+
+.panel-settings__volume input[type="range"]:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.panel-settings__volume-value {
+    flex: 0 0 auto;
+    min-width: 2.6rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.8rem;
+}
+
 .rating-settings-anchor {
     position: relative;
     display: inline-flex;
@@ -7467,6 +7534,11 @@ button.openings-shell__crumb:hover {
         align-items: center;
         gap: 0.75rem;
     }
+
+    .panel-header {
+        width: 100%;
+        flex: 0 0 100%;
+    }
 }
 
 @media (max-width: 767px) {
@@ -7532,6 +7604,15 @@ button.openings-shell__crumb:hover {
 
     .game-page .chess-status {
         display: none;
+    }
+
+    .game-page .panel-header {
+        display: contents;
+    }
+
+    .game-page .panel-settings {
+        order: 5;
+        margin-left: auto;
     }
 
     .game-page .chess-panel__active-matchup {
