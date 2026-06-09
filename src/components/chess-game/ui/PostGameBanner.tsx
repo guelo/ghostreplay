@@ -1,4 +1,5 @@
 import { memo } from "react";
+import SettingsGearIcon from "./SettingsGearIcon";
 import type {
   DrillSessionState,
   RatingChange,
@@ -16,6 +17,10 @@ type PostGameBannerProps = {
   drillOpeningKey?: string | null;
   drillState?: DrillSessionState | null;
   onNewDrill?: () => void;
+  /** Open the setup overlay to change drill settings (gear button). */
+  onAnotherDrillSettings?: () => void;
+  /** Disable the restart actions while a new drill is starting. */
+  drillActionsDisabled?: boolean;
   ratingChange: RatingChange | null;
   scoreChanges?: RatingScores | null;
   ratingDisplayType?: RatingScoreKey;
@@ -32,6 +37,8 @@ const PostGameBanner = ({
   drillOpeningKey,
   drillState,
   onNewDrill,
+  onAnotherDrillSettings,
+  drillActionsDisabled,
   ratingChange,
   scoreChanges,
   ratingDisplayType = "elo",
@@ -56,13 +63,28 @@ const PostGameBanner = ({
         <p className="game-end-banner-message">{gameResult.message}</p>
         <div className="chess-post-game-actions">
           {onNewDrill && (
-            <button
-              className="chess-button primary"
-              type="button"
-              onClick={onNewDrill}
-            >
-              Another drill
-            </button>
+            <span className="drill-again-group">
+              <button
+                className="chess-button primary"
+                type="button"
+                onClick={onNewDrill}
+                disabled={drillActionsDisabled}
+              >
+                Another drill
+              </button>
+              {onAnotherDrillSettings && (
+                <button
+                  className="drill-settings-gear"
+                  type="button"
+                  aria-label="Change drill settings"
+                  title="Change drill settings"
+                  onClick={onAnotherDrillSettings}
+                  disabled={drillActionsDisabled}
+                >
+                  <SettingsGearIcon />
+                </button>
+              )}
+            </span>
           )}
         </div>
       </div>
@@ -109,13 +131,28 @@ const PostGameBanner = ({
             History
           </button>
           {drillOpeningKey && onNewDrill && (
-            <button
-              className="chess-button primary"
-              type="button"
-              onClick={onNewDrill}
-            >
-              New Drill
-            </button>
+            <span className="drill-again-group">
+              <button
+                className="chess-button primary"
+                type="button"
+                onClick={onNewDrill}
+                disabled={drillActionsDisabled}
+              >
+                New Drill
+              </button>
+              {onAnotherDrillSettings && (
+                <button
+                  className="drill-settings-gear"
+                  type="button"
+                  aria-label="Change drill settings"
+                  title="Change drill settings"
+                  onClick={onAnotherDrillSettings}
+                  disabled={drillActionsDisabled}
+                >
+                  <SettingsGearIcon />
+                </button>
+              )}
+            </span>
           )}
         </div>
       </div>

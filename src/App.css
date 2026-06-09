@@ -554,14 +554,43 @@
     cursor: not-allowed;
 }
 
-.chess-button.icon {
-    padding: 0.6rem 0.75rem;
-    line-height: 1;
-    font-size: 1.05rem;
-}
-
 .chess-button:hover {
     border-color: var(--text-primary);
+}
+
+/* Again + settings-gear pairing — keep the gear visually tied to its button. */
+.drill-again-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.15rem;
+}
+
+.drill-settings-gear {
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    cursor: pointer;
+    transition:
+        border-color 200ms ease,
+        background 200ms ease,
+        color 200ms ease;
+}
+
+.drill-settings-gear:hover:not(:disabled) {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.drill-settings-gear:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .chessboard-wrapper {

@@ -136,4 +136,56 @@ describe("PostGameBanner", () => {
     fireEvent.click(btn);
     expect(onNewDrill).toHaveBeenCalledTimes(1);
   });
+
+  it("renders a gear button in the natural-end drill branch and fires onAnotherDrillSettings", () => {
+    const props = makeProps();
+    const onAnotherDrillSettings = vi.fn();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        onNewDrill={vi.fn()}
+        onAnotherDrillSettings={onAnotherDrillSettings}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /change drill settings/i }));
+    expect(onAnotherDrillSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a gear button in the stopped-drill branch and fires onAnotherDrillSettings", () => {
+    const props = makeProps();
+    const onAnotherDrillSettings = vi.fn();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        drillState="failed"
+        onNewDrill={vi.fn()}
+        onAnotherDrillSettings={onAnotherDrillSettings}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /change drill settings/i }));
+    expect(onAnotherDrillSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables the drill restart actions when drillActionsDisabled is set", () => {
+    const props = makeProps();
+    render(
+      <PostGameBanner
+        {...props}
+        drillOpeningKey="some-opening"
+        drillState="failed"
+        onNewDrill={vi.fn()}
+        onAnotherDrillSettings={vi.fn()}
+        drillActionsDisabled
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /another drill/i })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /change drill settings/i }),
+    ).toBeDisabled();
+  });
 });

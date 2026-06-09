@@ -6,10 +6,28 @@ describe("DrillStopActions", () => {
   const baseProps = {
     terminalReason: "accuracy" as const,
     onAnotherDrill: vi.fn(),
+    onAnotherDrillSettings: vi.fn(),
     onAnalyze: vi.fn(),
     analyzeEnabled: true,
     isPreparing: false,
   };
+
+  it("renders a gear button and fires onAnotherDrillSettings", () => {
+    const onAnotherDrillSettings = vi.fn();
+    render(
+      <DrillStopActions {...baseProps} onAnotherDrillSettings={onAnotherDrillSettings} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Change drill settings" }));
+    expect(onAnotherDrillSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables Again and the gear when disabled", () => {
+    render(<DrillStopActions {...baseProps} disabled />);
+
+    expect(screen.getByRole("button", { name: "Again" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change drill settings" })).toBeDisabled();
+  });
 
   it("renders an Analyze button and fires onAnalyze", () => {
     const onAnalyze = vi.fn();

@@ -239,6 +239,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [isLoadingOpenings, setIsLoadingOpenings] = useState(false);
   const [drillRecovery, setDrillRecovery] = useState<DrillRecovery | null>(null);
   const pendingDrillSetupRef = useRef<{ openingKey: string; playerColor: string } | null>(null);
+  // Set when handleAgainSettings seeds the setup panel from live store state, so
+  // the localStorage prefill effect doesn't clobber the exact store values.
+  const skipStickyPrefillRef = useRef(false);
   const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
   const drillState = useGameStore((s) => s.drillState);
   const isStoppedDrill = drillOpeningKey !== null && drillState === "failed";
@@ -877,6 +880,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Load sticky drill prefs when overlay opens
   useEffect(() => {
     if (!showStartOverlay) return;
+    // handleAgainSettings already seeded the panel from live store state; don't
+    // let localStorage (which rounds strictness) clobber the exact values.
+    if (skipStickyPrefillRef.current) {
+      skipStickyPrefillRef.current = false;
+      return;
+    }
     try {
       const raw = localStorage.getItem("ghostreplay_drill_prefs");
       if (!raw) return;
@@ -1420,10 +1429,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [lastMoveSquares, optionSquares],
   );
 
-  const handleCloseStartOverlay = useCallback(
-    () => setShowStartOverlay(false),
-    [],
-  );
+  const handleCloseStartOverlay = useCallback(() => {
+    setShowStartOverlay(false);
+    // Restore the natural-end banner if cancelling the gear/settings overlay.
+    // Successful starts close the overlay via handleNewDrill, not this handler,
+    // so the banner won't wrongly reappear after a started drill.
+    if (useGameStore.getState().gameResult) {
+      setShowPostGamePrompt(true);
+    }
+  }, []);
 
   const handleStartDrill = useCallback(async () => {
     if (!selectedDrillOpening) return;
@@ -1441,7 +1455,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       engineElo: engineElo,
       strictness: strictnessFromCp(drillStrictnessCp),
       strictnessCp: drillStrictnessCp,
-      selectedOpening: selectedDrillOpening,
     });
 
     if (result) {
@@ -1464,40 +1477,63 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     applyOpponentMove,
   ]);
 
-  const handleNewDrillSticky = useCallback(() => {
-    // Intentionally do NOT setIsGameActive(false) here:
-    // - For natural-end during drill, finishLocalGame has already cleared it.
-    // - For mid-board route-check failed, we want isGameActive=true so that
-    //   handleNewDrill's guard runs abandonDrill on the previous session.
-    useGameStore.getState().setGameResult(null);
-
-    try {
-      const raw = localStorage.getItem("ghostreplay_drill_prefs");
-      const prefs = raw ? JSON.parse(raw) : {};
-      if (typeof prefs.strictnessCp === "number") {
-        setDrillStrictnessCp(prefs.strictnessCp);
-      }
-      if (typeof prefs.engineElo === "number") {
-        setEngineElo(prefs.engineElo);
-      }
-      if (prefs.playerColor === "white" || prefs.playerColor === "black" || prefs.playerColor === "random") {
-        setPlayerColorChoice(prefs.playerColor);
-      }
-      if (prefs.openingKey) {
-        pendingDrillSetupRef.current = {
-          openingKey: prefs.openingKey,
-          playerColor: prefs.playerColor ?? "random",
-        };
-      }
-    } catch {
-      // ignore corrupted storage
+  // Open the drill setup overlay for changing settings (gear button / fallback).
+  // Does NOT clear gameResult, so the natural-end banner is preserved and can be
+  // restored if the overlay is cancelled (see handleCloseStartOverlay).
+  const handleAgainSettings = useCallback(() => {
+    const s = useGameStore.getState();
+    if (s.drillOpeningKey != null) {
+      // Seed the setup panel from the live (exact) store state — these win over
+      // localStorage, which rounds strictness to 0/25/50. Guard the localStorage
+      // prefill effect so it doesn't clobber these values.
+      skipStickyPrefillRef.current = true;
+      setDrillStrictnessCp(s.drillStrictnessCp ?? drillStrictnessCp);
+      setEngineElo(s.engineElo);
+      setPlayerColorChoice(s.playerColor);
+      pendingDrillSetupRef.current = {
+        openingKey: s.drillOpeningKey,
+        playerColor: s.playerColor,
+      };
     }
+    // When no drill state exists, fall back to the localStorage-prefill effects.
 
     setIsDrillMode(true);
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [drillStrictnessCp]);
+
+  // Instantly restart the drill with the previous drill's exact settings.
+  const handleAgainDrill = useCallback(async () => {
+    if (isStartingGame) return;
+    const s = useGameStore.getState();
+    // Exact replay is impossible without the exact cp — open the overlay instead.
+    if (!s.drillOpeningKey || s.drillStrictness == null || s.drillStrictnessCp == null) {
+      handleAgainSettings();
+      return;
+    }
+
+    const result = await handleNewDrill({
+      openingKey: s.drillOpeningKey,
+      playerColor: s.playerColor,
+      engineElo: s.engineElo,
+      strictness: s.drillStrictness,
+      strictnessCp: s.drillStrictnessCp,
+    });
+
+    if (result) {
+      drillFailedMoveIndexRef.current = null;
+      setAnalyzeError(null);
+      // Opponent-first restarts (player is black) are driven by the
+      // opponent-move effect, which runs after the new session is committed to
+      // the store. Calling applyOpponentMove directly here would capture the
+      // pre-restart sessionId and fire a request against the abandoned session.
+    } else {
+      // handleNewDrill clears end state only after a successful start, so the
+      // natural-end banner is intact — open the overlay preserving it.
+      handleAgainSettings();
+    }
+  }, [isStartingGame, handleNewDrill, handleAgainSettings]);
 
   const handleSwitchToDrillMode = useCallback(() => setIsDrillMode(true), []);
   const handleSwitchToPlayMode = useCallback(() => setIsDrillMode(false), []);
@@ -1696,7 +1732,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 gameResult={gameResult}
                 drillOpeningKey={drillOpeningKey}
                 drillState={drillState}
-                onNewDrill={handleNewDrillSticky}
+                onNewDrill={handleAgainDrill}
+                onAnotherDrillSettings={handleAgainSettings}
+                drillActionsDisabled={isStartingGame}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
                 ratingDisplayType={ratingDisplayType}
@@ -1713,10 +1751,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             {isGameActive && isStoppedDrill && !gameResult && (
               <DrillStopActions
                 terminalReason={drillTerminalReason}
-                onAnotherDrill={handleNewDrillSticky}
+                onAnotherDrill={handleAgainDrill}
+                onAnotherDrillSettings={handleAgainSettings}
                 onAnalyze={handleAnalyzeDrill}
                 analyzeEnabled={moveHistory.length > 0}
                 isPreparing={isPreparingAnalysis}
+                disabled={isStartingGame}
                 errorMessage={analyzeError}
               />
             )}

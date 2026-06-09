@@ -132,6 +132,10 @@ const initialGameStoreState = useGameStore.getInitialState();
 
 beforeEach(() => {
   useGameStore.setState(initialGameStoreState, true);
+  // Isolate persisted drill prefs between tests — a successful drill start
+  // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
+  // overlay prefill reads it (e.g. the remount engine-ELO persistence test).
+  localStorage.clear();
   capturedAnalysisResolvedListener = null;
   mockCoordinator.addAnalysisResolvedListener.mockClear();
   gameAnalysisStore.getState().clearAll();
@@ -1003,6 +1007,369 @@ describe("ChessGame characterization safeguards", () => {
         source: "post_game_history",
       }),
     );
+  });
+
+  // ---- Instant "Again" + gear settings on drill end (g-osni) -------------
+  const makeDrillResponse = (overrides: Record<string, unknown> = {}) => ({
+    session_id: "drill-restart",
+    mode: "drill",
+    drill_state: "active",
+    opening_key: "target-fen",
+    opening_name: "Target",
+    opening_family: "Target",
+    eco: null,
+    depth: 1,
+    player_color: "white",
+    engine_elo: 1500,
+    strictness: "lenient",
+    strictness_cp: 20,
+    is_rated: false,
+    rated_start_ply: null,
+    normal_started_at: null,
+    converted_at: null,
+    ...overrides,
+  });
+
+  it("instant Again restarts the drill with exact stored settings and no overlay", async () => {
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "white",
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+    });
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith({
+        opening_key: "target-fen",
+        player_color: "white",
+        engine_elo: expect.any(Number),
+        strictness: "lenient",
+        // Exact cp preserved — a 20cp drill restarts at 20cp, not a rounded 25.
+        strictness_cp: 20,
+      });
+    });
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the setup overlay instead of restarting when exact cp is missing", async () => {
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    await driveOffRouteFail();
+    useGameStore.setState({
+      drillStrictness: "lenient",
+      drillStrictnessCp: null,
+    });
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    expect(startDrillMock).not.toHaveBeenCalled();
+    expect(
+      await screen.findByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("a drill restarted via Again still stops on a post-root bad move", async () => {
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictness: "standard",
+      drillStrictnessCp: 25,
+    });
+    startDrillMock.mockResolvedValueOnce(
+      makeDrillResponse({
+        session_id: "drill-restart",
+        drill_state: "root_reached",
+        strictness_cp: 25,
+      }),
+    );
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    await waitFor(() => {
+      expect(useGameStore.getState().sessionId).toBe("drill-restart");
+      expect(useGameStore.getState().drillState).toBe("root_reached");
+      // Exact strictness carried into the restarted drill.
+      expect(useGameStore.getState().drillStrictnessCp).toBe(25);
+    });
+
+    // A post-root move whose eval loss (delta 30) exceeds the 25cp threshold
+    // must still fail the restarted drill.
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis.mockResolvedValue({
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "d2d4",
+      bestEval: 40,
+      playedEval: 10,
+      currentPositionEval: 10,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: 30,
+      classification: "mistake",
+      blunder: false,
+      recordable: false,
+    });
+    failDrillMock.mockResolvedValueOnce({
+      session_id: "drill-restart",
+      mode: "drill",
+      drill_state: "failed",
+      opening_key: "target-fen",
+      opening_name: "Target",
+      opening_family: "Target",
+      eco: null,
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1500,
+      strictness: "standard",
+      strictness_cp: 25,
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+      terminal_reason: "accuracy",
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(failDrillMock).toHaveBeenCalledWith("drill-restart", "accuracy");
+      expect(useGameStore.getState().drillState).toBe("failed");
+      expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
+    });
+  });
+
+  it("disables the restart actions while a new drill is starting", async () => {
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "white",
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+    });
+    let resolveStart: (value: unknown) => void = () => {};
+    startDrillMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveStart = resolve;
+      }),
+    );
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^again$/i })).toBeDisabled();
+      expect(
+        screen.getByRole("button", { name: /change drill settings/i }),
+      ).toBeDisabled();
+    });
+
+    await act(async () => {
+      resolveStart(makeDrillResponse());
+    });
+  });
+
+  it("applies the opponent move when restarting an opponent-first drill", async () => {
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "black",
+      boardOrientation: "black",
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+    });
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse({ player_color: "black" }));
+    getNextOpponentMoveMock.mockClear();
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith(
+        expect.objectContaining({ player_color: "black" }),
+      );
+    });
+    // The opponent move must target the NEW session, not the abandoned one — the
+    // direct call would have captured the pre-restart sessionId.
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledWith(
+        "drill-restart",
+        expect.any(String),
+        expect.any(Array),
+      );
+    });
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalledWith(
+      "session-characterization",
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it("gear opens the overlay seeded from the store, ignoring conflicting localStorage", async () => {
+    getOpeningRootsMock.mockResolvedValue({
+      families: [
+        {
+          family_name: "Target",
+          roots: [
+            {
+              opening_key: "target-fen",
+              opening_name: "Target Opening",
+              opening_family: "Target",
+              eco: null,
+              depth: 1,
+            },
+            {
+              opening_key: "other-fen",
+              opening_name: "Other Opening",
+              opening_family: "Other",
+              eco: null,
+              depth: 1,
+            },
+          ],
+        },
+      ],
+    });
+    localStorage.setItem(
+      "ghostreplay_drill_prefs",
+      JSON.stringify({
+        openingKey: "other-fen",
+        engineElo: 800,
+        strictnessCp: 50,
+        playerColor: "black",
+      }),
+    );
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "white",
+      engineElo: 1500,
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+    });
+
+    const gear = await screen.findByRole("button", {
+      name: /change drill settings/i,
+    });
+    await act(async () => {
+      fireEvent.click(gear);
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
+    // Store values win over localStorage: engine 1500 (not 800), white (not black).
+    expect(useGameStore.getState().engineElo).toBe(1500);
+    expect(useGameStore.getState().playerColorChoice).toBe("white");
+    // Exact 20cp strictness from the store, not the rounded 50 from localStorage.
+    await waitFor(() => {
+      expect(screen.getByText(/20 cp loss allowed/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/50 cp loss allowed/i)).not.toBeInTheDocument();
+    // The store's opening is selected, not the localStorage one.
+    await waitFor(() => {
+      expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(
+        "target-fen",
+      );
+    });
+    localStorage.removeItem("ghostreplay_drill_prefs");
+  });
+
+  // Reaches the natural-end PostGameBanner ("Another drill") branch by resigning
+  // a drill (abandonDrill -> drillState "failed", finishLocalGame sets
+  // gameResult + showPostGamePrompt).
+  const reachNaturalEndDrillBanner = async () => {
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    abandonDrillMock.mockResolvedValueOnce({ drill_state: "failed" });
+    await startGameAsWhite();
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "active",
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+      playerColor: "white",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("Resign"));
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /another drill/i }),
+    ).toBeInTheDocument();
+    expect(useGameStore.getState().gameResult).not.toBeNull();
+  };
+
+  it("natural-end Another drill restarts instantly with exact stored settings", async () => {
+    await reachNaturalEndDrillBanner();
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /another drill/i }));
+    });
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith({
+        opening_key: "target-fen",
+        player_color: "white",
+        engine_elo: expect.any(Number),
+        strictness: "lenient",
+        strictness_cp: 20,
+      });
+    });
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("failed natural-end restart opens the overlay, preserves gameResult, and restores the banner on cancel", async () => {
+    await reachNaturalEndDrillBanner();
+    startDrillMock.mockRejectedValueOnce(new Error("network down"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /another drill/i }));
+    });
+
+    // Overlay opens; gameResult preserved (handleNewDrill clears it only on
+    // success), and the banner is hidden while the modal is open.
+    expect(
+      await screen.findByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
+    expect(useGameStore.getState().gameResult).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /another drill/i }),
+    ).not.toBeInTheDocument();
+
+    // Cancelling the overlay restores the natural-end banner.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /close/i }));
+    });
+    expect(
+      await screen.findByRole("button", { name: /another drill/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
   });
 });
 

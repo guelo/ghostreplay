@@ -1350,13 +1350,6 @@ describe("useChessGameLifecycle", () => {
         engineElo: 1000,
         strictness: "standard",
         strictnessCp: 25,
-        selectedOpening: {
-          opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
-          opening_name: "Sicilian Defense",
-          opening_family: "Sicilian",
-          eco: "B20",
-          depth: 1,
-        },
       });
     });
 
@@ -1405,13 +1398,6 @@ describe("useChessGameLifecycle", () => {
         engineElo: 1200,
         strictness: "strict",
         strictnessCp: 0,
-        selectedOpening: {
-          opening_key: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
-          opening_name: "French Defense",
-          opening_family: "French",
-          eco: "C00",
-          depth: 1,
-        },
       });
     });
 
@@ -1449,13 +1435,6 @@ describe("useChessGameLifecycle", () => {
         engineElo: 800,
         strictness: "lenient",
         strictnessCp: 50,
-        selectedOpening: {
-          opening_key: "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
-          opening_name: "Unknown",
-          opening_family: "",
-          eco: null,
-          depth: 0,
-        },
       });
     });
 

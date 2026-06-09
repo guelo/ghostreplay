@@ -1,13 +1,18 @@
 import { memo } from "react";
+import SettingsGearIcon from "./SettingsGearIcon";
 
 type DrillStopActionsProps = {
   terminalReason: "off_route" | "accuracy" | "natural_end" | null;
   onAnotherDrill: () => void;
+  /** Open the setup overlay to change drill settings (gear button). */
+  onAnotherDrillSettings: () => void;
   onAnalyze: () => void;
   /** Hide the Analyze button when there are no moves to review. */
   analyzeEnabled: boolean;
   /** Disable Analyze and show a preparing label while the snapshot is built. */
   isPreparing: boolean;
+  /** Disable the restart actions while a new drill is starting. */
+  disabled?: boolean;
   /** Non-blocking error (e.g. abandon failed) shown above the actions. */
   errorMessage?: string | null;
 };
@@ -25,9 +30,11 @@ const subtitleFor = (reason: DrillStopActionsProps["terminalReason"]): string =>
 const DrillStopActions = ({
   terminalReason,
   onAnotherDrill,
+  onAnotherDrillSettings,
   onAnalyze,
   analyzeEnabled,
   isPreparing,
+  disabled,
   errorMessage,
 }: DrillStopActionsProps) => {
   return (
@@ -39,14 +46,26 @@ const DrillStopActions = ({
         </p>
       )}
       <div className="chess-post-game-actions">
-        <button
-          className="chess-button primary"
-          type="button"
-          onClick={onAnotherDrill}
-          disabled={isPreparing}
-        >
-          Again
-        </button>
+        <span className="drill-again-group">
+          <button
+            className="chess-button primary"
+            type="button"
+            onClick={onAnotherDrill}
+            disabled={isPreparing || disabled}
+          >
+            Again
+          </button>
+          <button
+            className="drill-settings-gear"
+            type="button"
+            aria-label="Change drill settings"
+            title="Change drill settings"
+            onClick={onAnotherDrillSettings}
+            disabled={isPreparing || disabled}
+          >
+            <SettingsGearIcon />
+          </button>
+        </span>
         {analyzeEnabled && (
           <button
             className="chess-button"

@@ -35,7 +35,6 @@ import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinato
 import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
-import type { OpeningRootItem } from "../utils/api";
 
 type PendingAnalysisContext = {
   fen: string;
@@ -615,7 +614,6 @@ export const useChessGameLifecycle = ({
       engineElo: number;
       strictness: DrillStrictness;
       strictnessCp: number;
-      selectedOpening: OpeningRootItem;
     }) => {
       try {
         setIsStartingGame(true);
