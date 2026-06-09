@@ -362,7 +362,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     (s) => s.variationStreamingEval,
   );
   const [showEngineArrows, setShowEngineArrows] = useState(true);
-  const [selectedEngineLineIndex, setSelectedEngineLineIndex] = useState<number | null>(null);
+  // Single source of truth for the engine-line popup: which line and whether it
+  // is a transient hover preview or a click-persisted popup. Deriving the index
+  // from this object avoids an "index set but mode stale" race.
+  const [enginePopup, setEnginePopup] = useState<{ index: number; mode: "hover" | "persist" } | null>(null);
+  const selectedEngineLineIndex = enginePopup?.index ?? null;
+  const graceTimerRef = useRef<number | null>(null);
   const [selectedEnginePlyIndex, setSelectedEnginePlyIndex] = useState(0);
   const [enginePopupPosition, setEnginePopupPosition] = useState<React.CSSProperties | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
@@ -698,10 +703,18 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     };
   }, [selectedPreviewMove]);
 
-  const closeEnginePopup = useCallback(() => {
-    setSelectedEngineLineIndex(null);
-    setEnginePopupPosition(null);
+  const clearGraceTimer = useCallback(() => {
+    if (graceTimerRef.current !== null) {
+      window.clearTimeout(graceTimerRef.current);
+      graceTimerRef.current = null;
+    }
   }, []);
+
+  const closeEnginePopup = useCallback(() => {
+    clearGraceTimer();
+    setEnginePopup(null);
+    setEnginePopupPosition(null);
+  }, [clearGraceTimer]);
 
   const updateEnginePopupPosition = useCallback(() => {
     if (selectedEngineLineIndex === null) return;
@@ -796,8 +809,11 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     return () => document.removeEventListener("pointerdown", handlePointerDown);
   }, [selectedEngineLineIndex, closeEnginePopup]);
 
+  // Arrow keys drive the preview PV only when the popup is persisted (clicked).
+  // In hover mode the arrows keep driving the main move list (see MoveList's
+  // suppressKeyboardNavigation prop, also gated on persist).
   useEffect(() => {
-    if (!selectedEngineLine) return;
+    if (enginePopup?.mode !== "persist" || !selectedEngineLine) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
@@ -811,7 +827,10 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
     window.addEventListener("keydown", handleKeyDown, { capture: true });
     return () => window.removeEventListener("keydown", handleKeyDown, { capture: true });
-  }, [selectedEngineLine]);
+  }, [enginePopup, selectedEngineLine]);
+
+  // Clear any pending grace timer on unmount.
+  useEffect(() => clearGraceTimer, [clearGraceTimer]);
 
   // Engine-recommended move arrows — best move is blue, others grey with
   // opacity proportional to their centipawn loss relative to the best move.
@@ -1301,11 +1320,40 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     [stopSearch],
   );
 
-  const handleEngineLineOpen = useCallback((index: number) => {
-    setSelectedEngineLineIndex(index);
+  // Click: open (or promote) the popup to persisted mode. Works from any state.
+  const handleEngineLineClick = useCallback((index: number) => {
+    clearGraceTimer();
     setSelectedEnginePlyIndex(0);
+    setEnginePopup({ index, mode: "persist" });
     window.requestAnimationFrame(updateEnginePopupPosition);
-  }, [updateEnginePopupPosition]);
+  }, [clearGraceTimer, updateEnginePopupPosition]);
+
+  // Hover a line: open/replace as a transient preview, but never downgrade a
+  // persisted popup — that only changes via an explicit click or outside-click.
+  const handleEngineLineHover = useCallback((index: number) => {
+    clearGraceTimer();
+    if (enginePopup?.mode === "persist") return;
+    if (enginePopup?.index === index && enginePopup.mode === "hover") return;
+    setSelectedEnginePlyIndex(0);
+    setEnginePopup({ index, mode: "hover" });
+    window.requestAnimationFrame(updateEnginePopupPosition);
+  }, [clearGraceTimer, enginePopup, updateEnginePopupPosition]);
+
+  // Mouse leaves a line button or the popup: close after a short grace window,
+  // but only if still in hover mode. Persisted popups are never closed by leave.
+  const handleEngineLineLeave = useCallback(() => {
+    clearGraceTimer();
+    graceTimerRef.current = window.setTimeout(() => {
+      graceTimerRef.current = null;
+      setEnginePopup((prev) => (prev?.mode === "hover" ? null : prev));
+    }, 80);
+  }, [clearGraceTimer]);
+
+  // Any interaction inside the popup promotes a hover preview to persisted.
+  const handlePopupInteract = useCallback(() => {
+    clearGraceTimer();
+    setEnginePopup((prev) => (prev && prev.mode === "hover" ? { ...prev, mode: "persist" } : prev));
+  }, [clearGraceTimer]);
 
   const content = (
     <div className="analysis-board" ref={boardRootRef}>
@@ -1359,6 +1407,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
           </div>
         </div>
         <div className="analysis-board__moves-col">
+          <div className="analysis-board__engine-panel">
           <div className="analysis-board__engine-header">
             {showEngineArrows && activeEngineDepth > 0 && (
               <div
@@ -1406,7 +1455,9 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                     className="analysis-board__engine-line"
                     aria-label={`Show engine line ${i + 1}`}
                     aria-pressed={selectedEngineLineIndex === line.sourceSlot}
-                    onClick={() => handleEngineLineOpen(i)}
+                    onClick={() => handleEngineLineClick(i)}
+                    onMouseEnter={() => handleEngineLineHover(i)}
+                    onMouseLeave={handleEngineLineLeave}
                     style={{
                       opacity: i === 0 ? 1 : 0.6,
                     }}
@@ -1432,6 +1483,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               })}
             </div>
           )}
+          </div>
           <MaterialDisplay
             fen={displayedFen}
             perspective={boardOrientation === "white" ? "black" : "white"}
@@ -1451,7 +1503,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                 navigateUp={navigateUp}
                 navigateDown={navigateDown}
                 headerEvalOverride={varHeaderEval}
-                suppressKeyboardNavigation={selectedEngineLine !== null}
+                suppressKeyboardNavigation={enginePopup?.mode === "persist"}
               />
             );
           })()}
@@ -1469,6 +1521,9 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
           style={enginePopupPosition ?? undefined}
           role="dialog"
           aria-label="Engine line preview"
+          onMouseEnter={clearGraceTimer}
+          onMouseLeave={handleEngineLineLeave}
+          onPointerDown={handlePopupInteract}
         >
           <div className="analysis-board__engine-popup-header">
             <span className="analysis-board__engine-popup-eval">

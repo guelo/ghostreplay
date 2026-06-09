@@ -125,34 +125,54 @@ vi.mock('./AnalysisGraph', () => ({
 }))
 
 let capturedMoveListProps: Record<string, unknown> = {}
+// Arrow keys that actually reached the (mocked) main move list's window
+// listener — i.e. were NOT intercepted by the board's capture-phase handler.
+const capturedMoveListKeys: string[] = []
 
-vi.mock('./MoveList', () => ({
-  default: (props: {
-    moves: Array<{ san: string }>
-    onNavigate: (index: number | null) => void
-    playerColor?: 'white' | 'black'
-    [key: string]: unknown
-  }) => {
-    capturedMoveListProps = props
-    return (
-      <div>
-        <div data-testid="move-list-player-color">{props.playerColor ?? 'unset'}</div>
-        {props.moves.map((move, index) => (
-          <button
-            key={`${move.san}-${index}`}
-            type="button"
-            onClick={() => props.onNavigate(index)}
-          >
-            Move {index + 1}
+vi.mock('./MoveList', async () => {
+  const { useEffect } = await import('react')
+  return {
+    default: (props: {
+      moves: Array<{ san: string }>
+      onNavigate: (index: number | null) => void
+      playerColor?: 'white' | 'black'
+      suppressKeyboardNavigation?: boolean
+      [key: string]: unknown
+    }) => {
+      capturedMoveListProps = props
+      // Mirror the real MoveList contract: a window keydown listener active only
+      // while not suppressed. A regressed capture handler that stole arrows in
+      // hover mode would stopPropagation before this bubble listener fires.
+      useEffect(() => {
+        const handler = (event: KeyboardEvent) => {
+          if (props.suppressKeyboardNavigation) return
+          if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+            capturedMoveListKeys.push(event.key)
+          }
+        }
+        window.addEventListener('keydown', handler)
+        return () => window.removeEventListener('keydown', handler)
+      }, [props.suppressKeyboardNavigation])
+      return (
+        <div>
+          <div data-testid="move-list-player-color">{props.playerColor ?? 'unset'}</div>
+          {props.moves.map((move, index) => (
+            <button
+              key={`${move.san}-${index}`}
+              type="button"
+              onClick={() => props.onNavigate(index)}
+            >
+              Move {index + 1}
+            </button>
+          ))}
+          <button type="button" onClick={() => props.onNavigate(null)}>
+            Latest
           </button>
-        ))}
-        <button type="button" onClick={() => props.onNavigate(null)}>
-          Latest
-        </button>
-      </div>
-    )
-  },
-}))
+        </div>
+      )
+    },
+  }
+})
 
 vi.mock('./HorizontalMoveList', () => ({
   default: (props: { playerColor?: 'white' | 'black'; [key: string]: unknown }) => {
@@ -203,6 +223,7 @@ beforeEach(() => {
   capturedEvalBarProps = {}
   capturedGraphProps = {}
   capturedMoveListProps = {}
+  capturedMoveListKeys.length = 0
   capturedMaterialDisplays.length = 0
   mockTree = createEmptyTree()
   mockSelectedVarNodeId = null
@@ -898,6 +919,179 @@ describe('AnalysisBoard MoveList', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="white" />)
 
     expect(screen.getAllByRole('button', { name: /Show engine line/ })).toHaveLength(1)
+  })
+})
+
+describe('AnalysisBoard — engine line hover', () => {
+  const dialogQuery = { name: 'Engine line preview' }
+
+  it('opens the popup on hover and auto-dismisses after the grace window on leave', async () => {
+    vi.useFakeTimers()
+    try {
+      mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6'], score: { type: 'cp', value: 42 }, depth: 18 }]
+      mockEngineInfoFenRef.current = moves[1].fen_after
+      render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+      const line = screen.getByRole('button', { name: 'Show engine line 1' })
+      act(() => {
+        fireEvent.mouseEnter(line)
+      })
+      expect(screen.getByRole('dialog', dialogQuery)).toBeInTheDocument()
+
+      act(() => {
+        fireEvent.mouseLeave(line)
+      })
+      // Still open before the grace timer fires.
+      expect(screen.getByRole('dialog', dialogQuery)).toBeInTheDocument()
+      act(() => {
+        vi.advanceTimersByTime(100)
+      })
+      expect(screen.queryByRole('dialog', dialogQuery)).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps the popup open when crossing the button→popup gap before the timer fires', async () => {
+    vi.useFakeTimers()
+    try {
+      mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6'], score: { type: 'cp', value: 42 }, depth: 18 }]
+      mockEngineInfoFenRef.current = moves[1].fen_after
+      render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+      const line = screen.getByRole('button', { name: 'Show engine line 1' })
+      act(() => {
+        fireEvent.mouseEnter(line)
+      })
+      const dialog = screen.getByRole('dialog', dialogQuery)
+      act(() => {
+        fireEvent.mouseLeave(line)
+        fireEvent.mouseEnter(dialog)
+        vi.advanceTimersByTime(100)
+      })
+      expect(screen.getByRole('dialog', dialogQuery)).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('promotes hover to persist when interacting inside the popup', async () => {
+    vi.useFakeTimers()
+    try {
+      mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6'], score: { type: 'cp', value: 42 }, depth: 18 }]
+      mockEngineInfoFenRef.current = moves[1].fen_after
+      render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+      const line = screen.getByRole('button', { name: 'Show engine line 1' })
+      act(() => {
+        fireEvent.mouseEnter(line)
+      })
+      const dialog = screen.getByRole('dialog', dialogQuery)
+      act(() => {
+        fireEvent.pointerDown(dialog)
+      })
+      // Persisted: leaving no longer auto-dismisses.
+      act(() => {
+        fireEvent.mouseLeave(dialog)
+        vi.advanceTimersByTime(100)
+      })
+      expect(screen.getByRole('dialog', dialogQuery)).toBeInTheDocument()
+      expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a persisted popup open on leave and hovering a different line', async () => {
+    vi.useFakeTimers()
+    try {
+      mockEngineInfoRef.current = [
+        { pv: ['g1f3', 'd7d6'], score: { type: 'cp', value: 42 }, depth: 18 },
+        { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 10 }, depth: 18, multipv: 2 },
+      ]
+      mockEngineInfoFenRef.current = moves[1].fen_after
+      render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+      const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+      const line2 = screen.getByRole('button', { name: 'Show engine line 2' })
+      // Click persists line 1.
+      act(() => {
+        fireEvent.click(line1)
+      })
+      expect(line1).toHaveAttribute('aria-pressed', 'true')
+
+      // Hovering line 2 must not downgrade/replace the persisted popup.
+      act(() => {
+        fireEvent.mouseEnter(line2)
+        fireEvent.mouseLeave(line2)
+        vi.advanceTimersByTime(100)
+      })
+      expect(screen.getByRole('dialog', dialogQuery)).toBeInTheDocument()
+      expect(line1).toHaveAttribute('aria-pressed', 'true')
+      expect(line2).toHaveAttribute('aria-pressed', 'false')
+
+      // Outside click dismisses it.
+      act(() => {
+        fireEvent.pointerDown(document.body)
+      })
+      expect(screen.queryByRole('dialog', dialogQuery)).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('routes arrows to the main move list (not the preview) while only hovering', async () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6', 'd2d4'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const chess = new Chess(moves[1].fen_after)
+    chess.move({ from: 'g1', to: 'f3' })
+    const firstFen = chess.fen()
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    const line = screen.getByRole('button', { name: 'Show engine line 1' })
+    act(() => {
+      fireEvent.mouseEnter(line)
+    })
+    await screen.findByRole('dialog', dialogQuery)
+    expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(false)
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: 'ArrowRight' })
+    })
+    // The arrow reached the main move-list listener (not stolen by a capture
+    // handler), and the preview PV did NOT advance.
+    expect(capturedMoveListKeys).toContain('ArrowRight')
+    const lastPreview = capturedChessboardRenders.filter((r) => r.kind === 'preview').at(-1)
+    expect(lastPreview?.options.position).toBe(firstFen)
+  })
+
+  it('drives the preview PV and withholds arrows from the main list once persisted', async () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6', 'd2d4'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    const chess = new Chess(moves[1].fen_after)
+    chess.move({ from: 'g1', to: 'f3' })
+    const firstFen = chess.fen()
+    chess.move({ from: 'd7', to: 'd6' })
+    const secondFen = chess.fen()
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Show engine line 1' }))
+    await screen.findByRole('dialog', dialogQuery)
+    expect(capturedMoveListProps.suppressKeyboardNavigation).toBe(true)
+
+    fireEvent.keyDown(document.body, { key: 'ArrowRight' })
+    await waitFor(() => {
+      const lastPreview = capturedChessboardRenders.filter((r) => r.kind === 'preview').at(-1)
+      expect(lastPreview?.options.position).toBe(secondFen)
+    })
+    fireEvent.keyDown(document.body, { key: 'ArrowLeft' })
+    await waitFor(() => {
+      const lastPreview = capturedChessboardRenders.filter((r) => r.kind === 'preview').at(-1)
+      expect(lastPreview?.options.position).toBe(firstFen)
+    })
+    // The capture handler intercepted the arrows; none reached the main list.
+    expect(capturedMoveListKeys).not.toContain('ArrowRight')
+    expect(capturedMoveListKeys).not.toContain('ArrowLeft')
   })
 })
 

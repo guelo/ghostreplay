@@ -1905,57 +1905,66 @@
     accent-color: #3b82f6;
 }
 
+.analysis-board__engine-panel {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: 0.4rem;
+    background: var(--card-bg);
+    overflow: hidden;
+}
+
 .analysis-board__engine-lines {
     display: flex;
-    gap: 0.5rem;
-    padding: 0.1rem 0.5rem 0.25rem;
+    gap: 0.35rem;
+    padding: 0.25rem 0.4rem 0.4rem;
     font-size: 0.75rem;
     font-family: monospace;
     line-height: 1.4;
-    border-bottom: 1px solid var(--border-color, rgba(148, 163, 184, 0.15));
-}
-
-.analysis-board__engine-line + .analysis-board__engine-line::before {
-    content: "|";
-    opacity: 0.3;
 }
 
 .analysis-board__engine-line {
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
+    flex: 1 1 0;
+    min-width: 0;
     white-space: nowrap;
-    border: 0;
+    border: 1px solid var(--border-color);
     border-radius: 0.25rem;
-    background: transparent;
+    background: var(--card-bg);
     color: inherit;
     font: inherit;
-    padding: 0;
+    padding: 0.15rem 0.4rem;
     cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
 }
 
 .analysis-board__engine-line:hover,
 .analysis-board__engine-line[aria-pressed="true"] {
-    background: rgba(148, 163, 184, 0.12);
+    border-color: var(--color-violet-400, #8b7fd6);
+    background: var(--card-bg-selected, rgba(139, 127, 214, 0.14));
 }
 
 .analysis-board__engine-line--placeholder {
     cursor: default;
     opacity: 0;
+    border-color: transparent;
     pointer-events: none;
 }
 
 .analysis-board__engine-eval {
     flex-shrink: 0;
-    width: 5ch;
     text-align: right;
     font-weight: 600;
-    color: var(--text-primary, #e2e8f0);
+    color: var(--text-primary);
 }
 
 .analysis-board__engine-pv {
-    width: 6ch;
-    color: var(--text-secondary, #94a3b8);
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
 }
@@ -1968,10 +1977,10 @@
     flex-direction: column;
     gap: 0.55rem;
     padding: 0.7rem;
-    border: 1px solid var(--border-color, rgba(148, 163, 184, 0.25));
+    border: 1px solid var(--border-color);
     border-radius: 0.5rem;
-    background: var(--bg-secondary, #0f172a);
-    box-shadow: 0 18px 45px rgba(2, 6, 23, 0.45);
+    background: var(--card-bg);
+    box-shadow: 0 12px 30px rgba(74, 56, 32, 0.22);
 }
 
 .analysis-board__engine-popup-header {
@@ -5954,26 +5963,9 @@ button.openings-shell__crumb:hover {
     justify-content: center;
 }
 
-.opening-selector {
-    width: 100%;
-    max-width: 280px;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.5rem;
-    border: 1px solid var(--border-color-strong);
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    font-size: 0.9rem;
-}
-
-.opening-selector optgroup {
-    font-weight: 600;
-    color: var(--text-secondary);
-}
-
 .strictness-slider-row {
     display: flex;
     width: 100%;
-    max-width: 280px;
 }
 
 .strictness-label {
@@ -5984,10 +5976,184 @@ button.openings-shell__crumb:hover {
     display: block;
 }
 
-.strictness-hint {
-    font-size: 0.8rem;
+/* ---- Drill setup: short/wide left-labeled rows (g-pr8z) ---- */
+.chess-start-panel--drill {
+    width: min(calc(100vw - 2rem), 30rem);
+    max-width: 100%;
+    box-sizing: border-box;
+}
+
+.drill-field {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    width: 100%;
+    text-align: left;
+}
+
+.drill-field__label {
+    flex: 0 0 96px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.drill-field__control {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.drill-field .chess-elo-bot-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* ---- Opening picker (portal popover; list + board) ---- */
+.opening-picker {
+    width: 100%;
+}
+
+.opening-picker__trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+}
+
+.opening-picker__trigger:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.opening-picker__trigger-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.opening-picker__popover {
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--modal-bg);
+    box-shadow: var(--shadow-xl);
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.opening-picker__toggle {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: center;
+}
+
+.opening-picker__search {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    box-sizing: border-box;
+}
+
+.opening-picker__list {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    flex: 1 1 auto;
+}
+
+.opening-picker__group-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    padding: 0.35rem 0.5rem 0.15rem;
+    position: sticky;
+    top: 0;
+    background: var(--modal-bg);
+}
+
+.opening-picker__row {
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.4rem;
+    font-size: 0.85rem;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.opening-picker__row--active {
+    background: var(--bg-secondary);
+}
+
+.opening-picker__row--selected {
+    font-weight: 700;
+    color: var(--text-on-gradient);
+    background: var(--gradient-brand);
+}
+
+.opening-picker__empty {
+    padding: 0.75rem;
+    font-size: 0.85rem;
     color: var(--text-tertiary);
-    display: block;
+    text-align: center;
+}
+
+.opening-picker__board-mode {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.opening-picker__board {
+    width: min(240px, 100%);
+    aspect-ratio: 1;
+}
+
+.opening-picker__board > * {
+    width: 100%;
+    height: 100%;
+}
+
+.opening-picker__board-controls {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.opening-picker__match {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: center;
+}
+
+.opening-picker__match--none {
+    font-weight: 500;
+    color: var(--text-tertiary);
+}
+
+.opening-picker__moves {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-align: center;
 }
 
 /* OpeningsPage card drill button */
@@ -6018,6 +6184,11 @@ button.openings-shell__crumb:hover {
 @media (max-width: 767px) {
     .game-page .chess-start-scroll--drill {
         max-height: min(60vh, 380px);
+    }
+
+    /* Beat the generic .chess-start-panel 22rem cap for drill mode. */
+    .game-page .chess-start-panel--drill {
+        width: min(calc(100vw - 1.5rem), 30rem);
     }
 
     .opening-family-card__footer-actions {
