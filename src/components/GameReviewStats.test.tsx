@@ -63,8 +63,8 @@ describe('GameReviewStats accuracy info button', () => {
 
     await user.click(btn);
     const tooltip = screen.getByRole('tooltip');
-    expect(tooltip).toHaveTextContent(/overall measure of your play/i);
-    expect(tooltip).toHaveTextContent(/100% means every move matched the engine/i);
+    expect(tooltip).toHaveTextContent(/how closely your moves matched the engine/i);
+    expect(tooltip).toHaveTextContent(/100% means perfect play/i);
 
     await user.click(btn);
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
