@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import GameReviewStats from './GameReviewStats';
 import type { SideStats } from '../utils/gameStats';
@@ -49,5 +50,34 @@ describe('GameReviewStats accuracy row', () => {
     renderStats(87, true);
     expect(screen.getByText('87%')).toBeInTheDocument();
     expect(screen.queryByText('computing…')).not.toBeInTheDocument();
+  });
+});
+
+describe('GameReviewStats accuracy info button', () => {
+  it('toggles an explanatory popup when the info button is clicked', async () => {
+    const user = userEvent.setup();
+    renderStats(87);
+
+    const btn = screen.getByRole('button', { name: /what does accuracy mean/i });
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+
+    await user.click(btn);
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip).toHaveTextContent(/overall measure of your play/i);
+    expect(tooltip).toHaveTextContent(/100% means every move matched the engine/i);
+
+    await user.click(btn);
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+  });
+
+  it('closes the popup when clicking outside', async () => {
+    const user = userEvent.setup();
+    renderStats(87);
+
+    await user.click(screen.getByRole('button', { name: /what does accuracy mean/i }));
+    expect(screen.getByRole('tooltip')).toBeInTheDocument();
+
+    await user.click(document.body);
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
   });
 });
