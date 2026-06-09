@@ -1311,6 +1311,13 @@
     min-width: 0;
 }
 
+/* Don't let the graph stretch to the row height (the opening score card can be
+   taller). Keep it at its content height so the absolutely-positioned y-axis
+   (top:0/bottom:0) matches the SVG height, not the card's. */
+.analysis-board__graph-row .analysis-graph--with-axis {
+    align-self: flex-start;
+}
+
 .analysis-board__graph-footer {
     flex: 0 0 230px;
 }
