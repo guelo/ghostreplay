@@ -558,6 +558,7 @@ export const useChessGameLifecycle = ({
         s2.setIsRated(true);
         s2.setIsPracticeContinuation(false);
         s2.setDrillOpeningKey(null);
+        s2.setDrillOpeningName(null);
         s2.setDrillState(null);
         s2.setDrillStrictness(null);
         s2.setDrillStrictnessCp(null);
@@ -658,6 +659,7 @@ export const useChessGameLifecycle = ({
         s.setIsRated(false);
         s.setIsPracticeContinuation(false);
         s.setDrillOpeningKey(options.openingKey);
+        s.setDrillOpeningName(response.opening_name);
         s.setDrillState(response.drill_state);
         s.setDrillStrictness(options.strictness);
         s.setDrillStrictnessCp(response.strictness_cp ?? options.strictnessCp);
@@ -916,6 +918,7 @@ export const useChessGameLifecycle = ({
     store.setIsRated(true);
     store.setIsPracticeContinuation(false);
     store.setDrillOpeningKey(null);
+    store.setDrillOpeningName(null);
     store.setDrillState(null);
     store.setDrillStrictness(null);
     store.setDrillStrictnessCp(null);

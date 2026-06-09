@@ -52,6 +52,7 @@ export type GameState = {
   isRated: boolean;
   isPracticeContinuation: boolean;
   drillOpeningKey: string | null;
+  drillOpeningName: string | null;
   drillState: DrillSessionState | null;
   drillStrictness: DrillStrictness | null;
   drillStrictnessCp: number | null;
@@ -80,6 +81,7 @@ export type GameActions = {
   setIsRated: (update: SetStateAction<boolean>) => void;
   setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
   setDrillOpeningKey: (update: SetStateAction<string | null>) => void;
+  setDrillOpeningName: (update: SetStateAction<string | null>) => void;
   setDrillState: (update: SetStateAction<DrillSessionState | null>) => void;
   setDrillStrictness: (
     update: SetStateAction<DrillStrictness | null>,
@@ -114,6 +116,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   isRated: true,
   isPracticeContinuation: false,
   drillOpeningKey: null,
+  drillOpeningName: null,
   drillState: null,
   drillStrictness: null,
   drillStrictnessCp: null,
@@ -153,6 +156,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     })),
   setDrillOpeningKey: (u) =>
     set((s) => ({ drillOpeningKey: resolve(u, s.drillOpeningKey) })),
+  setDrillOpeningName: (u) =>
+    set((s) => ({ drillOpeningName: resolve(u, s.drillOpeningName) })),
   setDrillState: (u) =>
     set((s) => ({ drillState: resolve(u, s.drillState) })),
   setDrillStrictness: (u) =>

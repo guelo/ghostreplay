@@ -335,6 +335,37 @@ describe("ChessGame characterization safeguards", () => {
     });
   };
 
+  it("shows the drilling label while a drill is active or at root, but not once converted", async () => {
+    await startGameAsWhite();
+
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillOpeningName: "Sicilian Defense",
+        drillState: "active",
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Drilling:")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Sicilian Defense")).toBeInTheDocument();
+
+    act(() => {
+      useGameStore.setState({ drillState: "root_reached" });
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Drilling:")).toBeInTheDocument();
+    });
+
+    // A converted drill is normal rated play — the drilling label must clear.
+    act(() => {
+      useGameStore.setState({ drillState: "converted" });
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("Drilling:")).not.toBeInTheDocument();
+    });
+  });
+
   it("starts live drill play after a player-reached root before requesting the next opponent move", async () => {
     await startGameAsWhite();
 

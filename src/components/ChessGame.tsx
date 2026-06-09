@@ -245,6 +245,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // the localStorage prefill effect doesn't clobber the exact store values.
   const skipStickyPrefillRef = useRef(false);
   const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
+  const drillOpeningName = useGameStore((s) => s.drillOpeningName);
   const drillState = useGameStore((s) => s.drillState);
   const isStoppedDrill = drillOpeningKey !== null && drillState === "failed";
   const drillTerminalReason = useGameStore((s) => s.drillTerminalReason);
@@ -1624,6 +1625,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             isPracticeContinuation={isPracticeContinuation}
             isStoppedDrill={isStoppedDrill}
             isGameActive={isGameActive}
+            isActiveDrill={
+              drillOpeningKey !== null &&
+              isGameActive &&
+              (drillState === "active" || drillState === "root_reached")
+            }
+            drillOpeningName={drillOpeningName}
             playerColorChoice={playerColorChoice}
             playerColor={playerColor}
             playerRating={playerRating}

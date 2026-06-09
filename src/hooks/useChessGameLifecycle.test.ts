@@ -1365,6 +1365,7 @@ describe("useChessGameLifecycle", () => {
     expect(store.isGameActive).toBe(true);
     expect(store.sessionId).toBe("drill-session-123");
     expect(store.drillOpeningKey).toBe("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2");
+    expect(store.drillOpeningName).toBe("Sicilian Defense");
     expect(store.drillState).toBe("active");
     expect(store.drillStrictness).toBe("standard");
     expect(store.isRated).toBe(false);

@@ -225,6 +225,10 @@
     font-weight: 600;
 }
 
+.chess-status__drill-label {
+    color: var(--text-tertiary);
+}
+
 .chess-meta {
     margin: 0;
     color: var(--text-tertiary);

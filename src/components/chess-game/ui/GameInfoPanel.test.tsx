@@ -56,6 +56,27 @@ describe("GameInfoPanel", () => {
     expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(2000));
   });
 
+  it("shows the drilling label instead of the status text in an active drill", () => {
+    const props = {
+      ...makeProps(),
+      isActiveDrill: true,
+      drillOpeningName: "Sicilian Defense",
+    };
+    render(<GameInfoPanel {...props} />);
+
+    expect(screen.getByText("Drilling:")).toBeInTheDocument();
+    expect(screen.getByText("Sicilian Defense")).toBeInTheDocument();
+    expect(screen.queryByText("White to move")).toBeNull();
+  });
+
+  it("falls back to the status text when not in an active drill", () => {
+    const props = makeProps();
+    render(<GameInfoPanel {...props} />);
+
+    expect(screen.getByText("White to move")).toBeInTheDocument();
+    expect(screen.queryByText("Drilling:")).toBeNull();
+  });
+
   it("keeps the opponent visible and shows the result avatar after a game ends", () => {
     const props = {
       ...makeProps(),

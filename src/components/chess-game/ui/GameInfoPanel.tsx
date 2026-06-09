@@ -17,6 +17,8 @@ type GameInfoPanelProps = {
   isPracticeContinuation: boolean;
   isStoppedDrill?: boolean;
   isGameActive: boolean;
+  isActiveDrill?: boolean;
+  drillOpeningName?: string | null;
   playerColorChoice: BoardOrientation | "random";
   playerColor: BoardOrientation;
   playerRating: number;
@@ -218,6 +220,8 @@ const GameInfoPanel = ({
   isPracticeContinuation,
   isStoppedDrill = false,
   isGameActive,
+  isActiveDrill = false,
+  drillOpeningName,
   playerColorChoice: _playerColorChoice,
   playerColor: _playerColor,
   playerRating,
@@ -257,7 +261,14 @@ const GameInfoPanel = ({
   );
   return (
     <div className="chess-panel" aria-live="polite">
-      <p className="chess-status">{statusText}</p>
+      {isActiveDrill ? (
+        <p className="chess-status chess-status--drill">
+          <span className="chess-status__drill-label">Drilling:</span>{" "}
+          {drillOpeningName ?? "Opening"}
+        </p>
+      ) : (
+        <p className="chess-status">{statusText}</p>
+      )}
       {gameStatusBadge && (
         <span className={`game-status-badge ${gameStatusBadge.className}`}>
           {gameStatusBadge.label}
