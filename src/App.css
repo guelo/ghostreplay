@@ -2177,7 +2177,7 @@
 
 .analysis-graph--with-axis {
     position: relative;
-    align-self: flex-start;
+    align-self: stretch;
     margin-right: 2.8rem;
 }
 
