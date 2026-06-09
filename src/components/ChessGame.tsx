@@ -121,7 +121,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const setBoardOrientation = useGameStore((s) => s.setBoardOrientation);
   const playerColor = useGameStore((s) => s.playerColor);
   const playerColorChoice = useGameStore((s) => s.playerColorChoice);
-  const setPlayerColorChoice = useGameStore((s) => s.setPlayerColorChoice);
   const engineElo = useGameStore((s) => s.engineElo);
   const setEngineElo = useGameStore((s) => s.setEngineElo);
   const moveHistory = useGameStore((s) => s.moveHistory);
@@ -235,6 +234,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [isDrillMode, setIsDrillMode] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
   const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
+  // Drill side is independent of normal-play's store playerColorChoice (which
+  // also feeds normal-game random); drill never offers Random.
+  const [drillPlayerColor, setDrillPlayerColor] = useState<"white" | "black">("white");
   const [openingFamilies, setOpeningFamilies] = useState<Array<{ family_name: string; roots: OpeningRootItem[] }> | null>(null);
   const [isLoadingOpenings, setIsLoadingOpenings] = useState(false);
   const [drillRecovery, setDrillRecovery] = useState<DrillRecovery | null>(null);
@@ -869,6 +871,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       .catch(() => {
         if (cancelled) return;
         setOpeningFamilies(null);
+        // Drop any prior selection so a failed reload can't silently start a
+        // stale opening behind the "Failed to load openings" trigger.
+        setSelectedDrillOpening(null);
       })
       .finally(() => {
         if (cancelled) return;
@@ -896,8 +901,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (typeof prefs.engineElo === "number") {
         setEngineElo(prefs.engineElo);
       }
-      if (prefs.playerColor === "white" || prefs.playerColor === "black" || prefs.playerColor === "random") {
-        setPlayerColorChoice(prefs.playerColor);
+      if (prefs.playerColor === "white" || prefs.playerColor === "black") {
+        setDrillPlayerColor(prefs.playerColor);
+      } else if (prefs.playerColor === "random") {
+        // Legacy stored drill pref: coerce dropped "random" to White.
+        setDrillPlayerColor("white");
       }
       if (prefs.openingKey && !pendingDrillSetupRef.current) {
         pendingDrillSetupRef.current = {
@@ -921,9 +929,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setSelectedDrillOpening(opening);
     }
     const color = pendingDrillSetupRef.current.playerColor;
-    if (color === "white" || color === "black" || color === "random") {
-      setPlayerColorChoice(color);
-    }
+    setDrillPlayerColor(color === "black" ? "black" : "white");
     pendingDrillSetupRef.current = null;
   }, [openingFamilies]);
   // -------------------------------------------------------------------
@@ -1441,17 +1447,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const handleStartDrill = useCallback(async () => {
     if (!selectedDrillOpening) return;
-    const effectiveChoice = playerColorChoice ?? "random";
-    const resolvedPlayerColor =
-      effectiveChoice === "random"
-        ? Math.random() < 0.5
-          ? "white"
-          : "black"
-        : effectiveChoice;
 
     const result = await handleNewDrill({
       openingKey: selectedDrillOpening.opening_key,
-      playerColor: resolvedPlayerColor,
+      playerColor: drillPlayerColor,
       engineElo: engineElo,
       strictness: strictnessFromCp(drillStrictnessCp),
       strictnessCp: drillStrictnessCp,
@@ -1463,18 +1462,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // old stopped drill, which still needs its targeted barrier/index.
       drillFailedMoveIndexRef.current = null;
       setAnalyzeError(null);
-      if (chess.turn() !== (resolvedPlayerColor === "white" ? "w" : "b")) {
+      if (chess.turn() !== (drillPlayerColor === "white" ? "w" : "b")) {
         void applyOpponentMove(result.fen, result.uciHistory);
       }
     }
   }, [
     selectedDrillOpening,
-    playerColorChoice,
     engineElo,
     drillStrictnessCp,
     handleNewDrill,
     chess,
     applyOpponentMove,
+    drillPlayerColor,
   ]);
 
   // Open the drill setup overlay for changing settings (gear button / fallback).
@@ -1489,7 +1488,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       skipStickyPrefillRef.current = true;
       setDrillStrictnessCp(s.drillStrictnessCp ?? drillStrictnessCp);
       setEngineElo(s.engineElo);
-      setPlayerColorChoice(s.playerColor);
+      setDrillPlayerColor(s.playerColor === "black" ? "black" : "white");
       pendingDrillSetupRef.current = {
         openingKey: s.drillOpeningKey,
         playerColor: s.playerColor,
@@ -1701,10 +1700,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onSwitchToDrillMode={handleSwitchToDrillMode}
                 openingFamilies={openingFamilies}
                 selectedDrillOpening={selectedDrillOpening}
-                drillPlayerColor={playerColorChoice}
+                drillPlayerColor={drillPlayerColor}
                 drillStrictnessCp={drillStrictnessCp}
                 onSelectDrillOpening={setSelectedDrillOpening}
-                onDrillPlayerColorChange={setPlayerColorChoice}
+                onDrillPlayerColorChange={setDrillPlayerColor}
                 onDrillStrictnessChange={setDrillStrictnessCp}
                 onStartDrill={handleStartDrill}
                 isLoadingOpenings={isLoadingOpenings}

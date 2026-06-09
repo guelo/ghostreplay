@@ -1276,19 +1276,80 @@ describe("ChessGame characterization safeguards", () => {
     ).toBeInTheDocument();
     // Store values win over localStorage: engine 1500 (not 800), white (not black).
     expect(useGameStore.getState().engineElo).toBe(1500);
-    expect(useGameStore.getState().playerColorChoice).toBe("white");
+    // Drill side is now local state, decoupled from the store playerColorChoice;
+    // the White side toggle should be active (from the store's player_color).
+    expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass("active");
     // Exact 20cp strictness from the store, not the rounded 50 from localStorage.
     await waitFor(() => {
       expect(screen.getByText(/20 cp loss allowed/i)).toBeInTheDocument();
     });
     expect(screen.queryByText(/50 cp loss allowed/i)).not.toBeInTheDocument();
-    // The store's opening is selected, not the localStorage one.
+    // The store's opening is selected, not the localStorage one (picker trigger
+    // shows the selected opening name).
     await waitFor(() => {
-      expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(
-        "target-fen",
-      );
+      expect(screen.getByRole("combobox")).toHaveTextContent("Target");
     });
     localStorage.removeItem("ghostreplay_drill_prefs");
+  });
+
+  it("clears the prior opening so a failed reload can't start a stale selection", async () => {
+    const targetFamily = {
+      families: [
+        {
+          family_name: "Target",
+          roots: [
+            {
+              opening_key: "target-fen",
+              opening_name: "Target Opening",
+              opening_family: "Target",
+              eco: null,
+              depth: 1,
+            },
+          ],
+        },
+      ],
+    };
+    // First overlay open succeeds; the reopen's fetch fails.
+    getOpeningRootsMock
+      .mockResolvedValueOnce(targetFamily)
+      .mockRejectedValueOnce(new Error("boom"));
+
+    await driveOffRouteFail();
+    useGameStore.setState({ playerColor: "white", drillStrictnessCp: 20 });
+
+    const gear = await screen.findByRole("button", {
+      name: /change drill settings/i,
+    });
+    await act(async () => {
+      fireEvent.click(gear);
+    });
+
+    // Opening resolves and Start Drill becomes enabled.
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent("Target");
+    });
+    expect(
+      screen.getByRole("button", { name: /start drill/i }),
+    ).not.toBeDisabled();
+
+    // Close the overlay, then reopen with a failing fetch.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    });
+    await act(async () => {
+      fireEvent.click(
+        await screen.findByRole("button", { name: /change drill settings/i }),
+      );
+    });
+
+    // Failure surfaces on the trigger and the stale selection is cleared, so
+    // Start Drill cannot relaunch the previous opening.
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent(
+        /failed to load openings/i,
+      );
+    });
+    expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
   });
 
   // Reaches the natural-end PostGameBanner ("Another drill") branch by resigning

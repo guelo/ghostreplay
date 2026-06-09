@@ -57,10 +57,10 @@ type BoardStageProps = {
   onSwitchToDrillMode?: () => void;
   openingFamilies?: Array<{ family_name: string; roots: OpeningRootItem[] }> | null;
   selectedDrillOpening?: OpeningRootItem | null;
-  drillPlayerColor?: "white" | "black" | "random";
+  drillPlayerColor?: "white" | "black";
   drillStrictnessCp?: number;
   onSelectDrillOpening?: (opening: OpeningRootItem | null) => void;
-  onDrillPlayerColorChange?: (color: "white" | "black" | "random") => void;
+  onDrillPlayerColorChange?: (color: "white" | "black") => void;
   onDrillStrictnessChange?: (cp: number) => void;
   onStartDrill?: () => void;
   isLoadingOpenings?: boolean;
@@ -134,7 +134,7 @@ const BoardStage = ({
   onSwitchToDrillMode,
   openingFamilies,
   selectedDrillOpening,
-  drillPlayerColor = "random",
+  drillPlayerColor = "white",
   drillStrictnessCp = 25,
   onSelectDrillOpening,
   onDrillPlayerColorChange,
@@ -163,7 +163,7 @@ const BoardStage = ({
           )}
           {showStartOverlay && (!isGameActive || isStoppedDrill) && (
             <div className="chessboard-overlay">
-              <div className="chess-start-panel">
+              <div className={`chess-start-panel${isDrillMode ? " chess-start-panel--drill" : ""}`}>
                 <button
                   className="chess-start-close"
                   type="button"

@@ -15,7 +15,8 @@ const makeProps = () => {
         family_name: "Sicilian",
         roots: [
           {
-            opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            // 4-field opening_key (matches backend normalize_fen output).
+            opening_key: "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
             opening_name: "Sicilian Defense",
             opening_family: "Sicilian",
             eco: "B20",
@@ -27,7 +28,7 @@ const makeProps = () => {
         family_name: "French",
         roots: [
           {
-            opening_key: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            opening_key: "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
             opening_name: "French Defense",
             opening_family: "French",
             eco: "C00",
@@ -37,7 +38,7 @@ const makeProps = () => {
       },
     ],
     selectedOpening: null,
-    playerColor: "random" as const,
+    playerColor: "white" as const,
     engineElo: 1000,
     strictnessCp: 25,
     maiaEloBins: [800, 1000, 1200] as const,
@@ -56,22 +57,32 @@ const makeProps = () => {
 };
 
 describe("DrillSetupPanel", () => {
-  it("renders opening selector with optgroups", () => {
-    const props = makeProps();
-    render(<DrillSetupPanel {...props} />);
-
-    expect(screen.getByRole("combobox")).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /Sicilian Defense/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /French Defense/ })).toBeInTheDocument();
+  it("renders left-side labels for each field", () => {
+    render(<DrillSetupPanel {...makeProps()} />);
+    expect(screen.getByText("Opening")).toBeInTheDocument();
+    expect(screen.getByText("Side")).toBeInTheDocument();
+    expect(screen.getByText("Engine Difficulty")).toBeInTheDocument();
+    expect(screen.getByText("Strictness")).toBeInTheDocument();
   });
 
-  it("calls onSelectOpening when an opening is selected", () => {
+  it("does not render a Random side option", () => {
+    render(<DrillSetupPanel {...makeProps()} />);
+    expect(screen.queryByRole("button", { name: /^random$/i })).not.toBeInTheDocument();
+  });
+
+  it("does not render the strictness tolerance hint", () => {
+    render(<DrillSetupPanel {...makeProps()} />);
+    expect(
+      screen.queryByText(/Adjust tolerance for acceptable moves/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens the opening picker and selects an opening", () => {
     const props = makeProps();
     render(<DrillSetupPanel {...props} />);
 
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: props.openingFamilies![0].roots[0].opening_key },
-    });
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(screen.getByRole("option", { name: /Sicilian Defense/ }));
 
     expect(props.onSelectOpening).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -84,10 +95,10 @@ describe("DrillSetupPanel", () => {
     const props = makeProps();
     render(<DrillSetupPanel {...props} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /white/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^white$/i }));
     expect(props.onPlayerColorChange).toHaveBeenCalledWith("white");
 
-    fireEvent.click(screen.getByRole("button", { name: /black/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^black$/i }));
     expect(props.onPlayerColorChange).toHaveBeenCalledWith("black");
   });
 
@@ -144,11 +155,11 @@ describe("DrillSetupPanel", () => {
     expect(screen.getByText("Failed to start")).toBeInTheDocument();
   });
 
-  it("shows loading state when openingFamilies is null", () => {
+  it("shows loading state on the picker trigger", () => {
     const props = makeProps();
     render(<DrillSetupPanel {...props} openingFamilies={null} isLoadingOpenings />);
 
     expect(screen.getByRole("combobox")).toBeDisabled();
-    expect(screen.getByRole("option", { name: /loading openings/i })).toBeInTheDocument();
+    expect(screen.getByText(/loading openings/i)).toBeInTheDocument();
   });
 });
