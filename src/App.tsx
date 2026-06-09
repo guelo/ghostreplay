@@ -15,6 +15,9 @@ const boardPieces: Record<number, string> = {
   23: "♔",
 };
 
+const boardFiles = ["a", "b", "c", "d", "e"];
+const boardRanks = [5, 4, 3, 2, 1];
+
 function TrainingBoard() {
   return (
     <div className="home-demo" aria-hidden="true">
@@ -27,18 +30,33 @@ function TrainingBoard() {
       </div>
 
       <div className="home-demo__stage">
-        <div className="home-demo__board">
-          {Array.from({ length: 25 }, (_, index) => (
-            <span
-              className={`home-demo__square${
-                index === 12 ? " home-demo__square--target" : ""
-              }`}
-              key={index}
-            >
-              {boardPieces[index]}
-            </span>
-          ))}
-          <span className="home-demo__arrow">↗</span>
+        <div className="home-demo__board-frame">
+          <div className="home-demo__ranks">
+            {boardRanks.map((rank) => (
+              <span key={rank}>{rank}</span>
+            ))}
+          </div>
+          <div className="home-demo__board">
+            {Array.from({ length: 25 }, (_, index) => (
+              <span
+                className={`home-demo__square${
+                  index === 12 ? " home-demo__square--target" : ""
+                }`}
+                key={index}
+              >
+                {boardPieces[index]}
+                {index === 12 && (
+                  <span className="home-demo__spectre">♞</span>
+                )}
+              </span>
+            ))}
+            <span className="home-demo__arrow">↗</span>
+          </div>
+          <div className="home-demo__files">
+            {boardFiles.map((file) => (
+              <span key={file}>{file}</span>
+            ))}
+          </div>
         </div>
 
         <img
@@ -70,6 +88,9 @@ function TrainingBoard() {
 function App() {
   return (
     <main className="app-shell home-page">
+      <span className="home-wanderer" aria-hidden="true">
+        👻
+      </span>
       <AppNav showLogo />
 
       <div className="constrained-content home-page__content">
@@ -88,7 +109,7 @@ function App() {
             <span className="ecto-particle" />
             <span className="ecto-particle" />
           </div>
-          <div className="home-hero__copy">
+          <div className="home-hero__intro">
             <p className="home-kicker">
               <span aria-hidden="true">👻</span> Your blunders never really die{" "}
               <span aria-hidden="true">— they haunt.</span>
@@ -102,16 +123,6 @@ function App() {
               those moments back as personalized games, drills, and spaced
               reviews.
             </p>
-
-            <div className="home-hero__actions">
-              <Link to="/play" className="chess-button primary home-button">
-                Play a ghost game <span aria-hidden="true">→</span>
-              </Link>
-              <Link to="/openings" className="chess-button home-button">
-                Explore opening drills
-              </Link>
-            </div>
-
             <ul className="home-hero__proof" aria-label="Training highlights">
               <li>Haunted by your own blunders</li>
               <li>Stockfish-powered exorcism</li>
@@ -119,84 +130,120 @@ function App() {
             </ul>
           </div>
 
-          <TrainingBoard />
-        </section>
-
-        <section
-          className="home-drill-spotlight"
-          aria-labelledby="home-drill-title"
-        >
-          <div className="home-drill-spotlight__ghosts" aria-hidden="true">
-            <span>♟</span>
-            <span>♞</span>
-            <span>♛</span>
-            <span>♝</span>
-            <span>♚</span>
-          </div>
-
-          <div className="home-drill-spotlight__copy">
-            <p className="home-kicker">
-              <span aria-hidden="true">⚡</span> The marquee feature{" "}
-              <span aria-hidden="true">— it's electric (but also haunted)</span>
-            </p>
-            <h2 id="home-drill-title">
-              How long can you play <em>perfect</em> chess?
-            </h2>
-            <p className="home-drill-spotlight__lede">
-              Opening Drills replay your real games move by move. Stay on the
-              best line and your streak grows. Slip once and the ghost pounces —
-              then files that exact position for a rematch.
-            </p>
-
-            <div className="home-drill-spotlight__stats" aria-hidden="true">
-              <span className="home-drill-stat">
-                <strong>17</strong> move streak
+          <div className="home-portals">
+            <Link to="/play" className="home-portal home-portal--ghost">
+              <div className="home-portal__head">
+                <span className="home-portal__tag">
+                  <span aria-hidden="true">👻</span> Ghost games
+                </span>
+                <h2>Play against your past.</h2>
+                <p>
+                  The ghost steers every game toward positions from your own
+                  history — your second chance, disguised as a fresh game.
+                </p>
+              </div>
+              <TrainingBoard />
+              <span className="home-portal__cta chess-button primary home-button">
+                Summon a ghost game <span aria-hidden="true">→</span>
               </span>
-              <span className="home-drill-stat">
-                <strong>98%</strong> book accuracy
-              </span>
-              <span className="home-drill-stat home-drill-stat--ghost">
-                <strong>👻 1</strong> ghost lurking
-              </span>
-            </div>
+            </Link>
 
-            <Link
-              to="/openings"
-              className="chess-button primary home-button home-drill-spotlight__cta"
-            >
-              Start an opening drill <span aria-hidden="true">→</span>
+            <Link to="/openings" className="home-portal home-portal--drill">
+              <div className="home-portal__ghosts" aria-hidden="true">
+                <span>♛</span>
+                <span>♞</span>
+              </div>
+              <div className="home-portal__head">
+                <span className="home-portal__tag home-portal__tag--electric">
+                  <span aria-hidden="true">⚡</span> The challenge
+                </span>
+                <h2>
+                  How long can you play <em>perfect</em> chess?
+                </h2>
+                <p>
+                  Opening drills replay your real games move by move. Stay on
+                  the best line and the streak grows. Slip once — the ghost
+                  pounces.
+                </p>
+              </div>
+
+              <div className="home-portal__panel" aria-hidden="true">
+                <div className="home-portal__panel-head">
+                  <span>Drilling: Sicilian Defense</span>
+                  <span className="home-drill-spotlight__perfect">HAUNTED</span>
+                </div>
+                <ol className="home-drill-moves">
+                  <li className="home-drill-move home-drill-move--good">
+                    <span>1. e4 c5</span>
+                    <span aria-hidden="true">✓</span>
+                  </li>
+                  <li className="home-drill-move home-drill-move--good">
+                    <span>2. Nf3 d6</span>
+                    <span aria-hidden="true">✓</span>
+                  </li>
+                  <li className="home-drill-move home-drill-move--live">
+                    <span>3. d4 ...</span>
+                    <span className="home-drill-move__cursor">♟</span>
+                  </li>
+                </ol>
+                <div className="home-portal__streak">
+                  <span className="home-drill-spotlight__flame" aria-hidden="true">
+                    🔥
+                  </span>
+                  <strong>17-move streak</strong> alive — your move
+                </div>
+              </div>
+
+              <div className="home-portal__stats" aria-hidden="true">
+                <span className="home-drill-stat">
+                  <strong>98%</strong> book accuracy
+                </span>
+                <span className="home-drill-stat home-drill-stat--ghost">
+                  <strong>👻 1</strong> ghost lurking
+                </span>
+              </div>
+
+              <span className="home-portal__cta chess-button home-button">
+                Start an opening drill <span aria-hidden="true">→</span>
+              </span>
             </Link>
           </div>
+        </section>
 
-          <div className="home-drill-spotlight__panel" aria-hidden="true">
-            <div className="home-drill-spotlight__panel-head">
-              <span>Drilling: Sicilian Defense</span>
-              <span className="home-drill-spotlight__perfect">HAUNTED</span>
-            </div>
-            <ol className="home-drill-moves">
-              <li className="home-drill-move home-drill-move--good">
-                <span>1. e4 c5</span>
-                <span aria-hidden="true">✓</span>
-              </li>
-              <li className="home-drill-move home-drill-move--good">
-                <span>2. Nf3 d6</span>
-                <span aria-hidden="true">✓</span>
-              </li>
-              <li className="home-drill-move home-drill-move--good">
-                <span>3. d4 cxd4</span>
-                <span aria-hidden="true">✓</span>
-              </li>
-              <li className="home-drill-move home-drill-move--live">
-                <span>4. Nxd4 ...</span>
-                <span className="home-drill-move__cursor">♟</span>
-              </li>
-            </ol>
-            <div className="home-drill-spotlight__streak">
-              <span className="home-drill-spotlight__flame" aria-hidden="true">
-                🔥
-              </span>
-              Streak alive — your move
-            </div>
+        <section className="home-ticker" aria-label="How Ghost Replay trains you">
+          <div className="home-ticker__track">
+            {[false, true].map((isClone) => (
+              <ul
+                className="home-ticker__group"
+                aria-hidden={isClone || undefined}
+                key={isClone ? "clone" : "original"}
+              >
+                <li>
+                  <span aria-hidden="true">👻</span> Every blunder is saved
+                  with its best reply
+                </li>
+                <li>
+                  <span aria-hidden="true">♞</span> Ghost games steer into
+                  positions from your real games
+                </li>
+                <li>
+                  <span aria-hidden="true">🔮</span> Spaced repetition decides
+                  when a ghost returns
+                </li>
+                <li>
+                  <span aria-hidden="true">♛</span> Opening drills replay your
+                  own games move by move
+                </li>
+                <li>
+                  <span aria-hidden="true">⚙️</span> Stockfish grades every
+                  move you make
+                </li>
+                <li>
+                  <span aria-hidden="true">💀</span> ?? is chess notation for a
+                  blunder — we collect those
+                </li>
+              </ul>
+            ))}
           </div>
         </section>
 
@@ -324,11 +371,16 @@ function App() {
               No generic puzzle pile. Ghost Replay turns your own decisions into
               a practice plan that keeps evolving — and the ghost always remembers.
             </p>
+            <p className="home-loop__legend">
+              In chess notation <strong>??</strong> marks a blunder and{" "}
+              <strong>!!</strong> a brilliancy. This loop walks you from one to
+              the other.
+            </p>
           </div>
 
           <ol className="home-loop__steps">
             <li>
-              <span className="home-loop__number">01</span>
+              <span className="home-loop__number">1. e4</span>
               <span className="home-loop__glyph" aria-hidden="true">
                 ♟
               </span>
@@ -338,7 +390,9 @@ function App() {
               </div>
             </li>
             <li>
-              <span className="home-loop__number">02</span>
+              <span className="home-loop__number home-loop__number--blunder">
+                2. ??
+              </span>
               <span className="home-loop__glyph" aria-hidden="true">
                 👻
               </span>
@@ -350,7 +404,9 @@ function App() {
               </div>
             </li>
             <li>
-              <span className="home-loop__number">03</span>
+              <span className="home-loop__number home-loop__number--brilliant">
+                3. !!
+              </span>
               <span className="home-loop__glyph" aria-hidden="true">
                 ⚔️
               </span>
@@ -362,6 +418,114 @@ function App() {
               </div>
             </li>
           </ol>
+        </section>
+
+        <section className="home-faq" aria-labelledby="home-faq-title">
+          <div className="home-faq__intro">
+            <p className="home-kicker">
+              <span aria-hidden="true">🕯️</span> Frequently asked hauntings
+            </p>
+            <h2 id="home-faq-title">Questions from beyond the board.</h2>
+            <p>
+              Everything you need to know before your first séance. The ghost
+              answered these personally.
+            </p>
+            <img
+              className="home-faq__mascot"
+              src="/branding/ghost-logo-option-4-scholar.svg"
+              alt=""
+            />
+          </div>
+
+          <div className="home-faq__list">
+            <details className="home-faq__item" open>
+              <summary>
+                <span className="home-faq__move" aria-hidden="true">
+                  1.
+                </span>
+                What exactly is a ghost game?
+                <span className="home-faq__ghost" aria-hidden="true">
+                  👻
+                </span>
+              </summary>
+              <p>
+                A full game against an opponent built from your own history. The
+                ghost steers play toward positions where you went wrong before,
+                so you get a natural second chance at the exact decisions that
+                cost you — no flashcards, just chess.
+              </p>
+            </details>
+
+            <details className="home-faq__item">
+              <summary>
+                <span className="home-faq__move" aria-hidden="true">
+                  2.
+                </span>
+                Where do my blunders come from?
+                <span className="home-faq__ghost" aria-hidden="true">
+                  👻
+                </span>
+              </summary>
+              <p>
+                Every game you play here is analyzed by Stockfish. When a move
+                loses serious ground, the position is filed away with the
+                opening it came from and the move you should have played. That
+                file is your personal haunting list.
+              </p>
+            </details>
+
+            <details className="home-faq__item">
+              <summary>
+                <span className="home-faq__move" aria-hidden="true">
+                  3.
+                </span>
+                How do opening drills work?
+                <span className="home-faq__ghost" aria-hidden="true">
+                  👻
+                </span>
+              </summary>
+              <p>
+                Pick an opening family from your repertoire map and replay your
+                own games move by move. Match the best line and your streak
+                grows; deviate and the drill stops you on the spot, shows the
+                better move, and queues the position for review.
+              </p>
+            </details>
+
+            <details className="home-faq__item">
+              <summary>
+                <span className="home-faq__move" aria-hidden="true">
+                  4.
+                </span>
+                When do ghosts come back to haunt me?
+                <span className="home-faq__ghost" aria-hidden="true">
+                  👻
+                </span>
+              </summary>
+              <p>
+                On a spaced-repetition schedule. Positions you fumble return
+                quickly; positions you nail come back later and later, until the
+                ghost finally gives up and moves on. That's the exorcism.
+              </p>
+            </details>
+
+            <details className="home-faq__item">
+              <summary>
+                <span className="home-faq__move" aria-hidden="true">
+                  5.
+                </span>
+                Do I need an account to get haunted?
+                <span className="home-faq__ghost" aria-hidden="true">
+                  👻
+                </span>
+              </summary>
+              <p>
+                You can start playing as a guest right away — the ghost starts
+                taking notes immediately. Register whenever you want to keep
+                your hauntings, stats, and streaks safe across sessions.
+              </p>
+            </details>
+          </div>
         </section>
 
         <section className="home-final-cta">
