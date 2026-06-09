@@ -131,6 +131,12 @@ graph TD
 | `/login` | `AuthForm` | Login |
 | `/register` | `AuthForm` | Registration |
 
+The landing page is a route-driven product tour of the full training loop:
+play a ghost game, identify mistakes through background analysis, revisit due
+blunders with spaced repetition, drill weak opening branches, review completed
+games, and track progress. Its hero training board is illustrative only and does
+not fetch or display account data.
+
 ### 3.2 Backend (The Coordinator)
 
 * **Responsibility:** Ghost-path traversal, opponent move selection (via remote Maia3 API), and SRS updates.
