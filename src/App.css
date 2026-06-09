@@ -246,6 +246,8 @@
         26px 26px,
         26px 26px,
         auto;
+    box-shadow:
+        inset 0 0 80px color-mix(in srgb, var(--status-ghost) 15%, transparent);
 }
 
 .home-demo__board {
@@ -260,7 +262,10 @@
     border: 7px solid color-mix(in srgb, var(--text-primary) 82%, var(--status-ghost));
     border-radius: 0.45rem;
     background: var(--color-cream-100);
-    box-shadow: 0 22px 45px color-mix(in srgb, var(--text-primary) 24%, transparent);
+    box-shadow:
+        0 22px 45px color-mix(in srgb, var(--text-primary) 24%, transparent),
+        0 0 60px 4px color-mix(in srgb, var(--status-ghost) 12%, transparent),
+        inset 0 0 30px color-mix(in srgb, var(--status-ghost) 6%, transparent);
 }
 
 .home-demo__square {
@@ -302,12 +307,19 @@
 
 .home-demo__mascot {
     position: absolute;
-    right: -4%;
-    bottom: -3%;
+    right: -6%;
+    bottom: -6%;
     z-index: 3;
-    width: clamp(86px, 14vw, 132px);
-    filter: drop-shadow(0 12px 14px color-mix(in srgb, var(--text-primary) 18%, transparent));
-    animation: home-float 4s ease-in-out infinite;
+    width: clamp(100px, 16vw, 155px);
+    filter:
+        drop-shadow(0 12px 14px color-mix(in srgb, var(--text-primary) 18%, transparent))
+        drop-shadow(0 0 22px color-mix(in srgb, var(--status-ghost) 30%, transparent));
+    animation: ghost-spook 5s ease-in-out infinite;
+}
+
+.home-demo__mascot:hover {
+    animation: ghost-spook 1.5s ease-in-out infinite;
+    cursor: pointer;
 }
 
 .home-demo__callout {
@@ -341,9 +353,9 @@
     width: 1.7rem;
     height: 1.7rem;
     border-radius: 50%;
-    color: white;
     font-size: 0.85rem;
     font-weight: 850;
+    line-height: 1;
 }
 
 .home-demo__callout--blunder {
@@ -352,18 +364,10 @@
     transform: rotate(-4deg);
 }
 
-.home-demo__callout--blunder .home-demo__callout-icon {
-    background: var(--error);
-}
-
 .home-demo__callout--review {
     right: -7%;
     bottom: 16%;
     transform: rotate(3deg);
-}
-
-.home-demo__callout--review .home-demo__callout-icon {
-    background: var(--teal);
 }
 
 .home-section-heading {
@@ -424,7 +428,9 @@
 .home-feature:hover {
     transform: translateY(-5px) rotate(-0.25deg);
     border-color: color-mix(in srgb, var(--status-ghost) 42%, var(--border-color));
-    box-shadow: var(--shadow-xl);
+    box-shadow:
+        var(--shadow-xl),
+        0 0 40px 2px color-mix(in srgb, var(--status-ghost) 10%, transparent);
 }
 
 .home-feature:focus-visible {
@@ -471,6 +477,12 @@
     font-size: 1.45rem;
     font-weight: 800;
     line-height: 1;
+    transition: transform 200ms ease, box-shadow 200ms ease;
+}
+
+.home-feature:hover .home-feature__icon {
+    transform: scale(1.08) rotate(-5deg);
+    box-shadow: 0 0 20px color-mix(in srgb, var(--status-ghost) 25%, transparent);
 }
 
 .home-feature__tag {
@@ -720,7 +732,14 @@
     font-family: Georgia, "Times New Roman", serif;
     font-size: 1.65rem;
     font-weight: 850;
-    box-shadow: var(--shadow-md);
+    box-shadow:
+        var(--shadow-md),
+        0 0 15px color-mix(in srgb, var(--status-ghost) 12%, transparent);
+    transition: transform 200ms ease;
+}
+
+.home-loop__glyph:hover {
+    transform: scale(1.1) rotate(-8deg);
 }
 
 .home-loop__steps h3 {
@@ -763,9 +782,11 @@
     bottom: -95px;
     width: 190px;
     height: 190px;
-    border: 1px dashed color-mix(in srgb, white 20%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--status-ghost-light) 28%, transparent);
     border-radius: 50%;
     content: "";
+    animation: home-float 6s ease-in-out infinite;
+    animation-delay: -3s;
 }
 
 .home-final-cta img {
@@ -859,6 +880,55 @@
     animation-duration: 12s;
 }
 
+/* Ghostly ectoplasm particles floating around the hero */
+.home-hero__drift span.ecto-particle {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--status-ghost-light) 55%, transparent);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--status-ghost) 35%, transparent);
+    filter: none;
+    font-size: 0;
+    animation: ecto-float 8s ease-in-out infinite;
+}
+
+.home-hero__drift span.ecto-particle:nth-child(7) {
+    top: 22%;
+    left: 36%;
+    animation-delay: -0.5s;
+    animation-duration: 9s;
+}
+.home-hero__drift span.ecto-particle:nth-child(8) {
+    top: 45%;
+    left: 72%;
+    animation-delay: -3s;
+    animation-duration: 7s;
+}
+.home-hero__drift span.ecto-particle:nth-child(9) {
+    top: 78%;
+    left: 28%;
+    animation-delay: -5.5s;
+    animation-duration: 10s;
+}
+.home-hero__drift span.ecto-particle:nth-child(10) {
+    top: 52%;
+    left: 42%;
+    animation-delay: -7s;
+    animation-duration: 8.5s;
+}
+.home-hero__drift span.ecto-particle:nth-child(11) {
+    top: 88%;
+    left: 55%;
+    animation-delay: -2s;
+    animation-duration: 11s;
+}
+.home-hero__drift span.ecto-particle:nth-child(12) {
+    top: 16%;
+    left: 65%;
+    animation-delay: -4s;
+    animation-duration: 9.5s;
+}
+
 /* Opening Drills spotlight */
 .home-drill-spotlight {
     position: relative;
@@ -890,25 +960,49 @@
 
 .home-drill-spotlight__ghosts span {
     position: absolute;
-    color: color-mix(in srgb, white 9%, transparent);
+    color: color-mix(in srgb, var(--status-ghost-light) 14%, transparent);
     font-family: Georgia, "Times New Roman", serif;
-    font-size: clamp(5rem, 14vw, 11rem);
+    font-size: clamp(6rem, 16vw, 13rem);
     line-height: 1;
-    animation: home-float 6s ease-in-out infinite;
+    filter: blur(1px);
+    animation: home-float 7s ease-in-out infinite;
 }
 .home-drill-spotlight__ghosts span:nth-child(1) {
-    top: -8%;
-    left: 4%;
+    top: -12%;
+    left: 2%;
+    font-size: clamp(7rem, 18vw, 15rem);
 }
 .home-drill-spotlight__ghosts span:nth-child(2) {
-    right: 30%;
-    bottom: -18%;
+    right: 28%;
+    bottom: -22%;
     animation-delay: -2s;
+    animation-duration: 8s;
 }
 .home-drill-spotlight__ghosts span:nth-child(3) {
-    top: 18%;
-    left: 40%;
+    top: 14%;
+    left: 38%;
     animation-delay: -4s;
+    animation-duration: 6.5s;
+}
+
+/* Ghostly mist overlay on the drill spotlight */
+.home-drill-spotlight::before {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    content: "";
+    background:
+        radial-gradient(
+            ellipse at 25% 80%,
+            color-mix(in srgb, var(--status-ghost) 15%, transparent),
+            transparent 40%
+        ),
+        radial-gradient(
+            ellipse at 70% 15%,
+            color-mix(in srgb, var(--status-ghost-light) 12%, transparent),
+            transparent 35%
+        );
+    pointer-events: none;
 }
 
 .home-drill-spotlight__copy,
@@ -1085,9 +1179,35 @@
         transform: translateY(0) rotate(-6deg);
         opacity: 0.7;
     }
+    25% {
+        opacity: 0.85;
+    }
     50% {
         transform: translateY(-22px) rotate(6deg);
         opacity: 1;
+    }
+    75% {
+        opacity: 0.8;
+    }
+}
+
+@keyframes ecto-float {
+    0%,
+    100% {
+        transform: translateY(0) translateX(0);
+        opacity: 0.25;
+    }
+    25% {
+        transform: translateY(-18px) translateX(8px);
+        opacity: 0.7;
+    }
+    50% {
+        transform: translateY(-8px) translateX(-6px);
+        opacity: 0.35;
+    }
+    75% {
+        transform: translateY(-26px) translateX(4px);
+        opacity: 0.55;
     }
 }
 
@@ -1119,7 +1239,31 @@
         transform: translateY(0) rotate(-2deg);
     }
     50% {
-        transform: translateY(-10px) rotate(2deg);
+        transform: translateY(-12px) rotate(3deg);
+    }
+}
+
+@keyframes ghost-spook {
+    0%,
+    100% {
+        transform: scale(1) translateY(0);
+        opacity: 0.8;
+    }
+    15% {
+        transform: scale(1.08) translateY(-4px);
+        opacity: 1;
+    }
+    30% {
+        transform: scale(0.96) translateY(2px);
+        opacity: 0.75;
+    }
+    45% {
+        transform: scale(1.04) translateY(-2px);
+        opacity: 0.9;
+    }
+    60% {
+        transform: scale(1) translateY(0);
+        opacity: 0.8;
     }
 }
 
