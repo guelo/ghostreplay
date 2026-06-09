@@ -211,10 +211,10 @@ describe("GameInfoPanel", () => {
       />,
     );
 
-    expect(screen.getByText("Ghost reactivated")).toBeInTheDocument();
+    expect(screen.getByText("The haunting resumes")).toBeInTheDocument();
     expect(screen.getByText("Steering to past mistake")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Ghost reactivated"));
+    fireEvent.click(screen.getByText("The haunting resumes"));
     expect(props.onDismissRehookToast).toHaveBeenCalledTimes(1);
   });
 

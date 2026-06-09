@@ -2117,7 +2117,7 @@ describe("ChessGame blunder recording", () => {
     });
 
     expect(
-      screen.queryByText("Ghost reactivated"),
+      screen.queryByText("The haunting resumes"),
     ).not.toBeInTheDocument();
 
     await act(async () => {
@@ -2130,7 +2130,7 @@ describe("ChessGame blunder recording", () => {
       );
       expect(
         rehookToasts.some((toast) =>
-          toast.textContent?.includes("Ghost reactivated"),
+          toast.textContent?.includes("The haunting resumes"),
         ),
       ).toBe(true);
     });

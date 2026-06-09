@@ -164,7 +164,7 @@ export const GameWarningStack = memo(({
           <span className="review-warning-toast__label">Review Position</span>
         </div>
         <p className="review-warning-toast__detail">
-          Be careful. You've messed this position up before.
+          This position has come back to haunt you. You've messed this up before.
         </p>
         {resolvedReview.result !== "pending" && (
           <div className="review-warning-toast__overlay">
@@ -181,7 +181,7 @@ export const GameWarningStack = memo(({
           <span className="review-warning-toast__label">Review Position</span>
         </div>
         <p className="review-warning-toast__detail">
-          Be careful. You've messed this position up before.
+          This position has come back to haunt you. You've messed this up before.
         </p>
       </div>
     ) : null;
@@ -202,7 +202,7 @@ export const GameWarningStack = memo(({
           onClick={onDismissRehookToast}
           type="button"
         >
-          <span className="rehook-toast__label">Ghost reactivated</span>
+          <span className="rehook-toast__label">The haunting resumes</span>
           <span className="rehook-toast__detail">
             Steering to past mistake
           </span>
