@@ -28,9 +28,17 @@ describe("App landing page", () => {
 
     expect(
       screen.getByRole("heading", {
-        name: /turn every blunder into your next best move/i,
+        name: /your blunders are coming back\. good\./i,
       }),
     ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: /how long can you keep the perfect line alive/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("link", { name: /start an opening drill/i }),
+    ).toHaveLength(2);
 
     const destinations = Array.from(
       container.querySelectorAll<HTMLAnchorElement>("a[href]"),
