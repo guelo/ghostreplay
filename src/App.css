@@ -803,6 +803,304 @@
     color: var(--color-brown-900);
 }
 
+/* Floating ghost chess pieces drifting behind the hero */
+.home-hero__drift {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.home-hero__drift span {
+    position: absolute;
+    color: color-mix(in srgb, var(--status-ghost) 26%, transparent);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: clamp(2.4rem, 6vw, 4.6rem);
+    line-height: 1;
+    filter: blur(0.3px);
+    animation: home-drift 12s ease-in-out infinite;
+}
+
+.home-hero__drift span:nth-child(1) {
+    top: 14%;
+    left: 8%;
+    animation-delay: -1s;
+    animation-duration: 13s;
+}
+.home-hero__drift span:nth-child(2) {
+    top: 62%;
+    left: 18%;
+    animation-delay: -5s;
+    animation-duration: 15s;
+}
+.home-hero__drift span:nth-child(3) {
+    top: 30%;
+    left: 52%;
+    animation-delay: -3s;
+    animation-duration: 11s;
+}
+.home-hero__drift span:nth-child(4) {
+    top: 74%;
+    left: 64%;
+    animation-delay: -8s;
+    animation-duration: 14s;
+}
+.home-hero__drift span:nth-child(5) {
+    top: 8%;
+    left: 80%;
+    animation-delay: -6s;
+    animation-duration: 16s;
+}
+.home-hero__drift span:nth-child(6) {
+    top: 50%;
+    left: 90%;
+    animation-delay: -2s;
+    animation-duration: 12s;
+}
+
+/* Opening Drills spotlight */
+.home-drill-spotlight {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1.05fr) minmax(300px, 0.95fr);
+    align-items: center;
+    gap: clamp(2rem, 5vw, 4.5rem);
+    padding: clamp(2rem, 5vw, 4rem);
+    overflow: hidden;
+    border-radius: clamp(1.6rem, 4vw, 2.5rem);
+    background:
+        radial-gradient(
+            circle at 85% 12%,
+            color-mix(in srgb, var(--status-ghost) 60%, transparent),
+            transparent 40%
+        ),
+        linear-gradient(125deg, var(--color-brown-900), #45345d 78%);
+    color: white;
+    box-shadow: var(--shadow-xl);
+}
+
+.home-drill-spotlight__ghosts {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    pointer-events: none;
+}
+
+.home-drill-spotlight__ghosts span {
+    position: absolute;
+    color: color-mix(in srgb, white 9%, transparent);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: clamp(5rem, 14vw, 11rem);
+    line-height: 1;
+    animation: home-float 6s ease-in-out infinite;
+}
+.home-drill-spotlight__ghosts span:nth-child(1) {
+    top: -8%;
+    left: 4%;
+}
+.home-drill-spotlight__ghosts span:nth-child(2) {
+    right: 30%;
+    bottom: -18%;
+    animation-delay: -2s;
+}
+.home-drill-spotlight__ghosts span:nth-child(3) {
+    top: 18%;
+    left: 40%;
+    animation-delay: -4s;
+}
+
+.home-drill-spotlight__copy,
+.home-drill-spotlight__panel {
+    position: relative;
+    z-index: 1;
+}
+
+.home-drill-spotlight__copy {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1.15rem;
+}
+
+.home-drill-spotlight .home-kicker {
+    color: var(--status-ghost-light);
+}
+
+.home-drill-spotlight h2 {
+    margin: 0;
+    color: white;
+    font-size: clamp(2.1rem, 4.6vw, 3.9rem);
+    letter-spacing: -0.05em;
+    line-height: 1.02;
+}
+
+.home-drill-spotlight h2 em {
+    font-style: italic;
+    background: linear-gradient(
+        110deg,
+        var(--status-ghost-light),
+        var(--color-orange-500)
+    );
+    background-clip: text;
+    color: transparent;
+    -webkit-background-clip: text;
+}
+
+.home-drill-spotlight__lede {
+    max-width: 52ch;
+    margin: 0;
+    color: color-mix(in srgb, white 80%, transparent);
+    font-size: clamp(1rem, 1.5vw, 1.15rem);
+}
+
+.home-drill-spotlight__stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+    margin: 0.2rem 0;
+}
+
+.home-drill-stat {
+    padding: 0.4rem 0.85rem;
+    border: 1px solid color-mix(in srgb, white 18%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, white 8%, transparent);
+    color: color-mix(in srgb, white 78%, transparent);
+    font-size: 0.78rem;
+    font-weight: 650;
+}
+
+.home-drill-stat strong {
+    color: white;
+    font-weight: 850;
+}
+
+.home-drill-stat--ghost {
+    border-color: color-mix(in srgb, var(--status-ghost) 55%, transparent);
+    background: color-mix(in srgb, var(--status-ghost) 26%, transparent);
+}
+
+.home-drill-spotlight__cta {
+    margin-top: 0.35rem;
+    background: white;
+    color: var(--color-brown-900);
+}
+
+/* Drill panel mock */
+.home-drill-spotlight__panel {
+    transform: rotate(1.4deg);
+    padding: 1rem 1.1rem 1.15rem;
+    border: 1px solid color-mix(in srgb, white 14%, transparent);
+    border-radius: 1.3rem;
+    background: color-mix(in srgb, var(--card-bg) 96%, transparent);
+    box-shadow: 0 30px 60px color-mix(in srgb, black 38%, transparent);
+}
+
+.home-drill-spotlight__panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.85rem;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 750;
+}
+
+.home-drill-spotlight__perfect {
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--teal) 18%, var(--card-bg));
+    color: var(--teal-dark);
+    font-size: 0.64rem;
+    font-weight: 850;
+    letter-spacing: 0.12em;
+}
+
+.home-drill-moves {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.home-drill-move {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.55rem 0.75rem;
+    border-radius: 0.7rem;
+    background: color-mix(in srgb, var(--text-primary) 4%, transparent);
+    color: var(--text-primary);
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 0.98rem;
+    font-weight: 650;
+}
+
+.home-drill-move--good > span:last-child {
+    color: var(--teal-dark);
+    font-weight: 850;
+}
+
+.home-drill-move--live {
+    background: color-mix(in srgb, var(--status-ghost) 16%, var(--card-bg));
+    box-shadow: inset 0 0 0 1.5px
+        color-mix(in srgb, var(--status-ghost) 50%, transparent);
+}
+
+.home-drill-move__cursor {
+    animation: home-drill-bob 1.3s ease-in-out infinite;
+}
+
+.home-drill-spotlight__streak {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.85rem;
+    padding-top: 0.85rem;
+    border-top: 1px dashed var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.home-drill-spotlight__flame {
+    font-size: 1rem;
+    animation: home-drill-bob 1s ease-in-out infinite;
+}
+
+@media (max-width: 900px) {
+    .home-drill-spotlight {
+        grid-template-columns: 1fr;
+    }
+}
+
+@keyframes home-drift {
+    0%,
+    100% {
+        transform: translateY(0) rotate(-6deg);
+        opacity: 0.7;
+    }
+    50% {
+        transform: translateY(-22px) rotate(6deg);
+        opacity: 1;
+    }
+}
+
+@keyframes home-drill-bob {
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-3px);
+    }
+}
+
 @keyframes home-live-pulse {
     0%,
     100% {
@@ -1000,7 +1298,11 @@
 
 @media (prefers-reduced-motion: reduce) {
     .home-demo__live > span,
-    .home-demo__mascot {
+    .home-demo__mascot,
+    .home-hero__drift span,
+    .home-drill-spotlight__ghosts span,
+    .home-drill-move__cursor,
+    .home-drill-spotlight__flame {
         animation: none;
     }
 

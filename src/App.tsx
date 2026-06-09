@@ -74,9 +74,17 @@ function App() {
 
       <div className="constrained-content home-page__content">
         <section className="home-hero">
+          <div className="home-hero__drift" aria-hidden="true">
+            <span>♞</span>
+            <span>♟</span>
+            <span>♝</span>
+            <span>♜</span>
+            <span>♛</span>
+            <span>♚</span>
+          </div>
           <div className="home-hero__copy">
             <p className="home-kicker">
-              <span aria-hidden="true">✦</span> Your mistakes want a rematch
+              <span aria-hidden="true">👻</span> Your blunders never really die
             </p>
             <h1>
               Turn every blunder into your{" "}
@@ -107,6 +115,81 @@ function App() {
           <TrainingBoard />
         </section>
 
+        <section
+          className="home-drill-spotlight"
+          aria-labelledby="home-drill-title"
+        >
+          <div className="home-drill-spotlight__ghosts" aria-hidden="true">
+            <span>♟</span>
+            <span>♞</span>
+            <span>♛</span>
+          </div>
+
+          <div className="home-drill-spotlight__copy">
+            <p className="home-kicker">
+              <span aria-hidden="true">⚡</span> The marquee feature
+            </p>
+            <h2 id="home-drill-title">
+              How long can you play <em>perfect</em> chess?
+            </h2>
+            <p className="home-drill-spotlight__lede">
+              Opening Drills replay your real games move by move. Stay on the
+              best line and your streak grows. Slip once and the ghost pounces —
+              then files that exact position for a rematch.
+            </p>
+
+            <div className="home-drill-spotlight__stats" aria-hidden="true">
+              <span className="home-drill-stat">
+                <strong>17</strong> move streak
+              </span>
+              <span className="home-drill-stat">
+                <strong>98%</strong> book accuracy
+              </span>
+              <span className="home-drill-stat home-drill-stat--ghost">
+                <strong>1</strong> ghost lurking
+              </span>
+            </div>
+
+            <Link
+              to="/openings"
+              className="chess-button primary home-button home-drill-spotlight__cta"
+            >
+              Start an opening drill <span aria-hidden="true">→</span>
+            </Link>
+          </div>
+
+          <div className="home-drill-spotlight__panel" aria-hidden="true">
+            <div className="home-drill-spotlight__panel-head">
+              <span>Drilling: Sicilian Defense</span>
+              <span className="home-drill-spotlight__perfect">PERFECT</span>
+            </div>
+            <ol className="home-drill-moves">
+              <li className="home-drill-move home-drill-move--good">
+                <span>1. e4 c5</span>
+                <span aria-hidden="true">✓</span>
+              </li>
+              <li className="home-drill-move home-drill-move--good">
+                <span>2. Nf3 d6</span>
+                <span aria-hidden="true">✓</span>
+              </li>
+              <li className="home-drill-move home-drill-move--good">
+                <span>3. d4 cxd4</span>
+                <span aria-hidden="true">✓</span>
+              </li>
+              <li className="home-drill-move home-drill-move--live">
+                <span>4. Nxd4 ...</span>
+                <span className="home-drill-move__cursor">♟</span>
+              </li>
+            </ol>
+            <div className="home-drill-spotlight__streak">
+              <span className="home-drill-spotlight__flame" aria-hidden="true">
+                🔥
+              </span>
+              Streak alive — your move
+            </div>
+          </div>
+        </section>
+
         <section className="home-features" aria-labelledby="home-features-title">
           <div className="home-section-heading">
             <p className="home-kicker">One loop. More ways to improve.</p>
@@ -130,7 +213,7 @@ function App() {
                 </span>
                 <span className="home-feature__tag">Opening lab</span>
               </div>
-              <h3>Build a repertoire that survives contact.</h3>
+              <h3>Drill the lines that keep haunting you.</h3>
               <p>
                 See which families cost you games, explore every branch, and
                 launch a drill from the exact line that needs work.
@@ -138,7 +221,7 @@ function App() {
               <div className="home-feature__pills" aria-hidden="true">
                 <span>Repertoire map</span>
                 <span>Branch stats</span>
-                <span>Targeted drills</span>
+                <span>Perfect-line drills</span>
               </div>
               <span className="home-feature__link">Enter the opening lab →</span>
               <div className="home-feature__orbit" aria-hidden="true">
