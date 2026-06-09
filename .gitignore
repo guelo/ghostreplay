@@ -47,3 +47,4 @@ backend/.opening_graph_cache/
 *.db
 .beads-credential-key
 /work
+/work.md
