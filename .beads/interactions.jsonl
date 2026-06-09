@@ -156,3 +156,4 @@
 {"id":"int-bc952166","kind":"field_change","created_at":"2026-06-09T10:01:40.974508Z","actor":"miguel","issue_id":"g-tswe","extra":{"field":"status","new_value":"closed","old_value":"open","reason":"Closed"}}
 {"id":"int-ff3e3b11","kind":"field_change","created_at":"2026-06-09T10:01:51.633189Z","actor":"miguel","issue_id":"g-refresh-homepage","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-9ce84ead","kind":"field_change","created_at":"2026-06-09T10:09:27.925649Z","actor":"miguel","issue_id":"g-4wna","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-e3c09de9","kind":"field_change","created_at":"2026-06-09T10:17:31.140961Z","actor":"miguel","issue_id":"g-3qdc","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}

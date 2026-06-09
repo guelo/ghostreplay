@@ -124,11 +124,49 @@
         110deg,
         var(--brand-secondary),
         var(--status-ghost),
-        var(--color-orange-500)
+        var(--color-orange-500),
+        var(--status-ghost),
+        var(--brand-secondary)
     );
+    background-size: 220% 100%;
     background-clip: text;
     color: transparent;
     -webkit-background-clip: text;
+    animation: home-accent-shimmer 6s ease-in-out infinite;
+}
+
+@keyframes home-accent-shimmer {
+    0%,
+    100% {
+        background-position: 0% 50%;
+    }
+    50% {
+        background-position: 100% 50%;
+    }
+}
+
+/* Playful bobbing/wiggling kicker emoji */
+.home-kicker [aria-hidden="true"]:first-child {
+    display: inline-block;
+    animation: home-kicker-wiggle 3.2s ease-in-out infinite;
+    transform-origin: 70% 80%;
+}
+
+@keyframes home-kicker-wiggle {
+    0%,
+    88%,
+    100% {
+        transform: rotate(0) translateY(0);
+    }
+    91% {
+        transform: rotate(-14deg) translateY(-2px);
+    }
+    94% {
+        transform: rotate(12deg) translateY(-2px);
+    }
+    97% {
+        transform: rotate(-6deg);
+    }
 }
 
 .home-hero__lede {
@@ -277,6 +315,17 @@
     font-size: clamp(1.55rem, 4.3vw, 2.8rem);
     line-height: 1;
     text-shadow: 0 2px 1px color-mix(in srgb, white 60%, transparent);
+    transition:
+        transform 200ms ease,
+        text-shadow 200ms ease;
+}
+
+/* Give the demo board life — pieces jump and glow when poked */
+.home-demo__square:hover {
+    transform: translateY(-6px) scale(1.18) rotate(-5deg);
+    text-shadow:
+        0 6px 6px color-mix(in srgb, var(--status-ghost) 50%, transparent);
+    cursor: pointer;
 }
 
 .home-demo__square:nth-child(odd) {
@@ -789,11 +838,67 @@
     animation-delay: -3s;
 }
 
+.home-final-cta__mascot {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    place-items: center;
+}
+
 .home-final-cta img {
     position: relative;
     z-index: 1;
     width: clamp(72px, 10vw, 112px);
     filter: drop-shadow(0 10px 12px color-mix(in srgb, black 26%, transparent));
+    animation: ghost-spook 4.5s ease-in-out infinite;
+}
+
+/* Cheeky 'Boo!' that pops out of the ghost on a loop */
+.home-final-cta__boo {
+    position: absolute;
+    top: -0.6rem;
+    right: -1.4rem;
+    z-index: 2;
+    padding: 0.18rem 0.6rem;
+    border-radius: 999px;
+    background: white;
+    color: var(--color-brown-900);
+    font-size: 0.82rem;
+    font-weight: 850;
+    letter-spacing: -0.01em;
+    box-shadow: 0 6px 14px color-mix(in srgb, black 35%, transparent);
+    transform-origin: bottom left;
+    animation: home-boo-pop 5s ease-in-out infinite;
+}
+
+.home-final-cta__boo::before {
+    position: absolute;
+    bottom: -4px;
+    left: 8px;
+    width: 10px;
+    height: 10px;
+    background: inherit;
+    border-radius: 1px;
+    content: "";
+    transform: rotate(45deg);
+}
+
+@keyframes home-boo-pop {
+    0%,
+    62%,
+    100% {
+        transform: scale(0) rotate(-12deg);
+        opacity: 0;
+    }
+    68% {
+        transform: scale(1.18) rotate(6deg);
+        opacity: 1;
+    }
+    74%,
+    92% {
+        transform: scale(1) rotate(-3deg);
+        opacity: 1;
+    }
 }
 
 .home-final-cta > div {
@@ -1446,8 +1551,17 @@
     .home-hero__drift span,
     .home-drill-spotlight__ghosts span,
     .home-drill-move__cursor,
-    .home-drill-spotlight__flame {
+    .home-drill-spotlight__flame,
+    .home-hero__accent,
+    .home-kicker [aria-hidden="true"]:first-child,
+    .home-final-cta img,
+    .home-final-cta__boo {
         animation: none;
+    }
+
+    .home-final-cta__boo {
+        transform: scale(1) rotate(-3deg);
+        opacity: 1;
     }
 
     .home-button,

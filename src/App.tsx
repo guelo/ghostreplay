@@ -365,11 +365,10 @@ function App() {
         </section>
 
         <section className="home-final-cta">
-          <img
-            src="/branding/ghost-logo-option-3-wink.svg"
-            alt=""
-            aria-hidden="true"
-          />
+          <div className="home-final-cta__mascot" aria-hidden="true">
+            <span className="home-final-cta__boo">Boo!</span>
+            <img src="/branding/ghost-logo-option-3-wink.svg" alt="" />
+          </div>
           <div>
             <p className="home-kicker">
               <span aria-hidden="true">👻</span> Your ghost is waiting
