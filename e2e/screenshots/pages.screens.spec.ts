@@ -203,8 +203,8 @@ test.describe("blunders", () => {
       waitFor: (p) => p.locator(".blunder-detail .analysis-board"),
     });
 
-    // Due-only filter: toggle the "Due only" button (due user has due items).
-    await page.getByRole("button", { name: "Due only" }).click();
+    // Practice-ready filter: toggle the "Practice-ready" button (due user has ready items).
+    await page.getByRole("button", { name: "Practice-ready" }).click();
     await captureAcrossViewports(page, test.info(), {
       pageKey: "blunders",
       state: "due-only",
@@ -534,19 +534,23 @@ const waitForMoveCountAtLeast = async (
   page: Page,
   minimum: number,
 ): Promise<void> => {
+  // Counts half-moves across both layouts: the vertical list renders
+  // `.move-list-grid .move-button`, while the narrow/mobile layout swaps in
+  // HorizontalMoveList, whose half-moves are `.h-move` tokens.
   await expect
-    .poll(async () => page.locator(".move-list-grid .move-button").count())
+    .poll(async () =>
+      page.locator(".move-list-grid .move-button, .h-move").count(),
+    )
     .toBeGreaterThanOrEqual(minimum);
 };
 
 const startGameAsWhite = async (page: Page): Promise<void> => {
+  // "Play White" starts the game immediately. (Note: a bare /^play$/i would
+  // also match the Play/Drill mode toggle, which is the already-active default
+  // and goes disabled the instant the game starts — never click that here.)
   const playWhite = page.getByRole("button", { name: /play white/i });
   if ((await playWhite.count()) > 0) {
     await playWhite.click();
-    const playButton = page.getByRole("button", { name: /^play$/i });
-    if ((await playButton.count()) > 0 && (await playButton.first().isVisible())) {
-      await playButton.first().click();
-    }
   }
   await expect(page.locator(".game-status-badge--live")).toBeVisible({
     timeout: 15_000,
@@ -640,7 +644,8 @@ test.describe("play", () => {
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "mid-game",
-      waitFor: (p) => p.locator(".move-list-grid .move-button").first(),
+      waitFor: (p) =>
+        p.locator(".move-list-grid .move-button, .h-move").first(),
     });
   });
 
