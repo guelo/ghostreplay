@@ -21,6 +21,15 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
+    proxy: {
+      // Forward API calls to the backend so LAN clients (e.g. a phone on the
+      // same wifi) that resolve the API base to "/api" reach the backend
+      // instead of hitting the Vite dev server (which 404s).
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     headers: {
