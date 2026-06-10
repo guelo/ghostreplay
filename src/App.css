@@ -7588,7 +7588,28 @@ button.openings-shell__crumb:hover {
     }
 }
 
+/*
+ * Below 768px the two-column mid-sized layout gets cramped, so drop the eval
+ * bar to give the board more horizontal room. The layout itself stays
+ * two-column all the way down to 660px (the mobile block below takes over at
+ * 659px).
+ */
 @media (max-width: 767px) {
+    .game-page .eval-bar {
+        display: none;
+    }
+
+    .game-page .chessboard-board-with-eval {
+        gap: 0;
+    }
+}
+
+/*
+ * Game switches to the mobile single-column layout here. The 659px value is
+ * mirrored by GAME_MOBILE_MAX_WIDTH in src/styles/breakpoints.ts (used by the
+ * JS move-list switch); src/styles/breakpoints.test.ts fails CI if they drift.
+ */
+@media (max-width: 659px) {
     .app-shell.game-page {
         padding: 0.5rem 0 0.75rem;
         gap: 0.5rem;
@@ -7628,14 +7649,6 @@ button.openings-shell__crumb:hover {
         width: 100%;
         max-width: 100vw;
         justify-self: center;
-    }
-
-    .game-page .chessboard-board-with-eval {
-        gap: 0;
-    }
-
-    .game-page .eval-bar {
-        display: none;
     }
 
     .game-page .chess-panel {

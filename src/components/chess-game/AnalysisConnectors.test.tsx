@@ -9,6 +9,7 @@ import {
 } from "../../stores/createAnalysisStore";
 import type { MoveRecord } from "./domain/movePresentation";
 import type { AnalysisResult } from "../../hooks/useMoveAnalysis";
+import { GAME_MOBILE_QUERY } from "../../styles/breakpoints";
 
 const makeAnalysis = (overrides: Partial<AnalysisResult> & Pick<AnalysisResult, 'playedEval' | 'bestEval' | 'bestMove' | 'delta' | 'classification' | 'blunder'>): AnalysisResult => ({
   id: crypto.randomUUID(),
@@ -252,17 +253,17 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
     expect(fresh.size).toBe(0);
   });
 
-  it("renders HorizontalMoveList below the game's 767px breakpoint", () => {
+  it("renders HorizontalMoveList below the game's mobile breakpoint", () => {
     useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "white" });
-    setMatchMedia("(max-width: 767px)", true);
+    setMatchMedia(GAME_MOBILE_QUERY, true);
     const { queryByTestId } = renderConnected();
     expect(queryByTestId("h-move-list")).not.toBeNull();
     expect(queryByTestId("move-list")).toBeNull();
   });
 
-  it("renders the vertical MoveList above the 767px breakpoint", () => {
+  it("renders the vertical MoveList above the game's mobile breakpoint", () => {
     useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "white" });
-    setMatchMedia("(max-width: 767px)", false);
+    setMatchMedia(GAME_MOBILE_QUERY, false);
     const { queryByTestId } = renderConnected();
     expect(queryByTestId("move-list")).not.toBeNull();
     expect(queryByTestId("h-move-list")).toBeNull();

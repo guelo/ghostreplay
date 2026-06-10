@@ -13,6 +13,7 @@ import AnalysisGraph from "../AnalysisGraph";
 import MoveList from "../MoveList";
 import HorizontalMoveList from "../HorizontalMoveList";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
+import { GAME_MOBILE_QUERY } from "../../styles/breakpoints";
 import type { MoveMessage, SrsFailDetail } from "../MoveList";
 
 // Walk back from selectedMoveIndex to the most recent move with a played eval
@@ -182,7 +183,7 @@ export const ConnectedMoveList = memo(
     isInteractionDisabled,
   }: ConnectedMoveListProps) => {
     const analysisStoreApi = useAnalysisStoreApi();
-    const isNarrow = useMediaQuery("(max-width: 767px)");
+    const isNarrow = useMediaQuery(GAME_MOBILE_QUERY);
     const analysisMap = useAnalysisStore((s) => s.analysisMap);
     const moveHistory = useGameStore((s) => s.moveHistory);
     const viewIndex = useGameStore((s) => s.viewIndex);
