@@ -55,25 +55,25 @@ const MoveMessages = ({
                 <span className="srs-fail-body__label">{msg.text}</span>
                 {msg.srsStats && (
                   <span className="srs-stats">
-                    pass/fail: {msg.srsStats.passCount}/{msg.srsStats.failCount} ·
-                    streak {msg.srsStats.streak}
-                  </span>
-                )}
-                {isRevealed && msg.srsFailDetail && (
-                  <div className="srs-fail-body__detail">
-                    <p>
-                      You played:{" "}
-                      <strong className="srs-fail-body__bad">
-                        {msg.srsFailDetail.userMoveSan}
-                      </strong>
-                    </p>
-                    <p>
-                      Best was:{" "}
-                      <span className="srs-fail-body__best">
-                        {msg.srsFailDetail.bestMoveSan}
+                    <span className="srs-stats__item srs-stats__item--pass">
+                      <span className="srs-stats__value">
+                        {msg.srsStats.passCount}
                       </span>
-                    </p>
-                  </div>
+                      <span className="srs-stats__caption">pass</span>
+                    </span>
+                    <span className="srs-stats__item srs-stats__item--fail">
+                      <span className="srs-stats__value">
+                        {msg.srsStats.failCount}
+                      </span>
+                      <span className="srs-stats__caption">fail</span>
+                    </span>
+                    <span className="srs-stats__item srs-stats__item--streak">
+                      <span className="srs-stats__value">
+                        {msg.srsStats.streak}
+                      </span>
+                      <span className="srs-stats__caption">streak</span>
+                    </span>
+                  </span>
                 )}
               </div>
             </div>
@@ -89,9 +89,24 @@ const MoveMessages = ({
             <span>{msg.text}</span>
             {msg.srsStats && (
               <span className="srs-stats">
-                pass/fail: {msg.srsStats.passCount}/{msg.srsStats.failCount}
-                <br />
-                streak {msg.srsStats.streak}
+                <span className="srs-stats__item srs-stats__item--pass">
+                  <span className="srs-stats__value">
+                    {msg.srsStats.passCount}
+                  </span>
+                  <span className="srs-stats__caption">pass</span>
+                </span>
+                <span className="srs-stats__item srs-stats__item--fail">
+                  <span className="srs-stats__value">
+                    {msg.srsStats.failCount}
+                  </span>
+                  <span className="srs-stats__caption">fail</span>
+                </span>
+                <span className="srs-stats__item srs-stats__item--streak">
+                  <span className="srs-stats__value">
+                    {msg.srsStats.streak}
+                  </span>
+                  <span className="srs-stats__caption">streak</span>
+                </span>
               </span>
             )}
           </div>

@@ -4697,9 +4697,47 @@
 }
 
 .srs-stats {
-    font-size: 0.72rem;
-    color: var(--text-tertiary);
+    display: flex;
+    gap: 0.4rem;
+    margin-top: 0.3rem;
     white-space: nowrap;
+}
+
+.srs-stats__item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 2.2rem;
+    padding: 0.15rem 0.35rem;
+    border-radius: 6px;
+    background: var(--bg-primary);
+    border: 1px solid color-mix(in srgb, var(--text-primary) 12%, transparent);
+    line-height: 1.05;
+}
+
+.srs-stats__value {
+    font-size: 1rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+}
+
+.srs-stats__caption {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+}
+
+.srs-stats__item--pass .srs-stats__value {
+    color: color-mix(in srgb, var(--success) 80%, white);
+}
+
+.srs-stats__item--fail .srs-stats__value {
+    color: color-mix(in srgb, var(--eval-blunder) 75%, white);
+}
+
+.srs-stats__item--streak .srs-stats__value {
+    color: var(--text-primary);
 }
 
 .panel-header {
@@ -4891,25 +4929,6 @@
     font-size: 0.82rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-}
-
-.srs-fail-body__detail {
-    margin-top: 0.25rem;
-    font-size: 0.78rem;
-}
-
-.srs-fail-body__detail p {
-    margin: 0.1rem 0;
-}
-
-.srs-fail-body__bad {
-    color: var(--eval-blunder);
-    font-weight: 600;
-}
-
-.srs-fail-body__best {
-    color: var(--success);
-    font-weight: 600;
 }
 
 .move-placeholder-dots {

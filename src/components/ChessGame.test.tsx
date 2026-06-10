@@ -2344,7 +2344,6 @@ describe("ChessGame blunder recording", () => {
     ).toBe("You made this mistake again!");
     const inlineBubble = document.querySelector(".move-bubble--srs-fail");
     expect(inlineBubble?.textContent).toContain("You made this mistake again!");
-    expect(inlineBubble?.textContent).toContain("You played:");
     expect(
       screen.getByTestId("chessboard").getAttribute("data-arrow-count"),
     ).toBe("2");
@@ -2361,7 +2360,6 @@ describe("ChessGame blunder recording", () => {
     expect(persistedBubble?.textContent).toContain(
       "You made this mistake again!",
     );
-    expect(persistedBubble?.textContent).toContain("You played:");
     expect(
       screen.getByTestId("chessboard").getAttribute("data-arrow-count"),
     ).toBe("2");
