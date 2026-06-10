@@ -7558,6 +7558,15 @@ button.openings-shell__crumb:hover {
     .chess-warning-stack--panel {
         order: -1;
     }
+
+    /*
+     * Panel now hugs the right edge, so the ghost-info popup must open to the
+     * left instead of the right to stay on screen.
+     */
+    .ghost-info-box {
+        left: auto;
+        right: 0;
+    }
 }
 
 @media (max-width: 767px) {
