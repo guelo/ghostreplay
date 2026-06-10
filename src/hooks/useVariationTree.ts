@@ -39,7 +39,7 @@ export type NavigateUpResult =
 export const useVariationTree = () => {
   // Mutable ref for synchronous reads within addMove; state snapshot for render consumers
   const treeRef = useRef<VariationTree>(createEmptyTree())
-  const [tree, setTree] = useState<VariationTree>(() => snapshotTree(treeRef.current))
+  const [tree, setTree] = useState<VariationTree>(() => snapshotTree(createEmptyTree()))
   const [selectedVarNodeId, setSelectedVarNodeId] = useState<VariationNodeId | null>(null)
 
   // FEN-keyed analysis cache for variation positions

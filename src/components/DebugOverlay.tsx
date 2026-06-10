@@ -17,18 +17,14 @@ function formatTs(ts: number): string {
 }
 
 export default function DebugOverlay() {
-  const [open, setOpen] = useState(false)
+  // ?debug=1 auto-opens on mount.
+  const [open, setOpen] = useState(
+    () => new URLSearchParams(window.location.search).get('debug') === '1',
+  )
   const [levelFilter, setLevelFilter] = useState<Set<LogLevel>>(new Set(LEVELS))
   const [textFilter, setTextFilter] = useState('')
 
   const entries = useSyncExternalStore(subscribe, getEntries)
-
-  // ?debug=1 auto-opens on mount.
-  useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('debug') === '1') {
-      setOpen(true)
-    }
-  }, [])
 
   // Ctrl+Shift+D desktop chord.
   useEffect(() => {

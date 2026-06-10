@@ -80,14 +80,19 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
   const requestCacheKeyById = useRef<Map<string, string>>(new Map())
 
   useEffect(() => {
+    // Reset transient engine output whenever the enabled state flips so a
+    // re-enabled engine never briefly exposes the previous session's lines.
+    activeRequestId.current = null
+    activeCacheKey.current = null
+    requestFenById.current.clear()
+    requestCacheKeyById.current.clear()
+    /* eslint-disable react-hooks/set-state-in-effect */
+    setInfo([])
+    setInfoFen(null)
+    setIsThinking(false)
+    /* eslint-enable react-hooks/set-state-in-effect */
+
     if (!enabled) {
-      activeRequestId.current = null
-      activeCacheKey.current = null
-      requestFenById.current.clear()
-      requestCacheKeyById.current.clear()
-      setIsThinking(false)
-      setInfo([])
-      setInfoFen(null)
       return
     }
 

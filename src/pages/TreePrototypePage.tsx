@@ -265,10 +265,12 @@ function TreePrototypePage() {
   // SVG overlay) lives inside it, so a measurement of `elementRect - treeRect`
   // is stable under both horizontal tree scroll and per-column vertical scroll.
   const treeRef = useRef<HTMLDivElement>(null);
-  const columnRefs = useRef(new Map<number, HTMLDivElement>());
-  const nodesScrollRefs = useRef(new Map<number, HTMLDivElement>());
-  const headerRefs = useRef(new Map<number, HTMLButtonElement>());
-  const pathNodeRefs = useRef(new Map<number, HTMLElement>());
+  // Stable keyed element stores. Plain Maps (not refs) so the ref-callback
+  // factory and render code never touch a ref's `.current` during render.
+  const columnRefs = useMemo(() => new Map<number, HTMLDivElement>(), []);
+  const nodesScrollRefs = useMemo(() => new Map<number, HTMLDivElement>(), []);
+  const headerRefs = useMemo(() => new Map<number, HTMLButtonElement>(), []);
+  const pathNodeRefs = useMemo(() => new Map<number, HTMLElement>(), []);
   const setMapRef =
     <T extends HTMLElement>(map: Map<number, T>, key: number) =>
     (el: T | null) => {
@@ -286,10 +288,10 @@ function TreePrototypePage() {
       const next: Connector[] = [];
       // path[c] is the selected node in column c and the parent of column c+1.
       for (let c = 0; c < path.length; c++) {
-        const childNodes = nodesScrollRefs.current.get(c + 1);
-        const cell = pathNodeRefs.current.get(c);
-        const col = columnRefs.current.get(c);
-        const nodes = nodesScrollRefs.current.get(c);
+        const childNodes = nodesScrollRefs.get(c + 1);
+        const cell = pathNodeRefs.get(c);
+        const col = columnRefs.get(c);
+        const nodes = nodesScrollRefs.get(c);
         if (!childNodes || !cell || !col || !nodes) continue;
 
         const colR = col.getBoundingClientRect();
@@ -320,7 +322,7 @@ function TreePrototypePage() {
         // selection yet (the freshly-revealed replies column), fall back to
         // the column's vertical midpoint.
         const x2 = childR.left - t.left;
-        const childCell = pathNodeRefs.current.get(c + 1);
+        const childCell = pathNodeRefs.get(c + 1);
         let y2: number;
         let off2: Connector["off2"] = 0;
         if (childCell) {
@@ -365,7 +367,8 @@ function TreePrototypePage() {
       treeScroll?.removeEventListener("scroll", schedule, true);
       ro.disconnect();
     };
-  }, [path, columnCount, ecoNames]);
+    // columnRefs/nodesScrollRefs/pathNodeRefs are stable memoized Maps.
+  }, [path, columnCount, ecoNames, columnRefs, nodesScrollRefs, pathNodeRefs]);
 
   // Select a node in a given column (columnIndex 0 = root column).
   const handleSelect = (columnIndex: number, node: TreeNode) => {
@@ -505,7 +508,7 @@ function TreePrototypePage() {
               return (
                 <div
                   key={colIndex}
-                  ref={setMapRef(columnRefs.current, colIndex)}
+                  ref={setMapRef(columnRefs, colIndex)}
                   style={{
                     ...styles.column,
                     ...(isActiveColumn ? styles.columnActive : {}),
@@ -513,7 +516,7 @@ function TreePrototypePage() {
                 >
                   <button
                     type="button"
-                    ref={setMapRef(headerRefs.current, colIndex)}
+                    ref={setMapRef(headerRefs, colIndex)}
                     style={{
                       ...styles.columnHeader,
                       ...(path[colIndex] ? styles.columnHeaderActive : {}),
@@ -527,7 +530,7 @@ function TreePrototypePage() {
                       : "—"}
                   </button>
                   <div
-                    ref={setMapRef(nodesScrollRefs.current, colIndex)}
+                    ref={setMapRef(nodesScrollRefs, colIndex)}
                     style={{
                       ...styles.columnNodes,
                       ...(isNarrow ? styles.columnNodesNarrow : {}),
@@ -549,7 +552,7 @@ function TreePrototypePage() {
                         return (
                           <div
                             key={node.san ?? "root"}
-                            ref={setMapRef(pathNodeRefs.current, colIndex)}
+                            ref={setMapRef(pathNodeRefs, colIndex)}
                           >
                             <OpeningCard node={node} name={name} />
                           </div>
@@ -562,7 +565,7 @@ function TreePrototypePage() {
                           type="button"
                           ref={
                             isPathNode
-                              ? setMapRef(pathNodeRefs.current, colIndex)
+                              ? setMapRef(pathNodeRefs, colIndex)
                               : undefined
                           }
                           style={{

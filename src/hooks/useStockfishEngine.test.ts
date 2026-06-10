@@ -408,4 +408,45 @@ describe('useStockfishEngine', () => {
     expect(result.current.info[0]?.pv).toEqual(['c2c4'])
     expect(result.current.isThinking).toBe(false)
   })
+
+  it('clears stored output across an enabled → disabled → enabled transition', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result, rerender } = renderHook(
+      ({ enabled }: { enabled: boolean }) => useStockfishEngine({ enabled }),
+      { initialProps: { enabled: true } },
+    )
+
+    act(() => emit({ type: 'ready' }))
+
+    let firstPromise!: Promise<{ move: string; raw: string }>
+    await act(async () => {
+      firstPromise = result.current.evaluatePosition('fen-1', { depth: 21 })
+    })
+    firstPromise.catch(() => {})
+    const requestId = workerInstances[0].postMessage.mock.calls.at(-1)?.[0]?.id as string
+
+    act(() => emit({ type: 'thinking', id: requestId, fen: 'fen-1' }))
+    act(() => {
+      emit({
+        type: 'info',
+        id: requestId,
+        info: { depth: 21, multipv: 1, pv: ['e2e4'], score: { type: 'cp', value: 30 } },
+        raw: 'info depth 21 multipv 1 score cp 30 pv e2e4',
+      })
+    })
+    expect(result.current.info[0]?.pv).toEqual(['e2e4'])
+    expect(result.current.isThinking).toBe(true)
+
+    // Disabling clears the stored lines and thinking flag immediately.
+    rerender({ enabled: false })
+    expect(result.current.info).toEqual([])
+    expect(result.current.infoFen).toBeNull()
+    expect(result.current.isThinking).toBe(false)
+
+    // Re-enabling must not resurrect the previous session's stale output.
+    rerender({ enabled: true })
+    expect(result.current.info).toEqual([])
+    expect(result.current.infoFen).toBeNull()
+    expect(result.current.isThinking).toBe(false)
+  })
 })

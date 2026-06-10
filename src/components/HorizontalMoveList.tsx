@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { MoveListProps } from "./MoveList";
-import { CLASSIFICATION_ICON, classificationClass } from "./MoveRow";
+import { CLASSIFICATION_ICON, classificationClass } from "./MoveRow.helpers";
 import ControlsRow from "./ControlsRow";
 import MoveMessages from "./MoveMessages";
 

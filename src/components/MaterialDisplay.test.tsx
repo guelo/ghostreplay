@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { render, screen } from '../test/utils'
-import MaterialDisplay, { parseMaterial } from './MaterialDisplay'
+import MaterialDisplay from './MaterialDisplay'
+import { parseMaterial } from './MaterialDisplay.helpers'
 
 // Standard starting position
 const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'

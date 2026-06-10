@@ -1,6 +1,7 @@
 import { memo, useCallback, useId, useRef, useMemo } from "react";
 import { mateToCp } from "../workers/analysisUtils";
-import { formatWhiteEval } from "./MoveRow";
+import { formatWhiteEval } from "./MoveRow.helpers";
+import { cpToWinningChances } from "./AnalysisGraph.helpers";
 
 type HighlightedMoves = {
   indices: number[];
@@ -32,19 +33,7 @@ const SVG_HEIGHT = 120;
 const PAD_X = 8;
 const PAD_X_RIGHT = 0;
 const PAD_Y = 4;
-const WINNING_CHANCES_SLOPE = 0.00368208;
-const WINNING_CHANCES_MAX_CP = 1000;
 const WINNING_CHANCES_RANGE = 1.05;
-
-/**
- * Match Lichess's analysis graph by plotting bounded winning chances instead of
- * raw centipawns. This keeps large late-game swings visible without a hard
- * centipawn ceiling flattening the chart.
- */
-export const cpToWinningChances = (cp: number) => {
-  const clamped = Math.max(-WINNING_CHANCES_MAX_CP, Math.min(WINNING_CHANCES_MAX_CP, cp));
-  return 2 / (1 + Math.exp(-WINNING_CHANCES_SLOPE * clamped)) - 1;
-};
 
 const EVAL_COLOR_LOSING: [number, number, number] = [255, 59, 48]; // #FF3B30
 const EVAL_COLOR_EQUAL: [number, number, number] = [158, 158, 158]; // #9E9E9E
@@ -253,12 +242,6 @@ const AnalysisGraph = ({
     (variationLine.anchor != null ||
       variationLine.points.length > 0 ||
       variationLine.streaming != null);
-  if (
-    n === 0 &&
-    (!pendingIndices || pendingIndices.length === 0) &&
-    !hasVariation
-  )
-    return null;
 
   // Dynamic vertical position for the eval badge within the y-axis.
   // The y-axis stretches to match the SVG height, so we use the full
@@ -279,6 +262,14 @@ const AnalysisGraph = ({
     if (badgeCp == null || !playerColor) return undefined;
     return evalToColor(badgeCp, playerColor);
   }, [badgeCp, playerColor]);
+
+  // Hooks must run unconditionally, so this early return comes after them.
+  if (
+    n === 0 &&
+    (!pendingIndices || pendingIndices.length === 0) &&
+    !hasVariation
+  )
+    return null;
 
   return (
     <div

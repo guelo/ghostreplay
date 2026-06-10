@@ -173,9 +173,12 @@ function OpeningsPage() {
     const requestVersion = requestVersionRef.current + 1;
     requestVersionRef.current = requestVersion;
 
+    // Reset request state before refetching when the requested path changes.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setError(null);
     setResponse(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     getOpeningChildren({
       playerColor,

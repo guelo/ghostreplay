@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import GameSelector, { formatShortDate, resultClass } from "./GameSelector";
+import GameSelector from "./GameSelector";
+import { formatShortDate, resultClass } from "./GameSelector.helpers";
 import type { HistoryGame } from "../utils/api";
 
 function makeGame(overrides: Partial<HistoryGame>): HistoryGame {

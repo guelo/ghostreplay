@@ -26,10 +26,13 @@ function GameAnalysisPage() {
 
     let cancelled = false;
     pollCountRef.current = 0;
+    // Reset request state when the polled id changes, before kicking off the fetch.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setProcessing(false);
     setLoading(true);
     setError(null);
     setAnalysis(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     const doFetch = (isInitial: boolean) => {
       fetchAnalysis(id)

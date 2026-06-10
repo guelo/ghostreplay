@@ -102,7 +102,7 @@ const mockCoordinator = {
   ),
 };
 
-vi.mock("../contexts/GameAnalysisCoordinatorContext", () => ({
+vi.mock("../contexts/useGameAnalysisCoordinator", () => ({
   useGameAnalysisCoordinator: () => mockCoordinator,
 }));
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildEngineArrows, engineArrowColor } from "./AnalysisBoard";
+import { buildEngineArrows, engineArrowColor } from "./AnalysisBoard.helpers";
 import type { EngineInfo } from "../workers/stockfishMessages";
 
 const BEST_MOVE_COLOR = "rgba(59, 130, 246, 0.85)";

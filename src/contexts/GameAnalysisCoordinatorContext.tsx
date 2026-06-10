@@ -1,11 +1,7 @@
-import { createContext, useContext, useEffect } from 'react'
+import { useEffect } from 'react'
 import type { ReactNode } from 'react'
-import {
-  GameAnalysisCoordinator,
-  gameAnalysisCoordinator,
-} from '../services/GameAnalysisCoordinator'
-
-const CoordinatorContext = createContext<GameAnalysisCoordinator | null>(null)
+import { gameAnalysisCoordinator } from '../services/GameAnalysisCoordinator'
+import { CoordinatorContext } from './useGameAnalysisCoordinator'
 
 export function GameAnalysisCoordinatorProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
@@ -20,12 +16,4 @@ export function GameAnalysisCoordinatorProvider({ children }: { children: ReactN
       {children}
     </CoordinatorContext.Provider>
   )
-}
-
-export function useGameAnalysisCoordinator(): GameAnalysisCoordinator {
-  const coordinator = useContext(CoordinatorContext)
-  if (!coordinator) {
-    throw new Error('useGameAnalysisCoordinator used outside GameAnalysisCoordinatorProvider')
-  }
-  return coordinator
 }

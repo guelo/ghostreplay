@@ -10,14 +10,14 @@ import { useChessGameController } from "../hooks/useChessGameController";
 import type { PlayerMoveApplyResult } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useGameStore } from "../stores/useGameStore";
-import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel";
+import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningRootItem } from "../utils/api";
 import { checkDrillRoute, failDrill, getOpeningRoots } from "../utils/api";
 import {
   gameAnalysisStore,
   AnalysisStoreProvider,
 } from "../stores/createAnalysisStore";
-import { useGameAnalysisCoordinator } from "../contexts/GameAnalysisCoordinatorContext";
+import { useGameAnalysisCoordinator } from "../contexts/useGameAnalysisCoordinator";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen, prewarmOpeningBook } from "../openings/openingBook";
 import { scheduleIdle } from "../utils/scheduleIdle";
@@ -461,7 +461,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Invariant: appendMoveMessage only pushes (never edits in place at constant length).
   // A future "replace message" path would need to invalidate differently.
   const prevMoveMessagesSnapshotRef = useRef<ReadonlyMap<number, MoveMessage[]>>(new Map());
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
   const moveMessages = useMemo(() => {
     void moveMessagesVersion; // depend on version counter
     const prev = prevMoveMessagesSnapshotRef.current;
@@ -856,7 +856,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowStartOverlay(true);
 
     navigate(location.pathname, { replace: true, state: null });
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, [location.state, navigate, location.pathname]);
 
   // Fetch opening roots when drill mode active and overlay shown

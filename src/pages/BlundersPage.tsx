@@ -165,12 +165,15 @@ function BlundersPage() {
   useEffect(() => {
     const generation = requestGenerationRef.current + 1;
     requestGenerationRef.current = generation;
+    // Reset list state before refetching when the filter changes.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setLoading(true);
     setLoadingMore(false);
     setError(null);
     setSelectedId(null);
     setAnalysis(null);
     setAnalysisLoading(false);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     fetchBlunders({ practiceReady: readyOnly, limit: BLUNDER_PAGE_SIZE, offset: 0 })
       .then((data) => {
@@ -220,8 +223,11 @@ function BlundersPage() {
 
   // Fetch full game analysis when a blunder with a session is selected
   useEffect(() => {
+    // Reset analysis state when the selected session changes, before fetching.
+    /* eslint-disable react-hooks/set-state-in-effect */
     setAnalysis(null);
     setAnalysisLoading(!!selectedAnalysisSessionId);
+    /* eslint-enable react-hooks/set-state-in-effect */
     if (!selectedAnalysisSessionId) {
       return;
     }

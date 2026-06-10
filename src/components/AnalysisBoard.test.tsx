@@ -2,7 +2,8 @@ import { Chess } from 'chess.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '../test/utils'
 import { setMatchMedia } from '../test/setup'
-import AnalysisBoard, { computeBoardEvalIcon } from './AnalysisBoard'
+import AnalysisBoard from './AnalysisBoard'
+import { computeBoardEvalIcon } from './AnalysisBoard.helpers'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
 import { createEmptyTree } from '../types/variationTree'
@@ -132,13 +133,13 @@ const capturedMoveListKeys: string[] = []
 vi.mock('./MoveList', async () => {
   const { useEffect } = await import('react')
   return {
-    default: (props: {
+    default: function MockMoveList(props: {
       moves: Array<{ san: string }>
       onNavigate: (index: number | null) => void
       playerColor?: 'white' | 'black'
       suppressKeyboardNavigation?: boolean
       [key: string]: unknown
-    }) => {
+    }) {
       capturedMoveListProps = props
       // Mirror the real MoveList contract: a window keydown listener active only
       // while not suppressed. A regressed capture handler that stole arrows in

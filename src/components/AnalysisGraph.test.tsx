@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { render } from '../test/utils'
-import AnalysisGraph, { cpToWinningChances } from './AnalysisGraph'
+import AnalysisGraph from './AnalysisGraph'
+import { cpToWinningChances } from './AnalysisGraph.helpers'
 
 const onSelectMove = vi.fn()
 

@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { MoveClassification } from "../workers/analysisUtils";
 import type { VariationTree, VariationNodeId } from "../types/variationTree";
 import type { NavigateUpResult } from "../hooks/useVariationTree";
-import MoveRow, { formatWhiteEval } from "./MoveRow";
+import MoveRow from "./MoveRow";
+import { formatWhiteEval } from "./MoveRow.helpers";
 import type { MoveMessage, SrsFailDetail } from "./MoveRow";
 import VariationLine from "./VariationLine";
 

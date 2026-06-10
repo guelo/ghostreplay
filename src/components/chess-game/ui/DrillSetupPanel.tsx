@@ -2,6 +2,7 @@ import { memo } from "react";
 import type { OpeningRootItem } from "../../../utils/api";
 import OpponentAvatar from "./OpponentAvatar";
 import OpeningPicker from "./OpeningPicker";
+import { strictnessFromCp } from "./DrillSetupPanel.helpers";
 
 type DrillSetupPanelProps = {
   // Data
@@ -27,12 +28,6 @@ type DrillSetupPanelProps = {
   onStrictnessChange: (cp: number) => void;
   onStartDrill: () => void;
 };
-
-export function strictnessFromCp(cp: number): "strict" | "standard" | "lenient" {
-  if (cp <= 15) return "strict";
-  if (cp <= 35) return "standard";
-  return "lenient";
-}
 
 function labelForStrictnessCp(cp: number): string {
   const tier = strictnessFromCp(cp);

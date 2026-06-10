@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { squareToPercent } from "./PromotionPicker";
+import { squareToPercent } from "./PromotionPicker.helpers";
 
 describe("squareToPercent", () => {
   it("white promoting e8, white orientation", () => {

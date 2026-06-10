@@ -1,5 +1,5 @@
 import { memo } from "react"
-import { formatWhiteEval } from "./MoveRow"
+import { formatWhiteEval } from "./MoveRow.helpers"
 
 type EvalBarProps = {
   whitePerspectiveCp: number | null
