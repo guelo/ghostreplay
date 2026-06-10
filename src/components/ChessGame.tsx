@@ -275,6 +275,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const moveMessagesRef = useRef<Map<number, MoveMessage[]>>(new Map());
   const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
+  // Guards the opening opponent-move effect against re-entrancy: the effect is
+  // async (backend round-trip) and its guard conditions stay true during the
+  // await, so volatile deps re-running it would fire a second concurrent
+  // request and apply an illegal move on an already-moved board.
+  const openingOpponentMoveInFlightRef = useRef(false);
   const handleGameEndRef = useRef<() => Promise<void>>(async () => {});
   const blunderBoardTimerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
   const handleGameEndStable = useCallback(
@@ -1215,6 +1220,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   useEffect(() => {
     if (!isGameActive) {
+      // New/ended game resets the opening guard so the next game can fire.
+      openingOpponentMoveInFlightRef.current = false;
       return;
     }
 
@@ -1227,12 +1234,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
 
     if (moveCount > 0 || chess.turn() !== "w") {
+      // Past the opening: clear the guard so a later reset/new game can fire.
+      openingOpponentMoveInFlightRef.current = false;
       return;
     }
 
     if (engineStatus !== "ready" || isThinking || !isViewingLive) {
       return;
     }
+
+    if (openingOpponentMoveInFlightRef.current) {
+      return;
+    }
+    openingOpponentMoveInFlightRef.current = true;
 
     void applyOpponentMove(
       chess.fen(),
