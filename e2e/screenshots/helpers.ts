@@ -109,6 +109,12 @@ interface CaptureOptions {
   waitFor?: Locator;
   /** Capture the full scrollable page instead of the viewport. */
   fullPage?: boolean;
+  /**
+   * Skip the viewport resize before capture. Use when the caller has already
+   * sized the page AND established viewport-dependent state (e.g. a re-measured
+   * overlay) that a redundant resize would invalidate.
+   */
+  skipResize?: boolean;
 }
 
 /**
@@ -120,9 +126,11 @@ export const captureState = async (
   testInfo: TestInfo,
   opts: CaptureOptions,
 ): Promise<void> => {
-  const { page, state, viewport, waitFor, fullPage } = opts;
+  const { page, state, viewport, waitFor, fullPage, skipResize } = opts;
   resetOutputDirOnce();
-  await pw.setViewportSize({ width: viewport.width, height: viewport.height });
+  if (!skipResize) {
+    await pw.setViewportSize({ width: viewport.width, height: viewport.height });
+  }
   if (waitFor) {
     // .first() so a state locator that legitimately matches multiple nodes
     // (e.g. several .stats-section blocks) doesn't trip strict mode.

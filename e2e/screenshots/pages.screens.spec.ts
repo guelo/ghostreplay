@@ -4,6 +4,7 @@ import {
   buildIndex,
   captureState,
   failRoute,
+  FIXED_TIME,
   prepareDeterministicPage,
   stallRoute,
   viewportsFor,
@@ -552,6 +553,42 @@ const startGameAsWhite = async (page: Page): Promise<void> => {
   });
 };
 
+/**
+ * Tick the (paused) clock frame-by-frame until the SRS-fail spotlight content
+ * re-anchors to the CURRENT board rect. The scrim re-measures on resize via a
+ * rAF the paused clock won't fire on its own, so we poll the measured geometry
+ * (content's inline left/top vs the board's bounding box) rather than trusting
+ * a fixed delay. SrsFailSpotlight sets left = rect.cx, top = rect.top + min(18,
+ * height*0.04); matching those means the new measurement has committed.
+ */
+const settleSpotlightGeometry = async (page: Page): Promise<void> => {
+  await expect
+    .poll(
+      async () => {
+        await page.clock.runFor(64);
+        return page.evaluate(() => {
+          const content =
+            document.querySelector<HTMLElement>(".srs-fail-content");
+          const board = document.querySelector<HTMLElement>(
+            ".chessboard-square-measure",
+          );
+          if (!content || !board) return Number.POSITIVE_INFINITY;
+          const b = board.getBoundingClientRect();
+          const left = parseFloat(content.style.left || "0");
+          const top = parseFloat(content.style.top || "0");
+          const expectedLeft = b.left + b.width / 2;
+          const expectedTop = b.top + Math.min(18, b.height * 0.04);
+          return Math.max(
+            Math.abs(left - expectedLeft),
+            Math.abs(top - expectedTop),
+          );
+        });
+      },
+      { timeout: 5_000 },
+    )
+    .toBeLessThan(1.5);
+};
+
 test.describe("play", () => {
   test("fresh board + review toast", async ({ page, loginAs }) => {
     await prepareDeterministicPage(page);
@@ -605,5 +642,277 @@ test.describe("play", () => {
       state: "mid-game",
       waitFor: (p) => p.locator(".move-list-grid .move-button").first(),
     });
+  });
+
+  // --- Game-end banner (resign path) ------------------------------------
+  // Resigning reaches the banner deterministically (no long game needed). The
+  // rating delta comes from POST /api/game/end, which is non-deterministic, so
+  // mock it with a fixed EndGameResponse for a stable banner.
+  test("game-end banner", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+
+    const endGamePayload = {
+      session_id: "e2e-resign",
+      result: "resign",
+      ended_at: "2026-06-01T12:00:00Z",
+      rating: {
+        rating_before: 1200,
+        rating_after: 1188,
+        is_provisional: false,
+      },
+      // The banner renders score_changes.elo.rating as the DELTA, so use -12 to
+      // match the 1200 -> 1188 rating_before/after for a realistic banner.
+      score_changes: {
+        elo: { rating: -12, is_provisional: false },
+        chesscom: null,
+        lichess: null,
+      },
+    };
+    await page.route("**/api/game/end", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(endGamePayload),
+      }),
+    );
+
+    await page.goto("/play");
+    await startGameAsWhite(page);
+
+    // Play one move so resign is enabled, then open the resign warning dialog.
+    await playMove(page, "e2", "e4");
+    await waitForMoveCountAtLeast(page, 2);
+    await page.getByRole("button", { name: "Resign" }).click();
+    // Both the board control and the dialog button are named "Resign"; scope
+    // the confirm click through the alertdialog to avoid a strict-mode match.
+    await page
+      .getByRole("alertdialog")
+      .getByRole("button", { name: "Resign" })
+      .click();
+
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "game-end-banner",
+      waitFor: (p) => p.locator(".game-end-banner-message"),
+    });
+    await page.unrouteAll();
+  });
+
+  // --- Drill setup overlay (deterministic, no mocks) --------------------
+  test("drill setup overlay", async ({ page, loginAs }) => {
+    // The openings graph is a process-wide singleton; first cold load is slow.
+    test.setTimeout(300_000);
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+    await page.goto("/play");
+
+    // The start overlay shows on load (showStartOverlay defaults true). Switch
+    // to drill mode via the "Drill" toggle in the overlay.
+    await page.getByRole("button", { name: "Drill" }).click();
+
+    // DrillSetupPanel is a fragment (no root) and .opening-picker renders while
+    // openings still load, so gate on the trigger label flipping to its loaded
+    // state instead of a panel root.
+    await expect(
+      page.locator(".opening-picker__trigger"),
+    ).toHaveText(/Select opening/, { timeout: 180_000 });
+
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "drill-setup",
+      waitFor: (p) => p.locator(".opening-picker__trigger"),
+    });
+  });
+
+  // --- Review-fail spotlight (real moves, no mocks) ---------------------
+  // Replay the seeded SRS review and FAIL it (Ke2) to fire the full-screen
+  // spotlight scrim. The scrim auto-dismisses on a timer and re-measures its
+  // clip-path hole via rAF, so pause the clock and tick one frame per resize.
+  test("review-fail spotlight", async ({ page, loginAs }) => {
+    test.setTimeout(120_000);
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+
+    // Mock the COMPLETE opponent reply sequence before any move. The backend
+    // ghost path is timing-sensitive: on a cold/fresh DB a reply can fall
+    // through to Maia (e.g. Nf6 instead of Bc5), producing the wrong opening
+    // (C55) and arming no review. Scripting every reply makes the whole line
+    // deterministic. mode "ghost" matches the replay mode (only the first reply
+    // transitions engine->ghost). The Bc5 reply carries the review target: the
+    // FEN AFTER Bc5 (white to move) — applyPlayerMove gates the SRS review on
+    // hasReviewTargetAtFen comparing this against the board FEN at Ke2, so it
+    // must be the exact Giuoco Piano position (normalize_fen keeps fields 1-4).
+    const ghostReplies: {
+      move: { uci: string; san: string };
+      target_blunder_id?: number;
+      target_fen?: string;
+      target_blunder_srs?: {
+        last_reviewed_at: string | null;
+        created_at: string | null;
+        pass_count: number;
+        fail_count: number;
+        pass_streak: number;
+      };
+    }[] = [
+      { move: { uci: "e7e5", san: "e5" } }, // reply to e4
+      { move: { uci: "b8c6", san: "Nc6" } }, // reply to Nf3
+      {
+        // reply to Bc4 — arms the SRS review at the Giuoco Piano position
+        move: { uci: "f8c5", san: "Bc5" },
+        target_blunder_id: 1,
+        target_fen:
+          "r1bqk1nr/pppp1ppp/2n5/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+        target_blunder_srs: {
+          last_reviewed_at: "2026-05-01T12:00:00Z",
+          created_at: "2026-04-01T12:00:00Z",
+          pass_count: 0,
+          fail_count: 1,
+          pass_streak: 0,
+        },
+      },
+      { move: { uci: "g8f6", san: "Nf6" } }, // reply to the failing Ke2
+    ];
+    let ghostReplyIndex = 0;
+    await page.route("**/api/game/next-opponent-move", (route) => {
+      const reply =
+        ghostReplies[Math.min(ghostReplyIndex, ghostReplies.length - 1)];
+      ghostReplyIndex += 1;
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          mode: "ghost",
+          move: reply.move,
+          target_blunder_id: reply.target_blunder_id ?? null,
+          target_blunder_srs: reply.target_blunder_srs ?? null,
+          target_fen: reply.target_fen ?? null,
+          decision_source: "ghost_path",
+          drill_route: null,
+        }),
+      });
+    });
+
+    await page.goto("/play");
+    await startGameAsWhite(page);
+
+    // Reach the seeded review position (blunder Nxe5) via the scripted ghost
+    // line. Play at the default viewport; the capture loop resizes per viewport.
+    await playMove(page, "e2", "e4");
+    await waitForMoveCountAtLeast(page, 2);
+    await playMove(page, "g1", "f3");
+    await waitForMoveCountAtLeast(page, 4);
+    await playMove(page, "f1", "c4");
+    await waitForMoveCountAtLeast(page, 6);
+    await expect(page.locator(".review-warning-toast:visible")).toBeVisible({
+      timeout: 30_000,
+    });
+
+    // Gate on the opening lookup resolving before failing — otherwise a stale
+    // label bleeds into the capture before the C50 Giuoco Piano lookup completes.
+    await expect(
+      page.getByText(/C50 Italian Game: Giuoco Piano/).first(),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // The first ghost reply (engine->ghost) raised the "The haunting resumes"
+    // rehook toast, which auto-dismisses after 3s — but the frozen clock blocks
+    // that timer, so it would linger beneath the spotlight. Advance the clock to
+    // dismiss it (and confirm) before pausing for the capture.
+    await page.clock.runFor(3500);
+    await expect(page.locator(".rehook-toast:visible")).toHaveCount(0);
+
+    // Pause the clock so the spotlight's hold/shrink timers don't advance and
+    // dismiss the scrim mid-capture.
+    await page.clock.pauseAt(FIXED_TIME);
+
+    // Play the recorded fail move (king move) to trigger the spotlight.
+    await playMove(page, "e1", "e2");
+    await expect(page.locator(".srs-fail-scrim")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // Dedicated capture loop. The scrim's clip-path hole + headline position are
+    // set from a board getBoundingClientRect() that re-measures on resize via a
+    // rAF the PAUSED clock won't auto-fire. After each resize, tick frames until
+    // the spotlight content actually re-anchors to the new board rect (polling
+    // the measured geometry, not a fixed delay), then screenshot directly so a
+    // second captureState resize can't re-stale the geometry.
+    for (const viewport of viewportsFor("play")) {
+      await page.setViewportSize({
+        width: viewport.width,
+        height: viewport.height,
+      });
+      await settleSpotlightGeometry(page);
+      await captureState(page, test.info(), {
+        page: "play",
+        state: "review-fail-spotlight",
+        viewport,
+        waitFor: page.locator(".srs-fail-scrim"),
+        // The geometry is already settled at this viewport; a captureState
+        // resize would fire another resize -> rAF and re-stale it mid-capture.
+        skipResize: true,
+      });
+    }
+    await page.unrouteAll();
+  });
+
+  // --- Promotion picker (scripted opponent line) ------------------------
+  // The picker fires only when the LOCAL board has a pawn one step from the
+  // last rank, so script an exact legal line by mocking the single opponent
+  // endpoint. White escorts the a-pawn to b7 then captures b7xc8; Black just
+  // shuffles the g8 knight (never touching the advancing pawn).
+  test("promotion picker", async ({ page, loginAs }) => {
+    await prepareDeterministicPage(page);
+    await loginAs(page, "due");
+
+    // Alternating legal Black knight replies (g8<->f6). Each reply is the FULL
+    // NextOpponentMoveResponse contract; mode stays "engine" so no ghost-rehook
+    // toast (engine->ghost transition) pollutes the screenshot.
+    const blackReplies = [
+      { uci: "g8f6", san: "Nf6" },
+      { uci: "f6g8", san: "Ng8" },
+      { uci: "g8f6", san: "Nf6" },
+      { uci: "f6g8", san: "Ng8" },
+    ];
+    let replyIndex = 0;
+    await page.route("**/api/game/next-opponent-move", (route) => {
+      const move = blackReplies[Math.min(replyIndex, blackReplies.length - 1)];
+      replyIndex += 1;
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          mode: "engine",
+          move,
+          target_blunder_id: null,
+          target_blunder_srs: null,
+          target_fen: null,
+          decision_source: "backend_engine",
+          drill_route: null,
+        }),
+      });
+    });
+
+    await page.goto("/play");
+    await startGameAsWhite(page);
+
+    // Escort the a-pawn: a4, a5, a6, axb7 (each followed by a knight reply),
+    // then b7xc8 reaches the last rank with no promotion piece -> picker.
+    await playMove(page, "a2", "a4");
+    await waitForMoveCountAtLeast(page, 2);
+    await playMove(page, "a4", "a5");
+    await waitForMoveCountAtLeast(page, 4);
+    await playMove(page, "a5", "a6");
+    await waitForMoveCountAtLeast(page, 6);
+    await playMove(page, "a6", "b7");
+    await waitForMoveCountAtLeast(page, 8);
+    await playMove(page, "b7", "c8");
+
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "play",
+      state: "promotion-picker",
+      waitFor: (p) => p.locator(".promotion-picker-square").first(),
+    });
+    await page.unrouteAll();
   });
 });
