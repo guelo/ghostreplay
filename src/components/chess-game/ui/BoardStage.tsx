@@ -394,6 +394,11 @@ const BoardStage = ({
                 animationDurationInMs: 200,
                 allowDragging,
                 squareStyles,
+                // The measuring wrapper sets line-height: 0 to kill the inline gap
+                // below the board; without restoring it here the coordinate glyphs
+                // collapse to zero height and get clipped by the square edges.
+                alphaNotationStyle: { lineHeight: 1 },
+                numericNotationStyle: { lineHeight: 1 },
                 arrows: arrows.length > 0 ? arrows : undefined,
                 boardStyle: {
                   borderRadius: "0",
