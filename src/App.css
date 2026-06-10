@@ -7530,27 +7530,33 @@ button.openings-shell__crumb:hover {
     .chess-layout {
         grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
         grid-template-areas:
-            "panel panel"
-            "board moves";
+            "board moves"
+            "panel panel";
     }
 
+    /*
+     * Panel drops into the bottom-right cell — below the move list and to the
+     * right of the graph. This frees the top row so the board can grow taller,
+     * and isolates the board from height changes when status/warning messages
+     * appear in the panel (they only reflow the panel's own row).
+     */
     .chess-layout.has-graph {
         grid-template-areas:
-            "panel panel"
             "board moves"
-            "graph .";
+            "graph panel";
     }
 
+    /* Panel stays a vertical column (like desktop) in its narrow cell. */
     .chess-panel {
-        flex-direction: row;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 0.75rem;
+        align-self: start;
     }
 
-    .panel-header {
-        width: 100%;
-        flex: 0 0 100%;
+    /*
+     * Vertical space beside the graph is tight, so surface the review warning
+     * above the rest of the panel content.
+     */
+    .chess-warning-stack--panel {
+        order: -1;
     }
 }
 
