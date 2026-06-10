@@ -1792,7 +1792,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               </div>
             )}
             {isGameActive && !isPlayersTurn && (
-              <span className="turn-label">Waiting for opponent</span>
+              <span className="turn-label">
+                Waiting for opponent
+                <span className="turn-label-spinner" aria-hidden="true" />
+              </span>
             )}
             <ConnectedMoveList
               onNavigate={handleNavigate}
