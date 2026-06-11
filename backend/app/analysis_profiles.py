@@ -239,6 +239,7 @@ def _load_manifest(profile_id: str) -> Profile:
 
 
 _CANONICAL = _load_manifest(CANONICAL_PROFILE_ID)
+_CANONICAL_LINUX  = _load_manifest("canonical-sf18-depth24-linux-v1")
 
 _BROWSER = Profile(
     profile_id=BROWSER_PROFILE_ID,
@@ -279,7 +280,7 @@ _JEFFML = Profile(
 )
 
 _REGISTRY: dict[str, Profile] = {
-    p.profile_id: p for p in (_CANONICAL, _BROWSER, _JEFFML)
+        p.profile_id: p for p in (_CANONICAL, _CANONICAL_LINUX, _BROWSER, _JEFFML)
 }
 
 
