@@ -12,7 +12,7 @@ const waitForMoveCountAtLeast = async (
   minimum: number,
 ): Promise<void> => {
   await expect
-    .poll(async () => page.locator(".move-list-grid .move-button").count())
+    .poll(async () => page.locator(".h-move-list__strip .h-move").count())
     .toBeGreaterThanOrEqual(minimum);
 };
 
@@ -83,34 +83,37 @@ test("narrow game layout keeps controls usable and overlays in viewport", async 
 
   const movesColumn = page.locator(".moves-column");
   const graphArea = page.locator(".chess-graph-area");
-  const moveNav = page.locator(".move-list-nav");
-  const moveScroll = page.locator(".move-list-scroll");
+  const controlsRow = page.locator(".moves-column .controls-row");
+  const moveStripRow = page.locator(".h-move-list__row");
 
   await expect(movesColumn).toBeVisible();
   await expect(graphArea).toBeVisible();
-  await expect(moveNav).toBeVisible();
-  await expect(moveScroll).toBeVisible();
+  await expect(controlsRow).toBeVisible();
+  await expect(moveStripRow).toBeVisible();
 
   const movesBox = await movesColumn.boundingBox();
   const graphBox = await graphArea.boundingBox();
-  const navBox = await moveNav.boundingBox();
-  const scrollBox = await moveScroll.boundingBox();
+  const controlsBox = await controlsRow.boundingBox();
+  const stripBox = await moveStripRow.boundingBox();
 
   expect(movesBox).not.toBeNull();
   expect(graphBox).not.toBeNull();
-  expect(navBox).not.toBeNull();
-  expect(scrollBox).not.toBeNull();
+  expect(controlsBox).not.toBeNull();
+  expect(stripBox).not.toBeNull();
   expect(movesBox!.y).toBeLessThan(graphBox!.y);
-  expect(navBox!.y).toBeLessThan(scrollBox!.y);
-  expect(scrollBox!.height).toBeGreaterThan(64);
+  // Controls row sits above the move strip in the horizontal list.
+  expect(controlsBox!.y).toBeLessThan(stripBox!.y);
 
   const mobileWarnings = page.locator(".chess-warning-stack--mobile");
   await expect(mobileWarnings.locator(".review-warning-toast")).toBeVisible();
   await expect(mobileWarnings.locator(".rehook-toast")).toBeVisible();
   await expectNoticesBelowBoard(page);
 
+  // Above the 659px portrait breakpoint the mobile notice stack is hidden and
+  // notices move into the panel, so the below-board assertion no longer
+  // applies. Resize only to exercise the ghost-info popover at a wider width.
   await page.setViewportSize({ width: 767, height: 430 });
-  await expectNoticesBelowBoard(page);
+  await expect(page.locator(".chess-warning-stack--mobile")).toBeHidden();
 
   await page.getByRole("button", { name: "Toggle ghost info" }).click();
   const ghostInfo = page.locator(".ghost-info-box");
@@ -122,3 +125,38 @@ test("narrow game layout keeps controls usable and overlays in viewport", async 
   expect(ghostBox!.x).toBeGreaterThanOrEqual(0);
   expect(ghostBox!.x + ghostBox!.width).toBeLessThanOrEqual(viewport!.width);
 });
+
+// Toast-free mid-game: after playing a couple of moves the analysis graph
+// should be in the viewport once the header auto-scrolls away. Uses a plain
+// (non-seeded) user so no review/rehook toasts add a row and push the graph
+// down. Poll the graph box (not the wrapper) to absorb the async smooth scroll.
+for (const { width, height } of [
+  { width: 390, height: 844 },
+  { width: 360, height: 640 },
+]) {
+  test(`analysis graph is in view mid-game at ${width}x${height}`, async ({
+    page,
+    loginAs,
+  }) => {
+    await page.setViewportSize({ width, height });
+    await loginAs(page, "stable");
+    await page.goto("/game");
+
+    await startNewGameAsWhite(page);
+    await playMove(page, "e2", "e4");
+    await waitForMoveCountAtLeast(page, 2);
+    await playMove(page, "g1", "f3");
+    await waitForMoveCountAtLeast(page, 4);
+
+    const graph = page.locator(".analysis-graph");
+    await expect(graph).toBeVisible();
+
+    await expect
+      .poll(async () => {
+        const box = await graph.boundingBox();
+        if (!box) return false;
+        return box.y < height && box.y + box.height > 0;
+      })
+      .toBe(true);
+  });
+}

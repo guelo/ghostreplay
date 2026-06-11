@@ -7,6 +7,7 @@ import { getRatingDisplayLabel, resolveDisplayScore, useGameStore } from "../../
 import type { ResolvedReview } from "../types";
 import { deriveOpponentAvatarMood, type GameResult } from "../domain/status";
 import OpponentAvatar from "./OpponentAvatar";
+import MaterialDisplay from "../../MaterialDisplay";
 
 type BoardOrientation = "white" | "black";
 type OpponentMode = "ghost" | "engine";
@@ -49,6 +50,10 @@ type GameInfoPanelProps = {
     current: number;
     personalBest: number;
   };
+  /** Mobile-portrait only: opponent-capture material relocated into the panel.
+   *  Hidden by default CSS; shown inside the 659px block. */
+  materialFen?: string;
+  materialPerspective?: BoardOrientation;
 };
 
 type GameWarningStackProps = {
@@ -249,6 +254,8 @@ const GameInfoPanel = ({
   showRehookToast,
   onDismissRehookToast,
   perfectStreak,
+  materialFen,
+  materialPerspective,
 }: GameInfoPanelProps) => {
   const [showSettings, setShowSettings] = useState(false);
   const gearButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -529,6 +536,11 @@ const GameInfoPanel = ({
               : "Unknown"}
           </span>
         </p>
+      )}
+      {materialFen && materialPerspective && (
+        <div className="chess-panel__material">
+          <MaterialDisplay fen={materialFen} perspective={materialPerspective} />
+        </div>
       )}
     </div>
   );

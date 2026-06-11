@@ -9,6 +9,8 @@ import { useChessGameLifecycle } from "../hooks/useChessGameLifecycle";
 import { useChessGameController } from "../hooks/useChessGameController";
 import type { PlayerMoveApplyResult } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
+import { useMediaQuery } from "../hooks/useMediaQuery";
+import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningRootItem } from "../utils/api";
@@ -1628,9 +1630,36 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
   const hasBelowBoardContent = moveHistory.length > 0 || !isGameActive;
 
+  // Mobile portrait: when below-board content (the analysis graph) first
+  // appears, scroll the nav/hamburger header out of view so the graph lands in
+  // the viewport. Only on a false→true transition while narrow; seed on first
+  // run so an initial mount with existing moves does not jump.
+  const isNarrow = useMediaQuery(GAME_MOBILE_QUERY);
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const prevHasBelowRef = useRef<boolean | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevHasBelowRef.current;
+    prevHasBelowRef.current = hasBelowBoardContent;
+    if (prev === undefined) return; // seed only — no scroll on first run
+    if (!isNarrow) return;
+    if (prev || !hasBelowBoardContent) return; // only false→true transitions
+    const behavior: ScrollBehavior = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches
+      ? "auto"
+      : "smooth";
+    sectionRef.current?.scrollIntoView({ block: "start", behavior });
+  }, [hasBelowBoardContent, isNarrow]);
+
+  // Opponent captures (panel) use the opposite perspective; player captures
+  // (controls row) use the player's. Only supplied in portrait via CSS, but the
+  // values are always threaded — the targets render conditionally.
+  const panelMaterialFen = isNarrow ? displayedFen : undefined;
+  const controlsMaterialFen = isNarrow ? displayedFen : undefined;
+
   return (
     <AnalysisStoreProvider value={analysisStore}>
-      <section className="chess-section">
+      <section className="chess-section" ref={sectionRef}>
         <div className={`chess-layout ${hasBelowBoardContent ? 'has-graph' : ''}`}>
           <GameInfoPanel
             statusText={statusText}
@@ -1671,6 +1700,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             showRehookToast={showRehookToast}
             onDismissRehookToast={handleDismissRehookToast}
             perfectStreak={perfectStreak}
+            materialFen={panelMaterialFen}
+            materialPerspective={opponentColor}
           />
 
           <div className="chessboard-wrapper">
@@ -1824,6 +1855,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               onReset={handleReset}
               isGameActive={isGameActive}
               isInteractionDisabled={isRevertPending}
+              materialFen={controlsMaterialFen}
             />
             {isGameActive && isPlayersTurn && (
               <span className="turn-label">Your turn</span>

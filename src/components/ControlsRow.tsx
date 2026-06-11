@@ -1,4 +1,5 @@
 import React from "react";
+import MaterialDisplay from "./MaterialDisplay";
 
 export type ControlsRowProps = {
   onResign?: () => void;
@@ -14,6 +15,10 @@ export type ControlsRowProps = {
   onAddSelectedMove?: (index: number) => void;
   /** Index used when the add button is clicked (effective selected move). */
   effectiveIndex?: number;
+  /** When supplied, render a MaterialDisplay at the trailing edge of the row
+   *  (mobile-portrait relocation of the moves-column bottom material). */
+  materialFen?: string;
+  materialPerspective?: "white" | "black";
 };
 
 /** Row of game-control icon buttons (resign / flip / add / revert / reset).
@@ -32,11 +37,17 @@ const ControlsRow = ({
   isAddingSelectedMove = false,
   onAddSelectedMove,
   effectiveIndex = -1,
+  materialFen,
+  materialPerspective,
 }: ControlsRowProps) => {
   const hasAddButton = Boolean(onAddSelectedMove);
   const isAddEnabled = hasAddButton && effectiveIndex >= 0 && canAddSelectedMove;
+  const hasMaterial = Boolean(materialFen && materialPerspective);
 
-  if (!(onResign || onFlipBoard || onReset || onRevert || hasAddButton)) {
+  if (
+    !(onResign || onFlipBoard || onReset || onRevert || hasAddButton) &&
+    !hasMaterial
+  ) {
     return null;
   }
 
@@ -116,6 +127,11 @@ const ControlsRow = ({
             <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
           </svg>
         </button>
+      )}
+      {hasMaterial && (
+        <div className="controls-row__material">
+          <MaterialDisplay fen={materialFen!} perspective={materialPerspective!} />
+        </div>
       )}
     </div>
   );

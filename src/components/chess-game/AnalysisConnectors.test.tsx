@@ -261,6 +261,23 @@ describe("ConnectedMoveList — freshlyResolvedIndices", () => {
     expect(queryByTestId("move-list")).toBeNull();
   });
 
+  it("forwards materialFen + playerColor-derived perspective to the list", () => {
+    useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "black" });
+    render(
+      <AnalysisStoreProvider value={store}>
+        <ConnectedMoveList
+          onNavigate={vi.fn()}
+          messages={new Map()}
+          onRevealSrsFail={vi.fn()}
+          revealedSrsFailIndex={null}
+          materialFen={NORMAL_FEN}
+        />
+      </AnalysisStoreProvider>,
+    );
+    expect(capturedMoveListProps.materialFen).toBe(NORMAL_FEN);
+    expect(capturedMoveListProps.materialPerspective).toBe("black");
+  });
+
   it("renders the vertical MoveList above the game's mobile breakpoint", () => {
     useGameStore.setState({ moveHistory: [], viewIndex: null, playerColor: "white" });
     setMatchMedia(GAME_MOBILE_QUERY, false);

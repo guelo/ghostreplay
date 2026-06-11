@@ -279,6 +279,25 @@ describe("GameInfoPanel", () => {
     );
   });
 
+  it("renders relocated material from materialFen + materialPerspective", () => {
+    const props = makeProps();
+    const { container } = render(
+      <GameInfoPanel
+        {...props}
+        materialFen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        materialPerspective="black"
+      />,
+    );
+    const material = container.querySelector(".chess-panel__material");
+    expect(material).not.toBeNull();
+    expect(material!.querySelector(".material-display")).not.toBeNull();
+  });
+
+  it("renders no panel material when the props are absent", () => {
+    const { container } = render(<GameInfoPanel {...makeProps()} />);
+    expect(container.querySelector(".chess-panel__material")).toBeNull();
+  });
+
   describe("game settings popover", () => {
     beforeEach(() => {
       useGameStore.setState({ soundMuted: false, soundVolume: 1 });

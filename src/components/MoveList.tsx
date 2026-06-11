@@ -51,6 +51,10 @@ export type MoveListProps = {
   isGameActive?: boolean;
   isInteractionDisabled?: boolean;
   suppressKeyboardNavigation?: boolean;
+  /** Mobile-portrait only: relocate the moves-column bottom material into the
+   *  horizontal list's controls row. Ignored by the vertical `MoveList`. */
+  materialFen?: string;
+  materialPerspective?: "white" | "black";
 };
 
 type DisplayItem =

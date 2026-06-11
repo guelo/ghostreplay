@@ -4,6 +4,8 @@ import { render, screen, fireEvent, waitFor, act } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
 import { STARTING_FEN } from "./chess-game/config";
+import { setMatchMedia } from "../test/setup";
+import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import type { AnalysisResult } from "../hooks/useMoveAnalysis";
 
 const startGameMock = vi.fn();
@@ -3424,5 +3426,89 @@ describe("ChessGame blunder board rewind", () => {
       fenAfterBlunder,
     );
     expect(screen.getByTestId("chessboard")).toHaveAttribute("data-arrow-count", "2");
+  });
+});
+
+describe("ChessGame mobile auto-scroll on graph appearance", () => {
+  let scrollSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    scrollSpy = vi.fn();
+    window.HTMLElement.prototype.scrollIntoView =
+      scrollSpy as unknown as typeof window.HTMLElement.prototype.scrollIntoView;
+    startGameMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    evaluatePositionMock.mockReset();
+    lookupOpeningByFenMock.mockReset();
+    gameAnalysisStore.getState().clearAll();
+    capturedPieceDrop = null;
+
+    startGameMock.mockResolvedValue({
+      session_id: "session-scroll",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "engine",
+      move: { uci: "d7d5", san: "d5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    lookupOpeningByFenMock.mockResolvedValue(null);
+  });
+
+  async function startAndPlayFirstMove() {
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+    await waitFor(() => expect(startGameMock).toHaveBeenCalled());
+    // Clear scrolls from the start flow so we measure only the graph transition.
+    scrollSpy.mockClear();
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument(),
+    );
+  }
+
+  const graphScrolls = (): ScrollIntoViewOptions[] =>
+    scrollSpy.mock.calls
+      .map(([opts]) => opts as ScrollIntoViewOptions)
+      .filter((opts) => opts && opts.block === "start");
+
+  it("scrolls the section into view once (smooth) when the graph first appears (narrow)", async () => {
+    setMatchMedia(GAME_MOBILE_QUERY, true);
+    await startAndPlayFirstMove();
+    const scrolls = graphScrolls();
+    expect(scrolls).toHaveLength(1);
+    expect(scrolls[0].behavior).toBe("smooth");
+  });
+
+  it("does not auto-scroll when not narrow", async () => {
+    setMatchMedia(GAME_MOBILE_QUERY, false);
+    await startAndPlayFirstMove();
+    expect(graphScrolls()).toHaveLength(0);
+  });
+
+  it("does not auto-scroll on an initial mount that already has below-board content", async () => {
+    // The game starts inactive, so hasBelowBoardContent is already true at
+    // mount — the effect must seed without a false→true transition (no jump).
+    setMatchMedia(GAME_MOBILE_QUERY, true);
+    render(<ChessGame />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /new game/i })).toBeInTheDocument(),
+    );
+    expect(graphScrolls()).toHaveLength(0);
+  });
+
+  it("uses behavior:auto when prefers-reduced-motion is set", async () => {
+    setMatchMedia(GAME_MOBILE_QUERY, true);
+    setMatchMedia("(prefers-reduced-motion: reduce)", true);
+    await startAndPlayFirstMove();
+    const scrolls = graphScrolls();
+    expect(scrolls).toHaveLength(1);
+    expect(scrolls[0].behavior).toBe("auto");
   });
 });

@@ -38,6 +38,8 @@ const HorizontalMoveList = ({
   variationTree,
   navigateUp,
   navigateDown,
+  materialFen,
+  materialPerspective,
 }: MoveListProps) => {
   const stripRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -241,6 +243,8 @@ const HorizontalMoveList = ({
         isAddingSelectedMove={isAddingSelectedMove}
         onAddSelectedMove={onAddSelectedMove}
         effectiveIndex={effectiveIndex}
+        materialFen={materialFen}
+        materialPerspective={materialPerspective}
       />
       <div className="h-move-list__row">
         <button

@@ -125,6 +125,16 @@ describe("HorizontalMoveList", () => {
     expect(strip.scrollLeft).toBe(42);
   });
 
+  it("renders relocated material in the controls row when supplied", () => {
+    const { container } = renderList({
+      materialFen: "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+      materialPerspective: "white",
+    });
+    const material = container.querySelector(".controls-row__material");
+    expect(material).not.toBeNull();
+    expect(material!.querySelector(".material-display")).not.toBeNull();
+  });
+
   it("opens a popup on the message badge and dismisses on navigation", () => {
     const msgs: MoveMessage[] = [{ key: "m1", variant: "srs-pass", text: "Nice!" }];
     const messages = new Map<number, MoveMessage[]>([[0, msgs]]);

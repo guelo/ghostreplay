@@ -165,6 +165,8 @@ type ConnectedMoveListProps = {
   onReset?: () => void;
   isGameActive?: boolean;
   isInteractionDisabled?: boolean;
+  /** FEN used for the relocated material in the mobile controls row. */
+  materialFen?: string;
 };
 
 export const ConnectedMoveList = memo(
@@ -181,6 +183,7 @@ export const ConnectedMoveList = memo(
     onReset,
     isGameActive,
     isInteractionDisabled,
+    materialFen,
   }: ConnectedMoveListProps) => {
     const analysisStoreApi = useAnalysisStoreApi();
     const isNarrow = useMediaQuery(GAME_MOBILE_QUERY);
@@ -338,6 +341,8 @@ export const ConnectedMoveList = memo(
         onReset={onReset}
         isGameActive={isGameActive}
         isInteractionDisabled={isInteractionDisabled}
+        materialFen={materialFen}
+        materialPerspective={playerColor}
       />
     );
   },

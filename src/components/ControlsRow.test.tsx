@@ -39,6 +39,22 @@ describe("ControlsRow", () => {
     expect(queryByTitle("Revert last move")).not.toBeNull();
   });
 
+  it("renders when only material is supplied (no actions)", () => {
+    const { container } = render(
+      <ControlsRow
+        materialFen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        materialPerspective="white"
+      />,
+    );
+    expect(container.querySelector(".controls-row")).not.toBeNull();
+    expect(container.querySelector(".controls-row__material")).not.toBeNull();
+  });
+
+  it("returns null when neither actions nor material are present", () => {
+    const { container } = render(<ControlsRow materialPerspective="white" />);
+    expect(container.firstChild).toBeNull();
+  });
+
   it("enables add only for a valid selected move", () => {
     const onAdd = vi.fn();
     const { getByTitle } = render(
