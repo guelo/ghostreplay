@@ -193,6 +193,17 @@ def _create_test_schema(conn) -> None:
             eval_delta INTEGER,
             classification VARCHAR(20),
             source VARCHAR(20) NOT NULL DEFAULT 'game',
+            analysis_profile_id VARCHAR(64),
+            engine_name VARCHAR(64),
+            engine_version VARCHAR(64),
+            engine_build VARCHAR(128),
+            network_id VARCHAR(128),
+            search_limit_type VARCHAR(16),
+            search_limit_value INTEGER,
+            threads INTEGER,
+            hash_mb INTEGER,
+            multipv INTEGER,
+            evidence_contract_id VARCHAR(64),
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fen_before, move_uci)
         )

@@ -523,3 +523,86 @@ def test_lookup_best_line_uci_null_for_legacy_rows(client, auth_headers, db_sess
     assert response.status_code == 200
     result = response.json()["results"][f"{STARTING_FEN}::e2e4"]
     assert result["best_line_uci"] is None
+
+
+# --- Quality metadata: provenance, trust flag, and non-downgrade ---
+
+
+def _canonical_seed_values():
+    from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
+
+    p = get_profile(CANONICAL_PROFILE_ID)
+    values = {"analysis_profile_id": CANONICAL_PROFILE_ID, "evidence_contract_id": "resolver-complete-v1"}
+    for f in IDENTITY_FIELDS:
+        values[f] = getattr(p, f)
+    return values
+
+
+def test_browser_upload_stamps_non_authoritative_metadata(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": [{
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": AFTER_E4_FEN, "eval_cp": 20, "best_move_san": "e4",
+            "best_move_eval_cp": 20, "eval_delta": 0, "classification": "best",
+            "fen_before": STARTING_FEN, "move_uci": "e2e4", "best_move_uci": "e2e4",
+            "best_line_uci": ["e2e4", "e7e5"],
+        }]},
+        headers=auth_headers(user_id=123),
+    )
+    cached = db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == STARTING_FEN, AnalysisCache.move_uci == "e2e4",
+    ).first()
+    assert cached.analysis_profile_id == "browser-game-v1"
+    assert cached.evidence_contract_id == "resolver-complete-v1"
+
+    lookup = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(user_id=123),
+    )
+    result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
+    assert result["analysis_profile_id"] == "browser-game-v1"
+    assert result["source"] == "game"
+    assert result["authoritative"] is False
+
+
+def test_game_upload_does_not_downgrade_canonical_row(
+    client, auth_headers, create_game_session, db_session
+):
+    _seed_cache(db_session, [{
+        "fen_before": STARTING_FEN, "move_uci": "e2e4", "move_san": "e4",
+        "best_move_uci": "e2e4", "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5", "eval_delta": 0, "classification": "best",
+        "played_eval": 20, "best_eval": 20, "source": "precomputed",
+        **_canonical_seed_values(),
+    }])
+
+    client.post(
+        f"/api/session/{create_game_session(user_id=123, player_color='white')}/moves",
+        json={"moves": [{
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": AFTER_E4_FEN, "eval_cp": 999, "best_move_san": "e4",
+            "best_move_eval_cp": 999, "eval_delta": 0, "classification": "blunder",
+            "fen_before": STARTING_FEN, "move_uci": "e2e4", "best_move_uci": "e2e4",
+            "best_line_uci": ["e2e4", "e7e5"],
+        }]},
+        headers=auth_headers(user_id=123),
+    )
+
+    cached = db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == STARTING_FEN, AnalysisCache.move_uci == "e2e4",
+    ).first()
+    assert cached.source == "precomputed"
+    assert cached.played_eval == 20  # canonical evidence preserved
+
+    lookup = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(user_id=123),
+    )
+    result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
+    assert result["authoritative"] is True

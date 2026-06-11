@@ -299,6 +299,19 @@ class AnalysisCache(Base):
     eval_delta: Mapped[int | None] = mapped_column(Integer)
     classification: Mapped[str | None] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20), nullable=False, server_default="game")
+    # Provenance / quality metadata (see app/analysis_profiles.py). NULL on
+    # legacy rows, which are treated as untrusted/unidentified.
+    analysis_profile_id: Mapped[str | None] = mapped_column(String(64))
+    engine_name: Mapped[str | None] = mapped_column(String(64))
+    engine_version: Mapped[str | None] = mapped_column(String(64))
+    engine_build: Mapped[str | None] = mapped_column(String(128))
+    network_id: Mapped[str | None] = mapped_column(String(128))
+    search_limit_type: Mapped[str | None] = mapped_column(String(16))
+    search_limit_value: Mapped[int | None] = mapped_column(Integer)
+    threads: Mapped[int | None] = mapped_column(Integer)
+    hash_mb: Mapped[int | None] = mapped_column(Integer)
+    multipv: Mapped[int | None] = mapped_column(Integer)
+    evidence_contract_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

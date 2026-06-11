@@ -33,8 +33,6 @@ log = logging.getLogger("ingest_scores")
 
 import chess
 from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +40,10 @@ PROJECT_ROOT = BACKEND_ROOT.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.models import AnalysisCache, Base
+from app.analysis_cache_repo import write_analysis_cache_rows
+from app.analysis_profiles import JEFFML_PROFILE_ID
+from app.evidence_contracts import MINIMAL_PLAYED_EVAL
+from app.models import Base
 
 JEFF_ECO_COMMIT = "f398993004c7a84701e24691573af3c9bd196ffd"
 SCORES_URL = f"https://raw.githubusercontent.com/JeffML/eco.json/{JEFF_ECO_COMMIT}/scores.json"
@@ -135,6 +136,8 @@ def match_scores(
                 "best_eval": None,
                 "eval_delta": None,
                 "source": SOURCE,
+                "analysis_profile_id": JEFFML_PROFILE_ID,
+                "evidence_contract_id": MINIMAL_PLAYED_EVAL,
             })
 
     log.info("Matched %d / %d scored positions (%d unmatched)", matched, len(scores), unmatched)
@@ -143,41 +146,18 @@ def match_scores(
 
 
 def upsert_rows(db: Session, rows: list[dict]) -> int:
-    """Upsert rows into analysis_cache. Returns number of rows affected."""
+    """Upsert rows into analysis_cache via the shared quality-aware writer.
+
+    JeffML rows are non-authoritative ``minimal-played-eval-v1`` evidence: they
+    only fill keys that have no evidence at all and can never replace richer
+    rows (enforced by the comparator)."""
     if not rows:
         return 0
 
-    dialect_name = db.bind.dialect.name if db.bind else ""
-
-    if dialect_name == "sqlite":
-        make_insert = sqlite_insert
-    elif dialect_name == "postgresql":
-        make_insert = postgresql_insert
-    else:
-        # Generic fallback — only insert new rows, skip existing
-        for val in rows:
-            existing = db.query(AnalysisCache).filter(
-                AnalysisCache.fen_before == val["fen_before"],
-                AnalysisCache.move_uci == val["move_uci"],
-            ).first()
-            if not existing:
-                db.add(AnalysisCache(**val))
-        db.commit()
-        return len(rows)
-
-    total = 0
-    for i in range(0, len(rows), BATCH_SIZE):
-        batch = rows[i : i + BATCH_SIZE]
-        stmt = make_insert(AnalysisCache).values(batch)
-        # Skip rows that already exist from richer sources (precomputed/game)
-        stmt = stmt.on_conflict_do_nothing(
-            index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci],
-        )
-        db.execute(stmt)
-        total += len(batch)
-
     db.commit()
-    return total
+    for i in range(0, len(rows), BATCH_SIZE):
+        write_analysis_cache_rows(db, rows[i : i + BATCH_SIZE])
+    return len(rows)
 
 
 def main() -> None:

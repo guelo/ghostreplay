@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.analysis_profiles import IDENTITY_FIELDS, get_profile
 from app.db import get_db
 from app.models import AnalysisCache, decode_uci_line
 from app.security import TokenPayload, get_current_user
@@ -34,6 +35,21 @@ class CachedAnalysisResult(BaseModel):
     best_eval: int | None = None
     eval_delta: int | None = None
     classification: str | None = None
+    source: str | None = None
+    analysis_profile_id: str | None = None
+    engine_version: str | None = None
+    engine_build: str | None = None
+    evidence_contract_id: str | None = None
+    # True when the row's stored identity metadata matches its claimed,
+    # authoritative profile (same validation the write comparator uses).
+    authoritative: bool = False
+
+
+def _is_authoritative(row: AnalysisCache) -> bool:
+    profile = get_profile(row.analysis_profile_id)
+    if profile is None or not profile.authoritative:
+        return False
+    return all(getattr(row, f) == getattr(profile, f) for f in IDENTITY_FIELDS)
 
 
 class AnalysisLookupResponse(BaseModel):
@@ -77,6 +93,12 @@ def lookup_analysis(
                 best_eval=row.best_eval,
                 eval_delta=row.eval_delta,
                 classification=row.classification,
+                source=row.source,
+                analysis_profile_id=row.analysis_profile_id,
+                engine_version=row.engine_version,
+                engine_build=row.engine_build,
+                evidence_contract_id=row.evidence_contract_id,
+                authoritative=_is_authoritative(row),
             )
 
     return AnalysisLookupResponse(results=results)

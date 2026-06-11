@@ -13,6 +13,9 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.analysis_cache_repo import write_analysis_cache_rows
+from app.analysis_profiles import BROWSER_PROFILE_ID
+from app.evidence_contracts import select_browser_contract
 from app.db import get_db
 from app.accuracy import (
     AccuracyMove,
@@ -34,7 +37,6 @@ from app.opening_cache import (
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.models import (
-    AnalysisCache,
     Blunder,
     BlunderOpportunityEvent,
     GameSession,
@@ -477,9 +479,15 @@ def _upsert_analysis_cache(
     db: Session,
     moves: list[SessionMoveInput],
 ) -> None:
-    """Upsert analysis results into the global cache for moves that include
-    the new fen_before/move_uci fields.  Evals are converted from
-    player-relative (as uploaded) to white-relative for storage."""
+    """Upsert browser-game analysis evidence into the global cache.
+
+    Evals are converted from player-relative (as uploaded) to white-relative for
+    storage. Rows are stamped with the non-authoritative ``browser-game-v1``
+    profile (the upload contract carries no engine identity) and routed through
+    the shared quality-aware writer: game uploads INSERT evidence for keys that
+    have none and never replace existing canonical or legacy rows. Each row is
+    classified per-shape into the most specific browser-allowed contract; rows
+    matching no allowed contract are rejected (not stored)."""
     cache_values = []
     for move in moves:
         if not move.fen_before or not move.move_uci:
@@ -495,7 +503,7 @@ def _upsert_analysis_cache(
         best_eval = move.best_move_eval_cp * sign if move.best_move_eval_cp is not None else None
         eval_delta = move.eval_delta  # already unsigned (best - played >= 0)
 
-        cache_values.append({
+        row = {
             "fen_before": move.fen_before,
             "move_uci": move.move_uci,
             "move_san": move.move_san,
@@ -508,48 +516,24 @@ def _upsert_analysis_cache(
             "eval_delta": eval_delta,
             "classification": move.classification.value if move.classification else None,
             "source": "game",
-        })
+            "analysis_profile_id": BROWSER_PROFILE_ID,
+        }
+        contract_id = select_browser_contract(row)
+        if contract_id is None:
+            # Row satisfies no allowed contract; skip rather than store a row it
+            # does not satisfy (logged as INVALID_INCOMING_KEEP by the helper if
+            # it were passed through; here we drop it deterministically).
+            continue
+        row["evidence_contract_id"] = contract_id
+        cache_values.append(row)
 
     if not cache_values:
         return
 
-    dialect_name = db.bind.dialect.name if db.bind else ""
-    if dialect_name == "sqlite":
-        stmt = sqlite_insert(AnalysisCache).values(cache_values)
-    elif dialect_name == "postgresql":
-        stmt = postgresql_insert(AnalysisCache).values(cache_values)
-    else:
-        for val in cache_values:
-            existing = db.query(AnalysisCache).filter(
-                AnalysisCache.fen_before == val["fen_before"],
-                AnalysisCache.move_uci == val["move_uci"],
-            ).first()
-            if existing:
-                for k, v in val.items():
-                    if k not in ("fen_before", "move_uci"):
-                        setattr(existing, k, v)
-            else:
-                db.add(AnalysisCache(**val))
-        db.commit()
-        return
-
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci],
-        set_={
-            "move_san": stmt.excluded.move_san,
-            "best_move_uci": stmt.excluded.best_move_uci,
-            "best_move_san": stmt.excluded.best_move_san,
-            "best_line_uci": stmt.excluded.best_line_uci,
-            "played_eval": stmt.excluded.played_eval,
-            "played_eval_mate": stmt.excluded.played_eval_mate,
-            "best_eval": stmt.excluded.best_eval,
-            "eval_delta": stmt.excluded.eval_delta,
-            "classification": stmt.excluded.classification,
-            "source": stmt.excluded.source,
-        },
-    )
-    db.execute(stmt)
+    # The shared helper owns its own transaction; ensure the caller session is
+    # clean (no pending state on this connection) before delegating.
     db.commit()
+    write_analysis_cache_rows(db, cache_values)
 
 @router.post(
     "/{session_id}/moves",

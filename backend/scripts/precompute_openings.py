@@ -13,9 +13,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
 import json
 import logging
+import os
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,8 +36,6 @@ log = logging.getLogger("precompute")
 
 import chess
 from sqlalchemy import create_engine
-from sqlalchemy.dialects.postgresql import insert as postgresql_insert
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +43,10 @@ PROJECT_ROOT = BACKEND_ROOT.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.models import AnalysisCache, Base
+from app.analysis_cache_repo import write_analysis_cache_rows
+from app.analysis_profiles import resolve_profile
+from app.evidence_contracts import RESOLVER_COMPLETE, get_contract
+from app.models import Base
 
 DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/ghostreplay"
 DEFAULT_ECO_PATH = PROJECT_ROOT / "public" / "data" / "openings" / "eco.json"
@@ -424,13 +429,132 @@ def _worker_thread(
         proc.wait(timeout=5)
 
 
-def upsert_results(db: Session, results: list[AnalysisResult]) -> int:
-    """Upsert analysis results into the cache. Returns number of rows affected."""
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def observe_engine_identity(stockfish_path: str, depth: int) -> dict:
+    """Derive concrete identity metadata from the engine binary + UCI handshake.
+
+    Captured BEFORE the long precompute starts so the persisted metadata reflects
+    exactly what produced the rows. ``engine_build`` is the binary's SHA-256 (UCI
+    ``id author`` is not a build identifier); ``network_id`` is the active EvalFile
+    name plus a hash of the network file contents. ``engine_version`` is the
+    parsed version token only (e.g. "16.1"), to match the profile registry.
+    """
+    observed: dict = {
+        "engine_name": None,
+        "engine_version": None,
+        "engine_build": None,
+        "network_id": None,
+        "search_limit_type": "depth",
+        "search_limit_value": depth,
+        "threads": 1,
+        "hash_mb": 128,
+        "multipv": 1,
+    }
+    # Resolve the binary through PATH so a bare "stockfish" hashes the real
+    # executable rather than failing and recording engine_build=None.
+    resolved = shutil.which(stockfish_path) or stockfish_path
+    try:
+        observed["engine_build"] = _sha256_file(resolved)
+    except OSError:
+        observed["engine_build"] = None
+
+    proc = subprocess.Popen(
+        [resolved],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        proc.stdin.write("uci\n")
+        proc.stdin.flush()
+        eval_file = None
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            if line.startswith("id name "):
+                # e.g. "id name Stockfish 16.1" -> name="Stockfish", version="16.1".
+                tokens = line[len("id name "):].strip().split()
+                if tokens:
+                    observed["engine_name"] = tokens[0]
+                if len(tokens) > 1:
+                    observed["engine_version"] = tokens[1]
+            if "name EvalFile" in line and "default" in line:
+                parts = line.split("default")
+                if len(parts) > 1:
+                    eval_file = parts[1].strip().split()[0] if parts[1].strip() else None
+            if line.startswith("uciok"):
+                break
+        if eval_file:
+            net_path = eval_file
+            if not os.path.isabs(net_path):
+                net_path = os.path.join(os.path.dirname(resolved) or ".", eval_file)
+            net_hash = None
+            if os.path.exists(net_path):
+                net_hash = _sha256_file(net_path)[:16]
+            observed["network_id"] = f"{eval_file}:{net_hash}" if net_hash else eval_file
+    finally:
+        try:
+            proc.stdin.write("quit\n")
+            proc.stdin.flush()
+        except Exception:
+            pass
+        proc.terminate()
+        proc.wait(timeout=5)
+    return observed
+
+
+def assert_can_produce_target_contract(contract_id: str = RESOLVER_COMPLETE) -> None:
+    """Fail-fast precondition: refuse to run unless the script can populate every
+    required field of its declared target contract.
+
+    ``AnalysisResult`` currently produces no ``best_line_uci``/``classification``,
+    so it cannot satisfy ``resolver-complete-v1`` — exit immediately rather than
+    burning a long Stockfish run only to discard every row. Producing
+    resolver-complete output is g-canonical-precomp's job.
+    """
+    contract = get_contract(contract_id)
+    if contract is None:
+        raise SystemExit(f"Unknown target evidence contract: {contract_id!r}")
+    producible = set(f.name for f in dataclasses.fields(AnalysisResult))
+    missing = set(contract.required_fields) - producible
+    if missing:
+        raise SystemExit(
+            "precompute cannot satisfy target contract "
+            f"{contract_id!r}: AnalysisResult is missing required field(s) "
+            f"{sorted(missing)}. Canonical PV/classification extraction is "
+            "delivered by g-canonical-precomp; refusing to run and discard "
+            "incomplete results."
+        )
+
+
+def upsert_results(
+    db: Session,
+    results: list[AnalysisResult],
+    *,
+    profile_id: str | None,
+    observed: dict,
+) -> int:
+    """Upsert analysis results into the cache via the shared quality-aware writer.
+
+    ``profile_id`` is the registry id resolved from observed engine artifacts
+    (``None`` => off-spec/unknown producer, stored as effectively-legacy and
+    non-authoritative). Rows target the ``resolver-complete-v1`` contract.
+    Returns number of rows submitted."""
     if not results:
         return 0
 
-    values = [
-        {
+    values = []
+    for r in results:
+        row = {
             "fen_before": r.fen_before,
             "move_uci": r.move_uci,
             "move_san": r.move_san,
@@ -440,44 +564,14 @@ def upsert_results(db: Session, results: list[AnalysisResult]) -> int:
             "best_eval": r.best_eval,
             "eval_delta": r.eval_delta,
             "source": "precomputed",
+            "analysis_profile_id": profile_id,
+            "evidence_contract_id": RESOLVER_COMPLETE,
+            **observed,
         }
-        for r in results
-    ]
+        values.append(row)
 
-    dialect_name = db.bind.dialect.name if db.bind else ""
-    if dialect_name == "sqlite":
-        stmt = sqlite_insert(AnalysisCache).values(values)
-    elif dialect_name == "postgresql":
-        stmt = postgresql_insert(AnalysisCache).values(values)
-    else:
-        for val in values:
-            existing = db.query(AnalysisCache).filter(
-                AnalysisCache.fen_before == val["fen_before"],
-                AnalysisCache.move_uci == val["move_uci"],
-            ).first()
-            if existing:
-                for k, v in val.items():
-                    if k not in ("fen_before", "move_uci"):
-                        setattr(existing, k, v)
-            else:
-                db.add(AnalysisCache(**val))
-        db.commit()
-        return len(values)
-
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci],
-        set_={
-            "move_san": stmt.excluded.move_san,
-            "best_move_uci": stmt.excluded.best_move_uci,
-            "best_move_san": stmt.excluded.best_move_san,
-            "played_eval": stmt.excluded.played_eval,
-            "best_eval": stmt.excluded.best_eval,
-            "eval_delta": stmt.excluded.eval_delta,
-            "source": stmt.excluded.source,
-        },
-    )
-    db.execute(stmt)
     db.commit()
+    write_analysis_cache_rows(db, values)
     return len(values)
 
 
@@ -536,6 +630,19 @@ def main() -> None:
         log.info("Dry run — skipping analysis and database writes.")
         return
 
+    # Fail-fast BEFORE launching any engine: refuse to run if we cannot populate
+    # the declared target contract's required fields.
+    assert_can_produce_target_contract()
+
+    # Capture concrete engine identity before the long run, then resolve it to a
+    # registered profile (None => off-spec, stored non-authoritative).
+    observed = observe_engine_identity(args.stockfish, args.depth)
+    profile_id = resolve_profile(observed)
+    log.info(
+        "Resolved analysis profile: %s (engine_build=%s)",
+        profile_id, observed.get("engine_build"),
+    )
+
     engine = create_engine(args.database_url)
     Base.metadata.create_all(engine)
 
@@ -577,7 +684,7 @@ def main() -> None:
     with Session(engine) as db:
         for i in range(0, len(result_list), BATCH_SIZE):
             batch = result_list[i : i + BATCH_SIZE]
-            upsert_results(db, batch)
+            upsert_results(db, batch, profile_id=profile_id, observed=observed)
 
     elapsed = time.time() - start
     rate = total / elapsed if elapsed > 0 else 0

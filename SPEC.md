@@ -393,7 +393,19 @@ CREATE TABLE analysis_cache (
     best_eval INTEGER,                      -- Eval of best move (centipawns)
     eval_delta INTEGER,                     -- best_eval - played_eval (positive = lost advantage)
     classification VARCHAR(20),             -- Move classification
-    source VARCHAR(20) NOT NULL DEFAULT 'game',  -- Origin: 'game' or 'worker'
+    source VARCHAR(20) NOT NULL DEFAULT 'game',  -- Provenance only: 'game' | 'precomputed' | 'jeffml-scores'
+    -- Provenance / quality metadata (nullable; NULL = legacy/untrusted row)
+    analysis_profile_id VARCHAR(64),        -- id into the in-code profile registry
+    engine_name VARCHAR(64),
+    engine_version VARCHAR(64),
+    engine_build VARCHAR(128),              -- binary SHA-256 (not UCI id author)
+    network_id VARCHAR(128),                -- NNUE EvalFile name + content hash
+    search_limit_type VARCHAR(16),          -- 'depth' | 'nodes' | 'movetime'
+    search_limit_value INTEGER,
+    threads INTEGER,
+    hash_mb INTEGER,
+    multipv INTEGER,
+    evidence_contract_id VARCHAR(64),       -- id into the evidence-contract registry
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
     UNIQUE (fen_before, move_uci)
@@ -404,8 +416,37 @@ CREATE INDEX idx_analysis_cache_fen ON analysis_cache(fen_before);
 
 **Key semantics:**
 - The `(fen_before, move_uci)` unique pair enables O(1) lookup: "has this exact position+move been analyzed before?"
-- `source` tracks whether the entry came from a game session (`game`) or a dedicated worker pass (`worker`)
+- `source` records provenance only (`game`, `precomputed`, `jeffml-scores`); it is **not** the quality comparator.
 - The frontend races its own local Stockfish worker against this cache to avoid redundant computation
+
+**Quality-aware writes (rows are NOT immutable).** Every writer — session/game
+uploads, opening precompute, and JeffML score ingestion — routes through one
+shared helper (`backend/app/analysis_cache_repo.py::write_analysis_cache_rows`)
+that applies a single deterministic replacement policy
+(`backend/app/analysis_cache_policy.py::decide_analysis_cache_replacement`)
+returning INSERT / REPLACE / MERGE / KEEP plus a reason code. The policy reasons
+over two registries, never over raw numeric depth:
+- **Profile registry** (`backend/app/analysis_profiles.py`) — immutable, versioned
+  engine/search profiles. A row is *trusted* only when its stored identity
+  metadata matches its claimed profile (`identity_verified`). Cross-family
+  replacement requires an explicit `dominates` edge **and** an authoritative
+  profile.
+- **Evidence-contract registry** (`backend/app/evidence_contracts.py`) — versioned
+  data-shape contracts with per-contract semantic validation
+  (`resolver-complete-v1` mirrors the worker's `canResolveCachedAnalysis`;
+  `minimal-played-eval-v1` / `minimal-best-eval-v1` cover eval-only rows).
+  Replacement/merge requires contract succession plus a populated-field superset
+  so no datum is ever silently dropped.
+
+Net guarantees: a browser `game` upload is non-authoritative — it may fill keys
+that have no evidence but can never downgrade a canonical or legacy row; sparse
+JeffML rows can never replace richer ones; only a re-run authoritative canonical
+profile reclaims legacy rows. Writes are serialized safely: PostgreSQL uses
+insert-first + `SELECT … FOR UPDATE`; file-backed SQLite uses `BEGIN IMMEDIATE` +
+`busy_timeout` with bounded retry; other dialects are rejected. The `/api/analysis/lookup`
+response exposes `source`, `analysis_profile_id`, `engine_version`, `engine_build`,
+`evidence_contract_id`, and an `authoritative` trust flag derived from the same
+validation the writer uses.
 
 ### 5.7 Opening Score Tables
 
@@ -2202,16 +2243,28 @@ Each entry is keyed by `(fen_before, move_uci)` — the exact position before a 
 
 Used in `GameAnalysisCoordinator` and `useMoveAnalysis` alongside Stockfish analysis tasks. Cache hits bypass the local engine only when `canResolveCachedAnalysis` can prove the row is complete: it must include classification data, `best_move_uci`, and a multi-move `best_line_uci` whose first move matches `best_move_uci`. Legacy, precomputed, eval-only, or one-token rows are treated as misses so the worker can backfill a full PV.
 
-### 14.3 Staleness
+### 14.3 Staleness & Quality-Aware Replacement
 
-No explicit invalidation. Analysis entries are immutable — the same FEN + move always yields the same Stockfish evaluation at the stored depth. Entries are only written, never updated.
+There is no time-based invalidation, but entries are **not** immutable: a higher-quality analysis of the same `(fen_before, move_uci)` can replace or merge into an existing row. All writers go through the shared quality-aware writer and deterministic replacement policy described in §5.6. The governing rules:
 
-### 14.4 `source` Field
+- A row's trust comes from its **profile** (engine/search identity, verified against the in-code registry) and its **evidence contract** (data-shape, with per-contract semantic validation) — never from raw numeric depth.
+- Browser `game` uploads are non-authoritative: they fill keys with no evidence but never downgrade a canonical or legacy row.
+- Sparse rows (e.g. JeffML eval-only) can never replace richer rows; replacement/merge requires contract succession plus a populated-field superset, so no datum is silently dropped.
+- Only a re-run authoritative canonical profile reclaims legacy (NULL-metadata) rows.
+
+Writes are concurrency-safe: PostgreSQL uses insert-first + `SELECT … FOR UPDATE`; file-backed SQLite uses `BEGIN IMMEDIATE` + `busy_timeout` with bounded retry.
+
+### 14.4 `source` Field & quality metadata
+
+`source` records provenance only (it is not the quality comparator):
 
 | Value | Meaning |
 |-------|---------|
-| `game` | Entry written during a normal game session |
-| `worker` | Entry written by a dedicated background analysis pass |
+| `game` | Entry written during a normal game session (browser worker) |
+| `precomputed` | Entry written by the opening precompute pass |
+| `jeffml-scores` | Entry ingested from the JeffML scores dataset (eval-only) |
+
+Quality/trust is carried by the metadata columns (`analysis_profile_id`, engine identity, `evidence_contract_id`) and surfaced on the lookup response via an `authoritative` flag. See §5.6 for the full model.
 
 DB reference: §5.6
 
