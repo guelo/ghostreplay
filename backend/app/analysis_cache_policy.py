@@ -18,7 +18,11 @@ from dataclasses import dataclass
 from enum import Enum
 
 from app.analysis_profiles import get_profile
-from app.evidence_contracts import contract_satisfied, is_superset_or_successor
+from app.evidence_contracts import (
+    contract_satisfied,
+    is_strict_successor,
+    is_superset_or_successor,
+)
 
 # Evidence fields whose presence/agreement participate in completeness + merge.
 EVIDENCE_FIELDS = (
@@ -28,6 +32,7 @@ EVIDENCE_FIELDS = (
     "played_eval",
     "played_eval_mate",
     "best_eval",
+    "best_eval_mate",
     "eval_delta",
     "classification",
 )
@@ -49,6 +54,7 @@ class Reason(str, Enum):
     LEGACY_REPLACED_BY_AUTH = "legacy_replaced_by_auth"
     SAME_PROFILE_IDEMPOTENT = "same_profile_idempotent"
     SAME_PROFILE_SUPERSET_MERGE = "same_profile_superset_merge"
+    SAME_PROFILE_CONTRACT_UPGRADE = "same_profile_contract_upgrade"
     MERGE_CONFLICT_KEEP = "merge_conflict_keep"
     INCOMPATIBLE_KEEP = "incompatible_keep"
     INCOMING_LESS_COMPLETE_KEEP = "incoming_less_complete_keep"
@@ -77,7 +83,9 @@ class CacheRow:
         if not self.identity_verified:
             return False
         profile = get_profile(self.analysis_profile_id)
-        return bool(profile and profile.authoritative)
+        # A retired (inactive) profile keeps its rows identity-verified for
+        # dominance, but they no longer count as trusted/authoritative hits.
+        return bool(profile and profile.authoritative and profile.active)
 
 
 def _fields_agree(existing: CacheRow, incoming: CacheRow) -> bool:
@@ -139,10 +147,16 @@ def decide_analysis_cache_replacement(
             return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
         if not _fields_agree(existing, incoming):
             return Decision.KEEP, Reason.MERGE_CONFLICT_KEEP
-        # Merge only adds value if incoming contributes a field existing lacks.
-        if not (incoming.populated_fields - existing.populated_fields):
-            return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
-        return Decision.MERGE, Reason.SAME_PROFILE_SUPERSET_MERGE
+        # A merge is worthwhile when incoming either contributes a field existing
+        # lacks, OR carries a strictly-newer contract (e.g. v1 -> v2) that the
+        # stored row should advertise even though no evidence field changes.
+        if incoming.populated_fields - existing.populated_fields:
+            return Decision.MERGE, Reason.SAME_PROFILE_SUPERSET_MERGE
+        if is_strict_successor(
+            incoming.evidence_contract_id, existing.evidence_contract_id
+        ):
+            return Decision.MERGE, Reason.SAME_PROFILE_CONTRACT_UPGRADE
+        return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
 
     # Rule 3: incoming is non-authoritative and not same-profile → never replaces.
     if not incoming_auth:

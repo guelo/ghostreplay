@@ -14,6 +14,7 @@ from app.analysis_cache_repo import (
 from app.analysis_profiles import (
     BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
+    IDENTITY_FIELDS,
     get_profile,
 )
 from app.evidence_contracts import MINIMAL_PLAYED_EVAL, RESOLVER_COMPLETE
@@ -47,16 +48,8 @@ def _canonical_values():
     p = get_profile(CANONICAL_PROFILE_ID)
     return {
         "analysis_profile_id": CANONICAL_PROFILE_ID,
-        "engine_name": p.engine_name,
-        "engine_version": p.engine_version,
-        "engine_build": p.engine_build,
-        "network_id": p.network_id,
-        "search_limit_type": p.search_limit_type,
-        "search_limit_value": p.search_limit_value,
-        "threads": p.threads,
-        "hash_mb": p.hash_mb,
-        "multipv": p.multipv,
         "evidence_contract_id": RESOLVER_COMPLETE,
+        **{f: getattr(p, f) for f in IDENTITY_FIELDS},
     }
 
 
@@ -534,3 +527,100 @@ def test_clean_session_precondition(file_db):
         write_analysis_cache_rows(s, [_browser_row()])
     s.rollback()
     s.close()
+
+
+def test_round_trip_best_eval_mate_and_nnue_columns(file_db):
+    """best_eval_mate + the two NNUE-identity columns persist and read back."""
+    _, Factory = file_db
+    p = get_profile(CANONICAL_PROFILE_ID)
+    row = {
+        "fen_before": FEN, "move_uci": "e2e4", "move_san": "e4",
+        "best_move_uci": "e2e4", "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5",
+        "played_eval": 10, "played_eval_mate": None,
+        "best_eval": 40, "best_eval_mate": 3,
+        "eval_delta": 30, "classification": "good",
+        "source": "precomputed",
+        "analysis_profile_id": CANONICAL_PROFILE_ID,
+        "evidence_contract_id": RESOLVER_COMPLETE,
+        **{f: getattr(p, f) for f in IDENTITY_FIELDS},
+    }
+    s = Factory()
+    write_analysis_cache_rows(s, [row])
+    s.close()
+    s2 = Factory()
+    stored = s2.query(AnalysisCache).one()
+    assert stored.best_eval_mate == 3
+    assert stored.eval_file_id == p.eval_file_id
+    assert stored.eval_file_small_id == p.eval_file_small_id
+    assert stored.analyzer_protocol_version == p.analyzer_protocol_version
+    assert stored.profile_manifest_digest == p.profile_manifest_digest
+    s2.close()
+
+
+def test_dedupe_contract_upgrade_order_independent(file_db):
+    """Identical v1/v2 canonical rows for one key store v2 regardless of order."""
+    from app.evidence_contracts import RESOLVER_COMPLETE_V2
+
+    def _row(contract):
+        return {
+            "fen_before": FEN, "move_uci": "e2e4", "move_san": "e4",
+            "best_move_uci": "e2e4", "best_move_san": "e4",
+            "best_line_uci": "e2e4 e7e5",
+            "played_eval": 0, "best_eval": 0, "eval_delta": 0,
+            "classification": "best", "source": "precomputed",
+            "analysis_profile_id": CANONICAL_PROFILE_ID,
+            "evidence_contract_id": contract,
+            **{f: get_profile(CANONICAL_PROFILE_ID).__getattribute__(f) for f in IDENTITY_FIELDS},
+        }
+
+    for order in ([RESOLVER_COMPLETE, RESOLVER_COMPLETE_V2],
+                  [RESOLVER_COMPLETE_V2, RESOLVER_COMPLETE]):
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        F = sessionmaker(bind=engine)
+        s = F()
+        write_analysis_cache_rows(s, [_row(order[0]), _row(order[1])])
+        s.close()
+        s2 = F()
+        row = s2.query(AnalysisCache).one()
+        assert row.evidence_contract_id == RESOLVER_COMPLETE_V2, f"order={order}"
+        s2.close()
+        engine.dispose()
+
+
+def test_dedupe_merges_richer_evidence_under_successor_contract(file_db):
+    """v1 (with best_eval_mate) + v2 (without) collapse to best_eval_mate kept AND
+    the v2 contract, regardless of input order."""
+    from app.evidence_contracts import RESOLVER_COMPLETE_V2
+
+    p = get_profile(CANONICAL_PROFILE_ID)
+
+    def _row(contract, best_eval_mate):
+        return {
+            "fen_before": FEN, "move_uci": "e2e4", "move_san": "e4",
+            "best_move_uci": "e2e4", "best_move_san": "e4",
+            "best_line_uci": "e2e4 e7e5",
+            "played_eval": 0, "best_eval": 0, "eval_delta": 0,
+            "best_eval_mate": best_eval_mate,
+            "classification": "best", "source": "precomputed",
+            "analysis_profile_id": CANONICAL_PROFILE_ID,
+            "evidence_contract_id": contract,
+            **{f: getattr(p, f) for f in IDENTITY_FIELDS},
+        }
+
+    v1 = _row(RESOLVER_COMPLETE, 3)
+    v2 = _row(RESOLVER_COMPLETE_V2, None)
+    for order in ([v1, v2], [v2, v1]):
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        F = sessionmaker(bind=engine)
+        s = F()
+        write_analysis_cache_rows(s, [dict(order[0]), dict(order[1])])
+        s.close()
+        s2 = F()
+        row = s2.query(AnalysisCache).one()
+        assert row.evidence_contract_id == RESOLVER_COMPLETE_V2, f"order contract {order}"
+        assert row.best_eval_mate == 3, f"richer evidence kept {order}"
+        s2.close()
+        engine.dispose()

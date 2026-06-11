@@ -15,6 +15,10 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import chess
+
+from app.move_classification import VALID_CLASSIFICATIONS
+
 
 def _is_finite_int(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
@@ -58,6 +62,58 @@ def _validate_minimal_best_eval(data: dict) -> bool:
     )
 
 
+def _pv_first_equals_best(data: dict) -> bool:
+    best_move = data.get("best_move_uci")
+    if not best_move:
+        return False
+    line = data.get("best_line_uci")
+    if isinstance(line, str):
+        line = line.split() if line else None
+    return isinstance(line, list) and len(line) > 1 and line[0] == best_move
+
+
+def _validate_resolver_complete_v2(data: dict) -> bool:
+    """Stronger resolver-complete contract that fails closed.
+
+    Requires the full eval triple every downstream consumer reads (drills,
+    recording, SRS), an explicit enum-valid classification, a multi-move PV
+    starting with the best move, AND internal delta consistency derived from the
+    position's active color. A malformed/missing FEN returns ``False`` rather than
+    propagating an exception through ``contract_satisfied``.
+    """
+    if not _pv_first_equals_best(data):
+        return False
+
+    classification = data.get("classification")
+    if classification not in VALID_CLASSIFICATIONS:
+        return False
+
+    played_eval = data.get("played_eval")
+    best_eval = data.get("best_eval")
+    eval_delta = data.get("eval_delta")
+    if not (_is_finite_int(played_eval) and _is_finite_int(best_eval)):
+        return False
+    if not (_is_finite_int(eval_delta) and eval_delta >= 0):
+        return False
+
+    fen = data.get("fen_before")
+    if not isinstance(fen, str) or not fen:
+        return False
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        return False
+
+    # played_eval/best_eval are white-relative cp; the stored delta is
+    # side-to-move-relative and clamped at >= 0.
+    if board.turn == chess.WHITE:
+        expected = best_eval - played_eval
+    else:
+        expected = played_eval - best_eval
+    expected = max(expected, 0)
+    return eval_delta == expected
+
+
 @dataclass(frozen=True)
 class Contract:
     contract_id: str
@@ -69,10 +125,31 @@ class Contract:
 
 
 RESOLVER_COMPLETE = "resolver-complete-v1"
+RESOLVER_COMPLETE_V2 = "resolver-complete-v2"
 MINIMAL_PLAYED_EVAL = "minimal-played-eval-v1"
 MINIMAL_BEST_EVAL = "minimal-best-eval-v1"
 
 _CONTRACTS: dict[str, Contract] = {
+    RESOLVER_COMPLETE_V2: Contract(
+        contract_id=RESOLVER_COMPLETE_V2,
+        required_fields=frozenset(
+            {
+                "fen_before",
+                "best_move_uci",
+                "best_line_uci",
+                "classification",
+                "played_eval",
+                "best_eval",
+                "eval_delta",
+            }
+        ),
+        # A v2 canonical row may upgrade a v1 row or either minimal row; the
+        # reverse is deliberately NOT allowed (v1 does not supersede v2).
+        supersedes=frozenset(
+            {RESOLVER_COMPLETE, MINIMAL_PLAYED_EVAL, MINIMAL_BEST_EVAL}
+        ),
+        validate=_validate_resolver_complete_v2,
+    ),
     RESOLVER_COMPLETE: Contract(
         contract_id=RESOLVER_COMPLETE,
         required_fields=frozenset({"best_move_uci", "best_line_uci"}),
@@ -132,6 +209,13 @@ def is_superset_or_successor(incoming_id: str | None, existing_id: str | None) -
     if contract is None:
         return False
     return existing_id in contract.supersedes
+
+
+def is_strict_successor(incoming_id: str | None, existing_id: str | None) -> bool:
+    """True when ``incoming_id`` strictly succeeds ``existing_id`` (not equal)."""
+    if incoming_id is None or existing_id is None or incoming_id == existing_id:
+        return False
+    return is_superset_or_successor(incoming_id, existing_id)
 
 
 def select_browser_contract(data: dict) -> str | None:

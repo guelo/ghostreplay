@@ -190,6 +190,7 @@ def _create_test_schema(conn) -> None:
             played_eval INTEGER,
             played_eval_mate INTEGER,
             best_eval INTEGER,
+            best_eval_mate INTEGER,
             eval_delta INTEGER,
             classification VARCHAR(20),
             source VARCHAR(20) NOT NULL DEFAULT 'game',
@@ -203,6 +204,10 @@ def _create_test_schema(conn) -> None:
             threads INTEGER,
             hash_mb INTEGER,
             multipv INTEGER,
+            eval_file_id TEXT,
+            eval_file_small_id TEXT,
+            analyzer_protocol_version VARCHAR(64),
+            profile_manifest_digest VARCHAR(64),
             evidence_contract_id VARCHAR(64),
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(fen_before, move_uci)

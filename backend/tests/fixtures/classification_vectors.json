@@ -1,0 +1,383 @@
+{
+  "description": "Shared golden vectors for classify_move_advanced (Python) / classifyMoveAdvanced (TS). Both post scores are opponent-to-move. Includes threshold-adjacent cases bracketing the 0.02/0.10/0.20/0.30 win-chance-drop boundaries.",
+  "cases": [
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 20
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 20
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": true,
+      "expected": "best"
+    },
+    {
+      "prevScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "scorePov": "black",
+      "mover": "black",
+      "isBest": true,
+      "expected": "best"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 300
+      },
+      "scorePov": "white",
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 600
+      },
+      "scorePov": "white",
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": -100
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "scorePov": "black",
+      "mover": "black",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 300
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "scorePov": "black",
+      "mover": "white",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": -1200
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": -5
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": -800
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": -5
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "mistake"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": -3
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 500
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": -2
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 1200
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "prevScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 800
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "mistake"
+    },
+    {
+      "prevScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 100
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": -4
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": -1200
+      },
+      "nextScore": {
+        "type": "mate",
+        "value": 5
+      },
+      "scorePov": "black",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "mate",
+        "value": -3
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": -1200
+      },
+      "scorePov": "black",
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 399
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 384
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 379
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "good"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 324
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "good"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 314
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 254
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 244
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "mistake"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 190
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "mistake"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 175
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "prevScore": {
+        "type": "cp",
+        "value": 400
+      },
+      "nextScore": {
+        "type": "cp",
+        "value": 30
+      },
+      "scorePov": "white",
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-"""The precompute script must refuse to run until it can produce its target contract."""
+"""The precompute script can now produce its target contract (resolver-complete-v2)."""
 
 import importlib
 
@@ -15,8 +15,14 @@ def _load_script():
     return importlib.import_module("precompute_openings")
 
 
-def test_assert_can_produce_target_contract_fails_for_resolver_complete():
+def test_assert_can_produce_target_contract_succeeds_for_v2():
     mod = _load_script()
-    # AnalysisResult lacks best_line_uci, so it cannot satisfy resolver-complete-v1.
+    # AnalysisResult now produces best_line_uci + classification + the eval triple
+    # + fen_before, so it satisfies resolver-complete-v2.
+    mod.assert_can_produce_target_contract()
+
+
+def test_assert_can_produce_target_contract_rejects_unknown_contract():
+    mod = _load_script()
     with pytest.raises(SystemExit):
-        mod.assert_can_produce_target_contract()
+        mod.assert_can_produce_target_contract("does-not-exist")

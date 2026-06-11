@@ -1,5 +1,7 @@
 """Unit tests for the pure analysis_cache replacement comparator."""
 
+import dataclasses
+
 from app.analysis_cache_policy import (
     CacheRow,
     Decision,
@@ -15,6 +17,7 @@ from app.evidence_contracts import (
     MINIMAL_BEST_EVAL,
     MINIMAL_PLAYED_EVAL,
     RESOLVER_COMPLETE,
+    RESOLVER_COMPLETE_V2,
 )
 
 
@@ -153,6 +156,45 @@ def test_same_browser_profile_idempotent():
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+# Rule 2 — contract-only successor upgrade (v1 -> v2, no new evidence field)
+def test_same_profile_contract_upgrade():
+    shared = {f: 1 for f in ("best_move_uci", "best_line_uci", "classification", "eval_delta")}
+    fields = set(shared)
+    existing = _canonical(fields, contract=RESOLVER_COMPLETE, values=shared)
+    incoming = _canonical(fields, contract=RESOLVER_COMPLETE_V2, values=shared)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.MERGE
+    assert reason is Reason.SAME_PROFILE_CONTRACT_UPGRADE
+
+
+def test_same_profile_same_contract_no_new_field_idempotent():
+    shared = {f: 1 for f in ("best_move_uci", "best_line_uci", "classification", "eval_delta")}
+    fields = set(shared)
+    existing = _canonical(fields, contract=RESOLVER_COMPLETE_V2, values=shared)
+    incoming = _canonical(fields, contract=RESOLVER_COMPLETE_V2, values=shared)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.SAME_PROFILE_IDEMPOTENT
+
+
+def test_retired_profile_row_is_not_authoritative(monkeypatch):
+    """A retired (inactive) canonical row stops counting as a trusted hit."""
+    import app.analysis_cache_policy as policy
+    from app.analysis_profiles import get_profile
+
+    canonical = get_profile(CANONICAL_PROFILE_ID)
+    retired = dataclasses.replace(canonical, active=False)
+
+    def fake_get_profile(pid):
+        if pid == CANONICAL_PROFILE_ID:
+            return retired
+        return get_profile(pid)
+
+    monkeypatch.setattr(policy, "get_profile", fake_get_profile)
+    row = _canonical({"best_move_uci", "best_line_uci"}, contract=RESOLVER_COMPLETE_V2)
+    assert row.is_effectively_authoritative() is False
 
 
 # Sparse JeffML cannot replace richer existing

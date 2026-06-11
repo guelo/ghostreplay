@@ -47,7 +47,9 @@ class CachedAnalysisResult(BaseModel):
 
 def _is_authoritative(row: AnalysisCache) -> bool:
     profile = get_profile(row.analysis_profile_id)
-    if profile is None or not profile.authoritative:
+    # A retired (inactive) profile's rows stay identity-verifiable but stop
+    # counting as trusted/authoritative cache hits.
+    if profile is None or not profile.authoritative or not profile.active:
         return False
     return all(getattr(row, f) == getattr(profile, f) for f in IDENTITY_FIELDS)
 

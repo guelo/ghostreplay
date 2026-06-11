@@ -833,3 +833,30 @@ describe('canResolveCachedAnalysis', () => {
     ).toBe(false)
   })
 })
+
+// Shared golden vectors — same fixture drives backend test_move_classification.py
+// so the two classifier implementations cannot drift.
+import classificationVectors from '../../backend/tests/fixtures/classification_vectors.json'
+
+describe('classifyMoveAdvanced golden vectors (shared with backend)', () => {
+  for (const [i, c] of (classificationVectors.cases as Array<{
+    prevScore: EngineScore
+    nextScore: EngineScore
+    scorePov: 'white' | 'black'
+    mover: 'white' | 'black'
+    isBest: boolean
+    expected: string
+  }>).entries()) {
+    it(`case ${i}: ${c.expected}`, () => {
+      expect(
+        classifyMoveAdvanced({
+          prevScore: c.prevScore,
+          nextScore: c.nextScore,
+          scorePov: c.scorePov,
+          mover: c.mover,
+          isBestMove: c.isBest,
+        }),
+      ).toBe(c.expected)
+    })
+  }
+})

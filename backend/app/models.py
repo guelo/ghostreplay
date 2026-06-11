@@ -296,6 +296,8 @@ class AnalysisCache(Base):
     # White-relative mate count for the played move (NULL when not a mate).
     played_eval_mate: Mapped[int | None] = mapped_column(Integer)
     best_eval: Mapped[int | None] = mapped_column(Integer)
+    # White-relative mate count for the best move (NULL when not a mate).
+    best_eval_mate: Mapped[int | None] = mapped_column(Integer)
     eval_delta: Mapped[int | None] = mapped_column(Integer)
     classification: Mapped[str | None] = mapped_column(String(20))
     source: Mapped[str] = mapped_column(String(20), nullable=False, server_default="game")
@@ -311,6 +313,13 @@ class AnalysisCache(Base):
     threads: Mapped[int | None] = mapped_column(Integer)
     hash_mb: Mapped[int | None] = mapped_column(Integer)
     multipv: Mapped[int | None] = mapped_column(Integer)
+    # Full NNUE network identities "<filename>:<hash>" (two embedded SF18 nets).
+    eval_file_id: Mapped[str | None] = mapped_column(Text)
+    eval_file_small_id: Mapped[str | None] = mapped_column(Text)
+    # Version of the analyzer output contract that produced this row.
+    analyzer_protocol_version: Mapped[str | None] = mapped_column(String(64))
+    # Digest of the immutable analysis-identity bits of the producing profile.
+    profile_manifest_digest: Mapped[str | None] = mapped_column(String(64))
     evidence_contract_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

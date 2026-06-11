@@ -103,6 +103,10 @@ _METADATA_FIELDS = (
     "threads",
     "hash_mb",
     "multipv",
+    "eval_file_id",
+    "eval_file_small_id",
+    "analyzer_protocol_version",
+    "profile_manifest_digest",
     "evidence_contract_id",
 )
 _EVIDENCE_FIELDS = (
@@ -112,6 +116,7 @@ _EVIDENCE_FIELDS = (
     "played_eval",
     "played_eval_mate",
     "best_eval",
+    "best_eval_mate",
     "eval_delta",
     "classification",
 )
@@ -174,7 +179,29 @@ def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, s
 
     Returns surviving rows plus (key, Reason) for keys rejected as conflicting.
     """
-    from app.evidence_contracts import is_superset_or_successor
+    from app.evidence_contracts import is_strict_successor, is_superset_or_successor
+
+    def _collapse_pair(a: dict, b: dict) -> dict | None:
+        """Union two comparable same-producer rows under the most-advanced contract.
+
+        Returns the merged row, or ``None`` when the union fails the surviving
+        contract's validation (treated as a conflict by the caller).
+        """
+        ca, cb = a.get("evidence_contract_id"), b.get("evidence_contract_id")
+        if is_strict_successor(cb, ca):
+            contract = cb
+        elif is_strict_successor(ca, cb):
+            contract = ca
+        else:  # equal (or incomparable, already excluded): keep incumbent's
+            contract = ca
+        merged = dict(a)
+        for f in _EVIDENCE_FIELDS:
+            if merged.get(f) is None and b.get(f) is not None:
+                merged[f] = b[f]
+        merged["evidence_contract_id"] = contract
+        if not contract_satisfied(contract, merged):
+            return None
+        return merged
 
     by_key: dict[tuple[str, str], dict] = {}
     rejected: list[tuple[tuple[str, str], Reason]] = []
@@ -233,10 +260,19 @@ def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, s
             and fields_comparable
             and _producer_equal(existing, data)
         ):
-            # Both valid and equivalent producer: keep the strictly most-complete;
-            # ties keep the incumbent.
-            if proj_i.populated_fields > proj_e.populated_fields:
-                by_key[key] = data
+            # Both valid and same producer: the survivor is the UNION of their
+            # evidence under the most-advanced contract, computed order-
+            # independently. This matches what sequential comparator merges would
+            # produce (e.g. v1 with best_eval_mate + v2 without -> the merged row
+            # carries best_eval_mate AND the v2 contract), instead of dropping
+            # either the richer evidence or the successor contract.
+            merged = _collapse_pair(existing, data)
+            if merged is None:
+                conflicted.add(key)
+                del by_key[key]
+                rejected.append((key, Reason.DUPLICATE_CONFLICT))
+            else:
+                by_key[key] = merged
         else:
             conflicted.add(key)
             del by_key[key]
