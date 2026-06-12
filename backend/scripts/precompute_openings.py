@@ -50,7 +50,11 @@ PROJECT_ROOT = BACKEND_ROOT.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.analysis_cache_repo import write_analysis_cache_rows
+from app.analysis_cache_repo import (
+    write_analysis_cache_rows,
+    _identity_verified,
+    _row_to_dict,
+)
 from app.analysis_cache_policy import Reason
 from app.analysis_profiles import (
     ANALYZER_PROTOCOL_VERSION,
@@ -58,7 +62,11 @@ from app.analysis_profiles import (
     resolve_profile,
     stamp_identity,
 )
-from app.evidence_contracts import RESOLVER_COMPLETE_V2, get_contract
+from app.evidence_contracts import (
+    RESOLVER_COMPLETE_V2,
+    contract_satisfied,
+    get_contract,
+)
 from app.models import AnalysisCache, Base
 from app.move_classification import EngineScore, classify_move_advanced
 
@@ -557,13 +565,15 @@ def _worker_thread(
             try:
                 result, outcome = _analyze_with_engine(engine, pos, depth)
             except (EngineTimeout, EngineDied) as exc:
-                log.error("[w%d] engine failure on %s: %s", worker_id, pos.move_uci, exc)
+                log.error("[w%d] engine failure on %s (%s) at fen %s: %s",
+                          worker_id, pos.move_san, pos.move_uci, pos.fen_before, exc)
                 with result_lock:
                     outcomes[(pos.fen_before, pos.move_uci)] = ERROR
                 abort.set()
                 break
             except Exception as exc:  # unexpected: abort the run
-                log.error("[w%d] unexpected error on %s: %s", worker_id, pos.move_uci, exc)
+                log.error("[w%d] unexpected error on %s (%s) at fen %s: %s",
+                          worker_id, pos.move_san, pos.move_uci, pos.fen_before, exc)
                 with result_lock:
                     outcomes[(pos.fen_before, pos.move_uci)] = ERROR
                     worker_errors.append((worker_id, f"{pos.move_uci}: {exc}"))
@@ -584,10 +594,10 @@ def _worker_thread(
                 log.info("%d/%d (%d%%) — %.2f pos/s — ETA %.0fm",
                          n, total, n * 100 // total, rate, eta_min)
             if _verbose:
-                log.info("[w%d] %s (%s) → best %s Δ%s [%s] (%.1fs)",
+                log.info("[w%d] %s (%s) → best %s Δ%s [%s] (%.1fs) fen %s",
                          worker_id, pos.move_san, pos.move_uci,
                          result.best_move_uci, result.eval_delta, outcome,
-                         time.time() - pos_start)
+                         time.time() - pos_start, pos.fen_before)
     finally:
         engine.close()
 
@@ -766,6 +776,39 @@ def _verify_stored(
     return failures
 
 
+def filter_unstored_positions(
+    db: Session, positions: list[PositionToAnalyze], profile_id: str
+) -> tuple[list[PositionToAnalyze], int]:
+    """Return ``(remaining_positions, already_stored_count)`` for resume.
+
+    A position is treated as already done only when its stored row passes the
+    exact gate prod uses at read time: full stored identity matches the
+    registered profile (``_identity_verified`` — covers the manifest digest and
+    every IDENTITY_FIELD) AND the row satisfies the v2 contract's semantic
+    validation (``contract_satisfied`` — classification enum, full eval triple,
+    PV length/order, delta consistency). Rows that only nominally claim the
+    profile/contract but fail either check are KEPT (re-analyzed), so a malformed
+    legacy row can never short-circuit into a false ``status: ok``.
+    """
+    rows = (
+        db.query(AnalysisCache)
+        .filter(
+            AnalysisCache.analysis_profile_id == profile_id,
+            AnalysisCache.evidence_contract_id == RESOLVER_COMPLETE_V2,
+        )
+        .all()
+    )
+    verified: set[tuple[str, str]] = set()
+    for row in rows:
+        data = _row_to_dict(row)
+        if _identity_verified(data) and contract_satisfied(RESOLVER_COMPLETE_V2, data):
+            verified.add((row.fen_before, row.move_uci))
+    remaining = [
+        p for p in positions if (p.fen_before, p.move_uci) not in verified
+    ]
+    return remaining, len(positions) - len(remaining)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Pre-compute canonical Stockfish analysis for the opening book."
@@ -775,6 +818,10 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--stockfish", default="stockfish")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Disable resume; re-analyze every position even if an "
+                             "authoritative resolver-complete-v2 row already exists "
+                             "for the resolved profile.")
     parser.add_argument("--manifest-out", type=Path, default=None,
                         help="Run manifest sidecar path (default: "
                              "backend/precompute_run_manifest.json; always written).")
@@ -835,6 +882,59 @@ def main() -> None:
 
         engine = create_engine(args.database_url)
         Base.metadata.create_all(engine)
+
+        # Resume: skip positions that already carry a TRUSTWORTHY authoritative
+        # resolver-complete-v2 row for THIS resolved profile. "Trustworthy" means
+        # the exact gate prod uses at read time: full stored identity matches the
+        # registered profile (``_identity_verified``, which covers the manifest
+        # digest and every IDENTITY_FIELD) AND the row passes the v2 contract's
+        # semantic validation (``contract_satisfied`` — classification enum, the
+        # full eval triple, PV length/order, and delta consistency). A row that
+        # only nominally claims the profile/contract but fails either check is NOT
+        # skipped: it is re-analyzed and re-written, then caught by the final
+        # verification gate — so a malformed legacy row can never yield a false
+        # ``status: ok``. For a brand-new profile (e.g. SF19) nothing matches, so
+        # resume is a no-op and the full book is analyzed.
+        book_total = total
+        already_stored = 0
+        if not args.no_resume:
+            with Session(engine) as db:
+                positions, already_stored = filter_unstored_positions(
+                    db, positions, profile_id
+                )
+            total = len(positions)
+            log.info(
+                "Resume: %d/%d positions already verified-stored for %s; "
+                "%d remaining.",
+                already_stored, book_total, profile_id, total,
+            )
+
+        if total == 0:
+            log.info("Nothing to analyze — all positions already stored. "
+                     "Skipping worker startup.")
+            result_list: list[AnalysisResult] = []
+            outcomes: dict = {}
+            unprocessed: set = set()
+            errored: list = []
+            skipped: list = []
+            write_failures: list[tuple[str, str]] = []
+            verify_failures: list[tuple[str, str]] = []
+            worker_errors = []
+            accepted = 0
+            _write_run_manifest(
+                manifest_path, "ok", started_at=start, strict=True,
+                profile_id=profile_id,
+                profile_manifest_digest=get_profile(profile_id).profile_manifest_digest,
+                eco_sha256=_sha256_file(str(args.eco_path)),
+                workers=args.workers, depth=args.depth,
+                total=total, book_total=book_total,
+                already_stored_skipped=already_stored,
+                stored=0, skipped_no_continuation=0, errored=0,
+                unprocessed=0, write_failures=0, verify_failures=0, worker_errors=0,
+            )
+            terminal_written = True
+            log.info("Done. Nothing to do in %.1f min.", (time.time() - start) / 60)
+            return
 
         log.info("Starting analysis: %d positions, depth %d, %d worker(s)",
                  total, args.depth, args.workers)
@@ -916,6 +1016,8 @@ def main() -> None:
             workers=args.workers,
             depth=args.depth,
             total=total,
+            book_total=book_total,
+            already_stored_skipped=already_stored,
             stored=accepted,
             skipped_no_continuation=len(skipped),
             errored=len(errored),

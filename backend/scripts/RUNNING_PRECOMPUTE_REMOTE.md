@@ -178,6 +178,33 @@ python scripts/precompute_openings.py \
 `--workers` ≈ physical cores (each worker is one single-threaded SF at 128MB
 hash). Default is 1 — bump it up.
 
+**Resume is automatic.** On startup the script skips any position that already
+has an authoritative resolver-complete-v2 row for the resolved profile (matched
+by profile id + contract + manifest digest). So if a run aborts partway, just
+**re-run the exact same command** — it processes only the remaining positions and
+each run makes forward progress. The log prints `Resume: N/M positions already
+stored ...`. For a brand-new profile (e.g. SF19) nothing is stored yet, so resume
+is a no-op and the full book is analyzed. Pass `--no-resume` to force a full
+re-analysis. Resume only skips rows that pass the same trust gate prod uses at
+read time (full identity match + v2 contract validation); a malformed row is
+re-analyzed rather than skipped.
+
+No DB writes happen *during* the hours of analysis — all results are held in
+memory and flushed only after every worker joins. That flush then commits in
+independent ~100-row transactions, so a crash mid-flush (or an aborted run) can
+leave some batches committed and others not. That's fine: resume validates each
+stored row independently on the next run, so partial commits simply become fewer
+remaining positions.
+
+> One slow search aborts the whole run. The 300s `SEARCH_DEADLINE_S` is **per
+> search**, and each position runs up to 3 searches, so a position can take >300s
+> in aggregate and still pass — but a *single* search exceeding 300s raises
+> `EngineTimeout`, which calls `abort.set()` and stops all workers (the
+> in-flight/completed results are still written on join). Under heavy worker
+> contention this can hit a hard position. Just re-run; resume picks up where it
+> left off. The per-position and engine-failure log lines include the FEN, so you
+> can identify a deterministically-slow position if the same one keeps timing out.
+
 ### 8. Verify and record
 
 ```bash
@@ -203,3 +230,4 @@ the relevant beads issue.
 | connection refused / timeout to `*.railway.internal` | used the private URL from an external box | use `DATABASE_PUBLIC_URL` (`*.proxy.rlwy.net`) |
 | TLS/SSL errors against Railway | missing sslmode | append `?sslmode=require` |
 | `$SF` empty inside `python - <<PY` | var set but not exported | `export SF` before the heredoc |
+| `engine failure on <move> at fen <fen>: engine read deadline exceeded`; manifest `status: failed` with large `unprocessed` | one search exceeded 300s under load and aborted all workers | re-run the same command — resume skips the already-stored rows; if the *same* FEN times out every run, that position is pathological (investigate it or raise `SEARCH_DEADLINE_S`) |
