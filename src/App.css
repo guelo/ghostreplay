@@ -5203,6 +5203,28 @@
     }
 }
 
+/*
+ * 2-col /play, short viewports (≤760px tall, ≥768px wide — the band where the
+ * board sits left of a full-width analysis graph). The board is capped by
+ * --game-board-max-width while its column still has horizontal slack, and the
+ * 6.5rem/8.5rem chrome bumps above over-reserve vertical space — leaving dead
+ * margin below the graph. Those bumps were sized for the old fixed-220px graph;
+ * now that the graph shrinks with viewport height (clamp at line ~7560), the
+ * reservation is doubly stale. Shrink the reserved chrome to roughly the real
+ * top offset so the board grows into that margin. Because raising the board's
+ * max-width only enlarges a width-constrained board, this is a no-op once the
+ * board already fills its column (narrower viewports) — matching "grow only
+ * when the board isn't using all its width" — and once the board hits its 300px
+ * floor at very short heights. The larger board pushes the graph down to the
+ * viewport bottom. Must follow the max-height bumps above so source order wins
+ * (equal specificity). See g-jth2 / g-9g1y.
+ */
+@media (min-width: 768px) and (max-width: 1099px) and (max-height: 760px) {
+    .chess-layout {
+        --game-viewport-chrome: 3rem;
+    }
+}
+
 /* Turn labels */
 .turn-label {
     display: inline-flex;
@@ -7554,6 +7576,14 @@ button.openings-shell__crumb:hover {
     }
 
     .chess-layout {
+        /*
+         * Shrink the graph proportionally to viewport height so it stays above
+         * the fold on short viewports. Tied to dvh (the independent variable)
+         * because board height depends on graph height. Caps at the desktop
+         * 220px above ~1100px tall; floors at 110px to stay readable and keep
+         * the graph in view down to ~600px. See g-9g1y.
+         */
+        --game-graph-height: clamp(110px, 20dvh, 220px);
         grid-template-columns: minmax(0, 1fr) minmax(180px, 240px);
         grid-template-areas:
             "board moves"
