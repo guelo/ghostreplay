@@ -28,17 +28,22 @@ describe("App landing page", () => {
 
     expect(
       screen.getByRole("heading", {
-        name: /your blunders are coming back\. good\./i,
+        name: /two ways to outplay past you/i,
       }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("heading", {
-        name: /how long can you keep the perfect line alive/i,
+        name: /your blunders come back to haunt you/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: /the best way to learn an opening/i,
       }),
     ).toBeInTheDocument();
     expect(
       screen.getAllByRole("link", { name: /start an opening drill/i }),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
 
     const destinations = Array.from(
       container.querySelectorAll<HTMLAnchorElement>("a[href]"),

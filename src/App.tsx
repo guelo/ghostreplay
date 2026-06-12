@@ -153,13 +153,69 @@ function TrainingBoard() {
   );
 }
 
+function DrillConsole() {
+  return (
+    <div className="home-drill-console" aria-hidden="true">
+      <div className="home-drill-console__topbar">
+        <span>
+          <i />
+          Drilling: Sicilian Defense
+        </span>
+        <strong>HAUNTED LINE</strong>
+      </div>
+
+      <div className="home-drill-console__score">
+        <div>
+          <span>Perfect streak</span>
+          <strong>17</strong>
+          <small>moves and counting</small>
+        </div>
+        <div className="home-drill-console__spirit">
+          <img
+            src="/branding/ghost-logo-option-3-wink-glasses.svg"
+            alt=""
+          />
+          <span>still watching</span>
+        </div>
+      </div>
+
+      <ol className="home-drill-console__moves">
+        <li>
+          <span>1. e4</span>
+          <span>c5</span>
+          <strong>Perfect</strong>
+        </li>
+        <li>
+          <span>2. Nf3</span>
+          <span>d6</span>
+          <strong>Perfect</strong>
+        </li>
+        <li className="home-drill-console__move--active">
+          <span>3. d4</span>
+          <span>...</span>
+          <strong>Your move</strong>
+        </li>
+      </ol>
+
+      <div className="home-drill-console__footer">
+        <span>
+          <strong>98%</strong> book accuracy
+        </span>
+        <span>
+          <strong>👻 1</strong> ghost lurking
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   return (
     <main className="app-shell home-page">
       <AppNav showLogo />
 
       <div className="constrained-content home-page__content">
-        <section className="home-hero">
+        <section className="home-hero home-hero--twin">
           <div className="home-hero__atmosphere" aria-hidden="true">
             <span>♞</span>
             <span>✦</span>
@@ -167,44 +223,91 @@ function App() {
             <span>✧</span>
           </div>
 
-          <div className="home-hero__copy">
+          <div className="home-hero__intro">
             <p className="home-kicker">
               <span aria-hidden="true">👻</span> Personal chess training with
               unfinished business
             </p>
             <h1>
-              Your blunders are coming back.{" "}
-              <span className="home-hero__accent">Good.</span>
+              Two ways to outplay{" "}
+              <span className="home-hero__accent">past you.</span>
             </h1>
             <p className="home-hero__lede">
-              Ghost Replay remembers the positions that beat you, then sneaks
-              them into future games until the better move sticks.
+              Ghost Replay turns your own games into training: it haunts you with
+              the blunders you keep making, and drills the openings you want to
+              own — until both become second nature.
             </p>
+          </div>
 
-            <div className="home-hero__actions">
+          <div className="home-twin">
+            <article className="home-feature home-feature--ghost">
+              <div className="home-feature__head">
+                <span className="home-feature__badge" aria-hidden="true">
+                  👻
+                </span>
+                <div>
+                  <p className="home-feature__eyebrow">Ghost Replay</p>
+                  <h2>Your blunders come back to haunt you.</h2>
+                </div>
+              </div>
+              <p className="home-feature__lede">
+                Every costly move becomes a personal case file. We sneak the
+                position back into future games until the better move sticks.
+              </p>
+
+              <div className="home-feature__visual">
+                <span className="home-hero__scribble" aria-hidden="true">
+                  it remembers →
+                </span>
+                <TrainingBoard />
+              </div>
+
+              <ul className="home-feature__proof" aria-label="Ghost Replay highlights">
+                <li>Built from your games</li>
+                <li>Engine checked</li>
+                <li>Spaced just right</li>
+              </ul>
+
               <Link to="/play" className="chess-button primary home-button">
                 Summon a ghost game <span aria-hidden="true">→</span>
               </Link>
+            </article>
+
+            <article className="home-feature home-feature--drill">
+              <div className="home-feature__head">
+                <span className="home-feature__badge" aria-hidden="true">
+                  ⚡
+                </span>
+                <div>
+                  <p className="home-feature__eyebrow">Opening Drills</p>
+                  <h2>The best way to learn an opening.</h2>
+                </div>
+              </div>
+              <p className="home-feature__lede">
+                Replay your repertoire move by move. Every best move grows the
+                streak; one slip wakes the ghost. Lines turn into instinct.
+              </p>
+
+              <div className="home-feature__visual">
+                <span className="home-hero__scribble" aria-hidden="true">
+                  keep the streak →
+                </span>
+                <DrillConsole />
+              </div>
+
+              <ul className="home-feature__proof" aria-label="Opening Drills highlights">
+                <li>Drill any branch</li>
+                <li>Instant feedback</li>
+                <li>Beat your best streak</li>
+              </ul>
+
               <Link
                 to="/openings"
-                className="chess-button home-button home-button--quiet"
+                className="chess-button home-button home-feature__cta-drill"
               >
-                Start an opening drill
+                Start an opening drill <span aria-hidden="true">→</span>
               </Link>
-            </div>
-
-            <ul className="home-hero__proof" aria-label="Training highlights">
-              <li>Built from your games</li>
-              <li>Engine checked</li>
-              <li>Spaced just right</li>
-            </ul>
-          </div>
-
-          <div className="home-hero__visual">
-            <span className="home-hero__scribble" aria-hidden="true">
-              it remembers →
-            </span>
-            <TrainingBoard />
+            </article>
           </div>
         </section>
 
@@ -232,88 +335,6 @@ function App() {
               </li>
             ))}
           </ol>
-        </section>
-
-        <section
-          className="home-drill-feature"
-          aria-labelledby="home-drill-feature-title"
-        >
-          <div className="home-drill-feature__copy">
-            <p className="home-kicker">
-              <span aria-hidden="true">⚡</span> Opening drill challenge
-            </p>
-            <h2 id="home-drill-feature-title">
-              How long can you keep the perfect line alive?
-            </h2>
-            <p>
-              Choose a weak branch from your own repertoire and replay it move
-              by move. Every best move grows the streak. One slip wakes the
-              ghost.
-            </p>
-            <ul className="home-drill-feature__proof">
-              <li>Built from your real games</li>
-              <li>Instant engine feedback</li>
-              <li>Drill any opening branch</li>
-            </ul>
-            <Link
-              to="/openings"
-              className="chess-button home-button home-drill-feature__button"
-            >
-              Start an opening drill <span aria-hidden="true">→</span>
-            </Link>
-          </div>
-
-          <div className="home-drill-console" aria-hidden="true">
-            <div className="home-drill-console__topbar">
-              <span>
-                <i />
-                Drilling: Sicilian Defense
-              </span>
-              <strong>HAUNTED LINE</strong>
-            </div>
-
-            <div className="home-drill-console__score">
-              <div>
-                <span>Perfect streak</span>
-                <strong>17</strong>
-                <small>moves and counting</small>
-              </div>
-              <div className="home-drill-console__spirit">
-                <img
-                  src="/branding/ghost-logo-option-3-wink-glasses.svg"
-                  alt=""
-                />
-                <span>still watching</span>
-              </div>
-            </div>
-
-            <ol className="home-drill-console__moves">
-              <li>
-                <span>1. e4</span>
-                <span>c5</span>
-                <strong>Perfect</strong>
-              </li>
-              <li>
-                <span>2. Nf3</span>
-                <span>d6</span>
-                <strong>Perfect</strong>
-              </li>
-              <li className="home-drill-console__move--active">
-                <span>3. d4</span>
-                <span>...</span>
-                <strong>Your move</strong>
-              </li>
-            </ol>
-
-            <div className="home-drill-console__footer">
-              <span>
-                <strong>98%</strong> book accuracy
-              </span>
-              <span>
-                <strong>👻 1</strong> ghost lurking
-              </span>
-            </div>
-          </div>
         </section>
 
         <section className="home-rooms" aria-labelledby="home-rooms-title">
