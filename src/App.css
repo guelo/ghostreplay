@@ -4148,11 +4148,11 @@
     height: auto;
     display: block;
     border-radius: 0.5rem;
-    background: #fff;
+    background: var(--graph-bg);
 }
 
 .analysis-graph__zero-line {
-    stroke: var(--text-tertiary);
+    stroke: var(--graph-line);
     stroke-width: 1.5;
 }
 
@@ -4166,24 +4166,24 @@
 
 .analysis-graph__line {
     fill: none;
-    stroke: var(--text-tertiary);
+    stroke: var(--graph-line);
     stroke-width: 1.5;
     stroke-linejoin: round;
 }
 
 .analysis-graph__line--streaming {
-    stroke: var(--text-tertiary);
+    stroke: var(--graph-line);
     opacity: 0.7;
 }
 
 .analysis-graph__streaming-dot {
-    fill: var(--text-tertiary);
+    fill: var(--graph-line);
     opacity: 0.8;
 }
 
 .analysis-graph__pending-dot {
     fill: none;
-    stroke: var(--text-tertiary);
+    stroke: var(--graph-line);
     stroke-width: 1;
     opacity: 0.5;
 }

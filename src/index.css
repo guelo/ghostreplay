@@ -141,12 +141,10 @@
     );
 
     /* Graph & Analysis */
-    --graph-area-dark: color-mix(in srgb, var(--text-primary) 8%, transparent);
-    --graph-area-light: color-mix(
-        in srgb,
-        var(--bg-secondary) 40%,
-        transparent
-    );
+    --graph-line: #e9ac77;
+    --graph-bg: #f4f0e9;
+    --graph-area-dark: #faf9f8;
+    --graph-area-light: #bebcba;
     --scrim-ended: color-mix(in srgb, var(--text-primary) 8%, transparent);
 
     /* Status Colors */
