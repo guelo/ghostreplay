@@ -20,6 +20,7 @@ import {
   AnalysisStoreProvider,
 } from "../stores/createAnalysisStore";
 import { useGameAnalysisCoordinator } from "../contexts/useGameAnalysisCoordinator";
+import { gradeDrillMove } from "../workers/analysisUtils";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen, prewarmOpeningBook } from "../openings/openingBook";
 import { scheduleIdle } from "../utils/scheduleIdle";
@@ -1023,7 +1024,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           useGameStore.getState().drillStrictnessCp,
           useGameStore.getState().drillStrictness,
         );
-        if (analysis.delta !== null && analysis.delta > threshold) {
+        // Tri-state grade: a missing/non-finite eval is `unavailable` (NOT a
+        // pass) and routes to the same recovery path as a failed analysis fetch
+        // so the drill never silently advances on ungraded moves. The boundary
+        // value and 0cp PASS (failsDrill uses strict `>`).
+        const grade = gradeDrillMove(analysis.delta, threshold);
+        if (grade === "unavailable") {
+          setDrillRecovery({ kind: "analysis", result });
+          setEngineMessage(
+            "Move analysis is unavailable. Try again or abandon the drill.",
+          );
+          return;
+        }
+        if (grade === "fail") {
           try {
             await stopPostRootDrillForAccuracy(capturedSessionId, result, analysis);
           } catch (error) {

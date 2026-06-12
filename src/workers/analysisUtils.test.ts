@@ -17,6 +17,11 @@ import {
   classifyMoveAdvanced,
   canResolveCachedAnalysis,
   isTrustedCacheHit,
+  isMoveClassification,
+  evalLoss,
+  failsDrill,
+  gradeDrillMove,
+  gradeRecordableMove,
   calculateWinChance,
   checkMateEvents,
   WIN_CHANCE_MULTIPLIER,
@@ -452,6 +457,83 @@ describe('computeAnalysisResult', () => {
   })
 })
 
+describe('evalLoss', () => {
+  it('clamps the delta to >= 0', () => {
+    expect(evalLoss(35)).toBe(35)
+    expect(evalLoss(0)).toBe(0)
+    expect(evalLoss(-20)).toBe(0)
+  })
+
+  it('returns null for missing or non-finite deltas', () => {
+    expect(evalLoss(null)).toBe(null)
+    expect(evalLoss(undefined)).toBe(null)
+    expect(evalLoss(Infinity)).toBe(null)
+    expect(evalLoss(NaN)).toBe(null)
+  })
+})
+
+describe('failsDrill vs isRecordableFailure boundaries (separate comparators)', () => {
+  // The drill comparator uses strict `>` (boundary PASSES); recording/SRS use
+  // inclusive `>=` 50 (boundary FAILS). The two MUST NOT collapse into one.
+  for (const v of [0, 15, 35, 50]) {
+    it(`drill @${v}: equal value passes, above fails, below passes`, () => {
+      expect(failsDrill(v, v)).toBe(false) // boundary PASSES
+      expect(failsDrill(v + 1, v)).toBe(true)
+      expect(failsDrill(v - 1, v)).toBe(false)
+    })
+  }
+
+  it('drill: 0cp passes any strictness, including 0', () => {
+    expect(failsDrill(0, 0)).toBe(false)
+    expect(failsDrill(0, 50)).toBe(false)
+  })
+
+  it('recording: 50 fails (inclusive), 49 passes', () => {
+    expect(isRecordableFailure(50)).toBe(true)
+    expect(isRecordableFailure(49)).toBe(false)
+  })
+
+  it('non-finite delta is never a drill or recordable failure', () => {
+    expect(failsDrill(null, 0)).toBe(false)
+    expect(failsDrill(Infinity, 0)).toBe(false)
+    expect(isRecordableFailure(null)).toBe(false)
+    expect(isRecordableFailure(NaN)).toBe(false)
+  })
+})
+
+describe('gradeDrillMove / gradeRecordableMove tri-state', () => {
+  it('drill: unavailable for null/non-finite, pass at/below strictness, fail above', () => {
+    expect(gradeDrillMove(null, 35)).toBe('unavailable')
+    expect(gradeDrillMove(NaN, 35)).toBe('unavailable')
+    expect(gradeDrillMove(35, 35)).toBe('pass') // boundary passes
+    expect(gradeDrillMove(0, 35)).toBe('pass')
+    expect(gradeDrillMove(36, 35)).toBe('fail')
+  })
+
+  it('recordable: unavailable for null, pass below 50, fail at/above 50', () => {
+    expect(gradeRecordableMove(null)).toBe('unavailable')
+    expect(gradeRecordableMove(49)).toBe('pass')
+    expect(gradeRecordableMove(50)).toBe('fail') // boundary fails
+    expect(gradeRecordableMove(500)).toBe('fail')
+  })
+})
+
+describe('isMoveClassification', () => {
+  it('accepts every union member', () => {
+    for (const c of ['best', 'excellent', 'good', 'inaccuracy', 'mistake', 'blunder']) {
+      expect(isMoveClassification(c)).toBe(true)
+    }
+  })
+
+  it('rejects arbitrary strings and non-strings', () => {
+    expect(isMoveClassification('great')).toBe(false)
+    expect(isMoveClassification('')).toBe(false)
+    expect(isMoveClassification(null)).toBe(false)
+    expect(isMoveClassification(undefined)).toBe(false)
+    expect(isMoveClassification(3)).toBe(false)
+  })
+})
+
 describe('isRecordableFailure', () => {
   it('threshold constant is 50', () => {
     expect(RECORDABLE_FAILURE_THRESHOLD_CP).toBe(50)
@@ -812,15 +894,36 @@ describe('canResolveCachedAnalysis', () => {
     ).toBe(false)
   })
 
-  it('still rejects rows missing both classification and eval delta', () => {
+  it('rejects rows whose classification is not a valid MoveClassification', () => {
+    expect(
+      canResolveCachedAnalysis({
+        best_move_uci: 'e2e4',
+        best_line_uci: ['e2e4', 'e7e5'],
+        classification: 'totally-not-a-classification',
+        eval_delta: 0,
+      }),
+    ).toBe(false)
+
     expect(
       canResolveCachedAnalysis({
         best_move_uci: 'e2e4',
         best_line_uci: ['e2e4', 'e7e5'],
         classification: null,
-        eval_delta: null,
+        eval_delta: 0,
       }),
     ).toBe(false)
+  })
+
+  it('rejects rows with a null/non-finite/negative eval_delta', () => {
+    const base = {
+      best_move_uci: 'e2e4',
+      best_line_uci: ['e2e4', 'e7e5'],
+      classification: 'best' as const,
+    }
+    expect(canResolveCachedAnalysis({ ...base, eval_delta: null })).toBe(false)
+    expect(canResolveCachedAnalysis({ ...base, eval_delta: -1 })).toBe(false)
+    expect(canResolveCachedAnalysis({ ...base, eval_delta: Infinity })).toBe(false)
+    expect(canResolveCachedAnalysis({ ...base, eval_delta: NaN })).toBe(false)
   })
 
   it('rejects rows that have no best move to avoid synthesizing a PV-less best line', () => {
@@ -828,7 +931,7 @@ describe('canResolveCachedAnalysis', () => {
       canResolveCachedAnalysis({
         best_move_uci: null,
         best_line_uci: null,
-        classification: null,
+        classification: 'best',
         eval_delta: 0,
       }),
     ).toBe(false)
@@ -843,18 +946,27 @@ describe('isTrustedCacheHit', () => {
     eval_delta: 0,
   }
 
-  it('accepts an authoritative + structurally-complete row', () => {
-    expect(isTrustedCacheHit({ ...complete, authoritative: true })).toBe(true)
+  it('trusts a backend-marked trusted_for_resolution row, independent of the diagnostic fields', () => {
+    expect(
+      isTrustedCacheHit({ ...complete, trusted_for_resolution: true }),
+    ).toBe(true)
   })
 
-  it('rejects a structurally-complete but non-authoritative row', () => {
-    expect(isTrustedCacheHit({ ...complete, authoritative: false })).toBe(false)
+  it('does NOT trust a row the backend left untrusted, regardless of authoritative/contract surface', () => {
+    expect(
+      isTrustedCacheHit({ ...complete, trusted_for_resolution: false }),
+    ).toBe(false)
+    // No trusted flag at all -> worker fallback.
     expect(isTrustedCacheHit({ ...complete })).toBe(false)
   })
 
-  it('rejects an authoritative row that is structurally incomplete', () => {
+  it('falls back to the worker when a trusted row lacks renderable structure', () => {
     expect(
-      isTrustedCacheHit({ ...complete, best_line_uci: null, authoritative: true }),
+      isTrustedCacheHit({
+        ...complete,
+        best_line_uci: null,
+        trusted_for_resolution: true,
+      }),
     ).toBe(false)
   })
 })

@@ -544,6 +544,60 @@ describe("AnalysisEffects — best-move bling", () => {
     expect(pendingSrsReviewRef.current.size).toBe(0);
   });
 
+  it("retains the pending entry and posts nothing when the SRS grade is unavailable (null delta)", () => {
+    const analysisId = "analysis-unavailable";
+    useGameStore.setState({
+      sessionId: "session-1",
+      playerColor: "white",
+      isGameActive: true,
+      isPracticeContinuation: false,
+    });
+
+    const pendingSrsReviewRef = createPendingSrsReviewRef([
+      [
+        analysisId,
+        {
+          sessionId: "session-one",
+          analysisId,
+          blunderId: 42,
+          moveIndex: 0,
+          userMoveSan: "e4",
+          srs: null,
+        },
+      ],
+    ]);
+    const setResolvedReview = vi.fn();
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <AnalysisEffects
+          pendingAnalysisContextRef={createRef() as any}
+          blunderRecordedRef={createRef() as any}
+          pendingSrsReviewRef={pendingSrsReviewRef as any}
+          appendMoveMessage={vi.fn()}
+          setBlunderAlert={vi.fn()}
+          setShowFlash={vi.fn()}
+          setResolvedReview={setResolvedReview}
+          onSrsFail={vi.fn()}
+        />
+      </AnalysisStoreProvider>,
+    );
+
+    act(() => {
+      store.getState().setLastAnalysis(makeResult({
+        id: analysisId,
+        moveIndex: 0,
+        delta: null,
+      }));
+    });
+
+    // 'unavailable' must NOT consume the entry (so g-hpw4's retry can reconnect)
+    // and must NOT post a review or a pass/fail resolution.
+    expect(pendingSrsReviewRef.current.has(analysisId)).toBe(true);
+    expect(reviewSrsBlunderMock).not.toHaveBeenCalled();
+    expect(setResolvedReview).not.toHaveBeenCalled();
+  });
+
   it("keeps pending SRS entries for unknown analysis ids and move-index mismatches", () => {
     useGameStore.setState({
       sessionId: "session-1",

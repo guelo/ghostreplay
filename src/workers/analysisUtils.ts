@@ -172,12 +172,71 @@ export const computeAnalysisResult = (input: {
 }
 
 /**
- * Determines if a move is a recordable failure (for blunder recording and SRS
- * review pass/fail). Uses a simple fixed threshold — no context-aware scaling.
+ * Tri-state grade for a played move. `unavailable` means the eval is missing or
+ * non-finite (NOT a pass): the move could not be graded and callers must route
+ * to a recovery/no-op path rather than treating it as correct.
  */
-export const isRecordableFailure = (delta: number | null): boolean => {
-  if (delta === null) return false
-  return delta >= RECORDABLE_FAILURE_THRESHOLD_CP
+export type MoveGrade = 'pass' | 'fail' | 'unavailable'
+
+/**
+ * The authoritative centipawn loss for threshold decisions: the played move's
+ * delta clamped to >= 0, or `null` when the delta is missing/non-finite. Every
+ * threshold comparator below derives from this single helper so drill accuracy,
+ * regular-game recording, and SRS pass/fail read the same eval surface.
+ */
+export const evalLoss = (delta: number | null | undefined): number | null => {
+  if (delta === null || delta === undefined || !Number.isFinite(delta)) {
+    return null
+  }
+  return Math.max(delta, 0)
+}
+
+/**
+ * Drill-accuracy comparator: a move FAILS only when its eval loss strictly
+ * EXCEEDS the configured strictness (the boundary value PASSES). Distinct from
+ * the recording/SRS comparator on purpose — do not merge the two thresholds.
+ */
+export const failsDrill = (
+  delta: number | null | undefined,
+  strictnessCp: number,
+): boolean => {
+  const loss = evalLoss(delta)
+  return loss !== null && loss > strictnessCp
+}
+
+/**
+ * Determines if a move is a recordable failure (for blunder recording and SRS
+ * review pass/fail). Inclusive boundary (>= 50) matching the backend contract
+ * (SPEC.md:1012) — the boundary value FAILS. No context-aware scaling.
+ */
+export const isRecordableFailure = (delta: number | null | undefined): boolean => {
+  const loss = evalLoss(delta)
+  return loss !== null && loss >= RECORDABLE_FAILURE_THRESHOLD_CP
+}
+
+/**
+ * Tri-state drill grade. `unavailable` when the eval is missing/non-finite;
+ * otherwise `fail` when failsDrill (> strictness), else `pass` (boundary and
+ * 0cp pass regardless of best-move equality).
+ */
+export const gradeDrillMove = (
+  delta: number | null | undefined,
+  strictnessCp: number,
+): MoveGrade => {
+  if (evalLoss(delta) === null) return 'unavailable'
+  return failsDrill(delta, strictnessCp) ? 'fail' : 'pass'
+}
+
+/**
+ * Tri-state recordable grade (regular-game recording + SRS). `unavailable` when
+ * the eval is missing/non-finite; otherwise `fail` when isRecordableFailure
+ * (>= 50), else `pass`.
+ */
+export const gradeRecordableMove = (
+  delta: number | null | undefined,
+): MoveGrade => {
+  if (evalLoss(delta) === null) return 'unavailable'
+  return isRecordableFailure(delta) ? 'fail' : 'pass'
 }
 
 export const isWithinRecordingMoveCap = (
@@ -215,11 +274,28 @@ export const classifyMove = (
   return 'blunder'
 }
 
+const MOVE_CLASSIFICATIONS: ReadonlySet<MoveClassification> = new Set([
+  'best',
+  'excellent',
+  'good',
+  'inaccuracy',
+  'mistake',
+  'blunder',
+])
+
+/** Lightweight runtime membership guard over the MoveClassification union. */
+export const isMoveClassification = (
+  value: unknown,
+): value is MoveClassification =>
+  typeof value === 'string' &&
+  MOVE_CLASSIFICATIONS.has(value as MoveClassification)
+
 /**
- * Cache hits must carry enough data to classify the move immediately and to
- * preserve the cached best-move PV. Rows missing either contract are treated
- * as misses so the worker can produce a complete result instead of freezing
- * incomplete analysis into session uploads.
+ * Local-build guard: a cached row carries enough VALID data to render a result
+ * immediately and to preserve the cached best-move PV. Requires an enum-valid
+ * classification, a finite non-negative eval_delta, a best move, and a
+ * multi-move PV beginning with that best move. This guards local rendering, not
+ * trust — trust is decided by the backend (see isTrustedCacheHit).
  */
 export const canResolveCachedAnalysis = (input: {
   best_move_uci?: string | null | undefined
@@ -227,8 +303,10 @@ export const canResolveCachedAnalysis = (input: {
   classification: MoveClassification | string | null | undefined
   eval_delta: number | null | undefined
 }): boolean => {
-  const hasClassification = input.classification != null || input.eval_delta != null
-  if (!hasClassification) return false
+  if (!isMoveClassification(input.classification)) return false
+
+  const delta = input.eval_delta
+  if (delta == null || !Number.isFinite(delta) || delta < 0) return false
 
   if (!input.best_move_uci) return false
 
@@ -240,20 +318,22 @@ export const canResolveCachedAnalysis = (input: {
 }
 
 /**
- * A cached row may only override local worker analysis when it is BOTH
- * authoritative (its identity fields match an active authoritative profile,
- * computed by the backend) AND structurally complete. A structurally-complete
- * but non-authoritative row (e.g. a browser-game upload) must be treated as a
- * miss so the worker fallback wins.
+ * A cached row may override local worker analysis only when the BACKEND marks it
+ * trusted for resolution (`trusted_for_resolution === true` = authoritative
+ * profile AND resolver-complete-v2 contract AND that contract's semantic
+ * validation passes). The frontend does NOT reimplement the V2 validator; the
+ * `authoritative`/`evidence_contract_id`/`contract_satisfied` fields are kept
+ * for diagnostics only. The local-build guard is still applied so a trusted row
+ * that somehow lacks renderable structure falls back to the worker.
  */
 export const isTrustedCacheHit = (input: {
-  authoritative?: boolean
+  trusted_for_resolution?: boolean
   best_move_uci?: string | null | undefined
   best_line_uci?: string[] | null | undefined
   classification: MoveClassification | string | null | undefined
   eval_delta: number | null | undefined
 }): boolean => {
-  return input.authoritative === true && canResolveCachedAnalysis(input)
+  return input.trusted_for_resolution === true && canResolveCachedAnalysis(input)
 }
 
 // ── Win-chance classifier (Lichess logistic model) ──────────────────

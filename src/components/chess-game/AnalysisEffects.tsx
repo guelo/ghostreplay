@@ -6,7 +6,7 @@ import {
   reviewSrsBlunder,
 } from "../../utils/api";
 import { shouldRecordBlunder } from "../../utils/blunder";
-import { isRecordableFailure } from "../../workers/analysisUtils";
+import { evalLoss, gradeRecordableMove } from "../../workers/analysisUtils";
 import {
   buildBlunderAlert,
   fenBeforeMove,
@@ -125,14 +125,19 @@ const AnalysisEffects = ({
       return;
     }
 
-    pendingSrsReviewRef.current.delete(analysis.id);
-
-    if (analysis.delta === null) {
+    // Tri-state grade BEFORE consuming the pending entry. An `unavailable`
+    // result (missing/non-finite eval) must neither post a review nor delete
+    // the entry — that would record a false pass/fail. Reanalysis + retry is
+    // owned by g-hpw4; here we simply retain the entry and no-op.
+    const grade = gradeRecordableMove(analysis.delta);
+    if (grade === "unavailable") {
       return;
     }
 
-    const evalLossCp = Math.max(analysis.delta, 0);
-    const passed = !isRecordableFailure(evalLossCp);
+    pendingSrsReviewRef.current.delete(analysis.id);
+
+    const evalLossCp = evalLoss(analysis.delta) ?? 0;
+    const passed = grade === "pass";
 
     setResolvedReview((prev) =>
       prev?.analysisId === analysis.id

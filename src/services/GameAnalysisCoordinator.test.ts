@@ -159,7 +159,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0) // resolve cache promise
@@ -332,7 +332,7 @@ describe('GameAnalysisCoordinator', () => {
             best_eval: -9980,
             eval_delta: 0,
             classification: 'best',
-            authoritative: true,
+            trusted_for_resolution: true,
           }],
         ])),
       )
@@ -548,7 +548,7 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -591,7 +591,7 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -622,7 +622,7 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -717,13 +717,13 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
         ['fen-1::uci-1', {
           move_san: 'm1', best_move_uci: 'uci-1', best_move_san: 'm1',
           best_line_uci: ['uci-1', 'reply-1'],
           played_eval: 5, best_eval: 5, eval_delta: 0, classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -753,7 +753,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm2', best_move_uci: 'uci-2', best_move_san: 'm2',
           best_line_uci: ['uci-2', 'reply-2'],
           played_eval: 3, best_eval: 3, eval_delta: 0, classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -829,7 +829,7 @@ describe('GameAnalysisCoordinator', () => {
       best_eval: 25,
       eval_delta: 0,
       classification: 'best' as const,
-      authoritative: true,
+      trusted_for_resolution: true,
       analysis_profile_id: 'linux-sf18-d24',
       ...overrides,
     })
@@ -880,7 +880,7 @@ describe('GameAnalysisCoordinator', () => {
       postWorker(id)
 
       vi.advanceTimersByTime(200)
-      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { authoritative: false })]]))
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { trusted_for_resolution: false })]]))
       await vi.advanceTimersByTimeAsync(0)
 
       expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')

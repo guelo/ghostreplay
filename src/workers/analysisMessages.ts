@@ -38,6 +38,13 @@ export type AnalysisWorkerResponse =
       playedEvalMate: number | null
       delta: number | null
       classification: MoveClassification | null
+      /**
+       * False when the classification came from the legacy delta-band fallback
+       * (classifyMove) rather than the canonical win-chance model
+       * (classifyMoveAdvanced), or when the position yielded no best move.
+       * Diagnostics only — not persisted (profile propagation is a follow-up).
+       */
+      canonical: boolean
     }
   | { type: 'error'; error: string; id?: string }
   | { type: 'log'; message: string }

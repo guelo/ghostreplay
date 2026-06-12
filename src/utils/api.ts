@@ -661,6 +661,17 @@ export interface CachedAnalysis {
   engine_build?: string | null
   evidence_contract_id?: string | null
   authoritative?: boolean
+  /**
+   * Backend-computed: the row's evidence passes its declared contract's
+   * semantic validation. Diagnostics only — does not by itself confer trust.
+   */
+  contract_satisfied?: boolean
+  /**
+   * Backend-computed trust decision: authoritative profile AND
+   * resolver-complete-v2 contract AND that contract's validation passed. The
+   * frontend's isTrustedCacheHit keys off this and does NOT re-derive trust.
+   */
+  trusted_for_resolution?: boolean
 }
 
 interface AnalysisLookupRequest {

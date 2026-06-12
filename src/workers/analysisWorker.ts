@@ -39,6 +39,19 @@ let activeSearch: {
 let activeAnalysisId: string | null = null;
 const canceledAnalyses = new Set<string>();
 
+// Per-request readiness waiters, distinct from the init engineReady handshake.
+// Each `ucinewgame`+`isready` reset pushes one waiter; Stockfish answers every
+// `isready` with exactly one `readyok`, so acknowledgments are matched in FIFO
+// order. A canceled/errored request stays in the queue (marked `done`) until its
+// own readyok arrives and is absorbed — this prevents a stale ack from a
+// canceled request from satisfying the NEXT request's reset barrier.
+type ResetWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  done: boolean;
+};
+const resetAckQueue: ResetWaiter[] = [];
+
 const pendingAnalyses: AnalyzeMoveMessage[] = [];
 let analysisInFlight = false;
 
@@ -67,6 +80,52 @@ class AnalysisCanceledError extends Error {
 const throwIfCanceled = (analysisId: string) => {
   if (canceledAnalyses.has(analysisId)) {
     throw new AnalysisCanceledError();
+  }
+};
+
+/**
+ * Reset the engine for ONE independent analysis. Sent once at the top of
+ * analyzeMove (before the root search) and NEVER between the 3 related searches,
+ * so a single position's eval triple stays internally consistent while distinct
+ * positions no longer share leftover search state. Resolves on the next
+ * `readyok` via the dedicated pendingRequestReady waiter.
+ */
+const awaitRequestReady = () =>
+  new Promise<void>((resolve, reject) => {
+    resetAckQueue.push({ resolve, reject, done: false });
+    sendEngineCommand("ucinewgame");
+    sendEngineCommand("isready");
+  });
+
+/**
+ * Reject the request currently awaiting its reset (the most recently enqueued,
+ * not-yet-settled waiter) from any analysis exit. The waiter is marked `done`
+ * but LEFT in the FIFO queue so its still-in-flight `readyok` is absorbed rather
+ * than released to the next request.
+ */
+const rejectRequestReady = (error: Error) => {
+  for (let i = resetAckQueue.length - 1; i >= 0; i--) {
+    const waiter = resetAckQueue[i];
+    if (!waiter.done) {
+      waiter.done = true;
+      waiter.reject(error);
+      return;
+    }
+  }
+};
+
+/**
+ * Fatal teardown of the reset queue: the engine is gone (error/terminate) so no
+ * further `readyok`s will arrive. Reject every outstanding waiter and drop the
+ * placeholders that would otherwise wait forever for an absorbed ack.
+ */
+const failAllRequestReady = (error: Error) => {
+  const waiters = resetAckQueue.splice(0);
+  for (const waiter of waiters) {
+    if (!waiter.done) {
+      waiter.done = true;
+      waiter.reject(error);
+    }
   }
 };
 
@@ -169,6 +228,9 @@ const buildBestLine = (
 
 const handleEngineError = (event: ErrorEvent) => {
   const message = event.message || "Failed to initialize Stockfish";
+  // The engine is broken: settle all in-flight resets so analysisInFlight cannot
+  // stick and no placeholder waits for an ack that will never come.
+  failAllRequestReady(new Error(message));
   ctx.postMessage({
     type: "error",
     error: message,
@@ -190,6 +252,17 @@ const handleEngineLine = (line: string) => {
   }
 
   if (line === "readyok") {
+    // Per-request reset acks take precedence over the init handshake and are
+    // matched in FIFO order. A `done` waiter (its request was canceled/errored)
+    // absorbs its own ack without releasing the next request's barrier.
+    if (resetAckQueue.length > 0) {
+      const waiter = resetAckQueue.shift()!;
+      if (!waiter.done) {
+        waiter.done = true;
+        waiter.resolve();
+      }
+      return;
+    }
     engineReady = true;
     ctx.postMessage({ type: "ready" } satisfies AnalysisWorkerResponse);
     drainQueue();
@@ -242,6 +315,10 @@ const cancelAnalysis = (analysisId: string) => {
     if (activeSearch) {
       sendEngineCommand("stop");
     }
+    // Cancel may land while awaiting the per-request reset (before any search
+    // starts): reject the waiter so analyzeMove unwinds via AnalysisCanceledError
+    // instead of hanging until a readyok that we no longer act on.
+    rejectRequestReady(new AnalysisCanceledError());
     return;
   }
 
@@ -320,6 +397,12 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     throw new Error("Invalid FEN supplied for analysis");
   }
 
+  // Reset the engine ONCE per independent analysis, before the root search and
+  // never between the 3 related searches. Then re-check cancellation: a cancel
+  // delivered during the reset rejects the waiter, so we never start searching.
+  await awaitRequestReady();
+  throwIfCanceled(request.id);
+
   const bestSearch = await runSearch(request.fen, []);
   throwIfCanceled(request.id);
   const bestMove = bestSearch.bestmove;
@@ -337,6 +420,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       playedEvalMate: null,
       delta: null,
       classification: null,
+      canonical: false,
     } satisfies AnalysisWorkerResponse);
     return;
   }
@@ -409,6 +493,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   const scorePov: "white" | "black" = sideToMove === "w" ? "black" : "white";
 
   let classification: MoveClassification | null = null;
+  let canonical = false;
   if (postBestScore && playedEvalSearch.score) {
     classification = classifyMoveAdvanced({
       prevScore: postBestScore,
@@ -417,8 +502,14 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       mover,
       isBestMove,
     });
+    canonical = true;
   } else {
+    // Legacy delta-band fallback: a non-canonical result (one of the post-move
+    // searches produced no score). Surface it for diagnostics; not persisted.
     classification = classifyMove(delta);
+    postLog(
+      `[analysisWorker] non-canonical classification (delta-band fallback) for move ${request.move}`,
+    );
   }
 
   // Prefer the root PV when it begins with the final bestmove. If Stockfish's
@@ -440,6 +531,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     playedEvalMate,
     delta,
     classification,
+    canonical,
   } satisfies AnalysisWorkerResponse);
 };
 
@@ -470,6 +562,7 @@ ctx.addEventListener(
         engine?.terminate();
         engine = null;
         engineReady = false;
+        failAllRequestReady(new Error("Analysis worker terminated"));
         activeSearch = null;
         activeAnalysisId = null;
         canceledAnalyses.clear();

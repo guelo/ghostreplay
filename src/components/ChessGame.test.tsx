@@ -506,6 +506,100 @@ describe("ChessGame characterization safeguards", () => {
     });
   });
 
+  it("passes a post-root drill move whose loss exactly equals strictness (boundary passes)", async () => {
+    useGameStore.setState({
+      sessionId: "session-boundary",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 25,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
+    });
+
+    failDrillMock.mockClear();
+    getNextOpponentMoveMock.mockClear();
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis.mockResolvedValue({
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "d2d4",
+      bestEval: 35,
+      playedEval: 10,
+      currentPositionEval: 10,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: 25, // exactly strictness — must PASS (strict `>` comparator)
+      classification: "good",
+      blunder: false,
+      recordable: false,
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalled();
+    });
+    expect(failDrillMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState().drillState).not.toBe("failed");
+  });
+
+  it("routes an ungraded post-root move (null delta) to recovery instead of advancing", async () => {
+    useGameStore.setState({
+      sessionId: "session-unavailable",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 25,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
+    });
+
+    failDrillMock.mockClear();
+    getNextOpponentMoveMock.mockClear();
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis.mockResolvedValue({
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "d2d4",
+      bestEval: null,
+      playedEval: null,
+      currentPositionEval: null,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: null, // unavailable — neither pass nor fail
+      classification: null,
+      blunder: false,
+      recordable: false,
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/analysis is unavailable/i)).toBeInTheDocument();
+    });
+    expect(failDrillMock).not.toHaveBeenCalled();
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
   const driveOffRouteFail = async () => {
     await startGameAsWhite();
     useGameStore.setState({

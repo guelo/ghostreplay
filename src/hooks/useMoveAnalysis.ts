@@ -151,6 +151,10 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
   const pendingMeta = useRef<Map<string, { moveIndex: number; legalMoveCount: number | undefined }>>(new Map())
   // Maps request IDs to the absolute ply + FEN of an in-flight what-if analysis
   const pendingVariationPlies = useRef<Map<string, { ply: number; fen: string }>>(new Map())
+  // Per-variation no-hang deadline timers (variation requests are not tracked in
+  // resolutionState, so they need their own deadline that also cancels the
+  // worker request — otherwise a missing readyok stalls the worker queue).
+  const variationDeadlineTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   // Throttle streaming eval updates to avoid excessive rerenders
   const lastStreamingUpdateMs = useRef(0)
   // Which request currently owns the global analyzing/streaming transient state,
@@ -207,9 +211,17 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
     s.setStreamingEval(null)
   }, [store])
 
-  // Hard no-hang terminator: drop all per-request state + both timers. The hook
-  // has no waiters, so failure simply skips the move — but it must clear the
-  // spinner if this request still owns it, or isAnalyzing stays stuck (Finding 1).
+  // Tell the worker to abandon a request so a stalled search/reset cannot keep
+  // the worker's serial queue blocked. Harmless when the request already
+  // finished (the worker drops unknown ids).
+  const cancelWorkerRequest = useCallback((requestId: string) => {
+    workerRef.current?.postMessage({ type: 'cancel-analysis', id: requestId })
+  }, [])
+
+  // Hard no-hang terminator: drop all per-request state + both timers AND cancel
+  // the worker request, so a stalled worker (e.g. a missing readyok) cannot keep
+  // the queue blocked. It must also clear the spinner if this request still owns
+  // it, or isAnalyzing stays stuck (Finding 1).
   const failRequest = useCallback(
     (moveIndex: number, requestId: string) => {
       const entry = resolutionState.current.get(moveIndex)
@@ -220,9 +232,37 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       resolutionState.current.delete(moveIndex)
       pendingMoveIndices.current.delete(requestId)
       pendingMeta.current.delete(requestId)
+      cancelWorkerRequest(requestId)
       clearActiveAnalysisStateIfCurrent(requestId)
     },
-    [clearActiveAnalysisStateIfCurrent],
+    [clearActiveAnalysisStateIfCurrent, cancelWorkerRequest],
+  )
+
+  const clearVariationTimer = useCallback((requestId: string) => {
+    const timer = variationDeadlineTimers.current.get(requestId)
+    if (timer) clearTimeout(timer)
+    variationDeadlineTimers.current.delete(requestId)
+  }, [])
+
+  const clearAllVariationTimers = useCallback(() => {
+    for (const timer of variationDeadlineTimers.current.values()) {
+      clearTimeout(timer)
+    }
+    variationDeadlineTimers.current.clear()
+  }, [])
+
+  // No-hang terminator for what-if (variation) requests: cancel the worker
+  // request and drop its streaming/transient state when the deadline elapses.
+  const failVariation = useCallback(
+    (requestId: string) => {
+      clearVariationTimer(requestId)
+      if (!pendingVariationPlies.current.has(requestId)) return
+      pendingVariationPlies.current.delete(requestId)
+      cancelWorkerRequest(requestId)
+      store.getState().setVariationStreamingEval(null)
+      clearActiveAnalysisStateIfCurrent(requestId)
+    },
+    [store, clearVariationTimer, cancelWorkerRequest, clearActiveAnalysisStateIfCurrent],
   )
 
   // Release the buffered worker fallback once the cache settles non-trusted.
@@ -298,9 +338,11 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
 
           if (resolveAnalysis(pending.moveIndex, result)) {
             // The authoritative result wins; the discarded worker may still be
-            // running (and could stall). Clear the spinner now since cache
-            // resolution also cleared the deadline timer (Finding 1, mirrors the
+            // running (and could stall). Cancel the worker request so it cannot
+            // block the serial queue, and clear the spinner now since cache
+            // resolution also cleared the deadline timer (mirrors the
             // coordinator).
+            cancelWorkerRequest(pending.requestId)
             clearActiveAnalysisStateIfCurrent(pending.requestId)
             console.log(
               `[Analyst] resolve idx=${pending.moveIndex} source=cache(authoritative profile=${cached.analysis_profile_id ?? 'unknown'})`,
@@ -319,7 +361,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           releaseFallback(pending.moveIndex, pending.requestId, 'cache-error')
         }
       })
-  }, [resolveAnalysis, releaseFallback, clearActiveAnalysisStateIfCurrent])
+  }, [resolveAnalysis, releaseFallback, clearActiveAnalysisStateIfCurrent, cancelWorkerRequest])
 
   // `keepTombstones` retains requestIdToMoveIndex so that, when the worker stays
   // alive across the clear (clearAnalysis), a late indexed result is still
@@ -443,6 +485,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           // Clear any in-flight variation streaming for this request; the
           // resolved result now lives in the variation analysis cache.
           if (pendingVariationPlies.current.has(message.id)) {
+            clearVariationTimer(message.id)
             pendingVariationPlies.current.delete(message.id)
             s.setVariationStreamingEval(null)
           }
@@ -535,6 +578,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             // state, not the global status (Finding G4). The worker stopped for
             // this request, so clear the spinner if it owns it (Finding 1).
             if (pendingVariationPlies.current.has(message.id)) {
+              clearVariationTimer(message.id)
               pendingVariationPlies.current.delete(message.id)
               s.setVariationStreamingEval(null)
               clearActiveAnalysisStateIfCurrent(message.id)
@@ -567,6 +611,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           lastStreamingUpdateMs.current = 0
           currentAnalyzingRequestId.current = null
           pendingVariationPlies.current.clear()
+          clearAllVariationTimers()
           clearResolutionState()
           // Invalidate the worker so a late `ready` cannot flip status back and
           // let queued stale results enter the ad-hoc path (Finding 3). Recovery
@@ -598,6 +643,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       lastStreamingUpdateMs.current = 0
       currentAnalyzingRequestId.current = null
       pendingVariationPlies.current.clear()
+      clearAllVariationTimers()
       clearResolutionState()
       // Invalidate the worker (see the unscoped-error branch, Finding 3).
       if (workerRef.current) {
@@ -623,6 +669,10 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       }
       resolutionState.current.clear()
+      for (const timer of variationDeadlineTimers.current.values()) {
+        clearTimeout(timer)
+      }
+      variationDeadlineTimers.current.clear()
       if (cacheFlushTimer.current !== null) {
         clearTimeout(cacheFlushTimer.current)
         cacheFlushTimer.current = null
@@ -648,6 +698,10 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
         if (prevEntry) {
           if (prevEntry.deadlineTimer) clearTimeout(prevEntry.deadlineTimer)
           if (prevEntry.cacheTimer) clearTimeout(prevEntry.cacheTimer)
+          // Cancel the superseded worker request: dropping its deadline here
+          // would otherwise leave a reset-stalled old request blocking the
+          // worker queue, with only the replacement's deadline firing later.
+          cancelWorkerRequest(prevEntry.requestId)
         }
         pendingMoveIndices.current.set(id, moveIndex)
         pendingMeta.current.set(id, { moveIndex, legalMoveCount })
@@ -663,6 +717,15 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
         resolutionState.current.set(moveIndex, { requestId: id, cacheStatus: 'pending', deadlineTimer })
       } else if (variationPly !== undefined && variationFen !== undefined) {
         pendingVariationPlies.current.set(id, { ply: variationPly, fen: variationFen })
+        // Variation requests are not in resolutionState, so give them their own
+        // no-hang deadline that cancels the worker request (a missing readyok
+        // would otherwise block the worker queue indefinitely).
+        const token = mountToken.current
+        const variationTimer = setTimeout(() => {
+          if (mountToken.current !== token) return
+          failVariation(id)
+        }, ANALYSIS_TOTAL_DEADLINE_MS)
+        variationDeadlineTimers.current.set(id, variationTimer)
       }
 
       // Fire the worker (existing path)
@@ -684,16 +747,26 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
 
       return id
     },
-    [store, scheduleCacheLookup, failRequest],
+    [store, scheduleCacheLookup, failRequest, failVariation, cancelWorkerRequest],
   )
 
   const clearAnalysis = useCallback(() => {
     store.getState().clearAll()
     lastStreamingUpdateMs.current = 0
     currentAnalyzingRequestId.current = null
+    // Cancel every in-flight worker request (indexed + variation) before
+    // dropping their bookkeeping: clearAnalysis does not terminate the worker,
+    // so an abandoned reset-stalled request would otherwise block its queue.
+    for (const requestId of pendingMoveIndices.current.keys()) {
+      cancelWorkerRequest(requestId)
+    }
+    for (const requestId of pendingVariationPlies.current.keys()) {
+      cancelWorkerRequest(requestId)
+    }
     pendingMoveIndices.current.clear()
     pendingMeta.current.clear()
     pendingVariationPlies.current.clear()
+    clearAllVariationTimers()
     resolvedIndices.current.clear()
     // Keep the requestId→index tombstones: clearAnalysis does not terminate the
     // worker, so a late indexed result must still be dropped, not treated as
@@ -703,7 +776,7 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       clearTimeout(cacheFlushTimer.current)
       cacheFlushTimer.current = null
     }
-  }, [store, clearResolutionState])
+  }, [store, clearResolutionState, clearAllVariationTimers, cancelWorkerRequest])
 
   return { analyzeMove, clearAnalysis }
 }

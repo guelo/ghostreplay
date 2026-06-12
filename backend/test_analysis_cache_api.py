@@ -606,3 +606,93 @@ def test_game_upload_does_not_downgrade_canonical_row(
     )
     result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
     assert result["authoritative"] is True
+
+
+# --- Backend-computed trust: contract_satisfied + trusted_for_resolution ---
+
+
+def _canonical_v2_seed_values():
+    """Canonical identity, but stamped with the resolver-complete-v2 contract."""
+    values = _canonical_seed_values()
+    values["evidence_contract_id"] = "resolver-complete-v2"
+    return values
+
+
+def _seed_v2_canonical(db_session, **overrides):
+    row = {
+        "fen_before": STARTING_FEN, "move_uci": "e2e4", "move_san": "e4",
+        "best_move_uci": "e2e4", "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5", "eval_delta": 0, "classification": "best",
+        "played_eval": 20, "best_eval": 20, "source": "precomputed",
+        **_canonical_v2_seed_values(),
+    }
+    row.update(overrides)
+    _seed_cache(db_session, [row])
+
+
+def _lookup_e4(client, auth_headers):
+    return client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(),
+    ).json()["results"][f"{STARTING_FEN}::e2e4"]
+
+
+def test_trusted_for_resolution_true_for_authoritative_v2_row(
+    client, auth_headers, db_session
+):
+    _seed_v2_canonical(db_session)
+    result = _lookup_e4(client, auth_headers)
+    assert result["authoritative"] is True
+    assert result["contract_satisfied"] is True
+    assert result["trusted_for_resolution"] is True
+
+
+def test_trust_false_when_contract_is_v1_even_if_authoritative(
+    client, auth_headers, db_session
+):
+    # v1 contract: identity is authoritative and v1's own validation passes, but
+    # trust requires resolver-complete-v2 specifically.
+    _seed_cache(db_session, [{
+        "fen_before": STARTING_FEN, "move_uci": "e2e4", "move_san": "e4",
+        "best_move_uci": "e2e4", "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5", "eval_delta": 0, "classification": "best",
+        "played_eval": 20, "best_eval": 20, "source": "precomputed",
+        **_canonical_seed_values(),
+    }])
+    result = _lookup_e4(client, auth_headers)
+    assert result["authoritative"] is True
+    assert result["contract_satisfied"] is True  # v1 validator passes
+    assert result["trusted_for_resolution"] is False
+
+
+def test_trust_false_when_not_authoritative(
+    client, auth_headers, create_game_session, db_session
+):
+    # A browser upload satisfies a contract but is not from an authoritative
+    # profile, so it is never trusted for resolution.
+    client.post(
+        f"/api/session/{create_game_session(user_id=123, player_color='white')}/moves",
+        json={"moves": [{
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": AFTER_E4_FEN, "eval_cp": 20, "best_move_san": "e4",
+            "best_move_eval_cp": 20, "eval_delta": 0, "classification": "best",
+            "fen_before": STARTING_FEN, "move_uci": "e2e4", "best_move_uci": "e2e4",
+            "best_line_uci": ["e2e4", "e7e5"],
+        }]},
+        headers=auth_headers(user_id=123),
+    )
+    result = _lookup_e4(client, lambda: auth_headers(user_id=123))
+    assert result["authoritative"] is False
+    assert result["trusted_for_resolution"] is False
+
+
+def test_trust_false_when_v2_validation_fails(client, auth_headers, db_session):
+    # Authoritative + v2 contract id, but the stored delta is inconsistent with
+    # the eval triple (white to move: expected best-played = 0, stored 40), so
+    # the v2 validator fails closed.
+    _seed_v2_canonical(db_session, eval_delta=40)
+    result = _lookup_e4(client, auth_headers)
+    assert result["authoritative"] is True
+    assert result["contract_satisfied"] is False
+    assert result["trusted_for_resolution"] is False

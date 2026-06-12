@@ -670,7 +670,9 @@ describe('useMoveAnalysis', () => {
     act(() => {
       result.current.analyzeMove('fen-2', 'd2d4', 'white', 0)
     })
-    const id2 = postMessageMock.mock.calls[1][0].id
+    const id2 = postMessageMock.mock.calls
+      .filter((c) => c[0].type === 'analyze-move')
+      .at(-1)![0].id
 
     now.mockReturnValue(1010)
     act(() => {
@@ -833,7 +835,7 @@ describe('useMoveAnalysis', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
     })
@@ -886,7 +888,7 @@ describe('useMoveAnalysis', () => {
           best_eval: -9980,
           eval_delta: 0,
           classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
     })
@@ -1007,7 +1009,9 @@ describe('useMoveAnalysis', () => {
     const staleId = postMessageMock.mock.calls[0][0].id
 
     act(() => { result.current.analyzeMove('fen-new', 'd2d4', 'white', 0) })
-    const liveId = postMessageMock.mock.calls[1][0].id
+    const liveId = postMessageMock.mock.calls
+      .filter((c) => c[0].type === 'analyze-move')
+      .at(-1)![0].id
 
     // The live request owns the spinner.
     act(() => { simulateMessage({ type: 'analysis-started', id: liveId, move: 'd2d4' }) })
@@ -1067,6 +1071,129 @@ describe('useMoveAnalysis', () => {
     expect(store.getState().analyzingMove).toBeNull()
   })
 
+  it('cancels the stalled worker request when the indexed deadline elapses', async () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(8000) })
+
+    // The deadline must tell the worker to abandon the request so its serial
+    // queue cannot stay blocked behind a missing readyok.
+    expect(
+      postMessageMock.mock.calls.some(
+        ([message]) => message.type === 'cancel-analysis' && message.id === id,
+      ),
+    ).toBe(true)
+  })
+
+  it('gives a variation (what-if) request a deadline that cancels the stalled worker request', async () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => {
+      // moveIndex undefined -> variation path (ply + fen tracked separately).
+      result.current.analyzeMove('fen-v', 'e2e4', 'white', undefined, undefined, 4, 'fen-v')
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+    expect(id).toBeTruthy()
+
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+
+    // Before the deadline: no cancel yet.
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+    expect(
+      postMessageMock.mock.calls.some(([m]) => m.type === 'cancel-analysis'),
+    ).toBe(false)
+
+    // After the deadline: the worker request is canceled and streaming cleared.
+    await act(async () => { await vi.advanceTimersByTimeAsync(8000) })
+    expect(
+      postMessageMock.mock.calls.some(
+        ([m]) => m.type === 'cancel-analysis' && m.id === id,
+      ),
+    ).toBe(true)
+    expect(store.getState().isAnalyzing).toBe(false)
+  })
+
+  it('cancels the still-running worker request when a trusted cache hit wins', async () => {
+    vi.useFakeTimers()
+    let resolveLookup!: (value: Map<string, unknown>) => void
+    lookupAnalysisCacheMock.mockReturnValueOnce(
+      new Promise((resolve) => { resolveLookup = resolve }),
+    )
+
+    const { result } = renderHook(() => useMoveAnalysis(store))
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0, 20) })
+    const id = postMessageMock.mock.calls[0][0].id
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+    act(() => {
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5'],
+          played_eval: 25, best_eval: 25, eval_delta: 0, classification: 'best',
+          trusted_for_resolution: true,
+        }],
+      ]))
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(store.getState().analysisMap.get(0)?.bestMove).toBe('e2e4')
+    expect(
+      postMessageMock.mock.calls.some(
+        ([m]) => m.type === 'cancel-analysis' && m.id === id,
+      ),
+    ).toBe(true)
+  })
+
+  it('cancels the superseded worker request when the same index is re-analyzed', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+    act(() => { simulateMessage({ type: 'ready' }) })
+
+    act(() => { result.current.analyzeMove('fen-old', 'e2e4', 'white', 0) })
+    const staleId = postMessageMock.mock.calls[0][0].id
+
+    act(() => { result.current.analyzeMove('fen-new', 'd2d4', 'white', 0) })
+
+    // The superseded request is canceled at the worker, not just locally dropped.
+    expect(
+      postMessageMock.mock.calls.some(
+        ([m]) => m.type === 'cancel-analysis' && m.id === staleId,
+      ),
+    ).toBe(true)
+  })
+
+  it('cancels in-flight worker requests on clearAnalysis', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+    act(() => { simulateMessage({ type: 'ready' }) })
+
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const indexedId = postMessageMock.mock.calls[0][0].id
+    act(() => {
+      result.current.analyzeMove('fen-v', 'g1f3', 'white', undefined, undefined, 4, 'fen-v')
+    })
+    const variationId = postMessageMock.mock.calls.at(-1)![0].id
+
+    act(() => { result.current.clearAnalysis() })
+
+    const canceled = postMessageMock.mock.calls
+      .filter(([m]) => m.type === 'cancel-analysis')
+      .map(([m]) => m.id)
+    expect(canceled).toContain(indexedId)
+    expect(canceled).toContain(variationId)
+  })
+
   it('clears the spinner on a scoped worker error (Finding 1)', () => {
     vi.useFakeTimers()
     const { result } = renderHook(() => useMoveAnalysis(store))
@@ -1110,7 +1237,7 @@ describe('useMoveAnalysis', () => {
           move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
           best_line_uci: ['e2e4', 'e7e5'],
           played_eval: 25, best_eval: 25, eval_delta: 0, classification: 'best',
-          authoritative: true,
+          trusted_for_resolution: true,
         }],
       ]))
     })

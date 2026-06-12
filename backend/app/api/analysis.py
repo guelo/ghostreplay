@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis_profiles import IDENTITY_FIELDS, get_profile
 from app.db import get_db
+from app.evidence_contracts import RESOLVER_COMPLETE_V2, contract_satisfied
 from app.models import AnalysisCache, decode_uci_line
 from app.security import TokenPayload, get_current_user
 
@@ -43,6 +44,14 @@ class CachedAnalysisResult(BaseModel):
     # True when the row's stored identity metadata matches its claimed,
     # authoritative profile (same validation the write comparator uses).
     authoritative: bool = False
+    # True when the row's evidence passes its declared contract's semantic
+    # validation. Diagnostics only — trust additionally requires authoritative
+    # identity and the resolver-complete-v2 contract (see trusted_for_resolution).
+    contract_satisfied: bool = False
+    # The single backend-owned trust decision the frontend keys off: the row is
+    # authoritative AND declares resolver-complete-v2 AND that contract's
+    # semantic validation passes. The frontend does NOT re-derive this.
+    trusted_for_resolution: bool = False
 
 
 def _is_authoritative(row: AnalysisCache) -> bool:
@@ -52,6 +61,31 @@ def _is_authoritative(row: AnalysisCache) -> bool:
     if profile is None or not profile.authoritative or not profile.active:
         return False
     return all(getattr(row, f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+
+
+def _row_contract_data(row: AnalysisCache) -> dict:
+    """Project a cache row into the dict shape the contract validators read."""
+    return {
+        "fen_before": row.fen_before,
+        "best_move_uci": row.best_move_uci,
+        "best_line_uci": row.best_line_uci,
+        "classification": row.classification,
+        "played_eval": row.played_eval,
+        "best_eval": row.best_eval,
+        "eval_delta": row.eval_delta,
+    }
+
+
+def _trust_flags(row: AnalysisCache) -> tuple[bool, bool, bool]:
+    """Return (authoritative, contract_satisfied, trusted_for_resolution)."""
+    authoritative = _is_authoritative(row)
+    satisfied = contract_satisfied(row.evidence_contract_id, _row_contract_data(row))
+    trusted = (
+        authoritative
+        and row.evidence_contract_id == RESOLVER_COMPLETE_V2
+        and satisfied
+    )
+    return authoritative, satisfied, trusted
 
 
 class AnalysisLookupResponse(BaseModel):
@@ -85,6 +119,7 @@ def lookup_analysis(
         row = row_map.get((position.fen, position.move_uci))
         if row is not None:
             key = _make_cache_key(position.fen, position.move_uci)
+            authoritative, satisfied, trusted = _trust_flags(row)
             results[key] = CachedAnalysisResult(
                 move_san=row.move_san,
                 best_move_uci=row.best_move_uci,
@@ -100,7 +135,9 @@ def lookup_analysis(
                 engine_version=row.engine_version,
                 engine_build=row.engine_build,
                 evidence_contract_id=row.evidence_contract_id,
-                authoritative=_is_authoritative(row),
+                authoritative=authoritative,
+                contract_satisfied=satisfied,
+                trusted_for_resolution=trusted,
             )
 
     return AnalysisLookupResponse(results=results)

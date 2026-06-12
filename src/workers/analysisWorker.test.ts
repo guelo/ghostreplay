@@ -19,11 +19,26 @@ describe('analysisWorker', () => {
   let messageHandler: ((event: MessageEvent<AnalysisWorkerRequest>) => void) | undefined
   let postMessageMock: ReturnType<typeof vi.fn>
   let constructedUrl: string | undefined
+  // The per-request reset sends `ucinewgame`+`isready` and waits for `readyok`.
+  // The first `isready` is the init handshake (driven manually by each test);
+  // every later one is a reset, which we auto-answer so existing tests keep
+  // their flow. Set `autoReadyok = false` to exercise a missing/late readyok.
+  let isReadyCount: number
+  let autoReadyok: boolean
 
   beforeEach(() => {
     vi.resetModules()
 
-    engineWorkerPostMessageMock = vi.fn()
+    isReadyCount = 0
+    autoReadyok = true
+    engineWorkerPostMessageMock = vi.fn((command: string) => {
+      if (command === 'isready') {
+        isReadyCount += 1
+        if (isReadyCount > 1 && autoReadyok) {
+          queueMicrotask(() => engineMessageHandler?.('readyok'))
+        }
+      }
+    })
     terminateMock = vi.fn()
     postMessageMock = vi.fn()
     engineMessageHandler = undefined
@@ -571,5 +586,193 @@ describe('analysisWorker', () => {
         }),
       )
     })
+  })
+
+  it('resets the engine (ucinewgame+isready) once at the start, before the root search and not between the related searches', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'reset-1',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    // The reset precedes the root search.
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('ucinewgame')
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+
+    const order = engineWorkerPostMessageMock.mock.calls.map((c) => c[0] as string)
+    const firstNewGame = order.indexOf('ucinewgame')
+    const firstPosition = order.findIndex((c) => c.startsWith('position fen'))
+    expect(firstNewGame).toBeGreaterThanOrEqual(0)
+    expect(firstNewGame).toBeLessThan(firstPosition)
+
+    engineMessageHandler?.('info depth 17 score cp 30 pv e2e4 e7e5')
+    engineMessageHandler?.('bestmove e2e4')
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        expect.stringContaining('moves e2e4'),
+      )
+    })
+    engineMessageHandler?.('info depth 17 score cp -25 pv e7e5')
+    engineMessageHandler?.('bestmove e7e5')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'analysis', id: 'reset-1' }),
+      )
+    })
+
+    // Exactly one reset for the whole request (best move == played move here, so
+    // only the root + post-played searches ran — never a reset between them).
+    const newGameCalls = engineWorkerPostMessageMock.mock.calls.filter(
+      (c) => c[0] === 'ucinewgame',
+    )
+    expect(newGameCalls).toHaveLength(1)
+  })
+
+  it('settles a cancel that arrives while awaiting the per-request reset, clearing analysisInFlight', async () => {
+    await import('./analysisWorker')
+
+    autoReadyok = false // hold back the reset readyok so the cancel races it
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'cancel-reset',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    // Reset issued, but no readyok yet — the root search never starts.
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('isready')
+    })
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith('go depth 17')
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: { type: 'cancel-analysis', id: 'cancel-reset' } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    // A late readyok must not start a search for the canceled request, and the
+    // queue must be free to run the next analysis (analysisInFlight cleared).
+    engineMessageHandler?.('readyok')
+    autoReadyok = true
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'after-cancel',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'd2d4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'analysis-started', id: 'after-cancel' }),
+      )
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+
+    expect(postMessageMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'analysis', id: 'cancel-reset' }),
+    )
+  })
+
+  it("absorbs a canceled request's late readyok instead of releasing the next request's reset barrier", async () => {
+    await import('./analysisWorker')
+
+    autoReadyok = false // drive every readyok manually to control ordering
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok') // init handshake
+    engineWorkerPostMessageMock.mockClear()
+    postMessageMock.mockClear()
+
+    // Request A starts and issues its reset, then is canceled mid-reset.
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'req-a',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('isready')
+    })
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: { type: 'cancel-analysis', id: 'req-a' } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    // Request B drains next and installs its OWN reset waiter (A's readyok is
+    // still in flight at this point).
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'req-b',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'd2d4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+    await vi.waitFor(() => {
+      // Two resets issued (A + B); B's barrier is not yet satisfied.
+      const newGames = engineWorkerPostMessageMock.mock.calls.filter(
+        (c) => c[0] === 'ucinewgame',
+      )
+      expect(newGames.length).toBe(2)
+    })
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith('go depth 17')
+
+    // First readyok belongs to A (FIFO). It must be ABSORBED — B must not start.
+    engineMessageHandler?.('readyok')
+    await Promise.resolve()
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith('go depth 17')
+
+    // Second readyok belongs to B — only now does B cross its reset barrier.
+    engineMessageHandler?.('readyok')
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+    expect(postMessageMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'analysis', id: 'req-a' }),
+    )
   })
 })
