@@ -246,6 +246,22 @@ describe('AnalysisBoard — MaterialDisplays', () => {
     expect(capturedMaterialDisplays[1].perspective).toBe('white')
   })
 
+  it('moves opponent material into an opt-in mobile toolbar', () => {
+    setMatchMedia('(max-width: 720px)', true)
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        mobileToolbar={<div data-testid="mobile-toolbar-content">picker</div>}
+      />,
+    )
+
+    const toolbar = screen.getByTestId('mobile-toolbar-content').parentElement?.parentElement
+    expect(toolbar).toHaveClass('analysis-board__mobile-toolbar')
+    expect(toolbar?.querySelector('[data-testid="material-display-black"]')).not.toBeNull()
+    expect(screen.getAllByTestId(/material-display-/)).toHaveLength(2)
+  })
+
   it('passes displayedFen to both displays for latest move', () => {
     render(<AnalysisBoard moves={moves} boardOrientation="black" />)
 

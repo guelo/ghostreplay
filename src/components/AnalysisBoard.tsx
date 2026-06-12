@@ -40,6 +40,7 @@ type AnalysisBoardProps = {
   startingFen?: string;
   initialMoveIndex?: number;
   footer?: React.ReactNode;
+  mobileToolbar?: React.ReactNode;
   positionAnalysis?: Record<string, PositionAnalysis>;
   highlightedMoves?: { indices: number[]; classification: 'blunder' | 'mistake' | 'inaccuracy' } | null;
   onGraphMoveClick?: () => void;
@@ -224,6 +225,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   startingFen = STARTING_FEN,
   initialMoveIndex,
   footer,
+  mobileToolbar,
   positionAnalysis,
   highlightedMoves,
   onGraphMoveClick,
@@ -1249,6 +1251,19 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
   const content = (
     <div className="analysis-board" ref={boardRootRef}>
+      {isNarrow && mobileToolbar && (
+        <div className="analysis-board__mobile-toolbar">
+          <div className="analysis-board__material analysis-board__material--opponent">
+            <MaterialDisplay
+              fen={displayedFen}
+              perspective={boardOrientation === "white" ? "black" : "white"}
+            />
+          </div>
+          <div className="analysis-board__mobile-toolbar-content">
+            {mobileToolbar}
+          </div>
+        </div>
+      )}
       <div className="analysis-board__layout">
         <div className="analysis-board__board-col">
           <div className="analysis-board__board-with-eval">
@@ -1376,10 +1391,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             </div>
           )}
           </div>
-          <MaterialDisplay
-            fen={displayedFen}
-            perspective={boardOrientation === "white" ? "black" : "white"}
-          />
+          {(!isNarrow || !mobileToolbar) && (
+            <div className="analysis-board__material analysis-board__material--opponent">
+              <MaterialDisplay
+                fen={displayedFen}
+                perspective={boardOrientation === "white" ? "black" : "white"}
+              />
+            </div>
+          )}
           {(() => {
             const Component = isNarrow ? HorizontalMoveList : MoveList;
             return (
@@ -1399,10 +1418,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               />
             );
           })()}
-          <MaterialDisplay
-            fen={displayedFen}
-            perspective={boardOrientation}
-          />
+          <div className="analysis-board__material analysis-board__material--player">
+            <MaterialDisplay
+              fen={displayedFen}
+              perspective={boardOrientation}
+            />
+          </div>
         </div>
       </div>
 

@@ -5,19 +5,11 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import HistoryPage from './HistoryPage';
 
-// Spy on navigation (Start Drill entry point) while keeping the rest of the router.
-const mockNavigate = vi.fn();
-vi.mock('react-router-dom', async () => {
-  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
-  return { ...actual, useNavigate: () => mockNavigate };
-});
-
-// jsdom doesn't have matchMedia — stub it for useTouchOnly
-beforeAll(() => {
+const setMatchMedia = (matches: boolean) => {
   Object.defineProperty(window, 'matchMedia', {
     writable: true,
     value: vi.fn().mockImplementation((query: string) => ({
-      matches: false,
+      matches,
       media: query,
       onchange: null,
       addListener: vi.fn(),
@@ -27,6 +19,18 @@ beforeAll(() => {
       dispatchEvent: vi.fn(),
     })),
   });
+};
+
+// Spy on navigation (Start Drill entry point) while keeping the rest of the router.
+const mockNavigate = vi.fn();
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return { ...actual, useNavigate: () => mockNavigate };
+});
+
+// jsdom doesn't have matchMedia — stub it for useTouchOnly
+beforeAll(() => {
+  setMatchMedia(false);
 });
 
 // Mock the API module
@@ -54,10 +58,12 @@ vi.mock('../components/AnalysisBoard', () => ({
         boardOrientation,
         initialMoveIndex,
         footer,
+        mobileToolbar,
       }: {
         boardOrientation: string;
         initialMoveIndex?: number;
         footer?: React.ReactNode;
+        mobileToolbar?: React.ReactNode;
       },
       ref: React.Ref<{ jumpToMove: (index: number) => void }>,
     ) => {
@@ -68,6 +74,7 @@ vi.mock('../components/AnalysisBoard', () => ({
           data-orientation={boardOrientation}
           data-initial-move={initialMoveIndex}
         >
+          {mobileToolbar}
           {footer}
         </div>
       );
@@ -115,6 +122,7 @@ const ANALYSIS_RESPONSE = {
 describe('HistoryPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    setMatchMedia(false);
     mockFetchSessionOpenings.mockResolvedValue({ player_color: 'white', lineage: [] });
   });
 
@@ -135,6 +143,24 @@ describe('HistoryPage', () => {
     expect(mockFetchHistory).toHaveBeenCalled();
     expect(mockFetchAnalysis).toHaveBeenCalledWith('abc-123');
     expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-initial-move', '0');
+  });
+
+  it('places the game selector inside the analysis board on narrow screens', async () => {
+    setMatchMedia(true);
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    const board = await screen.findByTestId('analysis-board');
+    const selector = screen.getByRole('button', { name: /Win vs 1500/ });
+
+    expect(board).toContainElement(selector);
+    expect(screen.getAllByRole('button', { name: /Win vs 1500/ })).toHaveLength(1);
   });
 
   it('fetches history and analysis, then renders board without initialMoveIndex for empty game', async () => {

@@ -16,6 +16,7 @@ import GameReviewStats from "../components/GameReviewStats";
 import GameOpeningLineage from "../components/GameOpeningLineage";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 import "../App.css";
 
 const POLL_INTERVAL_MS = 2000;
@@ -25,6 +26,7 @@ function HistoryPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const navState = location.state as OpenHistoryOptions | null;
+  const isNarrow = useMediaQuery("(max-width: 720px)");
 
   const [games, setGames] = useState<HistoryGame[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -148,6 +150,29 @@ function HistoryPage() {
 
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
   const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
+  const handleGameChange = useCallback((id: string) => {
+    if (id && id !== selectedId) {
+      setAnalysisLoading(true);
+      setAnalysis(null);
+      setOpeningLineage([]);
+      setSelectedId(id);
+    }
+  }, [selectedId]);
+
+  const gameSelector = games.length > 0 ? (
+    <div className="game-selector-row">
+      <GameSelector
+        games={games}
+        selectedId={selectedId}
+        onChange={handleGameChange}
+      />
+      {selectedId && (
+        <Link to={`/game?id=${selectedId}`} className="game-share-link" aria-label="Open game analysis link">
+          &#x1F517;
+        </Link>
+      )}
+    </div>
+  ) : null;
 
   const boardRef = useRef<AnalysisBoardRef>(null);
 
@@ -195,27 +220,7 @@ function HistoryPage() {
 
       <div className="constrained-content">
         <section className="history-shell">
-          {games.length > 0 && (
-            <div className="game-selector-row">
-              <GameSelector
-                games={games}
-                selectedId={selectedId}
-                onChange={(id) => {
-                  if (id && id !== selectedId) {
-                    setAnalysisLoading(true);
-                    setAnalysis(null);
-                    setOpeningLineage([]);
-                    setSelectedId(id);
-                  }
-                }}
-              />
-              {selectedId && (
-                <Link to={`/game?id=${selectedId}`} className="game-share-link" aria-label="Open game analysis link">
-                  &#x1F517;
-                </Link>
-              )}
-            </div>
-          )}
+          {!isNarrow && gameSelector}
 
           {loading && (
             <p className="history-shell__placeholder">Loading games...</p>
@@ -263,6 +268,7 @@ function HistoryPage() {
                     positionAnalysis={analysis.position_analysis}
                     highlightedMoves={highlightedMoves}
                     onGraphMoveClick={handleGraphMoveClick}
+                    mobileToolbar={isNarrow ? gameSelector : undefined}
                     footer={
                       <>
                         <GameReviewStats
