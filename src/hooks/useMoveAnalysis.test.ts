@@ -167,7 +167,8 @@ describe('useMoveAnalysis', () => {
     })
   })
 
-  it('propagates a worker mate count into the resolved analysis', () => {
+  it('propagates a worker mate count into the resolved analysis', async () => {
+    vi.useFakeTimers()
     const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
@@ -192,6 +193,11 @@ describe('useMoveAnalysis', () => {
         delta: 0,
         classification: 'best',
       })
+    })
+
+    // Worker result is buffered until the cache misses and releases it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
     })
 
     const resolved = store.getState().analysisMap.get(0)
@@ -335,7 +341,8 @@ describe('useMoveAnalysis', () => {
     expect(s.analyzingMove).toBeNull()
   })
 
-  it('stores result in analysisMap when moveIndex is provided', () => {
+  it('stores result in analysisMap when moveIndex is provided', async () => {
+    vi.useFakeTimers()
     const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
@@ -369,6 +376,10 @@ describe('useMoveAnalysis', () => {
       })
     })
 
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+
     const s = store.getState()
     expect(s.analysisMap.size).toBe(1)
     expect(s.analysisMap.get(0)).toEqual(
@@ -377,7 +388,8 @@ describe('useMoveAnalysis', () => {
     expect(s.lastAnalysis?.moveIndex).toBe(0)
   })
 
-  it('accumulates multiple results in analysisMap at different indices', () => {
+  it('accumulates multiple results in analysisMap at different indices', async () => {
+    vi.useFakeTimers()
     const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
@@ -422,6 +434,10 @@ describe('useMoveAnalysis', () => {
       })
     })
 
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+
     const s = store.getState()
     expect(s.analysisMap.size).toBe(2)
     expect(s.analysisMap.get(0)?.move).toBe('e2e4')
@@ -461,7 +477,8 @@ describe('useMoveAnalysis', () => {
     expect(s.lastAnalysis).not.toBeNull()
   })
 
-  it('clears all state on clearAnalysis', () => {
+  it('clears all state on clearAnalysis', async () => {
+    vi.useFakeTimers()
     const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
@@ -485,6 +502,10 @@ describe('useMoveAnalysis', () => {
         delta: 0,
         classification: 'best',
       })
+    })
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
     })
 
     expect(store.getState().analysisMap.size).toBe(1)
@@ -659,7 +680,8 @@ describe('useMoveAnalysis', () => {
 
   })
 
-  it('does not update streamingEval for already-resolved move indices', () => {
+  it('does not update streamingEval for already-resolved move indices', async () => {
+    vi.useFakeTimers()
     const { result } = renderHook(() => useMoveAnalysis(store))
 
     act(() => {
@@ -671,7 +693,7 @@ describe('useMoveAnalysis', () => {
     })
     const requestId = postMessageMock.mock.calls[0][0].id
 
-    // Resolve the analysis first
+    // Resolve the analysis first (buffered worker released by cache miss)
     act(() => {
       simulateMessage({
         type: 'analysis',
@@ -683,6 +705,9 @@ describe('useMoveAnalysis', () => {
         delta: 0,
         classification: 'best',
       })
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
     })
     expect(store.getState().streamingEval).toBeNull()
 
@@ -808,6 +833,7 @@ describe('useMoveAnalysis', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
+          authoritative: true,
         }],
       ]))
     })
@@ -860,6 +886,7 @@ describe('useMoveAnalysis', () => {
           best_eval: -9980,
           eval_delta: 0,
           classification: 'best',
+          authoritative: true,
         }],
       ]))
     })
@@ -947,5 +974,187 @@ describe('useMoveAnalysis', () => {
         classification: 'best',
       }),
     )
+  })
+
+  // ── code-review regressions (Findings 1-3) ───────────────────────
+
+  it('does not let a superseded request stream update the replacement index (Finding 2)', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+
+    act(() => { result.current.analyzeMove('fen-old', 'e2e4', 'white', 0) })
+    const staleId = postMessageMock.mock.calls[0][0].id
+
+    // Replay the same index — supersedes the first request.
+    act(() => { result.current.analyzeMove('fen-new', 'd2d4', 'white', 0) })
+
+    // A stale streaming message for the superseded request must be ignored.
+    act(() => {
+      simulateMessage({ type: 'analysis-streaming', id: staleId, cp: 99, depth: 9 })
+    })
+    expect(store.getState().streamingEval).toBeNull()
+  })
+
+  it('a stale result does not clear the spinner of a live newer request (Finding 2)', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+
+    act(() => { result.current.analyzeMove('fen-old', 'e2e4', 'white', 0) })
+    const staleId = postMessageMock.mock.calls[0][0].id
+
+    act(() => { result.current.analyzeMove('fen-new', 'd2d4', 'white', 0) })
+    const liveId = postMessageMock.mock.calls[1][0].id
+
+    // The live request owns the spinner.
+    act(() => { simulateMessage({ type: 'analysis-started', id: liveId, move: 'd2d4' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    // A stale result for the superseded request must not clear it.
+    act(() => {
+      simulateMessage({
+        type: 'analysis', id: staleId, move: 'e2e4', bestMove: 'e2e4',
+        bestEval: 10, playedEval: 10, delta: 0, classification: 'best',
+      })
+    })
+    expect(store.getState().isAnalyzing).toBe(true)
+    expect(store.getState().analyzingMove).toBe('d2d4')
+  })
+
+  it('a late ready cannot reopen analysis after a fatal error (Finding 3)', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    // Fatal (unscoped) error.
+    act(() => { simulateMessage({ type: 'error', error: 'fatal' }) })
+    expect(store.getState().status).toBe('error')
+    expect(terminateMock).toHaveBeenCalled()
+
+    // A late ready must NOT flip status back and reopen the ad-hoc path.
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => {
+      simulateMessage({
+        type: 'analysis', id, move: 'e2e4', bestMove: 'e2e4',
+        bestEval: 10, playedEval: 10, delta: 0, classification: 'best',
+      })
+    })
+    expect(store.getState().status).toBe('error')
+    expect(store.getState().lastAnalysis).toBeNull()
+  })
+
+  it('clears the spinner when the worker stalls past the total deadline (Finding 1)', async () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    // Cache misses (released, no buffered worker), worker never emits.
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(8000) })
+
+    expect(store.getState().isAnalyzing).toBe(false)
+    expect(store.getState().analyzingMove).toBeNull()
+  })
+
+  it('clears the spinner on a scoped worker error (Finding 1)', () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    // Scoped worker error while cache pending — spinner must clear.
+    act(() => { simulateMessage({ type: 'error', id, error: 'boom' }) })
+    expect(store.getState().isAnalyzing).toBe(false)
+    expect(store.getState().analyzingMove).toBeNull()
+    // Scoped error must NOT set the global error status.
+    expect(store.getState().status).not.toBe('error')
+  })
+
+  it('a trusted cache hit clears the spinner even if the worker is still running (Finding 1)', async () => {
+    vi.useFakeTimers()
+    let resolveLookup!: (value: Map<string, unknown>) => void
+    lookupAnalysisCacheMock.mockReturnValueOnce(
+      new Promise((resolve) => { resolveLookup = resolve }),
+    )
+
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0, 20) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    // Worker started — spinner on. The worker never finishes (stalls).
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+    act(() => {
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5'],
+          played_eval: 25, best_eval: 25, eval_delta: 0, classification: 'best',
+          authoritative: true,
+        }],
+      ]))
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    expect(store.getState().analysisMap.get(0)?.bestMove).toBe('e2e4')
+    expect(store.getState().isAnalyzing).toBe(false)
+    expect(store.getState().analyzingMove).toBeNull()
+  })
+
+  it('clears the spinner on a worker ErrorEvent (Finding 2)', () => {
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    act(() => { simulateError('worker crashed') })
+    expect(store.getState().isAnalyzing).toBe(false)
+    expect(store.getState().analyzingMove).toBeNull()
+  })
+
+  it('clearAnalysis drops a late indexed result instead of setting lastAnalysis (Finding 1)', async () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => { result.current.clearAnalysis() })
+
+    // Late worker result for the discarded indexed request → dropped.
+    act(() => {
+      simulateMessage({
+        type: 'analysis', id, move: 'e2e4', bestMove: 'e2e4',
+        bestEval: 10, playedEval: 10, delta: 0, classification: 'best',
+      })
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+
+    expect(store.getState().lastAnalysis).toBeNull()
+    expect(store.getState().analysisMap.has(0)).toBe(false)
   })
 })

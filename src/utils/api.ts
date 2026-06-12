@@ -649,6 +649,18 @@ export interface CachedAnalysis {
   best_eval: number | null
   eval_delta: number | null
   classification: MoveClassification | null
+  /**
+   * Quality metadata from the backend (see backend CachedAnalysisResult).
+   * `authoritative` is true only when the row's identity fields match an active
+   * authoritative profile; a structurally-complete but non-authoritative row
+   * (e.g. a browser-game upload) must NOT override local worker analysis.
+   */
+  source?: string | null
+  analysis_profile_id?: string | null
+  engine_version?: string | null
+  engine_build?: string | null
+  evidence_contract_id?: string | null
+  authoritative?: boolean
 }
 
 interface AnalysisLookupRequest {

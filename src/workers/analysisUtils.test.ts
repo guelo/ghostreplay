@@ -16,6 +16,7 @@ import {
   classifyMove,
   classifyMoveAdvanced,
   canResolveCachedAnalysis,
+  isTrustedCacheHit,
   calculateWinChance,
   checkMateEvents,
   WIN_CHANCE_MULTIPLIER,
@@ -830,6 +831,30 @@ describe('canResolveCachedAnalysis', () => {
         classification: null,
         eval_delta: 0,
       }),
+    ).toBe(false)
+  })
+})
+
+describe('isTrustedCacheHit', () => {
+  const complete = {
+    best_move_uci: 'e2e4',
+    best_line_uci: ['e2e4', 'e7e5'],
+    classification: 'best' as const,
+    eval_delta: 0,
+  }
+
+  it('accepts an authoritative + structurally-complete row', () => {
+    expect(isTrustedCacheHit({ ...complete, authoritative: true })).toBe(true)
+  })
+
+  it('rejects a structurally-complete but non-authoritative row', () => {
+    expect(isTrustedCacheHit({ ...complete, authoritative: false })).toBe(false)
+    expect(isTrustedCacheHit({ ...complete })).toBe(false)
+  })
+
+  it('rejects an authoritative row that is structurally incomplete', () => {
+    expect(
+      isTrustedCacheHit({ ...complete, best_line_uci: null, authoritative: true }),
     ).toBe(false)
   })
 })

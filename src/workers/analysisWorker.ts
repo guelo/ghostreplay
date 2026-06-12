@@ -285,8 +285,13 @@ const drainQueue = () => {
       }
       const message =
         error instanceof Error ? error.message : "Failed to analyze move";
+      // Scope this failure to the originating request so the consumer can
+      // attribute it to a single moveIndex rather than failing all analysis.
+      // Engine/bootstrap/fatal failures remain unscoped (no `id`) and are
+      // emitted elsewhere.
       ctx.postMessage({
         type: "error",
+        id: request.id,
         error: message,
       } satisfies AnalysisWorkerResponse);
     })

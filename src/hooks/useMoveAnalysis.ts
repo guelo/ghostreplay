@@ -3,7 +3,7 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, canResolveCachedAnalysis } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedCacheHit } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
@@ -45,13 +45,29 @@ export type AnalysisResult = {
 }
 
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
+const CACHE_BATCH_MAX_AGE_MS = 400
+const ANALYSIS_RESOLUTION_TIMEOUT_MS = 2500
+const ANALYSIS_TOTAL_DEADLINE_MS = 8000
 
 type PendingCacheLookup = {
+  requestId: string
   fen: string
   move: string
   moveIndex: number
   playerColor: 'white' | 'black'
   legalMoveCount: number | undefined
+}
+
+type ReleaseReason = 'cache-miss' | 'untrusted' | 'cache-error' | 'timeout' | 'worker-error'
+
+type ResolutionEntry = {
+  requestId: string
+  cacheStatus: 'pending' | 'released'
+  releaseReason?: ReleaseReason
+  bufferedWorker?: AnalysisResult
+  workerFailed?: boolean
+  deadlineTimer?: ReturnType<typeof setTimeout>
+  cacheTimer?: ReturnType<typeof setTimeout>
 }
 
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
@@ -86,6 +102,7 @@ const mateToPlayerPerspective = (
  * from game context.
  */
 const fromCachedAnalysis = (
+  requestId: string,
   cached: CachedAnalysis,
   move: string,
   moveIndex: number,
@@ -107,7 +124,9 @@ const fromCachedAnalysis = (
     isWithinRecordingMoveCap(moveIndex)
 
   return {
-    id: createRequestId(),
+    // Preserve the originating request id so the cache result is attributable
+    // to its request (Finding R6), matching the coordinator.
+    id: requestId,
     move,
     bestMove: cached.best_move_uci ?? move,
     bestLine: cached.best_line_uci ?? null,
@@ -134,44 +153,142 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
   const pendingVariationPlies = useRef<Map<string, { ply: number; fen: string }>>(new Map())
   // Throttle streaming eval updates to avoid excessive rerenders
   const lastStreamingUpdateMs = useRef(0)
+  // Which request currently owns the global analyzing/streaming transient state,
+  // so a stale result cannot clear the spinner of a live newer request.
+  const currentAnalyzingRequestId = useRef<string | null>(null)
 
   // Race tracking: which moveIndices have been resolved (by either source)
   const resolvedIndices = useRef<Set<number>>(new Set())
 
+  // Cache-first resolution state machine (mirrors GameAnalysisCoordinator).
+  const resolutionState = useRef<Map<number, ResolutionEntry>>(new Map())
+  // Latest request id per index — guards every resolution against superseded
+  // requests (Finding 2). The hook had no such guard before.
+  const latestRequestIds = useRef<Map<number, string>>(new Map())
+  // Retained until lifecycle cleanup so a late worker message for a settled
+  // index is never mistaken for a non-indexed request (Finding G1).
+  const requestIdToMoveIndex = useRef<Map<string, number>>(new Map())
+  // Incremented on unmount; async cache callbacks captured at schedule time
+  // no-op if it changed, preventing post-unmount store mutation (Finding 5).
+  const mountToken = useRef(0)
+
   // Debounced cache lookup batch
   const pendingCacheLookups = useRef<PendingCacheLookup[]>([])
   const cacheFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const cacheBatchFirstEnqueuedAt = useRef<number | null>(null)
 
+  // Terminal publication point — single place that writes the store.
   const resolveAnalysis = useCallback(
     (moveIndex: number, result: AnalysisResult) => {
-      if (resolvedIndices.current.has(moveIndex)) {
-        return false
-      }
+      if (latestRequestIds.current.get(moveIndex) !== result.id) return false
+      if (resolvedIndices.current.has(moveIndex)) return false
       resolvedIndices.current.add(moveIndex)
+      const entry = resolutionState.current.get(moveIndex)
+      if (entry) {
+        if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+        if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+        resolutionState.current.delete(moveIndex)
+      }
+      pendingMoveIndices.current.delete(result.id)
+      pendingMeta.current.delete(result.id)
       store.getState().resolveAnalysis(moveIndex, result)
       return true
     },
     [store],
   )
 
+  const clearActiveAnalysisStateIfCurrent = useCallback((requestId: string) => {
+    if (currentAnalyzingRequestId.current !== requestId) return
+    currentAnalyzingRequestId.current = null
+    lastStreamingUpdateMs.current = 0
+    const s = store.getState()
+    s.setIsAnalyzing(false)
+    s.setAnalyzingMove(null)
+    s.setStreamingEval(null)
+  }, [store])
+
+  // Hard no-hang terminator: drop all per-request state + both timers. The hook
+  // has no waiters, so failure simply skips the move — but it must clear the
+  // spinner if this request still owns it, or isAnalyzing stays stuck (Finding 1).
+  const failRequest = useCallback(
+    (moveIndex: number, requestId: string) => {
+      const entry = resolutionState.current.get(moveIndex)
+      if (!entry || entry.requestId !== requestId) return
+      if (resolvedIndices.current.has(moveIndex)) return
+      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+      resolutionState.current.delete(moveIndex)
+      pendingMoveIndices.current.delete(requestId)
+      pendingMeta.current.delete(requestId)
+      clearActiveAnalysisStateIfCurrent(requestId)
+    },
+    [clearActiveAnalysisStateIfCurrent],
+  )
+
+  // Release the buffered worker fallback once the cache settles non-trusted.
+  const releaseFallback = useCallback(
+    (moveIndex: number, requestId: string, reason: ReleaseReason) => {
+      const entry = resolutionState.current.get(moveIndex)
+      if (!entry || entry.requestId !== requestId) return
+      if (resolvedIndices.current.has(moveIndex)) return
+      if (entry.cacheStatus === 'released') return
+      if (entry.cacheTimer) {
+        clearTimeout(entry.cacheTimer)
+        entry.cacheTimer = undefined
+      }
+      entry.cacheStatus = 'released'
+      entry.releaseReason = reason
+      if (entry.bufferedWorker) {
+        resolveAnalysis(moveIndex, entry.bufferedWorker)
+      } else if (entry.workerFailed) {
+        failRequest(moveIndex, requestId)
+      }
+      // else: worker result resolves on arrival, or the deadline terminates it.
+    },
+    [resolveAnalysis, failRequest],
+  )
+
   const flushCacheLookups = useCallback(() => {
     const batch = pendingCacheLookups.current.splice(0)
+    cacheBatchFirstEnqueuedAt.current = null
     if (batch.length === 0) return
+
+    const token = mountToken.current
+
+    // Start the cache-response window at dispatch (Finding 5).
+    for (const pending of batch) {
+      const entry = resolutionState.current.get(pending.moveIndex)
+      if (!entry || entry.requestId !== pending.requestId) continue
+      if (entry.cacheStatus !== 'pending') continue
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+      entry.cacheTimer = setTimeout(() => {
+        if (mountToken.current !== token) return
+        releaseFallback(pending.moveIndex, pending.requestId, 'timeout')
+      }, ANALYSIS_RESOLUTION_TIMEOUT_MS)
+    }
 
     const positions = batch.map(p => ({ fen: p.fen, move_uci: p.move }))
 
     lookupAnalysisCache(positions)
       .then(results => {
+        if (mountToken.current !== token) return
         for (const pending of batch) {
-          if (pending.moveIndex === undefined) continue
+          const entry = resolutionState.current.get(pending.moveIndex)
+          if (!entry || entry.requestId !== pending.requestId) continue
+          if (entry.cacheStatus !== 'pending') continue
           if (resolvedIndices.current.has(pending.moveIndex)) continue
 
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
-          if (!cached) continue
-          if (!canResolveCachedAnalysis(cached)) continue
+
+          if (!cached || !isTrustedCacheHit(cached)) {
+            const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
+            releaseFallback(pending.moveIndex, pending.requestId, reason)
+            continue
+          }
 
           const result = fromCachedAnalysis(
+            pending.requestId,
             cached,
             pending.move,
             pending.moveIndex,
@@ -180,8 +297,13 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           )
 
           if (resolveAnalysis(pending.moveIndex, result)) {
+            // The authoritative result wins; the discarded worker may still be
+            // running (and could stall). Clear the spinner now since cache
+            // resolution also cleared the deadline timer (Finding 1, mirrors the
+            // coordinator).
+            clearActiveAnalysisStateIfCurrent(pending.requestId)
             console.log(
-              `[Analyst] Cache hit for move ${pending.move} at index ${pending.moveIndex}`,
+              `[Analyst] resolve idx=${pending.moveIndex} source=cache(authoritative profile=${cached.analysis_profile_id ?? 'unknown'})`,
             )
             if (result.blunder && result.delta !== null) {
               console.log(
@@ -192,21 +314,50 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
         }
       })
       .catch(() => {
-        // Cache miss — worker will handle it
+        if (mountToken.current !== token) return
+        for (const pending of batch) {
+          releaseFallback(pending.moveIndex, pending.requestId, 'cache-error')
+        }
       })
-  }, [resolveAnalysis])
+  }, [resolveAnalysis, releaseFallback, clearActiveAnalysisStateIfCurrent])
+
+  // `keepTombstones` retains requestIdToMoveIndex so that, when the worker stays
+  // alive across the clear (clearAnalysis), a late indexed result is still
+  // recognized as a discarded indexed request and dropped — never mistaken for
+  // an ad-hoc result that would repopulate lastAnalysis (Finding 1). Fatal
+  // teardown terminates the worker, so it can drop the tombstones too.
+  const clearResolutionState = useCallback((keepTombstones = false) => {
+    for (const entry of resolutionState.current.values()) {
+      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+    }
+    resolutionState.current.clear()
+    latestRequestIds.current.clear()
+    if (!keepTombstones) {
+      requestIdToMoveIndex.current.clear()
+    }
+    pendingCacheLookups.current.length = 0
+    cacheBatchFirstEnqueuedAt.current = null
+  }, [])
 
   const scheduleCacheLookup = useCallback(
     (lookup: PendingCacheLookup) => {
+      if (pendingCacheLookups.current.length === 0) {
+        cacheBatchFirstEnqueuedAt.current = Date.now()
+      }
       pendingCacheLookups.current.push(lookup)
 
       if (cacheFlushTimer.current !== null) {
         clearTimeout(cacheFlushTimer.current)
       }
+      const elapsed = cacheBatchFirstEnqueuedAt.current !== null
+        ? Date.now() - cacheBatchFirstEnqueuedAt.current
+        : 0
+      const delay = Math.max(0, Math.min(CACHE_LOOKUP_DEBOUNCE_MS, CACHE_BATCH_MAX_AGE_MS - elapsed))
       cacheFlushTimer.current = setTimeout(() => {
         cacheFlushTimer.current = null
         flushCacheLookups()
-      }, CACHE_LOOKUP_DEBOUNCE_MS)
+      }, delay)
     },
     [flushCacheLookups],
   )
@@ -228,15 +379,41 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
 
       switch (message.type) {
         case 'ready':
+          // A stray late `ready` must not flip a fatal error back to ready and
+          // reopen the ad-hoc path (Finding 3). A genuine remount resets status
+          // to 'booting' (resetTransient), so legitimate recovery still works.
+          if (s.status === 'error') break
           s.setStatus('ready')
           break
-        case 'analysis-started':
+        case 'analysis-started': {
+          // Drop late worker messages after a fatal error (Finding F1).
+          if (s.status === 'error') break
+          // Gate indexed requests by request state (Finding R5), but accept
+          // variation requests which are tracked separately (Finding G4).
+          const startIdx = requestIdToMoveIndex.current.get(message.id)
+          if (startIdx !== undefined) {
+            if (latestRequestIds.current.get(startIdx) !== message.id || resolvedIndices.current.has(startIdx)) {
+              break
+            }
+          }
+          currentAnalyzingRequestId.current = message.id
           s.setIsAnalyzing(true)
           s.setAnalyzingMove(message.move)
           break
+        }
         case 'analysis-streaming': {
+          if (s.status === 'error') break
           const streamIdx = pendingMoveIndices.current.get(message.id)
-          if (streamIdx !== undefined && !resolvedIndices.current.has(streamIdx)) {
+          // Guard by latestRequestIds so a superseded request's stream cannot
+          // update the replacement index (Finding 2).
+          if (
+            streamIdx !== undefined &&
+            latestRequestIds.current.get(streamIdx) === message.id &&
+            !resolvedIndices.current.has(streamIdx)
+          ) {
+            // This (latest) request owns the global transient state, so its own
+            // terminal result is allowed to clear it later.
+            currentAnalyzingRequestId.current = message.id
             const now = performance.now()
             if (now - lastStreamingUpdateMs.current >= 250) {
               lastStreamingUpdateMs.current = now
@@ -260,35 +437,74 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           break
         }
         case 'analysis': {
-          s.setIsAnalyzing(false)
-          s.setAnalyzingMove(null)
-          s.setStreamingEval(null)
-          lastStreamingUpdateMs.current = 0
+          // Drop late worker results after a fatal error (Finding F1).
+          if (s.status === 'error') break
+
           // Clear any in-flight variation streaming for this request; the
           // resolved result now lives in the variation analysis cache.
           if (pendingVariationPlies.current.has(message.id)) {
             pendingVariationPlies.current.delete(message.id)
             s.setVariationStreamingEval(null)
           }
-          const moveIndex = pendingMoveIndices.current.get(message.id)
-          if (moveIndex !== undefined) {
-            pendingMoveIndices.current.delete(message.id)
-          }
-          const meta = pendingMeta.current.get(message.id)
-          pendingMeta.current.delete(message.id)
 
-          // If cache already resolved this moveIndex, skip the worker result
-          if (moveIndex !== undefined && resolvedIndices.current.has(moveIndex)) {
+          const moveIndex = requestIdToMoveIndex.current.get(message.id)
+          if (moveIndex !== undefined) {
+            // Known indexed request (possibly already settled). Clear the
+            // spinner only if THIS request owns it, so a stale result cannot
+            // clear a live newer request's transient state (Finding 2).
+            clearActiveAnalysisStateIfCurrent(message.id)
+            const entry = resolutionState.current.get(moveIndex)
+            if (
+              !entry ||
+              entry.requestId !== message.id ||
+              latestRequestIds.current.get(moveIndex) !== message.id ||
+              resolvedIndices.current.has(moveIndex)
+            ) {
+              break
+            }
+
+            const meta = pendingMeta.current.get(message.id)
+            const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
+            const blunder = !forced && message.classification === 'blunder'
+            const recordable =
+              !forced &&
+              isRecordableFailure(message.delta) &&
+              isWithinRecordingMoveCap(moveIndex)
+
+            const result: AnalysisResult = {
+              id: message.id,
+              move: message.move,
+              bestMove: message.bestMove,
+              bestLine: message.bestLine,
+              bestEval: message.bestEval,
+              playedEval: message.playedEval,
+              currentPositionEval: message.playedEval,
+              playedEvalMate: message.playedEvalMate,
+              currentPositionEvalMate: message.playedEvalMate,
+              moveIndex,
+              delta: message.delta,
+              classification: message.classification,
+              blunder,
+              recordable,
+            }
+
+            if (entry.cacheStatus === 'pending') {
+              // Hold until the authoritative cache settles (Finding 3).
+              entry.bufferedWorker = result
+            } else {
+              resolveAnalysis(moveIndex, result)
+              if (blunder && message.delta !== null) {
+                console.log(
+                  `[Analyst] Blunder detected: Δ${message.delta}cp (best ${message.bestMove}).`,
+                )
+              }
+            }
             break
           }
 
-          const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
-          const blunder = !forced && message.classification === 'blunder'
-          const recordable =
-            !forced &&
-            isRecordableFailure(message.delta) &&
-            (moveIndex !== undefined ? isWithinRecordingMoveCap(moveIndex) : false)
-
+          // Genuinely non-indexed (variation / ad-hoc) request.
+          clearActiveAnalysisStateIfCurrent(message.id)
+          pendingMeta.current.delete(message.id)
           const result: AnalysisResult = {
             id: message.id,
             move: message.move,
@@ -299,27 +515,48 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
             currentPositionEval: message.playedEval,
             playedEvalMate: message.playedEvalMate,
             currentPositionEvalMate: message.playedEvalMate,
-            moveIndex: moveIndex ?? null,
+            moveIndex: null,
             delta: message.delta,
             classification: message.classification,
-            blunder,
-            recordable,
+            blunder: message.classification === 'blunder',
+            recordable: false,
           }
-
-          if (moveIndex !== undefined) {
-            resolveAnalysis(moveIndex, result)
-          } else {
-            store.getState().setLastAnalysis(result)
-          }
-
-          if (blunder && message.delta !== null) {
+          store.getState().setLastAnalysis(result)
+          if (result.blunder && message.delta !== null) {
             console.log(
               `[Analyst] Blunder detected: Δ${message.delta}cp (best ${message.bestMove}).`,
             )
           }
           break
         }
-        case 'error':
+        case 'error': {
+          if (message.id !== undefined) {
+            // Scoped variation error: clear only that variation's streaming
+            // state, not the global status (Finding G4). The worker stopped for
+            // this request, so clear the spinner if it owns it (Finding 1).
+            if (pendingVariationPlies.current.has(message.id)) {
+              pendingVariationPlies.current.delete(message.id)
+              s.setVariationStreamingEval(null)
+              clearActiveAnalysisStateIfCurrent(message.id)
+              break
+            }
+            // Scoped indexed error.
+            const idx = requestIdToMoveIndex.current.get(message.id)
+            if (idx === undefined) break
+            const entry = resolutionState.current.get(idx)
+            if (!entry || entry.requestId !== message.id) break
+            if (resolvedIndices.current.has(idx)) break
+            // The worker has stopped for this request either way, so clear the
+            // spinner if it still owns it (failRequest also does this).
+            clearActiveAnalysisStateIfCurrent(message.id)
+            if (entry.cacheStatus === 'pending') {
+              entry.workerFailed = true
+            } else {
+              failRequest(idx, message.id)
+            }
+            break
+          }
+          // Unscoped / fatal error.
           s.setStatus('error')
           s.setError(message.error)
           s.setIsAnalyzing(false)
@@ -328,8 +565,19 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           s.setStreamingEval(null)
           s.setVariationStreamingEval(null)
           lastStreamingUpdateMs.current = 0
+          currentAnalyzingRequestId.current = null
           pendingVariationPlies.current.clear()
+          clearResolutionState()
+          // Invalidate the worker so a late `ready` cannot flip status back and
+          // let queued stale results enter the ad-hoc path (Finding 3). Recovery
+          // is a remount (the effect creates a fresh worker).
+          if (workerRef.current) {
+            workerRef.current.terminate()
+            workerRef.current = null
+          }
+          mountToken.current++
           break
+        }
         case 'log':
           console.log(`[Analyst] ${message.message}`)
           break
@@ -342,11 +590,21 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       const s = store.getState()
       s.setStatus('error')
       s.setError(event.message)
+      s.setIsAnalyzing(false)
+      s.setAnalyzingMove(null)
       // Drop any in-flight streaming state so no stale dot/segment lingers.
       s.setStreamingEval(null)
       s.setVariationStreamingEval(null)
       lastStreamingUpdateMs.current = 0
+      currentAnalyzingRequestId.current = null
       pendingVariationPlies.current.clear()
+      clearResolutionState()
+      // Invalidate the worker (see the unscoped-error branch, Finding 3).
+      if (workerRef.current) {
+        workerRef.current.terminate()
+        workerRef.current = null
+      }
+      mountToken.current++
     }
 
     worker.addEventListener('message', handleMessage)
@@ -357,6 +615,18 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       worker.removeEventListener('error', handleError)
       worker.terminate()
       workerRef.current = null
+      // Invalidate any in-flight async cache callbacks so they cannot mutate
+      // the store after unmount (Finding 5), and clear timers.
+      mountToken.current++
+      for (const entry of resolutionState.current.values()) {
+        if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+        if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+      }
+      resolutionState.current.clear()
+      if (cacheFlushTimer.current !== null) {
+        clearTimeout(cacheFlushTimer.current)
+        cacheFlushTimer.current = null
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -373,8 +643,24 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
 
       const id = createRequestId()
       if (moveIndex !== undefined) {
+        // Supersede any prior resolution state for this index (Findings 2 & F2).
+        const prevEntry = resolutionState.current.get(moveIndex)
+        if (prevEntry) {
+          if (prevEntry.deadlineTimer) clearTimeout(prevEntry.deadlineTimer)
+          if (prevEntry.cacheTimer) clearTimeout(prevEntry.cacheTimer)
+        }
         pendingMoveIndices.current.set(id, moveIndex)
         pendingMeta.current.set(id, { moveIndex, legalMoveCount })
+        latestRequestIds.current.set(moveIndex, id)
+        requestIdToMoveIndex.current.set(id, moveIndex)
+        resolvedIndices.current.delete(moveIndex)
+
+        const token = mountToken.current
+        const deadlineTimer = setTimeout(() => {
+          if (mountToken.current !== token) return
+          failRequest(moveIndex, id)
+        }, ANALYSIS_TOTAL_DEADLINE_MS)
+        resolutionState.current.set(moveIndex, { requestId: id, cacheStatus: 'pending', deadlineTimer })
       } else if (variationPly !== undefined && variationFen !== undefined) {
         pendingVariationPlies.current.set(id, { ply: variationPly, fen: variationFen })
       }
@@ -393,27 +679,31 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
 
       // Race: also fire a cache lookup
       if (moveIndex !== undefined) {
-        scheduleCacheLookup({ fen, move, moveIndex, playerColor, legalMoveCount })
+        scheduleCacheLookup({ requestId: id, fen, move, moveIndex, playerColor, legalMoveCount })
       }
 
       return id
     },
-    [store, scheduleCacheLookup],
+    [store, scheduleCacheLookup, failRequest],
   )
 
   const clearAnalysis = useCallback(() => {
     store.getState().clearAll()
     lastStreamingUpdateMs.current = 0
+    currentAnalyzingRequestId.current = null
     pendingMoveIndices.current.clear()
     pendingMeta.current.clear()
     pendingVariationPlies.current.clear()
     resolvedIndices.current.clear()
-    pendingCacheLookups.current.length = 0
+    // Keep the requestId→index tombstones: clearAnalysis does not terminate the
+    // worker, so a late indexed result must still be dropped, not treated as
+    // ad-hoc (Finding 1).
+    clearResolutionState(true)
     if (cacheFlushTimer.current !== null) {
       clearTimeout(cacheFlushTimer.current)
       cacheFlushTimer.current = null
     }
-  }, [store])
+  }, [store, clearResolutionState])
 
   return { analyzeMove, clearAnalysis }
 }

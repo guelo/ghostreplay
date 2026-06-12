@@ -13,7 +13,7 @@ import {
   isRecordableFailure,
   isWithinRecordingMoveCap,
   classifyMove,
-  canResolveCachedAnalysis,
+  isTrustedCacheHit,
 } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
@@ -32,6 +32,25 @@ const createRequestId = () => {
 }
 
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
+/**
+ * Hard cap on how long the trailing cache-lookup debounce may slide under a
+ * sustained burst. Without it a continuous stream of moves could defer dispatch
+ * (and therefore the cache-response timer) indefinitely. Measured from the first
+ * enqueue into an empty batch.
+ */
+const CACHE_BATCH_MAX_AGE_MS = 400
+/**
+ * Cache-response window. Started when the lookup is actually dispatched (in
+ * flushCacheLookups), not at analyzeMove. If the cache has not answered within
+ * this window the buffered worker fallback is released.
+ */
+const ANALYSIS_RESOLUTION_TIMEOUT_MS = 2500
+/**
+ * Hard total-analysis deadline started at analyzeMove. Guarantees no-hang: if an
+ * indexed request never resolves (worker never emits, cache missed, etc.) the
+ * request is terminated as failed so analysis-dependent gameplay cannot deadlock.
+ */
+const ANALYSIS_TOTAL_DEADLINE_MS = 8000
 const INCREMENTAL_UPLOAD_INTERVAL_MS = 3000
 const INCREMENTAL_UPLOAD_BATCH_THRESHOLD = 4
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000 // 5 minutes
@@ -48,8 +67,35 @@ type PendingCacheLookup = {
 
 type AnalysisWaiter = {
   generation: number
+  /** Bound at registration so a superseded request cannot fulfil a waiter that
+   *  was awaiting a different (older or newer) request for the same index. */
+  requestId: string | undefined
   resolve: (result: AnalysisResult) => void
   reject: (error: Error) => void
+}
+
+type ReleaseReason = 'cache-miss' | 'untrusted' | 'cache-error' | 'timeout' | 'worker-error'
+
+/**
+ * Per-moveIndex resolution state machine. The worker result is buffered while
+ * the authoritative cache lookup is still pending; the cache settle performs the
+ * single policy decision. Carries the owning requestId so a superseded/older
+ * request can never settle a newer one.
+ */
+type ResolutionEntry = {
+  requestId: string
+  cacheStatus: 'pending' | 'released'
+  releaseReason?: ReleaseReason
+  /** Worker finished but cache still pending — held here until cache settles. */
+  bufferedWorker?: AnalysisResult
+  /** Worker errored (scoped) while cache pending — awaiting cache recovery. */
+  workerFailed?: boolean
+  /** Captured scoped-error text, used when rejecting waiters. */
+  workerError?: string
+  /** Total-analysis hard deadline (started at analyzeMove). */
+  deadlineTimer?: ReturnType<typeof setTimeout>
+  /** Cache-response window (started at dispatch in flushCacheLookups). */
+  cacheTimer?: ReturnType<typeof setTimeout>
 }
 
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
@@ -141,6 +187,14 @@ export class GameAnalysisCoordinator {
   // Cache lookup batching
   private pendingCacheLookups: PendingCacheLookup[] = []
   private cacheFlushTimer: ReturnType<typeof setTimeout> | null = null
+  /** Timestamp of the first enqueue into an empty batch (max-batch-age clock). */
+  private cacheBatchFirstEnqueuedAt: number | null = null
+
+  // Cache-first resolution state machine (keyed by moveIndex).
+  private resolutionState = new Map<number, ResolutionEntry>()
+  /** Retained until lifecycle cleanup so a late worker message for a settled
+   *  index is never mistaken for a non-indexed request (Finding G1). */
+  private requestIdToMoveIndex = new Map<string, number>()
 
   // Session state — generation monotonically increases on each startSession
   // so in-flight async work from a previous session can be detected and dropped.
@@ -251,6 +305,7 @@ export class GameAnalysisCoordinator {
     this.activeSessionId = sessionId
     this.sessionGeneration++
     this.rejectAnalysisWaiters(new Error('Analysis session changed'))
+    this.clearAllResolutionState()
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
@@ -291,6 +346,7 @@ export class GameAnalysisCoordinator {
     this.activeSessionId = null
     this.sessionGeneration++
     this.rejectAnalysisWaiters(new Error('Analysis session cleared'))
+    this.clearAllResolutionState()
     this.store.getState().clearAll()
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
@@ -346,11 +402,28 @@ export class GameAnalysisCoordinator {
       if (previousRequestId && previousRequestId !== id) {
         this.cancelWorkerAnalysis(previousRequestId)
       }
+
+      // Supersede any prior resolution state for this index: clear BOTH timers
+      // and immediately reject waiters bound to the superseded request so a
+      // caller awaiting the old request does not hang (Finding F2).
+      const prevEntry = this.resolutionState.get(moveIndex)
+      if (prevEntry) {
+        if (prevEntry.deadlineTimer) clearTimeout(prevEntry.deadlineTimer)
+        if (prevEntry.cacheTimer) clearTimeout(prevEntry.cacheTimer)
+        this.rejectWaitersForRequest(moveIndex, prevEntry.requestId, new Error('Analysis superseded'))
+      }
+
       this.store.getState().removeAnalysis(moveIndex)
       this.pendingMoveIndices.set(id, moveIndex)
       this.pendingMeta.set(id, { moveIndex, legalMoveCount })
       this.latestRequestIds.set(moveIndex, id)
+      this.requestIdToMoveIndex.set(id, moveIndex)
       this.resolvedIndices.delete(moveIndex)
+
+      const deadlineTimer = setTimeout(() => {
+        this.failRequest(moveIndex, id, 'deadline')
+      }, ANALYSIS_TOTAL_DEADLINE_MS)
+      this.resolutionState.set(moveIndex, { requestId: id, cacheStatus: 'pending', deadlineTimer })
     }
 
     const message: AnalyzeMoveMessage = {
@@ -376,6 +449,13 @@ export class GameAnalysisCoordinator {
     this.currentAnalyzingRequestId = null
     this.lastStreamingUpdateMs = 0
     this.terminateWorker()
+    // Terminating the worker orphans every in-flight request — buffered,
+    // pending, and worker-failed alike — so reject all their waiters rather
+    // than leaving them to hang until the total deadline (Finding R4).
+    this.clearAllResolutionState()
+    this.rejectAnalysisWaiters(new Error('Analysis worker restarted'))
+    this.pendingMoveIndices.clear()
+    this.pendingMeta.clear()
     const s = this.store.getState()
     s.setStatus('booting')
     s.setError(null)
@@ -383,6 +463,18 @@ export class GameAnalysisCoordinator {
     s.setAnalyzingMove(null)
     s.setStreamingEval(null)
     this.ensureWorker()
+  }
+
+  /** Clear every resolution-state entry and its timers, plus the requestId↔index
+   *  tombstone map and the cache-batch age clock. Used by all lifecycle paths. */
+  private clearAllResolutionState() {
+    for (const entry of this.resolutionState.values()) {
+      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+    }
+    this.resolutionState.clear()
+    this.requestIdToMoveIndex.clear()
+    this.cacheBatchFirstEnqueuedAt = null
   }
 
   waitForAnalysis(moveIndex: number): Promise<AnalysisResult> {
@@ -403,7 +495,7 @@ export class GameAnalysisCoordinator {
 
     const generation = this.sessionGeneration
     return new Promise((resolve, reject) => {
-      const waiter: AnalysisWaiter = { generation, resolve, reject }
+      const waiter: AnalysisWaiter = { generation, requestId, resolve, reject }
       const waiters = this.analysisWaiters.get(moveIndex) ?? new Set<AnalysisWaiter>()
       waiters.add(waiter)
       this.analysisWaiters.set(moveIndex, waiters)
@@ -413,11 +505,25 @@ export class GameAnalysisCoordinator {
   clearAnalysis() {
     this.store.getState().clearAll()
     this.lastStreamingUpdateMs = 0
+    // Reject any unresolved waiters — clearing orphans every in-flight request
+    // (Finding R4).
+    for (const entry of this.resolutionState.values()) {
+      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+    }
+    this.resolutionState.clear()
+    this.cacheBatchFirstEnqueuedAt = null
+    this.rejectAnalysisWaiters(new Error('Analysis cleared'))
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
     this.latestRequestIds.clear()
     this.resolvedIndices.clear()
     this.pendingCacheLookups = []
+    // Intentionally retain requestIdToMoveIndex as a tombstone: clearAnalysis
+    // does NOT terminate the worker, so a late worker `analysis` for a now-
+    // discarded indexed request must still be recognized as indexed (its entry
+    // is gone → dropped), never mistaken for an ad-hoc result that would
+    // repopulate lastAnalysis and retrigger subscribers (Finding 1).
     this.currentAnalyzingRequestId = null
     if (this.cacheFlushTimer) {
       clearTimeout(this.cacheFlushTimer)
@@ -435,12 +541,25 @@ export class GameAnalysisCoordinator {
       case 'ready':
         s.setStatus('ready')
         break
-      case 'analysis-started':
+      case 'analysis-started': {
+        // Drop late worker messages after a fatal error (Finding F1).
+        if (s.status === 'error') break
+        // Gate by request state so a late start after a cache hit cancels does
+        // not re-show the spinner (Finding R5).
+        const startIdx = this.requestIdToMoveIndex.get(message.id)
+        if (
+          startIdx !== undefined &&
+          (this.latestRequestIds.get(startIdx) !== message.id || this.resolvedIndices.has(startIdx))
+        ) {
+          break
+        }
         this.currentAnalyzingRequestId = message.id
         s.setIsAnalyzing(true)
         s.setAnalyzingMove(message.move)
         break
+      }
       case 'analysis-streaming': {
+        if (s.status === 'error') break
         const streamIdx = this.pendingMoveIndices.get(message.id)
         if (
           streamIdx !== undefined &&
@@ -456,72 +575,87 @@ export class GameAnalysisCoordinator {
         break
       }
       case 'analysis': {
-        this.clearActiveAnalysisStateIfCurrent(message.id)
-
-        const moveIndex = this.pendingMoveIndices.get(message.id)
-        if (moveIndex !== undefined) {
-          this.pendingMoveIndices.delete(message.id)
-        }
-        const meta = this.pendingMeta.get(message.id)
-        this.pendingMeta.delete(message.id)
-
-        if (
-          moveIndex !== undefined &&
-          (
-            this.latestRequestIds.get(moveIndex) !== message.id ||
-            this.resolvedIndices.has(moveIndex)
-          )
-        ) {
+        // Drop late worker results after a fatal error (Finding F1).
+        if (s.status === 'error') {
+          this.clearActiveAnalysisStateIfCurrent(message.id)
           break
         }
 
-        const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
-        const blunder = !forced && message.classification === 'blunder'
-        const recordable =
-          !forced &&
-          isRecordableFailure(message.delta) &&
-          (moveIndex !== undefined ? isWithinRecordingMoveCap(moveIndex) : false)
-
-        const result: AnalysisResult = {
-          id: message.id,
-          move: message.move,
-          bestMove: message.bestMove,
-          bestLine: message.bestLine,
-          bestEval: message.bestEval,
-          playedEval: message.playedEval,
-          currentPositionEval: message.playedEval,
-          playedEvalMate: message.playedEvalMate,
-          currentPositionEvalMate: message.playedEvalMate,
-          moveIndex: moveIndex ?? null,
-          delta: message.delta,
-          classification: message.classification,
-          blunder,
-          recordable,
-        }
-
+        const moveIndex = this.requestIdToMoveIndex.get(message.id)
         if (moveIndex !== undefined) {
-          this.resolveAnalysisResult(moveIndex, result)
-        } else {
-          this.store.getState().setLastAnalysis(result)
+          // Known indexed request (possibly already settled). Never treat it as
+          // non-indexed \u2014 that would clobber lastAnalysis (Finding G1).
+          this.clearActiveAnalysisStateIfCurrent(message.id)
+          const entry = this.resolutionState.get(moveIndex)
+          if (
+            !entry ||
+            entry.requestId !== message.id ||
+            this.latestRequestIds.get(moveIndex) !== message.id ||
+            this.resolvedIndices.has(moveIndex)
+          ) {
+            // Stale / superseded / already resolved \u2192 drop.
+            break
+          }
+
+          const result = this.buildWorkerResult(message, moveIndex)
+          if (entry.cacheStatus === 'pending') {
+            // Hold the worker result until the authoritative cache settles.
+            // Keep pendingMoveIndices/pendingMeta so waitForAnalysis still
+            // registers a waiter (Finding 3).
+            entry.bufferedWorker = result
+          } else {
+            this.resolveAnalysisResult(moveIndex, result)
+            console.log(
+              `[Analyst] resolve idx=${moveIndex} source=worker(${entry.releaseReason ?? 'released'})`,
+            )
+            if (result.blunder && message.delta !== null) {
+              console.log(
+                `[Analyst] Blunder detected: \u0394${message.delta}cp (best ${message.bestMove}).`,
+              )
+            }
+          }
+          break
         }
 
-        if (blunder && message.delta !== null) {
+        // Genuinely non-indexed (ad-hoc) request.
+        this.clearActiveAnalysisStateIfCurrent(message.id)
+        this.pendingMeta.delete(message.id)
+        const result = this.buildWorkerResult(message, null)
+        this.store.getState().setLastAnalysis(result)
+        if (result.blunder && message.delta !== null) {
           console.log(
             `[Analyst] Blunder detected: \u0394${message.delta}cp (best ${message.bestMove}).`,
           )
         }
         break
       }
-      case 'error':
-        this.currentAnalyzingRequestId = null
-        this.lastStreamingUpdateMs = 0
-        s.setStatus('error')
-        s.setError(message.error)
-        s.setIsAnalyzing(false)
-        s.setAnalyzingMove(null)
-        s.setStreamingEval(null)
-        this.rejectAnalysisWaiters(new Error(message.error))
+      case 'error': {
+        if (message.id !== undefined) {
+          // Scoped, request-specific failure \u2014 do NOT set global store status
+          // error (Finding R2) so a later trusted cache hit can still recover.
+          const idx = this.requestIdToMoveIndex.get(message.id)
+          if (idx === undefined) break
+          const entry = this.resolutionState.get(idx)
+          if (!entry || entry.requestId !== message.id) break
+          if (this.resolvedIndices.has(idx)) break
+          this.clearActiveAnalysisStateIfCurrent(message.id)
+          if (entry.cacheStatus === 'pending') {
+            // A trusted cache hit can still resolve this move; wait for the
+            // cache to settle before rejecting (rule 7 workerFailed branch).
+            entry.workerFailed = true
+            entry.workerError = message.error
+          } else {
+            // Cache already released the fallback (reverse order) and no worker
+            // result is coming \u2014 fail immediately rather than waiting for the
+            // total deadline (Finding 1/2).
+            this.failRequest(idx, message.id, 'worker-error', message.error)
+          }
+          break
+        }
+        // Unscoped / fatal error (engine/bootstrap).
+        this.handleFatalError(message.error)
         break
+      }
       case 'log':
         console.log(`[Analyst] ${message.message}`)
         break
@@ -531,30 +665,179 @@ export class GameAnalysisCoordinator {
   }
 
   private handleWorkerError = (event: ErrorEvent) => {
+    this.handleFatalError(event.message || 'Analysis worker error')
+  }
+
+  /**
+   * Fatal (unscoped) worker failure: set global error status, reject all
+   * waiters, and fully tear down resolution state so an in-flight cache `.then`
+   * cannot resolve a move after consumers were told analysis failed (Finding
+   * G3). Invalidate the worker so queued messages cannot reopen the late-worker
+   * bug (Finding F1).
+   */
+  private handleFatalError(errorText: string) {
+    this.currentAnalyzingRequestId = null
+    this.lastStreamingUpdateMs = 0
     const s = this.store.getState()
     s.setStatus('error')
-    s.setError(event.message)
-    this.rejectAnalysisWaiters(new Error(event.message || 'Analysis worker error'))
+    s.setError(errorText)
+    s.setIsAnalyzing(false)
+    s.setAnalyzingMove(null)
+    s.setStreamingEval(null)
+
+    this.clearAllResolutionState()
+    this.pendingMoveIndices.clear()
+    this.pendingMeta.clear()
+    this.pendingCacheLookups = []
+    if (this.cacheFlushTimer) {
+      clearTimeout(this.cacheFlushTimer)
+      this.cacheFlushTimer = null
+    }
+    this.rejectAnalysisWaiters(new Error(errorText))
+    this.terminateWorker()
   }
 
   // --- Resolution ---
+
+  private fulfillWaiters(moveIndex: number, result: AnalysisResult) {
+    const waiters = this.analysisWaiters.get(moveIndex)
+    if (!waiters) return
+    this.analysisWaiters.delete(moveIndex)
+    for (const waiter of waiters) {
+      if (
+        waiter.generation === this.sessionGeneration &&
+        (waiter.requestId === undefined || waiter.requestId === result.id)
+      ) {
+        waiter.resolve(result)
+      } else {
+        waiter.reject(new Error('Analysis superseded'))
+      }
+    }
+  }
+
+  /** Reject only the waiters bound to a specific request (e.g. on supersession),
+   *  leaving waiters for other requests of the same index untouched. */
+  private rejectWaitersForRequest(moveIndex: number, requestId: string, error: Error) {
+    const waiters = this.analysisWaiters.get(moveIndex)
+    if (!waiters) return
+    const remaining = new Set<AnalysisWaiter>()
+    for (const waiter of waiters) {
+      if (waiter.requestId === requestId) {
+        waiter.reject(error)
+      } else {
+        remaining.add(waiter)
+      }
+    }
+    if (remaining.size > 0) {
+      this.analysisWaiters.set(moveIndex, remaining)
+    } else {
+      this.analysisWaiters.delete(moveIndex)
+    }
+  }
+
+  private buildWorkerResult(
+    message: Extract<AnalysisWorkerResponse, { type: 'analysis' }>,
+    moveIndex: number | null,
+  ): AnalysisResult {
+    const meta = moveIndex !== null ? this.pendingMeta.get(message.id) : undefined
+    const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
+    const blunder = !forced && message.classification === 'blunder'
+    const recordable =
+      !forced &&
+      isRecordableFailure(message.delta) &&
+      (moveIndex !== null ? isWithinRecordingMoveCap(moveIndex) : false)
+
+    return {
+      id: message.id,
+      move: message.move,
+      bestMove: message.bestMove,
+      bestLine: message.bestLine,
+      bestEval: message.bestEval,
+      playedEval: message.playedEval,
+      currentPositionEval: message.playedEval,
+      playedEvalMate: message.playedEvalMate,
+      currentPositionEvalMate: message.playedEvalMate,
+      moveIndex: moveIndex ?? null,
+      delta: message.delta,
+      classification: message.classification,
+      blunder,
+      recordable,
+    }
+  }
+
+  /**
+   * Release the buffered worker fallback once the cache has settled non-trusted
+   * (miss / untrusted / error / timeout). Idempotent and id-guarded. Does NOT
+   * clear the total-analysis deadline — that still guards a never-arriving
+   * worker.
+   */
+  private releaseFallback(moveIndex: number, requestId: string, reason: ReleaseReason) {
+    const entry = this.resolutionState.get(moveIndex)
+    if (!entry || entry.requestId !== requestId) return
+    if (this.resolvedIndices.has(moveIndex)) return
+    if (entry.cacheStatus === 'released') return
+    if (entry.cacheTimer) {
+      clearTimeout(entry.cacheTimer)
+      entry.cacheTimer = undefined
+    }
+    entry.cacheStatus = 'released'
+    entry.releaseReason = reason
+
+    if (entry.bufferedWorker) {
+      this.resolveAnalysisResult(moveIndex, entry.bufferedWorker)
+      console.log(`[Analyst] resolve idx=${moveIndex} source=worker(${reason})`)
+    } else if (entry.workerFailed) {
+      // Worker already errored and no result will ever come.
+      this.failRequest(moveIndex, requestId, 'worker-error', entry.workerError)
+    }
+    // else: leave released; the worker result resolves on arrival, or the total
+    // deadline terminates the request.
+  }
+
+  /**
+   * Hard no-hang terminator. Rejects the index's waiters, cancels the worker,
+   * clears active state, and drops all per-request state + both timers. (g-hpw4
+   * will emit a `failed` outcome here so the recording frontier advances.)
+   */
+  private failRequest(
+    moveIndex: number,
+    requestId: string,
+    reason: 'deadline' | 'worker-error',
+    errorText?: string,
+  ) {
+    const entry = this.resolutionState.get(moveIndex)
+    if (!entry || entry.requestId !== requestId) return
+    if (this.resolvedIndices.has(moveIndex)) return
+
+    if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+    if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+    this.resolutionState.delete(moveIndex)
+    this.pendingMoveIndices.delete(requestId)
+    this.pendingMeta.delete(requestId)
+
+    this.rejectWaitersForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
+    this.cancelWorkerAnalysis(requestId)
+    this.clearActiveAnalysisStateIfCurrent(requestId)
+    console.log(`[Analyst] resolve idx=${moveIndex} source=failed(${reason})`)
+  }
 
   private resolveAnalysisResult(moveIndex: number, result: AnalysisResult) {
     if (this.latestRequestIds.get(moveIndex) !== result.id) return
     if (this.resolvedIndices.has(moveIndex)) return
     this.resolvedIndices.add(moveIndex)
-    this.store.getState().resolveAnalysis(moveIndex, result)
-    const waiters = this.analysisWaiters.get(moveIndex)
-    if (waiters) {
-      this.analysisWaiters.delete(moveIndex)
-      for (const waiter of waiters) {
-        if (waiter.generation === this.sessionGeneration) {
-          waiter.resolve(result)
-        } else {
-          waiter.reject(new Error('Analysis session changed'))
-        }
-      }
+
+    // Terminal: clear per-request state + both timers + pending metadata.
+    const entry = this.resolutionState.get(moveIndex)
+    if (entry) {
+      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+      this.resolutionState.delete(moveIndex)
     }
+    this.pendingMoveIndices.delete(result.id)
+    this.pendingMeta.delete(result.id)
+
+    this.store.getState().resolveAnalysis(moveIndex, result)
+    this.fulfillWaiters(moveIndex, result)
 
     // Mark dirty for incremental upload
     if (
@@ -577,23 +860,49 @@ export class GameAnalysisCoordinator {
   // --- Cache lookups ---
 
   private scheduleCacheLookup(lookup: PendingCacheLookup) {
+    if (this.pendingCacheLookups.length === 0) {
+      this.cacheBatchFirstEnqueuedAt = Date.now()
+    }
     this.pendingCacheLookups.push(lookup)
     if (this.cacheFlushTimer !== null) {
       clearTimeout(this.cacheFlushTimer)
     }
+    // Trailing debounce, but capped by a mandatory max batch age so a sustained
+    // burst cannot defer dispatch (and the cache-response timer) indefinitely.
+    const elapsed = this.cacheBatchFirstEnqueuedAt !== null
+      ? Date.now() - this.cacheBatchFirstEnqueuedAt
+      : 0
+    const delay = Math.max(0, Math.min(CACHE_LOOKUP_DEBOUNCE_MS, CACHE_BATCH_MAX_AGE_MS - elapsed))
     this.cacheFlushTimer = setTimeout(() => {
       this.cacheFlushTimer = null
       this.flushCacheLookups()
-    }, CACHE_LOOKUP_DEBOUNCE_MS)
+    }, delay)
   }
 
   private flushCacheLookups() {
     const batch = this.pendingCacheLookups.splice(0)
+    // Reset the max-batch-age clock every time the batch is emptied so the next
+    // batch's first request is not seen as already aged (Finding 2).
+    this.cacheBatchFirstEnqueuedAt = null
     if (batch.length === 0) return
 
     // Capture generation so we can discard results if the session changed
     // while the cache lookup was in flight.
     const gen = this.sessionGeneration
+
+    // Start the cache-response window NOW (at dispatch), not at analyzeMove, so
+    // a sliding trailing debounce cannot release a request before its lookup is
+    // even sent (Finding 5).
+    for (const pending of batch) {
+      const entry = this.resolutionState.get(pending.moveIndex)
+      if (!entry || entry.requestId !== pending.requestId) continue
+      if (entry.cacheStatus !== 'pending') continue
+      if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+      entry.cacheTimer = setTimeout(() => {
+        this.releaseFallback(pending.moveIndex, pending.requestId, 'timeout')
+      }, ANALYSIS_RESOLUTION_TIMEOUT_MS)
+    }
+
     const positions = batch.map(p => ({ fen: p.fen, move_uci: p.move }))
 
     lookupAnalysisCache(positions)
@@ -602,14 +911,23 @@ export class GameAnalysisCoordinator {
         if (this.sessionGeneration !== gen) return
 
         for (const pending of batch) {
-          if (pending.moveIndex === undefined) continue
-          if (this.latestRequestIds.get(pending.moveIndex) !== pending.requestId) continue
+          const entry = this.resolutionState.get(pending.moveIndex)
+          if (!entry || entry.requestId !== pending.requestId) continue
+          // A released (timed-out) worker fallback owns the resolution, so a
+          // late trusted hit must not win (Finding R3).
+          if (entry.cacheStatus !== 'pending') continue
           if (this.resolvedIndices.has(pending.moveIndex)) continue
 
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
-          if (!cached) continue
-          if (!canResolveCachedAnalysis(cached)) continue
+
+          if (!cached || !isTrustedCacheHit(cached)) {
+            // Miss / no row / structurally-complete-but-untrusted → release the
+            // worker fallback.
+            const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
+            this.releaseFallback(pending.moveIndex, pending.requestId, reason)
+            continue
+          }
 
           const result = fromCachedAnalysis(
             pending.requestId,
@@ -621,12 +939,12 @@ export class GameAnalysisCoordinator {
           )
 
           if (!this.resolvedIndices.has(pending.moveIndex)) {
-            console.log(
-              `[Analyst] Cache hit for move ${pending.move} at index ${pending.moveIndex}`,
-            )
             this.resolveAnalysisResult(pending.moveIndex, result)
             this.clearActiveAnalysisStateIfCurrent(pending.requestId)
             this.cancelWorkerAnalysis(pending.requestId)
+            console.log(
+              `[Analyst] resolve idx=${pending.moveIndex} source=cache(authoritative profile=${cached.analysis_profile_id ?? 'unknown'})`,
+            )
             if (result.blunder && result.delta !== null) {
               console.log(
                 `[Analyst] Blunder detected (cached): \u0394${result.delta}cp (best ${result.bestMove}).`,
@@ -636,7 +954,12 @@ export class GameAnalysisCoordinator {
         }
       })
       .catch(() => {
-        // Cache miss — worker will handle it
+        // Network/lookup error — release the worker fallback for every still-
+        // pending move in the batch rather than stranding a buffered result.
+        if (this.sessionGeneration !== gen) return
+        for (const pending of batch) {
+          this.releaseFallback(pending.moveIndex, pending.requestId, 'cache-error')
+        }
       })
   }
 
@@ -765,6 +1088,10 @@ export class GameAnalysisCoordinator {
     if (this.idleTimer) {
       clearTimeout(this.idleTimer)
     }
+    this.clearAllResolutionState()
+    this.rejectAnalysisWaiters(new Error('Analysis coordinator destroyed'))
+    this.pendingMoveIndices.clear()
+    this.pendingMeta.clear()
     this.terminateWorker()
     this.analysisResolvedListeners.clear()
     this.uploadState = null

@@ -239,6 +239,23 @@ export const canResolveCachedAnalysis = (input: {
   )
 }
 
+/**
+ * A cached row may only override local worker analysis when it is BOTH
+ * authoritative (its identity fields match an active authoritative profile,
+ * computed by the backend) AND structurally complete. A structurally-complete
+ * but non-authoritative row (e.g. a browser-game upload) must be treated as a
+ * miss so the worker fallback wins.
+ */
+export const isTrustedCacheHit = (input: {
+  authoritative?: boolean
+  best_move_uci?: string | null | undefined
+  best_line_uci?: string[] | null | undefined
+  classification: MoveClassification | string | null | undefined
+  eval_delta: number | null | undefined
+}): boolean => {
+  return input.authoritative === true && canResolveCachedAnalysis(input)
+}
+
 // ── Win-chance classifier (Lichess logistic model) ──────────────────
 
 export const WIN_CHANCE_MULTIPLIER = -0.00368208

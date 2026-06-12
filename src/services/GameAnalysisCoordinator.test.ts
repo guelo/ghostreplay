@@ -41,6 +41,9 @@ beforeEach(() => {
   gameAnalysisStore.getState().clearAll()
   lookupAnalysisCacheMock.mockReset()
   uploadSessionMovesMock.mockReset()
+  // Default: cache misses, so the worker fallback is released. Tests that
+  // exercise a trusted cache hit override this with `mockReturnValueOnce`.
+  lookupAnalysisCacheMock.mockResolvedValue(new Map())
   coordinator = new GameAnalysisCoordinator()
 })
 
@@ -156,6 +159,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
+          authoritative: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0) // resolve cache promise
@@ -280,6 +284,10 @@ describe('GameAnalysisCoordinator', () => {
         },
       })
 
+      // Worker result is buffered until the cache settles; flush the (missing)
+      // cache lookup to release the buffered fallback.
+      await vi.advanceTimersByTimeAsync(200)
+
       await expect(pending).resolves.toMatchObject({ id: requestId, move: 'e2e4' })
     })
 
@@ -303,6 +311,8 @@ describe('GameAnalysisCoordinator', () => {
         },
       })
 
+      await vi.advanceTimersByTimeAsync(200)
+
       await expect(pending).resolves.toMatchObject({
         playedEvalMate: 2,
         currentPositionEvalMate: 2,
@@ -322,6 +332,7 @@ describe('GameAnalysisCoordinator', () => {
             best_eval: -9980,
             eval_delta: 0,
             classification: 'best',
+            authoritative: true,
           }],
         ])),
       )
@@ -426,7 +437,7 @@ describe('GameAnalysisCoordinator', () => {
   })
 
   describe('latest request wins per move index', () => {
-    it('ignores stale worker results for a replayed ply', () => {
+    it('ignores stale worker results for a replayed ply', async () => {
       coordinator.startSession('session-A')
 
       const firstId = coordinator.analyzeMove('fen-old', 'e2e4', 'white', 0, 20)
@@ -462,6 +473,9 @@ describe('GameAnalysisCoordinator', () => {
           classification: 'best',
         },
       })
+
+      // Second worker result is buffered until the cache misses and releases it.
+      await vi.advanceTimersByTimeAsync(200)
 
       expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(secondId)
       expect(coordinator.store.getState().analysisMap.get(0)?.move).toBe('d2d4')
@@ -534,6 +548,7 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
+          authoritative: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -576,6 +591,7 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
+          authoritative: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -606,6 +622,7 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
+          authoritative: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -700,11 +717,13 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
+          authoritative: true,
         }],
         ['fen-1::uci-1', {
           move_san: 'm1', best_move_uci: 'uci-1', best_move_san: 'm1',
           best_line_uci: ['uci-1', 'reply-1'],
           played_eval: 5, best_eval: 5, eval_delta: 0, classification: 'best',
+          authoritative: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -734,6 +753,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm2', best_move_uci: 'uci-2', best_move_san: 'm2',
           best_line_uci: ['uci-2', 'reply-2'],
           played_eval: 3, best_eval: 3, eval_delta: 0, classification: 'best',
+          authoritative: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -793,6 +813,240 @@ describe('GameAnalysisCoordinator', () => {
 
       expect(worker.terminate).toHaveBeenCalled()
       expect((coordinator as any).worker).toBeNull()
+    })
+  })
+
+  // ---------------------------------------------------------------
+  // Cache-first authoritative resolution (g-cache-first-resolve)
+  // ---------------------------------------------------------------
+  describe('cache-first authoritative resolution', () => {
+    const trustedRow = (move: string, overrides: Record<string, unknown> = {}) => ({
+      move_san: move,
+      best_move_uci: move,
+      best_move_san: move,
+      best_line_uci: [move, 'zzzz'],
+      played_eval: 25,
+      best_eval: 25,
+      eval_delta: 0,
+      classification: 'best' as const,
+      authoritative: true,
+      analysis_profile_id: 'linux-sf18-d24',
+      ...overrides,
+    })
+
+    const postWorker = (id: string, overrides: Record<string, unknown> = {}) => {
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id,
+          move: 'e2e4',
+          bestMove: 'worker-best',
+          bestEval: 11,
+          playedEval: 11,
+          delta: 0,
+          classification: 'best',
+          ...overrides,
+        },
+      })
+    }
+
+    it('publishes only the trusted cache result when the worker finishes first (AC1)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+
+      // Worker finishes first — buffered, not published.
+      postWorker(id)
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4')]]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('e2e4')
+      expect(worker.postMessage).toHaveBeenCalledWith({ type: 'cancel-analysis', id })
+    })
+
+    it('publishes the worker result when the cache row is non-authoritative (AC3)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(id)
+
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { authoritative: false })]]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    it('publishes the worker result on a cache miss (AC2)', async () => {
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(id)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    it('publishes the worker result when the lookup rejects (AC2)', async () => {
+      coordinator.startSession('s')
+      // Create the rejection lazily (at call time) so the `.catch` in
+      // flushCacheLookups attaches synchronously and no unhandled rejection is
+      // emitted before the debounced mock is invoked.
+      lookupAnalysisCacheMock.mockImplementationOnce(() => Promise.reject(new Error('network')))
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(id)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    it('cache-first hit ignores a late worker result and keeps it indexed (AC4, G1)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4')]]))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('e2e4')
+
+      const lastBefore = coordinator.store.getState().lastAnalysis
+      // Late worker result for the same (settled) request must NOT clobber.
+      postWorker(id)
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('e2e4')
+      expect(coordinator.store.getState().lastAnalysis).toBe(lastBefore)
+    })
+
+    it('total-analysis deadline rejects a stalled worker without hanging (AC7, 10b)', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const pending = coordinator.waitForAnalysis(0)
+      const rejection = expect(pending).rejects.toThrow(/timed out/i)
+
+      // Cache misses (releases, no buffered worker), worker never emits.
+      await vi.advanceTimersByTimeAsync(200)
+      await vi.advanceTimersByTimeAsync(8000)
+      await rejection
+      expect((coordinator as any).resolutionState.size).toBe(0)
+    })
+
+    it('timeout releases the worker; a late trusted hit is ignored (AC2, R3)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      vi.advanceTimersByTime(200) // dispatch lookup, start cache timer
+      vi.advanceTimersByTime(2500) // cache-response timeout fires → released
+
+      postWorker(id) // released → worker resolves immediately
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+
+      // Late trusted hit must be ignored.
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4')]]))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    it('recovers a worker error via a trusted cache hit (AC6a)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+
+      // Scoped worker error while cache pending — does NOT set global error.
+      ;(coordinator as any).handleWorkerMessage({ data: { type: 'error', id, error: 'boom' } })
+      expect(coordinator.store.getState().status).not.toBe('error')
+
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4')]]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(pending).resolves.toMatchObject({ bestMove: 'e2e4' })
+    })
+
+    it('cache-miss-first then scoped worker error fails immediately (AC6b, 10e)', async () => {
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+      const rejection = expect(pending).rejects.toThrow(/boom/)
+
+      await vi.advanceTimersByTimeAsync(200) // cache miss → released, no worker
+
+      // Scoped worker error after release → fail immediately (not after 8s).
+      ;(coordinator as any).handleWorkerMessage({ data: { type: 'error', id, error: 'boom' } })
+      await rejection
+      expect((coordinator as any).resolutionState.size).toBe(0)
+    })
+
+    it('an unscoped worker error sets global error and tears down state (AC; F1/G3)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+
+      ;(coordinator as any).handleWorkerMessage({ data: { type: 'error', error: 'fatal' } })
+      expect(coordinator.store.getState().status).toBe('error')
+      expect((coordinator as any).resolutionState.size).toBe(0)
+
+      // Late cache hit after fatal teardown must not write the store.
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4')]]))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+    })
+
+    it('superseded waiter rejects and only the new request resolves (AC4, G2/F2)', async () => {
+      coordinator.startSession('s')
+      const firstId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const stale = coordinator.waitForAnalysis(0)
+      const staleRejection = expect(stale).rejects.toThrow(/superseded/i)
+
+      // Replay the same index — supersedes the first request immediately.
+      const secondId = coordinator.analyzeMove('fen-new', 'd2d4', 'white', 0, 20)!
+      await staleRejection
+
+      const fresh = coordinator.waitForAnalysis(0)
+      postWorker(secondId, { move: 'd2d4', bestMove: 'd2d4' })
+      await vi.advanceTimersByTimeAsync(200)
+      await expect(fresh).resolves.toMatchObject({ id: secondId })
+      // The stale worker result must not settle the new request.
+      postWorker(firstId)
+      expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(secondId)
+    })
+
+    it('clearAnalysis drops a late worker result rather than repopulating lastAnalysis (Finding 1)', async () => {
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+
+      // Clear analysis while the worker is still alive (soft reset).
+      coordinator.clearAnalysis()
+      expect(coordinator.store.getState().lastAnalysis).toBeNull()
+
+      // A late worker result for the discarded indexed request must be dropped,
+      // not routed into the ad-hoc setLastAnalysis path.
+      postWorker(id)
+      expect(coordinator.store.getState().lastAnalysis).toBeNull()
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+    })
+
+    it('restartAnalysisWorker rejects unresolved waiters (AC; R4)', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const pending = coordinator.waitForAnalysis(0)
+      const rejection = expect(pending).rejects.toThrow(/restarted/i)
+      coordinator.restartAnalysisWorker()
+      await rejection
+      expect((coordinator as any).resolutionState.size).toBe(0)
     })
   })
 })

@@ -39,5 +39,5 @@ export type AnalysisWorkerResponse =
       delta: number | null
       classification: MoveClassification | null
     }
-  | { type: 'error'; error: string }
+  | { type: 'error'; error: string; id?: string }
   | { type: 'log'; message: string }
