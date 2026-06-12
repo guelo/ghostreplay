@@ -196,14 +196,47 @@ leave some batches committed and others not. That's fine: resume validates each
 stored row independently on the next run, so partial commits simply become fewer
 remaining positions.
 
-> One slow search aborts the whole run. The 300s `SEARCH_DEADLINE_S` is **per
-> search**, and each position runs up to 3 searches, so a position can take >300s
-> in aggregate and still pass — but a *single* search exceeding 300s raises
-> `EngineTimeout`, which calls `abort.set()` and stops all workers (the
-> in-flight/completed results are still written on join). Under heavy worker
-> contention this can hit a hard position. Just re-run; resume picks up where it
-> left off. The per-position and engine-failure log lines include the FEN, so you
-> can identify a deterministically-slow position if the same one keeps timing out.
+> One slow search aborts the whole run. `SEARCH_DEADLINE_S` (default **600s**,
+> override with `--search-deadline`) is **per search**, and each position runs up
+> to 3 searches (root, played-move, best-move) back-to-back on one persistent
+> engine. A *single* search exceeding the deadline raises `EngineTimeout`, which
+> calls `abort.set()` and stops all workers (in-flight/completed results are still
+> written on join, so resume recovers them).
+>
+> The slowest opening-book positions are simply expensive at depth 24. Example:
+> `a2a3` at `N1bk3r/pp1p1ppp/2n2n2/8/1b6/5B1q/PPPN1P1P/R1BQK2R w KQ - 1 11` takes
+> ~225s on a fully idle box (root ~11s, played ~152s, best ~62s), so at the old
+> 300s-per-search wall any load tipped its 152s search over and it aborted every
+> run regardless of `--workers`. The default is now 600s, which leaves headroom
+> for these honest-but-slow searches; with that, a timeout means a genuinely
+> dead/hung engine. (The frontend `analysisWorker.ts` never hits this: it searches
+> at `go depth 17`, far cheaper than the canonical depth 24. The precompute is the
+> only thing that walks the whole book this deep. The searches are intentionally
+> NOT reset between each other — `ucinewgame` is sent once per position and never
+> between the 3 searches — to stay bit-identical to the frontend analyzer; do not
+> "fix" the slowness by adding a reset, as TT carryover can change the depth-24
+> result and break the contract.)
+>
+> To check whether a recurring timeout is a slow position or a real hang, time it
+> idle with the analyzer itself — do NOT use a `stockfish <<EOF ... go depth 24`
+> heredoc: stdin EOF makes Stockfish abort the search early and report a bogus
+> sub-second time. Use the real code path, which keeps the engine alive until
+> `bestmove`:
+>
+> ```bash
+> python - <<'PY'
+> import os, time
+> from scripts.precompute_openings import analyze_position, PositionToAnalyze
+> pos = PositionToAnalyze(fen_before="<fen>", move_uci="<uci>", move_san="x")
+> t = time.time()
+> res, outcome = analyze_position(pos, 24, os.environ["SF"])
+> print(f"{outcome} {time.time()-t:.1f}s")
+> PY
+> ```
+>
+> If that idle time is already a large fraction of the deadline, raise
+> `--search-deadline` (and/or lower `--workers` for less load-induced slowdown)
+> rather than assuming a hang.
 
 ### 8. Verify and record
 

@@ -82,9 +82,14 @@ THREADS = 1
 MULTIPV = 1
 
 # Engine liveness deadlines. A handshake or search that exceeds these is a hung
-# or dead engine; fail closed rather than block forever.
+# or dead engine; fail closed rather than block forever. The search deadline is
+# PER search, and a position runs up to three searches (root/played/best). The
+# slowest opening-book positions take ~4 min for a single depth-24 search even on
+# an idle box, so the default is generous enough that a timeout means a genuinely
+# dead engine rather than an honest-but-slow search losing a race with CPU load.
+# Override with --search-deadline when tuning for a slower/faster box.
 HANDSHAKE_DEADLINE_S = 30.0
-SEARCH_DEADLINE_S = 300.0
+SEARCH_DEADLINE_S = 600.0
 
 # Mate<->cp conversion, identical to analysisUtils.ts mateToCp.
 _MATE_BASE = 10000
@@ -810,6 +815,7 @@ def filter_unstored_positions(
 
 
 def main() -> None:
+    global _verbose, SEARCH_DEADLINE_S
     parser = argparse.ArgumentParser(
         description="Pre-compute canonical Stockfish analysis for the opening book."
     )
@@ -818,6 +824,10 @@ def main() -> None:
     parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH)
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--stockfish", default="stockfish")
+    parser.add_argument("--search-deadline", type=float, default=SEARCH_DEADLINE_S,
+                        help="Per-search wall-clock deadline in seconds (a position "
+                             "runs up to 3 searches). Exceeding it is treated as a "
+                             f"dead engine and aborts the run. Default: {SEARCH_DEADLINE_S:g}.")
     parser.add_argument("--no-resume", action="store_true",
                         help="Disable resume; re-analyze every position even if an "
                              "authoritative resolver-complete-v2 row already exists "
@@ -829,8 +839,8 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    global _verbose
     _verbose = args.verbose
+    SEARCH_DEADLINE_S = args.search_deadline
 
     if args.dry_run:
         log.info("Loading opening book from %s", args.eco_path)
