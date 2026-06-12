@@ -4086,6 +4086,13 @@
     position: relative;
 }
 
+/* What-if (variation) mode: wash out the board so it reads as a
+   hypothetical, disabled-looking exploration rather than the live line. */
+.analysis-board__board-frame--variation {
+    filter: saturate(0.55) brightness(0.92) contrast(0.95);
+    transition: filter 0.2s ease;
+}
+
 /* Eval-icon badges overlaid on the analysis board */
 .board-eval-icons {
     position: absolute;

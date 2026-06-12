@@ -1281,7 +1281,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               }
               whiteOnBottom={boardOrientation === "white"}
             />
-            <div className="analysis-board__board-frame" ref={boardFrameRef}>
+            <div
+              className={`analysis-board__board-frame${
+                isInVariation ? " analysis-board__board-frame--variation" : ""
+              }`}
+              ref={boardFrameRef}
+            >
               <Chessboard
                 options={{
                   id: `${chessboardId}-main`,
