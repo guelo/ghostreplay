@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -122,6 +123,16 @@ class BlunderReview(Base):
     __tablename__ = "blunder_reviews"
     __table_args__ = (
         Index("idx_blunder_reviews_blunder", "blunder_id", "reviewed_at"),
+        # Partial unique index: the WHERE clause excludes NULL keys from
+        # uniqueness, so two keyless reviews of the same blunder are both
+        # permitted while a supplied key dedupes retries.
+        Index(
+            "uq_blunder_reviews_idempotency",
+            "blunder_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
@@ -131,6 +142,11 @@ class BlunderReview(Base):
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     move_played_san: Mapped[str] = mapped_column(String(10), nullable=False)
     eval_delta_cp: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # pass_streak value AFTER this review was applied. Captured so an idempotent
+    # retry can reconstruct the exact original response even if later reviews have
+    # since mutated the blunder. NULL on pre-migration rows.
+    pass_streak_after: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class GameSession(Base):
@@ -194,6 +210,11 @@ class GameSession(Base):
     normal_started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     converted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     rated_start_ply: Mapped[int | None] = mapped_column(Integer)
+    # Idempotency bookkeeping for the first-blunder recording decision. Plain
+    # (non-FK) columns: recorded_blunder_id mirrors Blunder.id so retries can
+    # echo back the recorded id; blunder_idempotency_key is the decision key.
+    recorded_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, nullable=True)
+    blunder_idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Move(Base):

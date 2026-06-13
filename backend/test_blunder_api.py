@@ -3,12 +3,14 @@ Tests for POST /api/blunder endpoint.
 
 Run with: pytest test_blunder_api.py -v
 """
+import concurrent.futures
 import uuid
 
 from sqlalchemy import text
 
 from app.fen import fen_hash
 from app.models import GameSession
+from conftest import pg_required
 
 
 def test_record_blunder_success(client, auth_headers, create_game_session):
@@ -163,8 +165,9 @@ def test_record_blunder_wrong_user(client, auth_headers, create_game_session):
     assert "not authorized" in response.json()["detail"].lower()
 
 
-def test_record_blunder_already_recorded(client, auth_headers, create_game_session):
-    """Test that second blunder in same session is not recorded."""
+def test_record_blunder_already_recorded_legacy_ambiguous(client, auth_headers, create_game_session):
+    """A session recorded before idempotency bookkeeping (no key, no recorded id)
+    cannot safely echo the blunder id, so a retry is LEGACY_AMBIGUOUS."""
     session_id = create_game_session(user_id=123, player_color="white", blunder_recorded=True)
 
     response = client.post(
@@ -181,11 +184,8 @@ def test_record_blunder_already_recorded(client, auth_headers, create_game_sessi
         headers=auth_headers(user_id=123)
     )
 
-    # Should return 201 but with is_new=False
-    assert response.status_code == 201
-    data = response.json()
-    assert data["is_new"] is False
-    assert data["positions_created"] == 0
+    assert response.status_code == 409
+    assert response.json()["error"]["details"]["error_code"] == "LEGACY_AMBIGUOUS"
 
 
 def test_record_blunder_invalid_pgn(client, auth_headers, create_game_session):
@@ -582,6 +582,113 @@ def test_record_manual_blunder_does_not_set_session_flag(client, auth_headers, c
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).first()
     assert session is not None
     assert session.blunder_recorded is False
+
+
+_BLUNDER_PGN = "1. e4 e5 2. Qh5"
+_BLUNDER_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+
+def _blunder_body(session_id: str, *, idempotency_key: str | None = None) -> dict:
+    body = {
+        "session_id": session_id,
+        "pgn": _BLUNDER_PGN,
+        "fen": _BLUNDER_FEN,
+        "user_move": "Qh5",
+        "best_move": "Nf3",
+        "eval_before": 50,
+        "eval_after": -100,
+    }
+    if idempotency_key is not None:
+        body["idempotency_key"] = idempotency_key
+    return body
+
+
+def test_record_blunder_idempotent_key_match_echoes_id(
+    client, auth_headers, create_game_session
+):
+    """A retry with the same idempotency key echoes the recorded blunder id and
+    does not record a second blunder."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    first = client.post(
+        "/api/blunder",
+        json=_blunder_body(session_id, idempotency_key="rec-key-1"),
+        headers=auth_headers(user_id=123),
+    )
+    assert first.status_code == 201
+    assert first.json()["is_new"] is True
+    recorded_id = first.json()["blunder_id"]
+    assert recorded_id is not None
+
+    second = client.post(
+        "/api/blunder",
+        json=_blunder_body(session_id, idempotency_key="rec-key-1"),
+        headers=auth_headers(user_id=123),
+    )
+    assert second.status_code == 201
+    assert second.json()["is_new"] is False
+    assert second.json()["blunder_id"] == recorded_id
+
+
+def test_record_blunder_idempotent_key_mismatch_conflicts(
+    client, auth_headers, create_game_session
+):
+    """A request with a different idempotency key against an already-recorded
+    session is an IDEMPOTENCY_CONFLICT."""
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    first = client.post(
+        "/api/blunder",
+        json=_blunder_body(session_id, idempotency_key="rec-key-1"),
+        headers=auth_headers(user_id=123),
+    )
+    assert first.status_code == 201
+
+    second = client.post(
+        "/api/blunder",
+        json=_blunder_body(session_id, idempotency_key="rec-key-2"),
+        headers=auth_headers(user_id=123),
+    )
+    assert second.status_code == 409
+    assert second.json()["error"]["details"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pg_required
+def test_record_blunder_concurrent_same_key_records_once(pg_client, pg_session_factory, auth_headers):
+    """Under real row locks, two concurrent first requests with the same key
+    record exactly one blunder and agree on the id."""
+    start = pg_client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "white"},
+        headers=auth_headers(user_id=123),
+    )
+    assert start.status_code == 201
+    session_id = start.json()["session_id"]
+
+    def _post():
+        return pg_client.post(
+            "/api/blunder",
+            json=_blunder_body(session_id, idempotency_key="concurrent-rec-key"),
+            headers=auth_headers(user_id=123),
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        responses = [f.result() for f in [pool.submit(_post), pool.submit(_post)]]
+
+    assert all(r.status_code == 201 for r in responses)
+    ids = {r.json()["blunder_id"] for r in responses}
+    assert len(ids) == 1
+    assert None not in ids
+
+    verify = pg_session_factory()
+    try:
+        count = verify.execute(
+            text("SELECT COUNT(*) FROM blunders WHERE user_id = :u"),
+            {"u": 123},
+        ).scalar_one()
+    finally:
+        verify.close()
+    assert count == 1
 
 
 if __name__ == "__main__":

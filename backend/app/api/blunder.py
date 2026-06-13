@@ -46,6 +46,11 @@ class BlunderRequest(BaseModel):
     best_move: str = Field(..., description="SAN of the engine's best move")
     eval_before: int = Field(..., description="Centipawn eval of best move")
     eval_after: int = Field(..., description="Centipawn eval after user's move")
+    idempotency_key: str | None = Field(
+        None,
+        max_length=64,
+        description="Optional decision key; retries with the same key echo the first recording.",
+    )
 
 
 class ManualBlunderRequest(BaseModel):
@@ -265,6 +270,7 @@ def _record_target(
     eval_after: int,
     mark_first_blunder_recorded: bool,
     max_full_moves: int | None = None,
+    idempotency_key: str | None = None,
 ) -> BlunderResponse:
     replay_data = _replay_pgn(pgn, fen, max_full_moves=max_full_moves)
 
@@ -312,6 +318,10 @@ def _record_target(
 
     if mark_first_blunder_recorded:
         session.blunder_recorded = True
+        # Idempotency bookkeeping so retries can echo the recorded id and detect
+        # key conflicts. Only the auto-recording (first-blunder) path owns these.
+        session.recorded_blunder_id = blunder_id
+        session.blunder_idempotency_key = idempotency_key
 
     db.commit()
     return BlunderResponse(
@@ -341,18 +351,50 @@ def record_blunder(
     The blunder is only recorded if the position's side-to-move matches
     the player's color in the session.
     """
-    session = _get_session_or_404(db, request.session_id)
+    # Lock the session row BEFORE checking blunder_recorded so two concurrent
+    # first requests cannot both observe blunder_recorded=False and both record
+    # (no-op locking on SQLite). _get_session_or_404 plus ownership check below.
+    session = (
+        db.query(GameSession)
+        .filter(GameSession.id == request.session_id)
+        .with_for_update()
+        .first()
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Game session not found")
     _ensure_session_owned_by_user(session, user)
     # Amended drill policy (2026-06-01): pre-continue drill flows (including
     # strictness failures) record blunders/SRS evidence through regular logic.
 
     # Check if blunder already recorded for this session
     if session.blunder_recorded:
-        return BlunderResponse(
-            blunder_id=None,
-            position_id=0,
-            positions_created=0,
-            is_new=False,
+        if session.blunder_idempotency_key is not None:
+            if request.idempotency_key == session.blunder_idempotency_key:
+                # Same decision retried — echo the recorded blunder id.
+                return BlunderResponse(
+                    blunder_id=session.recorded_blunder_id,
+                    position_id=0,
+                    positions_created=0,
+                    is_new=False,
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": "IDEMPOTENCY_CONFLICT"},
+            )
+        if session.recorded_blunder_id is not None:
+            # Recorded with bookkeeping but no key (e.g. keyless retry) — the id
+            # is known and unambiguous, so echo it.
+            return BlunderResponse(
+                blunder_id=session.recorded_blunder_id,
+                position_id=0,
+                positions_created=0,
+                is_new=False,
+            )
+        # Legacy session recorded before idempotency bookkeeping existed: the
+        # real blunder id is unknown, so we cannot safely echo it.
+        raise HTTPException(
+            status_code=409,
+            detail={"error_code": "LEGACY_AMBIGUOUS"},
         )
 
     return _record_target(
@@ -367,6 +409,7 @@ def record_blunder(
         eval_after=request.eval_after,
         mark_first_blunder_recorded=True,
         max_full_moves=AUTO_RECORDING_MAX_FULL_MOVES,
+        idempotency_key=request.idempotency_key,
     )
 
 

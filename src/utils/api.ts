@@ -82,6 +82,8 @@ export class ApiError extends Error {
   code: string
   details: unknown
   retryable: boolean
+  /** Parsed `Retry-After` header in milliseconds, when present and parseable. */
+  retryAfterMs?: number
 
   constructor(
     message: string,
@@ -90,6 +92,7 @@ export class ApiError extends Error {
       code?: string
       details?: unknown
       retryable?: boolean
+      retryAfterMs?: number
     },
   ) {
     super(message)
@@ -99,7 +102,43 @@ export class ApiError extends Error {
     this.details = options.details
     this.retryable =
       options.retryable ?? (options.status === 429 || options.status >= 500)
+    this.retryAfterMs = options.retryAfterMs
   }
+}
+
+/**
+ * Type guard to read a backend `error_code` off an unknown error.
+ * Backend conflict responses carry `{ error: { details: { error_code } } }`,
+ * surfaced here as `ApiError.details`.
+ */
+export const errorCodeOf = (err: unknown): string | undefined => {
+  if (
+    err instanceof ApiError &&
+    err.details &&
+    typeof err.details === 'object' &&
+    'error_code' in err.details
+  ) {
+    return (err.details as { error_code?: string }).error_code
+  }
+  return undefined
+}
+
+/**
+ * Parse a `Retry-After` header value into milliseconds.
+ * Supports both delta-seconds (e.g. "120") and an HTTP-date (RFC 1123).
+ * Returns undefined when absent or unparseable.
+ */
+const parseRetryAfterMs = (headerValue: string | null): number | undefined => {
+  if (!headerValue) return undefined
+  const trimmed = headerValue.trim()
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1000
+  }
+  const dateMs = Date.parse(trimmed)
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, dateMs - Date.now())
+  }
+  return undefined
 }
 
 const delay = async (ms: number): Promise<void> =>
@@ -131,11 +170,16 @@ const createApiError = async (
 ): Promise<ApiError> => {
   const payload = await parseJsonSafely(response)
   const message = getErrorMessage(payload, fallbackMessage, response.statusText)
+  const retryAfterHeader =
+    typeof response.headers?.get === 'function'
+      ? response.headers.get('Retry-After')
+      : null
   return new ApiError(message, {
     status: response.status,
     code: payload?.error?.code,
     details: payload?.error?.details,
     retryable: payload?.error?.retryable,
+    retryAfterMs: parseRetryAfterMs(retryAfterHeader),
   })
 }
 
@@ -375,7 +419,12 @@ interface SessionMovesResponse {
   drill_terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
 }
 
-interface BlunderRequest {
+/**
+ * Exact POST body for `POST /api/blunder`. Exported so the DecisionOwner,
+ * `evaluateBlunderCandidate`, and the retry outbox can share one shape; the
+ * outbox sends the same `idempotency_key` on every attempt so retries dedupe.
+ */
+export interface RecordBlunderRequest {
   session_id: string
   pgn: string
   fen: string
@@ -383,6 +432,7 @@ interface BlunderRequest {
   best_move: string
   eval_before: number
   eval_after: number
+  idempotency_key?: string
 }
 
 interface ManualBlunderRequest {
@@ -426,6 +476,7 @@ interface SrsReviewRequest {
   passed: boolean
   user_move: string
   eval_delta: number
+  idempotency_key?: string
 }
 
 interface SrsReviewResponse {
@@ -717,10 +768,13 @@ export const recordBlunder = async (
   bestMove: string,
   evalBefore: number,
   evalAfter: number,
+  idempotencyKey?: string,
 ): Promise<BlunderResponse> => {
   return requestJson<BlunderResponse>(`${API_BASE_URL}/api/blunder`, {
     method: 'POST',
     headers: getAuthHeaders(),
+    // JSON.stringify drops `idempotency_key` when undefined, so legacy callers
+    // that omit the key send the exact body they always have.
     body: JSON.stringify({
       session_id: sessionId,
       pgn,
@@ -729,7 +783,8 @@ export const recordBlunder = async (
       best_move: bestMove,
       eval_before: evalBefore,
       eval_after: evalAfter,
-    } satisfies BlunderRequest),
+      idempotency_key: idempotencyKey,
+    } satisfies RecordBlunderRequest),
   }, { fallbackMessage: 'Failed to record blunder' })
 }
 
@@ -907,16 +962,20 @@ export const reviewSrsBlunder = async (
   passed: boolean,
   userMove: string,
   evalDelta: number,
+  idempotencyKey?: string,
 ): Promise<SrsReviewResponse> => {
   return requestJson<SrsReviewResponse>(`${API_BASE_URL}/api/srs/review`, {
     method: 'POST',
     headers: getAuthHeaders(),
+    // JSON.stringify drops `idempotency_key` when undefined, so legacy callers
+    // that omit the key send the exact body they always have.
     body: JSON.stringify({
       session_id: sessionId,
       blunder_id: blunderId,
       passed,
       user_move: userMove,
       eval_delta: evalDelta,
+      idempotency_key: idempotencyKey,
     } satisfies SrsReviewRequest),
   }, { fallbackMessage: 'Failed to record SRS review' })
 }

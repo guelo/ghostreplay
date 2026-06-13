@@ -6,13 +6,14 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
 from app.opening_score_scheduler import request_recompute
 from app.security import TokenPayload, get_current_user
-from app.srs_math import calculate_priority, expected_interval_hours
+from app.srs_math import as_utc, calculate_priority, expected_interval_hours
 
 router = APIRouter(prefix="/api/srs", tags=["srs"])
 logger = logging.getLogger(__name__)
@@ -24,6 +25,11 @@ class SrsReviewRequest(BaseModel):
     passed: bool = Field(..., description="Whether the user passed the review")
     user_move: str = Field(..., min_length=1, max_length=10, description="Move the user played")
     eval_delta: int = Field(..., description="Centipawn loss from best move")
+    idempotency_key: str | None = Field(
+        None,
+        max_length=64,
+        description="Optional dedup key; retries with the same key return the first review.",
+    )
 
 
 class SrsReviewResponse(BaseModel):
@@ -45,13 +51,6 @@ def _ensure_session_owned_by_user(game_session: GameSession, user: TokenPayload)
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
 
 
-def _get_blunder_or_404(db: Session, *, blunder_id: int, user_id: int) -> Blunder:
-    blunder = db.query(Blunder).filter(Blunder.id == blunder_id, Blunder.user_id == user_id).first()
-    if not blunder:
-        raise HTTPException(status_code=404, detail="Blunder not found")
-    return blunder
-
-
 def _get_blunder_player_color(db: Session, blunder: Blunder) -> str | None:
     if blunder.source_session_id is not None:
         source_color = (
@@ -64,6 +63,63 @@ def _get_blunder_player_color(db: Session, blunder: Blunder) -> str | None:
     return db.query(Position.active_color).filter(Position.id == blunder.position_id).scalar()
 
 
+def _srs_response_for(blunder: Blunder, *, reviewed_at: datetime) -> SrsReviewResponse:
+    interval_hours = expected_interval_hours(blunder.pass_streak)
+    return SrsReviewResponse(
+        blunder_id=blunder.id,
+        pass_streak=blunder.pass_streak,
+        priority=calculate_priority(
+            pass_streak=blunder.pass_streak,
+            last_reviewed_at=blunder.last_reviewed_at,
+            created_at=blunder.created_at,
+            now=reviewed_at,
+        ),
+        next_expected_review=reviewed_at + timedelta(hours=interval_hours),
+    )
+
+
+def _srs_response_from_review(blunder: Blunder, review: BlunderReview) -> SrsReviewResponse:
+    """Reconstruct the ORIGINAL response for an idempotent retry.
+
+    At review time ``last_reviewed_at == reviewed_at == now``, so the stored
+    ``pass_streak_after`` and ``reviewed_at`` fully determine the original
+    priority and next_expected_review — independent of any later reviews that
+    have since mutated the blunder. ``reviewed_at`` is normalized to UTC so the
+    echoed response is byte-identical across SQLite (naive) and Postgres (aware).
+    ``pass_streak_after`` falls back to the live streak for pre-migration rows
+    (which can never be matched by key anyway, as their key is NULL).
+    """
+    reviewed_at = as_utc(review.reviewed_at)
+    pass_streak = (
+        review.pass_streak_after
+        if review.pass_streak_after is not None
+        else blunder.pass_streak
+    )
+    interval_hours = expected_interval_hours(pass_streak)
+    return SrsReviewResponse(
+        blunder_id=blunder.id,
+        pass_streak=pass_streak,
+        priority=calculate_priority(
+            pass_streak=pass_streak,
+            last_reviewed_at=reviewed_at,
+            created_at=blunder.created_at,
+            now=reviewed_at,
+        ),
+        next_expected_review=reviewed_at + timedelta(hours=interval_hours),
+    )
+
+
+def _find_existing_review(db: Session, *, blunder_id: int, idempotency_key: str) -> BlunderReview | None:
+    return (
+        db.query(BlunderReview)
+        .filter(
+            BlunderReview.blunder_id == blunder_id,
+            BlunderReview.idempotency_key == idempotency_key,
+        )
+        .first()
+    )
+
+
 @router.post("/review", response_model=SrsReviewResponse, status_code=200)
 def review_blunder(
     request: SrsReviewRequest,
@@ -73,11 +129,24 @@ def review_blunder(
     game_session = _get_session_or_404(db, request.session_id)
     _ensure_session_owned_by_user(game_session, user)
 
-    blunder = _get_blunder_or_404(
-        db,
-        blunder_id=request.blunder_id,
-        user_id=user.user_id,
+    # Lock the blunder row BEFORE the duplicate lookup and mutation so two
+    # concurrent reviews for the same blunder serialize (no-op on SQLite).
+    blunder = (
+        db.query(Blunder)
+        .filter(Blunder.id == request.blunder_id, Blunder.user_id == user.user_id)
+        .with_for_update()
+        .first()
     )
+    if not blunder:
+        raise HTTPException(status_code=404, detail="Blunder not found")
+
+    if request.idempotency_key is not None:
+        existing = _find_existing_review(
+            db, blunder_id=request.blunder_id, idempotency_key=request.idempotency_key
+        )
+        if existing is not None:
+            # Already applied — echo the original outcome without mutating again.
+            return _srs_response_from_review(blunder, existing)
 
     reviewed_at = datetime.now(timezone.utc)
     blunder.pass_streak = blunder.pass_streak + 1 if request.passed else 0
@@ -91,25 +160,30 @@ def review_blunder(
             passed=request.passed,
             move_played_san=request.user_move,
             eval_delta_cp=request.eval_delta,
+            idempotency_key=request.idempotency_key,
+            pass_streak_after=blunder.pass_streak,
         )
     )
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # Idempotent recovery ONLY when a key was supplied. A keyless review
+        # cannot collide on the partial unique index (WHERE idempotency_key IS
+        # NOT NULL), so an IntegrityError here is an UNRELATED constraint
+        # failure and must not be mistaken for a duplicate.
+        if request.idempotency_key is None:
+            raise
+        existing = _find_existing_review(
+            db, blunder_id=request.blunder_id, idempotency_key=request.idempotency_key
+        )
+        if existing is None:
+            raise  # genuinely unrelated failure — re-raise rather than swallow
+        db.refresh(blunder)
+        return _srs_response_from_review(blunder, existing)
 
     player_color = _get_blunder_player_color(db, blunder)
     if player_color is not None:
         request_recompute(user.user_id, player_color)
 
-    interval_hours = expected_interval_hours(blunder.pass_streak)
-    next_expected_review = reviewed_at + timedelta(hours=interval_hours)
-
-    return SrsReviewResponse(
-        blunder_id=blunder.id,
-        pass_streak=blunder.pass_streak,
-        priority=calculate_priority(
-            pass_streak=blunder.pass_streak,
-            last_reviewed_at=blunder.last_reviewed_at,
-            created_at=blunder.created_at,
-            now=reviewed_at,
-        ),
-        next_expected_review=next_expected_review,
-    )
+    return _srs_response_for(blunder, reviewed_at=reviewed_at)

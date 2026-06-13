@@ -1,8 +1,11 @@
 import os
+import pathlib
 import uuid
 from unittest.mock import patch
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -10,9 +13,10 @@ from sqlalchemy.pool import StaticPool
 
 os.environ.setdefault("JWT_SECRET", "test-secret-32-bytes-minimum-length")
 
+from app.database_url import _normalize_postgres_scheme
 from app.db import get_db
 from app.main import app
-from app.models import GameSession, User
+from app.models import Base, GameSession, User
 from app.security import create_access_token, hash_password
 
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -58,6 +62,8 @@ def _create_test_schema(conn) -> None:
             normal_started_at TIMESTAMP,
             converted_at TIMESTAMP,
             rated_start_ply INTEGER,
+            recorded_blunder_id INTEGER,
+            blunder_idempotency_key VARCHAR(64),
             CHECK (session_mode IN ('normal','drill')),
             CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
@@ -272,8 +278,11 @@ def _create_test_schema(conn) -> None:
             passed BOOLEAN NOT NULL,
             move_played_san VARCHAR(10) NOT NULL,
             eval_delta_cp INTEGER NOT NULL,
+            idempotency_key VARCHAR(64),
+            pass_streak_after INTEGER,
             FOREIGN KEY (blunder_id) REFERENCES blunders(id) ON DELETE CASCADE,
-            FOREIGN KEY (session_id) REFERENCES game_sessions(id)
+            FOREIGN KEY (session_id) REFERENCES game_sessions(id),
+            UNIQUE(blunder_id, idempotency_key)
         )
     """))
     conn.commit()
@@ -370,6 +379,85 @@ def create_user(db_session):
         return user
 
     return _create_user
+
+
+# ---------------------------------------------------------------------------
+# PostgreSQL-backed fixtures (opt-in via GHOSTREPLAY_TEST_PG_URL).
+#
+# These exercise behaviour SQLite cannot: real SELECT ... FOR UPDATE row locks
+# and the partial unique index on blunder_reviews. Tests decorated with
+# @pg_required skip cleanly when no Postgres URL is configured (e.g. locally),
+# and run for real in CI where the postgres service is available.
+#
+# The schema under test is the ALEMBIC-MIGRATED one (never create_all from
+# models, never drop_all), so PG behaviour tests always exercise the real
+# migrated DDL — including the partial unique index and BigInteger columns the
+# model metadata alone would not validate. The schema is session-scoped and
+# per-test isolation is via TRUNCATE.
+# ---------------------------------------------------------------------------
+
+_PG_URL = os.getenv("GHOSTREPLAY_TEST_PG_URL")
+
+pg_required = pytest.mark.skipif(
+    not _PG_URL,
+    reason="GHOSTREPLAY_TEST_PG_URL not set; PostgreSQL-backed tests skipped",
+)
+
+
+@pytest.fixture(scope="session")
+def pg_engine():
+    if not _PG_URL:
+        pytest.skip("GHOSTREPLAY_TEST_PG_URL not set")
+    url = _normalize_postgres_scheme(_PG_URL)
+
+    # Ensure the migrated schema via Alembic (idempotent: a no-op when CI has
+    # already run `alembic upgrade head`). env.py resolves the URL from
+    # DATABASE_URL, so point it at the test DB for the duration of the upgrade.
+    alembic_ini = pathlib.Path(__file__).resolve().parent / "alembic.ini"
+    prior_database_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = url
+    try:
+        command.upgrade(Config(str(alembic_ini)), "head")
+    finally:
+        if prior_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = prior_database_url
+
+    pg = create_engine(url)
+    yield pg
+    pg.dispose()
+
+
+@pytest.fixture
+def pg_session_factory(pg_engine):
+    return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
+
+
+@pytest.fixture
+def pg_client(pg_engine, pg_session_factory):
+    """TestClient backed by Postgres, with per-test truncation for isolation.
+
+    Overrides get_db AFTER the autouse SQLite ``_db_override`` so Postgres wins.
+    Each request gets its own session, so concurrent requests can contend for
+    real row locks.
+    """
+    table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
+    with pg_engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
+
+    def _override_pg_db():
+        db = pg_session_factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = _override_pg_db
+    with patch("app.main.engine", pg_engine), patch("app.main.get_scheduler"):
+        with TestClient(app) as pg_test_client:
+            yield pg_test_client
+    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture

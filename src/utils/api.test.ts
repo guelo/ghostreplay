@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   ApiError,
+  errorCodeOf,
   resolveApiBaseUrl,
   resolveApiEndpointBaseUrl,
   startGame,
@@ -404,6 +405,29 @@ describe('recordBlunder', () => {
     )
   })
 
+  it('includes idempotency_key in the body when provided', async () => {
+    mockResponse({ blunder_id: 1, position_id: 10, positions_created: 3, is_new: true })
+
+    await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100, 'rec-key-1')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/blunder'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          session_id: 'sess-1',
+          pgn: '1. e4',
+          fen: 'fen',
+          user_move: 'e4',
+          best_move: 'd4',
+          eval_before: 50,
+          eval_after: -100,
+          idempotency_key: 'rec-key-1',
+        }),
+      }),
+    )
+  })
+
   it('returns parsed response', async () => {
     const expected = { blunder_id: 1, position_id: 10, positions_created: 3, is_new: true }
     mockResponse(expected)
@@ -700,12 +724,161 @@ describe('reviewSrsBlunder', () => {
     )
   })
 
+  it('includes idempotency_key in the body when provided', async () => {
+    mockResponse({
+      blunder_id: 42,
+      pass_streak: 3,
+      priority: 1.25,
+      next_expected_review: '2026-02-08T12:00:00Z',
+    })
+
+    await reviewSrsBlunder('sess-1', 42, false, 'Qh5', 50, 'srs-key-1')
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/srs/review'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          session_id: 'sess-1',
+          blunder_id: 42,
+          passed: false,
+          user_move: 'Qh5',
+          eval_delta: 50,
+          idempotency_key: 'srs-key-1',
+        }),
+      }),
+    )
+  })
+
   it('throws on non-ok response', async () => {
     mockResponse({}, false, 'Unauthorized', 401)
 
     await expect(
       reviewSrsBlunder('sess-1', 42, true, 'Nf3', 20),
     ).rejects.toThrow('Failed to record SRS review: Unauthorized')
+  })
+})
+
+describe('ApiError classification, errorCodeOf, and Retry-After', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  const mockErrorResponse = (
+    data: Record<string, unknown>,
+    status: number,
+    headers?: Record<string, string>,
+  ) => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status,
+      statusText: 'Error',
+      json: () => Promise.resolve(data),
+      headers: headers
+        ? { get: (name: string) => headers[name] ?? headers[name.toLowerCase()] ?? null }
+        : undefined,
+    })
+  }
+
+  it('marks a 429 response as retryable', async () => {
+    mockErrorResponse({ detail: 'slow down' }, 429)
+
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(ApiError)
+      expect((error as ApiError).retryable).toBe(true)
+    }
+  })
+
+  it('reads IDEMPOTENCY_CONFLICT via errorCodeOf on a 409', async () => {
+    mockErrorResponse(
+      { error: { code: 'http_409', details: { error_code: 'IDEMPOTENCY_CONFLICT' } } },
+      409,
+    )
+
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect(errorCodeOf(error)).toBe('IDEMPOTENCY_CONFLICT')
+    }
+  })
+
+  it('reads LEGACY_AMBIGUOUS via errorCodeOf on a 409', async () => {
+    mockErrorResponse(
+      { error: { code: 'http_409', details: { error_code: 'LEGACY_AMBIGUOUS' } } },
+      409,
+    )
+
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect(errorCodeOf(error)).toBe('LEGACY_AMBIGUOUS')
+    }
+  })
+
+  it('returns undefined from errorCodeOf for non-ApiError and detail-less errors', () => {
+    expect(errorCodeOf(new Error('boom'))).toBeUndefined()
+    expect(errorCodeOf(new ApiError('x', { status: 500 }))).toBeUndefined()
+  })
+
+  it('parses Retry-After delta-seconds into milliseconds', async () => {
+    mockErrorResponse({ detail: 'slow down' }, 429, { 'Retry-After': '120' })
+
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect((error as ApiError).retryAfterMs).toBe(120000)
+    }
+  })
+
+  it('parses Retry-After HTTP-date into a clamped non-negative delay', async () => {
+    const future = new Date(Date.now() + 60_000).toUTCString()
+    mockErrorResponse({ detail: 'slow down' }, 429, { 'Retry-After': future })
+
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      const { retryAfterMs } = error as ApiError
+      expect(retryAfterMs).toBeGreaterThanOrEqual(0)
+      expect(retryAfterMs).toBeLessThanOrEqual(60_000)
+    }
+  })
+
+  it('parses a past Retry-After HTTP-date as 0 (clamped)', async () => {
+    const past = new Date(Date.now() - 60_000).toUTCString()
+    mockErrorResponse({ detail: 'slow down' }, 429, { 'Retry-After': past })
+
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect((error as ApiError).retryAfterMs).toBe(0)
+    }
+  })
+
+  it('leaves retryAfterMs undefined when header is absent or unparseable', async () => {
+    mockErrorResponse({ detail: 'nope' }, 429)
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect((error as ApiError).retryAfterMs).toBeUndefined()
+    }
+
+    mockErrorResponse({ detail: 'nope' }, 429, { 'Retry-After': 'not-a-date' })
+    try {
+      await recordBlunder('sess-1', '1. e4', 'fen', 'e4', 'd4', 50, -100)
+      throw new Error('expected recordBlunder to throw')
+    } catch (error) {
+      expect((error as ApiError).retryAfterMs).toBeUndefined()
+    }
   })
 })
 
