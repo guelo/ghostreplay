@@ -10,7 +10,6 @@ const routeActions = [
   { to: "/", label: "Home" },
   { to: "/play", label: "Play" },
   { to: "/history", label: "History" },
-  { to: "/blunders", label: "Blunders" },
   { to: "/openings", label: "Openings" },
   { to: "/stats", label: "Stats" },
 ] as const;

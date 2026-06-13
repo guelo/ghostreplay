@@ -60,7 +60,6 @@ describe("AppNav", () => {
       "Home",
       "Play",
       "History",
-      "Blunders",
       "Openings",
       "Stats",
       "Register",

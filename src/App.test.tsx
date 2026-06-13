@@ -54,7 +54,6 @@ describe("App landing page", () => {
       expect.arrayContaining([
         "/play",
         "/openings",
-        "/blunders",
         "/history",
         "/stats",
       ]),
