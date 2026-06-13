@@ -23,18 +23,9 @@ from app.accuracy import (
     expected_total_moves_from_pgn,
 )
 from app.fen import active_color, fen_hash, normalize_fen
-from app.opening_aggregate import (
-    _aggregate_branch_rows,
-    _collect_branch_rows,
-    _refresh_cached_scores_if_stale,
-    _snapshot_cached_rows,
-)
-from app.opening_cache import (
-    ensure_opening_scores,
-    opening_score_inputs_fingerprint,
-)
-from app.opening_score_scheduler import request_recompute
-from app.opening_graph import get_opening_graph
+from app.opening_aggregate import _snapshot_cached_rows
+from app.opening_cache import list_cached_opening_scores
+from app.opening_score_scheduler import refresh_now, request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.models import (
     Blunder,
@@ -813,28 +804,16 @@ def get_session_openings(
     if not chain:
         return SessionOpeningsResponse(player_color=player_color, lineage=[])
 
-    # Subtree aggregates (matching the /openings card) require cached scores.
-    # Refresh stale batches the same way /api/openings/children does, so the
-    # lineage score matches what the user sees after clicking through.
-    graph = get_opening_graph()
-    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
-    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
-    batch, rows = _refresh_cached_scores_if_stale(
-        db,
-        user.user_id,
-        player_color,
-        current_fingerprint,
-        roots_registry,
-        batch,
-        rows,
-    )
-    rows_by_key = {row.opening_key: row for row in _snapshot_cached_rows(rows)}
+    # Direct-row lineage scores (matching the /openings card). Flush/await any
+    # pending recompute (best-effort) via the scheduler, then serve cached rows.
+    refresh_now(user.user_id, player_color)
+    _, cached_rows = list_cached_opening_scores(db, user.user_id, player_color)
+    rows_by_key = {row.opening_key: row for row in _snapshot_cached_rows(cached_rows)}
 
     lineage: list[OpeningLineageItem] = []
     for index, root in enumerate(chain):
-        subtree_rows = _collect_branch_rows(rows_by_key, root.opening_key, roots_registry)
-        aggregate = _aggregate_branch_rows(subtree_rows)
-        scored = aggregate.root_count > 0
+        direct = rows_by_key.get(root.opening_key)
+        scored = direct is not None
         lineage.append(
             OpeningLineageItem(
                 opening_key=root.opening_key,
@@ -842,10 +821,10 @@ def get_session_openings(
                 opening_family=root.opening_family,
                 eco=root.eco,
                 depth=root.depth,
-                score=aggregate.score if scored else None,
-                confidence=aggregate.confidence if scored else None,
-                coverage=aggregate.coverage if scored else None,
-                sample_size=aggregate.sample_size if scored else None,
+                score=direct.opening_score if scored else None,
+                confidence=direct.confidence if scored else None,
+                coverage=direct.coverage if scored else None,
+                sample_size=direct.sample_size if scored else None,
                 path=[prev.opening_key for prev in chain[:index]],
             )
         )

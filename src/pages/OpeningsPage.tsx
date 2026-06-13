@@ -249,10 +249,12 @@ function OpeningsPage() {
   const heroTone = getPriorityTone(currentBranchStats?.score ?? null);
   const heroStatsLabel = currentBreadcrumb ? "Current branch" : "Repertoire-wide";
   const heroStatsCaption = currentBreadcrumb
-    ? "Selected opening aggregate"
-    : "All scored roots in this repertoire";
+    ? "Selected opening"
+    : "Whole repertoire from the start position";
+  // Direct-row semantics: scored state is the presence of a direct score, not a
+  // descendant root count.
   const hasScoredCurrentBranch =
-    response !== null && response.current_branch_stats.root_count > 0;
+    response !== null && response.current_branch_stats.score != null;
   const isTrueNoEvidence =
     response !== null && response.computed_at === null && !hasScoredCurrentBranch;
   const isSnapshotEmpty =
@@ -511,7 +513,9 @@ function OpeningsPage() {
             >
               {sortedChildren.map((child) => {
                 const tone = getPriorityTone(child.subtree_score);
-                const isUnscored = child.subtree_root_count === 0;
+                // Direct-row semantics: a card is unscored when it has no direct
+                // score (subtree_root_count is navigation metadata only).
+                const isUnscored = child.subtree_score == null;
                 const canDrillDown = child.child_count > 0;
                 const openingMoveLine = getOpeningMoveLine(
                   child.opening_key,

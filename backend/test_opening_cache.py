@@ -22,10 +22,13 @@ from app.opening_cache import (
     get_latest_opening_score_batch,
     list_cached_opening_scores,
     list_opening_score_candidate_pairs,
+    opening_score_inputs_fingerprint,
     prune_old_opening_score_batches,
     recompute_opening_scores,
     recompute_opening_scores_if_needed,
 )
+from app.opening_graph import get_opening_graph
+from app.opening_roots import get_opening_roots
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
 
@@ -34,6 +37,9 @@ KINGS_PAWN_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
 OPEN_GAME_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
 KNIGHT_OPENING_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"
 TWO_KNIGHTS_FEN = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -"
+
+# Synthetic whole-repertoire hero row key (normalized initial position).
+SYNTHETIC_INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 
 START_FULL = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 KINGS_PAWN_FULL = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
@@ -186,7 +192,11 @@ def test_recompute_writes_one_coherent_batch(db_session):
 
     assert batch.user_id == 123
     assert batch.player_color == "black"
-    assert {row.opening_key for row in rows} == {KINGS_PAWN_FEN, KNIGHT_OPENING_FEN}
+    assert {row.opening_key for row in rows} == {
+        KINGS_PAWN_FEN,
+        KNIGHT_OPENING_FEN,
+        SYNTHETIC_INITIAL_FEN,
+    }
     assert all(row.batch_id == batch.id for row in rows)
     assert all(row.user_id == 123 for row in rows)
     assert all(row.player_color == "black" for row in rows)
@@ -207,16 +217,21 @@ def test_recompute_releases_db_transaction_before_scoring(db_session):
     assert observed_transactions == [False]
 
 
-def test_recompute_skips_cached_branch_summaries(db_session):
+def test_recompute_persists_branch_summaries(db_session):
+    # Branch summaries are now persisted from the single shared calculation (2b),
+    # so the drill-down endpoint reads them straight from cached rows.
     _seed_black_opening_session(db_session)
 
     recompute_opening_scores(db_session, 123, "black")
     _, rows = list_cached_opening_scores(db_session, 123, "black")
 
     assert rows
-    assert all(row.strongest_branch_key is None for row in rows)
-    assert all(row.weakest_branch_key is None for row in rows)
-    assert all(row.underexposed_branch_key is None for row in rows)
+    by_key = {row.opening_key: row for row in rows}
+    # The Kings Pawn root has a scored child branch, so its strongest/weakest
+    # branch keys are persisted from the shared calc.
+    kings_pawn = by_key[KINGS_PAWN_FEN]
+    assert kings_pawn.strongest_branch_key is not None
+    assert kings_pawn.weakest_branch_key is not None
 
 
 def test_latest_batch_read_selects_only_latest_batch(db_session):
@@ -570,7 +585,11 @@ def test_session_upload_refreshes_relevant_opening_snapshot(
     db_session.expire_all()
     batch, rows = list_cached_opening_scores(db_session, 123, "black")
     assert batch is not None
-    assert {row.opening_key for row in rows} == {KINGS_PAWN_FEN, KNIGHT_OPENING_FEN}
+    assert {row.opening_key for row in rows} == {
+        KINGS_PAWN_FEN,
+        KNIGHT_OPENING_FEN,
+        SYNTHETIC_INITIAL_FEN,
+    }
 
 
 def test_srs_review_refreshes_relevant_opening_snapshot(
@@ -651,7 +670,11 @@ def test_repeated_recompute_retains_only_latest_batches(db_session):
     # keep=2 retention: only the two newest generations survive.
     assert len(remaining) == 2
     assert batch.id == remaining[0].id
-    assert {row.opening_key for row in rows} == {KINGS_PAWN_FEN, KNIGHT_OPENING_FEN}
+    assert {row.opening_key for row in rows} == {
+        KINGS_PAWN_FEN,
+        KNIGHT_OPENING_FEN,
+        SYNTHETIC_INITIAL_FEN,
+    }
     assert all(row.batch_id == batch.id for row in rows)
 
     # Pruned batches' snapshot rows are gone via ON DELETE CASCADE.
@@ -727,8 +750,9 @@ def test_if_needed_recomputes_when_evidence_mutated_in_place(db_session):
     assert get_latest_opening_score_batch(db_session, 123, "black").id == second.id
 
 
-def test_if_needed_reuses_empty_but_valid_batch(db_session):
-    # Evidence exists (candidate pair) but maps to no scoring roots → empty batch.
+def test_if_needed_reuses_synthetic_only_batch(db_session):
+    # Evidence exists but maps to no scored named roots → batch carries only the
+    # synthetic whole-repertoire hero row. The reuse path must not re-append it.
     session = _create_session_row(db_session, user_id=777, player_color="white")
     db_session.add(
         SessionMove(
@@ -746,7 +770,7 @@ def test_if_needed_reuses_empty_but_valid_batch(db_session):
     first = recompute_opening_scores_if_needed(db_session, 777, "white")
     _, first_rows = list_cached_opening_scores(db_session, 777, "white")
     assert first is not None
-    assert first_rows == []
+    assert {row.opening_key for row in first_rows} == {SYNTHETIC_INITIAL_FEN}
 
     second = recompute_opening_scores_if_needed(db_session, 777, "white")
 
@@ -775,3 +799,35 @@ def test_if_needed_recomputes_when_batch_stale_for_decay(db_session):
     if computed_at.tzinfo is None:
         computed_at = computed_at.replace(tzinfo=timezone.utc)
     assert computed_at > stale_at + OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
+
+
+@pytest.mark.parametrize(
+    "const",
+    ["SCORE_MODEL_VERSION", "DIVIDER_VERSION", "QUALITY_VERSION", "TAU_WC", "TAU_CP"],
+)
+def test_inputs_fingerprint_changes_with_model_curve_versions(monkeypatch, const):
+    graph = get_opening_graph()
+    roots = get_opening_roots()
+    baseline = opening_score_inputs_fingerprint(graph, roots)
+
+    current = getattr(__import__("app.opening_cache", fromlist=[const]), const)
+    bumped = current + 1.0 if isinstance(current, float) else f"{current}-bumped"
+    monkeypatch.setattr(f"app.opening_cache.{const}", bumped)
+
+    assert opening_score_inputs_fingerprint(graph, roots) != baseline
+
+
+def test_model_version_bump_invalidates_existing_batch(db_session, monkeypatch):
+    _seed_black_opening_session(db_session)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert first is not None
+
+    # A model-version bump drifts the registry fingerprint; the next if_needed
+    # read recomputes a fresh generation, leaving generation/pruning atomic.
+    monkeypatch.setattr("app.opening_cache.SCORE_MODEL_VERSION", "sm-v2-1-bumped")
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None
+    assert second.id != first.id
+    assert second.generation > first.generation
+    assert _count_batches(db_session, 123, "black") <= 2

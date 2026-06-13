@@ -10,9 +10,12 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.game_phase import DIVIDER_VERSION
 from app.models import OpeningScoreBatch, OpeningScoreCursor, UserOpeningScore
+from app.opening_aggregate import _batch_has_stale_branch_keys
 from app.opening_evidence import EvidenceOverlay, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
+from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
 from app.opening_rootcalc import (
     RootCalcConfig,
     RootScore,
@@ -25,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 PlayerColor = Literal["white", "black"]
 _VALID_PLAYER_COLORS = {"white", "black"}
+
+# Explicit score-model version. Bump on any change to the scoring model that is
+# not already captured by graph/roots/config/quality fingerprints, to force a
+# full recompute and invalidate stale v1 snapshots.
+SCORE_MODEL_VERSION = "sm-v2-1"
 
 # Number of latest batches to retain per (user_id, player_color). keep=2 protects
 # a concurrent reader that holds the previous batch when a recompute lands; it does
@@ -46,7 +54,11 @@ def opening_score_inputs_fingerprint(
     graph: OpeningGraph,
     roots: OpeningRoots,
 ) -> str:
-    return f"{graph.fingerprint}:{roots.fingerprint}:{root_calc_config_fingerprint()}"
+    return (
+        f"{graph.fingerprint}:{roots.fingerprint}:{root_calc_config_fingerprint()}"
+        f":{SCORE_MODEL_VERSION}:{DIVIDER_VERSION}"
+        f":{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
+    )
 
 
 def _iso(ts: datetime | None) -> str:
@@ -167,7 +179,8 @@ def _build_cached_scores(
         roots,
         RootCalcConfig(),
         computed_at,
-        include_branch_summaries=False,
+        include_branch_summaries=True,
+        include_synthetic_root=True,
     )
     return list(scores.values())
 
@@ -461,17 +474,41 @@ def recompute_opening_scores_if_needed(
     user_id: int,
     player_color: PlayerColor,
 ) -> OpeningScoreBatch | None:
+    """Single recompute-decision function — the only reader-driven path that may
+    write a batch, run exclusively on the scheduler's serialized worker.
+
+    Recomputes when any of the following holds, else reuses the current batch:
+      - cache miss (no batch) and the user has opening evidence,
+      - the evidence ``inputs_fingerprint`` changed (drill bursts), gated by the
+        time-decay interval when nothing else changed,
+      - the ``registry_fingerprint`` drifted (graph/roots/config/model versions),
+      - the batch has legacy/stale branch-key rows.
+    """
     now = datetime.now(timezone.utc)
     graph = get_opening_graph()
     roots = get_opening_roots()
     overlay = overlay_evidence(db, user_id, player_color, graph)
     fingerprint = opening_score_evidence_fingerprint(overlay, graph, roots)
+    registry_fingerprint = opening_score_inputs_fingerprint(graph, roots)
 
-    batch = get_latest_opening_score_batch(db, user_id, player_color)
-    if batch is None and not has_opening_evidence(db, user_id, player_color):
-        return None
+    batch, rows = list_cached_opening_scores(db, user_id, player_color)
 
-    if batch is not None and batch.inputs_fingerprint == fingerprint:
+    if batch is None:
+        if not has_opening_evidence(db, user_id, player_color):
+            return None
+        return recompute_opening_scores(
+            db,
+            user_id,
+            player_color,
+            overlay=overlay,
+            inputs_fingerprint=fingerprint,
+            computed_at=now,
+        )
+
+    registry_drift = batch.registry_fingerprint != registry_fingerprint
+    stale_branch_keys = _batch_has_stale_branch_keys(rows)
+
+    if not registry_drift and not stale_branch_keys and batch.inputs_fingerprint == fingerprint:
         # Evidence/registry/config unchanged. Reuse unless the batch is stale enough
         # that wall-clock time decay should be re-applied. Reuse empty-but-valid
         # snapshots too, else they re-append on every refresh.

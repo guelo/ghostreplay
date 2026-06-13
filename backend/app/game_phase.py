@@ -45,7 +45,13 @@ import chess
 
 from app.fen import normalize_fen
 
+# Version tag for the phase-divider implementation. Bump when the divider logic
+# (thresholds, mixedness, control flow) changes so opening-score fingerprints
+# invalidate stale cached batches computed under the old divider.
+DIVIDER_VERSION = "divider-1"
+
 __all__ = [
+    "DIVIDER_VERSION",
     "Division",
     "majors_and_minors",
     "backrank_sparse",

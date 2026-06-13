@@ -13,6 +13,14 @@ from app.opening_graph import OpeningGraph
 from app.opening_roots import OpeningRoot, OpeningRoots
 
 
+# Standard chess initial position (normalized 4-field FEN). This is the graph
+# root_fen and the key under which the synthetic whole-repertoire hero row is
+# persisted/served.
+SYNTHETIC_INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+SYNTHETIC_ROOT_NAME = "Repertoire"
+SYNTHETIC_ROOT_FAMILY = "__repertoire__"
+
+
 @dataclass(frozen=True)
 class RootCalcConfig:
     alpha: float = 1.0
@@ -93,6 +101,19 @@ def _normalized(fen: str) -> str:
     if len(fen.split()) == 4:
         return fen
     return normalize_fen(fen)
+
+
+def _synthetic_initial_root() -> OpeningRoot:
+    """Build the synthetic whole-repertoire root anchored at the initial position."""
+    return OpeningRoot(
+        opening_key=SYNTHETIC_INITIAL_FEN,
+        opening_name=SYNTHETIC_ROOT_NAME,
+        opening_family=SYNTHETIC_ROOT_FAMILY,
+        eco=None,
+        depth=0,
+        parent_keys=frozenset(),
+        child_keys=frozenset(),
+    )
 
 
 def _iter_named_roots(roots: OpeningRoots) -> list[OpeningRoot]:
@@ -681,9 +702,11 @@ def compute_all_root_scores(
     *,
     debug: bool = False,
     include_branch_summaries: bool = True,
+    include_synthetic_root: bool = False,
 ) -> tuple[dict[str, RootScore], set[str]]:
     config = config or RootCalcConfig()
     now = now or datetime.now(timezone.utc)
+    named_roots = _iter_named_roots(roots)
     if not any(node.quality_count > 0 for node in overlay.nodes.values()):
         return {}, set()
     calculator = _SharedCalculator(
@@ -691,18 +714,19 @@ def compute_all_root_scores(
     )
     eligible = {
         root.opening_key
-        for root in _iter_named_roots(roots)
+        for root in named_roots
         if calculator.has_mastery_below(root.opening_key)
     }
-    selected = [
-        root for root in _iter_named_roots(roots) if root.opening_key in eligible
-    ]
-    return (
-        calculator.compute_roots(
-            selected, include_branch_summaries=include_branch_summaries
-        ),
-        eligible,
+    selected = [root for root in named_roots if root.opening_key in eligible]
+    if include_synthetic_root and not any(
+        root.opening_key == SYNTHETIC_INITIAL_FEN for root in selected
+    ):
+        # Reuse the same calculator/DAG pass for the whole-repertoire hero row.
+        selected = [_synthetic_initial_root(), *selected]
+    result = calculator.compute_roots(
+        selected, include_branch_summaries=include_branch_summaries
     )
+    return result, eligible
 
 
 def compute_root_score(

@@ -11,24 +11,24 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import OpeningScoreBatch, UserOpeningScore
+from app.models import OpeningScoreBatch
 from app.opening_aggregate import (
     CachedOpeningScoreRow,
-    OpeningBranchAggregate,
-    _aggregate_branch_rows,
-    _collect_branch_rows,
-    _refresh_cached_scores_if_stale,
     _snapshot_cached_rows,
     _weakest_root,
+    direct_branch_view,
 )
-from app.opening_cache import (
-    ensure_opening_scores,
-    opening_score_inputs_fingerprint,
-)
+from app.opening_cache import list_cached_opening_scores
 from app.opening_evidence import overlay_evidence
 from app.opening_graph import get_opening_graph
-from app.opening_rootcalc import RootScore, compute_root_score
+from app.opening_rootcalc import (
+    SYNTHETIC_INITIAL_FEN,
+    SYNTHETIC_ROOT_FAMILY,
+    RootScore,
+    compute_root_score,
+)
 from app.opening_roots import OpeningRoots, get_opening_roots
+from app.opening_score_scheduler import refresh_now
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/openings", tags=["openings"])
@@ -215,18 +215,44 @@ class ChildrenResponse(BaseModel):
 # Aggregation helpers
 # ---------------------------------------------------------------------------
 
-def _branch_aggregate_to_response(aggregate: OpeningBranchAggregate) -> CurrentBranchStats:
+def _load_cached_rows(
+    db: Session,
+    user_id: int,
+    player_color: Literal["white", "black"],
+) -> tuple[OpeningScoreBatch | None, list[CachedOpeningScoreRow]]:
+    """Reader entry point: flush/await any pending recompute (best-effort), then
+    serve the current cached batch unconditionally.
+
+    All recompute decisions (registry drift, stale branch keys, cache miss,
+    evidence change) happen inside the scheduler's serialized worker via
+    ``recompute_opening_scores_if_needed``; the reader never writes a batch.
+    """
+    refresh_now(user_id, player_color)
+    batch, rows = list_cached_opening_scores(db, user_id, player_color)
+    return batch, _snapshot_cached_rows(rows)
+
+
+def _direct_branch_stats(row: CachedOpeningScoreRow | None) -> CurrentBranchStats:
+    """Direct-row current-branch stats. ``root_count`` is direct-row presence."""
+    if row is None:
+        return CurrentBranchStats(
+            score=None, confidence=None, coverage=None, sample_size=None, root_count=0
+        )
     return CurrentBranchStats(
-        score=aggregate.score,
-        confidence=aggregate.confidence,
-        coverage=aggregate.coverage,
-        sample_size=aggregate.sample_size if aggregate.root_count > 0 else None,
-        root_count=aggregate.root_count,
+        score=row.opening_score,
+        confidence=row.confidence,
+        coverage=row.coverage,
+        sample_size=row.sample_size,
+        root_count=1,
     )
 
 
 def build_family_scores(rows: list[CachedOpeningScoreRow]) -> list[FamilyScoreItem]:
-    """Aggregate per-root cached scores into per-family items."""
+    """Aggregate per-root cached scores into per-family items.
+
+    The synthetic whole-repertoire row is excluded so it never pollutes a family.
+    """
+    rows = [row for row in rows if row.opening_family != SYNTHETIC_ROOT_FAMILY]
     families_map: dict[str, list[CachedOpeningScoreRow]] = defaultdict(list)
     for row in rows:
         families_map[row.opening_family].append(row)
@@ -263,50 +289,6 @@ def build_family_scores(rows: list[CachedOpeningScoreRow]) -> list[FamilyScoreIt
     # Sort: weakest_root_score asc, family_score asc, family_name asc
     items.sort(key=lambda f: (f.weakest_root_score, f.family_score, f.family_name))
     return items
-
-
-def _row_needs_branch_enrichment(row: UserOpeningScore | CachedOpeningScoreRow) -> bool:
-    return (
-        row.strongest_branch_key is None
-        and row.weakest_branch_key is None
-        and row.underexposed_branch_key is None
-    )
-
-
-def _compute_missing_drill_down_branches(
-    db: Session,
-    user_id: int,
-    player_color: Literal["white", "black"],
-    family_name: str,
-    rows: list[CachedOpeningScoreRow],
-    graph,
-    roots_registry: OpeningRoots,
-) -> dict[str, RootScore]:
-    missing_rows = [
-        row
-        for row in rows
-        if (
-            row.opening_family == family_name
-            and _row_needs_branch_enrichment(row)
-            and graph.has_position(row.opening_key)
-        )
-    ]
-    if not missing_rows:
-        return {}
-
-    overlay = overlay_evidence(db, user_id, player_color, graph)
-    db.rollback()
-    return {
-        row.opening_key: compute_root_score(
-            row.opening_key,
-            player_color,
-            graph,
-            overlay,
-            roots_registry,
-            include_branch_summaries=True,
-        )
-        for row in missing_rows
-    }
 
 
 def _make_drill_branch(
@@ -436,9 +418,9 @@ def build_opening_children(
     items: list[OpeningChildItem] = []
 
     for child in roots_registry.get_children(parent_key):
-        subtree_rows = _collect_branch_rows(rows_by_key, child.opening_key, roots_registry)
-        aggregate = _aggregate_branch_rows(subtree_rows)
-        weakest = aggregate.weakest_root
+        view = direct_branch_view(rows_by_key, child.opening_key, roots_registry)
+        direct = view.direct_row
+        weakest = view.weakest_root
 
         items.append(
             OpeningChildItem(
@@ -448,12 +430,14 @@ def build_opening_children(
                 eco=child.eco,
                 depth=child.depth,
                 child_count=len(roots_registry.get_children(child.opening_key)),
-                subtree_score=aggregate.score,
-                subtree_confidence=aggregate.confidence,
-                subtree_coverage=aggregate.coverage,
-                subtree_sample_size=aggregate.sample_size,
-                subtree_root_count=aggregate.root_count,
-                last_practiced_at=aggregate.last_practiced_at,
+                # Card score/sample/last-practiced are the child's DIRECT row.
+                subtree_score=direct.opening_score if direct is not None else None,
+                subtree_confidence=direct.confidence if direct is not None else None,
+                subtree_coverage=direct.coverage if direct is not None else None,
+                subtree_sample_size=direct.sample_size if direct is not None else 0,
+                # Navigation metadata only — count of scored named rows in subtree.
+                subtree_root_count=view.scored_root_count,
+                last_practiced_at=direct.last_practiced_at if direct is not None else None,
                 weakest_root_key=weakest.opening_key if weakest is not None else None,
                 weakest_root_name=weakest.opening_name if weakest is not None else None,
                 weakest_root_family=weakest.opening_family if weakest is not None else None,
@@ -637,21 +621,8 @@ def get_family_scores(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> FamilyScoresResponse:
-    graph = get_opening_graph()
-    roots_registry = get_opening_roots()
-    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
-    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
-    batch, rows = _refresh_cached_scores_if_stale(
-        db,
-        user.user_id,
-        player_color,
-        current_fingerprint,
-        roots_registry,
-        batch,
-        rows,
-    )
+    batch, row_views = _load_cached_rows(db, user.user_id, player_color)
     computed_at = batch.computed_at if batch is not None else None
-    row_views = _snapshot_cached_rows(rows)
     families = build_family_scores(row_views)
     return FamilyScoresResponse(
         player_color=player_color,
@@ -668,39 +639,19 @@ def get_family_drill_down(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillDownResponse:
-    graph = get_opening_graph()
     roots_registry = get_opening_roots()
     if not roots_registry.get_family(family_name):
         raise HTTPException(status_code=404, detail="Unknown opening family")
 
-    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
-    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
-    batch, rows = _refresh_cached_scores_if_stale(
-        db,
-        user.user_id,
-        player_color,
-        current_fingerprint,
-        roots_registry,
-        batch,
-        rows,
-    )
+    batch, row_views = _load_cached_rows(db, user.user_id, player_color)
     computed_at = batch.computed_at if batch is not None else None
-    row_views = _snapshot_cached_rows(rows)
 
-    branch_scores_by_key = _compute_missing_drill_down_branches(
-        db,
-        user.user_id,
-        player_color,
-        family_name,
-        row_views,
-        graph,
-        roots_registry,
-    )
+    # Branch summaries are persisted from the shared calculation; read them
+    # straight from the cached rows (no per-root recompute).
     root_items, scored_count = build_drill_down_roots(
         row_views,
         family_name,
         roots_registry,
-        branch_scores_by_key=branch_scores_by_key,
     )
     return DrillDownResponse(
         player_color=player_color,
@@ -720,25 +671,13 @@ def get_opening_children(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> ChildrenResponse:
-    graph = get_opening_graph()
     roots_registry = get_opening_roots()
     if parent_key is not None and roots_registry.get_root(parent_key) is None:
         raise HTTPException(status_code=404, detail="Unknown opening root")
 
-    batch, rows = ensure_opening_scores(db, user.user_id, player_color)
-    current_fingerprint = opening_score_inputs_fingerprint(graph, roots_registry)
-    batch, rows = _refresh_cached_scores_if_stale(
-        db,
-        user.user_id,
-        player_color,
-        current_fingerprint,
-        roots_registry,
-        batch,
-        rows,
-    )
+    batch, row_views = _load_cached_rows(db, user.user_id, player_color)
     computed_at = batch.computed_at if batch is not None else None
 
-    row_views = _snapshot_cached_rows(rows)
     rows_by_key = {row.opening_key: row for row in row_views}
     canonical_parent_key, canonical_path, route_roots = canonicalize_children_route(
         parent_key,
@@ -755,10 +694,12 @@ def get_opening_children(
         canonical_parent_key,
         roots_registry,
     )
-    current_branch_rows = (
-        row_views
+    # Top level: synthetic whole-repertoire row. Drilled in: the selected root's
+    # own direct row. No descendant aggregation.
+    current_branch_row = rows_by_key.get(
+        SYNTHETIC_INITIAL_FEN
         if canonical_parent_key is None
-        else _collect_branch_rows(rows_by_key, canonical_parent_key, roots_registry)
+        else canonical_parent_key
     )
     return ChildrenResponse(
         player_color=player_color,
@@ -767,9 +708,7 @@ def get_opening_children(
         canonical_opening_key=canonical_parent_key,
         canonical_path=canonical_path,
         breadcrumbs=build_opening_breadcrumbs(route_roots),
-        current_branch_stats=_branch_aggregate_to_response(
-            _aggregate_branch_rows(current_branch_rows)
-        ),
+        current_branch_stats=_direct_branch_stats(current_branch_row),
         children=children,
         total_children=len(children),
         computed_at=computed_at,

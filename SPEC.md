@@ -450,7 +450,7 @@ validation the writer uses.
 
 ### 5.7 Opening Score Tables
 
-The opening score system computes and stores per-user weakness metrics for opening lines. Three tables work together: batches group computation runs, cursors track the latest batch per user/color, and scores hold the actual per-opening metrics.
+The opening score system computes and stores per-user 0-100 mastery scores for opening lines (higher = better). Three tables work together: batches group computation runs, cursors track the latest batch per user/color, and scores hold the actual per-opening metrics.
 
 #### 5.7.1 `opening_score_batches` (Computation Runs)
 
@@ -489,7 +489,7 @@ CREATE TABLE opening_score_cursors (
 
 #### 5.7.3 `user_opening_scores` (Per-Opening Metrics)
 
-Stores the actual weakness metrics for each opening line, computed within a batch.
+Stores the actual mastery metrics for each opening line, computed within a batch.
 
 ```sql
 CREATE TABLE user_opening_scores (
@@ -500,7 +500,7 @@ CREATE TABLE user_opening_scores (
     opening_key TEXT NOT NULL,             -- ECO-style key identifying the opening line
     opening_name TEXT NOT NULL,            -- Human-readable opening name
     opening_family TEXT NOT NULL,          -- Broader family grouping (e.g., "Sicilian Defense")
-    opening_score FLOAT NOT NULL,          -- Composite weakness score (0 = perfect, higher = weaker)
+    opening_score FLOAT NOT NULL,          -- Mastery score (0-100, higher = better) computed directly per root
     confidence FLOAT NOT NULL,             -- Statistical confidence in the score
     coverage FLOAT NOT NULL,               -- Fraction of moves in this line that have been played
     weighted_depth FLOAT NOT NULL,         -- Average depth of user's games in this opening
@@ -526,11 +526,12 @@ CREATE INDEX idx_user_opening_scores_user_color ON user_opening_scores(user_id, 
 ```
 
 **Key semantics:**
-- `opening_score` is a composite metric — higher values indicate weaker performance in that opening
+- `opening_score` is a **0-100 mastery** score (higher = better), computed **directly per root** from the shared scoring DAG. There is no confidence-weighted descendant rollup: a card shows its own root row, and the top-level hero shows a synthetic initial-position ("whole repertoire") row persisted under the normalized initial FEN with `opening_family = "__repertoire__"`.
 - `confidence` and `sample_size` let the frontend de-emphasize scores based on sparse data
-- Branch fields (strongest/weakest/underexposed) identify specific sub-lines for targeted practice recommendations
+- Branch fields (strongest/weakest/underexposed) are persisted from the same shared calculation and read directly by the drill-down (no per-request recompute)
 - Batches are replaced atomically: a new batch is computed, then the cursor is updated to point to it; old batches are pruned
-- `recompute_opening_scores_if_needed()` is triggered after move uploads and SRS reviews
+- The batch `inputs_fingerprint`/`registry_fingerprint` include the score-model, phase-divider, and quality-curve versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`, `TAU_CP`), so any model/divider/curve change invalidates all prior snapshots on the next read.
+- `recompute_opening_scores_if_needed()` is the single recompute-decision function, run on the scheduler's serialized worker. Readers call `refresh_now()` (best-effort flush/await) and then serve the cached batch; they never recompute synchronously.
 
 ### 5.8 Authentication
 
@@ -2191,13 +2192,13 @@ DB reference: §5.5
 
 ## 13. Opening Weakness Tracking
 
-The opening weakness system computes per-user performance scores for each opening line and surfaces them on the `/openings` page.
+The opening score system computes per-user 0-100 mastery scores (higher = better) for each opening line and surfaces them on the `/openings` page.
 
 ### 13.1 Trigger Points
 
 - **After move uploads:** `recompute_opening_scores_if_needed()` is called at the end of `POST /api/session/:id/moves`. If the user's inputs (game history or opening registry) have changed since the last batch, a new batch is computed.
 - **After SRS reviews:** `recompute_opening_scores_if_needed()` is called after each SRS review submission, since a review pass can change per-opening accuracy.
-- **On openings page load:** `ensure_opening_scores()` is called when serving `GET /api/openings`. It calls `recompute_opening_scores` if no valid batch exists yet.
+- **On openings page load:** readers call `refresh_now()` (a best-effort keyed flush/await on the scheduler worker) and then serve the cached batch. They never recompute synchronously; all recompute decisions — cache miss, registry drift, stale branch keys, evidence change — are consolidated in `recompute_opening_scores_if_needed()` run on the single serialized worker.
 
 ### 13.2 Batch/Cursor Pattern
 
@@ -2210,13 +2211,14 @@ Computation runs are not overwritten in-place. Instead:
 
 This ensures the current scores are always available atomically and reads never see a partially-computed state.
 
-`registry_fingerprint` captures a hash of the opening registry at compute time. If the fingerprint changes (e.g. new openings added to the registry), the next trigger forces a full recompute.
+`registry_fingerprint` captures a hash of the opening registry **plus** the score-model, phase-divider, and quality-curve versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`, `TAU_CP`) at compute time. If it changes (new openings, or a model/divider/curve change), the next trigger forces a full recompute and all prior snapshots are invalidated.
 
 ### 13.3 Score Semantics
 
-- `opening_score`: composite weakness metric — 0 = perfect play, higher = weaker performance
+- `opening_score`: **0-100 mastery** score (higher = better), computed **directly per root** — no confidence-weighted descendant rollup.
+- **Card / hero semantics:** each `/openings` card shows its **direct** root row; the top-level hero shows a **synthetic initial-position** ("whole repertoire") row persisted under the normalized initial FEN (`opening_family = "__repertoire__"`), which is excluded from family roll-ups. `subtree_root_count` is navigation metadata (count of scored named rows in the subtree) and never feeds a score; a card is unscored when its direct `subtree_score` is null.
 - `confidence` and `sample_size`: let the frontend de-emphasize scores backed by sparse data
-- Branch fields: each score row includes `strongest_branch`, `weakest_branch`, and `underexposed_branch` sub-line details for targeted practice recommendations
+- Branch fields: each score row includes `strongest_branch`, `weakest_branch`, and `underexposed_branch` sub-line details, persisted from the same shared calculation and read directly by the drill-down (no per-request recompute)
 
 The score engine evaluates all named roots for one user/color as a shared DAG rather
 than building a separate name-owned subtree per opening. Structural reachability

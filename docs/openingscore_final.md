@@ -448,6 +448,35 @@ Clicking a family card reveals named descendant roots:
 
 Each drill-down entry is just the same scoring algorithm applied to a deeper named root.
 
+### Shipped card / hero semantics (v2)
+
+The persisted cache and the `/openings` API use **direct-row** semantics:
+
+- Each card shows its **direct** root row (`opening_score` is the root's own
+  0-100 mastery value, higher = better). There is no confidence-weighted
+  descendant rollup. A card is **unscored** when its direct row is absent
+  (`subtree_score == null`); `subtree_root_count` is navigation metadata only
+  (count of scored named rows in the subtree) and never feeds a score.
+- The top-level hero shows a **synthetic initial-position** ("whole repertoire")
+  row, computed in the same shared DAG pass and persisted under the normalized
+  initial FEN with `opening_family = "__repertoire__"`. It is excluded from
+  family roll-ups. Drilled-in, the current-branch hero is the selected root's
+  direct row.
+- Strongest / weakest / underexposed branch summaries are persisted from the one
+  shared calculation and read directly by the drill-down (no per-request
+  recompute).
+
+### Shipped cache invalidation (v2)
+
+The batch fingerprints fold in the score-model, phase-divider, and quality-curve
+versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`,
+`TAU_CP`) alongside graph/roots/config, so any model/divider/curve change
+invalidates all prior snapshots on the next read. Recompute decisions (cache
+miss, registry drift, stale branch keys, evidence change) are consolidated in
+`recompute_opening_scores_if_needed()` and run only on the scheduler's single
+serialized worker. Readers call `refresh_now()` (best-effort keyed flush/await)
+and then serve the cached batch — they never recompute synchronously.
+
 ## Output Per Opening
 
 Each computed opening record should include:

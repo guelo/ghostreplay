@@ -8,6 +8,9 @@ from app.fen import active_color, normalize_fen
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import (
+    SYNTHETIC_INITIAL_FEN,
+    SYNTHETIC_ROOT_FAMILY,
+    SYNTHETIC_ROOT_NAME,
     RootCalcConfig,
     _SharedCalculator,
     compute_all_root_scores,
@@ -459,3 +462,28 @@ def test_shared_memo_computes_diamond_nodes_once_per_pass():
     calculator.compute_roots([roots.get_root(root)], include_branch_summaries=False)
     assert calculator.calculation_misses == 8
     assert len(calculator._metrics) == 8
+
+
+def test_synthetic_initial_root_emitted_only_when_requested():
+    a, b = _positions(["e2e4"])
+    assert a == SYNTHETIC_INITIAL_FEN
+    graph = _graph([["e2e4"]])
+    roots = _roots(_root(b, "King's Pawn"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, a, b, "e2e4")
+    overlay.nodes[b] = _quality(b, 0.8)
+
+    without, _ = compute_all_root_scores("white", graph, overlay, roots)
+    assert SYNTHETIC_INITIAL_FEN not in without
+
+    with_syn, _ = compute_all_root_scores(
+        "white", graph, overlay, roots, include_synthetic_root=True
+    )
+    assert SYNTHETIC_INITIAL_FEN in with_syn
+    syn = with_syn[SYNTHETIC_INITIAL_FEN]
+    assert syn.opening_family == SYNTHETIC_ROOT_FAMILY
+    assert syn.opening_name == SYNTHETIC_ROOT_NAME
+    assert 0.0 <= syn.opening_score <= 100.0
+    # The named root score is unchanged whether or not the synthetic row is added
+    # (same shared DAG pass).
+    assert with_syn[b].opening_score == pytest.approx(without[b].opening_score)

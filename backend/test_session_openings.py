@@ -33,9 +33,11 @@ _STUB_GRAPH = _stub_graph()
 
 @pytest.fixture(autouse=True)
 def _stub_singletons():
+    # The lineage reader flushes via refresh_now (best-effort) then serves cached
+    # rows; stub it to a no-op so unit tests serve seeded rows directly.
     with (
         patch("app.api.session.request_recompute", return_value=None),
-        patch(PATCH_GRAPH, return_value=_STUB_GRAPH),
+        patch("app.api.session.refresh_now", return_value=False),
     ):
         yield
 
@@ -300,9 +302,9 @@ def test_openings_fully_unscored_lineage_null(client, auth_headers, create_game_
         assert item["sample_size"] is None
 
 
-def test_openings_no_own_row_but_scored_descendant(client, auth_headers, create_game_session, db_session):
-    """An ancestor without its own cached row still reports a non-null subtree
-    score when a descendant is scored."""
+def test_openings_ancestor_without_own_row_is_unscored(client, auth_headers, create_game_session, db_session):
+    """Direct-row semantics: an ancestor without its own cached row is unscored,
+    even when a descendant is scored (no descendant rollup)."""
     session_id = create_game_session(user_id=123, player_color="white")
     _insert_moves(db_session, session_id, RUY_SANS)
 
@@ -319,11 +321,11 @@ def test_openings_no_own_row_but_scored_descendant(client, auth_headers, create_
         resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
 
     lineage = {item["opening_key"]: item for item in resp.json()["lineage"]}
-    # All three nodes inherit the Morphy subtree score.
+    # Only Morphy (its own direct row) is scored; ancestors are unscored.
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(70.0)
-    assert lineage[RUY_KEY]["score"] == pytest.approx(70.0)
-    assert lineage[KP_KEY]["score"] == pytest.approx(70.0)
-    assert lineage[RUY_KEY]["sample_size"] == 8
+    assert lineage[MORPHY_KEY]["sample_size"] == 8
+    assert lineage[RUY_KEY]["score"] is None
+    assert lineage[KP_KEY]["score"] is None
 
 
 def test_openings_score_parity_with_build_opening_children(client, auth_headers, create_game_session, db_session):
@@ -362,14 +364,13 @@ def test_openings_score_parity_with_build_opening_children(client, auth_headers,
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(ruy_children[MORPHY_KEY].subtree_score)
 
 
-def test_openings_stale_batch_triggers_recompute(client, auth_headers, create_game_session, db_session):
-    """A batch whose registry fingerprint no longer matches is recomputed before
-    aggregating, so lineage scores match the refreshed /openings card."""
+def test_openings_lineage_flushes_via_refresh_now_then_serves_cached(client, auth_headers, create_game_session, db_session):
+    """The lineage reader flushes via refresh_now (the worker repairs staleness)
+    and serves whatever list_cached then returns — no reader-side recompute."""
     session_id = create_game_session(user_id=123, player_color="white")
     _insert_moves(db_session, session_id, RUY_SANS)
     roots = _ruy_roots()
 
-    # Seed a batch with a deliberately stale fingerprint and a stale score.
     batch = OpeningScoreBatch(
         user_id=123, player_color="white", generation=1,
         registry_fingerprint="stale-fingerprint",
@@ -377,12 +378,8 @@ def test_openings_stale_batch_triggers_recompute(client, auth_headers, create_ga
     )
     db_session.add(batch)
     db_session.flush()
-    _add_score_row(db_session, batch_id=batch.id, opening_key=MORPHY_KEY,
-                   opening_name="Ruy Lopez: Morphy Defense", opening_family="Ruy Lopez",
-                   opening_score=10.0, confidence=0.6, coverage=0.5, sample_size=8)
     db_session.commit()
 
-    # After recompute, the refreshed read returns a different (fresh) score.
     fresh_rows = [
         UserOpeningScore(
             batch_id=batch.id, user_id=123, player_color="white",
@@ -395,13 +392,13 @@ def test_openings_stale_batch_triggers_recompute(client, auth_headers, create_ga
 
     with (
         patch(PATCH_ROOTS, return_value=roots),
-        patch("app.opening_aggregate.recompute_opening_scores") as mock_recompute,
-        patch("app.opening_aggregate.list_cached_opening_scores", return_value=(batch, fresh_rows)),
+        patch("app.api.session.refresh_now") as mock_refresh,
+        patch("app.api.session.list_cached_opening_scores", return_value=(batch, fresh_rows)),
     ):
         resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
 
     assert resp.status_code == 200
-    mock_recompute.assert_called_once()
+    mock_refresh.assert_called_once_with(123, "white")
     lineage = {item["opening_key"]: item for item in resp.json()["lineage"]}
-    # Score reflects the recomputed batch, not the stale seeded 10.0.
+    # Score reflects the (post-flush) cached batch.
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(90.0)
