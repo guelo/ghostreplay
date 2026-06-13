@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -141,13 +142,17 @@ def _insert_move(
     fen_before: str | None,
     fen_after: str,
     eval_delta: int | None = None,
+    eval_cp: int | None = None,
+    best_move_eval_cp: int | None = None,
 ) -> None:
     db.execute(text("""
-        INSERT INTO session_moves (session_id, move_number, color, move_san, fen_before, fen_after, eval_delta)
-        VALUES (:sid, :mn, :c, :ms, :fb, :fa, :ed)
+        INSERT INTO session_moves (session_id, move_number, color, move_san, fen_before, fen_after,
+                                   eval_delta, eval_cp, best_move_eval_cp)
+        VALUES (:sid, :mn, :c, :ms, :fb, :fa, :ed, :ec, :bc)
     """), {
         "sid": session_id, "mn": move_number, "c": color,
         "ms": move_san, "fb": fen_before, "fa": fen_after, "ed": eval_delta,
+        "ec": eval_cp, "bc": best_move_eval_cp,
     })
     db.commit()
 
@@ -459,8 +464,10 @@ class TestBookExtension:
         assert norm_nc6 in ov.nodes
         assert ov.nodes[norm_nc6].live_attempts == 1
 
-    def test_extension_stops_at_limit(self, db_session, branching_graph):
-        """Third user decision beyond book should not be collected."""
+    def test_no_user_decision_cutoff_within_opening(self, db_session, branching_graph):
+        """Off-book user decisions are collected for as long as the line is in
+        the opening phase: there is no fixed two-user-decision cutoff (the divider
+        is the only horizon)."""
         _insert_user(db_session)
         sid = _insert_session(db_session)
 
@@ -469,15 +476,15 @@ class TestBookExtension:
         _insert_move(db_session, sid, 1, "black", "e5", RAW_E4, RAW_E4E5, eval_delta=5)
         _insert_move(db_session, sid, 2, "white", "Nf3", RAW_E4E5, RAW_E4E5NF3, eval_delta=8)
 
-        # Off-book chain.
+        # Off-book chain — all still a full-piece opening (no middlegame trigger).
         moves_uci = ["e2e4", "e7e5", "g1f3"]
         off_book_sequence = [
-            ("b8c6", "black", "Nc6"),    # opponent (depth 0)
+            ("b8c6", "black", "Nc6"),    # opponent
             ("f1c4", "white", "Bc4"),    # user decision 1
-            ("g8f6", "black", "Nf6"),    # opponent (still depth 1)
+            ("g8f6", "black", "Nf6"),    # opponent
             ("d2d3", "white", "d3"),     # user decision 2
-            ("f8e7", "black", "Be7"),    # opponent (still depth 2)
-            ("c1g5", "white", "Bg5"),    # user decision 3 — should be EXCLUDED
+            ("f8e7", "black", "Be7"),    # opponent
+            ("c1g5", "white", "Bg5"),    # user decision 3 — still opening, included
         ]
 
         prev_raw = RAW_E4E5NF3
@@ -497,22 +504,13 @@ class TestBookExtension:
             uci_chain.append(uci)
             fens.append(normalize_fen(_raw_fen_after_moves(*uci_chain)))
 
-        # Nc6 (opponent, depth 0): should have edge from Nf3.
-        assert (FEN_E4E5NF3, fens[0]) in ov.edges
-
-        # Bc4 (user decision 1): node evidence at Nc6 position.
+        # User decisions 1 and 2 are collected as before.
         assert fens[0] in ov.nodes
-
-        # Nf6 (opponent, depth 1): edge should exist.
-        assert (fens[1], fens[2]) in ov.edges
-
-        # d3 (user decision 2): node evidence at Nf6 position.
         assert fens[2] in ov.nodes
-
-        # Bg5 (user decision 3): should NOT be collected.
-        # The parent position (after Be7) should not have node evidence.
-        assert fens[4] not in ov.nodes
-        assert (fens[4], fens[5]) not in ov.edges
+        # User decision 3 (Bg5) is now also collected: it is still in the opening
+        # phase, so the old two-decision cap no longer drops it.
+        assert fens[4] in ov.nodes
+        assert (fens[4], fens[5]) in ov.edges
 
 
 class TestExtensionTransposition:
@@ -657,7 +655,9 @@ class TestUserExitConsumesDepth:
     """Finding #2: a user move that exits the book should consume one extension
     depth, so only 1 more user decision is allowed (not 2)."""
 
-    def test_user_exit_limits_extension_to_one_more(self, db_session, branching_graph):
+    def test_user_exit_extends_through_opening_phase(self, db_session, branching_graph):
+        """A user move that exits the book no longer burns a decision budget;
+        every opening-phase user decision after it is still collected."""
         _insert_user(db_session)
         sid = _insert_session(db_session)
 
@@ -665,7 +665,7 @@ class TestUserExitConsumesDepth:
         _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10)
         _insert_move(db_session, sid, 1, "black", "e5", RAW_E4, RAW_E4E5, eval_delta=5)
 
-        # USER exits book: plays d3 instead of Nf3 (user decision 1 of 2).
+        # USER exits book: plays d3 instead of Nf3 (user decision 1).
         raw_d3 = _raw_fen_after_moves("e2e4", "e7e5", "d2d3")
         _insert_move(db_session, sid, 2, "white", "d3", RAW_E4E5, raw_d3, eval_delta=15)
 
@@ -673,7 +673,7 @@ class TestUserExitConsumesDepth:
         raw_d3_nc6 = _raw_fen_after_moves("e2e4", "e7e5", "d2d3", "b8c6")
         _insert_move(db_session, sid, 2, "black", "Nc6", raw_d3, raw_d3_nc6, eval_delta=3)
 
-        # User plays Nf3 (user decision 2 of 2).
+        # User plays Nf3 (user decision 2).
         raw_d3_nc6_nf3 = _raw_fen_after_moves("e2e4", "e7e5", "d2d3", "b8c6", "g1f3")
         _insert_move(db_session, sid, 3, "white", "Nf3", raw_d3_nc6, raw_d3_nc6_nf3, eval_delta=5)
 
@@ -681,7 +681,7 @@ class TestUserExitConsumesDepth:
         raw_d3_nc6_nf3_d6 = _raw_fen_after_moves("e2e4", "e7e5", "d2d3", "b8c6", "g1f3", "d7d6")
         _insert_move(db_session, sid, 3, "black", "d6", raw_d3_nc6_nf3, raw_d3_nc6_nf3_d6, eval_delta=2)
 
-        # User plays Be2 (user decision 3 — should be EXCLUDED).
+        # User plays Be2 (user decision 3 — still opening, now included).
         raw_be2 = _raw_fen_after_moves("e2e4", "e7e5", "d2d3", "b8c6", "g1f3", "d7d6", "f1e2")
         _insert_move(db_session, sid, 4, "white", "Be2", raw_d3_nc6_nf3_d6, raw_be2, eval_delta=8)
 
@@ -700,9 +700,9 @@ class TestUserExitConsumesDepth:
         assert norm_d3_nc6 in ov.nodes
         assert (norm_d3_nc6, norm_d3_nc6_nf3) in ov.edges
 
-        # User decision 3: should be excluded.
-        assert norm_d3_nc6_nf3_d6 not in ov.nodes
-        assert (norm_d3_nc6_nf3_d6, norm_be2) not in ov.edges
+        # User decision 3 (Be2): now collected — no fixed cutoff inside the opening.
+        assert norm_d3_nc6_nf3_d6 in ov.nodes
+        assert (norm_d3_nc6_nf3_d6, norm_be2) in ov.edges
 
 
 class TestBoundaryDoubleCount:
@@ -759,6 +759,236 @@ class TestGhostTargets:
         assert FEN_ROOT not in ov.nodes
 
 
+class TestContinuousQuality:
+    def test_primary_session_evals_set_quality(self, db_session, branching_graph):
+        """A user move with mover-relative best/played evals scores continuous
+        quality without consulting eval_delta."""
+        from app.opening_quality import (
+            SOURCE_SESSION_EVAL,
+            quality_from_win_chance_loss,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        # Best line was even (0cp); played dropped to -60cp (mover perspective).
+        _insert_move(
+            db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4,
+            eval_delta=60, eval_cp=-60, best_move_eval_cp=0,
+        )
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_count == 1
+        assert node.quality_sum == pytest.approx(quality_from_win_chance_loss(0, -60))
+        # Telemetry attributes the observation to the primary source.
+        assert ov.source_counts[SOURCE_SESSION_EVAL] == 1
+
+        edge = ov.edges[(FEN_ROOT, FEN_E4)]
+        assert edge.quality_count == 1
+
+    def test_eval_delta_fallback_source(self, db_session, branching_graph):
+        """A user move with only eval_delta uses the deterministic fallback and
+        is attributed to the eval_delta source."""
+        from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=120)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_count == 1
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(120))
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+
+    def test_no_eval_signal_no_quality(self, db_session, branching_graph):
+        """A user move with no eval at all yields no quality observation."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=None)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert FEN_ROOT not in ov.nodes
+        assert ov.source_counts == Counter()
+
+    def test_broken_continuity_excludes_session(self, db_session, branching_graph):
+        """A session whose move list is not a continuous board line is dropped
+        and counted, rather than guessed across."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        # fen_after of move 1 does not match fen_before of move 2.
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10)
+        bogus_before = _raw_fen_after_moves("d2d4")  # discontinuous jump
+        _insert_move(db_session, sid, 1, "black", "d5", bogus_before,
+                     _raw_fen_after_moves("d2d4", "d7d5"), eval_delta=10)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.excluded_sessions == 1
+        assert ov.nodes == {}
+
+
+class TestDedupOnce:
+    """A move reachable by both the pass-2 book-exit and pass-3 extension routes
+    must contribute exactly one mastery observation (regression for the
+    transposition double-count)."""
+
+    def test_transposed_move_recorded_once(self, db_session, branching_graph):
+        _insert_user(db_session)
+
+        # Two sessions transpose to the same off-book position tp after one user
+        # decision past the book leaf Nf3, exercising both traversal routes.
+        sid_a = _insert_session(db_session)
+        sid_b = _insert_session(db_session)
+        for sid in (sid_a, sid_b):
+            _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10)
+            _insert_move(db_session, sid, 1, "black", "e5", RAW_E4, RAW_E4E5, eval_delta=5)
+            _insert_move(db_session, sid, 2, "white", "Nf3", RAW_E4E5, RAW_E4E5NF3, eval_delta=8)
+
+        # Session A: ...Nc6 (opp exit) Bc4 (user) ...Nf6 (opp) → tp
+        raw_nc6 = _raw_fen_after_moves("e2e4", "e7e5", "g1f3", "b8c6")
+        raw_nc6_bc4 = _raw_fen_after_moves("e2e4", "e7e5", "g1f3", "b8c6", "f1c4")
+        raw_tp = _raw_fen_after_moves("e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6")
+        _insert_move(db_session, sid_a, 2, "black", "Nc6", RAW_E4E5NF3, raw_nc6, eval_delta=5)
+        # The shared user decision Bc4 from raw_nc6 — give it primary evals.
+        _insert_move(db_session, sid_a, 3, "white", "Bc4", raw_nc6, raw_nc6_bc4,
+                     eval_delta=8, eval_cp=10, best_move_eval_cp=15)
+        _insert_move(db_session, sid_a, 3, "black", "Nf6", raw_nc6_bc4, raw_tp, eval_delta=3)
+
+        # Session B reaches raw_nc6 via a different route order (Nf6 first) so the
+        # Bc4 user node at raw_nc6 can also be queued from the extension BFS.
+        raw_nf6 = _raw_fen_after_moves("e2e4", "e7e5", "g1f3", "g8f6")
+        raw_nf6_bc4 = _raw_fen_after_moves("e2e4", "e7e5", "g1f3", "g8f6", "f1c4")
+        raw_tp_b = _raw_fen_after_moves("e2e4", "e7e5", "g1f3", "g8f6", "f1c4", "b8c6")
+        _insert_move(db_session, sid_b, 2, "black", "Nf6", RAW_E4E5NF3, raw_nf6, eval_delta=4)
+        _insert_move(db_session, sid_b, 3, "white", "Bc4", raw_nf6, raw_nf6_bc4,
+                     eval_delta=7, eval_cp=12, best_move_eval_cp=14)
+        _insert_move(db_session, sid_b, 3, "black", "Nc6", raw_nf6_bc4, raw_tp_b, eval_delta=2)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        # Each session's Bc4 is a distinct identity, so two observations total at
+        # the (distinct) source positions — but neither is counted twice.
+        norm_nc6 = normalize_fen(raw_nc6)
+        norm_nf6 = normalize_fen(raw_nf6)
+        assert ov.nodes[norm_nc6].quality_count == 1
+        assert ov.nodes[norm_nf6].quality_count == 1
+        # Edge live attempts are not double-counted across passes either.
+        assert ov.edges[(norm_nc6, normalize_fen(raw_nc6_bc4))].live_attempts == 1
+
+
+def _insert_analysis_cache(
+    db,
+    fen_before: str,
+    move_uci: str,
+    move_san: str,
+    played_eval: int | None = None,
+    played_eval_mate: int | None = None,
+    best_eval: int | None = None,
+    best_eval_mate: int | None = None,
+) -> None:
+    db.execute(text("""
+        INSERT INTO analysis_cache (fen_before, move_uci, move_san,
+            played_eval, played_eval_mate, best_eval, best_eval_mate, source)
+        VALUES (:fb, :u, :s, :pe, :pem, :be, :bem, 'game')
+    """), {
+        "fb": fen_before, "u": move_uci, "s": move_san,
+        "pe": played_eval, "pem": played_eval_mate,
+        "be": best_eval, "bem": best_eval_mate,
+    })
+    db.commit()
+
+
+class TestAnalysisCacheFallback:
+    def test_cache_reconstructs_quality_and_telemetry(self, db_session, branching_graph):
+        """A user move lacking primary session evals is rescored from a matching
+        analysis_cache row, attributed to the analysis_cache source."""
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            quality_from_win_chance_loss,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        # No eval_cp / best_move_eval_cp on the move → triggers cache lookup.
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # White to move at the root, so white-relative evals are mover-relative.
+        _insert_analysis_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+        )
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_count == 1
+        assert node.quality_sum == pytest.approx(quality_from_win_chance_loss(20, -30))
+        assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+    def test_cache_miss_falls_through_to_eval_delta(self, db_session, branching_graph):
+        from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # No cache row inserted → deterministic eval_delta fallback.
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(40))
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+
+
+class TestPhaseExclusion:
+    """Moves whose pre-move position is at or beyond the divider's middlegame
+    boundary are excluded from opening evidence."""
+
+    def test_post_middlegame_moves_excluded(self, db_session, branching_graph):
+        from app.game_phase import divide, is_opening_premove, reconstruct_board_sequence
+
+        # A development line that thins White's back rank into the middlegame.
+        uci_line = [
+            "e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "b1c3", "f8c5",
+            "d2d3", "d7d6", "c1g5", "c8g4", "d1d2", "d8d7", "e1c1", "e8c8",
+        ]
+        board = chess.Board()
+        rows = []  # (move_number, color, san, fen_before, fen_after)
+        for ply, uci in enumerate(uci_line):
+            move = chess.Move.from_uci(uci)
+            san = board.san(move)
+            fen_before = board.fen()
+            color = "white" if board.turn == chess.WHITE else "black"
+            board.push(move)
+            rows.append((ply // 2 + 1, color, san, fen_before, board.fen()))
+
+        # Confirm the line actually reaches a middlegame boundary.
+        boards = reconstruct_board_sequence([(r[3], r[4], r[2]) for r in rows])
+        division = divide(boards)
+        assert division.middle is not None
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        for move_number, color, san, fen_before, fen_after in rows:
+            _insert_move(db_session, sid, move_number, color, san, fen_before, fen_after, eval_delta=10)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        # Every white (user) move is recorded iff its pre-move ply is inside the
+        # opening interval; nothing at/after the middlegame boundary leaks in.
+        for ply, (_, color, _, fen_before, _) in enumerate(rows):
+            if color != "white":
+                continue
+            norm_before = normalize_fen(fen_before)
+            in_opening = is_opening_premove(division, ply)
+            assert (norm_before in ov.nodes) == in_opening, (
+                f"ply {ply} opening={in_opening} but node present="
+                f"{norm_before in ov.nodes}"
+            )
+        # At least one white move is on each side of the boundary, so this test
+        # exercises both inclusion and exclusion.
+        white_plies = [p for p, r in enumerate(rows) if r[1] == "white"]
+        assert any(p < division.middle for p in white_plies)
+        assert any(p >= division.middle for p in white_plies)
+
+
 class TestReviews:
     def test_review_pass(self, db_session, branching_graph):
         _insert_user(db_session)
@@ -773,6 +1003,9 @@ class TestReviews:
         assert node.review_passes == 1
         assert node.review_fails == 0
         assert node.last_review_at is not None
+        # Reviews never add a mastery (quality) observation.
+        assert node.quality_count == 0
+        assert ov.source_counts == Counter()
 
     def test_review_fail(self, db_session, branching_graph):
         _insert_user(db_session)
