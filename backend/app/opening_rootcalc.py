@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-import math
 import hashlib
-from dataclasses import dataclass, field, fields
-from datetime import datetime, timezone
+import math
 from collections import deque
-from typing import Set, Dict, List, Tuple
+from dataclasses import dataclass, fields, replace
+from datetime import datetime, timezone
 
-from app.fen import active_color
+from app.fen import active_color, normalize_fen
+from app.game_phase import is_middlegame_position
 from app.opening_evidence import EvidenceOverlay
 from app.opening_graph import OpeningGraph
-from app.opening_roots import OpeningRoots, OpeningRoot
+from app.opening_roots import OpeningRoot, OpeningRoots
 
 
 @dataclass(frozen=True)
@@ -23,13 +23,11 @@ class RootCalcConfig:
     k_evidence: float = 5.0
     half_life_days: float = 45.0
     coverage_live_threshold: int = 2
-    book_exit_extension_user_decisions: int = 2
 
 
 def root_calc_config_fingerprint(config: RootCalcConfig | None = None) -> str:
     """Return a stable fingerprint for the active root scoring configuration."""
-    if config is None:
-        config = RootCalcConfig()
+    config = config or RootCalcConfig()
     payload = "|".join(
         f"{config_field.name}={getattr(config, config_field.name)!r}"
         for config_field in fields(config)
@@ -91,20 +89,35 @@ class RootScore:
     debug_nodes: list[NodeDebug]
 
 
-class _Calculator:
+def _normalized(fen: str) -> str:
+    if len(fen.split()) == 4:
+        return fen
+    return normalize_fen(fen)
+
+
+def _iter_named_roots(roots: OpeningRoots) -> list[OpeningRoot]:
+    result: list[OpeningRoot] = []
+    seen: set[str] = set()
+    for family in roots.get_families():
+        for root in roots.get_family(family):
+            if root.opening_key not in seen:
+                seen.add(root.opening_key)
+                result.append(root)
+    return result
+
+
+class _SharedCalculator:
     def __init__(
         self,
-        opening_key: str,
         player_color: str,
         graph: OpeningGraph,
         overlay: EvidenceOverlay,
         roots: OpeningRoots,
         config: RootCalcConfig,
         now: datetime,
-        debug: bool,
-        include_branch_summaries: bool = True,
+        debug: bool = False,
+        seeds: list[str] | None = None,
     ) -> None:
-        self.opening_key = opening_key
         self.player_color = player_color
         self.graph = graph
         self.overlay = overlay
@@ -112,683 +125,585 @@ class _Calculator:
         self.config = config
         self.now = now
         self.debug = debug
-        self.include_branch_summaries = include_branch_summaries
+        self._graph_nodes = {
+            _normalized(fen): node for fen, node in graph._nodes.items()
+        }
 
-        self.root_node = self.roots.get_root(opening_key)
-        
-        # Domains
-        self.in_book_fens: set[str] = set()
-        self.extension_fens: dict[str, int] = {} # fen -> user_decisions depth
-        
-        self.in_book_edges: set[tuple[str, str]] = set() # (parent_fen, child_fen)
+        self._overlay_nodes = {
+            _normalized(fen): evidence for fen, evidence in overlay.nodes.items()
+        }
+        self._overlay_edges = {
+            (_normalized(parent), _normalized(child)): evidence
+            for (parent, child), evidence in overlay.edges.items()
+        }
+        self._observed_children: dict[str, set[str]] = {}
+        for parent, child in self._overlay_edges:
+            self._observed_children.setdefault(parent, set()).add(child)
 
-        # Memoization & Helpers
-        self._memo_score: dict[str, float] = {}
-        self._memo_perfect_score: dict[str, float] = {}
-        self._memo_confidence: dict[str, float] = {}
-        self._memo_perfect_conf: dict[str, float] = {}
-        self._memo_coverage: dict[str, float] = {}
-        self._memo_depth: dict[str, float] = {}
-
-        self._memo_reachable: dict[str, set[str]] = {}
-        self._memo_ghost_target: dict[str, bool] = {}
-        self._memo_global_ghost_target: dict[str, bool] = {}
-        self._memo_graph_weights: dict[str, dict[str, float]] = {}
-        
+        self._reference_cache: dict[str, tuple[str, ...]] = {}
+        self._structural_cache: dict[str, tuple[str, ...]] = {}
+        self._reachable_cache: dict[str, set[str]] = {}
+        self._coverage_totals_cache: dict[str, tuple[int, int]] = {}
+        self._middlegame_cache: dict[str, bool] = {}
+        self._weights_cache: dict[str, dict[str, float]] = {}
+        self._score_reachable_cache: dict[str, set[str]] = {}
+        self._metrics: dict[tuple[str, bool], tuple[float, float, float, float]] = {}
         self.debug_nodes: dict[str, NodeDebug] = {}
+        self.calculation_misses = 0
 
-        # Subtree caches
-        self._subtree_live_cache: dict[str, int] = {}
-        self._subtree_review_cache: dict[str, int] = {}
+        named_keys = [_normalized(root.opening_key) for root in _iter_named_roots(roots)]
+        start_seeds = seeds or [graph.root_fen, *named_keys]
+        self._domain = self._enumerate_domain(start_seeds)
+        self._structural_parents = self._build_structural_parents()
+        self._mastery_ancestors = self._ancestors_of(
+            {
+                fen
+                for fen, evidence in self._overlay_nodes.items()
+                if evidence.quality_count > 0
+            }
+        )
+        self._ghost_ancestors = self._ancestors_of(
+            {
+                fen
+                for fen, evidence in self._overlay_nodes.items()
+                if evidence.is_ghost_target
+            }
+        )
+        self._precut_weights = {
+            fen: self._base_weights(fen, self._structural_children(fen))
+            for fen in self._domain
+        }
+        self._scc_index, self._scc_order = self._build_scc_cut()
 
-        # Cycle guard stack
-        self._active_stack: set[str] = set()
+    def _is_middlegame(self, fen: str) -> bool:
+        if fen not in self._middlegame_cache:
+            self._middlegame_cache[fen] = is_middlegame_position(fen)
+        return self._middlegame_cache[fen]
 
-        # Scored domain tracking
-        self.scored_user_nodes: set[str] = set()
-        
-        # Edge index for fast lookups
-        self._overlay_edges_by_parent: dict[str, list[str]] = {}
-        for parent_fen, child_fen in self.overlay.edges.keys():
-            if parent_fen not in self._overlay_edges_by_parent:
-                self._overlay_edges_by_parent[parent_fen] = []
-            self._overlay_edges_by_parent[parent_fen].append(child_fen)
+    def _structural_children(self, fen: str) -> tuple[str, ...]:
+        fen = _normalized(fen)
+        cached = self._structural_cache.get(fen)
+        if cached is not None:
+            return cached
 
-        if self.root_node:
-            self._build_domains()
+        children = set(self._observed_children.get(fen, ()))
+        children.update(self._reference_children(fen))
+        result = tuple(sorted(children))
+        self._structural_cache[fen] = result
+        return result
 
-    def _build_domains(self) -> None:
-        # 1a. In book owned subtree
-        queue = deque([self.opening_key])
-        self.in_book_fens.add(self.opening_key)
-        
-        while queue:
-            fen = queue.popleft()
-            node = self.graph.get_node(fen)
-            if node is None:
+    def _reference_children(self, fen: str) -> tuple[str, ...]:
+        fen = _normalized(fen)
+        cached = self._reference_cache.get(fen)
+        if cached is not None:
+            return cached
+
+        children: set[str] = set()
+        node = self._graph_nodes.get(fen)
+        if node is not None:
+            for raw_child in node.children.values():
+                child = _normalized(raw_child)
+                if not self._is_middlegame(child):
+                    children.add(child)
+
+        result = tuple(sorted(children))
+        self._reference_cache[fen] = result
+        return result
+
+    def _enumerate_domain(self, seeds: list[str]) -> set[str]:
+        visited: set[str] = set()
+        stack = [_normalized(seed) for seed in seeds]
+        while stack:
+            fen = stack.pop()
+            if fen in visited:
                 continue
-                
-            for child_fen in node.children.values():
-                if self.opening_key in self.roots.owning_root_keys(child_fen):
-                    if child_fen not in self.in_book_fens:
-                        self.in_book_fens.add(child_fen)
-                        queue.append(child_fen)
-                    self.in_book_edges.add((fen, child_fen))
-
-        # 1b. Off book extension subtree
-        # Start from edges that leave in-book subtree (both book exits and early user/opponent exits)
-        extension_queue = deque()
-        for parent_fen in self.in_book_fens:
-            for child_fen in self._overlay_edges_by_parent.get(parent_fen, []):
-                edge_key = (parent_fen, child_fen)
-                if edge_key not in self.in_book_edges:
-                    p_node = self.graph.get_node(parent_fen)
-                    is_graph_edge = p_node is not None and child_fen in p_node.children.values()
-                    if not is_graph_edge:
-                        p_color = active_color(parent_fen)
-                        cost = 1 if p_color == self.player_color else 0
-                        if cost <= self.config.book_exit_extension_user_decisions:
-                            extension_queue.append((child_fen, cost))
-
-        while extension_queue:
-            fen, cost = extension_queue.popleft()
-            
-            # keep min cost if multiple paths
-            if fen in self.extension_fens and self.extension_fens[fen] <= cost:
-                continue
-            self.extension_fens[fen] = cost
-            
-            # Find next edges in overlay
-            for c_fen in self._overlay_edges_by_parent.get(fen, []):
-                p_color = active_color(fen)
-                next_cost = cost + (1 if p_color == self.player_color else 0)
-                if next_cost <= self.config.book_exit_extension_user_decisions:
-                    extension_queue.append((c_fen, next_cost))
-
-    def _is_in_domain(self, fen: str) -> bool:
-        return fen in self.in_book_fens or fen in self.extension_fens
-
-    def _get_children(self, fen: str) -> list[str]:
-        """Returns scored children of a node based on domain classification."""
-        children = []
-        if fen in self.in_book_fens:
-            node = self.graph.get_node(fen)
-            if node:
-                for c_fen in node.children.values():
-                    if c_fen in self.in_book_fens:
-                        children.append(c_fen)
-            # Add extension edges leaving this node
-            for c_fen in self._overlay_edges_by_parent.get(fen, []):
-                edge_key = (fen, c_fen)
-                if edge_key not in self.in_book_edges and c_fen in self.extension_fens:
-                    children.append(c_fen)
-        elif fen in self.extension_fens:
-            # Extension node: only overlay continuation edges
-            for c_fen in self._overlay_edges_by_parent.get(fen, []):
-                if c_fen in self.extension_fens:
-                    children.append(c_fen)
-        return children
+            visited.add(fen)
+            stack.extend(self._structural_children(fen))
+        return visited
 
     def _get_reachable(self, fen: str) -> set[str]:
-        if fen in self._memo_reachable:
-            return self._memo_reachable[fen]
-        
-        reachable = set()
-        stack = [fen]
-        visited = set()
-        
-        while stack:
-            curr = stack.pop()
-            if curr in visited:
-                continue
-            visited.add(curr)
-            reachable.add(curr)
-            for c in self._get_children(curr):
-                stack.append(c)
-                
-        self._memo_reachable[fen] = reachable
+        fen = _normalized(fen)
+        cached = self._reachable_cache.get(fen)
+        if cached is not None:
+            return cached
+        reachable = self._enumerate_domain([fen])
+        self._reachable_cache[fen] = reachable
         return reachable
 
-    def _subtree_has_ghost_target(self, fen: str) -> bool:
-        if fen in self._memo_ghost_target:
-            return self._memo_ghost_target[fen]
-        
-        res = False
-        for r_fen in self._get_reachable(fen):
-            node_ev = self.overlay.nodes.get(r_fen)
-            if node_ev and node_ev.is_ghost_target:
-                res = True
-                break
-        self._memo_ghost_target[fen] = res
-        return res
+    def _build_structural_parents(self) -> dict[str, set[str]]:
+        parents: dict[str, set[str]] = {}
+        for parent in self._domain:
+            for child in self._structural_children(parent):
+                parents.setdefault(child, set()).add(parent)
+        return parents
 
-    def _global_has_ghost_target(self, fen: str) -> bool:
-        if fen in self._memo_global_ghost_target:
-            return self._memo_global_ghost_target[fen]
-            
-        stack = [fen]
-        visited = set()
-        res = False
-        
+    def _ancestors_of(self, targets: set[str]) -> set[str]:
+        ancestors: set[str] = set()
+        stack = [fen for fen in targets if fen in self._domain]
         while stack:
-            curr = stack.pop()
-            if curr in visited:
+            fen = stack.pop()
+            if fen in ancestors:
                 continue
-            visited.add(curr)
-            
-            node_ev = self.overlay.nodes.get(curr)
-            if node_ev and node_ev.is_ghost_target:
-                res = True
-                break
-                
-            node = self.graph.get_node(curr)
-            if node:
-                for c in node.children.values():
-                    stack.append(c)
-                    
-            for c_fen in self._overlay_edges_by_parent.get(curr, []):
-                stack.append(c_fen)
-                    
-        self._memo_global_ghost_target[fen] = res
-        return res
+            ancestors.add(fen)
+            stack.extend(self._structural_parents.get(fen, ()))
+        return ancestors
 
-    def _subtree_coverage_totals(self, fen: str) -> tuple[int, int]:
-        if fen in self._subtree_live_cache:
-            return self._subtree_live_cache[fen], self._subtree_review_cache[fen]
-            
-        live_tot = 0
-        rev_tot = 0
-        for r_fen in self._get_reachable(fen):
-            node_ev = self.overlay.nodes.get(r_fen)
-            if node_ev:
-                live_tot += node_ev.live_attempts
-                rev_tot += node_ev.review_attempts
-                
-        self._subtree_live_cache[fen] = live_tot
-        self._subtree_review_cache[fen] = rev_tot
-        return live_tot, rev_tot
+    def has_mastery_below(self, fen: str) -> bool:
+        return _normalized(fen) in self._mastery_ancestors
 
-    def _subtree_is_locally_covered(self, fen: str) -> bool:
-        live_tot, rev_tot = self._subtree_coverage_totals(fen)
-        if live_tot >= self.config.coverage_live_threshold:
-            return True
-        if live_tot >= 1 and rev_tot >= 1:
-            return True
-        return False
+    def _subtree_has_ghost_target(self, fen: str) -> bool:
+        return _normalized(fen) in self._ghost_ancestors
 
     def _is_user_turn(self, fen: str) -> bool:
         return active_color(fen) == self.player_color
 
-    def _get_prepared_children(self, fen: str) -> list[str]:
-        """At a user node, return the list of prepared children FENs."""
-        prepared = []
-        for c_fen in self._get_children(fen):
-            edge_ev = self.overlay.edges.get((fen, c_fen))
-            is_prep = False
-            if edge_ev:
-                if edge_ev.live_attempts >= 2:
-                    is_prep = True
-                elif edge_ev.live_passes >= 1:
-                    is_prep = True
-            if not is_prep:
-                if self._subtree_has_ghost_target(c_fen):
-                    is_prep = True
-            if is_prep:
-                prepared.append(c_fen)
+    def _prepared_children(
+        self, fen: str, children: tuple[str, ...] | list[str]
+    ) -> list[str]:
+        prepared: list[str] = []
+        for child in children:
+            edge = self._overlay_edges.get((fen, child))
+            if (
+                (edge is not None and (edge.live_attempts >= 2 or edge.live_passes >= 1))
+                or self._subtree_has_ghost_target(child)
+            ):
+                prepared.append(child)
         return prepared
 
-    def _get_weights(self, fen: str) -> dict[str, float]:
-        """Return dict mapping child_fen to weight."""
-        weights: dict[str, float] = {}
-        is_user = self._is_user_turn(fen)
-        children = self._get_children(fen)
-        
-        if is_user:
-            prepared = self._get_prepared_children(fen)
-            if not prepared:
+    def _base_weights(
+        self, fen: str, children: tuple[str, ...] | list[str]
+    ) -> dict[str, float]:
+        if self._is_user_turn(fen):
+            weighted_children = self._prepared_children(fen, children)
+            if not weighted_children:
                 return {}
-            total_basis = 0.0
-            bases = {}
-            for c_fen in prepared:
-                edge_ev = self.overlay.edges.get((fen, c_fen))
-                attempts = edge_ev.live_attempts if edge_ev else 0
-                basis = attempts + self.config.rho
-                bases[c_fen] = basis
-                total_basis += basis
-            for c_fen in prepared:
-                weights[c_fen] = bases[c_fen] / total_basis
+            bases = {
+                child: (
+                    self._overlay_edges.get((fen, child)).live_attempts
+                    if self._overlay_edges.get((fen, child)) is not None
+                    else 0
+                )
+                + self.config.rho
+                for child in weighted_children
+            }
+            total = sum(bases.values())
+            return {child: basis / total for child, basis in bases.items()}
+        if not children:
+            return {}
+        reference_children = set(self._reference_children(fen))
+        weighted_children = [
+            child for child in children if child in reference_children
+        ] or list(children)
+        weight = 1.0 / len(weighted_children)
+        return {child: weight for child in weighted_children}
+
+    def _build_scc_cut(self) -> tuple[dict[str, int], dict[str, int]]:
+        index = 0
+        indexes: dict[str, int] = {}
+        lowlinks: dict[str, int] = {}
+        stack: list[str] = []
+        on_stack: set[str] = set()
+        components: list[list[str]] = []
+
+        def strongconnect(fen: str) -> None:
+            nonlocal index
+            indexes[fen] = index
+            lowlinks[fen] = index
+            index += 1
+            stack.append(fen)
+            on_stack.add(fen)
+            for child in self._precut_weights.get(fen, ()):
+                if child not in indexes:
+                    strongconnect(child)
+                    lowlinks[fen] = min(lowlinks[fen], lowlinks[child])
+                elif child in on_stack:
+                    lowlinks[fen] = min(lowlinks[fen], indexes[child])
+            if lowlinks[fen] == indexes[fen]:
+                component: list[str] = []
+                while True:
+                    child = stack.pop()
+                    on_stack.remove(child)
+                    component.append(child)
+                    if child == fen:
+                        break
+                components.append(component)
+
+        for fen in sorted(self._domain):
+            if fen not in indexes:
+                strongconnect(fen)
+
+        scc_index: dict[str, int] = {}
+        scc_order: dict[str, int] = {}
+        for component_index, component in enumerate(components):
+            for order, fen in enumerate(sorted(component)):
+                scc_index[fen] = component_index
+                scc_order[fen] = order
+        return scc_index, scc_order
+
+    def _score_children(self, fen: str) -> tuple[str, ...]:
+        if not self._is_user_turn(fen):
+            children = self._precut_weights.get(fen, {})
         else:
-            if fen in self.in_book_fens:
-                in_book_children = [c for c in children if c in self.in_book_fens]
-                if in_book_children:
-                    w = 1.0 / len(in_book_children)
-                    for c in in_book_children:
-                        weights[c] = w
-                elif children:
-                    w = 1.0 / len(children)
-                    for c in children:
-                        weights[c] = w
-            else:
-                if children:
-                    w = 1.0 / len(children)
-                    for c in children:
-                        weights[c] = w
-        return weights
+            children = self._structural_children(fen)
+        result: list[str] = []
+        for child in children:
+            same_scc = self._scc_index.get(fen) == self._scc_index.get(child)
+            backward = same_scc and self._scc_order.get(child, 0) <= self._scc_order.get(
+                fen, 0
+            )
+            if not backward:
+                result.append(child)
+        return tuple(result)
 
-    def _get_p_n(self, fen: str) -> float:
-        node_ev = self.overlay.nodes.get(fen)
-        if node_ev:
-            attempts = node_ev.live_passes + node_ev.live_fails
-            p_n = (node_ev.live_passes + self.config.alpha) / (attempts + self.config.alpha + self.config.beta)
-        else:
-            p_n = self.config.alpha / (self.config.alpha + self.config.beta)
-        return p_n
+    def _get_weights(self, fen: str) -> dict[str, float]:
+        if fen not in self._weights_cache:
+            score_children = set(self._score_children(fen))
+            survivors = {
+                child: weight
+                for child, weight in self._precut_weights.get(fen, {}).items()
+                if child in score_children
+            }
+            total = sum(survivors.values())
+            self._weights_cache[fen] = (
+                {
+                    child: weight / total
+                    for child, weight in survivors.items()
+                }
+                if total > 0
+                else {}
+            )
+        return self._weights_cache[fen]
 
-    def _get_c_n_and_components(self, fen: str) -> tuple[float, float, float, float]:
-        """Returns c_n, sample_conf, freshness, evidence_total."""
-        node_ev = self.overlay.nodes.get(fen)
-        if not node_ev:
-            return 0.0, 0.0, 0.0, 0.0
-            
-        last_live = node_ev.last_live_at
-        last_rev = node_ev.last_review_at
-        last_touch = None
-        if last_live and last_rev:
-            last_touch = max(last_live, last_rev)
-        elif last_live:
-            last_touch = last_live
-        elif last_rev:
-            last_touch = last_rev
-            
-        if not last_touch:
-            return 0.0, 0.0, 0.0, 0.0
-            
-        evidence_n = node_ev.live_attempts + self.config.lambda_review * node_ev.review_attempts
-        sample_conf = 1.0 - math.exp(-evidence_n / self.config.k_evidence)
-        
-        days_diff = (self.now - last_touch).total_seconds() / 86400.0
-        days_diff = max(0.0, days_diff)
-        freshness = math.exp(-days_diff / self.config.half_life_days)
-        
-        c_n = sample_conf * freshness
-        return c_n, sample_conf, freshness, evidence_n
+    def _mastery(self, fen: str) -> float:
+        node = self._overlay_nodes.get(fen)
+        quality_sum = node.quality_sum if node is not None else 0.0
+        quality_count = node.quality_count if node is not None else 0
+        return (quality_sum + self.config.alpha) / (
+            quality_count + self.config.alpha + self.config.beta
+        )
 
-    def _record_debug(self, fen: str, is_user: bool, weights: dict[str, float], prepared: list[str]) -> None:
-        if not self.debug:
+    def _confidence_components(
+        self, fen: str
+    ) -> tuple[float, float, float, float, datetime | None]:
+        node = self._overlay_nodes.get(fen)
+        if node is None:
+            return 0.0, 0.0, 0.0, 0.0, None
+        touches = [
+            touch for touch in (node.last_live_at, node.last_review_at) if touch is not None
+        ]
+        if not touches:
+            return 0.0, 0.0, 0.0, 0.0, None
+        last_touch = max(touches)
+        evidence = node.live_attempts + self.config.lambda_review * node.review_attempts
+        sample_conf = 1.0 - math.exp(-evidence / self.config.k_evidence)
+        days = max(0.0, (self.now - last_touch).total_seconds() / 86400.0)
+        freshness = math.exp(-days / self.config.half_life_days)
+        return sample_conf * freshness, sample_conf, freshness, evidence, last_touch
+
+    def _subtree_coverage_totals(self, fen: str) -> tuple[int, int]:
+        if fen not in self._coverage_totals_cache:
+            live = 0
+            review = 0
+            for reachable in self._get_reachable(fen):
+                node = self._overlay_nodes.get(reachable)
+                if node is not None:
+                    live += node.live_attempts
+                    review += node.review_attempts
+            self._coverage_totals_cache[fen] = live, review
+        return self._coverage_totals_cache[fen]
+
+    def _subtree_is_locally_covered(self, fen: str) -> bool:
+        live, review = self._subtree_coverage_totals(fen)
+        return live >= self.config.coverage_live_threshold or (
+            live >= 1 and review >= 1
+        )
+
+    def _record_debug(
+        self,
+        fen: str,
+        weights: dict[str, float],
+        prepared: list[str],
+        is_leaf: bool,
+    ) -> None:
+        if not self.debug or fen in self.debug_nodes:
             return
-        
-        if fen in self.debug_nodes:
-            return
-            
-        node_ev = self.overlay.nodes.get(fen)
-        last_touch = None
-        days_since = 0.0
-        if node_ev:
-            if node_ev.last_live_at and node_ev.last_review_at:
-                last_touch = max(node_ev.last_live_at, node_ev.last_review_at)
-            else:
-                last_touch = node_ev.last_live_at or node_ev.last_review_at
-            if last_touch:
-                days_since = max(0.0, (self.now - last_touch).total_seconds() / 86400.0)
-
-        c_n, sc, fresh, ev_tot = self._get_c_n_and_components(fen)
-        sl, sr = self._subtree_coverage_totals(fen)
-        
+        node = self._overlay_nodes.get(fen)
+        confidence, sample_conf, freshness, evidence, last_touch = (
+            self._confidence_components(fen)
+        )
+        days = (
+            max(0.0, (self.now - last_touch).total_seconds() / 86400.0)
+            if last_touch is not None
+            else 0.0
+        )
+        live, review = self._subtree_coverage_totals(fen)
+        graph_node = self._graph_nodes.get(fen)
+        observed_parent = fen in self._observed_children
         self.debug_nodes[fen] = NodeDebug(
             fen=fen,
-            is_user_turn=is_user,
-            in_book=fen in self.in_book_fens,
-            is_extension_node=fen in self.extension_fens,
-            p_n=self._get_p_n(fen) if is_user else 1.0,
-            c_n=c_n if is_user else 1.0,
-            sample_conf=sc,
-            freshness=fresh,
-            evidence_total=ev_tot,
-            days_since_last_touch=days_since,
+            is_user_turn=self._is_user_turn(fen),
+            in_book=graph_node is not None,
+            is_extension_node=graph_node is None or observed_parent,
+            p_n=self._mastery(fen) if self._is_user_turn(fen) else 1.0,
+            c_n=confidence if self._is_user_turn(fen) else 1.0,
+            sample_conf=sample_conf,
+            freshness=freshness,
+            evidence_total=evidence,
+            days_since_last_touch=days,
             last_touch_at=last_touch,
-            live_attempts=node_ev.live_attempts if node_ev else 0,
-            live_passes=node_ev.live_passes if node_ev else 0,
-            review_attempts=node_ev.review_attempts if node_ev else 0,
+            live_attempts=node.live_attempts if node is not None else 0,
+            live_passes=node.live_passes if node is not None else 0,
+            review_attempts=node.review_attempts if node is not None else 0,
             prepared_children=prepared,
-            weights=weights,
-            subtree_live_attempts=sl,
-            subtree_review_attempts=sr,
+            weights=dict(weights),
+            subtree_live_attempts=live,
+            subtree_review_attempts=review,
             covered_locally=self._subtree_is_locally_covered(fen),
             raw_score=0.0,
             raw_confidence=0.0,
             raw_coverage=0.0,
             raw_depth=0.0,
-            is_leaf=False # updated later
+            is_leaf=is_leaf,
         )
 
-    def _calc_metrics(self, fen: str, is_perfect: bool = False) -> tuple[float, float, float, float]:
-        """Returns (score, confidence, coverage, depth)."""
-        cache_key = f"{fen}_perf" if is_perfect else fen
-        
-        if cache_key in self._memo_score:
-            return self._memo_score[cache_key], self._memo_confidence[cache_key], self._memo_coverage[cache_key], self._memo_depth[cache_key]
-
-        # Cycle guard
-        if fen in self._active_stack:
-            # Reached a back edge, break the cycle by returning pessimistic defaults
-            return 0.0, 0.0, 0.0, 0.0
-            
-        self._active_stack.add(fen)
+    def _calc(
+        self, fen: str, perfect: bool = False
+    ) -> tuple[float, float, float, float]:
+        fen = _normalized(fen)
+        key = (fen, perfect)
+        cached = self._metrics.get(key)
+        if cached is not None:
+            return cached
+        self.calculation_misses += 1
 
         is_user = self._is_user_turn(fen)
-        if is_user:
-            self.scored_user_nodes.add(fen)
-
+        score_children = self._score_children(fen)
         weights = self._get_weights(fen)
-        prepared = self._get_prepared_children(fen) if is_user else []
-        
-        self._record_debug(fen, is_user, weights, prepared)
-
-        # Base cases
-        is_leaf = False
-        domain_children = self._get_children(fen)
-        if not domain_children:
-            is_leaf = True
-
-        if self.debug and cache_key in self.debug_nodes:
-            self.debug_nodes[cache_key].is_leaf = is_leaf
-
-        s_val, c_val, cov_val, d_val = 0.0, 0.0, 0.0, 0.0
+        prepared = list(weights) if is_user else []
+        is_leaf = not score_children
+        self._record_debug(fen, weights, prepared, is_leaf)
 
         if is_leaf:
             if is_user:
-                p_n = 1.0 if is_perfect else self._get_p_n(fen)
-                c_n, _, _, _ = self._get_c_n_and_components(fen)
-                conf = 1.0 if is_perfect else c_n
-                
-                s_val = p_n
-                c_val = conf
-                cov_val = 1.0
-                d_val = p_n
+                mastery = 1.0 if perfect else self._mastery(fen)
+                confidence = 1.0 if perfect else self._confidence_components(fen)[0]
+                result = mastery, confidence, 1.0, mastery
             else:
-                s_val = 1.0
-                c_val = 1.0
-                cov_val = 1.0
-                d_val = 0.0
-        else:
-            # Recursive step
-            if is_user:
-                p_n = 1.0 if is_perfect else self._get_p_n(fen)
-                c_n, _, _, _ = self._get_c_n_and_components(fen)
-                conf = 1.0 if is_perfect else c_n
-
-                s_sum = 0.0
-                c_sum = 0.0
-                cov_sum = 0.0
-                d_sum = 0.0
-
-                if not prepared:
-                    s_val = p_n
-                    c_val = conf
-                    cov_val = 0.0
-                    d_val = p_n
-                else:
-                    for c_fen, w in weights.items():
-                        c_s, c_c, c_cov, c_d = self._calc_metrics(c_fen, is_perfect)
-                        s_sum += w * c_s
-                        c_sum += w * c_c
-                        cov_sum += w * c_cov
-                        d_sum += w * c_d
-                    
-                    s_val = p_n * (1.0 + self.config.gamma * s_sum)
-                    c_val = conf * c_sum
-                    cov_val = cov_sum
-                    d_val = p_n * (1.0 + self.config.gamma * d_sum)
+                result = 1.0, 1.0, 1.0, 0.0
+        elif is_user:
+            mastery = 1.0 if perfect else self._mastery(fen)
+            confidence = 1.0 if perfect else self._confidence_components(fen)[0]
+            if not weights:
+                result = mastery, confidence, 0.0, mastery
             else:
-                s_sum = 0.0
-                c_sum = 0.0
-                cov_sum = 0.0
-                d_sum = 0.0
-                
-                for c_fen, w in weights.items():
-                    c_s, c_c, c_cov, c_d = self._calc_metrics(c_fen, is_perfect)
-                    covered_e = 1.0 if self._subtree_is_locally_covered(c_fen) else 0.0
-                    
-                    s_sum += w * c_s
-                    c_sum += w * c_c
-                    cov_sum += w * covered_e * c_cov
-                    d_sum += w * c_d
-                
-                s_val = s_sum
-                c_val = c_sum
-                cov_val = cov_sum
-                d_val = d_sum
-
-        self._active_stack.remove(fen)
-        
-        self._memo_score[cache_key] = s_val
-        self._memo_confidence[cache_key] = c_val
-        self._memo_coverage[cache_key] = cov_val
-        self._memo_depth[cache_key] = d_val
-
-        if not is_perfect and self.debug and fen in self.debug_nodes:
-            self.debug_nodes[fen].raw_score = s_val
-            self.debug_nodes[fen].raw_confidence = c_val
-            self.debug_nodes[fen].raw_coverage = cov_val
-            self.debug_nodes[fen].raw_depth = d_val
-
-        return s_val, c_val, cov_val, d_val
-
-    def _get_graph_weights(self, fen: str) -> dict[str, float]:
-        """Returns weights for all graph children, plus extension children if off-book."""
-        if fen in self._memo_graph_weights:
-            return self._memo_graph_weights[fen]
-            
-        weights: dict[str, float] = {}
-        is_user = self._is_user_turn(fen)
-        
-        node = self.graph.get_node(fen)
-        graph_children = list(node.children.values()) if node else []
-        
-        ext_children = []
-        for c_fen in self._overlay_edges_by_parent.get(fen, []):
-            if not node or c_fen not in node.children.values():
-                ext_children.append(c_fen)
-                
-        all_children = graph_children + ext_children
-        
-        if is_user:
-            prepared = []
-            for c_fen in all_children:
-                edge_ev = self.overlay.edges.get((fen, c_fen))
-                is_prep = False
-                if edge_ev:
-                    if edge_ev.live_attempts >= 2:
-                        is_prep = True
-                    elif edge_ev.live_passes >= 1:
-                        is_prep = True
-                if not is_prep:
-                    if self._global_has_ghost_target(c_fen):
-                        is_prep = True
-                if is_prep:
-                    prepared.append(c_fen)
-                    
-            if prepared:
-                total_basis = 0.0
-                bases = {}
-                for c_fen in prepared:
-                    edge_ev = self.overlay.edges.get((fen, c_fen))
-                    attempts = edge_ev.live_attempts if edge_ev else 0
-                    basis = attempts + self.config.rho
-                    bases[c_fen] = basis
-                    total_basis += basis
-                for c_fen in prepared:
-                    weights[c_fen] = bases[c_fen] / total_basis
-            else:
-                if graph_children:
-                    w = 1.0 / len(graph_children)
-                    for c in graph_children:
-                        weights[c] = w
-                elif ext_children:
-                    w = 1.0 / len(ext_children)
-                    for c in ext_children:
-                        weights[c] = w
-        else:
-            if graph_children:
-                w = 1.0 / len(graph_children)
-                for c in graph_children:
-                    weights[c] = w
-            elif ext_children:
-                w = 1.0 / len(ext_children)
-                for c in ext_children:
-                    weights[c] = w
-                    
-        self._memo_graph_weights[fen] = weights
-        return weights
-
-    def _path_importance(self, target_fen: str, current_fen: str, current_weight: float, visited: set[str] = None) -> float:
-        if current_fen == target_fen:
-            return current_weight
-            
-        if visited is None:
-            visited = set()
-        if current_fen in visited:
-            return 0.0
-        visited.add(current_fen)
-        
-        weights = self._get_graph_weights(current_fen)
-        
-        total = 0.0
-        if weights:
-            for c_fen, w in weights.items():
-                total += self._path_importance(target_fen, c_fen, current_weight * w, visited)
-                
-        visited.remove(current_fen)
-        return total
-
-    def _get_importance(self, target_fen: str) -> float:
-        return self._path_importance(target_fen, self.opening_key, 1.0)
-
-    def compute(self) -> RootScore:
-        if not self.root_node:
-            raise ValueError(f"Unknown root: {self.opening_key}")
-            
-        # Execute normal pass
-        self.scored_user_nodes.clear()
-        s_val, c_val, cov_val, d_val = self._calc_metrics(self.opening_key, False)
-        
-        # Execute perfect pass
-        perf_s, perf_c, _, _ = self._calc_metrics(self.opening_key, True)
-
-        opening_score = 0.0
-        if perf_s > 0:
-            opening_score = 100.0 * s_val / perf_s
-            
-        confidence = 0.0
-        if perf_c > 0:
-            confidence = 100.0 * c_val / perf_c
-            
-        coverage = 100.0 * cov_val
-
-        strongest_branch = None
-        weakest_branch = None
-        underexposed_branch = None
-        if self.include_branch_summaries:
-            max_s = -1.0
-            min_s = float('inf')
-
-            immediate_children_keys = list(self.root_node.child_keys)
-            for c_key in immediate_children_keys:
-                c_root = self.roots.get_root(c_key)
-                if not c_root:
-                    continue
-                imp = self._get_importance(c_key)
-                if imp > 0:
-                    child_calc = _Calculator(
-                        c_key,
-                        self.player_color,
-                        self.graph,
-                        self.overlay,
-                        self.roots,
-                        self.config,
-                        self.now,
-                        False,
-                        include_branch_summaries=False,
+                score_sum = confidence_sum = coverage_sum = depth_sum = 0.0
+                for child, weight in weights.items():
+                    child_score, child_conf, child_cov, child_depth = self._calc(
+                        child, perfect
                     )
-                    child_score = child_calc.compute()
+                    score_sum += weight * child_score
+                    confidence_sum += weight * child_conf
+                    coverage_sum += weight * child_cov
+                    depth_sum += weight * child_depth
+                result = (
+                    mastery * (1.0 + self.config.gamma * score_sum),
+                    confidence * confidence_sum,
+                    coverage_sum,
+                    mastery * (1.0 + self.config.gamma * depth_sum),
+                )
+        else:
+            score_sum = confidence_sum = coverage_sum = depth_sum = 0.0
+            for child, weight in weights.items():
+                child_score, child_conf, child_cov, child_depth = self._calc(
+                    child, perfect
+                )
+                score_sum += weight * child_score
+                confidence_sum += weight * child_conf
+                coverage_sum += (
+                    weight
+                    * float(self._subtree_is_locally_covered(child))
+                    * child_cov
+                )
+                depth_sum += weight * child_depth
+            result = score_sum, confidence_sum, coverage_sum, depth_sum
 
-                    bs = BranchSummary(c_key, c_root.opening_name, child_score.opening_score)
-                    if child_score.opening_score > max_s:
-                        max_s = child_score.opening_score
-                        strongest_branch = bs
-                    if child_score.opening_score < min_s:
-                        min_s = child_score.opening_score
-                        weakest_branch = bs
+        self._metrics[key] = result
+        if not perfect and self.debug:
+            debug = self.debug_nodes[fen]
+            (
+                debug.raw_score,
+                debug.raw_confidence,
+                debug.raw_coverage,
+                debug.raw_depth,
+            ) = result
+        return result
 
-            max_gap = -1.0
-
-            def get_all_descendants(r_key: str, desc: set[str]):
-                r = self.roots.get_root(r_key)
-                if r:
-                    for ck in r.child_keys:
-                        if ck not in desc:
-                            desc.add(ck)
-                            get_all_descendants(ck, desc)
-
-            desc_keys: set[str] = set()
-            get_all_descendants(self.opening_key, desc_keys)
-
-            for d_key in desc_keys:
-                d_root = self.roots.get_root(d_key)
-                if not d_root:
+    def _score_reachable(self, fen: str) -> set[str]:
+        if fen not in self._score_reachable_cache:
+            reachable: set[str] = set()
+            queue = deque([fen])
+            while queue:
+                current = queue.popleft()
+                if current in reachable:
                     continue
+                reachable.add(current)
+                queue.extend(self._get_weights(current))
+            self._score_reachable_cache[fen] = reachable
+        return self._score_reachable_cache[fen]
 
-                imp = self._get_importance(d_key)
-                if imp > 0:
-                    d_calc = _Calculator(
-                        d_key,
-                        self.player_color,
-                        self.graph,
-                        self.overlay,
-                        self.roots,
-                        self.config,
-                        self.now,
-                        False,
-                        include_branch_summaries=False,
-                    )
-                    if not d_calc._subtree_is_locally_covered(d_key):
-                        d_res = d_calc.compute()
-
-                        gap = imp * (1.0 - d_res.coverage / 100.0)
-                        if gap > max_gap:
-                            max_gap = gap
-                            underexposed_branch = BranchSummary(d_key, d_root.opening_name, gap)
-
-        sample_size = 0
-        last_practiced_at = None
-        for fn in self.scored_user_nodes:
-            node_ev = self.overlay.nodes.get(fn)
-            if node_ev:
-                sample_size += node_ev.live_attempts
-                if node_ev.last_live_at:
-                    if not last_practiced_at or node_ev.last_live_at > last_practiced_at:
-                        last_practiced_at = node_ev.last_live_at
-                if node_ev.last_review_at:
-                    if not last_practiced_at or node_ev.last_review_at > last_practiced_at:
-                        last_practiced_at = node_ev.last_review_at
-
+    def _base_root_score(self, root: OpeningRoot) -> RootScore:
+        key = _normalized(root.opening_key)
+        score, confidence, coverage, depth = self._calc(key, False)
+        perfect_score, perfect_confidence, _, _ = self._calc(key, True)
+        reachable = self._get_reachable(key)
+        sample_size = sum(
+            node.quality_count
+            for fen in reachable
+            if (node := self._overlay_nodes.get(fen)) is not None
+        )
+        touches = [
+            touch
+            for fen in reachable
+            if (node := self._overlay_nodes.get(fen)) is not None
+            for touch in (node.last_live_at, node.last_review_at)
+            if touch is not None
+        ]
         return RootScore(
-            opening_key=self.opening_key,
-            opening_name=self.root_node.opening_name,
-            opening_family=self.root_node.opening_family,
+            opening_key=root.opening_key,
+            opening_name=root.opening_name,
+            opening_family=root.opening_family,
             player_color=self.player_color,
-            opening_score=opening_score,
-            confidence=confidence,
-            coverage=coverage,
-            weighted_depth=d_val,
+            opening_score=100.0 * score / perfect_score if perfect_score > 0 else 0.0,
+            confidence=(
+                100.0 * confidence / perfect_confidence
+                if perfect_confidence > 0
+                else 0.0
+            ),
+            coverage=100.0 * coverage,
+            weighted_depth=depth,
             sample_size=sample_size,
-            last_practiced_at=last_practiced_at,
-            strongest_branch=strongest_branch,
-            weakest_branch=weakest_branch,
-            underexposed_branch=underexposed_branch,
+            last_practiced_at=max(touches) if touches else None,
+            strongest_branch=None,
+            weakest_branch=None,
+            underexposed_branch=None,
             computed_at=self.now,
             debug_nodes=list(self.debug_nodes.values()) if self.debug else [],
         )
+
+    def compute_roots(
+        self,
+        roots_to_compute: list[OpeningRoot],
+        *,
+        include_branch_summaries: bool,
+    ) -> dict[str, RootScore]:
+        scores = {
+            root.opening_key: self._base_root_score(root) for root in roots_to_compute
+        }
+        if not include_branch_summaries:
+            return scores
+
+        enriched: dict[str, RootScore] = {}
+        for root in roots_to_compute:
+            score = scores[root.opening_key]
+            score_reachable = self._score_reachable(_normalized(root.opening_key))
+            immediate = [
+                scores[key]
+                for key in sorted(root.child_keys)
+                if key in scores and _normalized(key) in score_reachable
+            ]
+            strongest = (
+                max(immediate, key=lambda item: (item.opening_score, item.opening_key))
+                if immediate
+                else None
+            )
+            weakest = (
+                min(immediate, key=lambda item: (item.opening_score, item.opening_key))
+                if immediate
+                else None
+            )
+            underexposed_candidates = [
+                scores[descendant.opening_key]
+                for descendant in self.roots.get_descendants(root.opening_key)
+                if descendant.opening_key in scores
+                and _normalized(descendant.opening_key) in score_reachable
+                and not self._subtree_is_locally_covered(
+                    _normalized(descendant.opening_key)
+                )
+            ]
+            underexposed = (
+                min(
+                    underexposed_candidates,
+                    key=lambda item: (item.coverage, item.opening_key),
+                )
+                if underexposed_candidates
+                else None
+            )
+            enriched[root.opening_key] = replace(
+                score,
+                strongest_branch=(
+                    BranchSummary(
+                        strongest.opening_key,
+                        strongest.opening_name,
+                        strongest.opening_score,
+                    )
+                    if strongest
+                    else None
+                ),
+                weakest_branch=(
+                    BranchSummary(
+                        weakest.opening_key,
+                        weakest.opening_name,
+                        weakest.opening_score,
+                    )
+                    if weakest
+                    else None
+                ),
+                underexposed_branch=(
+                    BranchSummary(
+                        underexposed.opening_key,
+                        underexposed.opening_name,
+                        1.0 - underexposed.coverage / 100.0,
+                    )
+                    if underexposed
+                    else None
+                ),
+            )
+        return enriched
+
+
+def compute_all_root_scores(
+    player_color: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    roots: OpeningRoots,
+    config: RootCalcConfig | None = None,
+    now: datetime | None = None,
+    *,
+    debug: bool = False,
+    include_branch_summaries: bool = True,
+) -> tuple[dict[str, RootScore], set[str]]:
+    config = config or RootCalcConfig()
+    now = now or datetime.now(timezone.utc)
+    if not any(node.quality_count > 0 for node in overlay.nodes.values()):
+        return {}, set()
+    calculator = _SharedCalculator(
+        player_color, graph, overlay, roots, config, now, debug=debug
+    )
+    eligible = {
+        root.opening_key
+        for root in _iter_named_roots(roots)
+        if calculator.has_mastery_below(root.opening_key)
+    }
+    selected = [
+        root for root in _iter_named_roots(roots) if root.opening_key in eligible
+    ]
+    return (
+        calculator.compute_roots(
+            selected, include_branch_summaries=include_branch_summaries
+        ),
+        eligible,
+    )
+
 
 def compute_root_score(
     opening_key: str,
@@ -801,20 +716,31 @@ def compute_root_score(
     debug: bool = False,
     include_branch_summaries: bool = True,
 ) -> RootScore:
-    if config is None:
-        config = RootCalcConfig()
-    if now is None:
-        now = datetime.now(timezone.utc)
-
-    calc = _Calculator(
-        opening_key=opening_key,
-        player_color=player_color,
-        graph=graph,
-        overlay=overlay,
-        roots=roots,
-        config=config,
-        now=now,
+    root = roots.get_root(opening_key)
+    if root is None:
+        raise ValueError(f"Unknown root: {opening_key}")
+    config = config or RootCalcConfig()
+    now = now or datetime.now(timezone.utc)
+    calculator = _SharedCalculator(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        config,
+        now,
         debug=debug,
-        include_branch_summaries=include_branch_summaries,
+        seeds=[opening_key],
     )
-    return calc.compute()
+    selected = [
+        candidate
+        for candidate in _iter_named_roots(roots)
+        if candidate.opening_key == opening_key
+        or (
+            calculator.has_mastery_below(candidate.opening_key)
+            and _normalized(candidate.opening_key)
+            in calculator._get_reachable(_normalized(opening_key))
+        )
+    ]
+    return calculator.compute_roots(
+        selected, include_branch_summaries=include_branch_summaries
+    )[opening_key]

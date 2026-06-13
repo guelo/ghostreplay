@@ -54,6 +54,7 @@ __all__ = [
     "reconstruct_board_sequence",
     "ContinuityError",
     "is_opening_premove",
+    "is_middlegame_position",
 ]
 
 
@@ -200,6 +201,11 @@ def _is_middlegame_board(board: chess.Board) -> bool:
         or backrank_sparse(board)
         or mixedness(board) > 150
     )
+
+
+def is_middlegame_position(fen: str) -> bool:
+    """Return whether a normalized four-field FEN is a middlegame position."""
+    return _is_middlegame_board(chess.Board(f"{fen} 0 1"))
 
 
 def divide(boards: list[chess.Board]) -> Division:

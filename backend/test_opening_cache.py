@@ -608,7 +608,7 @@ def test_srs_review_refreshes_relevant_opening_snapshot(
     db_session.expire_all()
     batch, rows = list_cached_opening_scores(db_session, 123, "black")
     assert batch is not None
-    assert {row.opening_key for row in rows} == {KNIGHT_OPENING_FEN}
+    assert rows == []
 
 
 def _count_batches(db_session, user_id: int, player_color: str) -> int:

@@ -2218,6 +2218,20 @@ This ensures the current scores are always available atomically and reads never 
 - `confidence` and `sample_size`: let the frontend de-emphasize scores backed by sparse data
 - Branch fields: each score row includes `strongest_branch`, `weakest_branch`, and `underexposed_branch` sub-line details for targeted practice recommendations
 
+The score engine evaluates all named roots for one user/color as a shared DAG rather
+than building a separate name-owned subtree per opening. Structural reachability
+includes observed session continuations plus reference-book edges that remain before
+the raw middlegame boundary. Observed edges are already phase-authoritative and are
+therefore never removed by the board-local middlegame predicate.
+
+Local mastery uses continuous move quality with a skeptical beta prior. Actual and
+perfect recursive metrics are memoized by normalized FEN, so transpositions are
+computed once and opening labels do not change node values. Repetition cycles are cut
+deterministically by SCC and canonical FEN order, with remaining child weights
+renormalized. A named root receives a score row only when its structurally reachable
+set contains at least one quality observation; review-only and ghost-target-only
+positions do not create prior-only rows.
+
 DB reference: §5.7
 
 ### 13.4 Opening Lineage in `/history`

@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from app.models import OpeningScoreBatch, OpeningScoreCursor, UserOpeningScore
 from app.opening_evidence import EvidenceOverlay, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
-from app.opening_rootcalc import RootCalcConfig, RootScore, _Calculator, root_calc_config_fingerprint
+from app.opening_rootcalc import (
+    RootCalcConfig,
+    RootScore,
+    compute_all_root_scores,
+    root_calc_config_fingerprint,
+)
 from app.opening_roots import OpeningRoots, get_opening_roots
 
 logger = logging.getLogger(__name__)
@@ -70,6 +75,8 @@ def opening_score_evidence_fingerprint(
                     str(n.live_attempts),
                     str(n.live_passes),
                     str(n.live_fails),
+                    str(n.quality_sum),
+                    str(n.quality_count),
                     _iso(n.last_live_at),
                     str(n.review_attempts),
                     str(n.review_passes),
@@ -146,22 +153,6 @@ def prune_old_opening_score_batches(
         return 0
 
 
-def _iter_named_roots(roots: OpeningRoots):
-    for family_name in roots.get_families():
-        for root in roots.get_family(family_name):
-            yield root
-
-
-def _calculator_has_evidence(calc: _Calculator, overlay: EvidenceOverlay) -> bool:
-    domain_fens = set(calc.in_book_fens)
-    domain_fens.update(calc.extension_fens.keys())
-    if not domain_fens:
-        return False
-    if any(fen in overlay.nodes for fen in domain_fens):
-        return True
-    return any(parent_fen in domain_fens and child_fen in domain_fens for parent_fen, child_fen in overlay.edges)
-
-
 def _build_cached_scores(
     player_color: PlayerColor,
     graph: OpeningGraph,
@@ -169,24 +160,16 @@ def _build_cached_scores(
     roots: OpeningRoots,
     computed_at: datetime,
 ) -> list[RootScore]:
-    config = RootCalcConfig()
-    scores: list[RootScore] = []
-    for root in _iter_named_roots(roots):
-        calc = _Calculator(
-            root.opening_key,
-            player_color,
-            graph,
-            overlay,
-            roots,
-            config,
-            computed_at,
-            False,
-            include_branch_summaries=False,
-        )
-        if not _calculator_has_evidence(calc, overlay):
-            continue
-        scores.append(calc.compute())
-    return scores
+    scores, _ = compute_all_root_scores(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        computed_at,
+        include_branch_summaries=False,
+    )
+    return list(scores.values())
 
 
 def get_latest_opening_score_batch(

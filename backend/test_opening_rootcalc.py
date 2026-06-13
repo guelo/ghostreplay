@@ -1,488 +1,461 @@
+import math
+from datetime import datetime, timedelta, timezone
+
+import chess
 import pytest
-from datetime import datetime, timezone, timedelta
-from app.opening_rootcalc import compute_root_score, RootCalcConfig, root_calc_config_fingerprint
+
+from app.fen import active_color, normalize_fen
+from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
-from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
-from app.opening_roots import OpeningRoots, OpeningRoot
-from app.fen import active_color
+from app.opening_rootcalc import (
+    RootCalcConfig,
+    _SharedCalculator,
+    compute_all_root_scores,
+    compute_root_score,
+    root_calc_config_fingerprint,
+)
+from app.opening_roots import OpeningRoot, OpeningRoots
 
-def _make_node(fen: str) -> OpeningGraphNode:
-    n = OpeningGraphNode(fen, active_color(fen))
-    n.name = "Test Root"
-    return n
 
-def _make_root(fen: str, name: str="Test", children: set[str]=None) -> OpeningRoot:
+def _fen(board: chess.Board) -> str:
+    return normalize_fen(board.fen())
+
+
+def _positions(moves: list[str]) -> list[str]:
+    board = chess.Board()
+    result = [_fen(board)]
+    for uci in moves:
+        board.push_uci(uci)
+        result.append(_fen(board))
+    return result
+
+
+def _graph(paths: list[list[str]]) -> OpeningGraph:
+    nodes: dict[str, OpeningGraphNode] = {}
+    root_fen = _fen(chess.Board())
+    for moves in paths:
+        board = chess.Board()
+        parent = _fen(board)
+        nodes.setdefault(parent, OpeningGraphNode(parent, active_color(parent)))
+        for uci in moves:
+            board.push_uci(uci)
+            child = _fen(board)
+            nodes.setdefault(child, OpeningGraphNode(child, active_color(child)))
+            nodes[parent].children[uci] = child
+            nodes[child].parents.add((parent, uci))
+            parent = child
+    return OpeningGraph(nodes, root_fen)
+
+
+def _root(
+    fen: str,
+    name: str = "Test",
+    *,
+    parents: set[str] | None = None,
+    children: set[str] | None = None,
+) -> OpeningRoot:
     return OpeningRoot(
         opening_key=fen,
         opening_name=name,
-        opening_family="TestFam",
+        opening_family="Test Family",
         eco=None,
         depth=0,
-        parent_keys=frozenset(),
-        child_keys=frozenset(children or [])
+        parent_keys=frozenset(parents or ()),
+        child_keys=frozenset(children or ()),
     )
+
+
+def _roots(*items: OpeningRoot) -> OpeningRoots:
+    return OpeningRoots(
+        {item.opening_key: item for item in items},
+        {item.opening_key: frozenset([item.opening_key]) for item in items},
+    )
+
+
+def _quality(
+    fen: str,
+    value: float,
+    count: int = 1,
+    *,
+    at: datetime | None = None,
+) -> NodeEvidence:
+    return NodeEvidence(
+        fen=fen,
+        live_attempts=count,
+        quality_sum=value,
+        quality_count=count,
+        last_live_at=at,
+    )
+
+
+def _prepared(
+    overlay: EvidenceOverlay,
+    parent: str,
+    child: str,
+    uci: str = "move",
+    attempts: int = 2,
+) -> None:
+    overlay.edges[(parent, child)] = EdgeEvidence(
+        parent, child, uci, live_attempts=attempts
+    )
+
 
 def test_unknown_root_raises():
-    graph = OpeningGraph({}, "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-    overlay = EvidenceOverlay(1, "white")
-    roots = OpeningRoots({}, {})
+    graph = _graph([[]])
     with pytest.raises(ValueError):
-        compute_root_score("unknown", "white", graph, overlay, roots)
+        compute_root_score(
+            "unknown", "white", graph, EvidenceOverlay(1, "white"), _roots()
+        )
 
-def test_mastery():
-    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    graph = OpeningGraph({fen: _make_node(fen)}, fen)
-    roots = OpeningRoots({fen: _make_root(fen)}, {fen: frozenset([fen])})
+
+def test_mastery_uses_continuous_quality():
+    fen = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(fen))
     config = RootCalcConfig(alpha=1.0, beta=2.0)
 
-    # 1. No evidence
+    prior = compute_root_score(
+        fen, "white", graph, EvidenceOverlay(1, "white"), roots, config
+    )
+    assert prior.opening_score == pytest.approx(100.0 / 3.0)
+
     overlay = EvidenceOverlay(1, "white")
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config)
-    assert pytest.approx(score.opening_score) == 100.0 * (1.0 / 3.0)
-    
-    # 2. All passes
-    overlay.nodes[fen] = NodeEvidence(fen=fen, live_attempts=3, live_passes=3, live_fails=0)
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config)
-    assert pytest.approx(score.opening_score) == 100.0 * (4.0 / 6.0)
+    overlay.nodes[fen] = _quality(fen, 1.5, count=3)
+    score = compute_root_score(fen, "white", graph, overlay, roots, config)
+    assert score.opening_score == pytest.approx(100.0 * 2.5 / 6.0)
+    assert score.sample_size == 3
 
-    # 3. All fails
-    overlay.nodes[fen] = NodeEvidence(fen=fen, live_attempts=3, live_passes=0, live_fails=3)
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config)
-    assert pytest.approx(score.opening_score) == 100.0 * (1.0 / 6.0)
 
-def test_confidence():
-    import math
-    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    graph = OpeningGraph({fen: _make_node(fen)}, fen)
-    roots = OpeningRoots({fen: _make_root(fen)}, {fen: frozenset([fen])})
+def test_confidence_preserves_sample_freshness_and_review_discount():
+    fen = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(fen))
     config = RootCalcConfig(k_evidence=5.0, half_life_days=45.0, lambda_review=0.5)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-
-    # 1. No evidence
     overlay = EvidenceOverlay(1, "white")
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config, now=now)
-    assert score.confidence == 0.0
 
-    # 2. Recent evidence, no decay
-    overlay.nodes[fen] = NodeEvidence(fen=fen, live_attempts=5, last_live_at=now)
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config, now=now)
-    expected_c = 1.0 - math.exp(-5.0 / 5.0)
-    assert pytest.approx(score.confidence) == 100.0 * expected_c
+    overlay.nodes[fen] = NodeEvidence(fen, live_attempts=5, last_live_at=now)
+    recent = compute_root_score(fen, "white", graph, overlay, roots, config, now)
+    expected = 1.0 - math.exp(-1.0)
+    assert recent.confidence == pytest.approx(100.0 * expected)
 
-    # 3. Stale decay
-    stale_date = now - timedelta(days=45)
-    overlay.nodes[fen] = NodeEvidence(fen=fen, live_attempts=5, last_live_at=stale_date)
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config, now=now)
-    freshness = math.exp(-45.0 / 45.0)
-    assert pytest.approx(score.confidence) == 100.0 * (expected_c * freshness)
+    overlay.nodes[fen].last_live_at = now - timedelta(days=45)
+    stale = compute_root_score(fen, "white", graph, overlay, roots, config, now)
+    assert stale.confidence == pytest.approx(100.0 * expected * math.exp(-1.0))
 
-    # 4. Review discount
-    overlay.nodes[fen] = NodeEvidence(fen=fen, live_attempts=0, review_attempts=10, last_review_at=now)
-    score = compute_root_score(fen, "white", graph, overlay, roots, config=config, now=now)
-    # 10 review * 0.5 = 5.0 evidence eq.
-    assert pytest.approx(score.confidence) == 100.0 * expected_c
-
-def test_prepared_children():
-    # User node -> 3 children. 1 prepared by attempts, 1 prepared by passes, 1 prepared by ghost
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_c1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_c2 = "8/8/8/8/8/8/8/8 b KQkq - 0 2"
-    fen_c3 = "8/8/8/8/8/8/8/8 b KQkq - 0 3"
-    
-    nodes = {
-        fen_u: _make_node(fen_u),
-        fen_c1: _make_node(fen_c1),
-        fen_c2: _make_node(fen_c2),
-        fen_c3: _make_node(fen_c3)
-    }
-    nodes[fen_u].children = {"e4": fen_c1, "d4": fen_c2, "c4": fen_c3}
-    
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_u, fen_c1)] = EdgeEvidence(fen_u, fen_c1, "e4", live_attempts=2) # Prepared by attempts
-    overlay.edges[(fen_u, fen_c2)] = EdgeEvidence(fen_u, fen_c2, "d4", live_attempts=1, live_passes=1) # Prepared by pass
-    overlay.nodes[fen_c3] = NodeEvidence(fen_c3, is_ghost_target=True) # Prepared by ghost
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, debug=True)
-    # All three should be prepared.
-    debug_u = next(d for d in score.debug_nodes if d.fen == fen_u)
-    assert set(debug_u.prepared_children) == {fen_c1, fen_c2, fen_c3}
-
-
-def test_root_calc_config_fingerprint_changes_when_config_changes():
-    default_fp = root_calc_config_fingerprint()
-    tuned_fp = root_calc_config_fingerprint(RootCalcConfig(alpha=1.25))
-
-    assert default_fp != tuned_fp
-
-def test_repertoire_weights():
-    # test rho smoothing, single child, equal children
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_c1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_c2 = "8/8/8/8/8/8/8/8 b KQkq - 0 2"
-    
-    nodes = {
-        fen_u: _make_node(fen_u),
-        fen_c1: _make_node(fen_c1),
-        fen_c2: _make_node(fen_c2)
-    }
-    nodes[fen_u].children = {"e4": fen_c1, "d4": fen_c2}
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    config = RootCalcConfig(rho=1.0)
-    
-    overlay = EvidenceOverlay(1, "white")
-    # Equal children
-    overlay.edges[(fen_u, fen_c1)] = EdgeEvidence(fen_u, fen_c1, "e4", live_attempts=2)
-    overlay.edges[(fen_u, fen_c2)] = EdgeEvidence(fen_u, fen_c2, "d4", live_attempts=2)
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, config=config, debug=True)
-    debug_u = next(d for d in score.debug_nodes if d.fen == fen_u)
-    assert debug_u.weights[fen_c1] == 0.5
-    assert debug_u.weights[fen_c2] == 0.5
-    
-    # Differential
-    overlay.edges[(fen_u, fen_c1)] = EdgeEvidence(fen_u, fen_c1, "e4", live_attempts=3)
-    overlay.edges[(fen_u, fen_c2)] = EdgeEvidence(fen_u, fen_c2, "d4", live_attempts=1, live_passes=1) # Need live_passes=1 to be prepared!
-    # total basis = (3+1) + (1+1) = 6. weights: 4/6 and 2/6
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, config=config, debug=True)
-    debug_u = next(d for d in score.debug_nodes if d.fen == fen_u)
-    assert pytest.approx(debug_u.weights[fen_c1]) == 4.0/6.0
-    assert pytest.approx(debug_u.weights[fen_c2]) == 2.0/6.0
-
-def test_score_recursion():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_o1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_o2 = "8/8/8/8/8/8/8/8 b KQkq - 0 2"
-    fen_leaf1 = "8/8/8/8/8/8/8/8 w KQkq - 0 3"
-    fen_leaf2 = "8/8/8/8/8/8/8/8 w KQkq - 0 4"
-    
-    nodes = {
-        fen_u: OpeningGraphNode(fen_u, "w"),
-        fen_o1: OpeningGraphNode(fen_o1, "b"),
-        fen_o2: OpeningGraphNode(fen_o2, "b"),
-        fen_leaf1: OpeningGraphNode(fen_leaf1, "w"),
-        fen_leaf2: OpeningGraphNode(fen_leaf2, "w"),
-    }
-    nodes[fen_u].children = {"1": fen_o1, "2": fen_o2}
-    nodes[fen_o1].children = {"1": fen_leaf1}
-    nodes[fen_o2].children = {"1": fen_leaf2}
-    
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    config = RootCalcConfig(alpha=1.0, beta=1.0, gamma=0.5, rho=1.0)
-    
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_u, fen_o1)] = EdgeEvidence(fen_u, fen_o1, "1", live_attempts=2)
-    overlay.edges[(fen_u, fen_o2)] = EdgeEvidence(fen_u, fen_o2, "2", live_attempts=2)
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, config=config, debug=True)
-    assert pytest.approx(score.opening_score) == 100.0 * 0.625 / 1.5
-
-def test_book_exit_extension():
-    fen_book_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_ext_o = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_ext_u = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
-    fen_ext_o2 = "8/8/8/8/8/8/8/8 b KQkq - 0 2"
-    
-    nodes = {fen_book_u: OpeningGraphNode(fen_book_u, "w")}
-    graph = OpeningGraph(nodes, fen_book_u)
-    roots = OpeningRoots({fen_book_u: _make_root(fen_book_u)}, {fen_book_u: frozenset([fen_book_u])})
-    
-    config = RootCalcConfig(book_exit_extension_user_decisions=2)
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_book_u, fen_ext_o)] = EdgeEvidence(fen_book_u, fen_ext_o, "u", live_attempts=2)
-    overlay.edges[(fen_ext_o, fen_ext_u)] = EdgeEvidence(fen_ext_o, fen_ext_u, "u")
-    overlay.edges[(fen_ext_u, fen_ext_o2)] = EdgeEvidence(fen_ext_u, fen_ext_o2, "u", live_attempts=2)
-    
-    score = compute_root_score(fen_book_u, "white", graph, overlay, roots, config=config, debug=True)
-    debug_u = {d.fen: d for d in score.debug_nodes}
-    assert fen_book_u in debug_u
-    assert fen_ext_o in debug_u
-    assert fen_ext_u in debug_u
-    assert fen_ext_o2 in debug_u
-    
-    assert debug_u[fen_ext_o].is_extension_node
-    assert debug_u[fen_ext_u].is_extension_node
-    assert debug_u[fen_ext_o2].is_extension_node
-
-def test_coverage():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_o1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_o2 = "8/8/8/8/8/8/8/8 b KQkq - 0 2"
-    fen_leaf = "8/8/8/8/8/8/8/8 w KQkq - 0 3"
-    
-    nodes = {
-        fen_u: OpeningGraphNode(fen_u, "w"),
-        fen_o1: OpeningGraphNode(fen_o1, "b"),
-        fen_o2: OpeningGraphNode(fen_o2, "b"),
-        fen_leaf: OpeningGraphNode(fen_leaf, "w"),
-    }
-    nodes[fen_u].children = {"1": fen_o1, "2": fen_o2}
-    nodes[fen_o1].children = {"1": fen_leaf}
-    nodes[fen_o2].children = {"1": fen_leaf}
-    
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    config = RootCalcConfig(coverage_live_threshold=2)
-    
-    overlay = EvidenceOverlay(1, "white")
-    overlay.nodes[fen_leaf] = NodeEvidence(fen_leaf, live_attempts=2)
-    overlay.edges[(fen_u, fen_o1)] = EdgeEvidence(fen_u, fen_o1, "1", live_attempts=2)
-    overlay.edges[(fen_u, fen_o2)] = EdgeEvidence(fen_u, fen_o2, "2", live_attempts=2)
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, config=config, debug=True)
-    # user leaves with no prep children have coverage 0.0 but wait! The spec says:
-    # "At user nodes: user leaf: Cov(n) = 1.0. user with no prepared children: Cov(n) = 0.0."
-    # A leaf is a user leaf. Since my code uses `is_leaf` which gives 1.0, it works.
-    assert score.coverage == 100.0
-
-def test_weighted_depth():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_o = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    
-    nodes = {fen_u: OpeningGraphNode(fen_u, "w"), fen_o: OpeningGraphNode(fen_o, "b")}
-    nodes[fen_u].children = {"1": fen_o}
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    
-    config = RootCalcConfig(gamma=0.5, alpha=1.0, beta=1.0)
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_u, fen_o)] = EdgeEvidence(fen_u, fen_o, "1", live_attempts=2)
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, config=config)
-    assert pytest.approx(score.weighted_depth) == 0.5
-
-def test_underexposed_branch():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_desc1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_desc2 = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
-    
-    nodes = {
-        fen_root: OpeningGraphNode(fen_root, "w"),
-        fen_desc1: OpeningGraphNode(fen_desc1, "b"),
-        fen_desc2: OpeningGraphNode(fen_desc2, "w")
-    }
-    nodes[fen_root].children = {"1": fen_desc1}
-    nodes[fen_desc1].children = {"1": fen_desc2}
-    
-    graph = OpeningGraph(nodes, fen_root)
-    root1 = _make_root(fen_root, "R", children={fen_desc1})
-    root2 = _make_root(fen_desc1, "D1", children={fen_desc2})
-    root3 = _make_root(fen_desc2, "D2")
-    roots = OpeningRoots(
-        {fen_root: root1, fen_desc1: root2, fen_desc2: root3},
-        {fen_root: frozenset([fen_root]), fen_desc1: frozenset([fen_desc1]), fen_desc2: frozenset([fen_desc2])}
+    overlay.nodes[fen] = NodeEvidence(
+        fen, review_attempts=10, last_review_at=now
     )
-    
+    review = compute_root_score(fen, "white", graph, overlay, roots, config, now)
+    assert review.confidence == pytest.approx(100.0 * expected)
+
+
+def test_prepared_children_and_rho_weights():
+    root, e4, d4, c4 = (
+        _positions(["e2e4"])[0],
+        _positions(["e2e4"])[1],
+        _positions(["d2d4"])[1],
+        _positions(["c2c4"])[1],
+    )
+    graph = _graph([["e2e4"], ["d2d4"], ["c2c4"]])
+    roots = _roots(_root(root))
     overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_root, fen_desc1)] = EdgeEvidence(fen_root, fen_desc1, "1", live_attempts=2)
-    overlay.edges[(fen_desc1, fen_desc2)] = EdgeEvidence(fen_desc1, fen_desc2, "1", live_attempts=2)
-    
-    score = compute_root_score(fen_root, "white", graph, overlay, roots)
-    assert score.underexposed_branch is not None
-    assert score.underexposed_branch.opening_key in (fen_desc1, fen_desc2)
+    _prepared(overlay, root, e4, "e2e4", attempts=3)
+    overlay.edges[(root, d4)] = EdgeEvidence(
+        root, d4, "d2d4", live_attempts=1, live_passes=1
+    )
+    overlay.nodes[c4] = NodeEvidence(c4, is_ghost_target=True)
 
-def test_branch_summaries():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_c1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_c2 = "8/8/8/8/8/8/8/8 b KQkq - 0 2"
-    
-    nodes = {
-        fen_root: OpeningGraphNode(fen_root, "w"),
-        fen_c1: OpeningGraphNode(fen_c1, "b"),
-        fen_c2: OpeningGraphNode(fen_c2, "b"),
-    }
-    nodes[fen_root].children = {"1": fen_c1, "2": fen_c2}
-    
-    graph = OpeningGraph(nodes, fen_root)
-    r = _make_root(fen_root, "R", children={fen_c1, fen_c2})
-    rc1 = _make_root(fen_c1, "C1")
-    rc2 = _make_root(fen_c2, "C2")
-    roots = OpeningRoots({fen_root: r, fen_c1: rc1, fen_c2: rc2}, {f: frozenset([f]) for f in nodes})
-    
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_root, fen_c1)] = EdgeEvidence(fen_root, fen_c1, "1", live_attempts=5, live_passes=5)
-    overlay.edges[(fen_root, fen_c2)] = EdgeEvidence(fen_root, fen_c2, "2", live_attempts=2, live_fails=2)
-    
-    score = compute_root_score(fen_root, "white", graph, overlay, roots)
-    assert score.strongest_branch is not None
-    assert score.weakest_branch is not None
-
-def test_dag_and_extension_safety():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_b = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    nodes = {fen_root: OpeningGraphNode(fen_root, "w")}
-    graph = OpeningGraph(nodes, fen_root)
-    roots = OpeningRoots({fen_root: _make_root(fen_root)}, {fen_root: frozenset([fen_root])})
-    
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_root, fen_b)] = EdgeEvidence(fen_root, fen_b, "1", live_attempts=2)
-    overlay.edges[(fen_b, fen_root)] = EdgeEvidence(fen_b, fen_root, "2", live_attempts=2)
-    
-    score = compute_root_score(fen_root, "white", graph, overlay, roots)
-    assert score is not None
-
-def test_aggregates():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    nodes = {fen_root: OpeningGraphNode(fen_root, "w")}
-    graph = OpeningGraph(nodes, fen_root)
-    roots = OpeningRoots({fen_root: _make_root(fen_root)}, {fen_root: frozenset([fen_root])})
-    
-    now = datetime(2026, 1, 2, tzinfo=timezone.utc)
-    overlay = EvidenceOverlay(1, "white")
-    overlay.nodes[fen_root] = NodeEvidence(fen_root, live_attempts=10, last_live_at=now)
-    
-    score = compute_root_score(fen_root, "white", graph, overlay, roots, now=now)
-    assert score.sample_size == 10
-    assert score.last_practiced_at == now
-
-def test_edge_cases():
-    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-    graph = OpeningGraph({fen: _make_node(fen)}, fen)
-    roots = OpeningRoots({fen: _make_root(fen)}, {fen: frozenset([fen])})
-    overlay = EvidenceOverlay(1, "white")
-    score = compute_root_score(fen, "white", graph, overlay, roots)
-    assert score.opening_score > 0
-    assert score.confidence == 0
-    assert score.coverage == 100.0
+    score = compute_root_score(root, "white", graph, overlay, roots, debug=True)
+    debug = next(node for node in score.debug_nodes if node.fen == root)
+    assert set(debug.prepared_children) == {e4, d4, c4}
+    assert debug.weights[e4] == pytest.approx(4.0 / 7.0)
+    assert debug.weights[d4] == pytest.approx(2.0 / 7.0)
+    assert debug.weights[c4] == pytest.approx(1.0 / 7.0)
 
 
-def test_gap_1_user_node_with_no_prepared_children():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_o = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    nodes = {fen_u: _make_node(fen_u), fen_o: _make_node(fen_o)}
-    nodes[fen_u].children = {"1": fen_o}
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    
-    # Root has one child but no evidence -> zero prepared children.
-    overlay = EvidenceOverlay(1, "white")
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, debug=True)
-    assert score.coverage == 0.0
-
-def test_gap_2_opponent_extension_frontier():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_o = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_ext = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
-    nodes = {fen_u: _make_node(fen_u), fen_o: _make_node(fen_o)}
-    nodes[fen_u].children = {"1": fen_o}
-    graph = OpeningGraph(nodes, fen_u)
-    roots = OpeningRoots({fen_u: _make_root(fen_u)}, {f: frozenset([fen_u]) for f in nodes})
-    
-    overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_u, fen_o)] = EdgeEvidence(fen_u, fen_o, "1", live_attempts=2)
-    # Opponent exits the book
-    overlay.edges[(fen_o, fen_ext)] = EdgeEvidence(fen_o, fen_ext, "e", live_attempts=2)
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, debug=True)
-    debug_fens = {d.fen for d in score.debug_nodes}
-    assert fen_ext in debug_fens
-
-def test_gap_3_unseen_child_roots():
-    fen_u = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_c = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    nodes = {fen_u: _make_node(fen_u), fen_c: _make_node(fen_c)}
-    nodes[fen_u].children = {"1": fen_c}
-    graph = OpeningGraph(nodes, fen_u)
-    
-    # fen_c is a descendant boundary root!
-    root1 = _make_root(fen_u, children={fen_c})
-    root2 = _make_root(fen_c)
-    roots = OpeningRoots({fen_u: root1, fen_c: root2}, {fen_u: frozenset([fen_u]), fen_c: frozenset([fen_c])})
-    
-    overlay = EvidenceOverlay(1, "white")
-    # NO evidence edge -> unseen child root!
-    
-    score = compute_root_score(fen_u, "white", graph, overlay, roots, debug=True)
-    debug_fens = {d.fen for d in score.debug_nodes}
-    
-    # The child root MUST NOT leak into the debug nodes (it's not scored by parent)
-    assert fen_c not in debug_fens
-    
-    # But it MUST appear in the strongest branch summary due to importance
-    assert score.strongest_branch is not None
-    assert score.strongest_branch.opening_key == fen_c
-
-
-def test_gap_4_underexposed_branch_local_coverage():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_desc1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_deep = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
-    
-    nodes = {
-        fen_root: _make_node(fen_root),
-        fen_desc1: _make_node(fen_desc1),
-        fen_deep: _make_node(fen_deep)
-    }
-    nodes[fen_root].children = {"1": fen_desc1}
-    nodes[fen_desc1].children = {"1": fen_deep}
-    
-    graph = OpeningGraph(nodes, fen_root)
-    root1 = _make_root(fen_root, children={fen_desc1})
-    root2 = _make_root(fen_desc1)
-    roots = OpeningRoots({fen_root: root1, fen_desc1: root2}, {fen_root: frozenset([fen_root]), fen_desc1: frozenset([fen_desc1]), fen_deep: frozenset([fen_desc1])})
-    
-    overlay = EvidenceOverlay(1, "white")
-    # Coverage deep in the descendant
-    overlay.nodes[fen_deep] = NodeEvidence(fen_deep, live_attempts=2)
-    overlay.edges[(fen_root, fen_desc1)] = EdgeEvidence(fen_root, fen_desc1, "1", live_attempts=5, live_passes=5)
-    overlay.edges[(fen_desc1, fen_deep)] = EdgeEvidence(fen_desc1, fen_deep, "1", live_attempts=2)
-    
-    score = compute_root_score(fen_root, "white", graph, overlay, roots, debug=True)
-    # Because it is fully covered deep down, it should NOT be emitted as underexposed!
-    assert score.underexposed_branch is None
-
-def test_gap_5_importance_ghost_target_boundary():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_desc1 = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_deep = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
-    
-    nodes = {
-        fen_root: _make_node(fen_root),
-        fen_desc1: _make_node(fen_desc1),
-        fen_deep: _make_node(fen_deep)
-    }
-    nodes[fen_root].children = {"1": fen_desc1}
-    nodes[fen_desc1].children = {"1": fen_deep}
-    
-    graph = OpeningGraph(nodes, fen_root)
-    root1 = _make_root(fen_root, children={fen_desc1})
-    root2 = _make_root(fen_desc1)
-    roots = OpeningRoots({fen_root: root1, fen_desc1: root2}, {fen_root: frozenset([fen_root]), fen_desc1: frozenset([fen_desc1]), fen_deep: frozenset([fen_desc1])})
-    
-    overlay = EvidenceOverlay(1, "white")
-    # No live attempts at the root. But there is a ghost target deep inside desc1.
-    overlay.nodes[fen_deep] = NodeEvidence(fen_deep, is_ghost_target=True)
-    
-    score = compute_root_score(fen_root, "white", graph, overlay, roots, debug=True)
-    # The child root MUST appear in strongest_branch because importance crossed the boundary!
-    assert score.strongest_branch is not None
-    assert score.strongest_branch.opening_key == fen_desc1
-
-
-def test_gap_6_global_ghost_target_overlay_path():
-    fen_root = "8/8/8/8/8/8/8/8 w KQkq - 0 1"
-    fen_desc = "8/8/8/8/8/8/8/8 b KQkq - 0 1"
-    fen_ext = "8/8/8/8/8/8/8/8 w KQkq - 0 2"
-
-    nodes = {fen_root: _make_node(fen_root), fen_desc: _make_node(fen_desc)}
-    nodes[fen_root].children = {"1": fen_desc}
-    graph = OpeningGraph(nodes, fen_root)
-
-    root1 = _make_root(fen_root, children={fen_desc})
-    root2 = _make_root(fen_desc)
-    roots = OpeningRoots(
-        {fen_root: root1, fen_desc: root2},
-        {fen_root: frozenset([fen_root]), fen_desc: frozenset([fen_desc])},
+def test_config_fingerprint_changes_with_scoring_parameters():
+    assert root_calc_config_fingerprint() != root_calc_config_fingerprint(
+        RootCalcConfig(alpha=1.25)
     )
 
+
+def test_score_recursion_and_weighted_depth():
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root))
     overlay = EvidenceOverlay(1, "white")
-    overlay.edges[(fen_desc, fen_ext)] = EdgeEvidence(fen_desc, fen_ext, "1")
-    overlay.nodes[fen_ext] = NodeEvidence(fen_ext, is_ghost_target=True)
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.nodes[root] = _quality(root, 0.5)
+    overlay.nodes[e5] = _quality(e5, 0.5)
+    config = RootCalcConfig(alpha=1.0, beta=1.0, gamma=0.5)
 
-    score = compute_root_score(fen_root, "white", graph, overlay, roots, debug=True)
+    score = compute_root_score(root, "white", graph, overlay, roots, config)
+    assert score.opening_score == pytest.approx(100.0 * 0.625 / 1.5)
+    assert score.weighted_depth == pytest.approx(0.625)
 
-    assert score.strongest_branch is not None
-    assert score.strongest_branch.opening_key == fen_desc
+
+def test_opponent_weights_prefer_reference_replies_over_observed_off_book_replies():
+    root, opponent, reference = _positions(["e2e4", "e7e5"])
+    off_book = _positions(["e2e4", "c7c5"])[2]
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, opponent, "e2e4")
+    overlay.edges[(opponent, off_book)] = EdgeEvidence(
+        opponent, off_book, "c7c5"
+    )
+    overlay.nodes[reference] = _quality(reference, 1.0)
+    overlay.nodes[off_book] = _quality(off_book, 0.0)
+
+    score = compute_root_score(root, "white", graph, overlay, roots, debug=True)
+    debug = next(node for node in score.debug_nodes if node.fen == opponent)
+    assert debug.weights == {reference: 1.0}
+
+
+def test_observed_continuations_cross_raw_middlegame_but_book_edges_stop():
+    root = _positions([])[0]
+    observed_middle = "8/8/8/8/8/8/4k3/4K3 b - -"
+    observed_continuation = "8/8/8/8/8/4k3/8/4K3 w - -"
+    book_middle = "8/8/8/8/8/8/3k4/4K3 b - -"
+    graph = _graph([[]])
+    graph._nodes[observed_middle] = OpeningGraphNode(observed_middle, "black")
+    graph._nodes[observed_continuation] = OpeningGraphNode(
+        observed_continuation, "white"
+    )
+    graph._nodes[book_middle] = OpeningGraphNode(book_middle, "black")
+    graph._nodes[root].children = {
+        "observed": observed_middle,
+        "reference": book_middle,
+    }
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, observed_middle, "observed")
+    overlay.edges[(observed_middle, observed_continuation)] = EdgeEvidence(
+        observed_middle, observed_continuation, "continuation"
+    )
+    overlay.nodes[observed_continuation] = _quality(observed_continuation, 1.0)
+
+    score = compute_root_score(root, "white", graph, overlay, roots, debug=True)
+    debug_fens = {node.fen for node in score.debug_nodes}
+    assert observed_middle in debug_fens
+    assert observed_continuation in debug_fens
+    assert book_middle not in debug_fens
+
+
+def test_cycle_cut_is_seed_independent_and_renormalized():
+    a, b = _positions(["e2e4"])
+    graph = _graph([["e2e4"]])
+    roots = _roots(
+        _root(a, "A", children={b}),
+        _root(b, "B", parents={a}),
+    )
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, a, b, "e2e4")
+    _prepared(overlay, b, a, "repeat")
+    overlay.nodes[a] = _quality(a, 0.8)
+    overlay.nodes[b] = _quality(b, 0.6)
+
+    all_scores, _ = compute_all_root_scores("white", graph, overlay, roots)
+    seeded_b = compute_root_score(b, "white", graph, overlay, roots)
+    assert all_scores[b].opening_score == pytest.approx(seeded_b.opening_score)
+    assert all_scores[b].opening_score == pytest.approx(45.0)
+    assert all_scores[b].coverage == pytest.approx(100.0)
+
+    calc = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        datetime.now(timezone.utc),
+        seeds=[a],
+    )
+    for total in (
+        sum(calc._get_weights(a).values()),
+        sum(calc._get_weights(b).values()),
+    ):
+        assert total == 0 or total == pytest.approx(1.0)
+    assert not (calc._score_children(a) and calc._score_children(b))
+
+
+def test_scc_cut_does_not_activate_observed_opponent_fallback_cycle():
+    opponent = _positions(["e2e4"])[1]
+    reference = _positions(["e2e4", "e7e5"])[2]
+    observed = _positions(["e2e4", "c7c5"])[2]
+    graph = OpeningGraph(
+        {
+            opponent: OpeningGraphNode(opponent, "black"),
+            reference: OpeningGraphNode(reference, "white"),
+        },
+        opponent,
+    )
+    graph._nodes[opponent].children["reference"] = reference
+    roots = _roots(_root(opponent))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(opponent, observed)] = EdgeEvidence(
+        opponent, observed, "observed"
+    )
+    _prepared(overlay, reference, opponent, "repeat-reference")
+    _prepared(overlay, observed, opponent, "repeat-observed")
+    overlay.nodes[observed] = _quality(observed, 1.0)
+
+    calc = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        datetime.now(timezone.utc),
+        seeds=[opponent],
+    )
+    assert calc._precut_weights[opponent] == {reference: 1.0}
+    assert calc._get_weights(opponent) == {}
+    assert observed not in calc._get_weights(opponent)
+
+    score = compute_root_score(opponent, "white", graph, overlay, roots)
+    assert score.opening_score == pytest.approx(100.0)
+
+
+def test_named_root_behind_unprepared_ancestor_is_still_scored():
+    root, child = _positions(["e2e4"])
+    graph = _graph([["e2e4"]])
+    roots = _roots(
+        _root(root, "Outer", children={child}),
+        _root(child, "Inner", parents={root}),
+    )
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[child] = _quality(child, 0.8)
+
+    scores, eligible = compute_all_root_scores("white", graph, overlay, roots)
+    assert child in eligible
+    assert child in scores
+    assert scores[root].strongest_branch is None
+
+
+def test_transposition_sample_size_counts_unique_nodes():
+    root = _positions([])[0]
+    e4 = _positions(["e2e4"])[1]
+    nf3 = _positions(["g1f3"])[1]
+    diamond = _positions(["e2e4", "e7e5"])[2]
+    graph = _graph([["e2e4"], ["g1f3"]])
+    graph._nodes.setdefault(diamond, OpeningGraphNode(diamond, active_color(diamond)))
+    graph._nodes[e4].children["to-d"] = diamond
+    graph._nodes[nf3].children["to-d"] = diamond
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    _prepared(overlay, root, nf3, "g1f3")
+    overlay.edges[(e4, diamond)] = EdgeEvidence(e4, diamond, "to-d")
+    overlay.edges[(nf3, diamond)] = EdgeEvidence(nf3, diamond, "to-d")
+    overlay.nodes[diamond] = _quality(diamond, 1.2, count=2)
+
+    score = compute_root_score(root, "white", graph, overlay, roots)
+    assert score.sample_size == 2
+
+
+def test_prior_only_ghost_or_review_does_not_create_rows():
+    root = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[root] = NodeEvidence(
+        root,
+        review_attempts=1,
+        last_review_at=datetime.now(timezone.utc),
+        is_ghost_target=True,
+    )
+    scores, eligible = compute_all_root_scores("white", graph, overlay, roots)
+    assert scores == {}
+    assert eligible == set()
+
+
+def test_unprepared_descendant_is_not_an_underexposed_branch():
+    root = _positions([])[0]
+    prepared = _positions(["e2e4"])[1]
+    ignored = _positions(["d2d4"])[1]
+    graph = _graph([["e2e4"], ["d2d4"]])
+    roots = _roots(
+        _root(root, "Root", children={prepared, ignored}),
+        _root(prepared, "Prepared", parents={root}),
+        _root(ignored, "Ignored", parents={root}),
+    )
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, prepared, "e2e4")
+    overlay.nodes[prepared] = _quality(prepared, 0.8, count=2)
+    overlay.nodes[ignored] = _quality(ignored, 0.2)
+
+    scores, _ = compute_all_root_scores("white", graph, overlay, roots)
+    summary = scores[root].underexposed_branch
+    assert summary is None or summary.opening_key != ignored
+
+
+def test_underexposed_value_is_fractional_coverage_gap():
+    root, opponent, child, _unprepared = _positions(
+        ["e2e4", "e7e5", "g1f3"]
+    )
+    graph = _graph([["e2e4", "e7e5", "g1f3"]])
+    roots = _roots(
+        _root(root, "Root", children={child}),
+        _root(child, "Child", parents={root}),
+    )
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, opponent, "e2e4")
+    overlay.nodes[child] = _quality(child, 1.0)
+
+    scores, _ = compute_all_root_scores("white", graph, overlay, roots)
+    assert scores[child].coverage == pytest.approx(0.0)
+    summary = scores[root].underexposed_branch
+    assert summary is not None
+    assert summary.opening_key == child
+    assert summary.value == pytest.approx(1.0)
+
+
+def test_scores_are_name_independent():
+    root, child = _positions(["e2e4"])
+    graph = _graph([["e2e4"]])
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, child, "e2e4")
+    overlay.nodes[root] = _quality(root, 0.7)
+    overlay.nodes[child] = _quality(child, 0.9)
+    without_boundary = _roots(_root(root, "Outer"))
+    with_boundary = _roots(
+        _root(root, "Outer", children={child}),
+        _root(child, "Inner", parents={root}),
+    )
+
+    first = compute_root_score(root, "white", graph, overlay, without_boundary)
+    second = compute_root_score(root, "white", graph, overlay, with_boundary)
+    assert first.opening_score == pytest.approx(second.opening_score)
+    assert first.coverage == pytest.approx(second.coverage)
+
+
+def test_shared_memo_computes_diamond_nodes_once_per_pass():
+    root = _positions([])[0]
+    left = _positions(["e2e4"])[1]
+    right = _positions(["d2d4"])[1]
+    leaf = _positions(["e2e4", "e7e5"])[2]
+    graph = _graph([["e2e4"], ["d2d4"]])
+    graph._nodes.setdefault(leaf, OpeningGraphNode(leaf, active_color(leaf)))
+    graph._nodes[left].children["left-leaf"] = leaf
+    graph._nodes[right].children["right-leaf"] = leaf
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, left, "e2e4")
+    _prepared(overlay, root, right, "d2d4")
+    overlay.edges[(left, leaf)] = EdgeEvidence(left, leaf, "left-leaf")
+    overlay.edges[(right, leaf)] = EdgeEvidence(right, leaf, "right-leaf")
+    overlay.nodes[root] = _quality(root, 0.8)
+    overlay.nodes[leaf] = _quality(leaf, 0.9)
+    calculator = _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        datetime.now(timezone.utc),
+    )
+
+    calculator.compute_roots([roots.get_root(root)], include_branch_summaries=False)
+    assert calculator.calculation_misses == 8
+    assert len(calculator._metrics) == 8
