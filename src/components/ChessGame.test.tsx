@@ -63,9 +63,16 @@ vi.mock("../openings/openingBook", () => ({
   prewarmOpeningBook: () => {},
 }));
 
+// Mutable router state so individual tests can supply location.state (e.g. the
+// "return from drill analysis" marker) and assert replace navigation.
+let mockLocation: { state: unknown; pathname: string } = {
+  state: null,
+  pathname: "/play",
+};
+const mockNavigate = vi.fn();
 vi.mock("react-router-dom", () => ({
-  useLocation: () => ({ state: null, pathname: "/play" }),
-  useNavigate: () => vi.fn(),
+  useLocation: () => mockLocation,
+  useNavigate: () => mockNavigate,
 }));
 
 import { gameAnalysisStore } from "../stores/createAnalysisStore";
@@ -181,6 +188,9 @@ vi.mock("react-chessboard", () => ({
 const initialGameStoreState = useGameStore.getInitialState();
 
 beforeEach(() => {
+  mockLocation = { state: null, pathname: "/play" };
+  mockNavigate.mockReset();
+  useDrillAnalysisStore.getState().clear();
   useGameStore.setState(initialGameStoreState, true);
   // Isolate persisted drill prefs between tests — a successful drill start
   // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
@@ -3664,5 +3674,332 @@ describe("ChessGame mobile auto-scroll on graph appearance", () => {
     const scrolls = graphScrolls();
     expect(scrolls).toHaveLength(1);
     expect(scrolls[0].behavior).toBe("auto");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC4 — post-root drill pass/fail is stable across the strictness threshold
+// matrix. This drives the REAL ChessGame post-root drill flow (gradeDrillMove
+// inside the controller) across every threshold/boundary, not a test-local
+// comparator.
+//
+// Order-invariance is COMPOSITIONAL, not re-tested here: (1) the coordinator
+// yields one settled AnalysisResult whose delta is identical regardless of cache/
+// worker completion order — proven by GameAnalysisCoordinator.test.ts, including
+// the "resolved delta is identical whether the worker or the cache wins (AC4
+// anchor)" case that pins the exact delta the drill reads; (2) gradeDrillMove is
+// a pure function of that delta (analysisUtils.test.ts). This suite covers the
+// remaining link: the controller grades the settled result and acts on it.
+// Matrix: delta at threshold-1 / threshold / threshold+1 for strict 15,
+// standard 35, lenient 50, plus custom {0,25,40}. failsDrill uses strict `>` so
+// the boundary value PASSES.
+// ---------------------------------------------------------------------------
+describe("ChessGame post-root drill outcome stability (AC4)", () => {
+  const STRICT_CP = 15;
+  const STANDARD_CP = 35;
+  const LENIENT_CP = 50;
+  const CUSTOM_CPS = [0, 25, 40];
+  const ALL_THRESHOLDS = [STRICT_CP, STANDARD_CP, LENIENT_CP, ...CUSTOM_CPS];
+  const SCENARIOS: Array<[number, number]> = ALL_THRESHOLDS.flatMap((t) =>
+    [t - 1, t, t + 1].filter((d) => d >= 0).map((d) => [t, d] as [number, number]),
+  );
+
+  beforeEach(() => {
+    window.HTMLElement.prototype.scrollIntoView = vi.fn();
+    failDrillMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    mockAnalyzeMove.mockReset();
+    mockCoordinator.waitForAnalysis.mockReset();
+    gameAnalysisStore.getState().clearAll();
+    capturedPieceDrop = null;
+    failDrillMock.mockResolvedValue({
+      session_id: "drill-matrix",
+      mode: "drill",
+      drill_state: "failed",
+      opening_key: "target-fen",
+      opening_name: "Target",
+      opening_family: "Target",
+      eco: null,
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1500,
+      strictness: "standard",
+      strictness_cp: 25,
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+      terminal_reason: "accuracy",
+    });
+    getNextOpponentMoveMock.mockResolvedValue({
+      mode: "engine",
+      move: { uci: "d7d5", san: "d5" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(SCENARIOS)(
+    "strictness=%i, delta=%i grades deterministically",
+    async (threshold, delta) => {
+      const shouldFail = delta > threshold; // failsDrill: strict `>`
+
+      useGameStore.setState({
+        sessionId: "drill-matrix",
+        isGameActive: true,
+        playerColor: "white",
+        boardOrientation: "white",
+        drillStrictnessCp: threshold,
+        liveFen: STARTING_FEN,
+      });
+
+      render(<ChessGame />);
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: threshold,
+      });
+
+      mockCoordinator.waitForAnalysis.mockResolvedValue({
+        id: "analysis-e4",
+        move: "e2e4",
+        bestMove: "d2d4",
+        bestEval: delta,
+        playedEval: 0,
+        currentPositionEval: 0,
+        playedEvalMate: null,
+        currentPositionEvalMate: null,
+        moveIndex: 0,
+        delta,
+        classification: shouldFail ? "mistake" : "good",
+        blunder: false,
+        recordable: false,
+      });
+
+      await act(async () => {
+        capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+      });
+
+      if (shouldFail) {
+        await waitFor(() => {
+          expect(failDrillMock).toHaveBeenCalledWith("drill-matrix", "accuracy");
+        });
+        expect(useGameStore.getState().drillState).toBe("failed");
+      } else {
+        await waitFor(() => {
+          expect(getNextOpponentMoveMock).toHaveBeenCalled();
+        });
+        expect(failDrillMock).not.toHaveBeenCalled();
+        expect(useGameStore.getState().drillState).not.toBe("failed");
+      }
+    },
+  );
+});
+
+describe("ChessGame return to drill after analyze (g-65ve)", () => {
+  const FEN_AFTER_E4 =
+    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
+
+  const seedAbandonedDrillStore = (sessionId = "drill-1") => {
+    useGameStore.setState({
+      sessionId,
+      isGameActive: false,
+      drillOpeningKey: "ruy-lopez",
+      drillOpeningName: "Ruy Lopez",
+      drillState: "abandoned",
+      drillStrictness: "standard",
+      drillStrictnessCp: 25,
+      playerColor: "white",
+      boardOrientation: "white",
+      engineElo: 1500,
+      isRated: false,
+      moveHistory: [{ san: "e4", fen: FEN_AFTER_E4, uci: "e2e4" }],
+      gameResult: { type: "resign", message: "Drill abandoned." },
+    });
+  };
+
+  const snapshotFor = (sessionId: string) => ({
+    moves: [
+      {
+        move_number: 1,
+        color: "white" as const,
+        move_san: "e4",
+        fen_after: FEN_AFTER_E4,
+        eval_cp: 20,
+        eval_mate: null,
+        best_move_san: "d4",
+        best_move_eval_cp: 30,
+        eval_delta: 10,
+        classification: "good" as const,
+      },
+    ],
+    positionAnalysis: {},
+    playerColor: "white" as const,
+    initialMoveIndex: 0,
+    sourceSessionId: sessionId,
+  });
+
+  const setReturnMarker = (sessionId: string) => {
+    mockLocation = {
+      state: { returnFromDrillAnalysis: { sourceSessionId: sessionId } },
+      pathname: "/play",
+    };
+  };
+
+  beforeEach(() => {
+    startDrillMock.mockReset();
+    getNextOpponentMoveMock.mockReset();
+    startDrillMock.mockResolvedValue({
+      session_id: "drill-2",
+      mode: "drill",
+      drill_state: "active",
+      opening_key: "ruy-lopez",
+      opening_name: "Ruy Lopez",
+      opening_family: "Ruy Lopez",
+      eco: null,
+      depth: 1,
+      player_color: "white",
+      engine_elo: 1500,
+      strictness: "standard",
+      strictness_cp: 25,
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+      terminal_reason: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("restores the drill with Again ready, no popup, board disabled, moves retained", async () => {
+    seedAbandonedDrillStore();
+    useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+    setReturnMarker("drill-1");
+
+    render(<ChessGame />);
+
+    // No setup popup and no generic "New game" action — only "Again" + gear.
+    expect(screen.getByRole("button", { name: /^again$/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /play white/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /new game/i })).toBeNull();
+
+    // Retained position/moves and a disabled (ended) board.
+    expect(screen.getByRole("button", { name: /e4/i })).toBeInTheDocument();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-allow-dragging",
+      "false",
+    );
+
+    // One-shot marker consumed via replace navigation, but presentation stays.
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith("/play", {
+        replace: true,
+        state: null,
+      });
+    });
+    expect(screen.getByRole("button", { name: /^again$/i })).toBeInTheDocument();
+  });
+
+  it("Again restarts with the preserved exact settings and no stale-session traffic", async () => {
+    seedAbandonedDrillStore();
+    useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+    setReturnMarker("drill-1");
+
+    render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^again$/i }));
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith({
+        opening_key: "ruy-lopez",
+        player_color: "white",
+        engine_elo: 1500,
+        strictness: "standard",
+        strictness_cp: 25,
+      });
+    });
+    // White-to-move restart: no opponent move fired against the abandoned drill.
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
+  it("gear clears the reviewed presentation and opens the drill setup overlay", async () => {
+    seedAbandonedDrillStore();
+    useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+    setReturnMarker("drill-1");
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+
+    render(<ChessGame />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /change drill settings/i }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /^again$/i })).toBeNull();
+    });
+    // Setup overlay opened (drill mode start controls present).
+    expect(
+      screen.getByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
+  });
+
+  describe.each([
+    {
+      name: "snapshot present but no marker",
+      setup: () => {
+        seedAbandonedDrillStore();
+        useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+      },
+    },
+    {
+      name: "marker/snapshot/store session mismatch",
+      setup: () => {
+        seedAbandonedDrillStore("drill-1");
+        useDrillAnalysisStore.getState().setSnapshot(snapshotFor("other"));
+        setReturnMarker("other");
+      },
+    },
+    {
+      name: "marker present but game still active",
+      setup: () => {
+        seedAbandonedDrillStore();
+        useGameStore.setState({ isGameActive: true });
+        useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+        setReturnMarker("drill-1");
+      },
+    },
+    {
+      name: "drill not abandoned",
+      setup: () => {
+        seedAbandonedDrillStore();
+        useGameStore.setState({ drillState: "failed" });
+        useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+        setReturnMarker("drill-1");
+      },
+    },
+    {
+      name: "incomplete restart settings",
+      setup: () => {
+        seedAbandonedDrillStore();
+        useGameStore.setState({ drillStrictnessCp: null });
+        useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+        setReturnMarker("drill-1");
+      },
+    },
+  ])("falls back to ordinary /play: $name", ({ setup }) => {
+    it("shows ordinary start UI and no reviewed Again action", () => {
+      setup();
+      render(<ChessGame />);
+
+      // No reviewed "Again" action exposed.
+      expect(screen.queryByRole("button", { name: /^again$/i })).toBeNull();
+    });
   });
 });

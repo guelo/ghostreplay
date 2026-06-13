@@ -924,6 +924,44 @@ describe('GameAnalysisCoordinator', () => {
       expect(coordinator.store.getState().lastAnalysis).toBe(lastBefore)
     })
 
+    it('resolved delta is identical whether the worker or the cache wins (AC4 anchor)', async () => {
+      // This is the real, deferred cache/worker race that the ChessGame AC4
+      // drill matrix composes on top of: the drill grades the settled result's
+      // delta, so that delta must not depend on which side won. The cache row
+      // and the worker carry the SAME delta; the winners differ (bestMove
+      // 'e2e4' vs 'worker-best') but the drill-relevant delta is stable.
+      const D = 30
+
+      // Case A: trusted cache hit present; the worker finishes FIRST (buffered),
+      // then the deferred lookup resolves → the cache wins.
+      coordinator.startSession('sA')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+      const idA = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(idA, { delta: D, bestEval: D, playedEval: 0 })
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([[
+        'fen-0::e2e4',
+        trustedRow('e2e4', { eval_delta: D, best_eval: D, played_eval: 0, classification: 'mistake' }),
+      ]]))
+      await vi.advanceTimersByTimeAsync(0)
+      const cacheWon = coordinator.store.getState().analysisMap.get(0)
+      expect(cacheWon?.bestMove).toBe('e2e4')
+      expect(cacheWon?.delta).toBe(D)
+
+      // Case B: cache MISSES (default mock); the worker result wins.
+      coordinator.startSession('sB')
+      const idB = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(idB, { delta: D, bestEval: D, playedEval: 0 })
+      await vi.advanceTimersByTimeAsync(200)
+      const workerWon = coordinator.store.getState().analysisMap.get(0)
+      expect(workerWon?.bestMove).toBe('worker-best')
+
+      // Different winner, identical drill input.
+      expect(workerWon?.delta).toBe(D)
+      expect(workerWon?.delta).toBe(cacheWon?.delta)
+    })
+
     it('total-analysis deadline rejects a stalled worker without hanging (AC7, 10b)', async () => {
       coordinator.startSession('s')
       coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)

@@ -2282,6 +2282,46 @@ Quality/trust is carried by the metadata columns (`analysis_profile_id`, engine 
 
 DB reference: §5.6
 
+### 14.5 Cache Repair & Invalidation
+
+The write guard (§5.6) only protects *new* writes. Rows that predate it —
+game-overwritten depth-17 results, partial legacy precompute rows, or rows that
+claim a profile they cannot back up — can still preserve unstable best moves,
+deltas, and classifications, which feed the eval-delta / win-chance fallbacks
+even though they never count as `trusted_for_resolution` hits.
+
+Repair has two halves, run **after** write protection is live:
+
+1. **Regenerate** — `scripts/precompute_openings.py` rewrites authoritative
+   `resolver-complete-v2` rows for opening positions. It is idempotent/resumable
+   and routes through the shared writer, so re-running is safe.
+2. **Invalidate** — `scripts/repair_analysis_cache.py` deletes the rows the
+   current write guard would reject if they arrived today. The classifier
+   (`backend/app/analysis_cache_audit.py`) is anchored on one predicate — the
+   comparator's own `incoming_is_valid` gate (contract satisfied AND no
+   unverifiable profile claim) — and sorts every row into one category:
+
+   | Category | Guard | Action |
+   |----------|-------|--------|
+   | `canonical_trusted` | accepts | keep (the rows the precompute produces) |
+   | `canonical_retired` | accepts | keep (identity-verified; retired or weaker-than-v2) |
+   | `non_auth_valid` | accepts | keep (browser/JeffML, valid for its contract) |
+   | `legacy_valid` | accepts | keep (no profile claim; satisfied contract) |
+   | `legacy_invalid` | rejects | invalidate **only** under `--include-legacy-null` |
+   | `contaminated_profile_claim` | rejects | invalidate by default |
+
+   `contaminated_profile_claim` carries a non-null `analysis_profile_id` but
+   fails the guard (unverifiable stored identity, or evidence that fails its
+   declared contract). `legacy_invalid` is profile-less yet still guard-rejected
+   (null / unsatisfied evidence contract, including key-only placeholders) —
+   these are consumed without trust validation by the eval-delta fallback, so the
+   opt-in removes them.
+
+The repair tool defaults to a non-destructive **audit** (per-category counts +
+JSON report); `--apply` performs the bounded, separately-committed, resumable
+deletes; `--verify` exits non-zero if any invalidation-eligible row remains.
+Deployment and rollback steps are in `backend/scripts/REPAIR_ANALYSIS_CACHE.md`.
+
 ---
 
 ## 15. Local Fallback
@@ -2438,5 +2478,26 @@ snapshot and redirects to `/play`. **No conversion, rating, history entry, or ga
 are created.** Abandoned/failed drills stay hidden from `/api/session/:id/analysis`, history,
 and normal game analysis via the existing visibility guard. Persisting a drill review would
 require a dedicated drill-analysis endpoint (future work).
+
+**Returning to the drill (g-65ve).** The review surface has an explicit "Back to drill"
+control (in addition to the browser back button) that navigates to `/play` with a one-shot
+router marker `{ returnFromDrillAnalysis: { sourceSessionId } }`. The snapshot is
+identity-bound: it carries the exact `sourceSessionId` it was captured from, and the marker,
+snapshot, and retained game store must all reference that same session for a restore to occur.
+On mount, `/play` decides **synchronously** (no post-paint effect, so the new-game popup never
+flashes) whether this is a valid reviewed-return: the marker/snapshot/store session IDs match,
+`isGameActive === false`, `drillState === "abandoned"`, the opening key and move history are
+present, and the full restart settings (player color, engine Elo, strictness tier, exact
+`drillStrictnessCp`) are available. When valid, the retained board, moves, orientation, and
+settings are read straight from the game store and the original drill-stopped actions
+(`DrillStopActions` — the terminal-reason subtitle plus **Again**/settings/Analyze) are
+restored; the generic post-game "New game" banner is suppressed so no misleading "Drill
+abandoned" message appears. The board stays disabled behind the `isGameActive === false` gate.
+The marker is consumed via replace
+navigation but the reviewed presentation persists until an explicit transition clears it
+(successful drill/normal-game start, the gear opening the setup overlay, or a reset). Identity
+is never inferred from opening key, moves, or reusable settings, and the abandoned backend
+session is **never revived** — any mismatch or missing precondition falls back to ordinary
+`/play` initialization.
 
 DB reference: §7.3 (`game_sessions` drill columns)
