@@ -23,6 +23,11 @@ const mockRegisterPending = vi.fn()
 const mockResolvePending = vi.fn()
 const mockClearTree = vi.fn()
 const mockPendingRequestsRef = { current: new Map<string, string>() }
+// Mirror the real rejectPending: drop the pending entry so hasPendingForFen
+// frees up (Finding F3).
+const mockRejectPending = vi.fn((requestId: string) => {
+  mockPendingRequestsRef.current.delete(requestId)
+})
 
 let mockTree: VariationTree = createEmptyTree()
 let mockSelectedVarNodeId: string | null = null
@@ -39,6 +44,7 @@ vi.mock('../hooks/useVariationTree', () => ({
     getVarAnalysis: mockGetVarAnalysis,
     registerPending: mockRegisterPending,
     resolvePending: mockResolvePending,
+    rejectPending: mockRejectPending,
     clearTree: mockClearTree,
     pendingRequestsRef: mockPendingRequestsRef,
     varAnalysisCacheRef: { current: new Map() },
@@ -78,13 +84,19 @@ const {
   }
 })
 
+// Captures the onVariationError callback AnalysisBoard passes in, so a test can
+// drive the failure channel (Finding F3).
+let capturedOnVariationError: ((id: string) => void) | undefined
 vi.mock('../hooks/useMoveAnalysis', () => ({
-  useMoveAnalysis: () => ({
-    analyzeMove: mockAnalyzeMove,
-    analysisMap: new Map(),
-    lastAnalysis: null,
-    clearAnalysis: vi.fn(),
-  }),
+  useMoveAnalysis: (_store: unknown, onVariationError?: (id: string) => void) => {
+    capturedOnVariationError = onVariationError
+    return {
+      analyzeMove: mockAnalyzeMove,
+      analysisMap: new Map(),
+      lastAnalysis: null,
+      clearAnalysis: vi.fn(),
+    }
+  },
 }))
 
 vi.mock('../hooks/useStockfishEngine', () => ({
@@ -395,6 +407,34 @@ describe('AnalysisBoard — what-if graph', () => {
     // Only the selected ancestor is plotted — the deeper child is excluded
     expect(variationLine.points).toHaveLength(1)
     expect(variationLine.points[0].index).toBe(2)
+  })
+})
+
+describe('AnalysisBoard — variation failure channel (Finding F3)', () => {
+  // 17d. A scoped variation error calls onVariationError → rejectPending, after
+  // which hasPendingForFen(fen) is false and the FEN can be re-requested.
+  it('wires onVariationError to rejectPending so a failed FEN frees up', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    // A variation request is in flight for this FEN.
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+    mockPendingRequestsRef.current.set('req-var', fen)
+    const hasPendingForFen = () => {
+      for (const v of mockPendingRequestsRef.current.values()) {
+        if (v === fen) return true
+      }
+      return false
+    }
+    expect(hasPendingForFen()).toBe(true)
+
+    // useMoveAnalysis received the failure callback.
+    expect(capturedOnVariationError).toBeTypeOf('function')
+
+    // Simulate a scoped variation error firing the callback.
+    capturedOnVariationError?.('req-var')
+
+    expect(mockRejectPending).toHaveBeenCalledWith('req-var')
+    expect(hasPendingForFen()).toBe(false)
   })
 })
 

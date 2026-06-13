@@ -577,6 +577,59 @@ describe('useVariationTree', () => {
     })
   })
 
+  describe('rejectPending (Finding F3)', () => {
+    it('drops a pending entry and bumps the cache version so the FEN can be re-requested', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      act(() => {
+        result.current.registerPending('req-1', 'fen-A')
+      })
+
+      const hasPending = () => {
+        for (const v of result.current.pendingRequestsRef.current.values()) {
+          if (v === 'fen-A') return true
+        }
+        return false
+      }
+      expect(hasPending()).toBe(true)
+      const versionBefore = result.current.analysisCacheVersion
+
+      act(() => {
+        result.current.rejectPending('req-1')
+      })
+
+      expect(hasPending()).toBe(false)
+      expect(result.current.analysisCacheVersion).toBe(versionBefore + 1)
+
+      // The FEN can now be re-requested under a new request id.
+      act(() => {
+        result.current.registerPending('req-2', 'fen-A')
+      })
+      expect(hasPending()).toBe(true)
+    })
+
+    it('does not cache an analysis result (failure path only)', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      act(() => {
+        result.current.registerPending('req-1', 'fen-A')
+        result.current.rejectPending('req-1')
+      })
+
+      expect(result.current.getVarAnalysis('fen-A')).toBeUndefined()
+    })
+
+    it('ignores rejection of unknown request IDs without bumping the version', () => {
+      const { result } = renderHook(() => useVariationTree())
+
+      const versionBefore = result.current.analysisCacheVersion
+      act(() => {
+        result.current.rejectPending('unknown')
+      })
+      expect(result.current.analysisCacheVersion).toBe(versionBefore)
+    })
+  })
+
   describe('tree snapshot identity', () => {
     it('produces a new tree object identity after addMove', () => {
       const { result } = renderHook(() => useVariationTree())

@@ -243,7 +243,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     initialMoveIndex ?? null,
   );
   const [analysisStore] = useState(() => createAnalysisStore());
-  const { analyzeMove } = useMoveAnalysis(analysisStore);
+  // rejectPending comes from useVariationTree (declared below), but
+  // useMoveAnalysis needs the failure callback now. Bridge through a ref so the
+  // stable callback resolves the latest rejectPending at call time (Finding F3).
+  const rejectPendingRef = useRef<((id: string) => void) | null>(null);
+  const handleVariationError = useCallback((id: string) => {
+    rejectPendingRef.current?.(id);
+  }, []);
+  const { analyzeMove } = useMoveAnalysis(analysisStore, handleVariationError);
   const lastAnalysis = useStore(analysisStore, (s) => s.lastAnalysis);
   const variationStreamingEval = useStore(
     analysisStore,
@@ -284,8 +291,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     analysisCacheVersion,
     registerPending,
     resolvePending,
+    rejectPending,
     pendingRequestsRef,
   } = useVariationTree();
+  useEffect(() => {
+    rejectPendingRef.current = rejectPending;
+  }, [rejectPending]);
 
   const isInVariation = selectedVarNodeId != null;
   const selectedVarNode = useMemo(() => {

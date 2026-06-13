@@ -143,7 +143,14 @@ const fromCachedAnalysis = (
   }
 }
 
-export const useMoveAnalysis = (store: AnalysisStore) => {
+export const useMoveAnalysis = (
+  store: AnalysisStore,
+  onVariationError?: (id: string) => void,
+) => {
+  // Held in a ref so the worker effect / clearAnalysis can call the latest
+  // callback without re-subscribing the worker or recreating clearAnalysis.
+  const onVariationErrorRef = useRef(onVariationError)
+  onVariationErrorRef.current = onVariationError
   const workerRef = useRef<Worker | null>(null)
   // Maps request IDs to move indices so we can file results into analysisMap
   const pendingMoveIndices = useRef<Map<string, number>>(new Map())
@@ -261,6 +268,10 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       cancelWorkerRequest(requestId)
       store.getState().setVariationStreamingEval(null)
       clearActiveAnalysisStateIfCurrent(requestId)
+      // Free the variation tree's pending entry so the timed-out FEN can be
+      // re-requested (Finding F3); otherwise it stays stranded like a scoped
+      // error would.
+      onVariationErrorRef.current?.(requestId)
     },
     [store, clearVariationTimer, cancelWorkerRequest, clearActiveAnalysisStateIfCurrent],
   )
@@ -582,6 +593,9 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
               pendingVariationPlies.current.delete(message.id)
               s.setVariationStreamingEval(null)
               clearActiveAnalysisStateIfCurrent(message.id)
+              // Free the variation tree's pending entry so this FEN can be
+              // re-requested (Finding F3); otherwise it stays stranded forever.
+              onVariationErrorRef.current?.(message.id)
               break
             }
             // Scoped indexed error.
@@ -610,6 +624,11 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
           s.setVariationStreamingEval(null)
           lastStreamingUpdateMs.current = 0
           currentAnalyzingRequestId.current = null
+          // Free every still-pending variation entry before clearing so their
+          // FENs can be re-requested after recovery (Finding F3).
+          for (const requestId of pendingVariationPlies.current.keys()) {
+            onVariationErrorRef.current?.(requestId)
+          }
           pendingVariationPlies.current.clear()
           clearAllVariationTimers()
           clearResolutionState()
@@ -642,6 +661,10 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       s.setVariationStreamingEval(null)
       lastStreamingUpdateMs.current = 0
       currentAnalyzingRequestId.current = null
+      // Free every still-pending variation entry before clearing (Finding F3).
+      for (const requestId of pendingVariationPlies.current.keys()) {
+        onVariationErrorRef.current?.(requestId)
+      }
       pendingVariationPlies.current.clear()
       clearAllVariationTimers()
       clearResolutionState()
@@ -664,6 +687,12 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
       // Invalidate any in-flight async cache callbacks so they cannot mutate
       // the store after unmount (Finding 5), and clear timers.
       mountToken.current++
+      // Free every still-pending variation entry so a remount can re-request
+      // those FENs (Finding F3).
+      for (const requestId of pendingVariationPlies.current.keys()) {
+        onVariationErrorRef.current?.(requestId)
+      }
+      pendingVariationPlies.current.clear()
       for (const entry of resolutionState.current.values()) {
         if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
@@ -762,6 +791,9 @@ export const useMoveAnalysis = (store: AnalysisStore) => {
     }
     for (const requestId of pendingVariationPlies.current.keys()) {
       cancelWorkerRequest(requestId)
+      // Free the variation tree's pending entry so the FEN can be re-requested
+      // after the clear (Finding F3).
+      onVariationErrorRef.current?.(requestId)
     }
     pendingMoveIndices.current.clear()
     pendingMeta.current.clear()

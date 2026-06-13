@@ -297,6 +297,107 @@ describe('useMoveAnalysis', () => {
     expect(store.getState().variationStreamingEval).toBeNull()
   })
 
+  it('invokes onVariationError on a scoped variation error (Finding F3)', () => {
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      simulateMessage({ type: 'error', id, error: 'Variation search failed' })
+    })
+
+    expect(onVariationError).toHaveBeenCalledTimes(1)
+    expect(onVariationError).toHaveBeenCalledWith(id)
+    // Scoped error must not flip global status.
+    expect(store.getState().status).not.toBe('error')
+  })
+
+  it('invokes onVariationError for every pending variation on fatal teardown (Finding F3)', () => {
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+    const fenA = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+    const fenB = 'rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fenA, 'e7e5', 'white', undefined, undefined, 2, fenA)
+      result.current.analyzeMove(fenB, 'd7d5', 'white', undefined, undefined, 2, fenB)
+    })
+    const idA = postMessageMock.mock.calls[0][0].id
+    const idB = postMessageMock.mock.calls[1][0].id
+
+    act(() => {
+      simulateMessage({ type: 'error', error: 'Engine crashed' })
+    })
+
+    expect(onVariationError).toHaveBeenCalledWith(idA)
+    expect(onVariationError).toHaveBeenCalledWith(idB)
+    expect(onVariationError).toHaveBeenCalledTimes(2)
+  })
+
+  it('invokes onVariationError for pending variations on clearAnalysis (Finding F3)', () => {
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => {
+      result.current.clearAnalysis()
+    })
+
+    expect(onVariationError).toHaveBeenCalledTimes(1)
+    expect(onVariationError).toHaveBeenCalledWith(id)
+  })
+
+  it('invokes onVariationError for pending variations on unmount (Finding F3)', () => {
+    const onVariationError = vi.fn()
+    const { result, unmount } = renderHook(() => useMoveAnalysis(store, onVariationError))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    unmount()
+
+    expect(onVariationError).toHaveBeenCalledTimes(1)
+    expect(onVariationError).toHaveBeenCalledWith(id)
+  })
+
+  it('invokes onVariationError when a variation request times out (Finding F3)', () => {
+    vi.useFakeTimers()
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    // Fire the per-variation no-hang deadline (ANALYSIS_TOTAL_DEADLINE_MS).
+    act(() => {
+      vi.advanceTimersByTime(8000)
+    })
+
+    expect(onVariationError).toHaveBeenCalledTimes(1)
+    expect(onVariationError).toHaveBeenCalledWith(id)
+  })
+
   it('does not post to worker when status is error', () => {
     const { result } = renderHook(() => useMoveAnalysis(store))
 

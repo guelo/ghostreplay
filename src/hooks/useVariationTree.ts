@@ -205,6 +205,18 @@ export const useVariationTree = () => {
     }
   }, [])
 
+  /**
+   * Reject a pending variation request: drop its entry from pendingRequestsRef
+   * and bump the cache version so hasPendingForFen re-evaluates and the FEN can
+   * be re-requested. Used when a variation analysis fails or is torn down
+   * (Finding F3) — without this the stranded entry blocks retrying that FEN.
+   */
+  const rejectPending = useCallback((requestId: string) => {
+    if (pendingRequestsRef.current.delete(requestId)) {
+      setAnalysisCacheVersion(v => v + 1)
+    }
+  }, [])
+
   const getVarAnalysis = useCallback((fen: string): AnalysisResult | undefined => {
     return varAnalysisCacheRef.current.get(fen)
   }, [])
@@ -230,6 +242,7 @@ export const useVariationTree = () => {
     analysisCacheVersion,
     registerPending,
     resolvePending,
+    rejectPending,
     clearTree,
     // Expose refs for direct access in effects
     varAnalysisCacheRef,
