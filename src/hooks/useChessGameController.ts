@@ -27,6 +27,9 @@ export type PendingSrsReview = {
   moveIndex: number;
   userMoveSan: string;
   srs: TargetBlunderSrs | null;
+  /** Stable logical-review id, minted at registration and preserved across
+   *  request-id retries (forward-prep for g-hpw4; no backend change here). */
+  srsDecisionId: string;
 };
 
 export type PlayerMoveApplyResult =
@@ -57,8 +60,10 @@ type UseChessGameControllerOptions = {
   blunderReviewId: number | null;
   blunderReviewSrs: TargetBlunderSrs | null;
   blunderTargetFen: string | null;
-  pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
+  pendingAnalysisContextRef: MutableRefObject<Map<string, PendingAnalysisContext>>;
   pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
+  /** Coordinator-facing skip emission for synthetic (worker-unavailable) ids. */
+  markSkipped: (moveIndex: number, requestId: string) => void;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setBlunderReviewId: Dispatch<SetStateAction<number | null>>;
@@ -92,6 +97,7 @@ export const useChessGameController = ({
   blunderTargetFen,
   pendingAnalysisContextRef,
   pendingSrsReviewRef,
+  markSkipped,
   setEngineMessage,
   setBlunderAlert,
   setBlunderReviewId,
@@ -122,6 +128,11 @@ export const useChessGameController = ({
         decisionSource?: SessionDecisionSource;
         targetBlunderId?: number | null;
       },
+      // Player moves register a BlunderContext keyed by the request id so the
+      // outcome-channel recording frontier can pair the resolved analysis with
+      // its own move (H2). Opponent moves skip this but still emit `skipped`
+      // below if analysis could not be scheduled.
+      registerBlunderContext = false,
     ) => {
       playMoveSound(Boolean(appliedMove.captured));
 
@@ -142,14 +153,33 @@ export const useChessGameController = ({
       store.setMoveHistory(nextMoveHistory);
       store.setViewIndex(null);
 
-      const analysisId =
-        analyzeMove(
-          fenBeforeMove,
-          uciMove,
-          analysisColor,
+      const scheduledId = analyzeMove(
+        fenBeforeMove,
+        uciMove,
+        analysisColor,
+        moveIndex,
+        legalMoveCount,
+      );
+      const analysisId = scheduledId ?? `analysis-${moveIndex}-${uciMove}`;
+
+      // K3: write context BEFORE the synchronous markSkipped so the consumer's
+      // frontier slot is created with a consistent moveIndex/context.
+      if (registerBlunderContext) {
+        pendingAnalysisContextRef.current.set(analysisId, {
+          fen: fenBeforeMove,
+          pgn: chess.pgn(),
+          moveSan: appliedMove.san,
+          moveUci: uciMove,
           moveIndex,
-          legalMoveCount,
-        ) ?? `analysis-${moveIndex}-${uciMove}`;
+        });
+      }
+
+      // analyzeMove returned undefined (worker unavailable → synthetic id): no
+      // real outcome will ever fire for this index, so emit the sole `skipped`
+      // terminal to unblock the recording frontier.
+      if (scheduledId === undefined) {
+        markSkipped(moveIndex, analysisId);
+      }
 
       return {
         analysisId,
@@ -160,7 +190,7 @@ export const useChessGameController = ({
         uciHistory: nextMoveHistory.map((m) => m.uci),
       };
     },
-    [analyzeMove, chess],
+    [analyzeMove, chess, markSkipped, pendingAnalysisContextRef],
   );
 
   const applyPlayerMove = useCallback(
@@ -212,6 +242,8 @@ export const useChessGameController = ({
         fenBeforeMove,
         legalMoveCount,
         playerColor,
+        undefined,
+        true,
       );
 
       if (isTargetedReviewMove) {
@@ -225,6 +257,7 @@ export const useChessGameController = ({
             moveIndex: committed.moveIndex,
             userMoveSan: committed.moveSan,
             srs: blunderReviewSrs,
+            srsDecisionId: crypto.randomUUID(),
           });
           setResolvedReview({
             analysisId: committed.analysisId,
@@ -233,14 +266,6 @@ export const useChessGameController = ({
           });
         }
       }
-
-      pendingAnalysisContextRef.current = {
-        fen: fenBeforeMove,
-        pgn: chess.pgn(),
-        moveSan: committed.moveSan,
-        moveUci: committed.uciMove,
-        moveIndex: committed.moveIndex,
-      };
 
       return {
         applied: true,
@@ -261,7 +286,6 @@ export const useChessGameController = ({
       clearMoveHighlights,
       clearReviewTarget,
       commitAppliedMove,
-      pendingAnalysisContextRef,
       pendingSrsReviewRef,
       resolvedReview,
       setBlunderAlert,

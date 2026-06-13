@@ -1049,4 +1049,123 @@ describe('GameAnalysisCoordinator', () => {
       expect((coordinator as any).resolutionState.size).toBe(0)
     })
   })
+
+  // ---------------------------------------------------------------
+  // g-hpw4: typed AnalysisOutcome channel
+  // ---------------------------------------------------------------
+  describe('AnalysisOutcome channel', () => {
+    const collect = () => {
+      const outcomes: any[] = []
+      const unsub = coordinator.addAnalysisOutcomeListener((o) => outcomes.push(o))
+      return { outcomes, unsub }
+    }
+
+    it('emits scheduled on analyzeMove and resolved on a trusted cache hit', async () => {
+      coordinator.startSession('s')
+      const { outcomes } = collect()
+
+      lookupAnalysisCacheMock.mockResolvedValueOnce(
+        new Map([
+          ['fen-0::e2e4', {
+            best_move_uci: 'd2d4', best_line_uci: ['d2d4', 'g8f6'], best_eval: 50,
+            played_eval: -150, played_eval_mate: null, eval_delta: 200,
+            classification: 'blunder', analysis_profile_id: 'p1',
+            trusted_for_resolution: true,
+          }],
+        ]),
+      )
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      const scheduled = outcomes.find((o) => o.status === 'scheduled')
+      const resolved = outcomes.find((o) => o.status === 'resolved')
+      expect(scheduled).toMatchObject({ moveIndex: 0, requestId: id, generation: expect.any(Number) })
+      expect(resolved).toMatchObject({ moveIndex: 0, requestId: id, status: 'resolved' })
+      expect(resolved.result.delta).toBe(200)
+    })
+
+    it('emits failed for each unresolved index on restart, preserving lineage', () => {
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const { outcomes } = collect()
+      coordinator.restartAnalysisWorker()
+      const failed = outcomes.find((o) => o.status === 'failed')
+      expect(failed).toMatchObject({ moveIndex: 0, requestId: id, status: 'failed' })
+      // Lineage preserved across same-generation cleanup → next schedule carries it.
+      const { outcomes: o2 } = collect()
+      const id2 = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const scheduled = o2.find((o) => o.status === 'scheduled')
+      expect(scheduled).toMatchObject({ requestId: id2, previousRequestId: id })
+    })
+
+    it('markSkipped emits exactly one skipped outcome per requestId', () => {
+      coordinator.startSession('s')
+      const { outcomes } = collect()
+      coordinator.markSkipped(3, 'synthetic-3')
+      coordinator.markSkipped(3, 'synthetic-3')
+      const skipped = outcomes.filter((o) => o.status === 'skipped')
+      expect(skipped).toHaveLength(1)
+      expect(skipped[0]).toMatchObject({ moveIndex: 3, requestId: 'synthetic-3' })
+    })
+
+    it('re-emits skipped for a replayed synthetic id after pruneFromMoveIndex (P2)', () => {
+      coordinator.startSession('s')
+      const { outcomes } = collect()
+      // First skip of the deterministic synthetic id for index 2.
+      coordinator.markSkipped(2, 'analysis-2-g1f3')
+      // Revert prunes index 2 (and clears its skipped-dedup guard).
+      coordinator.pruneFromMoveIndex(2)
+      // Replaying the same move yields the same synthetic id — it must skip again.
+      coordinator.markSkipped(2, 'analysis-2-g1f3')
+      const skipped = outcomes.filter((o) => o.status === 'skipped')
+      expect(skipped).toHaveLength(2)
+    })
+
+    it('re-emits skipped for a replayed synthetic id after skip -> scheduled -> prune (P2)', () => {
+      coordinator.startSession('s')
+      const { outcomes } = collect()
+      // skip (synthetic) -> retry scheduled (real id overwrites lineage) -> prune.
+      coordinator.markSkipped(2, 'analysis-2-g1f3')
+      coordinator.analyzeMove('fen-2', 'g1f3', 'white', 2, 20)
+      coordinator.pruneFromMoveIndex(2)
+      // Replaying the original synthetic id must still skip (not be suppressed).
+      coordinator.markSkipped(2, 'analysis-2-g1f3')
+      const skipped = outcomes.filter((o) => o.status === 'skipped')
+      expect(skipped).toHaveLength(2)
+    })
+
+    it('startSession emits a full reset (no fromMoveIndex) with the new epoch', () => {
+      coordinator.startSession('s1')
+      const resets: any[] = []
+      coordinator.addAnalysisResetListener((i) => resets.push(i))
+      const before = coordinator.getEpoch().generation
+      coordinator.startSession('s2')
+      expect(resets).toHaveLength(1)
+      expect(resets[0].fromMoveIndex).toBeUndefined()
+      expect(resets[0].generation).toBe(before + 1)
+    })
+
+    it('pruneFromMoveIndex tombstones pruned ids and emits a partial reset', () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const id1 = coordinator.analyzeMove('fen-1', 'e7e5', 'black', 1, 20)
+      const resets: any[] = []
+      coordinator.addAnalysisResetListener((i) => resets.push(i))
+
+      coordinator.pruneFromMoveIndex(1)
+
+      expect(resets).toEqual([expect.objectContaining({ fromMoveIndex: 1 })])
+      // A queued worker result for the pruned id is dropped (tombstone), not
+      // treated as non-indexed (no lastAnalysis mutation).
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id: id1, move: 'e7e5', bestMove: 'd2d4',
+          bestLine: null, bestEval: 0, playedEval: 0, playedEvalMate: null,
+          delta: 0, classification: 'good',
+        },
+      })
+      expect(coordinator.store.getState().lastAnalysis).toBeNull()
+    })
+  })
 })

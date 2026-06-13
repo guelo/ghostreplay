@@ -52,9 +52,10 @@ const createSetup = ({
     moveHistory: [...moveHistory],
   });
 
-  const pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null> = {
-    current: null,
+  const pendingAnalysisContextRef: MutableRefObject<Map<string, PendingAnalysisContext>> = {
+    current: new Map(),
   };
+  const markSkipped = vi.fn();
   const setEngineMessage = vi.fn();
   const setBlunderAlert = vi.fn();
   const setBlunderReviewId = vi.fn();
@@ -75,6 +76,7 @@ const createSetup = ({
       blunderTargetFen,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
+      markSkipped,
       setEngineMessage,
       setBlunderAlert,
       setBlunderReviewId,
@@ -95,6 +97,7 @@ const createSetup = ({
     chess,
     pendingAnalysisContextRef,
     pendingSrsReviewRef,
+    markSkipped,
     setEngineMessage,
     setBlunderAlert,
     setBlunderReviewId,
@@ -121,6 +124,7 @@ describe("useChessGameController", () => {
       chess,
       pendingAnalysisContextRef,
       analyzeMove,
+      markSkipped,
       clearMoveHighlights,
       setBlunderAlert,
     } = createSetup();
@@ -150,7 +154,12 @@ describe("useChessGameController", () => {
       0,
       20,
     );
-    expect(pendingAnalysisContextRef.current?.moveUci).toBe("e2e4");
+    const contexts = [...pendingAnalysisContextRef.current.values()];
+    expect(contexts).toHaveLength(1);
+    expect(contexts[0]?.moveUci).toBe("e2e4");
+    // analyzeMove returned undefined (mock) → synthetic id → markSkipped emitted
+    // after the context was registered (K3).
+    expect(markSkipped).toHaveBeenCalledWith(0, "analysis-0-e2e4");
   });
 
   it("captures pending SRS review metadata for targeted player moves", () => {
@@ -183,6 +192,7 @@ describe("useChessGameController", () => {
       moveIndex: 0,
       userMoveSan: "e4",
       srs: null,
+      srsDecisionId: expect.any(String),
     }]);
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);

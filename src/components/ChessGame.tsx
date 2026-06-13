@@ -138,6 +138,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Imperative-only — ChessGame does NOT subscribe to analysis state.
   // Analysis is delegated to the coordinator which survives route navigation.
+  const markSkipped = useCallback(
+    (moveIndex: number, requestId: string) =>
+      coordinator.markSkipped(moveIndex, requestId),
+    [coordinator],
+  );
   const analyzeMove = useCallback(
     (fen: string, move: string, playerColor: 'white' | 'black', moveIndex?: number, legalMoveCount?: number) =>
       coordinator.analyzeMove(fen, move, playerColor, moveIndex, legalMoveCount),
@@ -256,14 +261,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Blunder tracking: only record the first blunder per session
   const blunderRecordedRef = useRef(false);
-  // Store context for the pending move analysis (FEN before move, PGN after move)
-  const pendingAnalysisContextRef = useRef<{
+  // Per-request BlunderContext map keyed by analysis requestId (g-hpw4 H2), so
+  // the outcome-channel recording frontier pairs each resolved analysis with its
+  // own move's context even under out-of-order/batched resolution.
+  const pendingAnalysisContextRef = useRef<Map<string, {
     fen: string;
     pgn: string;
     moveSan: string;
     moveUci: string;
     moveIndex: number;
-  } | null>(null);
+  }>>(new Map());
   const pendingSrsReviewRef = useRef<Map<string, {
     sessionId: string;
     analysisId: string;
@@ -271,6 +278,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveIndex: number;
     userMoveSan: string;
     srs: TargetBlunderSrs | null;
+    srsDecisionId: string;
   }>>(new Map());
   const openingLookupRequestIdRef = useRef(0);
   // Index 0 = starting position (before any move), index N = after move N
@@ -498,6 +506,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       blunderTargetFen,
       pendingAnalysisContextRef,
       pendingSrsReviewRef,
+      markSkipped,
       setEngineMessage,
       setBlunderAlert,
       setBlunderReviewId,
@@ -1886,6 +1895,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           setShowFlash={setShowFlash}
           setResolvedReview={setResolvedReview}
           onSrsFail={triggerSrsFailSpotlight}
+          coordinator={coordinator}
         />
       </section>
     </AnalysisStoreProvider>

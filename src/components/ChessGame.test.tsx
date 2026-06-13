@@ -72,9 +72,7 @@ import { gameAnalysisStore } from "../stores/createAnalysisStore";
 import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
 
 const mockAnalyzeMove = vi.fn();
-let capturedAnalysisResolvedListener:
-  | ((moveIndex: number, result: AnalysisResult) => void)
-  | null = null;
+let capturedOutcomeListener: ((o: unknown) => void) | null = null;
 
 const mockCoordinator = {
   analyzeMove: mockAnalyzeMove,
@@ -92,21 +90,71 @@ const mockCoordinator = {
   stopSessionUploads: vi.fn(),
   sessionId: null,
   store: gameAnalysisStore,
-  addAnalysisResolvedListener: vi.fn(
-    (listener: (moveIndex: number, result: AnalysisResult) => void) => {
-      capturedAnalysisResolvedListener = listener;
-      return () => {
-        if (capturedAnalysisResolvedListener === listener) {
-          capturedAnalysisResolvedListener = null;
-        }
-      };
-    },
-  ),
+  markSkipped: vi.fn(),
+  pruneFromMoveIndex: vi.fn(),
+  getEpoch: vi.fn(() => ({ generation: 0, sessionId: null })),
+  addAnalysisResetListener: vi.fn(() => () => {}),
+  addAnalysisOutcomeListener: vi.fn((listener: (o: unknown) => void) => {
+    capturedOutcomeListener = listener;
+    return () => {
+      if (capturedOutcomeListener === listener) {
+        capturedOutcomeListener = null;
+      }
+    };
+  }),
 };
 
 vi.mock("../contexts/useGameAnalysisCoordinator", () => ({
   useGameAnalysisCoordinator: () => mockCoordinator,
 }));
+
+// Production resolveAnalysisResult both writes the store AND emits a `resolved`
+// outcome. These integration tests simulate resolution by writing the store
+// directly, so bridge store writes into the mock's outcome channel (keyed by the
+// controller's synthetic requestId so the BlunderContext lookup matches), and
+// drain earlier indices as `skipped` to advance the recording frontier.
+let bridgeLastEmittedIndex = -1;
+const bridgeEmittedIndices = new Set<number>();
+gameAnalysisStore.subscribe((state, prev) => {
+  if (state.lastAnalysis === prev.lastAnalysis) return;
+  const r = state.lastAnalysis;
+  if (!r || r.moveIndex === null || !capturedOutcomeListener) return;
+  const moveIndex = r.moveIndex;
+  // Defer so the controller's post-analyzeMove context registration runs first
+  // (the mock resolves synchronously inside analyzeMove).
+  queueMicrotask(() => {
+    const listener = capturedOutcomeListener;
+    if (!listener) return;
+    if (bridgeEmittedIndices.has(moveIndex)) return;
+    bridgeEmittedIndices.add(moveIndex);
+    const moveHistory = useGameStore.getState().moveHistory;
+    // Mirror the controller's key: `analyzeMove() ?? synthetic`. Find the id the
+    // analyzeMove mock returned for this index; fall back to the synthetic id.
+    let returned: string | undefined;
+    const calls = mockAnalyzeMove.mock.calls;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i][3] === moveIndex) {
+        returned = mockAnalyzeMove.mock.results[i]?.value as string | undefined;
+        break;
+      }
+    }
+    const uci = moveHistory[moveIndex]?.uci;
+    const requestId =
+      returned ?? (uci ? `analysis-${moveIndex}-${uci}` : r.id);
+    for (let i = bridgeLastEmittedIndex + 1; i < moveIndex; i++) {
+      listener({
+        seq: 0, generation: 0, sessionId: null,
+        moveIndex: i, requestId: `auto-${i}`, status: "skipped",
+      });
+    }
+    listener({
+      seq: 0, generation: 0, sessionId: null,
+      moveIndex, requestId, status: "resolved",
+      result: { ...r, id: requestId },
+    });
+    bridgeLastEmittedIndex = Math.max(bridgeLastEmittedIndex, moveIndex);
+  });
+});
 
 // Capture onPieceDrop from the Chessboard mock so tests can simulate moves
 let capturedPieceDrop:
@@ -138,8 +186,10 @@ beforeEach(() => {
   // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
   // overlay prefill reads it (e.g. the remount engine-ELO persistence test).
   localStorage.clear();
-  capturedAnalysisResolvedListener = null;
-  mockCoordinator.addAnalysisResolvedListener.mockClear();
+  capturedOutcomeListener = null;
+  bridgeLastEmittedIndex = -1;
+  bridgeEmittedIndices.clear();
+  mockCoordinator.addAnalysisOutcomeListener.mockClear();
   gameAnalysisStore.getState().clearAll();
   gameAnalysisStore.getState().setStatus("ready");
   class MockAudio {
@@ -3305,23 +3355,33 @@ describe("ChessGame blunder board rewind", () => {
     };
   };
 
-  const resolveMoveTwoAsBlunder = () => {
-    act(() => {
-      gameAnalysisStore.getState().resolveAnalysis(2, {
-        id: "rewind-blunder",
-        move: "g1f3",
-        bestMove: "d2d4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        playedEvalMate: null,
-        currentPositionEvalMate: null,
-        moveIndex: 2,
-        delta: 200,
-        classification: "blunder" as const,
-        blunder: true,
-        recordable: true,
+  const resolveMoveTwoAsBlunder = async () => {
+    const result = {
+      id: "analysis-2-g1f3",
+      move: "g1f3",
+      bestMove: "d2d4",
+      bestEval: 50,
+      playedEval: -150,
+      currentPositionEval: -150,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 2,
+      delta: 200,
+      classification: "blunder" as const,
+      blunder: true,
+      recordable: true,
+    };
+    // Drive the blunder alert through the outcome channel and flush the
+    // consumer's coalescing microtask so the board-wash fires before assertions.
+    // Dedup so the deferred bridge does not re-fire index 2.
+    await act(async () => {
+      gameAnalysisStore.getState().resolveAnalysis(2, result);
+      bridgeEmittedIndices.add(2);
+      capturedOutcomeListener?.({
+        seq: 0, generation: 0, sessionId: null,
+        moveIndex: 2, requestId: result.id, status: "resolved", result,
       });
+      await Promise.resolve();
     });
   };
 
@@ -3356,7 +3416,7 @@ describe("ChessGame blunder board rewind", () => {
       await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    resolveMoveTwoAsBlunder();
+    await resolveMoveTwoAsBlunder();
 
     expect(useGameStore.getState().viewIndex).toBe(3);
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
@@ -3414,7 +3474,7 @@ describe("ChessGame blunder board rewind", () => {
     expect(liveFenAfterReply).not.toBe(sourceFenBeforeBlunder);
 
     vi.useFakeTimers();
-    resolveMoveTwoAsBlunder();
+    await resolveMoveTwoAsBlunder();
 
     act(() => {
       vi.advanceTimersByTime(365);
@@ -3431,7 +3491,7 @@ describe("ChessGame blunder board rewind", () => {
     const { sourceFenBeforeBlunder } = await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    resolveMoveTwoAsBlunder();
+    await resolveMoveTwoAsBlunder();
 
     act(() => {
       vi.advanceTimersByTime(365);
@@ -3459,7 +3519,7 @@ describe("ChessGame blunder board rewind", () => {
     await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    resolveMoveTwoAsBlunder();
+    await resolveMoveTwoAsBlunder();
 
     fireEvent.click(screen.getByRole("button", { name: /reset game/i }));
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
@@ -3482,7 +3542,7 @@ describe("ChessGame blunder board rewind", () => {
       await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
-    resolveMoveTwoAsBlunder();
+    await resolveMoveTwoAsBlunder();
 
     act(() => {
       vi.advanceTimersByTime(365);

@@ -45,6 +45,8 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
     stopSessionUploads: vi.fn(),
     analyzeMove: vi.fn(),
     clearAnalysis: vi.fn(),
+    pruneFromMoveIndex: vi.fn(),
+    markSkipped: vi.fn(),
     sessionId: null,
     store: { getState: vi.fn().mockReturnValue({ analysisMap: new Map() }) },
   }) as unknown as GameAnalysisCoordinator;
@@ -66,6 +68,7 @@ type SetupOptions = {
     moveIndex: number;
     userMoveSan: string;
     srs: null;
+    srsDecisionId: string;
   }]>;
 };
 
@@ -99,13 +102,13 @@ const setup = ({
   const coordinator = createMockCoordinator();
   const openingHistoryRef: MutableRefObject<Array<null>> = { current: [] };
   const blunderRecordedRef: MutableRefObject<boolean> = { current: false };
-  const pendingAnalysisContextRef: MutableRefObject<{
+  const pendingAnalysisContextRef: MutableRefObject<Map<string, {
     fen: string;
     pgn: string;
     moveSan: string;
     moveUci: string;
     moveIndex: number;
-  } | null> = { current: null };
+  }>> = { current: new Map() };
   const pendingSrsReviewRef: MutableRefObject<Map<string, {
     sessionId: string;
     analysisId: string;
@@ -113,6 +116,7 @@ const setup = ({
     moveIndex: number;
     userMoveSan: string;
     srs: null;
+    srsDecisionId: string;
   }>> = { current: new Map(pendingSrsEntries) };
 
   const clearMoveHighlights = vi.fn();
@@ -330,7 +334,7 @@ describe("useChessGameLifecycle", () => {
       { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
     ];
 
-    const { result, pendingSrsReviewRef } = setup({
+    const { result, pendingSrsReviewRef, coordinator } = setup({
       chess,
       moveHistory,
       isGameActive: true,
@@ -346,6 +350,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 0,
             userMoveSan: "e4",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
         [
@@ -357,6 +362,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 2,
             userMoveSan: "Nf3",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
       ],
@@ -372,6 +378,8 @@ describe("useChessGameLifecycle", () => {
     expect(Array.from(pendingSrsReviewRef.current.keys())).toEqual([
       "kept-analysis",
     ]);
+    // M1: revert synchronously prunes coordinator-owned state from the new length.
+    expect(coordinator.pruneFromMoveIndex).toHaveBeenCalledWith(2);
   });
 
   it("prunes pending SRS reviews before rated revert network calls resolve", async () => {
@@ -409,6 +417,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 0,
             userMoveSan: "e4",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
         [
@@ -420,6 +429,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 2,
             userMoveSan: "Nf3",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
       ],
@@ -492,6 +502,7 @@ describe("useChessGameLifecycle", () => {
               moveIndex: 2,
               userMoveSan: "Nf3",
               srs: null,
+              srsDecisionId: "decision",
             },
           ],
         ],
@@ -914,6 +925,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 0,
             userMoveSan: "e4",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
       ],
@@ -947,6 +959,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 0,
             userMoveSan: "e4",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
       ],
@@ -988,6 +1001,7 @@ describe("useChessGameLifecycle", () => {
             moveIndex: 0,
             userMoveSan: "e4",
             srs: null,
+            srsDecisionId: "decision",
           },
         ],
       ],

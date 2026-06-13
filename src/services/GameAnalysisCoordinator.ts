@@ -98,6 +98,48 @@ type ResolutionEntry = {
   cacheTimer?: ReturnType<typeof setTimeout>
 }
 
+/**
+ * Typed outcome channel (g-hpw4). Every analysis index reaches exactly one
+ * terminal outcome (`resolved | failed | skipped`); `scheduled` is the
+ * non-terminal (re)open used for supersession/retry. Consumed by AnalysisEffects
+ * for exactly-once, context-correct recording / SRS / blunder-alert.
+ */
+export type AnalysisOutcomeStatus = 'scheduled' | 'resolved' | 'failed' | 'skipped'
+
+export type AnalysisOutcome = {
+  /** Monotonic journal sequence (forward-compat for g-hpw4 replay; undrained here). */
+  seq: number
+  /** sessionGeneration at emit time — consumers drop stale-generation outcomes. */
+  generation: number
+  /** activeSessionId at emit time. */
+  sessionId: string | null
+  moveIndex: number
+  requestId: string
+  status: AnalysisOutcomeStatus
+  /** Present on a `scheduled` that supersedes a prior request for this index. */
+  previousRequestId?: string
+  /** Present iff status === 'resolved'. */
+  result?: AnalysisResult
+}
+
+/**
+ * Narrow read interface the React consumer (AnalysisEffects) depends on. Lets
+ * tests substitute a controllable channel without the full coordinator.
+ */
+export type AnalysisResetInfo = {
+  generation: number
+  sessionId: string | null
+  /** Present on a revert prune: only indices >= this are reset (M1). Absent on a
+   *  full session-change reset. */
+  fromMoveIndex?: number
+}
+
+export interface AnalysisOutcomeSource {
+  getEpoch(): { generation: number; sessionId: string | null }
+  addAnalysisOutcomeListener(cb: (o: AnalysisOutcome) => void): () => void
+  addAnalysisResetListener(cb: (info: AnalysisResetInfo) => void): () => void
+}
+
 const makeCacheKey = (fen: string, moveUci: string) => `${fen}::${moveUci}`
 
 // Callers pass the MOVER's color (the side that played the analyzed move), so
@@ -208,8 +250,18 @@ export class GameAnalysisCoordinator {
   // Idle shutdown
   private idleTimer: ReturnType<typeof setTimeout> | null = null
 
-  // Listeners for analysis resolution (used by AnalysisEffects etc.)
-  private analysisResolvedListeners = new Set<(moveIndex: number, result: AnalysisResult) => void>()
+  // Outcome channel (g-hpw4) — the single fan-out for recording/SRS/alert.
+  private analysisOutcomeListeners = new Set<(o: AnalysisOutcome) => void>()
+  private analysisResetListeners = new Set<(info: AnalysisResetInfo) => void>()
+  private outcomeSeq = 0
+  /** Single source of `previousRequestId` for supersession/retry lineage (L3).
+   *  Preserved across same-generation failed cleanup; cleared on reset/prune. */
+  private lastRequestIdByMoveIndex = new Map<number, string>()
+  /** Synthetic/skipped request ids already emitted, to guard double emission (K3). */
+  private skippedRequestIds = new Set<string>()
+  /** Pruned (reverted) request ids the live worker may still message about (N1).
+   *  Worker handlers drop these FIRST; cleared on worker replacement. */
+  private discardedRequestIds = new Set<string>()
   private analysisWaiters = new Map<number, Set<AnalysisWaiter>>()
 
   get store() {
@@ -220,10 +272,126 @@ export class GameAnalysisCoordinator {
     return this.activeSessionId
   }
 
-  addAnalysisResolvedListener(cb: (moveIndex: number, result: AnalysisResult) => void) {
-    this.analysisResolvedListeners.add(cb)
+  /** Synchronous epoch snapshot so a freshly-mounted consumer can validate its
+   *  very first outcome by generation without waiting for a reset (M3). */
+  getEpoch(): { generation: number; sessionId: string | null } {
+    return { generation: this.sessionGeneration, sessionId: this.activeSessionId }
+  }
+
+  addAnalysisOutcomeListener(cb: (o: AnalysisOutcome) => void) {
+    this.analysisOutcomeListeners.add(cb)
     return () => {
-      this.analysisResolvedListeners.delete(cb)
+      this.analysisOutcomeListeners.delete(cb)
+    }
+  }
+
+  addAnalysisResetListener(cb: (info: AnalysisResetInfo) => void) {
+    this.analysisResetListeners.add(cb)
+    return () => {
+      this.analysisResetListeners.delete(cb)
+    }
+  }
+
+  /** Single fan-out point, stamping current generation/sessionId (+ seq). */
+  private emitOutcome(
+    o: Omit<AnalysisOutcome, 'seq' | 'generation' | 'sessionId'>,
+  ) {
+    const outcome: AnalysisOutcome = {
+      seq: this.outcomeSeq++,
+      generation: this.sessionGeneration,
+      sessionId: this.activeSessionId,
+      ...o,
+    }
+    for (const listener of this.analysisOutcomeListeners) {
+      listener(outcome)
+    }
+  }
+
+  /** Synchronously notify reset listeners (K4) — must run in the same task as the
+   *  generation bump, before any queued microtask (e.g. a buffered alert flush). */
+  private emitReset(fromMoveIndex?: number) {
+    const info: AnalysisResetInfo = {
+      ...this.getEpoch(),
+      ...(fromMoveIndex !== undefined ? { fromMoveIndex } : {}),
+    }
+    for (const listener of this.analysisResetListeners) {
+      listener(info)
+    }
+  }
+
+  /** Controller-facing: a move whose analyzeMove() returned undefined (synthetic
+   *  id) never enters the coordinator's pending maps, so emit its sole terminal
+   *  `skipped` outcome here. Guarded against double emission (K3). */
+  markSkipped(moveIndex: number, requestId: string) {
+    if (this.skippedRequestIds.has(requestId)) return
+    this.skippedRequestIds.add(requestId)
+    // Leave lineage so a later retry for this index can find its predecessor (L3).
+    this.lastRequestIdByMoveIndex.set(moveIndex, requestId)
+    this.emitOutcome({ moveIndex, requestId, status: 'skipped' })
+  }
+
+  /**
+   * Synchronous revert pruning (M1): for every index >= k cancel in-flight
+   * requests, clear resolution/timer/cache state, reject waiters, drop store
+   * analyses and lineage. Pruned request ids become tombstones (N1) so a
+   * worker message already queued for them is dropped, not mistaken for a
+   * non-indexed result. Called from rewindBoardLocally; the worker is NOT
+   * terminated, so tombstones persist until the next worker replacement.
+   */
+  pruneFromMoveIndex(k: number) {
+    const indices = new Set<number>()
+    for (const idx of this.resolutionState.keys()) if (idx >= k) indices.add(idx)
+    for (const idx of this.latestRequestIds.keys()) if (idx >= k) indices.add(idx)
+    for (const idx of this.lastRequestIdByMoveIndex.keys()) if (idx >= k) indices.add(idx)
+    for (const idx of this.resolvedIndices) if (idx >= k) indices.add(idx)
+
+    for (const idx of indices) {
+      const entry = this.resolutionState.get(idx)
+      if (entry) {
+        if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+        if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
+        this.resolutionState.delete(idx)
+      }
+      const requestId = this.latestRequestIds.get(idx)
+      if (requestId) {
+        this.cancelWorkerAnalysis(requestId)
+        this.clearActiveAnalysisStateIfCurrent(requestId)
+        this.pendingMoveIndices.delete(requestId)
+        this.pendingMeta.delete(requestId)
+        // Tombstone, do NOT delete from requestIdToMoveIndex (N1).
+        this.requestIdToMoveIndex.delete(requestId)
+        this.discardedRequestIds.add(requestId)
+      }
+      const waiters = this.analysisWaiters.get(idx)
+      if (waiters) {
+        this.analysisWaiters.delete(idx)
+        for (const waiter of waiters) waiter.reject(new Error('Analysis reverted'))
+      }
+      // Drop the skipped-dedup guard for this index's synthetic id so a replayed
+      // move (deterministic `analysis-{idx}-{uci}` id) can emit `skipped` again
+      // and re-terminate the frontier slot.
+      const lineageId = this.lastRequestIdByMoveIndex.get(idx)
+      if (lineageId) this.skippedRequestIds.delete(lineageId)
+      this.latestRequestIds.delete(idx)
+      this.lastRequestIdByMoveIndex.delete(idx)
+      this.resolvedIndices.delete(idx)
+      this.store.getState().removeAnalysis(idx)
+    }
+    // Drop not-yet-dispatched cache lookups for pruned indices.
+    if (this.pendingCacheLookups.length > 0) {
+      this.pendingCacheLookups = this.pendingCacheLookups.filter(p => p.moveIndex < k)
+    }
+    // Synchronously notify the consumer to prune its frontier/alert for >= k (K4).
+    this.emitReset(k)
+  }
+
+  /** Emit `failed` for every still-unresolved index, then the caller clears
+   *  resolution state. Used by same-generation termination (restart / fatal /
+   *  clearAnalysis) so the recording frontier never strands a `pending` slot.
+   *  Lineage (lastRequestIdByMoveIndex) is preserved for an immediate retry (L3). */
+  private terminateAllPendingAsFailed() {
+    for (const [moveIndex, entry] of this.resolutionState) {
+      this.emitOutcome({ moveIndex, requestId: entry.requestId, status: 'failed' })
     }
   }
 
@@ -278,6 +446,8 @@ export class GameAnalysisCoordinator {
     this.worker.removeEventListener('error', this.handleWorkerError)
     this.worker.terminate()
     this.worker = null
+    // The replaced worker can no longer message about pruned requests (N1).
+    this.discardedRequestIds.clear()
   }
 
   private resetIdleTimer() {
@@ -304,6 +474,11 @@ export class GameAnalysisCoordinator {
 
     this.activeSessionId = sessionId
     this.sessionGeneration++
+    // Synchronous reset BEFORE clearing pending requests, so a buffered
+    // microtask (alert flush) sees the bumped epoch first (K1/K4).
+    this.emitReset()
+    this.lastRequestIdByMoveIndex.clear()
+    this.skippedRequestIds.clear()
     this.rejectAnalysisWaiters(new Error('Analysis session changed'))
     this.clearAllResolutionState()
     this.resolvedIndices.clear()
@@ -345,6 +520,9 @@ export class GameAnalysisCoordinator {
     this.finalizeOldSession()
     this.activeSessionId = null
     this.sessionGeneration++
+    this.emitReset()
+    this.lastRequestIdByMoveIndex.clear()
+    this.skippedRequestIds.clear()
     this.rejectAnalysisWaiters(new Error('Analysis session cleared'))
     this.clearAllResolutionState()
     this.store.getState().clearAll()
@@ -424,6 +602,25 @@ export class GameAnalysisCoordinator {
         this.failRequest(moveIndex, id, 'deadline')
       }, ANALYSIS_TOTAL_DEADLINE_MS)
       this.resolutionState.set(moveIndex, { requestId: id, cacheStatus: 'pending', deadlineTimer })
+
+      // Outcome: supersession/retry lineage (L3). previousRequestId comes from
+      // the dedicated lineage map, NOT latestRequestIds (cleared by same-gen
+      // cleanup). Emit `scheduled` so the consumer (re)opens the slot to pending
+      // under the new id and migrates context/SRS old->new.
+      const prevLineageId = this.lastRequestIdByMoveIndex.get(moveIndex)
+      this.lastRequestIdByMoveIndex.set(moveIndex, id)
+      this.discardedRequestIds.delete(id)
+      this.skippedRequestIds.delete(id)
+      // A retry overwrites lineage, so clear the predecessor's skip-dedup guard
+      // too — otherwise a skipped synthetic id orphaned here would suppress a
+      // later replay of that same deterministic id after a prune (P2).
+      if (prevLineageId) this.skippedRequestIds.delete(prevLineageId)
+      this.emitOutcome({
+        moveIndex,
+        requestId: id,
+        status: 'scheduled',
+        ...(prevLineageId && prevLineageId !== id ? { previousRequestId: prevLineageId } : {}),
+      })
     }
 
     const message: AnalyzeMoveMessage = {
@@ -448,6 +645,9 @@ export class GameAnalysisCoordinator {
   restartAnalysisWorker() {
     this.currentAnalyzingRequestId = null
     this.lastStreamingUpdateMs = 0
+    // Emit `failed` per unresolved index (same generation) BEFORE teardown so the
+    // recording frontier advances; lineage is preserved for an immediate retry.
+    this.terminateAllPendingAsFailed()
     this.terminateWorker()
     // Terminating the worker orphans every in-flight request — buffered,
     // pending, and worker-failed alike — so reject all their waiters rather
@@ -505,6 +705,9 @@ export class GameAnalysisCoordinator {
   clearAnalysis() {
     this.store.getState().clearAll()
     this.lastStreamingUpdateMs = 0
+    // Same-generation termination: fail every unresolved index so the frontier
+    // advances; lineage retained for an immediate retry (L3).
+    this.terminateAllPendingAsFailed()
     // Reject any unresolved waiters — clearing orphans every in-flight request
     // (Finding R4).
     for (const entry of this.resolutionState.values()) {
@@ -544,6 +747,9 @@ export class GameAnalysisCoordinator {
       case 'analysis-started': {
         // Drop late worker messages after a fatal error (Finding F1).
         if (s.status === 'error') break
+        // Drop messages for pruned/reverted requests (N1) before any indexed
+        // lookup so they never re-show the spinner.
+        if (this.discardedRequestIds.has(message.id)) break
         // Gate by request state so a late start after a cache hit cancels does
         // not re-show the spinner (Finding R5).
         const startIdx = this.requestIdToMoveIndex.get(message.id)
@@ -560,6 +766,7 @@ export class GameAnalysisCoordinator {
       }
       case 'analysis-streaming': {
         if (s.status === 'error') break
+        if (this.discardedRequestIds.has(message.id)) break
         const streamIdx = this.pendingMoveIndices.get(message.id)
         if (
           streamIdx !== undefined &&
@@ -577,6 +784,12 @@ export class GameAnalysisCoordinator {
       case 'analysis': {
         // Drop late worker results after a fatal error (Finding F1).
         if (s.status === 'error') {
+          this.clearActiveAnalysisStateIfCurrent(message.id)
+          break
+        }
+        // Drop results for pruned/reverted requests (N1) so they never fall into
+        // the non-indexed branch and clobber lastAnalysis.
+        if (this.discardedRequestIds.has(message.id)) {
           this.clearActiveAnalysisStateIfCurrent(message.id)
           break
         }
@@ -685,6 +898,7 @@ export class GameAnalysisCoordinator {
     s.setAnalyzingMove(null)
     s.setStreamingEval(null)
 
+    this.terminateAllPendingAsFailed()
     this.clearAllResolutionState()
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
@@ -818,6 +1032,8 @@ export class GameAnalysisCoordinator {
     this.rejectWaitersForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
     this.cancelWorkerAnalysis(requestId)
     this.clearActiveAnalysisStateIfCurrent(requestId)
+    // Lineage retained so an immediate retry can migrate this index's context (L3).
+    this.emitOutcome({ moveIndex, requestId, status: 'failed' })
     console.log(`[Analyst] resolve idx=${moveIndex} source=failed(${reason})`)
   }
 
@@ -852,9 +1068,7 @@ export class GameAnalysisCoordinator {
       }
     }
 
-    for (const listener of this.analysisResolvedListeners) {
-      listener(moveIndex, result)
-    }
+    this.emitOutcome({ moveIndex, requestId: result.id, status: 'resolved', result })
   }
 
   // --- Cache lookups ---
@@ -1092,8 +1306,12 @@ export class GameAnalysisCoordinator {
     this.rejectAnalysisWaiters(new Error('Analysis coordinator destroyed'))
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
+    this.lastRequestIdByMoveIndex.clear()
+    this.skippedRequestIds.clear()
+    this.discardedRequestIds.clear()
     this.terminateWorker()
-    this.analysisResolvedListeners.clear()
+    this.analysisOutcomeListeners.clear()
+    this.analysisResetListeners.clear()
     this.uploadState = null
     this.activeSessionId = null
   }

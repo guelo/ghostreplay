@@ -51,6 +51,7 @@ type PendingSrsReview = {
   moveIndex: number;
   userMoveSan: string;
   srs: TargetBlunderSrs | null;
+  srsDecisionId: string;
 };
 
 const applyRatingScores = (scores: RatingScores | null | undefined) => {
@@ -66,7 +67,7 @@ type UseChessGameLifecycleArgs = {
   coordinator: GameAnalysisCoordinator;
   openingHistoryRef: MutableRefObject<(OpeningLookupResult | null)[]>;
   blunderRecordedRef: MutableRefObject<boolean>;
-  pendingAnalysisContextRef: MutableRefObject<PendingAnalysisContext | null>;
+  pendingAnalysisContextRef: MutableRefObject<Map<string, PendingAnalysisContext>>;
   pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
   clearMoveHighlights: () => void;
   resetMode: () => void;
@@ -157,6 +158,17 @@ export const useChessGameLifecycle = ({
       }
     },
     [pendingSrsReviewRef],
+  );
+
+  const prunePendingContextsFromMoveIndex = useCallback(
+    (boundaryMoveIndex: number) => {
+      for (const [requestId, ctx] of pendingAnalysisContextRef.current) {
+        if (ctx.moveIndex >= boundaryMoveIndex) {
+          pendingAnalysisContextRef.current.delete(requestId);
+        }
+      }
+    },
+    [pendingAnalysisContextRef],
   );
 
   const finishLocalGame = useCallback(
@@ -365,11 +377,15 @@ export const useChessGameLifecycle = ({
     setBlunderAlert(null);
     setPendingPromotion(null);
     prunePendingSrsReviewsFromMoveIndex(newHistory.length);
-    pendingAnalysisContextRef.current = null;
+    prunePendingContextsFromMoveIndex(newHistory.length);
+    // Synchronously prune coordinator-owned resolution/lineage state for the
+    // reverted indices (M1), in the same turn as the UI reset.
+    coordinator.pruneFromMoveIndex(newHistory.length);
   }, [
     chess,
+    coordinator,
     getRewindHistoryLength,
-    pendingAnalysisContextRef,
+    prunePendingContextsFromMoveIndex,
     prunePendingSrsReviewsFromMoveIndex,
     setBlunderAlert,
     setBlunderReviewId,
@@ -566,7 +582,7 @@ export const useChessGameLifecycle = ({
         setShowResignWarning(false);
         clearMoveHighlights();
         blunderRecordedRef.current = false;
-        pendingAnalysisContextRef.current = null;
+        pendingAnalysisContextRef.current.clear();
         pendingSrsReviewRef.current.clear();
         resetMode();
       } catch (error) {
@@ -697,7 +713,7 @@ export const useChessGameLifecycle = ({
         setLiveOpening(null);
         openingHistoryRef.current = [];
         blunderRecordedRef.current = false;
-        pendingAnalysisContextRef.current = null;
+        pendingAnalysisContextRef.current.clear();
         pendingSrsReviewRef.current.clear();
         resetMode();
 
@@ -926,7 +942,7 @@ export const useChessGameLifecycle = ({
     setShowResignWarning(false);
     clearMoveHighlights();
     blunderRecordedRef.current = false;
-    pendingAnalysisContextRef.current = null;
+    pendingAnalysisContextRef.current.clear();
     pendingSrsReviewRef.current.clear();
     resetMode();
   }, [
