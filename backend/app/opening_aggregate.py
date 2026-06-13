@@ -9,12 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal
 
-from sqlalchemy.orm import Session
-
-from app.models import OpeningScoreBatch, UserOpeningScore
-from app.opening_cache import list_cached_opening_scores, recompute_opening_scores
+from app.models import UserOpeningScore
 from app.opening_roots import OpeningRoots
 
 
@@ -41,22 +37,29 @@ class CachedOpeningScoreRow:
 
 
 @dataclass(frozen=True)
-class OpeningBranchAggregate:
-    score: float | None
-    confidence: float | None
-    coverage: float | None
-    sample_size: int
-    root_count: int
-    last_practiced_at: datetime | None
+class DirectBranchView:
+    """Direct-row view of a branch.
+
+    ``direct_row`` is the branch root's own cached score (None when unscored).
+    ``scored_root_count`` is navigation metadata only — the number of scored
+    named rows in the subtree (root + descendants) — and never feeds a score.
+    ``weakest_root`` is the weakest scored root in the subtree.
+    """
+
+    direct_row: CachedOpeningScoreRow | None
+    scored_root_count: int
     weakest_root: CachedOpeningScoreRow | None
 
 
 def _weakest_root(rows: list[CachedOpeningScoreRow]) -> CachedOpeningScoreRow:
-    """Pick the weakest root with deterministic tie-breaking."""
-    return min(
-        rows,
-        key=lambda r: (r.opening_score, r.confidence, r.opening_name, r.opening_key),
-    )
+    """Pick the weakest root, tie-breaking on ``opening_key`` only.
+
+    The design requires stable opening-key tie-breaking: equal-score roots must
+    resolve to the same key regardless of confidence/name, so the surfaced
+    weakest-root metadata does not flip when confidence changes despite unchanged
+    mastery (score).
+    """
+    return min(rows, key=lambda r: (r.opening_score, r.opening_key))
 
 
 def _collect_branch_rows(
@@ -77,36 +80,22 @@ def _collect_branch_rows(
     ]
 
 
-def _aggregate_branch_rows(rows: list[CachedOpeningScoreRow]) -> OpeningBranchAggregate:
-    if not rows:
-        return OpeningBranchAggregate(
-            score=None,
-            confidence=None,
-            coverage=None,
-            sample_size=0,
-            root_count=0,
-            last_practiced_at=None,
-            weakest_root=None,
-        )
+def direct_branch_view(
+    rows_by_key: dict[str, CachedOpeningScoreRow],
+    branch_key: str,
+    roots_registry: OpeningRoots,
+) -> DirectBranchView:
+    """Direct-row semantics for a branch (section 9).
 
-    total_conf = sum(row.confidence for row in rows)
-    if total_conf > 0:
-        score = sum(row.opening_score * row.confidence for row in rows) / total_conf
-    else:
-        score = sum(row.opening_score for row in rows) / len(rows)
-
-    practiced_dates = [
-        row.last_practiced_at for row in rows if row.last_practiced_at is not None
-    ]
-
-    return OpeningBranchAggregate(
-        score=score,
-        confidence=sum(row.confidence for row in rows) / len(rows),
-        coverage=sum(row.coverage for row in rows) / len(rows),
-        sample_size=sum(row.sample_size for row in rows),
-        root_count=len(rows),
-        last_practiced_at=max(practiced_dates) if practiced_dates else None,
-        weakest_root=_weakest_root(rows),
+    Score/sample/last-practiced come from the branch root's **own** cached row,
+    not a descendant rollup. ``scored_root_count`` and ``weakest_root`` are
+    navigation metadata computed over the scored subtree rows.
+    """
+    subtree_rows = _collect_branch_rows(rows_by_key, branch_key, roots_registry)
+    return DirectBranchView(
+        direct_row=rows_by_key.get(branch_key),
+        scored_root_count=len(subtree_rows),
+        weakest_root=_weakest_root(subtree_rows) if subtree_rows else None,
     )
 
 
@@ -120,28 +109,6 @@ def _batch_has_stale_branch_keys(
         or (row.underexposed_branch_name and not row.underexposed_branch_key)
         for row in rows
     )
-
-
-def _refresh_cached_scores_if_stale(
-    db: Session,
-    user_id: int,
-    player_color: Literal["white", "black"],
-    current_fingerprint: str,
-    roots_registry: OpeningRoots,
-    batch: OpeningScoreBatch | None,
-    rows: list[UserOpeningScore | CachedOpeningScoreRow],
-) -> tuple[OpeningScoreBatch | None, list[UserOpeningScore]]:
-    should_refresh = (
-        batch is not None
-        and (
-            batch.registry_fingerprint != current_fingerprint
-            or _batch_has_stale_branch_keys(rows)
-        )
-    )
-    if not should_refresh:
-        return batch, rows
-    recompute_opening_scores(db, user_id, player_color)
-    return list_cached_opening_scores(db, user_id, player_color)
 
 
 def _snapshot_cached_rows(rows: list[UserOpeningScore]) -> list[CachedOpeningScoreRow]:

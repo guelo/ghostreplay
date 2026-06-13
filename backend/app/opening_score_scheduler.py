@@ -16,15 +16,18 @@ IMPORTANT — single-process assumption:
     horizontal replicas reverts coalescing to per-process and needs shared-state
     (advisory-lock / external queue) coordination instead.
 
-Accepted staleness window:
-    While a recompute is pending in the debounce window, reader endpoints serve
-    the previously cached batch (``ensure_opening_scores`` returns cached batches
-    unconditionally, and ``_refresh_cached_scores_if_stale`` only compares the
-    registry fingerprint, not the evidence ``inputs_fingerprint`` that drilling
-    flips). If the process dies with pending work, scores stay stale until the
-    next evidence change re-enqueues a recompute. This is accepted for v1: during
-    a drill burst the user is drilling, not reading their opening report, and the
-    window is seconds. A read-side flush/await belongs with g-score-cache-api.
+Read-side flush/await:
+    Reader endpoints call ``refresh_now(user_id, player_color)`` — a keyed
+    flush/await that enqueues an immediate recompute for that one key and waits
+    for a covering, successful run to reach quiescence (bounded by ``timeout``).
+    It runs only the matching key's work through the single serialized worker, so
+    one user's read never triggers unrelated users' recomputes. On ``True`` the
+    reader reloads and serves fresh rows; on ``False`` (timeout/failure/shutdown)
+    it serves the current cached batch and lets the worker finish in the
+    background. All recompute decisions (cache miss, registry drift, stale branch
+    keys, evidence change) are consolidated in
+    ``recompute_opening_scores_if_needed`` so the worker is the only reader-driven
+    path that writes a batch.
 """
 
 from __future__ import annotations
@@ -48,6 +51,14 @@ class _Entry:
     first_seen: float
     deadline: float
     enqueue_count: int = 0
+    # Highest per-key enqueue sequence folded into this pending entry. A run that
+    # pops this entry has "run through" this sequence; refresh_now waiters compare
+    # against it to know their enqueue has been covered by a completed run.
+    max_seq: int = 0
+    # Sticky once an immediate (refresh_now) enqueue folds in: the entry stays due
+    # now until it is popped. Later normal enqueues must not push the deadline back
+    # out — otherwise a sustained burst could starve refresh_now past its timeout.
+    immediate: bool = False
 
 
 @dataclass
@@ -65,6 +76,10 @@ class OpeningScoreScheduler:
     _inflight: set[Key] = field(default_factory=set, init=False)
     _shutdown: bool = field(default=False, init=False)
     _thread: threading.Thread | None = field(default=None, init=False)
+    # Per-key monotonic enqueue counter and the latest completed run outcome
+    # (ran_through_seq, ok). Both guarded by ``_cond``.
+    _seq_counter: dict[Key, int] = field(default_factory=dict, init=False)
+    _last_result: dict[Key, tuple[int, bool]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         self._lock = threading.Lock()
@@ -73,6 +88,38 @@ class OpeningScoreScheduler:
     # ------------------------------------------------------------------
     # Enqueue
     # ------------------------------------------------------------------
+    def _enqueue_locked(self, key: Key, *, immediate: bool) -> int:
+        """Coalesce an enqueue for ``key``. Caller must hold ``_cond``.
+
+        Returns the per-key sequence assigned to this enqueue. ``immediate``
+        makes the entry due now (used by ``refresh_now``); otherwise the normal
+        debounce window applies.
+        """
+        now = self.clock()
+        seq = self._seq_counter.get(key, 0) + 1
+        self._seq_counter[key] = seq
+        entry = self._pending.get(key)
+        if entry is None:
+            deadline = now if immediate else min(now + self.quiet_window, now + self.max_wait)
+            entry = _Entry(
+                first_seen=now, deadline=deadline, max_seq=seq, immediate=immediate
+            )
+            self._pending[key] = entry
+        else:
+            if immediate:
+                entry.immediate = True
+                entry.deadline = min(entry.deadline, now)
+            elif entry.immediate:
+                # An immediate refresh is already pending; keep it due now. Fold
+                # this enqueue's sequence in but never postpone the deadline.
+                pass
+            else:
+                entry.deadline = min(now + self.quiet_window, entry.first_seen + self.max_wait)
+            entry.max_seq = max(entry.max_seq, seq)
+        entry.enqueue_count += 1
+        self._cond.notify_all()
+        return seq
+
     def request_recompute(self, user_id: int, player_color: str) -> None:
         """Coalesce a recompute request for ``(user_id, player_color)``.
 
@@ -83,23 +130,49 @@ class OpeningScoreScheduler:
         with self._cond:
             if self._shutdown:
                 return
-            now = self.clock()
-            entry = self._pending.get(key)
-            if entry is None:
-                entry = _Entry(
-                    first_seen=now,
-                    deadline=min(now + self.quiet_window, now + self.max_wait),
-                )
-                self._pending[key] = entry
-            else:
-                entry.deadline = min(now + self.quiet_window, entry.first_seen + self.max_wait)
-            entry.enqueue_count += 1
-            self._cond.notify()
+            self._enqueue_locked(key, immediate=False)
         if self.auto_start:
             try:
                 self.start()
             except Exception:
                 logger.exception("opening score scheduler start failed; recompute will not run")
+
+    def refresh_now(
+        self, user_id: int, player_color: str, timeout: float = 5.0
+    ) -> bool:
+        """Enqueue an immediate keyed recompute and await its quiescent success.
+
+        Returns ``True`` only when a run that covers this enqueue's sequence
+        completed **successfully** and the key has no pending or in-flight work
+        remaining. Returns ``False`` on a covering-run failure, worker-start
+        failure, scheduler shutdown, or ``timeout`` — in which case the caller
+        should serve the current cached batch and let the worker finish in the
+        background.
+        """
+        key: Key = (user_id, player_color)
+        deadline = self.clock() + timeout
+        with self._cond:
+            if self._shutdown:
+                return False
+            seq = self._enqueue_locked(key, immediate=True)
+        try:
+            self.start()
+        except Exception:
+            logger.exception("opening score scheduler start failed; refresh_now aborting")
+            return False
+        with self._cond:
+            while True:
+                if self._shutdown:
+                    return False
+                result = self._last_result.get(key)
+                covered = result is not None and result[0] >= seq
+                quiescent = key not in self._pending and key not in self._inflight
+                if covered and quiescent:
+                    return result[1]
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    return False
+                self._cond.wait(timeout=min(remaining, 0.1))
 
     # ------------------------------------------------------------------
     # Synchronous test surface
@@ -117,13 +190,13 @@ class OpeningScoreScheduler:
                 ]
                 if not due:
                     return
-                runs: list[tuple[Key, int]] = []
+                runs: list[tuple[Key, int, int]] = []
                 for key in due:
                     entry = self._pending.pop(key)
                     self._inflight.add(key)
-                    runs.append((key, entry.enqueue_count))
-            for key, enqueue_count in runs:
-                self._run_one(key, enqueue_count)
+                    runs.append((key, entry.enqueue_count, entry.max_seq))
+            for key, enqueue_count, ran_seq in runs:
+                self._run_one(key, enqueue_count, ran_seq)
 
     def flush_pending(self, timeout: float = 30.0) -> None:
         """Block until both ``_pending`` and ``_inflight`` are empty.
@@ -217,14 +290,15 @@ class OpeningScoreScheduler:
     # ------------------------------------------------------------------
     # Run a single recompute
     # ------------------------------------------------------------------
-    def _run_one(self, key: Key, enqueue_count: int) -> None:
+    def _run_one(self, key: Key, enqueue_count: int, ran_seq: int) -> None:
         user_id, player_color = key
         db = None
-        before_gen: int | None = None
         result = None
+        ok = False
         try:
             db = self.session_factory()
             result = self.recompute(db, user_id, player_color)
+            ok = True
         except Exception:
             logger.exception(
                 "opening score recompute failed",
@@ -238,6 +312,12 @@ class OpeningScoreScheduler:
                     logger.exception("opening score scheduler failed to close session")
             with self._cond:
                 self._inflight.discard(key)
+                # Record the highest sequence this key has run through and whether
+                # that run succeeded. Per-key runs are serialized (single worker,
+                # one in-flight per key), so ran_seq is monotonic for the key.
+                prev = self._last_result.get(key)
+                if prev is None or ran_seq >= prev[0]:
+                    self._last_result[key] = (ran_seq, ok)
                 self._cond.notify_all()
         # NOTE: recompute_opening_scores_if_needed returns the EXISTING batch
         # unchanged when the fingerprint matches, so a non-None result does not
@@ -280,5 +360,18 @@ def request_recompute(user_id: int, player_color: str) -> None:
         )
 
 
-def get_scheduler() -> OpeningScoreScheduler:
-    return _scheduler
+def refresh_now(user_id: int, player_color: str, timeout: float = 5.0) -> bool:
+    """Reader-facing keyed flush/await (best-effort).
+
+    Returns ``True`` only when a covering recompute completed successfully and the
+    key is quiescent; ``False`` on failure/timeout/shutdown (or any scheduler
+    error). The caller serves the current cached batch on ``False``.
+    """
+    try:
+        return _scheduler.refresh_now(user_id, player_color, timeout=timeout)
+    except Exception:
+        logger.exception(
+            "opening score refresh_now failed",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
+        return False

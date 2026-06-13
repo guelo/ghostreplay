@@ -15,7 +15,10 @@ from app.models import (
     SessionMove,
     UserOpeningScore,
 )
-from app.opening_cache import opening_score_inputs_fingerprint
+from app.opening_cache import (
+    opening_score_inputs_fingerprint,
+    recompute_opening_scores_if_needed,
+)
 from app.opening_evidence import EvidenceOverlay, NodeEvidence, EdgeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import BranchSummary, RootScore
@@ -28,6 +31,7 @@ from app.fen import active_color
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
 CHILD_FEN = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+SYNTHETIC_INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 
 
 def _make_graph() -> OpeningGraph:
@@ -90,9 +94,13 @@ _PATCH_OVERLAY = "app.api.openings.overlay_evidence"
 
 @pytest.fixture(autouse=True)
 def _mock_singletons():
+    # refresh_now is the reader's best-effort flush/await; in unit tests we stub it
+    # to a no-op so the reader simply serves whatever list_cached returns. Recompute
+    # decisions are covered by the worker-path tests in test_opening_cache.
     with (
         patch(_PATCH_GRAPH, return_value=_make_graph()),
         patch(_PATCH_ROOTS, return_value=_make_roots()),
+        patch("app.api.openings.refresh_now", return_value=False),
     ):
         yield
 
@@ -231,12 +239,13 @@ def test_roots_no_auth_returns_401(client):
 
 _FAMILIES_URL = "/api/openings/families/scores"
 
-# Patch targets for cache functions in the openings module namespace
-_PATCH_ENSURE = "app.api.openings.ensure_opening_scores"
-# recompute/list_cached are invoked by _refresh_cached_scores_if_stale, which
-# now lives in app.opening_aggregate, so patch them in that namespace.
-_PATCH_LIST_CACHED = "app.opening_aggregate.list_cached_opening_scores"
-_PATCH_RECOMPUTE = "app.opening_aggregate.recompute_opening_scores"
+# Patch targets for cache functions in the openings module namespace. Readers now
+# call list_cached_opening_scores directly (after a best-effort refresh_now), so
+# _PATCH_ENSURE points at the cached-row reader; it returns (batch, rows) just like
+# the old ensure_opening_scores contract.
+_PATCH_ENSURE = "app.api.openings.list_cached_opening_scores"
+_PATCH_LIST_CACHED = "app.api.openings.list_cached_opening_scores"
+_PATCH_RECOMPUTE = "app.opening_cache.recompute_opening_scores"
 
 
 def _make_batch(batch_id: int = 1, user_id: int = 123, player_color: str = "white",
@@ -604,10 +613,21 @@ def test_family_scores_bootstrap_on_cache_miss(client, auth_headers, db_session)
     # No batch exists yet — verify
     assert db_session.query(OpeningScoreBatch).filter_by(user_id=123, player_color="black").first() is None
 
-    # Patch graph/roots on the cache module so recompute uses our test graph
+    # Cache-miss bootstrap now happens in the scheduler worker via
+    # recompute_opening_scores_if_needed. Drive that synchronously through a
+    # refresh_now side effect (on the test session) to exercise the full read path.
+    def _drive_refresh(user_id, player_color, *args, **kwargs):
+        with (
+            patch("app.opening_cache.get_opening_graph", return_value=_make_graph()),
+            patch("app.opening_cache.get_opening_roots", return_value=_make_roots()),
+        ):
+            recompute_opening_scores_if_needed(db_session, user_id, player_color)
+        return True
+
     with (
         patch("app.opening_cache.get_opening_graph", return_value=_make_graph()),
         patch("app.opening_cache.get_opening_roots", return_value=_make_roots()),
+        patch("app.api.openings.refresh_now", side_effect=_drive_refresh),
     ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "black"}, headers=auth_headers())
 
@@ -759,12 +779,15 @@ def test_family_scores_last_practiced_at(client, auth_headers):
 
 # Case 11: weakest-root tie-break is deterministic
 def test_family_scores_weakest_root_tiebreak(client, auth_headers):
-    # Same score, same confidence — tie-break on opening_name ascending
+    # Same score — tie-break on opening_key ascending only. Names and confidence
+    # are arranged to disagree with the key order so this asserts the contract:
+    # equal-score roots resolve by key (k-a wins) regardless of name/confidence,
+    # so the surfaced metadata is stable when confidence shifts at equal mastery.
     rows = [
-        _make_row(opening_key="k-z", opening_name="Zulu Root", opening_family="F",
-                  opening_score=50.0, confidence=0.5),
-        _make_row(opening_key="k-a", opening_name="Alpha Root", opening_family="F",
-                  opening_score=50.0, confidence=0.5),
+        _make_row(opening_key="k-z", opening_name="Alpha Root", opening_family="F",
+                  opening_score=50.0, confidence=0.9),
+        _make_row(opening_key="k-a", opening_name="Zulu Root", opening_family="F",
+                  opening_score=50.0, confidence=0.1),
     ]
     roots = _roots_for_rows(*rows)
     batch = _make_batch_for_roots(roots)
@@ -776,7 +799,7 @@ def test_family_scores_weakest_root_tiebreak(client, auth_headers):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     fam = resp.json()["families"][0]
-    assert fam["weakest_root_name"] == "Alpha Root"
+    assert fam["weakest_root_name"] == "Zulu Root"
     assert fam["weakest_root_score"] == pytest.approx(50.0)
 
 
@@ -874,11 +897,11 @@ def test_family_scores_cache_only_read_path(client, auth_headers, db_session):
     ))
     db_session.commit()
 
-    # Patch calculator functions in both namespaces — the router imports these symbols,
-    # but ensure_opening_scores resolves recompute_opening_scores in its own module.
+    # The reader never recomputes synchronously: all recompute decisions live in
+    # the scheduler worker (refresh_now is a no-op here). Assert no direct
+    # recompute/compute happens on the reader path.
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.opening_aggregate.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
         patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
         patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
         patch("app.api.openings.compute_root_score", side_effect=AssertionError("should not compute")),
@@ -925,57 +948,10 @@ def test_family_scores_computed_at_from_batch(client, auth_headers, db_session):
     assert "2024" not in data["computed_at"]
 
 
-def test_family_scores_mismatched_fingerprint_triggers_recompute(client, auth_headers):
+def test_family_scores_reader_flushes_then_serves_cached(client, auth_headers):
+    # Registry drift / staleness is resolved by the scheduler worker; the reader
+    # just flushes via refresh_now and serves whatever list_cached then returns.
     roots = _make_drill_roots()
-    stale_batch = _make_batch(
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        registry_fingerprint="stale-fingerprint",
-    )
-    fresh_batch = _make_batch_for_roots(
-        roots,
-        batch_id=2,
-        generation=2,
-        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
-    )
-    stale_rows = [
-        _make_row(
-            opening_key=DRILL_KEY_RUY_BERLIN,
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            opening_score=48.0,
-        )
-    ]
-    fresh_rows = [
-        _make_row(
-            batch_id=2,
-            opening_key=DRILL_KEY_RUY_BERLIN,
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            opening_score=48.0,
-        )
-    ]
-
-    with (
-        patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
-        patch(_PATCH_RECOMPUTE) as recompute_mock,
-        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
-    ):
-        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
-
-    assert resp.status_code == 200
-    recompute_mock.assert_called_once()
-    data = resp.json()
-    assert "2026-03-02" in data["computed_at"]
-    assert data["families"][0]["family_name"] == DRILL_FAMILY_RUY
-
-
-def test_family_scores_empty_batch_with_evidence_triggers_recompute(client, auth_headers):
-    roots = _make_drill_roots()
-    stale_batch = _make_batch(
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        registry_fingerprint="stale-fingerprint",
-    )
     fresh_batch = _make_batch_for_roots(
         roots,
         batch_id=2,
@@ -988,23 +964,45 @@ def test_family_scores_empty_batch_with_evidence_triggers_recompute(client, auth
             opening_key=DRILL_KEY_RUY_BERLIN,
             opening_name="Ruy Lopez: Berlin Defense",
             opening_family=DRILL_FAMILY_RUY,
-            opening_score=61.0,
+            opening_score=48.0,
         )
     ]
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(stale_batch, [])),
-        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch("app.api.openings.refresh_now") as refresh_mock,
         patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
     ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     assert resp.status_code == 200
-    recompute_mock.assert_called_once()
+    refresh_mock.assert_called_once_with(123, "white")
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
     assert data["families"][0]["family_name"] == DRILL_FAMILY_RUY
+
+
+def test_family_scores_refresh_false_serves_current_batch(client, auth_headers):
+    # refresh_now returns False (timeout/failure): the reader serves the current
+    # (possibly stale/empty) batch and initiates no recompute itself.
+    roots = _make_drill_roots()
+    batch = _make_batch_for_roots(
+        roots,
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+
+    with (
+        patch(_PATCH_ROOTS, return_value=roots),
+        patch("app.api.openings.refresh_now", return_value=False),
+        patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("no reader recompute")),
+        patch(_PATCH_LIST_CACHED, return_value=(batch, [])),
+    ):
+        resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["families"] == []
+    assert "2026-03-01" in data["computed_at"]
 
 
 def test_family_scores_empty_batch_with_current_registry_fingerprint_is_cache_hit(client, auth_headers):
@@ -1026,62 +1024,10 @@ def test_family_scores_empty_batch_with_current_registry_fingerprint_is_cache_hi
     assert "2026-03-01" in data["computed_at"]
 
 
-def test_family_drill_registry_drift_unknown_cached_root_triggers_recompute(client, auth_headers):
+def test_family_drill_reader_flushes_then_serves_cached(client, auth_headers):
+    # The drill-down reader flushes via refresh_now (worker resolves drift/staleness)
+    # and serves whatever list_cached returns.
     roots = _make_drill_roots()
-    stale_batch = _make_batch(
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        registry_fingerprint="stale-fingerprint",
-    )
-    fresh_batch = _make_batch_for_roots(
-        roots,
-        batch_id=2,
-        generation=2,
-        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
-    )
-    stale_rows = [
-        _make_row(
-            opening_key="stale-ruy-key",
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            opening_score=55.0,
-        )
-    ]
-    fresh_rows = [
-        _make_row(
-            batch_id=2,
-            opening_key=DRILL_KEY_RUY_BERLIN,
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            opening_score=55.0,
-        )
-    ]
-
-    with (
-        patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
-        patch(_PATCH_RECOMPUTE) as recompute_mock,
-        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
-    ):
-        resp = client.get(
-            _drill_url(DRILL_FAMILY_RUY),
-            params={"player_color": "white"},
-            headers=auth_headers(),
-        )
-
-    assert resp.status_code == 200
-    recompute_mock.assert_called_once()
-    data = resp.json()
-    assert "2026-03-02" in data["computed_at"]
-    assert data["scored_roots"] == 1
-    assert data["roots"][0]["opening_key"] == DRILL_KEY_RUY_BERLIN
-
-
-def test_family_drill_empty_batch_with_evidence_triggers_recompute(client, auth_headers):
-    roots = _make_drill_roots()
-    stale_batch = _make_batch(
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        registry_fingerprint="stale-fingerprint",
-    )
     fresh_batch = _make_batch_for_roots(
         roots,
         batch_id=2,
@@ -1100,8 +1046,7 @@ def test_family_drill_empty_batch_with_evidence_triggers_recompute(client, auth_
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(stale_batch, [])),
-        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch("app.api.openings.refresh_now") as refresh_mock,
         patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
     ):
         resp = client.get(
@@ -1111,7 +1056,7 @@ def test_family_drill_empty_batch_with_evidence_triggers_recompute(client, auth_
         )
 
     assert resp.status_code == 200
-    recompute_mock.assert_called_once()
+    refresh_mock.assert_called_once_with(123, "white")
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
     assert data["scored_roots"] == 1
@@ -1356,59 +1301,10 @@ def test_family_drill_null_branches_stay_null(client, auth_headers):
     assert item["underexposed_branch"] is None
 
 
-def test_family_drill_unknown_branch_key_triggers_recompute(client, auth_headers):
-    roots = _make_drill_roots()
-    stale_batch = _make_batch(
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        registry_fingerprint="stale-fingerprint",
-    )
-    fresh_batch = _make_batch_for_roots(
-        roots,
-        batch_id=2,
-        generation=2,
-        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
-    )
-    stale_rows = [
-        _make_row(
-            opening_key=DRILL_KEY_RUY_BERLIN,
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            strongest_branch_key="missing-root",
-            strongest_branch_score=11.0,
-        )
-    ]
-    fresh_rows = [
-        _make_row(
-            batch_id=2,
-            opening_key=DRILL_KEY_RUY_BERLIN,
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            strongest_branch_key=DRILL_KEY_SICILIAN_NAJDORF,
-            strongest_branch_score=11.0,
-        )
-    ]
-    with (
-        patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
-        patch(_PATCH_RECOMPUTE) as recompute_mock,
-        patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
-    ):
-        resp = client.get(
-            _drill_url(DRILL_FAMILY_RUY),
-            params={"player_color": "white"},
-            headers=auth_headers(),
-        )
-
-    assert resp.status_code == 200
-    recompute_mock.assert_called_once()
-    data = resp.json()
-    assert "2026-03-02" in data["computed_at"]
-    assert data["roots"][0]["strongest_branch"]["opening_key"] == DRILL_KEY_SICILIAN_NAJDORF
-
-
-def test_family_drill_lazily_enriches_missing_branch_summaries(client, auth_headers):
+def test_family_drill_reads_persisted_branch_summaries_without_recompute(client, auth_headers):
+    # Branch summaries are persisted from the shared calc (2b): the drill-down
+    # reader reads them straight from cached rows and never calls compute_root_score.
     graph = _make_graph()
-    graph.has_position = lambda fen: fen == DRILL_KEY_RUY_BERLIN  # type: ignore[method-assign]
     roots = _make_drill_roots()
     batch = _make_batch_for_roots(roots)
     rows = [
@@ -1417,43 +1313,22 @@ def test_family_drill_lazily_enriches_missing_branch_summaries(client, auth_head
             opening_name="Ruy Lopez: Berlin Defense",
             opening_family=DRILL_FAMILY_RUY,
             opening_score=55.0,
+            strongest_branch_key=DRILL_KEY_RUY_EXCHANGE,
+            strongest_branch_name="Ruy Lopez: Exchange Variation",
+            strongest_branch_score=61.0,
+            weakest_branch_key=DRILL_KEY_RUY_MORPHY,
+            weakest_branch_name="Ruy Lopez: Morphy Defense",
+            weakest_branch_score=48.0,
+            underexposed_branch_key=DRILL_KEY_RUY_EXCHANGE,
+            underexposed_branch_name="Ruy Lopez: Exchange Variation",
+            underexposed_branch_value=0.35,
         )
     ]
-    lazy_score = RootScore(
-        opening_key=DRILL_KEY_RUY_BERLIN,
-        opening_name="Ruy Lopez: Berlin Defense",
-        opening_family=DRILL_FAMILY_RUY,
-        player_color="white",
-        opening_score=55.0,
-        confidence=0.8,
-        coverage=0.7,
-        weighted_depth=3.0,
-        sample_size=12,
-        last_practiced_at=None,
-        strongest_branch=BranchSummary(
-            opening_key=DRILL_KEY_RUY_EXCHANGE,
-            opening_name="Ruy Lopez: Exchange Variation",
-            value=61.0,
-        ),
-        weakest_branch=BranchSummary(
-            opening_key=DRILL_KEY_RUY_MORPHY,
-            opening_name="Ruy Lopez: Morphy Defense",
-            value=48.0,
-        ),
-        underexposed_branch=BranchSummary(
-            opening_key=DRILL_KEY_RUY_EXCHANGE,
-            opening_name="Ruy Lopez: Exchange Variation",
-            value=0.35,
-        ),
-        computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
-        debug_nodes=[],
-    )
     with (
         patch(_PATCH_GRAPH, return_value=graph),
         patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(batch, rows)),
-        patch(_PATCH_OVERLAY, return_value=_empty_overlay()),
-        patch("app.api.openings.compute_root_score", return_value=lazy_score) as score_mock,
+        patch(_PATCH_LIST_CACHED, return_value=(batch, rows)),
+        patch("app.api.openings.compute_root_score", side_effect=AssertionError("no per-root recompute")),
     ):
         resp = client.get(
             _drill_url(DRILL_FAMILY_RUY),
@@ -1462,7 +1337,6 @@ def test_family_drill_lazily_enriches_missing_branch_summaries(client, auth_head
         )
 
     assert resp.status_code == 200
-    score_mock.assert_called_once()
     item = resp.json()["roots"][0]
     assert item["strongest_branch"]["opening_key"] == DRILL_KEY_RUY_EXCHANGE
     assert item["weakest_branch"]["opening_key"] == DRILL_KEY_RUY_MORPHY
@@ -1630,28 +1504,16 @@ def test_family_drill_uses_registry_for_membership_name_depth_and_eco(client, au
     assert item["opening_score"] == pytest.approx(77.0)
 
 
-def test_family_drill_stale_batches_trigger_recompute(client, auth_headers):
+def test_family_drill_serves_refreshed_branch_keys(client, auth_headers):
+    # Legacy/stale branch-key rows are repaired by the worker; the reader serves
+    # whatever list_cached returns after the refresh_now flush.
     roots = _make_drill_roots()
-    stale_batch = _make_batch(
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        registry_fingerprint=opening_score_inputs_fingerprint(_make_graph(), roots),
-    )
     fresh_batch = _make_batch_for_roots(
         roots,
         batch_id=2,
         generation=2,
         computed_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
     )
-    stale_rows = [
-        _make_row(
-            opening_key=DRILL_KEY_RUY_BERLIN,
-            opening_name="Ruy Lopez: Berlin Defense",
-            opening_family=DRILL_FAMILY_RUY,
-            strongest_branch_name="Sicilian Defense: Najdorf Variation",
-            strongest_branch_key=None,
-            strongest_branch_score=21.0,
-        )
-    ]
     fresh_rows = [
         _make_row(
             batch_id=2,
@@ -1664,8 +1526,7 @@ def test_family_drill_stale_batches_trigger_recompute(client, auth_headers):
     ]
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch(_PATCH_ENSURE, return_value=(stale_batch, stale_rows)),
-        patch(_PATCH_RECOMPUTE) as recompute_mock,
+        patch("app.api.openings.refresh_now") as refresh_mock,
         patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
     ):
         resp = client.get(
@@ -1674,7 +1535,7 @@ def test_family_drill_stale_batches_trigger_recompute(client, auth_headers):
             headers=auth_headers(),
         )
 
-    recompute_mock.assert_called_once()
+    refresh_mock.assert_called_once_with(123, "white")
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
     assert data["roots"][0]["strongest_branch"]["opening_key"] == DRILL_KEY_SICILIAN_NAJDORF
@@ -1721,7 +1582,6 @@ def test_family_drill_cache_only_read_path(client, auth_headers, db_session):
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.opening_aggregate.recompute_opening_scores", side_effect=AssertionError("should not recompute")),
         patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("should not recompute via cache")),
         patch("app.api.openings.overlay_evidence", side_effect=AssertionError("should not overlay")),
         patch("app.opening_cache.overlay_evidence", side_effect=AssertionError("should not overlay via cache")),
@@ -1797,12 +1657,25 @@ def test_children_top_level_returns_structural_roots_without_scores(client, auth
     assert all(child["subtree_root_count"] == 0 for child in data["children"])
 
 
-def test_children_top_level_current_branch_stats_aggregate_all_cached_rows(
+def test_children_top_level_current_branch_stats_use_synthetic_initial_row(
     client, auth_headers
 ):
+    # Top level uses the synthetic whole-repertoire (initial-position) row, not a
+    # descendant aggregate.
     roots = _make_children_roots()
     batch = _make_batch_for_roots(roots)
     rows = _make_children_score_rows(include_polish_root=True, include_english=True)
+    rows.append(
+        _make_row(
+            opening_key=SYNTHETIC_INITIAL_FEN,
+            opening_name="Repertoire",
+            opening_family="__repertoire__",
+            opening_score=72.0,
+            confidence=0.66,
+            coverage=0.5,
+            sample_size=30,
+        )
+    )
     with (
         patch(_PATCH_ROOTS, return_value=roots),
         patch(_PATCH_ENSURE, return_value=(batch, rows)),
@@ -1816,11 +1689,11 @@ def test_children_top_level_current_branch_stats_aggregate_all_cached_rows(
     assert resp.status_code == 200
     assert resp.json()["current_branch_stats"] == pytest.approx(
         {
-            "score": 54.0,
-            "confidence": 0.3,
-            "coverage": 0.56,
-            "sample_size": 29,
-            "root_count": 5,
+            "score": 72.0,
+            "confidence": 0.66,
+            "coverage": 0.5,
+            "sample_size": 30,
+            "root_count": 1,
         }
     )
 
@@ -1864,13 +1737,14 @@ def test_children_drill_down_returns_immediate_children(client, auth_headers):
             "is_current": True,
         }
     ]
+    # Direct-row semantics: the selected branch stats are POLISH's own row.
     assert data["current_branch_stats"] == pytest.approx(
         {
-            "score": 46.0,
-            "confidence": 0.25,
-            "coverage": 0.525,
-            "sample_size": 20,
-            "root_count": 4,
+            "score": 60.0,
+            "confidence": 0.4,
+            "coverage": 0.6,
+            "sample_size": 6,
+            "root_count": 1,
         }
     )
     assert [child["opening_key"] for child in data["children"]] == [
@@ -1960,11 +1834,11 @@ def test_children_canonicalizes_inconsistent_path_to_deepest_valid_prefix(
     ]
     assert data["current_branch_stats"] == pytest.approx(
         {
-            "score": 46.0,
-            "confidence": 0.25,
-            "coverage": 0.525,
-            "sample_size": 20,
-            "root_count": 4,
+            "score": 60.0,
+            "confidence": 0.4,
+            "coverage": 0.6,
+            "sample_size": 6,
+            "root_count": 1,
         }
     )
     assert [child["opening_key"] for child in data["children"]] == [
@@ -2068,16 +1942,18 @@ def test_children_subtree_aggregation_deduplicates_shared_descendants(client, au
         child for child in resp.json()["children"] if child["opening_key"] == CHILD_KEY_POLISH
     )
     assert polish_item["child_count"] == 2
+    # subtree_root_count is navigation metadata: scored named rows in the subtree.
     assert polish_item["subtree_root_count"] == 4
-    assert polish_item["subtree_sample_size"] == 20
-    assert polish_item["subtree_score"] == pytest.approx(46.0)
-    assert polish_item["subtree_confidence"] == pytest.approx(0.25)
-    assert polish_item["subtree_coverage"] == pytest.approx(0.525)
+    # Direct-row semantics: card score/sample/coverage/last come from POLISH's own row.
+    assert polish_item["subtree_sample_size"] == 6
+    assert polish_item["subtree_score"] == pytest.approx(60.0)
+    assert polish_item["subtree_confidence"] == pytest.approx(0.4)
+    assert polish_item["subtree_coverage"] == pytest.approx(0.6)
     assert polish_item["weakest_root_key"] == CHILD_KEY_POLISH_E6
     assert polish_item["weakest_root_name"] == "Polish Opening, 1...e6"
     assert polish_item["weakest_root_family"] == "Polish Opening"
     assert polish_item["weakest_root_score"] == pytest.approx(20.0)
-    assert polish_item["last_practiced_at"].startswith("2026-03-04")
+    assert polish_item["last_practiced_at"].startswith("2026-03-01")
 
 
 def test_children_current_branch_stats_deduplicate_shared_descendants_for_drill_route(
@@ -2097,15 +1973,15 @@ def test_children_current_branch_stats_deduplicate_shared_descendants_for_drill_
         )
 
     assert resp.status_code == 200
-    assert resp.json()["current_branch_stats"] == pytest.approx(
-        {
-            "score": 36.666666666666664,
-            "confidence": 0.2,
-            "coverage": 0.5,
-            "sample_size": 14,
-            "root_count": 3,
-        }
-    )
+    # POLISH's own direct row is absent (include_polish_root=False), so the drilled
+    # current-branch stats are unscored under direct-row semantics.
+    assert resp.json()["current_branch_stats"] == {
+        "score": None,
+        "confidence": None,
+        "coverage": None,
+        "sample_size": None,
+        "root_count": 0,
+    }
 
 
 def test_children_sorts_scored_before_unscored_with_null_last(client, auth_headers):
@@ -2153,9 +2029,12 @@ def test_children_sorts_scored_before_unscored_with_null_last(client, auth_heade
 
     assert resp.status_code == 200
     children = resp.json()["children"]
+    # Direct-row semantics: only POLISH has its own row (scored). ENGLISH and BIRD
+    # are unscored (no direct row); ENGLISH sorts ahead of BIRD because it has a
+    # scored descendant (weakest_root) while BIRD has none.
     assert [child["opening_key"] for child in children] == [
-        CHILD_KEY_ENGLISH,
         CHILD_KEY_POLISH,
+        CHILD_KEY_ENGLISH,
         CHILD_KEY_BIRD,
     ]
     assert children[-1]["subtree_score"] is None
@@ -2223,8 +2102,9 @@ def test_children_sorts_by_subtree_score_descending_before_weakest_root_tiebreak
 
     assert resp.status_code == 200
     children = resp.json()["children"]
+    # Direct-row scores: POLISH 60 > ENGLISH 52 > BIRD 49.
     assert [child["opening_key"] for child in children] == [
+        CHILD_KEY_POLISH,
         CHILD_KEY_ENGLISH,
         CHILD_KEY_BIRD,
-        CHILD_KEY_POLISH,
     ]

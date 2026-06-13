@@ -87,6 +87,29 @@ def test_coalesces_burst_into_single_recompute():
     assert recompute.calls == [(123, "white")]
 
 
+def test_immediate_deadline_is_sticky_under_normal_enqueues():
+    # An immediate (refresh_now) enqueue is due now. A subsequent burst of normal
+    # enqueues for the same key must not push that deadline back into the debounce
+    # window — otherwise sustained traffic could starve refresh_now past its
+    # timeout while the worker sits idle.
+    clock = _FakeClock()
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    key = (7, "white")
+    with sched._cond:
+        sched._enqueue_locked(key, immediate=True)  # due now
+
+    # Normal enqueues keep arriving shortly after; none may postpone the deadline.
+    for _ in range(5):
+        sched.request_recompute(7, "white")
+        clock.advance(0.1)  # still well within one quiet window
+
+    # The immediate enqueue is still due at the current (advanced) time.
+    sched.run_due()
+    assert recompute.calls == [(7, "white")]
+
+
 def test_distinct_keys_each_recompute_once_with_own_session():
     clock = _FakeClock()
     recompute = _RecordingRecompute()
@@ -439,3 +462,104 @@ def test_lifespan_swallows_shutdown_timeout_and_disposes_engine(monkeypatch):
     scheduler.start.assert_called_once_with()
     scheduler.shutdown.assert_called_once_with(drain=True)
     dispose.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
+# refresh_now (keyed flush/await with outcome tracking) — real worker thread
+# ---------------------------------------------------------------------------
+
+import time  # noqa: E402
+
+
+def test_refresh_now_returns_true_on_successful_run():
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(time.monotonic, recompute)
+    try:
+        assert sched.refresh_now(1, "white", timeout=5.0) is True
+        assert recompute.calls == [(1, "white")]
+    finally:
+        sched.shutdown()
+
+
+def test_refresh_now_returns_false_on_recompute_exception():
+    def boom(db, user_id, player_color):
+        raise RuntimeError("recompute failed")
+
+    sched, _ = _make_scheduler(time.monotonic, boom)
+    try:
+        # A covering run that fails must not be reported as fresh.
+        assert sched.refresh_now(1, "white", timeout=5.0) is False
+    finally:
+        sched.shutdown()
+
+
+def test_refresh_now_returns_false_on_worker_start_failure_without_blocking():
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(time.monotonic, recompute)
+    sched.start = Mock(side_effect=RuntimeError("cannot start worker"))
+    started = time.monotonic()
+    assert sched.refresh_now(1, "white", timeout=5.0) is False
+    # Must not block for the full timeout waiting on a worker that never runs.
+    assert time.monotonic() - started < 1.0
+
+
+def test_refresh_now_does_not_trigger_unrelated_keys():
+    recompute = _RecordingRecompute()
+    # Long quiet window so the unrelated normal enqueue stays pending (its debounce
+    # deadline is far in the future) for the whole test; only the immediate
+    # refresh_now key should ever become due and run.
+    sched, _ = _make_scheduler(time.monotonic, recompute, quiet_window=30.0)
+    try:
+        # Queue an unrelated key as a normal (debounced) recompute. It must remain
+        # pending — never run, never in-flight — while we refresh a different key.
+        sched.request_recompute(2, "black")
+        assert sched.refresh_now(1, "white", timeout=5.0) is True
+        assert recompute.calls == [(1, "white")]
+        # The unrelated key is still pending and was never started: refresh_now
+        # isolates its flush/await to its own key.
+        with sched._cond:
+            assert (2, "black") in sched._pending
+            assert (2, "black") not in sched._inflight
+        assert (2, "black") not in recompute.calls
+    finally:
+        sched.shutdown(drain=False)
+
+
+def test_refresh_now_times_out_returns_false_and_makes_no_duplicate_run():
+    release = threading.Event()
+    calls: list[tuple[int, str]] = []
+
+    def slow(db, user_id, player_color):
+        calls.append((user_id, player_color))
+        release.wait(timeout=5.0)
+        return None
+
+    sched, _ = _make_scheduler(time.monotonic, slow)
+    try:
+        # The in-flight run blocks; refresh_now times out and serves the current batch.
+        assert sched.refresh_now(1, "white", timeout=0.3) is False
+        # No second/concurrent generation was triggered for the key.
+        assert calls == [(1, "white")]
+    finally:
+        release.set()
+        sched.shutdown()
+
+
+def test_refresh_now_waits_for_followup_enqueued_during_run():
+    calls: list[tuple[int, str]] = []
+
+    def recompute(db, user_id, player_color):
+        calls.append((user_id, player_color))
+        if len(calls) == 1:
+            # A normal enqueue arriving during the run creates a follow-up entry
+            # with a newer sequence; refresh_now must not return after the first
+            # run alone — it must wait for the follow-up and quiescence (TOCTOU).
+            sched.request_recompute(user_id, player_color)
+        return None
+
+    sched, _ = _make_scheduler(time.monotonic, recompute, quiet_window=0.0)
+    try:
+        assert sched.refresh_now(1, "white", timeout=5.0) is True
+        assert calls == [(1, "white"), (1, "white")]
+    finally:
+        sched.shutdown()
