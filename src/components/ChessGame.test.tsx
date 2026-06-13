@@ -3889,6 +3889,11 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     expect(screen.getByRole("button", { name: /^again$/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /play white/i })).toBeNull();
     expect(screen.queryByRole("button", { name: /new game/i })).toBeNull();
+    // Analyze keeps its original label but is re-wired to safely re-open the
+    // saved snapshot rather than rebuild it.
+    expect(
+      screen.getByRole("button", { name: /^analyze$/i }),
+    ).toBeInTheDocument();
 
     // Retained position/moves and a disabled (ended) board.
     expect(screen.getByRole("button", { name: /e4/i })).toBeInTheDocument();
@@ -3927,6 +3932,52 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     });
     // White-to-move restart: no opponent move fired against the abandoned drill.
     expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
+  it("Analyze re-opens the saved snapshot without rebuilding it", async () => {
+    seedAbandonedDrillStore();
+    const snapshot = snapshotFor("drill-1");
+    useDrillAnalysisStore.getState().setSnapshot(snapshot);
+    setReturnMarker("drill-1");
+
+    render(<ChessGame />);
+    mockNavigate.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: /^analyze$/i }));
+
+    expect(mockNavigate).toHaveBeenCalledWith("/drill-analysis");
+    // Snapshot is re-used as-is, never rebuilt/overwritten on return.
+    expect(useDrillAnalysisStore.getState().snapshot).toBe(snapshot);
+  });
+
+  it("preserves the retained engine Elo against the on-mount rating resample", async () => {
+    seedAbandonedDrillStore();
+    useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+    setReturnMarker("drill-1");
+    // A rating that maps to a different Maia bin — if the resample fired it would
+    // clobber the retained 1500 before "Again" reads it.
+    fetchCurrentRatingMock.mockResolvedValue({
+      current_rating: 900,
+      is_provisional: false,
+      games_played: 50,
+    });
+
+    render(<ChessGame />);
+
+    // Let the on-mount fetchCurrentRating().then(...) settle.
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(useGameStore.getState().engineElo).toBe(1500);
+
+    fireEvent.click(screen.getByRole("button", { name: /^again$/i }));
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith(
+        expect.objectContaining({ engine_elo: 1500 }),
+      );
+    });
   });
 
   it("gear clears the reviewed presentation and opens the drill setup overlay", async () => {

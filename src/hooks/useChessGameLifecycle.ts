@@ -95,6 +95,12 @@ type UseChessGameLifecycleArgs = {
   setResolvedReview: Dispatch<SetStateAction<ResolvedReview | null>>;
   setPendingPromotion: Dispatch<SetStateAction<{ from: string; to: string } | null>>;
   clearBlunderBoardOverride?: () => void;
+  /**
+   * Clear the route-local reviewed-drill-return presentation (g-65ve). Called
+   * on successful new-game/new-drill starts and on reset so the retained
+   * "Again" banner never lingers once a fresh session is live.
+   */
+  clearReviewedDrillReturn?: () => void;
 };
 
 export const useChessGameLifecycle = ({
@@ -130,6 +136,7 @@ export const useChessGameLifecycle = ({
   setResolvedReview,
   setPendingPromotion,
   clearBlunderBoardOverride,
+  clearReviewedDrillReturn,
 }: UseChessGameLifecycleArgs) => {
   const revertExecutionIdRef = useRef(0);
   const playedEndGameAudioSessionIdRef = useRef<string | null>(null);
@@ -236,9 +243,11 @@ export const useChessGameLifecycle = ({
             lichess: null,
           },
         );
-        // Only resample engine ELO if no active game — otherwise the
-        // displayed Maia name and stake would diverge from the backend session.
-        if (!s.isGameActive) {
+        // Only resample engine ELO when truly idle (no active game AND no drill
+        // context loaded). A reviewed-drill return mounts inactive but with the
+        // abandoned drill still in the store; resampling here would clobber the
+        // retained engine ELO before "Again" replays it (g-65ve).
+        if (!s.isGameActive && s.drillState === null) {
           s.setEngineElo(sampleEloBin(data.current_rating));
         }
       })
@@ -545,6 +554,7 @@ export const useChessGameLifecycle = ({
         s2.setIsGameActive(true);
         setIsStartingGame(false);
         setShowStartOverlay(false);
+        clearReviewedDrillReturn?.();
 
         chess.reset();
         s2.setLiveFen(chess.fen());
@@ -610,6 +620,7 @@ export const useChessGameLifecycle = ({
       setResolvedReview,
       setPendingPromotion,
       clearBlunderBoardOverride,
+      clearReviewedDrillReturn,
       setEngineMessage,
       setIsStartingGame,
       setLiveOpening,
@@ -719,6 +730,7 @@ export const useChessGameLifecycle = ({
 
         setIsStartingGame(false);
         setShowStartOverlay(false);
+        clearReviewedDrillReturn?.();
         setEngineMessage(null);
 
         try {
@@ -765,6 +777,7 @@ export const useChessGameLifecycle = ({
       setResolvedReview,
       setPendingPromotion,
       clearBlunderBoardOverride,
+      clearReviewedDrillReturn,
       setEngineMessage,
       setIsStartingGame,
       setLiveOpening,
@@ -925,6 +938,7 @@ export const useChessGameLifecycle = ({
     setShowPostGamePrompt(false);
     setRevertError(null);
     setIsRevertPending(false);
+    clearReviewedDrillReturn?.();
     setShowStartOverlay(true);
     setBlunderReviewId(null);
     setBlunderReviewSrs(null);
@@ -962,6 +976,7 @@ export const useChessGameLifecycle = ({
     setResolvedReview,
     setPendingPromotion,
     clearBlunderBoardOverride,
+    clearReviewedDrillReturn,
     setEngineMessage,
     setLiveOpening,
     setReviewFailModal,

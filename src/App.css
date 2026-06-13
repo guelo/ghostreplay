@@ -3108,6 +3108,44 @@
     gap: 1.25rem;
 }
 
+/*
+ * In-flow "return to drill" control on the transient drill-analysis surface
+ * (g-65ve). A solid, clearly visible back button anchored to the start of the
+ * shell — it occupies its own row above the board rather than overlapping the
+ * board or eval bar.
+ */
+.drill-analysis-return {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.85rem;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: 0.6rem;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.drill-analysis-return:hover {
+    border-color: color-mix(in srgb, var(--status-ghost) 42%, var(--border-color));
+    background: color-mix(in srgb, var(--card-bg) 88%, var(--status-ghost-light));
+}
+
+/*
+ * The return control occupies a short row above the viewport-driven board.
+ * Compensate the board height by that row (~3rem incl. the shell gap) so the
+ * board is not pushed below the fold on short/mobile viewports — keeping the
+ * fold layout neutral. References the breakpoint-specific --chrome so it holds
+ * across all the .history-page .analysis-board media queries.
+ */
+.history-page.drill-analysis-page .analysis-board {
+    --board-size: calc(100dvh - var(--chrome) - 3rem);
+}
+
 .history-shell__header {
     display: flex;
     align-items: center;

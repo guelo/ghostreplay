@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import userEvent from "@testing-library/user-event";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 import DrillAnalysisPage from "./DrillAnalysisPage";
 import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
@@ -30,12 +31,22 @@ vi.mock("../components/AppNav", () => ({
   default: () => <nav data-testid="app-nav" />,
 }));
 
+function PlayProbe() {
+  const location = useLocation();
+  const marker = (
+    location.state as { returnFromDrillAnalysis?: { sourceSessionId?: string } } | null
+  )?.returnFromDrillAnalysis;
+  return (
+    <div data-testid="play-page" data-return-session={marker?.sourceSessionId ?? ""} />
+  );
+}
+
 function renderWithRoutes() {
   return render(
     <MemoryRouter initialEntries={["/drill-analysis"]}>
       <Routes>
         <Route path="/drill-analysis" element={<DrillAnalysisPage />} />
-        <Route path="/play" element={<div data-testid="play-page" />} />
+        <Route path="/play" element={<PlayProbe />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -59,6 +70,7 @@ const snapshot: DrillAnalysisSnapshot = {
   positionAnalysis: {},
   playerColor: "black",
   initialMoveIndex: 0,
+  sourceSessionId: "sess-1",
 };
 
 describe("DrillAnalysisPage", () => {
@@ -83,6 +95,18 @@ describe("DrillAnalysisPage", () => {
     renderWithRoutes();
 
     expect(screen.getByText(/partial review/i)).toBeInTheDocument();
+  });
+
+  it("returns to /play carrying the snapshot source session identity", async () => {
+    const user = userEvent.setup();
+    useDrillAnalysisStore.getState().setSnapshot(snapshot);
+    renderWithRoutes();
+
+    await user.click(screen.getByRole("button", { name: /return to drill/i }));
+
+    const playPage = screen.getByTestId("play-page");
+    expect(playPage).toBeInTheDocument();
+    expect(playPage).toHaveAttribute("data-return-session", "sess-1");
   });
 
   it("redirects to /play when the store is empty", () => {

@@ -2490,10 +2490,17 @@ flashes) whether this is a valid reviewed-return: the marker/snapshot/store sess
 present, and the full restart settings (player color, engine Elo, strictness tier, exact
 `drillStrictnessCp`) are available. When valid, the retained board, moves, orientation, and
 settings are read straight from the game store and the original drill-stopped actions
-(`DrillStopActions` — the terminal-reason subtitle plus **Again**/settings/Analyze) are
-restored; the generic post-game "New game" banner is suppressed so no misleading "Drill
-abandoned" message appears. The board stays disabled behind the `isGameActive === false` gate.
-The marker is consumed via replace
+(`DrillStopActions` — the terminal-reason subtitle plus **Again**/settings) are restored;
+the **Analyze** action keeps its original label but is re-wired on return to simply
+re-navigate to `/drill-analysis` using the still-present snapshot (rebuilding would overwrite
+the saved review with an empty map, since the live analysis session was cleared on the way
+out). The generic post-game
+"New game" banner is suppressed so no misleading "Drill abandoned" message appears. The board
+stays disabled behind the `isGameActive === false` gate. The on-mount rating fetch does **not**
+resample engine Elo while a drill context is loaded, so "Again" replays the retained Elo. The
+"Back to drill" control is an in-flow row; the analysis board's viewport-driven height is
+compensated by that row so the board is not pushed below the fold. The marker is consumed via
+replace
 navigation but the reviewed presentation persists until an explicit transition clears it
 (successful drill/normal-game start, the gear opening the setup overlay, or a reset). Identity
 is never inferred from opening key, moves, or reusable settings, and the abandoned backend

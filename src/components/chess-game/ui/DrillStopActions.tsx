@@ -9,6 +9,11 @@ type DrillStopActionsProps = {
   onAnalyze: () => void;
   /** Hide the Analyze button when there are no moves to review. */
   analyzeEnabled: boolean;
+  /**
+   * Hide Analyze entirely. Defaults to showing it for the live drill-stopped
+   * state.
+   */
+  showAnalyze?: boolean;
   /** Disable Analyze and show a preparing label while the snapshot is built. */
   isPreparing: boolean;
   /** Disable the restart actions while a new drill is starting. */
@@ -33,6 +38,7 @@ const DrillStopActions = ({
   onAnotherDrillSettings,
   onAnalyze,
   analyzeEnabled,
+  showAnalyze = true,
   isPreparing,
   disabled,
   errorMessage,
@@ -66,7 +72,7 @@ const DrillStopActions = ({
             <SettingsGearIcon />
           </button>
         </span>
-        {analyzeEnabled && (
+        {showAnalyze && analyzeEnabled && (
           <button
             className="chess-button"
             type="button"

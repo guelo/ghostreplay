@@ -56,7 +56,10 @@ import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import DrillStopActions from "./chess-game/ui/DrillStopActions";
-import { buildDrillAnalysisSnapshot } from "./chess-game/domain/sessionUpload";
+import {
+  buildDrillAnalysisSnapshot,
+  type DrillAnalysisSnapshot,
+} from "./chess-game/domain/sessionUpload";
 import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
 import MaterialDisplay from "./MaterialDisplay";
 import type { MoveMessage, SrsFailDetail } from "./MoveList";
@@ -88,6 +91,44 @@ const resolveStrictnessCp = (
 type DrillRecovery =
   | { kind: "analysis"; result: Extract<PlayerMoveApplyResult, { applied: true }> }
   | { kind: "opponent"; fen: string; uciHistory: string[] };
+
+/** Router marker placed by DrillAnalysisPage's "Back to drill" control (g-65ve). */
+type ReturnFromDrillAnalysisMarker = {
+  returnFromDrillAnalysis?: { sourceSessionId?: string | null };
+};
+
+/**
+ * Decide synchronously whether the current mount is a valid "return to the
+ * just-reviewed drill" (g-65ve). Returns true only when the router marker, the
+ * transient analysis snapshot, and the retained game store all describe the
+ * same abandoned drill AND every restart setting needed to replay it is present.
+ *
+ * Identity is bound through the session ID end-to-end — never inferred from
+ * opening key, moves, or reusable settings — so a stale snapshot can never be
+ * paired with a different game. Any failure falls back to ordinary /play.
+ */
+const isReviewedDrillReturnValid = (
+  locationState: unknown,
+  snapshot: DrillAnalysisSnapshot | null,
+  store: ReturnType<typeof useGameStore.getState>,
+): boolean => {
+  const marker = (locationState as ReturnFromDrillAnalysisMarker | null)
+    ?.returnFromDrillAnalysis;
+  if (!marker?.sourceSessionId) return false;
+  if (!snapshot) return false;
+  if (marker.sourceSessionId !== snapshot.sourceSessionId) return false;
+  if (snapshot.sourceSessionId !== store.sessionId) return false;
+  if (store.isGameActive !== false) return false;
+  if (store.drillState !== "abandoned") return false;
+  if (!store.drillOpeningKey) return false;
+  if (store.moveHistory.length === 0) return false;
+  // Exact replay requires the full restart settings (handleAgainDrill inputs).
+  if (store.playerColor !== "white" && store.playerColor !== "black") return false;
+  if (typeof store.engineElo !== "number") return false;
+  if (store.drillStrictness == null) return false;
+  if (store.drillStrictnessCp == null) return false;
+  return true;
+};
 
 const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Reconstruct Chess from store state so it stays in sync after remounts.
@@ -149,6 +190,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     [coordinator],
   );
 
+  const location = useLocation();
+  const navigate = useNavigate();
   const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const sessionId = useGameStore((s) => s.sessionId);
   const isGameActive = useGameStore((s) => s.isGameActive);
@@ -158,7 +201,27 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const gameResult = useGameStore((s) => s.gameResult);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
-  const [showStartOverlay, setShowStartOverlay] = useState(true);
+  // Returning from /drill-analysis with a valid identity-bound marker restores
+  // the just-played drill with "Again" ready instead of the new-game popup
+  // (g-65ve). Computed once on mount from the router marker + transient snapshot
+  // + retained store; the start overlay seeds from the same result so the popup
+  // never flashes before an effect can run. Marker consumption (below) does not
+  // recompute or clear this — it is the accepted result, not the input.
+  const [isReviewedDrillReturn, setIsReviewedDrillReturn] = useState(() =>
+    isReviewedDrillReturnValid(
+      location.state,
+      useDrillAnalysisStore.getState().snapshot,
+      useGameStore.getState(),
+    ),
+  );
+  const [showStartOverlay, setShowStartOverlay] = useState(
+    () =>
+      !isReviewedDrillReturnValid(
+        location.state,
+        useDrillAnalysisStore.getState().snapshot,
+        useGameStore.getState(),
+      ),
+  );
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);
@@ -237,8 +300,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const isRevertPending = isRevertPendingState;
 
   // ---- Drill state --------------------------------------------------
-  const location = useLocation();
-  const navigate = useNavigate();
   const [isDrillMode, setIsDrillMode] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
   const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
@@ -663,6 +724,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setResolvedReview,
     setPendingPromotion,
     clearBlunderBoardOverride,
+    clearReviewedDrillReturn: () => setIsReviewedDrillReturn(false),
   });
 
   // "Analyze" drill-end action (g-a406): snapshot the just-played drill while
@@ -724,12 +786,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (!isStillOriginalSession()) return;
 
       const store = useGameStore.getState();
+      // Bind the snapshot to the exact drill session it describes. The session
+      // is still present in the store post-abandon (only isGameActive/drillState
+      // changed), so this is the identity used to validate a later return.
+      if (!store.sessionId) return;
       const snapshot = buildDrillAnalysisSnapshot(
         store.moveHistory,
         analysisStore.getState().analysisMap,
         STARTING_FEN,
         playerColor,
         failedMoveIndex,
+        store.sessionId,
       );
       useDrillAnalysisStore.getState().setSnapshot({ ...snapshot, warning });
 
@@ -863,6 +930,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [coordinator]);
 
   // ---- Drill effects ------------------------------------------------
+  // Consume the one-shot "return from drill analysis" marker so a refresh/back
+  // can't re-trigger it. This only clears the router input — isReviewedDrillReturn
+  // was already decided synchronously on mount and is NOT recomputed here.
+  useEffect(() => {
+    const marker = (location.state as ReturnFromDrillAnalysisMarker | null)
+      ?.returnFromDrillAnalysis;
+    if (!marker) return;
+    navigate(location.pathname, { replace: true, state: null });
+  }, [location.state, navigate, location.pathname]);
+
   // Intercept location.state from /openings navigation
   useEffect(() => {
     const drillSetup = (location.state as { drillSetup?: { openingKey: string; playerColor: string } } | null)?.drillSetup;
@@ -1519,6 +1596,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Does NOT clear gameResult, so the natural-end banner is preserved and can be
   // restored if the overlay is cancelled (see handleCloseStartOverlay).
   const handleAgainSettings = useCallback(() => {
+    // Leaving the reviewed-return presentation for the setup overlay: clear it
+    // up front, then seed the overlay from the retained exact store settings.
+    setIsReviewedDrillReturn(false);
     const s = useGameStore.getState();
     if (s.drillOpeningKey != null) {
       // Seed the setup panel from the live (exact) store state — these win over
@@ -1562,6 +1642,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     if (result) {
       drillFailedMoveIndexRef.current = null;
       setAnalyzeError(null);
+      // handleNewDrill already cleared isReviewedDrillReturn in its success path.
       // Opponent-first restarts (player is black) are driven by the
       // opponent-move effect, which runs after the new session is committed to
       // the store. Calling applyOpponentMove directly here would capture the
@@ -1572,6 +1653,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       handleAgainSettings();
     }
   }, [isStartingGame, handleNewDrill, handleAgainSettings]);
+
+  // Reviewed-return "View analysis": the saved snapshot is still in the store
+  // (it was never cleared on return), so just re-open the review. Never rebuild
+  // via handleAnalyzeDrill here — the live analysis map was cleared on the way
+  // out and a rebuild would overwrite the good snapshot with an empty one.
+  const handleViewDrillReview = useCallback(() => {
+    if (useDrillAnalysisStore.getState().snapshot) {
+      navigate("/drill-analysis");
+    }
+  }, [navigate]);
 
   const handleSwitchToDrillMode = useCallback(() => setIsDrillMode(true), []);
   const handleSwitchToPlayMode = useCallback(() => setIsDrillMode(false), []);
@@ -1805,6 +1896,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 gameResult={gameResult}
                 drillOpeningKey={drillOpeningKey}
                 drillState={drillState}
+                isReviewedDrillReturn={isReviewedDrillReturn}
                 onNewDrill={handleAgainDrill}
                 onAnotherDrillSettings={handleAgainSettings}
                 drillActionsDisabled={isStartingGame}
@@ -1821,12 +1913,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
           <div className="moves-column">
             <MaterialDisplay fen={displayedFen} perspective={opponentColor} />
-            {isGameActive && isStoppedDrill && !gameResult && (
+            {((isGameActive && isStoppedDrill && !gameResult) ||
+              isReviewedDrillReturn) && (
               <DrillStopActions
                 terminalReason={drillTerminalReason}
                 onAnotherDrill={handleAgainDrill}
                 onAnotherDrillSettings={handleAgainSettings}
-                onAnalyze={handleAnalyzeDrill}
+                // Live stop rebuilds + opens the review; reviewed return just
+                // re-opens the saved snapshot (rebuilding would wipe it, since
+                // the live analysis map was cleared on the way out).
+                onAnalyze={
+                  isReviewedDrillReturn ? handleViewDrillReview : handleAnalyzeDrill
+                }
                 analyzeEnabled={moveHistory.length > 0}
                 isPreparing={isPreparingAnalysis}
                 disabled={isStartingGame}

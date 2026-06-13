@@ -101,6 +101,12 @@ export interface DrillAnalysisSnapshot {
   positionAnalysis: Record<string, PositionAnalysis>;
   playerColor: "white" | "black";
   initialMoveIndex: number;
+  /**
+   * Identity of the drill session this snapshot describes. Binds the review and
+   * any "return to drill" restoration to a single drill so a stale snapshot can
+   * never be paired with a different game store state (g-65ve).
+   */
+  sourceSessionId: string;
   /** Non-blocking notice (e.g. partial analysis) shown on the review surface. */
   warning?: string | null;
 }
@@ -120,6 +126,7 @@ export const buildDrillAnalysisSnapshot = (
   startingFen: string,
   playerColor: "white" | "black",
   failedMoveIndex: number | null,
+  sourceSessionId: string,
 ): DrillAnalysisSnapshot => {
   const moves: AnalysisMove[] = [];
   const positionAnalysis: Record<string, PositionAnalysis> = {};
@@ -156,5 +163,5 @@ export const buildDrillAnalysisSnapshot = (
       ? 0
       : Math.min(Math.max(failedMoveIndex ?? 0, 0), moves.length - 1);
 
-  return { moves, positionAnalysis, playerColor, initialMoveIndex };
+  return { moves, positionAnalysis, playerColor, initialMoveIndex, sourceSessionId };
 };

@@ -45,6 +45,7 @@ describe("buildDrillAnalysisSnapshot", () => {
       STARTING_FEN,
       "white",
       2,
+      "sess-1",
     );
 
     expect(snap.moves).toHaveLength(3);
@@ -68,6 +69,7 @@ describe("buildDrillAnalysisSnapshot", () => {
       STARTING_FEN,
       "white",
       0,
+      "sess-1",
     );
 
     // Index 0's fen_before is the starting position.
@@ -83,11 +85,11 @@ describe("buildDrillAnalysisSnapshot", () => {
     const analyses = new Map<number, AnalysisResult>();
 
     expect(
-      buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", 99)
+      buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", 99, "sess-1")
         .initialMoveIndex,
     ).toBe(2);
     expect(
-      buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", null)
+      buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", null, "sess-1")
         .initialMoveIndex,
     ).toBe(0);
   });
@@ -99,6 +101,7 @@ describe("buildDrillAnalysisSnapshot", () => {
       STARTING_FEN,
       "black",
       null,
+      "sess-1",
     );
     expect(snap.moves).toHaveLength(0);
     expect(snap.initialMoveIndex).toBe(0);

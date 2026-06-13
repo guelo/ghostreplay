@@ -16,6 +16,12 @@ type PostGameBannerProps = {
   gameResult: GameResult | null;
   drillOpeningKey?: string | null;
   drillState?: DrillSessionState | null;
+  /**
+   * Returned from /drill-analysis to the just-played (abandoned) drill (g-65ve).
+   * Renders the "Again" + settings presentation instead of the generic inactive
+   * "New game" banner, without reviving the abandoned backend session.
+   */
+  isReviewedDrillReturn?: boolean;
   onNewDrill?: () => void;
   /** Open the setup overlay to change drill settings (gear button). */
   onAnotherDrillSettings?: () => void;
@@ -36,6 +42,7 @@ const PostGameBanner = ({
   gameResult,
   drillOpeningKey,
   drillState,
+  isReviewedDrillReturn,
   onNewDrill,
   onAnotherDrillSettings,
   drillActionsDisabled,
@@ -52,6 +59,14 @@ const PostGameBanner = ({
   );
   const selectedDelta = selectedChange?.rating;
   const isStoppedDrill = Boolean(drillOpeningKey) && drillState === "failed";
+
+  // Reviewed-return presentation (g-65ve): the drill-stopped actions are restored
+  // separately (DrillStopActions), so suppress the banner entirely here — in
+  // particular the generic inactive "New game" branch below — to avoid a
+  // duplicate/misleading "Drill abandoned" message.
+  if (isReviewedDrillReturn) {
+    return null;
+  }
 
   if (showPostGamePrompt && gameResult && isStoppedDrill) {
     return (

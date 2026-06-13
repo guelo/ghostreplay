@@ -170,6 +170,26 @@ describe("PostGameBanner", () => {
     expect(onAnotherDrillSettings).toHaveBeenCalledTimes(1);
   });
 
+  it("renders nothing in reviewed-return mode, suppressing the generic New game", () => {
+    const props = makeProps();
+    const { container } = render(
+      <PostGameBanner
+        {...props}
+        showPostGamePrompt={false}
+        gameResult={null}
+        ratingChange={null}
+        drillOpeningKey="some-opening"
+        drillState="abandoned"
+        isReviewedDrillReturn
+      />,
+    );
+
+    // DrillStopActions restores the drill-stopped controls separately; the banner
+    // must not render its generic inactive "New game" prompt here.
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByRole("button", { name: /new game/i })).toBeNull();
+  });
+
   it("disables the drill restart actions when drillActionsDisabled is set", () => {
     const props = makeProps();
     render(
