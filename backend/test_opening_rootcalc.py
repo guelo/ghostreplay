@@ -11,6 +11,7 @@ from app.opening_rootcalc import (
     SYNTHETIC_INITIAL_FEN,
     SYNTHETIC_ROOT_FAMILY,
     SYNTHETIC_ROOT_NAME,
+    CalcTelemetry,
     RootCalcConfig,
     _SharedCalculator,
     compute_all_root_scores,
@@ -487,3 +488,97 @@ def test_synthetic_initial_root_emitted_only_when_requested():
     # The named root score is unchanged whether or not the synthetic row is added
     # (same shared DAG pass).
     assert with_syn[b].opening_score == pytest.approx(without[b].opening_score)
+
+
+# A king-and-king position: majors_and_minors == 0 satisfies the middlegame
+# predicate, so it is a raw-middlegame root that carries no quality evidence.
+_MIDGAME_FEN = "8/8/8/4k3/4K3/8/8/8 w - -"
+
+
+def test_telemetry_counts_keys_and_roots_separately():
+    root, _e4, e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root, "Mainline"), _root(_MIDGAME_FEN, "Bare kings"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, _positions(["e2e4"])[1], "e2e4")
+    overlay.nodes[root] = _quality(root, 0.5)
+    overlay.nodes[e5] = _quality(e5, 0.5)
+
+    tel = CalcTelemetry()
+    scores, _ = compute_all_root_scores(
+        "white", graph, overlay, roots, telemetry=tel
+    )
+
+    assert tel.named_root_count == 2
+    # The natural and perfect passes traverse the same FEN set, so their distinct
+    # memo-key classes are equal in count and never conflated into one number.
+    assert tel.actual_key_count == tel.perfect_key_count
+    assert tel.actual_key_count > 0
+    # Each memo miss writes exactly one (fen, perfect) key, across both passes.
+    assert tel.calculation_misses == tel.actual_key_count + tel.perfect_key_count
+    # raw-middlegame and unscored counts are independent: the bare-kings root is
+    # raw-middlegame AND unscored, the mainline root is neither.
+    assert tel.raw_middlegame_root_count == 1
+    assert tel.unscored_root_count == 1
+    assert _MIDGAME_FEN not in scores
+
+
+def test_score_ordering_is_reproducible_across_recomputes():
+    # Rank stability (v1-free replacement for rank-change comparison): two
+    # consecutive recomputes of the same snapshot (fixed `now`) are identical.
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.nodes[root] = _quality(root, 0.7)
+    overlay.nodes[e5] = _quality(e5, 0.6)
+    now = datetime(2026, 6, 6, tzinfo=timezone.utc)
+
+    first, _ = compute_all_root_scores("white", graph, overlay, roots, now=now)
+    second, _ = compute_all_root_scores("white", graph, overlay, roots, now=now)
+
+    assert {k: v.opening_score for k, v in first.items()} == {
+        k: v.opening_score for k, v in second.items()
+    }
+
+
+def test_monotonic_sanity_strong_outranks_weak():
+    # Known-strong vs known-weak: a root whose user moves are near-best must
+    # outrank one whose moves are poor, holding tree shape constant.
+    root, e4 = _positions(["e2e4"])
+    graph = _graph([["e2e4"]])
+
+    def score_for(quality_sum: float) -> float:
+        roots = _roots(_root(root))
+        overlay = EvidenceOverlay(1, "white")
+        _prepared(overlay, root, e4, "e2e4")
+        overlay.nodes[root] = _quality(root, quality_sum, count=4)
+        scores, _ = compute_all_root_scores("white", graph, overlay, roots)
+        return scores[root].opening_score
+
+    # Four near-best observations (sum 3.8) vs four poor ones (sum 0.8).
+    assert score_for(0.95 * 4) > score_for(0.2 * 4)
+
+
+def test_telemetry_populated_on_empty_early_return():
+    root = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(root, "Start"), _root(_MIDGAME_FEN, "Bare kings"))
+    overlay = EvidenceOverlay(1, "white")  # no quality observations at all
+
+    tel = CalcTelemetry()
+    scores, eligible = compute_all_root_scores(
+        "white", graph, overlay, roots, telemetry=tel
+    )
+
+    assert scores == {}
+    assert eligible == set()
+    # Well-formed zeros + structural counts, never None, on the early-return path.
+    assert tel.named_root_count == 2
+    assert tel.actual_key_count == 0
+    assert tel.perfect_key_count == 0
+    assert tel.calculation_misses == 0
+    assert tel.unscored_root_count == 2
+    # Structural, so still reported even though no calculator was built.
+    assert tel.raw_middlegame_root_count == 1

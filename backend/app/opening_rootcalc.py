@@ -21,6 +21,37 @@ SYNTHETIC_ROOT_NAME = "Repertoire"
 SYNTHETIC_ROOT_FAMILY = "__repertoire__"
 
 
+@dataclass
+class CalcTelemetry:
+    """Optional calibration out-param for :func:`compute_all_root_scores`.
+
+    Mutated in place; never read by scoring, so it has no behavioural effect. The
+    recursion-bound proof relies on reporting key classes separately: ``_metrics``
+    is keyed ``(fen, perfect)`` (see :class:`_SharedCalculator`), so the natural and
+    perfect passes are counted apart rather than conflated into one ~2x number.
+
+    - ``named_root_count``: named roots in the registry snapshot.
+    - ``actual_key_count`` / ``perfect_key_count``: distinct memoized ``_calc``
+      keys for the natural (``perfect=False``) and idealized (``perfect=True``)
+      passes; each scales with unique reachable normalized FENs, not named roots.
+    - ``calculation_misses``: total memo misses across both passes.
+    - ``raw_middlegame_root_count``: named roots whose own board satisfies
+      ``is_middlegame_position``. This does **not** imply the root is unscored: a
+      raw-middlegame board can still have a scored subtree via observed off-book
+      moves (see ``_structural_children``).
+    - ``unscored_root_count``: named roots absent from the scored result set
+      (no reachable quality observation). Reported separately from the raw
+      middlegame count and never conflated with it.
+    """
+
+    named_root_count: int = 0
+    actual_key_count: int = 0
+    perfect_key_count: int = 0
+    calculation_misses: int = 0
+    raw_middlegame_root_count: int = 0
+    unscored_root_count: int = 0
+
+
 @dataclass(frozen=True)
 class RootCalcConfig:
     alpha: float = 1.0
@@ -113,6 +144,18 @@ def _synthetic_initial_root() -> OpeningRoot:
         depth=0,
         parent_keys=frozenset(),
         child_keys=frozenset(),
+    )
+
+
+def _raw_middlegame_root_count(named_roots: list[OpeningRoot]) -> int:
+    """Count named roots whose own board satisfies the middlegame predicate.
+
+    Structural (depends only on the registry, not on evidence), so it is safe to
+    compute on the early-return path. Distinct from the unscored-root count: a
+    raw-middlegame root may still be scored via observed off-book children.
+    """
+    return sum(
+        1 for root in named_roots if is_middlegame_position(_normalized(root.opening_key))
     )
 
 
@@ -703,11 +746,19 @@ def compute_all_root_scores(
     debug: bool = False,
     include_branch_summaries: bool = True,
     include_synthetic_root: bool = False,
+    telemetry: CalcTelemetry | None = None,
 ) -> tuple[dict[str, RootScore], set[str]]:
     config = config or RootCalcConfig()
     now = now or datetime.now(timezone.utc)
     named_roots = _iter_named_roots(roots)
     if not any(node.quality_count > 0 for node in overlay.nodes.values()):
+        # Early return before any calculator is built. Still populate telemetry
+        # with well-formed zeros (+ structural root counts) so empty/low-evidence
+        # pairs get counters rather than None.
+        if telemetry is not None:
+            telemetry.named_root_count = len(named_roots)
+            telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(named_roots)
+            telemetry.unscored_root_count = len(named_roots)
         return {}, set()
     calculator = _SharedCalculator(
         player_color, graph, overlay, roots, config, now, debug=debug
@@ -726,6 +777,19 @@ def compute_all_root_scores(
     result = calculator.compute_roots(
         selected, include_branch_summaries=include_branch_summaries
     )
+    if telemetry is not None:
+        telemetry.named_root_count = len(named_roots)
+        telemetry.actual_key_count = sum(
+            1 for key in calculator._metrics if not key[1]
+        )
+        telemetry.perfect_key_count = sum(
+            1 for key in calculator._metrics if key[1]
+        )
+        telemetry.calculation_misses = calculator.calculation_misses
+        telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(named_roots)
+        telemetry.unscored_root_count = sum(
+            1 for root in named_roots if root.opening_key not in result
+        )
     return result, eligible
 
 

@@ -140,18 +140,32 @@ For each node and edge, collect:
 - training-intent signals
 - drill-down and debugging context
 
-### 4. Book-exit extension
+### 4. Phase horizon (shipped: exact Lichess divider)
 
-There is no clean universal endpoint for an opening, so do not stop exactly at the last named book node.
+> **v2 — replaces the v1 "book-exit extension".** The earlier two-decision
+> book-exit rule (`book_exit_extension_user_decisions = 2`) is **removed**. There
+> is no fixed user-decision cutoff and no per-extension depth discount tied to it.
 
-For MVP:
+The opening horizon is the **opening / middlegame boundary** computed by the
+exact Lichess phase divider — a faithful static port of `Divider.scala` from
+`lichess-org/scalachess` (`backend/app/game_phase.py`; upstream verified
+2026-06-06:
+<https://github.com/lichess-org/scalachess/blob/master/core/src/main/scala/Divider.scala>).
+Per session we reconstruct the board line, call `divide(boards)`, and keep only
+opening-interval premoves (everything at or beyond the first middlegame board is
+dropped from opening evidence).
 
-- score the full named book subtree
-- allow up to `2` additional user decisions beyond the last book node
-- apply the normal depth discount in the extension
-- stop immediately when user evidence ends
+Consequences:
 
-This keeps the model honest: deeper personal prep gets credit, but the score does not silently turn into a middlegame score.
+- The horizon is **position-driven**, not count-driven: deeper personal prep is
+  scored as long as it is still the opening phase, and the score cannot silently
+  turn into a middlegame score.
+- A named root whose own board already satisfies the middlegame predicate is a
+  **raw-middlegame root**. It may *still* be scored when observed off-book moves
+  reach quality observations, so "raw-middlegame root" and "unscored root" are
+  reported as two distinct counts (see the calibration script).
+- `DIVIDER_VERSION` is part of the score fingerprint, so a divider change
+  invalidates cached snapshots.
 
 ## Core Metrics
 
@@ -192,31 +206,53 @@ It exists to separate:
 
 ## Local Statistics
 
-### User-node mastery
+### User-node mastery (shipped: continuous win-chance quality)
 
-At a user-to-move node `n`:
+> **v2 — replaces the v1 binary pass/fail mastery.** Local mastery is no longer a
+> Beta posterior over `pass`/`fail` counts. Each user move contributes a
+> **continuous quality** value in `[0, 1]`, and mastery is the skeptical-prior
+> mean of those qualities.
+
+At a user-to-move node `n` (`backend/app/opening_rootcalc.py:_mastery`):
 
 ```text
-attempts_n = live_passes_n + live_fails_n
-
-p_n = (live_passes_n + alpha) / (attempts_n + alpha + beta)
+p_n = (quality_sum_n + alpha) / (quality_count_n + alpha + beta)
 ```
 
-Recommended starting values:
+where `quality_sum_n` / `quality_count_n` aggregate the per-move quality
+observations at `n`. Starting values are unchanged:
 
 - `alpha = 1`
 - `beta = 2`
 
-This gives a skeptical prior, so one clean result does not look mastered.
+so the prior is still skeptical (one clean observation does not look mastered),
+but a near-best move now scores near `1.0` and a small inaccuracy degrades the
+term smoothly instead of flipping it to `0`.
 
-### Pass/fail rule
+### Move quality (shipped: win-chance loss, replaces the eval_delta < 50 rule)
 
-At a user node:
+> **v2 — replaces the binary `eval_delta < 50` pass/fail rule.** Quality is a
+> continuous function of **win-chance loss**, not a centipawn threshold.
 
-- `pass` if `eval_delta < 50`
-- `fail` if `eval_delta >= 50`
+For a user move (`backend/app/opening_quality.py`):
 
-This matches the existing Ghost/SRS threshold and keeps the score aligned with the rest of the product.
+```text
+W(cp)      = 2 / (1 + exp(-0.00368208 * cp)) - 1          # Lichess win-chance, clamped to [-1, 1]
+wc_loss    = W(best) - W(played)                          # mover perspective, >= 0
+quality    = exp(-wc_loss / tau_wc)                       # in (0, 1], 1.0 = best move
+```
+
+Quality is resolved from the best available evidence in a fixed
+**source-precedence ladder**, recorded per observation for calibration:
+
+1. `session_eval` — primary `(played, best)` evals stored on the move,
+2. `analysis_cache` — reconstructed `(played, best)` from a matching
+   `analysis_cache` row when the primary evals are absent,
+3. `eval_delta` — deterministic centipawn-delta fallback when neither is
+   available.
+
+`QUALITY_VERSION`, `TAU_WC`, and `TAU_CP` are part of the score fingerprint, so a
+curve change invalidates cached snapshots.
 
 ### Prepared repertoire children
 
@@ -605,9 +641,61 @@ None of those are required for MVP tuning.
 | `half_life_days` | 45 |
 | `coverage_live_threshold` | 2 |
 | `coverage_review_threshold` | `1 live + 1 review` |
-| `book_exit_extension_user_decisions` | 2 |
+| `tau_wc` | 0.20 |
+| `tau_cp` | 100.0 |
+
+> **v2:** `book_exit_extension_user_decisions` is **removed** — the opening
+> horizon is the exact Lichess phase divider (§4), not a fixed user-decision
+> count. `tau_wc` / `tau_cp` are the continuous win-chance quality-curve
+> parameters (`backend/app/opening_quality.py`).
 
 These should stay configurable in a debug view during tuning.
+
+## Calibration Outcome (v2)
+
+v2 is the only live scoring model (no v1 baseline), so calibration is run
+**directly on v2** via `backend/scripts/calibrate_opening_scores_v2.py`
+(no-write default; see `CALIBRATE_OPENING_SCORES.md`). The script reports
+per-user and pooled score distributions, the source mix, horizon behaviour, and
+the recursion bound, and is the reproducible basis for the decisions below.
+
+### Quality-curve parameters — **retained**
+
+`tau_wc = 0.20`, `tau_cp = 100.0`. The curve produces the intended smooth,
+context-sensitive grading: a near-equality move losing 49cp from an even
+position yields `quality ≈ 0.63` (`exp(-0.0899 / 0.20)`), and there is no
+discontinuity across the old 49↔50cp pass/fail boundary (asserted by
+`test_no_49_50_discontinuity` / `test_context_sensitivity` in
+`backend/test_opening_quality.py`). No change.
+
+### Grade thresholds — **retained**
+
+`A ≥ 85`, `B ≥ 70`, `C ≥ 55`, `D ≥ 45`, `F < 45`; tones `alert < 45`,
+`watch < 65` (`src/openings/format.ts`). Because `OpeningScore = 100 · S/PerfectS`
+normalizes against an all-quality-1.0 ideal on the same tree, a user whose
+average move quality is ~0.63 lands mid-band (~C), which matches the product
+intent ("playable but improvable"); strong, near-best repertoires push into A/B.
+The boundaries are retained rather than re-centred.
+
+> **Re-centring is data-gated.** Re-centring on observed percentiles requires a
+> populated cohort. When a dataset with pairs at/above `--min-observations`
+> exists, re-run the script and, if the pooled and per-user-median distributions
+> argue for a shift, edit `getPriorityLabel` / `getPriorityTone` and add
+> `src/openings/format.test.ts` asserting the new boundaries.
+
+### Source mix & horizon
+
+Reported by the script per run (aggregated `session_eval` / `analysis_cache` /
+`eval_delta` share with a guarded zero denominator; opening-interval-length
+distribution; raw-middlegame vs unscored root counts kept distinct).
+
+### Numeric gates (release bar)
+
+- One-pass in-memory scoring per pair (full ~11k-root registry): **< 5 s**.
+- Cache read (`list_cached_opening_scores` after one isolated recompute, under
+  `--write-bench`): **< 50 ms**.
+
+Fill exact medians from the first populated run and record them as the pass bar.
 
 ## Why This Is The Final Recommendation
 

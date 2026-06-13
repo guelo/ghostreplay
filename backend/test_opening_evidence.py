@@ -937,6 +937,68 @@ class TestAnalysisCacheFallback:
         assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
 
 
+class TestRolloutTelemetry:
+    """Aggregated calibration telemetry on the overlay: a single mixed fixture
+    exercising every quality source, the excluded-session counter, and the
+    per-session phase-horizon samples together."""
+
+    def test_mixed_fixture_aggregates_sources_excluded_and_phase_samples(
+        self, db_session, branching_graph
+    ):
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            SOURCE_EVAL_DELTA,
+            SOURCE_SESSION_EVAL,
+        )
+
+        _insert_user(db_session)
+
+        # Session 1 (clean opening line): primary session evals on e4, and a
+        # cache-reconstructed Nf3 (no primary evals → analysis_cache fallback).
+        sid1 = _insert_session(db_session)
+        _insert_move(
+            db_session, sid1, 1, "white", "e4", RAW_ROOT, RAW_E4,
+            eval_delta=30, eval_cp=-30, best_move_eval_cp=20,
+        )
+        _insert_move(db_session, sid1, 1, "black", "e5", RAW_E4, RAW_E4E5, eval_delta=5)
+        _insert_move(db_session, sid1, 2, "white", "Nf3", RAW_E4E5, RAW_E4E5NF3, eval_delta=40)
+        _insert_analysis_cache(
+            db_session, RAW_E4E5, "g1f3", "Nf3", played_eval=-20, best_eval=10
+        )
+
+        # Session 2 (clean opening line): eval_delta-only user move → deterministic
+        # fallback source.
+        sid2 = _insert_session(db_session)
+        _insert_move(db_session, sid2, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=120)
+
+        # Session 3: broken board continuity → excluded, contributes no sample.
+        sid3 = _insert_session(db_session)
+        _insert_move(db_session, sid3, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10)
+        _insert_move(
+            db_session, sid3, 1, "black", "d5", _raw_fen_after_moves("d2d4"),
+            _raw_fen_after_moves("d2d4", "d7d5"), eval_delta=10,
+        )
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        # All three quality sources show up once each in the aggregated counter.
+        assert ov.source_counts == Counter({
+            SOURCE_SESSION_EVAL: 1,
+            SOURCE_ANALYSIS_CACHE: 1,
+            SOURCE_EVAL_DELTA: 1,
+        })
+        # The discontinuous session is dropped and counted, not guessed across.
+        assert ov.excluded_sessions == 1
+        # One phase sample per non-excluded session; the excluded one has none.
+        assert len(ov.phase_samples) == 2
+        for sample in ov.phase_samples:
+            # Short book lines never reach a middlegame boundary, so the opening
+            # interval spans the whole line and middle/end stay None.
+            assert sample.opening_interval_len > 0
+            assert sample.middle_ply is None
+            assert sample.end_ply is None
+
+
 class TestPhaseExclusion:
     """Moves whose pre-move position is at or beyond the divider's middlegame
     boundary are excluded from opening evidence."""

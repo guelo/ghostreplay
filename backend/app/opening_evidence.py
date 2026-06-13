@@ -92,6 +92,21 @@ class EdgeEvidence:
     quality_count: int = 0
 
 
+@dataclass(slots=True)
+class PhaseSample:
+    """Per-session phase-horizon telemetry captured where ``divide`` already runs.
+
+    ``opening_interval_len`` is the divider's opening size (``middle`` when a
+    middlegame boundary exists, else the full ply count). ``middle_ply`` and
+    ``end_ply`` are the raw divider indices (``None`` when not reached). Purely
+    diagnostic for calibration; carries no effect on scoring.
+    """
+
+    opening_interval_len: int
+    middle_ply: int | None
+    end_ply: int | None
+
+
 @dataclass
 class EvidenceOverlay:
     user_id: int
@@ -102,6 +117,8 @@ class EvidenceOverlay:
     # how many sessions were dropped for broken board continuity.
     source_counts: Counter[str] = field(default_factory=Counter)
     excluded_sessions: int = 0
+    # Per-session horizon telemetry from the Lichess divider (calibration only).
+    phase_samples: list[PhaseSample] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -285,6 +302,13 @@ def _build_move_rows(
             continue
 
         division = divide(boards)
+        overlay.phase_samples.append(
+            PhaseSample(
+                opening_interval_len=division.opening_size,
+                middle_ply=division.middle,
+                end_ply=division.end,
+            )
+        )
         for index, r in enumerate(srows):
             if not is_opening_premove(division, index):
                 continue
