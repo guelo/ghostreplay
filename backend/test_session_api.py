@@ -9,12 +9,6 @@ from app.fen import fen_hash
 from app.models import Blunder, BlunderOpportunityEvent, Position, SessionMove
 
 
-@pytest.fixture(autouse=True)
-def _stub_opening_cache_refresh():
-    with patch("app.api.session.recompute_opening_scores_if_needed", return_value=None):
-        yield
-
-
 def test_session_moves_bulk_insert_success(client, auth_headers, create_game_session, db_session):
     session_id = create_game_session(user_id=123, player_color="white")
     session_uuid = uuid.UUID(session_id)
@@ -403,7 +397,14 @@ def test_session_moves_succeeds_when_opening_cache_refresh_fails(
     session_id = create_game_session(user_id=123, player_color="white")
     session_uuid = uuid.UUID(session_id)
 
-    with patch("app.api.session.recompute_opening_scores_if_needed", side_effect=RuntimeError("boom")):
+    # Exercise the real best-effort facade (not a stub) and force the underlying
+    # scheduler enqueue to raise. The facade must swallow it so /moves stays 200.
+    from app.opening_score_scheduler import request_recompute as real_request_recompute
+
+    with patch("app.api.session.request_recompute", real_request_recompute), patch(
+        "app.opening_score_scheduler.OpeningScoreScheduler.request_recompute",
+        side_effect=RuntimeError("boom"),
+    ):
         response = client.post(
             f"/api/session/{session_id}/moves",
             json={

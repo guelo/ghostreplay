@@ -88,8 +88,8 @@ CLASSIFICATION_CASES = _cp_white_mover_cases()
 
 @pytest.fixture(autouse=True)
 def _stub_opening_cache_refresh():
-    with patch("app.api.srs.recompute_opening_scores_if_needed", return_value=None), patch(
-        "app.api.session.recompute_opening_scores_if_needed", return_value=None
+    with patch("app.api.srs.request_recompute", return_value=None), patch(
+        "app.api.session.request_recompute", return_value=None
     ):
         yield
 

@@ -515,7 +515,9 @@ def test_session_upload_refreshes_relevant_opening_snapshot(
     auth_headers,
     create_game_session,
     db_session,
+    _no_op_recompute_scheduler,
 ):
+    session_stub, _ = _no_op_recompute_scheduler
     session_id = create_game_session(user_id=123, player_color="black")
 
     response = client.post(
@@ -560,6 +562,11 @@ def test_session_upload_refreshes_relevant_opening_snapshot(
     )
 
     assert response.status_code == 200
+    # The endpoint enqueues a coalesced recompute rather than running it inline;
+    # drive that recompute directly to assert the snapshot it would produce.
+    session_stub.assert_called_once_with(123, "black")
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+    db_session.commit()
     db_session.expire_all()
     batch, rows = list_cached_opening_scores(db_session, 123, "black")
     assert batch is not None
@@ -571,7 +578,9 @@ def test_srs_review_refreshes_relevant_opening_snapshot(
     auth_headers,
     create_game_session,
     db_session,
+    _no_op_recompute_scheduler,
 ):
+    _, srs_stub = _no_op_recompute_scheduler
     session_id = create_game_session(user_id=123, player_color="black")
     position = Position(
         user_id=123,
@@ -605,6 +614,9 @@ def test_srs_review_refreshes_relevant_opening_snapshot(
     )
 
     assert response.status_code == 200
+    srs_stub.assert_called_once_with(123, "black")
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+    db_session.commit()
     db_session.expire_all()
     batch, rows = list_cached_opening_scores(db_session, 123, "black")
     assert batch is not None

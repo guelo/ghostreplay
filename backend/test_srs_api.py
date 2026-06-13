@@ -9,12 +9,6 @@ from sqlalchemy import text
 from app.models import Blunder, Position
 
 
-@pytest.fixture(autouse=True)
-def _stub_opening_cache_refresh():
-    with patch("app.api.srs.recompute_opening_scores_if_needed", return_value=None):
-        yield
-
-
 def _create_blunder(
     db_session,
     *,
@@ -131,7 +125,12 @@ def test_srs_review_succeeds_when_opening_cache_refresh_fails(
     session_id = create_game_session(user_id=123, player_color="white")
     blunder = _create_blunder(db_session, user_id=123)
 
-    with patch("app.api.srs.recompute_opening_scores_if_needed", side_effect=RuntimeError("boom")):
+    from app.opening_score_scheduler import request_recompute as real_request_recompute
+
+    with patch("app.api.srs.request_recompute", real_request_recompute), patch(
+        "app.opening_score_scheduler.OpeningScoreScheduler.request_recompute",
+        side_effect=RuntimeError("boom"),
+    ):
         response = client.post(
             "/api/srs/review",
             json={

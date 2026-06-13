@@ -1,5 +1,6 @@
 import os
 import uuid
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -313,13 +314,28 @@ def _db_override():
     app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_op_recompute_scheduler():
+    """Stop API endpoints from touching the real opening-score scheduler.
+
+    The scheduler runs recomputes on its own thread against its own
+    ``SessionLocal`` session, which would bypass ``TestingSessionLocal`` and
+    never coalesce in tests. Patch the bound aliases imported into the API
+    modules so ``/moves`` and SRS review enqueue into a no-op recorder. Tests
+    that need to assert recompute behaviour drive the scheduler directly or
+    patch these aliases themselves.
+    """
+    with patch("app.api.session.request_recompute") as session_stub, patch(
+        "app.api.srs.request_recompute"
+    ) as srs_stub:
+        yield session_stub, srs_stub
+
+
 @pytest.fixture
 def client(_db_override):
-    client = TestClient(app)
-    try:
-        yield client
-    finally:
-        client.close()
+    with patch("app.main.engine", engine), patch("app.main.get_scheduler") as get_scheduler:
+        with TestClient(app) as client:
+            yield client
 
 
 @pytest.fixture

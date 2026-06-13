@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
-from app.opening_cache import recompute_opening_scores_if_needed
+from app.opening_score_scheduler import request_recompute
 from app.security import TokenPayload, get_current_user
 from app.srs_math import calculate_priority, expected_interval_hours
 
@@ -64,16 +64,6 @@ def _get_blunder_player_color(db: Session, blunder: Blunder) -> str | None:
     return db.query(Position.active_color).filter(Position.id == blunder.position_id).scalar()
 
 
-def _refresh_opening_scores_best_effort(db: Session, user_id: int, player_color: str) -> None:
-    try:
-        recompute_opening_scores_if_needed(db, user_id, player_color)
-    except Exception:
-        logger.exception(
-            "opening score cache refresh failed after SRS review",
-            extra={"user_id": user_id, "player_color": player_color},
-        )
-
-
 @router.post("/review", response_model=SrsReviewResponse, status_code=200)
 def review_blunder(
     request: SrsReviewRequest,
@@ -107,7 +97,7 @@ def review_blunder(
 
     player_color = _get_blunder_player_color(db, blunder)
     if player_color is not None:
-        _refresh_opening_scores_best_effort(db, user.user_id, player_color)
+        request_recompute(user.user_id, player_color)
 
     interval_hours = expected_interval_hours(blunder.pass_streak)
     next_expected_review = reviewed_at + timedelta(hours=interval_hours)

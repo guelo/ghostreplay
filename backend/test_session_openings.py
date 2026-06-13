@@ -34,7 +34,7 @@ _STUB_GRAPH = _stub_graph()
 @pytest.fixture(autouse=True)
 def _stub_singletons():
     with (
-        patch("app.api.session.recompute_opening_scores_if_needed", return_value=None),
+        patch("app.api.session.request_recompute", return_value=None),
         patch(PATCH_GRAPH, return_value=_STUB_GRAPH),
     ):
         yield

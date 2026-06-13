@@ -21,6 +21,7 @@ from app.api.stats import router as stats_router
 from app.api.session import router as session_router
 from app.api.srs import router as srs_router
 from app.db import engine
+from app.opening_score_scheduler import get_scheduler
 from app.security import AuthMiddleware
 from app.http_logging import HTTPLoggingMiddleware
 from app.logging_config import configure_logging
@@ -34,8 +35,24 @@ async def lifespan(app: FastAPI):
     with engine.connect() as connection:
         connection.execute(text("SELECT 1"))
 
-    yield
-    engine.dispose()
+    # Start the in-process opening-score recompute scheduler. A start failure
+    # must never block the API from coming up — enqueues then degrade to
+    # best-effort no-ops.
+    try:
+        get_scheduler().start()
+    except Exception:
+        logging.getLogger(__name__).exception("opening score scheduler failed to start")
+
+    try:
+        yield
+    finally:
+        # Teardown must not be wedged by a hung recompute: swallow drain errors
+        # so engine.dispose() always runs.
+        try:
+            get_scheduler().shutdown(drain=True)
+        except Exception:
+            logging.getLogger(__name__).exception("opening score scheduler shutdown failed")
+        engine.dispose()
 
 
 def create_app() -> FastAPI:

@@ -32,8 +32,8 @@ from app.opening_aggregate import (
 from app.opening_cache import (
     ensure_opening_scores,
     opening_score_inputs_fingerprint,
-    recompute_opening_scores_if_needed,
 )
+from app.opening_score_scheduler import request_recompute
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.models import (
@@ -195,16 +195,6 @@ def _validate_unique_move_keys(moves: list[SessionMoveInput]) -> None:
                 ),
             )
         seen.add(key)
-
-
-def _refresh_opening_scores_best_effort(db: Session, user_id: int, player_color: str) -> None:
-    try:
-        recompute_opening_scores_if_needed(db, user_id, player_color)
-    except Exception:
-        logger.exception(
-            "opening score cache refresh failed after session upload",
-            extra={"user_id": user_id, "player_color": player_color},
-        )
 
 
 def _reverse_ancestor_position_ids(
@@ -624,7 +614,7 @@ def upsert_session_moves(
                 player_color=game_session.player_color,
             )
             _upsert_analysis_cache(db, evidence_moves)
-            _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
+            request_recompute(user.user_id, game_session.player_color)
         return SessionMovesResponse(
             moves_inserted=len(values),
             drill_state=game_session.drill_state,
@@ -670,7 +660,7 @@ def upsert_session_moves(
             player_color=game_session.player_color,
         )
         _upsert_analysis_cache(db, evidence_moves)
-        _refresh_opening_scores_best_effort(db, user.user_id, game_session.player_color)
+        request_recompute(user.user_id, game_session.player_color)
 
     return SessionMovesResponse(
         moves_inserted=len(values),
