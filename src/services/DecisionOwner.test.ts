@@ -90,8 +90,11 @@ function makeOwner(stateOverrides: Partial<DecisionOwnerGameState> = {}) {
     playBuzzer: vi.fn(),
     playBlunderAudio: vi.fn(),
   }
-  const owner = new DecisionOwner({ getGameState: () => gameState, callbacks })
-  return { owner, callbacks, gameState }
+  const owner = new DecisionOwner({ getGameState: () => gameState })
+  // Default: hold a UI lease so the existing transient-UI assertions apply. Tests
+  // that exercise the no-lease (unmounted) path call release() first.
+  const release = owner.registerUICallbacks(callbacks)
+  return { owner, callbacks, gameState, release }
 }
 
 // Outcome builders (generation 0 — matches the owner's seeded default).
@@ -669,6 +672,85 @@ describe('DecisionOwner — stale generation & dispose', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// UI lease (g-2m0p): durable path always runs; transient UI is lease-gated
+// ---------------------------------------------------------------------------
+
+describe('DecisionOwner — UI lease', () => {
+  it('with NO lease, a resolved blunder still POSTs recordBlunder but fires no alert', async () => {
+    const { owner, callbacks, release } = makeOwner({
+      moveHistory: [
+        { san: 'e4', fen: 'after-0', uci: 'e2e4' },
+        { san: 'e5', fen: 'after-1', uci: 'e7e5' },
+        { san: 'Nf3', fen: 'after-2', uci: 'g1f3' },
+      ],
+    })
+    release() // unmount: drop the UI lease
+
+    seedResolvedThrough(owner, 2)
+    owner.registerBlunderContext('reqC', makeContext(2))
+    owner.handleOutcome(resolved(2, 'reqC', blunderResult(2)))
+
+    await Promise.resolve() // flush microtask
+    // Durable POST still landed.
+    expect(recordBlunderMock).toHaveBeenCalledTimes(1)
+    // Transient UI suppressed while unmounted.
+    expect(callbacks.setBlunderAlert).not.toHaveBeenCalled()
+    expect(callbacks.setShowFlash).not.toHaveBeenCalled()
+    expect(callbacks.playBlunderAudio).not.toHaveBeenCalled()
+  })
+
+  it('releasing the lease before a queued alert flush suppresses the flash/audio', async () => {
+    const { owner, callbacks, release } = makeOwner()
+    seedResolvedThrough(owner, 2)
+    owner.handleOutcome(resolved(2, 'reqC', blunderResult(2))) // buffers + schedules
+    release() // lease released before the microtask flush → epoch bump drops it
+
+    await Promise.resolve()
+    expect(callbacks.setBlunderAlert).not.toHaveBeenCalled()
+    expect(callbacks.playBlunderAudio).not.toHaveBeenCalled()
+  })
+
+  it('hasPendingReview is true while armed, false once resolved or cancelled', () => {
+    const { owner } = makeOwner()
+    owner.registerSrsReview('reqA', makeSrsReview(0, { srsDecisionId: 'SA' }))
+    expect(owner.hasPendingReview('reqA')).toBe(true)
+    // Resolution consumes the pending entry.
+    owner.handleOutcome(resolved(0, 'reqA', makeResult({ moveIndex: 0, delta: 300 })))
+    expect(owner.hasPendingReview('reqA')).toBe(false)
+
+    owner.registerSrsReview('reqB', makeSrsReview(1, { srsDecisionId: 'SB' }))
+    expect(owner.hasPendingReview('reqB')).toBe(true)
+    owner.cancelPendingSrsReviews()
+    expect(owner.hasPendingReview('reqB')).toBe(false)
+  })
+
+  it('cancelPendingSrsReviews terminates awaiting slots >= k, spares durable resolved ones', () => {
+    const { owner } = makeOwner()
+    // Durable: a resolved SRS slot at moveIndex 5 (in_flight POST).
+    owner.registerSrsReview('reqA', makeSrsReview(5, { srsDecisionId: 'SA', blunderId: 100 }))
+    owner.handleOutcome(resolved(5, 'reqA', makeResult({ moveIndex: 5, delta: 300 })))
+    const durable = owner.findSrsSlotBySrsDecisionId('SA')!.status
+    expect(['pending', 'in_flight', 'succeeded']).toContain(durable)
+
+    // Not-yet-resolved SRS slot at moveIndex 6.
+    owner.registerSrsReview('reqB', makeSrsReview(6, { srsDecisionId: 'SB', blunderId: 200 }))
+    expect(owner.findSrsSlotBySrsDecisionId('SB')?.status).toBe('awaiting_analysis')
+
+    owner.cancelPendingSrsReviews(5)
+
+    // The awaiting slot (moveIndex 6 >= 5) is terminated; the durable one is untouched.
+    expect(owner.findSrsSlotBySrsDecisionId('SB')?.status).toBe('terminal_error')
+    expect(owner.findSrsSlotBySrsDecisionId('SB')?.terminalError).toBe('pruned')
+    expect(owner.findSrsSlotBySrsDecisionId('SA')?.status).toBe(durable)
+
+    // reqB's later resolved posts nothing — its pendingSrsMap entry was pruned.
+    reviewSrsBlunderMock.mockClear()
+    owner.handleOutcome(resolved(6, 'reqB', makeResult({ moveIndex: 6, delta: 300 })))
+    expect(reviewSrsBlunderMock).not.toHaveBeenCalled()
   })
 })
 

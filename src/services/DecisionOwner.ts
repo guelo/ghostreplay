@@ -79,7 +79,6 @@ export interface DecisionOwnerCallbacks {
 
 export interface DecisionOwnerDeps {
   getGameState: () => DecisionOwnerGameState
-  callbacks: DecisionOwnerCallbacks
 }
 
 /** Per-moveIndex SRS registration payload (the controller mints `srsDecisionId`
@@ -211,7 +210,10 @@ const cancelTimer = (id: ReturnType<typeof setTimeout> | undefined): void => {
 
 export class DecisionOwner {
   private readonly getGameState: () => DecisionOwnerGameState
-  private readonly cb: DecisionOwnerCallbacks
+  /** The single active UI lease (or null while AnalysisEffects is unmounted).
+   *  Durable work runs regardless; transient UI calls are gated on this. */
+  private uiLease: { leaseId: number; callbacks: DecisionOwnerCallbacks } | null = null
+  private uiLeaseSeq = 0
 
   // Recording frontier / decision boundary
   private nextDecisionIndex = 0
@@ -251,7 +253,6 @@ export class DecisionOwner {
 
   constructor(deps: DecisionOwnerDeps) {
     this.getGameState = deps.getGameState
-    this.cb = deps.callbacks
   }
 
   /** Seed the generation from the coordinator's epoch so the very first outcome
@@ -260,10 +261,45 @@ export class DecisionOwner {
     this.currentGeneration = generation
   }
 
+  /** Lease the single active UI surface. The durable recording/SRS/outbox path
+   *  always runs; transient UI calls (alert flash/audio, resolved-review overlay,
+   *  move messages, onSrsFail) fire only while a lease is held. Acquiring or
+   *  releasing a lease bumps the UI epoch so an alert scheduled under one lease is
+   *  dropped if the lease changed before its microtask flush (unmount suppression).
+   *  Returns a cleanup that releases this exact lease (no-op if superseded). */
+  registerUICallbacks(callbacks: DecisionOwnerCallbacks): () => void {
+    const leaseId = ++this.uiLeaseSeq
+    this.uiLease = { leaseId, callbacks }
+    this.bumpUiEpoch()
+    return () => {
+      if (this.uiLease?.leaseId !== leaseId) return
+      this.uiLease = null
+      this.bumpUiEpoch()
+    }
+  }
+
+  /** Bump the UI epoch and clear any buffered/scheduled alert. A lease change or
+   *  reset between an alert's schedule and its flush makes the flush a no-op. */
+  private bumpUiEpoch(): void {
+    this.uiEpoch += 1
+    this.alertEpoch += 1
+    this.alertBuffer = []
+    this.alertScheduledEpoch = null
+  }
+
   // --- Registration (called by the controller before/around a move) ---
 
   registerBlunderContext(requestId: string, context: PendingAnalysisContext): void {
     this.contextMap.set(requestId, context)
+  }
+
+  /** True while an armed SRS review for `requestId` is still unresolved (its
+   *  analysis has not graded it yet). A leased UI uses this to decide whether a
+   *  surviving `pending` resolved-review overlay is still live (keep it — the
+   *  owner will transition it on resolution) or stale (the decision already
+   *  resolved durably while the UI was unmounted — clear it). */
+  hasPendingReview(requestId: string): boolean {
+    return this.pendingSrsMap.has(requestId)
   }
 
   /** Register a pending SRS review. Consults terminatedRequests so a review armed
@@ -439,7 +475,7 @@ export class DecisionOwner {
         }
       }
       // Keep the resolved-review overlay pointed at the live request id.
-      this.cb.setResolvedReview((p) =>
+      this.uiLease?.callbacks.setResolvedReview((p) =>
         p && p.analysisId === prev
           ? { analysisId: outcome.requestId, moveIndex: p.moveIndex, result: p.result }
           : p,
@@ -546,9 +582,13 @@ export class DecisionOwner {
     this.alertScheduledEpoch = null
     const buffer = this.alertBuffer
     this.alertBuffer = []
-    // A reset/prune/dispose between scheduling and flush bumps the epoch — drop.
+    // A reset/prune/dispose/lease-change between scheduling and flush bumps the
+    // epoch — drop the stale alert + audio.
     if (epochAtSchedule !== this.alertEpoch) return
     if (buffer.length === 0) return
+    // Transient-only: no UI lease (AnalysisEffects unmounted) → suppress.
+    const ui = this.uiLease?.callbacks
+    if (!ui) return
 
     // Latest-only: highest-moveIndex buffered player blunder.
     const top = buffer.reduce((a, b) => (b.moveIndex > a.moveIndex ? b : a))
@@ -557,7 +597,7 @@ export class DecisionOwner {
 
     const moveHistory = this.getGameState().moveHistory
     const moveSan = moveHistory[result.moveIndex]?.san ?? result.move
-    this.cb.setBlunderAlert(
+    ui.setBlunderAlert(
       buildBlunderAlert({
         moveHistory,
         moveIndex: result.moveIndex,
@@ -568,8 +608,8 @@ export class DecisionOwner {
         shouldRewind: true,
       }),
     )
-    this.cb.setShowFlash(true)
-    this.cb.playBlunderAudio()
+    ui.setShowFlash(true)
+    ui.playBlunderAudio()
   }
 
   // --- SRS slot fill + grading ---
@@ -607,48 +647,9 @@ export class DecisionOwner {
     const passed = grade === 'pass'
     const evalLossCp = evalLoss(result.delta) ?? 0
 
-    this.cb.setResolvedReview((prev) =>
-      prev?.analysisId === requestId
-        ? { analysisId: requestId, moveIndex: outcome.moveIndex, result: passed ? 'pass' : 'fail' }
-        : prev,
-    )
-
-    if (passed) {
-      const srs = pending.srs
-      this.cb.appendMoveMessage(outcome.moveIndex, {
-        key: `srs-${requestId}`,
-        text: 'Correct! You avoided your past mistake.',
-        variant: 'srs-pass',
-        srsStats: srs
-          ? { passCount: srs.pass_count + 1, failCount: srs.fail_count, streak: srs.pass_streak + 1 }
-          : undefined,
-      })
-    } else {
-      const sourceFen = fenBeforeMove(
-        this.getGameState().moveHistory,
-        outcome.moveIndex,
-      )
-      const bestMoveSan = sanForUciMove(sourceFen, result.bestMove)
-      const srs = pending.srs
-      const srsFailDetail: SrsFailDetail = {
-        userMoveSan: pending.userMoveSan,
-        bestMoveSan,
-        userMoveUci: result.move,
-        bestMoveUci: result.bestMove,
-      }
-      this.cb.appendMoveMessage(outcome.moveIndex, {
-        key: `srs-${requestId}`,
-        text: 'You made this mistake again!',
-        variant: 'srs-fail',
-        srsFailDetail,
-        srsStats: srs
-          ? { passCount: srs.pass_count, failCount: srs.fail_count + 1, streak: 0 }
-          : undefined,
-      })
-      this.cb.onSrsFail(srsFailDetail, outcome.moveIndex)
-      this.cb.playBuzzer()
-    }
-
+    // Durable side FIRST: build the payload, arm the slot, cancel the analysis
+    // lease, and drain. A throwing React setState in the transient block below
+    // then cannot starve the durable POST (review finding 4).
     slot.payload = {
       session_id: pending.sessionId,
       blunder_id: pending.blunderId,
@@ -661,6 +662,50 @@ export class DecisionOwner {
     cancelTimer(slot.analysisRetryTimeoutId)
     slot.analysisRetryTimeoutId = undefined
     this.drainOutbox()
+
+    // Transient UI — only while a lease is held.
+    const ui = this.uiLease?.callbacks
+    ui?.setResolvedReview((prev) =>
+      prev?.analysisId === requestId
+        ? { analysisId: requestId, moveIndex: outcome.moveIndex, result: passed ? 'pass' : 'fail' }
+        : prev,
+    )
+
+    if (passed) {
+      const srs = pending.srs
+      ui?.appendMoveMessage(outcome.moveIndex, {
+        key: `srs-${requestId}`,
+        text: 'Correct! You avoided your past mistake.',
+        variant: 'srs-pass',
+        srsStats: srs
+          ? { passCount: srs.pass_count + 1, failCount: srs.fail_count, streak: srs.pass_streak + 1 }
+          : undefined,
+      })
+    } else if (ui) {
+      const sourceFen = fenBeforeMove(
+        this.getGameState().moveHistory,
+        outcome.moveIndex,
+      )
+      const bestMoveSan = sanForUciMove(sourceFen, result.bestMove)
+      const srs = pending.srs
+      const srsFailDetail: SrsFailDetail = {
+        userMoveSan: pending.userMoveSan,
+        bestMoveSan,
+        userMoveUci: result.move,
+        bestMoveUci: result.bestMove,
+      }
+      ui.appendMoveMessage(outcome.moveIndex, {
+        key: `srs-${requestId}`,
+        text: 'You made this mistake again!',
+        variant: 'srs-fail',
+        srsFailDetail,
+        srsStats: srs
+          ? { passCount: srs.pass_count, failCount: srs.fail_count + 1, streak: 0 }
+          : undefined,
+      })
+      ui.onSrsFail(srsFailDetail, outcome.moveIndex)
+      ui.playBuzzer()
+    }
   }
 
   /** A `failed`/`skipped` for a request whose SRS review is already registered:
@@ -817,62 +862,53 @@ export class DecisionOwner {
     }
   }
 
+  /** Cancel not-yet-resolved SRS reviews for moveIndex >= `fromMoveIndex` (or ALL
+   *  when undefined): drop their pendingSrsMap entries and terminate outbox SRS
+   *  slots still in `awaiting_analysis`/`awaiting_retry`. Durable resolved slots
+   *  (`pending`/`in_flight`/`awaiting_http_retry`) are UNTOUCHED — they POST
+   *  regardless. The lifecycle calls this BEFORE awaited revert/new-game/new-drill
+   *  network work so an analysis resolving during that async window cannot POST a
+   *  review the flow is cancelling; `fullReset`/`partialReset` reuse it. */
+  cancelPendingSrsReviews(fromMoveIndex?: number, reason = 'pruned'): void {
+    const all = fromMoveIndex === undefined
+    for (const [reqId, srs] of this.pendingSrsMap) {
+      if (all || srs.moveIndex >= fromMoveIndex) this.pendingSrsMap.delete(reqId)
+    }
+    for (const entry of this.outbox) {
+      if (entry.kind !== 'srs') continue
+      if (!all && entry.moveIndex < fromMoveIndex) continue
+      if (entry.status === 'awaiting_analysis' || entry.status === 'awaiting_retry') {
+        this.markTerminal(entry, reason)
+      }
+    }
+  }
+
   private fullReset(generation: number): void {
     this.nextDecisionIndex = 0
     this.committedDecisionIndex = 0
     this.currentGeneration = generation
-    this.uiEpoch += 1
-    this.alertEpoch += 1
-    this.alertBuffer = []
-    this.alertScheduledEpoch = null
+    this.bumpUiEpoch()
 
     // Provisional SRS slots can never resolve now — terminate them. Durable
     // POST states (pending/awaiting_http_retry/in_flight) survive.
-    let settledAny = false
-    for (const entry of this.outbox) {
-      if (entry.kind !== 'srs') continue
-      if (entry.status === 'awaiting_analysis' || entry.status === 'awaiting_retry') {
-        cancelTimer(entry.analysisRetryTimeoutId)
-        entry.analysisRetryTimeoutId = undefined
-        entry.status = 'terminal_error'
-        entry.terminalError = 'session_reset'
-        settledAny = true
-      }
-    }
+    this.cancelPendingSrsReviews(undefined, 'session_reset')
 
     for (const slot of this.frontier.values()) cancelTimer(slot.retryTimeoutId)
     this.frontier.clear()
-    this.pendingSrsMap.clear()
     this.contextMap.clear()
     this.processedOutcomes.clear()
     this.terminatedRequests.clear()
     this.abandonedRequests.clear()
     this.blunderReserved = false
     // registrationSeqCounter is intentionally NOT reset (tab-lifetime monotonic).
-
-    if (settledAny) this.drainOutbox()
   }
 
   private partialReset(k: number): void {
     this.nextDecisionIndex = Math.min(this.nextDecisionIndex, k)
     // committedDecisionIndex unchanged (monotonic boundary).
-    this.uiEpoch += 1
-    this.alertEpoch += 1
-    this.alertBuffer = []
-    this.alertScheduledEpoch = null
+    this.bumpUiEpoch()
 
-    let settledAny = false
-    for (const entry of this.outbox) {
-      if (entry.kind !== 'srs') continue
-      if (entry.moveIndex < k) continue
-      if (entry.status === 'awaiting_analysis' || entry.status === 'awaiting_retry') {
-        cancelTimer(entry.analysisRetryTimeoutId)
-        entry.analysisRetryTimeoutId = undefined
-        entry.status = 'terminal_error'
-        entry.terminalError = 'pruned'
-        settledAny = true
-      }
-    }
+    this.cancelPendingSrsReviews(k, 'pruned')
 
     for (const [idx, slot] of this.frontier) {
       if (idx >= k) {
@@ -882,9 +918,6 @@ export class DecisionOwner {
     }
     for (const [reqId, ctx] of this.contextMap) {
       if (ctx.moveIndex >= k) this.contextMap.delete(reqId)
-    }
-    for (const [reqId, srs] of this.pendingSrsMap) {
-      if (srs.moveIndex >= k) this.pendingSrsMap.delete(reqId)
     }
     for (const [key, moveIndex] of this.processedOutcomes) {
       if (moveIndex >= k) this.processedOutcomes.delete(key)
@@ -897,8 +930,6 @@ export class DecisionOwner {
     for (const [reqId, moveIndex] of this.abandonedRequests) {
       if (moveIndex >= k) this.abandonedRequests.delete(reqId)
     }
-
-    if (settledAny) this.drainOutbox()
   }
 
   // --- Teardown ---
@@ -912,9 +943,7 @@ export class DecisionOwner {
       cancelTimer(entry.httpRetryTimeoutId)
     }
     for (const slot of this.frontier.values()) cancelTimer(slot.retryTimeoutId)
-    this.alertEpoch += 1
-    this.alertScheduledEpoch = null
-    this.alertBuffer = []
+    this.bumpUiEpoch()
   }
 
   // --- Test/inspection surface ---

@@ -36,24 +36,6 @@ import { buildSessionMoveUploads } from "../components/chess-game/domain/session
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
 
-type PendingAnalysisContext = {
-  fen: string;
-  pgn: string;
-  moveSan: string;
-  moveUci: string;
-  moveIndex: number;
-};
-
-type PendingSrsReview = {
-  sessionId: string;
-  analysisId: string;
-  blunderId: number;
-  moveIndex: number;
-  userMoveSan: string;
-  srs: TargetBlunderSrs | null;
-  srsDecisionId: string;
-};
-
 const applyRatingScores = (scores: RatingScores | null | undefined) => {
   if (!scores) return;
   const s = useGameStore.getState();
@@ -66,9 +48,6 @@ type UseChessGameLifecycleArgs = {
   chess: Chess;
   coordinator: GameAnalysisCoordinator;
   openingHistoryRef: MutableRefObject<(OpeningLookupResult | null)[]>;
-  blunderRecordedRef: MutableRefObject<boolean>;
-  pendingAnalysisContextRef: MutableRefObject<Map<string, PendingAnalysisContext>>;
-  pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
   clearMoveHighlights: () => void;
   resetMode: () => void;
   resetEngine: () => void;
@@ -107,9 +86,6 @@ export const useChessGameLifecycle = ({
   chess,
   coordinator,
   openingHistoryRef,
-  blunderRecordedRef,
-  pendingAnalysisContextRef,
-  pendingSrsReviewRef,
   clearMoveHighlights,
   resetMode,
   resetEngine,
@@ -154,28 +130,6 @@ export const useChessGameLifecycle = ({
       return Math.max(0, storeMoveHistory.length - undoCount);
     },
     [chess],
-  );
-
-  const prunePendingSrsReviewsFromMoveIndex = useCallback(
-    (boundaryMoveIndex: number) => {
-      for (const [analysisId, pendingReview] of pendingSrsReviewRef.current) {
-        if (pendingReview.moveIndex >= boundaryMoveIndex) {
-          pendingSrsReviewRef.current.delete(analysisId);
-        }
-      }
-    },
-    [pendingSrsReviewRef],
-  );
-
-  const prunePendingContextsFromMoveIndex = useCallback(
-    (boundaryMoveIndex: number) => {
-      for (const [requestId, ctx] of pendingAnalysisContextRef.current) {
-        if (ctx.moveIndex >= boundaryMoveIndex) {
-          pendingAnalysisContextRef.current.delete(requestId);
-        }
-      }
-    },
-    [pendingAnalysisContextRef],
   );
 
   const finishLocalGame = useCallback(
@@ -385,17 +339,14 @@ export const useChessGameLifecycle = ({
     setResolvedReview(null);
     setBlunderAlert(null);
     setPendingPromotion(null);
-    prunePendingSrsReviewsFromMoveIndex(newHistory.length);
-    prunePendingContextsFromMoveIndex(newHistory.length);
     // Synchronously prune coordinator-owned resolution/lineage state for the
-    // reverted indices (M1), in the same turn as the UI reset.
+    // reverted indices (M1), in the same turn as the UI reset. This drives the
+    // DecisionOwner's partial reset (frontier/context/SRS prune) via emitReset.
     coordinator.pruneFromMoveIndex(newHistory.length);
   }, [
     chess,
     coordinator,
     getRewindHistoryLength,
-    prunePendingContextsFromMoveIndex,
-    prunePendingSrsReviewsFromMoveIndex,
     setBlunderAlert,
     setBlunderReviewId,
     setBlunderReviewSrs,
@@ -418,7 +369,10 @@ export const useChessGameLifecycle = ({
     clearBlunderBoardOverride?.();
 
     const snapshotMoveHistory = [...store.moveHistory];
-    prunePendingSrsReviewsFromMoveIndex(
+    // Cancel pending SRS reviews for the reverted indices BEFORE the awaited
+    // upload/endGame, so an analysis resolving during that async window cannot
+    // POST a review the revert is cancelling (durable resolved slots survive).
+    coordinator.decisionOwner.cancelPendingSrsReviews(
       getRewindHistoryLength(snapshotMoveHistory),
     );
     setResolvedReview(null);
@@ -483,7 +437,6 @@ export const useChessGameLifecycle = ({
     coordinator,
     getRewindHistoryLength,
     isCurrentRevertExecution,
-    prunePendingSrsReviewsFromMoveIndex,
     rewindBoardLocally,
     setIsRevertPending,
     setRevertError,
@@ -522,7 +475,10 @@ export const useChessGameLifecycle = ({
           store.isGameActive &&
           !store.isPracticeContinuation
         ) {
-          pendingSrsReviewRef.current.clear();
+          // Cancel pending SRS reviews BEFORE the awaited abandon/endGame so an
+          // analysis resolving during that window cannot POST a review for the
+          // game being abandoned (durable resolved slots survive).
+          coordinator.decisionOwner.cancelPendingSrsReviews();
           setResolvedReview(null);
           coordinator.flushPendingUploads().catch((err) =>
             console.error("[SessionMoves] Flush failed:", err),
@@ -534,7 +490,7 @@ export const useChessGameLifecycle = ({
           }
         }
 
-        pendingSrsReviewRef.current.clear();
+        coordinator.decisionOwner.cancelPendingSrsReviews();
         setResolvedReview(null);
         const effectiveChoice = colorOverride ?? store.playerColorChoice;
         const resolvedPlayerColor =
@@ -591,9 +547,9 @@ export const useChessGameLifecycle = ({
         setShowRevertWarning(false);
         setShowResignWarning(false);
         clearMoveHighlights();
-        blunderRecordedRef.current = false;
-        pendingAnalysisContextRef.current.clear();
-        pendingSrsReviewRef.current.clear();
+        // DecisionOwner state (contextMap/pendingSrsMap/blunderReserved/frontier)
+        // is cleared by its fullReset, driven by coordinator.startSession →
+        // emitReset above. No React-ref decision state remains to clear here.
         resetMode();
       } catch (error) {
         const message =
@@ -604,13 +560,10 @@ export const useChessGameLifecycle = ({
       }
     },
     [
-      blunderRecordedRef,
       chess,
       coordinator,
       clearMoveHighlights,
       openingHistoryRef,
-      pendingAnalysisContextRef,
-      pendingSrsReviewRef,
       resetEngine,
       resetMode,
       setBlunderAlert,
@@ -651,7 +604,8 @@ export const useChessGameLifecycle = ({
 
         const store = useGameStore.getState();
         if (store.sessionId && store.isGameActive && !store.isPracticeContinuation) {
-          pendingSrsReviewRef.current.clear();
+          // Cancel pending SRS reviews BEFORE the awaited abandon/endGame.
+          coordinator.decisionOwner.cancelPendingSrsReviews();
           setResolvedReview(null);
           coordinator.flushPendingUploads().catch((err) =>
             console.error("[SessionMoves] Flush failed:", err),
@@ -663,7 +617,7 @@ export const useChessGameLifecycle = ({
           }
         }
 
-        pendingSrsReviewRef.current.clear();
+        coordinator.decisionOwner.cancelPendingSrsReviews();
         setResolvedReview(null);
 
         const response = await startDrill({
@@ -723,9 +677,8 @@ export const useChessGameLifecycle = ({
         clearMoveHighlights();
         setLiveOpening(null);
         openingHistoryRef.current = [];
-        blunderRecordedRef.current = false;
-        pendingAnalysisContextRef.current.clear();
-        pendingSrsReviewRef.current.clear();
+        // DecisionOwner decision state is cleared by its fullReset, driven by
+        // coordinator.clearSession/startSession → emitReset above.
         resetMode();
 
         setIsStartingGame(false);
@@ -761,13 +714,10 @@ export const useChessGameLifecycle = ({
       }
     },
     [
-      blunderRecordedRef,
       chess,
       coordinator,
       clearMoveHighlights,
       openingHistoryRef,
-      pendingAnalysisContextRef,
-      pendingSrsReviewRef,
       resetEngine,
       resetMode,
       setBlunderAlert,
@@ -955,18 +905,14 @@ export const useChessGameLifecycle = ({
     setShowRevertWarning(false);
     setShowResignWarning(false);
     clearMoveHighlights();
-    blunderRecordedRef.current = false;
-    pendingAnalysisContextRef.current.clear();
-    pendingSrsReviewRef.current.clear();
+    // DecisionOwner decision state is cleared by its fullReset, driven by
+    // coordinator.clearSession → emitReset above.
     resetMode();
   }, [
-    blunderRecordedRef,
     chess,
     coordinator,
     clearMoveHighlights,
     openingHistoryRef,
-    pendingAnalysisContextRef,
-    pendingSrsReviewRef,
     resetEngine,
     resetMode,
     setBlunderAlert,

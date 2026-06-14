@@ -320,27 +320,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const drillTerminalReason = useGameStore((s) => s.drillTerminalReason);
   // -------------------------------------------------------------------
 
-  // Blunder tracking: only record the first blunder per session
-  const blunderRecordedRef = useRef(false);
-  // Per-request BlunderContext map keyed by analysis requestId (g-hpw4 H2), so
-  // the outcome-channel recording frontier pairs each resolved analysis with its
-  // own move's context even under out-of-order/batched resolution.
-  const pendingAnalysisContextRef = useRef<Map<string, {
-    fen: string;
-    pgn: string;
-    moveSan: string;
-    moveUci: string;
-    moveIndex: number;
-  }>>(new Map());
-  const pendingSrsReviewRef = useRef<Map<string, {
-    sessionId: string;
-    analysisId: string;
-    blunderId: number;
-    moveIndex: number;
-    userMoveSan: string;
-    srs: TargetBlunderSrs | null;
-    srsDecisionId: string;
-  }>>(new Map());
+  // Recording/SRS decision state (blunderRecorded, contextMap, pendingSrsMap,
+  // frontier, committedDecisionIndex) now lives on the coordinator-owned
+  // DecisionOwner (g-2m0p), not on React refs.
   const openingLookupRequestIdRef = useRef(0);
   // Index 0 = starting position (before any move), index N = after move N
   const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);
@@ -565,8 +547,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       blunderReviewId,
       blunderReviewSrs,
       blunderTargetFen,
-      pendingAnalysisContextRef,
-      pendingSrsReviewRef,
+      decisionOwner: coordinator.decisionOwner,
       markSkipped,
       setEngineMessage,
       setBlunderAlert,
@@ -695,9 +676,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     chess,
     coordinator,
     openingHistoryRef,
-    blunderRecordedRef,
-    pendingAnalysisContextRef,
-    pendingSrsReviewRef,
     clearMoveHighlights,
     resetMode,
     resetEngine,
@@ -756,8 +734,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       ) {
         try {
           await coordinator.waitForAnalysis(failedMoveIndex);
-          // Let AnalysisEffects' blunder-recording React effect mount and fire
-          // its fire-and-forget POST before we unmount it via navigation.
+          // Recording is coordinator-owned (g-2m0p) and runs regardless of
+          // AnalysisEffects mount, but yield a frame so the resolved outcome's
+          // synchronous recording decision + outbox enqueue lands before navigation.
           await new Promise((resolve) =>
             requestAnimationFrame(() => resolve(null)),
           );
@@ -1985,9 +1964,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         </div>
 
         <AnalysisEffects
-          pendingAnalysisContextRef={pendingAnalysisContextRef}
-          blunderRecordedRef={blunderRecordedRef}
-          pendingSrsReviewRef={pendingSrsReviewRef}
           appendMoveMessage={appendMoveMessage}
           setBlunderAlert={setBlunderAlert}
           setShowFlash={setShowFlash}

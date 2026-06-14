@@ -26,23 +26,30 @@ const getStatsAchievementsMock = vi.fn();
 const audioPlayMock = vi.fn();
 const audioCtorSpy = vi.fn();
 
-vi.mock("../utils/api", () => ({
-  startGame: (...args: unknown[]) => startGameMock(...args),
-  endGame: (...args: unknown[]) => endGameMock(...args),
-  uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
-  getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
-  continueDrill: (...args: unknown[]) => continueDrillMock(...args),
-  failDrill: (...args: unknown[]) => failDrillMock(...args),
-  checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
-  abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
-  startDrill: (...args: unknown[]) => startDrillMock(...args),
-  getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
-  fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
-  getStatsAchievements: (...args: unknown[]) => getStatsAchievementsMock(...args),
-  recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
-  recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
-  reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
-}));
+// Spread the real module so ApiError/errorCodeOf stay intact — the
+// coordinator-owned DecisionOwner (g-2m0p) depends on them for retry
+// classification; only the listed endpoints are spied.
+vi.mock("../utils/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/api")>();
+  return {
+    ...actual,
+    startGame: (...args: unknown[]) => startGameMock(...args),
+    endGame: (...args: unknown[]) => endGameMock(...args),
+    uploadSessionMoves: (...args: unknown[]) => uploadSessionMovesMock(...args),
+    getNextOpponentMove: (...args: unknown[]) => getNextOpponentMoveMock(...args),
+    continueDrill: (...args: unknown[]) => continueDrillMock(...args),
+    failDrill: (...args: unknown[]) => failDrillMock(...args),
+    checkDrillRoute: (...args: unknown[]) => checkDrillRouteMock(...args),
+    abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
+    startDrill: (...args: unknown[]) => startDrillMock(...args),
+    getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
+    fetchCurrentRating: (...args: unknown[]) => fetchCurrentRatingMock(...args),
+    getStatsAchievements: (...args: unknown[]) => getStatsAchievementsMock(...args),
+    recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
+    recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
+    reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
+  };
+});
 
 const evaluatePositionMock = vi.fn();
 const lookupOpeningByFenMock = vi.fn();
@@ -77,6 +84,45 @@ vi.mock("react-router-dom", () => ({
 
 import { gameAnalysisStore } from "../stores/createAnalysisStore";
 import { useDrillAnalysisStore } from "../stores/drillAnalysisStore";
+import {
+  DecisionOwner,
+  type DecisionOwnerGameState,
+} from "../services/DecisionOwner";
+import type { AnalysisOutcome } from "../services/GameAnalysisCoordinator";
+
+// Fresh coordinator-lifetime DecisionOwner per test (g-2m0p). The controller
+// registers blunder-context/SRS on this owner; AnalysisEffects leases its UI
+// callbacks onto it; the store bridge below routes resolved analyses into it.
+const createTestDecisionOwner = () =>
+  new DecisionOwner({
+    getGameState: (): DecisionOwnerGameState => {
+      const s = useGameStore.getState();
+      return {
+        sessionId: s.sessionId,
+        isGameActive: s.isGameActive,
+        isPracticeContinuation: s.isPracticeContinuation,
+        playerColor: s.playerColor,
+        moveHistory: s.moveHistory,
+      };
+    },
+  });
+
+const benignResult = (moveIndex: number, uci: string): AnalysisResult => ({
+  id: `auto-${moveIndex}`,
+  move: uci,
+  bestMove: uci,
+  bestLine: null,
+  bestEval: 0,
+  playedEval: 0,
+  currentPositionEval: 0,
+  playedEvalMate: null,
+  currentPositionEvalMate: null,
+  moveIndex,
+  delta: 0,
+  classification: "good",
+  blunder: false,
+  recordable: false,
+});
 
 const mockAnalyzeMove = vi.fn();
 let capturedOutcomeListener: ((o: unknown) => void) | null = null;
@@ -91,24 +137,26 @@ const mockCoordinator = {
   }),
   restartAnalysisWorker: vi.fn(),
   clearAnalysis: vi.fn(),
-  startSession: vi.fn(),
-  clearSession: vi.fn(),
+  // Session changes drive the owner's full reset (in production via emitReset);
+  // the mock routes them directly so blunderReserved/frontier reset between games.
+  startSession: vi.fn(() =>
+    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null }),
+  ),
+  clearSession: vi.fn(() =>
+    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null }),
+  ),
   flushPendingUploads: vi.fn().mockResolvedValue(undefined),
   stopSessionUploads: vi.fn(),
   sessionId: null,
   store: gameAnalysisStore,
   markSkipped: vi.fn(),
-  pruneFromMoveIndex: vi.fn(),
+  pruneFromMoveIndex: vi.fn((k: number) =>
+    mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null, fromMoveIndex: k }),
+  ),
   getEpoch: vi.fn(() => ({ generation: 0, sessionId: null })),
   addAnalysisResetListener: vi.fn(() => () => {}),
-  addAnalysisOutcomeListener: vi.fn((listener: (o: unknown) => void) => {
-    capturedOutcomeListener = listener;
-    return () => {
-      if (capturedOutcomeListener === listener) {
-        capturedOutcomeListener = null;
-      }
-    };
-  }),
+  addAnalysisOutcomeListener: vi.fn(() => () => {}),
+  decisionOwner: createTestDecisionOwner(),
 };
 
 vi.mock("../contexts/useGameAnalysisCoordinator", () => ({
@@ -116,22 +164,23 @@ vi.mock("../contexts/useGameAnalysisCoordinator", () => ({
 }));
 
 // Production resolveAnalysisResult both writes the store AND emits a `resolved`
-// outcome. These integration tests simulate resolution by writing the store
-// directly, so bridge store writes into the mock's outcome channel (keyed by the
-// controller's synthetic requestId so the BlunderContext lookup matches), and
-// drain earlier indices as `skipped` to advance the recording frontier.
+// outcome into the coordinator-owned DecisionOwner. These integration tests
+// simulate resolution by writing the store directly, so this bridge routes store
+// writes into the owner (keyed by the controller's synthetic requestId so the
+// BlunderContext lookup matches), draining earlier indices as benign `resolved`
+// to advance the recording frontier (the owner treats `skipped`/`failed` as
+// provisional-blocking, so terminal resolves are required to advance).
 let bridgeLastEmittedIndex = -1;
 const bridgeEmittedIndices = new Set<number>();
 gameAnalysisStore.subscribe((state, prev) => {
   if (state.lastAnalysis === prev.lastAnalysis) return;
   const r = state.lastAnalysis;
-  if (!r || r.moveIndex === null || !capturedOutcomeListener) return;
+  if (!r || r.moveIndex === null) return;
   const moveIndex = r.moveIndex;
   // Defer so the controller's post-analyzeMove context registration runs first
   // (the mock resolves synchronously inside analyzeMove).
   queueMicrotask(() => {
-    const listener = capturedOutcomeListener;
-    if (!listener) return;
+    const owner = mockCoordinator.decisionOwner;
     if (bridgeEmittedIndices.has(moveIndex)) return;
     bridgeEmittedIndices.add(moveIndex);
     const moveHistory = useGameStore.getState().moveHistory;
@@ -149,12 +198,13 @@ gameAnalysisStore.subscribe((state, prev) => {
     const requestId =
       returned ?? (uci ? `analysis-${moveIndex}-${uci}` : r.id);
     for (let i = bridgeLastEmittedIndex + 1; i < moveIndex; i++) {
-      listener({
+      owner.handleOutcome({
         seq: 0, generation: 0, sessionId: null,
-        moveIndex: i, requestId: `auto-${i}`, status: "skipped",
+        moveIndex: i, requestId: `auto-${i}`, status: "resolved",
+        result: benignResult(i, moveHistory[i]?.uci ?? "0000"),
       });
     }
-    listener({
+    owner.handleOutcome({
       seq: 0, generation: 0, sessionId: null,
       moveIndex, requestId, status: "resolved",
       result: { ...r, id: requestId },
@@ -196,7 +246,11 @@ beforeEach(() => {
   // writes ghostreplay_drill_prefs, which would otherwise leak into tests whose
   // overlay prefill reads it (e.g. the remount engine-ELO persistence test).
   localStorage.clear();
-  capturedOutcomeListener = null;
+  // Fresh owner per test so blunderReserved/frontier/outbox don't leak across
+  // tests; bind the direct-emit helper used by a few tests to it.
+  mockCoordinator.decisionOwner = createTestDecisionOwner();
+  capturedOutcomeListener = (o: unknown) =>
+    mockCoordinator.decisionOwner.handleOutcome(o as AnalysisOutcome);
   bridgeLastEmittedIndex = -1;
   bridgeEmittedIndices.clear();
   mockCoordinator.addAnalysisOutcomeListener.mockClear();
@@ -1836,6 +1890,7 @@ describe("ChessGame blunder recording", () => {
         "c4",
         50,
         -150,
+        expect.any(String),
       );
     });
   });
@@ -2076,83 +2131,10 @@ describe("ChessGame blunder recording", () => {
     expect(recordBlunderMock).not.toHaveBeenCalled();
   });
 
-  it("does not retry recordBlunder on API failure", async () => {
-    recordBlunderMock.mockRejectedValueOnce(new Error("Network error"));
-
-    mockAnalyzeMove.mockImplementation(
-      (_fen: string, move: string, _color: string, moveIndex: number) => {
-        if (moveIndex !== 2) {
-          return;
-        }
-        gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
-          id: "fail-test",
-          move,
-          bestMove: "c2c4",
-          bestEval: 50,
-          playedEval: -150,
-          currentPositionEval: -150,
-          playedEvalMate: null,
-          currentPositionEvalMate: null,
-          moveIndex,
-          delta: 200,
-          classification: "blunder" as const,
-          blunder: true,
-          recordable: true,
-        });
-      },
-    );
-
-    await startGameAsWhite();
-
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
-    });
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
-    });
-
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
-    });
-
-    await waitFor(() => {
-      expect(mockAnalyzeMove).toHaveBeenCalledWith(
-        expect.any(String),
-        "g1f3",
-        "white",
-        2,
-        expect.any(Number),
-      );
-    });
-
-    await waitFor(() => {
-      expect(recordBlunderMock).toHaveBeenCalledTimes(1);
-    });
-
-    // Even after a second analysis result, no retry since blunderRecordedRef is true
-    act(() => {
-      gameAnalysisStore.getState().setLastAnalysis({
-        id: "fail-test-2",
-        move: "g1f3",
-        bestMove: "c2c4",
-        bestEval: 50,
-        playedEval: -150,
-        currentPositionEval: -150,
-        playedEvalMate: null,
-        currentPositionEvalMate: null,
-        moveIndex: 2,
-        delta: 200,
-        classification: "blunder" as const,
-        blunder: true,
-        recordable: true,
-      });
-    });
-
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(recordBlunderMock).toHaveBeenCalledTimes(1);
-  });
+  // HTTP retry/terminal classification for recordBlunder now lives on the
+  // coordinator-owned DecisionOwner — see DecisionOwner.test.ts (network
+  // TypeError → awaiting_http_retry, non-retryable 4xx → terminal_error). The
+  // old React-ref "does not retry" contract no longer applies here.
 
   it("adds selected player move to ghost library from MoveList", async () => {
     await startGameAsWhite();
@@ -2365,6 +2347,7 @@ describe("ChessGame blunder recording", () => {
         true,
         "Nf3",
         20,
+        expect.any(String),
       );
     });
     await waitFor(() => {
@@ -2432,6 +2415,7 @@ describe("ChessGame blunder recording", () => {
         false,
         "Nf3",
         50,
+        expect.any(String),
       );
     });
     expect(
@@ -2583,6 +2567,7 @@ describe("ChessGame blunder recording", () => {
         true,
         "Nf3",
         20,
+        expect.any(String),
       );
     });
     await waitFor(() => {

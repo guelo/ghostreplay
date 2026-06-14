@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import type { Chess } from "chess.js";
 import type { Square } from "chess.js";
-import type { Dispatch, MutableRefObject, SetStateAction } from "react";
+import type { Dispatch, SetStateAction } from "react";
 import type { DrillRouteMetadata, SessionDecisionSource, TargetBlunderSrs } from "../utils/api";
 import type { BlunderAlert } from "../components/chess-game/domain/movePresentation";
 import {
@@ -11,6 +11,7 @@ import {
 import type { ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
 import { playMoveSound } from "../utils/moveSound";
+import type { DecisionOwner } from "../services/DecisionOwner";
 
 export type PendingAnalysisContext = {
   fen: string;
@@ -60,8 +61,9 @@ type UseChessGameControllerOptions = {
   blunderReviewId: number | null;
   blunderReviewSrs: TargetBlunderSrs | null;
   blunderTargetFen: string | null;
-  pendingAnalysisContextRef: MutableRefObject<Map<string, PendingAnalysisContext>>;
-  pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>>;
+  /** Coordinator-lifetime recording/SRS owner the controller registers
+   *  blunder-context and SRS reviews onto (g-2m0p). */
+  decisionOwner: DecisionOwner;
   /** Coordinator-facing skip emission for synthetic (worker-unavailable) ids. */
   markSkipped: (moveIndex: number, requestId: string) => void;
   setEngineMessage: Dispatch<SetStateAction<string | null>>;
@@ -95,8 +97,7 @@ export const useChessGameController = ({
   blunderReviewId,
   blunderReviewSrs,
   blunderTargetFen,
-  pendingAnalysisContextRef,
-  pendingSrsReviewRef,
+  decisionOwner,
   markSkipped,
   setEngineMessage,
   setBlunderAlert,
@@ -165,7 +166,7 @@ export const useChessGameController = ({
       // K3: write context BEFORE the synchronous markSkipped so the consumer's
       // frontier slot is created with a consistent moveIndex/context.
       if (registerBlunderContext) {
-        pendingAnalysisContextRef.current.set(analysisId, {
+        decisionOwner.registerBlunderContext(analysisId, {
           fen: fenBeforeMove,
           pgn: chess.pgn(),
           moveSan: appliedMove.san,
@@ -190,7 +191,7 @@ export const useChessGameController = ({
         uciHistory: nextMoveHistory.map((m) => m.uci),
       };
     },
-    [analyzeMove, chess, markSkipped, pendingAnalysisContextRef],
+    [analyzeMove, chess, markSkipped, decisionOwner],
   );
 
   const applyPlayerMove = useCallback(
@@ -250,9 +251,8 @@ export const useChessGameController = ({
         const sessionId = useGameStore.getState().sessionId;
         clearReviewTarget();
         if (sessionId) {
-          pendingSrsReviewRef.current.set(committed.analysisId, {
+          decisionOwner.registerSrsReview(committed.analysisId, {
             sessionId,
-            analysisId: committed.analysisId,
             blunderId: blunderReviewId,
             moveIndex: committed.moveIndex,
             userMoveSan: committed.moveSan,
@@ -286,7 +286,7 @@ export const useChessGameController = ({
       clearMoveHighlights,
       clearReviewTarget,
       commitAppliedMove,
-      pendingSrsReviewRef,
+      decisionOwner,
       resolvedReview,
       setBlunderAlert,
       setBlunderReviewId,

@@ -1,17 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Chess } from "chess.js";
 import { renderHook, act } from "@testing-library/react";
-import type { MutableRefObject } from "react";
 import type { TargetBlunderSrs } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { ResolvedReview } from "../components/chess-game/types";
+import type { DecisionOwner } from "../services/DecisionOwner";
 import { useGameStore } from "../stores/useGameStore";
 import { playMoveSound } from "../utils/moveSound";
 import {
   useChessGameController,
-  type PendingAnalysisContext,
   type PlayerMoveApplyResult,
-  type PendingSrsReview,
 } from "./useChessGameController";
 
 vi.mock("../utils/moveSound", () => ({
@@ -19,6 +17,14 @@ vi.mock("../utils/moveSound", () => ({
 }));
 
 const initialStoreState = useGameStore.getInitialState();
+
+/** Spy standing in for the coordinator-owned DecisionOwner — the controller only
+ *  calls registerBlunderContext / registerSrsReview on it (g-2m0p). */
+const createDecisionOwnerSpy = () => ({
+  registerBlunderContext: vi.fn(),
+  registerSrsReview: vi.fn(),
+});
+type DecisionOwnerSpy = ReturnType<typeof createDecisionOwnerSpy>;
 
 type SetupOptions = {
   chess?: Chess;
@@ -29,7 +35,7 @@ type SetupOptions = {
   resolvedReview?: ResolvedReview | null;
   moveHistory?: MoveRecord[];
   sessionId?: string | null;
-  pendingSrsReviewRef?: MutableRefObject<Map<string, PendingSrsReview>>;
+  decisionOwner?: DecisionOwnerSpy;
 };
 
 const createSetup = ({
@@ -41,7 +47,7 @@ const createSetup = ({
   resolvedReview = null,
   moveHistory = [],
   sessionId = "session-1",
-  pendingSrsReviewRef = { current: new Map() },
+  decisionOwner = createDecisionOwnerSpy(),
 }: SetupOptions = {}) => {
   // Set up store state
   useGameStore.setState({
@@ -52,9 +58,6 @@ const createSetup = ({
     moveHistory: [...moveHistory],
   });
 
-  const pendingAnalysisContextRef: MutableRefObject<Map<string, PendingAnalysisContext>> = {
-    current: new Map(),
-  };
   const markSkipped = vi.fn();
   const setEngineMessage = vi.fn();
   const setBlunderAlert = vi.fn();
@@ -74,8 +77,7 @@ const createSetup = ({
       blunderReviewId,
       blunderReviewSrs,
       blunderTargetFen,
-      pendingAnalysisContextRef,
-      pendingSrsReviewRef,
+      decisionOwner: decisionOwner as unknown as DecisionOwner,
       markSkipped,
       setEngineMessage,
       setBlunderAlert,
@@ -95,8 +97,7 @@ const createSetup = ({
   return {
     result,
     chess,
-    pendingAnalysisContextRef,
-    pendingSrsReviewRef,
+    decisionOwner,
     markSkipped,
     setEngineMessage,
     setBlunderAlert,
@@ -122,7 +123,7 @@ describe("useChessGameController", () => {
     const {
       result,
       chess,
-      pendingAnalysisContextRef,
+      decisionOwner,
       analyzeMove,
       markSkipped,
       clearMoveHighlights,
@@ -154,9 +155,11 @@ describe("useChessGameController", () => {
       0,
       20,
     );
-    const contexts = [...pendingAnalysisContextRef.current.values()];
-    expect(contexts).toHaveLength(1);
-    expect(contexts[0]?.moveUci).toBe("e2e4");
+    expect(decisionOwner.registerBlunderContext).toHaveBeenCalledTimes(1);
+    expect(decisionOwner.registerBlunderContext).toHaveBeenCalledWith(
+      "analysis-0-e2e4",
+      expect.objectContaining({ moveUci: "e2e4", moveIndex: 0 }),
+    );
     // analyzeMove returned undefined (mock) → synthetic id → markSkipped emitted
     // after the context was registered (K3).
     expect(markSkipped).toHaveBeenCalledWith(0, "analysis-0-e2e4");
@@ -166,7 +169,7 @@ describe("useChessGameController", () => {
     const chess = new Chess();
     const {
       result,
-      pendingSrsReviewRef,
+      decisionOwner,
       setBlunderReviewId,
       setBlunderReviewSrs,
       setBlunderTargetFen,
@@ -184,16 +187,17 @@ describe("useChessGameController", () => {
     });
 
     expect(moveResult.applied).toBe(true);
-    const pendingReviews = Array.from(pendingSrsReviewRef.current.values());
-    expect(pendingReviews).toEqual([{
-      sessionId: "session-1",
-      analysisId: expect.any(String),
-      blunderId: 42,
-      moveIndex: 0,
-      userMoveSan: "e4",
-      srs: null,
-      srsDecisionId: expect.any(String),
-    }]);
+    expect(decisionOwner.registerSrsReview).toHaveBeenCalledWith(
+      expect.any(String),
+      {
+        sessionId: "session-1",
+        blunderId: 42,
+        moveIndex: 0,
+        userMoveSan: "e4",
+        srs: null,
+        srsDecisionId: expect.any(String),
+      },
+    );
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
     expect(setBlunderTargetFen).toHaveBeenCalledWith(null);
@@ -221,10 +225,8 @@ describe("useChessGameController", () => {
     });
   });
 
-  it("accumulates multiple targeted SRS reviews without overwriting", () => {
-    const pendingSrsReviewRef: MutableRefObject<Map<string, PendingSrsReview>> = {
-      current: new Map(),
-    };
+  it("registers each targeted SRS review on the owner without overwriting", () => {
+    const decisionOwner = createDecisionOwnerSpy();
 
     const firstChess = new Chess();
     const first = createSetup({
@@ -232,7 +234,7 @@ describe("useChessGameController", () => {
       blunderReviewId: 42,
       blunderTargetFen: firstChess.fen(),
       sessionId: "session-1",
-      pendingSrsReviewRef,
+      decisionOwner,
     });
     first.analyzeMove.mockReturnValueOnce("analysis-one");
 
@@ -248,7 +250,7 @@ describe("useChessGameController", () => {
       blunderTargetFen: secondChess.fen(),
       sessionId: "session-2",
       moveHistory: [{ san: "d4", fen: secondChess.fen(), uci: "d2d4" }],
-      pendingSrsReviewRef,
+      decisionOwner,
     });
     second.analyzeMove.mockReturnValueOnce("analysis-two");
 
@@ -256,7 +258,7 @@ describe("useChessGameController", () => {
       second.result.current.applyPlayerMove("g8", "f6");
     });
 
-    expect(Array.from(pendingSrsReviewRef.current.entries())).toEqual([
+    expect(decisionOwner.registerSrsReview.mock.calls).toEqual([
       [
         "analysis-one",
         expect.objectContaining({
@@ -282,7 +284,7 @@ describe("useChessGameController", () => {
     const chess = new Chess();
     const {
       result,
-      pendingSrsReviewRef,
+      decisionOwner,
       setBlunderReviewId,
       setBlunderReviewSrs,
       setBlunderTargetFen,
@@ -298,7 +300,7 @@ describe("useChessGameController", () => {
       result.current.applyPlayerMove("e2", "e4");
     });
 
-    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(decisionOwner.registerSrsReview).not.toHaveBeenCalled();
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
     expect(setBlunderTargetFen).toHaveBeenCalledWith(null);
@@ -310,7 +312,7 @@ describe("useChessGameController", () => {
   it("clears stale review targeting instead of grading a hidden review", () => {
     const {
       result,
-      pendingSrsReviewRef,
+      decisionOwner,
       setBlunderReviewId,
       setBlunderReviewSrs,
       setBlunderTargetFen,
@@ -321,7 +323,7 @@ describe("useChessGameController", () => {
       result.current.applyPlayerMove("e2", "e4");
     });
 
-    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(decisionOwner.registerSrsReview).not.toHaveBeenCalled();
     expect(setBlunderReviewId).toHaveBeenCalledWith(null);
     expect(setBlunderReviewSrs).toHaveBeenCalledWith(null);
     expect(setBlunderTargetFen).toHaveBeenCalledWith(null);

@@ -49,6 +49,13 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
     markSkipped: vi.fn(),
     sessionId: null,
     store: { getState: vi.fn().mockReturnValue({ analysisMap: new Map() }) },
+    // Coordinator-owned recording/SRS owner (g-2m0p). The lifecycle only calls
+    // cancelPendingSrsReviews on it; spy on that to assert the early-clear contract.
+    decisionOwner: {
+      cancelPendingSrsReviews: vi.fn(),
+      registerSrsReview: vi.fn(),
+      registerBlunderContext: vi.fn(),
+    },
   }) as unknown as GameAnalysisCoordinator;
 
 type SetupOptions = {
@@ -100,24 +107,11 @@ const setup = ({
   });
 
   const coordinator = createMockCoordinator();
+  // Seed pending SRS reviews onto the coordinator-owned owner (g-2m0p).
+  for (const [requestId, review] of pendingSrsEntries) {
+    coordinator.decisionOwner.registerSrsReview(requestId, review);
+  }
   const openingHistoryRef: MutableRefObject<Array<null>> = { current: [] };
-  const blunderRecordedRef: MutableRefObject<boolean> = { current: false };
-  const pendingAnalysisContextRef: MutableRefObject<Map<string, {
-    fen: string;
-    pgn: string;
-    moveSan: string;
-    moveUci: string;
-    moveIndex: number;
-  }>> = { current: new Map() };
-  const pendingSrsReviewRef: MutableRefObject<Map<string, {
-    sessionId: string;
-    analysisId: string;
-    blunderId: number;
-    moveIndex: number;
-    userMoveSan: string;
-    srs: null;
-    srsDecisionId: string;
-  }>> = { current: new Map(pendingSrsEntries) };
 
   const clearMoveHighlights = vi.fn();
   const resetMode = vi.fn();
@@ -152,9 +146,6 @@ const setup = ({
       chess,
       coordinator,
       openingHistoryRef,
-      blunderRecordedRef,
-      pendingAnalysisContextRef,
-      pendingSrsReviewRef,
       clearMoveHighlights,
       resetMode,
       resetEngine,
@@ -192,7 +183,6 @@ const setup = ({
     setShowPostGamePrompt,
     setShowStartOverlay,
     setResolvedReview,
-    pendingSrsReviewRef,
     coordinator,
     getResolvedReview: () => currentResolvedReview,
   };
@@ -334,7 +324,7 @@ describe("useChessGameLifecycle", () => {
       { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
     ];
 
-    const { result, pendingSrsReviewRef, coordinator } = setup({
+    const { result, coordinator } = setup({
       chess,
       moveHistory,
       isGameActive: true,
@@ -375,9 +365,8 @@ describe("useChessGameLifecycle", () => {
     });
 
     expect(useGameStore.getState().moveHistory).toHaveLength(2);
-    expect(Array.from(pendingSrsReviewRef.current.keys())).toEqual([
-      "kept-analysis",
-    ]);
+    // SRS reviews for reverted indices (>= new length) are cancelled on the owner.
+    expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith(2);
     // M1: revert synchronously prunes coordinator-owned state from the new length.
     expect(coordinator.pruneFromMoveIndex).toHaveBeenCalledWith(2);
   });
@@ -396,7 +385,7 @@ describe("useChessGameLifecycle", () => {
       { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
     ];
 
-    const { result, pendingSrsReviewRef, getResolvedReview } = setup({
+    const { result, coordinator, getResolvedReview } = setup({
       chess,
       moveHistory,
       isGameActive: true,
@@ -455,9 +444,8 @@ describe("useChessGameLifecycle", () => {
       pendingRevert = result.current.executeRevert();
     });
 
-    expect(Array.from(pendingSrsReviewRef.current.keys())).toEqual([
-      "kept-analysis",
-    ]);
+    // The cancel ran synchronously, BEFORE the awaited upload resolves.
+    expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith(2);
     expect(getResolvedReview()).toBeNull();
 
     await act(async () => {
@@ -480,7 +468,7 @@ describe("useChessGameLifecycle", () => {
       { san: moveThree.san, fen: chess.fen(), uci: "g1f3" },
     ];
 
-    const { result, pendingSrsReviewRef, getResolvedReview, setRevertError } =
+    const { result, coordinator, getResolvedReview, setRevertError } =
       setup({
         chess,
         moveHistory,
@@ -516,7 +504,8 @@ describe("useChessGameLifecycle", () => {
     });
 
     expect(useGameStore.getState().moveHistory).toHaveLength(3);
-    expect(pendingSrsReviewRef.current.size).toBe(0);
+    // Cancel ran before the (failing) seal await, so the SRS UI stays cleared.
+    expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith(2);
     expect(getResolvedReview()).toBeNull();
     expect(setRevertError).toHaveBeenCalledWith("upload failed");
   });
@@ -914,7 +903,7 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("clears pending SRS review registry on reset", async () => {
-    const { result, pendingSrsReviewRef } = setup({
+    const { result, coordinator } = setup({
       pendingSrsEntries: [
         [
           "analysis-one",
@@ -937,11 +926,13 @@ describe("useChessGameLifecycle", () => {
       result.current.handleReset();
     });
 
-    expect(pendingSrsReviewRef.current.size).toBe(0);
+    // Reset clears decision state via the coordinator's clearSession → the
+    // owner's fullReset (driven by emitReset), not a React ref.
+    expect(coordinator.clearSession).toHaveBeenCalledTimes(1);
   });
 
   it("clears pending SRS review registry when replacing an abandoned session", async () => {
-    const { result, pendingSrsReviewRef, getResolvedReview } = setup({
+    const { result, coordinator, getResolvedReview } = setup({
       isGameActive: true,
       isRated: true,
       resolvedReview: {
@@ -978,12 +969,12 @@ describe("useChessGameLifecycle", () => {
       await result.current.handleNewGame("white");
     });
 
-    expect(pendingSrsReviewRef.current.size).toBe(0);
+    expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith();
     expect(getResolvedReview()).toBeNull();
   });
 
   it("clears pending SRS review registry before active new-game abandonment resolves", async () => {
-    const { result, pendingSrsReviewRef, getResolvedReview } = setup({
+    const { result, coordinator, getResolvedReview } = setup({
       isGameActive: true,
       isRated: true,
       resolvedReview: {
@@ -1027,7 +1018,8 @@ describe("useChessGameLifecycle", () => {
       pendingNewGame = result.current.handleNewGame("white");
     });
 
-    expect(pendingSrsReviewRef.current.size).toBe(0);
+    // Cancel ran synchronously, BEFORE the awaited abandon resolves.
+    expect(coordinator.decisionOwner.cancelPendingSrsReviews).toHaveBeenCalledWith();
     expect(getResolvedReview()).toBeNull();
 
     await act(async () => {

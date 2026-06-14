@@ -23,6 +23,7 @@ import type { AnalysisResult } from '../hooks/useMoveAnalysis'
 import { useGameStore } from '../stores/useGameStore'
 import { buildSessionMoveUploadsForIndices } from '../components/chess-game/domain/sessionUpload'
 import { STARTING_FEN } from '../components/chess-game/config'
+import { DecisionOwner, type DecisionOwnerGameState } from './DecisionOwner'
 
 const createRequestId = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -264,8 +265,36 @@ export class GameAnalysisCoordinator {
   private discardedRequestIds = new Set<string>()
   private analysisWaiters = new Map<number, Set<AnalysisWaiter>>()
 
+  // Coordinator-lifetime recording/SRS decision owner (g-2m0p). Fed every
+  // outcome/reset for the singleton's life; the React layer leases UI callbacks
+  // onto it via registerUICallbacks. Durable POSTs survive AnalysisEffects unmount.
+  private readonly _decisionOwner: DecisionOwner
+
+  constructor() {
+    this._decisionOwner = new DecisionOwner({
+      getGameState: (): DecisionOwnerGameState => {
+        const s = useGameStore.getState()
+        return {
+          sessionId: s.sessionId,
+          isGameActive: s.isGameActive,
+          isPracticeContinuation: s.isPracticeContinuation,
+          playerColor: s.playerColor,
+          moveHistory: s.moveHistory,
+        }
+      },
+    })
+    this.addAnalysisOutcomeListener((o) => this._decisionOwner.handleOutcome(o))
+    this.addAnalysisResetListener((info) => this._decisionOwner.handleReset(info))
+    this._decisionOwner.seedGeneration(this.sessionGeneration)
+  }
+
   get store() {
     return gameAnalysisStore
+  }
+
+  /** The coordinator-owned recording/SRS decision owner (g-2m0p). */
+  get decisionOwner(): DecisionOwner {
+    return this._decisionOwner
   }
 
   get sessionId() {
@@ -1310,6 +1339,7 @@ export class GameAnalysisCoordinator {
     this.skippedRequestIds.clear()
     this.discardedRequestIds.clear()
     this.terminateWorker()
+    this._decisionOwner.dispose()
     this.analysisOutcomeListeners.clear()
     this.analysisResetListeners.clear()
     this.uploadState = null
