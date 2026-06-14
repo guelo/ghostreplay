@@ -2084,9 +2084,19 @@
 }
 
 .chess-layout.has-graph {
+    /*
+     * "moves" spans both rows so the move list stretches the full board+graph
+     * height (≈ down to the viewport bottom, since the board grows to fill
+     * --game-board-max-width above the graph) instead of stopping at the
+     * board's height. It fills what was an empty cell, so nothing is displaced.
+     * Combined with the .moves-column height:0/min-height:100% trick, the column
+     * fills this taller track WITHOUT inflating either row — keeping the graph
+     * in place. On shorter viewports the board+graph track shrinks, so the move
+     * list shrinks with it; once they hit their floors it extends past the fold.
+     */
     grid-template-areas:
         "panel board moves"
-        "panel graph .";
+        "panel graph moves";
 }
 
 .chess-graph-area {
