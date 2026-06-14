@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from app.game_phase import DIVIDER_VERSION
 from app.models import OpeningScoreBatch, OpeningScoreCursor, UserOpeningScore
 from app.opening_aggregate import _batch_has_stale_branch_keys
-from app.opening_evidence import EvidenceOverlay, overlay_evidence
+from app.opening_evidence import (
+    OPENING_EVIDENCE_INPUTS_VERSION,
+    EvidenceOverlay,
+    overlay_evidence,
+    raw_evidence_inputs_digest,
+)
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
 from app.opening_rootcalc import (
@@ -61,60 +66,40 @@ def opening_score_inputs_fingerprint(
     )
 
 
-def _iso(ts: datetime | None) -> str:
-    return ts.isoformat() if ts is not None else ""
-
-
-def opening_score_evidence_fingerprint(
-    overlay: EvidenceOverlay,
-    graph: OpeningGraph,
-    roots: OpeningRoots,
+def opening_score_raw_inputs_fingerprint(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
 ) -> str:
-    """Content fingerprint over the consumed evidence + registry/config inputs.
+    """Cheap freshness fingerprint computed from raw DB rows — no overlay build.
 
-    Hashes exactly the per-node and per-edge fields the score calculator reads, so
-    in-place upserts of session evidence (which mutate eval_delta etc. without bumping
-    any updated_at) still change the fingerprint and trigger a recompute.
+    ``overlay_evidence`` is a pure deterministic function of a fixed set of raw DB
+    rows plus the graph/roots/config/version constants. So "did anything change?"
+    can be answered by hashing the INPUTS to the derivation (cheap SQL, zero board
+    work) instead of the OUTPUT (which forces the ~2.6s python-chess replay first).
+
+    Composed from three independent change surfaces:
+      - ``opening_score_inputs_fingerprint`` — graph/roots/config/scoring/divider/
+        quality versions (registry/config);
+      - ``OPENING_EVIDENCE_INPUTS_VERSION`` — evidence-derivation logic version,
+        covering the residual ``opening_evidence`` semantics the registry does not
+        plus the digest contract itself;
+      - ``raw_evidence_inputs_digest`` — the ordered raw-row projection.
+
+    If this matches the value stored on the batch, the overlay is provably
+    identical and need never be built. A false-negative (digest changes when
+    nothing relevant did) only causes an unnecessary, still-correct rebuild; the
+    composition avoids false-positives (missing a real change) by covering all
+    inputs plus the two logic versions.
     """
-    parts: list[str] = [opening_score_inputs_fingerprint(graph, roots)]
-    for fen in sorted(overlay.nodes):
-        n = overlay.nodes[fen]
-        parts.append(
-            "N|"
-            + "|".join(
-                (
-                    n.fen,
-                    str(n.live_attempts),
-                    str(n.live_passes),
-                    str(n.live_fails),
-                    str(n.quality_sum),
-                    str(n.quality_count),
-                    _iso(n.last_live_at),
-                    str(n.review_attempts),
-                    str(n.review_passes),
-                    str(n.review_fails),
-                    _iso(n.last_review_at),
-                    str(int(n.is_ghost_target)),
-                )
-            )
-        )
-    for key in sorted(overlay.edges):
-        e = overlay.edges[key]
-        parts.append(
-            "E|"
-            + "|".join(
-                (
-                    e.parent_fen,
-                    e.child_fen,
-                    e.uci,
-                    str(e.traversal_count),
-                    str(e.live_attempts),
-                    str(e.live_passes),
-                    str(e.live_fails),
-                )
-            )
-        )
-    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    _validate_player_color(player_color)
+    graph = get_opening_graph()
+    roots = get_opening_roots()
+    registry_fp = opening_score_inputs_fingerprint(graph, roots)
+    row_digest = raw_evidence_inputs_digest(db, user_id, player_color)
+    return hashlib.sha256(
+        f"{registry_fp}|{OPENING_EVIDENCE_INPUTS_VERSION}|{row_digest}".encode("utf-8")
+    ).hexdigest()
 
 
 def prune_old_opening_score_batches(
@@ -368,15 +353,28 @@ def recompute_opening_scores(
     computed_at: datetime | None = None,
 ) -> OpeningScoreBatch:
     _validate_player_color(player_color)
+    if overlay is not None and inputs_fingerprint is None:
+        # A prebuilt overlay reflects a specific raw-input snapshot. Deriving the
+        # fingerprint here — after the overlay was built elsewhere — could store a
+        # fingerprint NEWER than the scored overlay if evidence changed in between,
+        # letting a later read fast-path over stale scores. Callers that pass an
+        # overlay must pass its matching fingerprint. Checked before any side
+        # effects (generation reservation) so misuse cannot leave dangling state.
+        raise ValueError("inputs_fingerprint is required when overlay is provided")
     generation = reserve_opening_score_generation(db, user_id, player_color)
     if computed_at is None:
         computed_at = datetime.now(timezone.utc)
     graph = get_opening_graph()
     roots = get_opening_roots()
+    if inputs_fingerprint is None:
+        # Compute the freshness fingerprint BEFORE building the overlay so the
+        # stored fingerprint can never be newer than the scored inputs. If evidence
+        # changes in the gap, the overlay is at-or-newer than the fingerprint, so
+        # the next read recomputes (at most one redundant pass) rather than
+        # fast-pathing over stale scores.
+        inputs_fingerprint = opening_score_raw_inputs_fingerprint(db, user_id, player_color)
     if overlay is None:
         overlay = overlay_evidence(db, user_id, player_color, graph)
-    if inputs_fingerprint is None:
-        inputs_fingerprint = opening_score_evidence_fingerprint(overlay, graph, roots)
     # Release the checked-out DB connection before the CPU-heavy scoring pass.
     # Without this, repeated requests can sit idle in transaction and exhaust
     # the pool while score computation is still running.
@@ -486,32 +484,35 @@ def recompute_opening_scores_if_needed(
     """
     now = datetime.now(timezone.utc)
     graph = get_opening_graph()
-    roots = get_opening_roots()
-    overlay = overlay_evidence(db, user_id, player_color, graph)
-    fingerprint = opening_score_evidence_fingerprint(overlay, graph, roots)
-    registry_fingerprint = opening_score_inputs_fingerprint(graph, roots)
+    registry_fingerprint = opening_score_inputs_fingerprint(graph, get_opening_roots())
+    # Cheap raw-input digest first — built WITHOUT the overlay. The overlay (which
+    # replays every session's board line through the Lichess divider, ~2.6s for a
+    # few hundred games) is built only on the non-fast paths below.
+    raw_fingerprint = opening_score_raw_inputs_fingerprint(db, user_id, player_color)
 
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
 
     if batch is None:
         if not has_opening_evidence(db, user_id, player_color):
             return None
+        overlay = overlay_evidence(db, user_id, player_color, graph)
         return recompute_opening_scores(
             db,
             user_id,
             player_color,
             overlay=overlay,
-            inputs_fingerprint=fingerprint,
+            inputs_fingerprint=raw_fingerprint,
             computed_at=now,
         )
 
     registry_drift = batch.registry_fingerprint != registry_fingerprint
     stale_branch_keys = _batch_has_stale_branch_keys(rows)
 
-    if not registry_drift and not stale_branch_keys and batch.inputs_fingerprint == fingerprint:
-        # Evidence/registry/config unchanged. Reuse unless the batch is stale enough
-        # that wall-clock time decay should be re-applied. Reuse empty-but-valid
-        # snapshots too, else they re-append on every refresh.
+    if not registry_drift and not stale_branch_keys and batch.inputs_fingerprint == raw_fingerprint:
+        # Inputs/registry/config unchanged → overlay provably identical. Serve the
+        # cached batch WITHOUT building the overlay, unless the batch is stale
+        # enough that wall-clock time decay should be re-applied. Reuse
+        # empty-but-valid snapshots too, else they re-append on every refresh.
         computed_at = batch.computed_at
         if computed_at.tzinfo is None:
             computed_at = computed_at.replace(tzinfo=timezone.utc)
@@ -519,11 +520,14 @@ def recompute_opening_scores_if_needed(
         if not stale_for_decay:
             return batch
 
+    # Change / registry drift / stale branch keys / decay-staleness: build the
+    # overlay and recompute.
+    overlay = overlay_evidence(db, user_id, player_color, graph)
     return recompute_opening_scores(
         db,
         user_id,
         player_color,
         overlay=overlay,
-        inputs_fingerprint=fingerprint,
+        inputs_fingerprint=raw_fingerprint,
         computed_at=now,
     )

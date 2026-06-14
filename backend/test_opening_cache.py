@@ -8,7 +8,9 @@ import pytest
 
 from app.fen import active_color
 from app.models import (
+    AnalysisCache,
     Blunder,
+    BlunderReview,
     GameSession,
     OpeningScoreBatch,
     OpeningScoreCursor,
@@ -23,10 +25,12 @@ from app.opening_cache import (
     list_cached_opening_scores,
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
+    opening_score_raw_inputs_fingerprint,
     prune_old_opening_score_batches,
     recompute_opening_scores,
     recompute_opening_scores_if_needed,
 )
+from app.opening_evidence import overlay_evidence as _real_overlay_evidence
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots
 from app.opening_graph import OpeningGraph, OpeningGraphNode
@@ -831,3 +835,286 @@ def test_model_version_bump_invalidates_existing_batch(db_session, monkeypatch):
     assert second.id != first.id
     assert second.generation > first.generation
     assert _count_batches(db_session, 123, "black") <= 2
+
+
+# ---------------------------------------------------------------------------
+# Cheap raw-input freshness digest (g-6zhp): the gate must flip on every change
+# the overlay would see, stay stable otherwise, and let the read path skip the
+# expensive overlay build entirely on the cache-hit fast path.
+# ---------------------------------------------------------------------------
+
+
+def _raw_fp(db_session, user_id: int = 123, player_color: str = "black") -> str:
+    return opening_score_raw_inputs_fingerprint(db_session, user_id, player_color)
+
+
+def _black_move(db_session, session):
+    return (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session.id, SessionMove.color == "black")
+        .first()
+    )
+
+
+def test_raw_fp_deterministic_across_repeated_calls(db_session):
+    _seed_black_opening_session(db_session)
+    assert _raw_fp(db_session) == _raw_fp(db_session)
+
+
+def test_raw_fp_flips_on_eval_delta_mutation(db_session):
+    session = _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    move = _black_move(db_session, session)
+    move.eval_delta = 500
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_primary_eval_mutation(db_session):
+    session = _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    move = _black_move(db_session, session)
+    move.eval_cp = 20
+    move.best_move_eval_cp = 30
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_new_session_move(db_session):
+    session = _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    db_session.add(
+        SessionMove(
+            session_id=session.id,
+            move_number=3,
+            color="white",
+            move_san="Bb5",
+            fen_before=TWO_KNIGHTS_FULL,
+            fen_after="r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 3 3",
+            eval_delta=0,
+        )
+    )
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_new_ghost_target(db_session):
+    session = _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    position = Position(
+        user_id=123, fen_hash="gt-black", fen_raw=KNIGHT_OPENING_FULL, active_color="black"
+    )
+    db_session.add(position)
+    db_session.flush()
+    db_session.add(
+        Blunder(
+            user_id=123,
+            position_id=position.id,
+            bad_move_san="Qh5",
+            best_move_san="Nc6",
+            eval_loss_cp=120,
+            source_session_id=session.id,
+        )
+    )
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_new_blunder_review(db_session):
+    session = _seed_black_opening_session(db_session)
+    position = Position(
+        user_id=123, fen_hash="rev-black", fen_raw=KNIGHT_OPENING_FULL, active_color="black"
+    )
+    db_session.add(position)
+    db_session.flush()
+    blunder = Blunder(
+        user_id=123,
+        position_id=position.id,
+        bad_move_san="Qh5",
+        best_move_san="Nc6",
+        eval_loss_cp=120,
+        source_session_id=session.id,
+    )
+    db_session.add(blunder)
+    db_session.commit()
+    before = _raw_fp(db_session)
+
+    db_session.add(
+        BlunderReview(
+            blunder_id=blunder.id,
+            session_id=session.id,
+            passed=True,
+            move_played_san="Nc6",
+            eval_delta_cp=0,
+        )
+    )
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_consulted_analysis_cache_row(db_session):
+    # The seeded black moves carry eval_delta but no primary eval, so their
+    # fen_before values are analysis_cache fallback candidates. A cache row on one
+    # of those fens is consulted by the overlay → must flip the digest.
+    _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    db_session.add(
+        AnalysisCache(
+            fen_before=KINGS_PAWN_FULL,
+            move_uci="e7e5",
+            move_san="e5",
+            played_eval=10,
+            best_eval=15,
+        )
+    )
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_unaffected_by_unrelated_analysis_cache_row(db_session):
+    # A cache row for a fen that no null-eval session move references can never be
+    # consulted, so it must not flip the digest (no needless rebuild).
+    _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    db_session.add(
+        AnalysisCache(
+            fen_before="8/8/8/8/8/8/8/8 w - - 0 1",
+            move_uci="a1a2",
+            move_san="Ra2",
+            played_eval=10,
+            best_eval=15,
+        )
+    )
+    db_session.commit()
+
+    assert _raw_fp(db_session) == before
+
+
+def test_raw_fp_flips_on_evidence_inputs_version_change(db_session, monkeypatch):
+    _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    monkeypatch.setattr("app.opening_cache.OPENING_EVIDENCE_INPUTS_VERSION", "raw-v1-bumped")
+
+    assert _raw_fp(db_session) != before
+
+
+@pytest.mark.parametrize(
+    "const",
+    ["SCORE_MODEL_VERSION", "DIVIDER_VERSION", "QUALITY_VERSION", "TAU_WC", "TAU_CP"],
+)
+def test_raw_fp_flips_on_registry_version_change(db_session, monkeypatch, const):
+    _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    current = getattr(__import__("app.opening_cache", fromlist=[const]), const)
+    bumped = current + 1.0 if isinstance(current, float) else f"{current}-bumped"
+    monkeypatch.setattr(f"app.opening_cache.{const}", bumped)
+
+    assert _raw_fp(db_session) != before
+
+
+def test_if_needed_fast_path_does_not_build_overlay(db_session):
+    _seed_black_opening_session(db_session)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert first is not None
+
+    # Nothing changed since the first recompute: the second call must serve the
+    # cached batch WITHOUT ever building the (expensive) overlay.
+    with patch(
+        "app.opening_cache.overlay_evidence",
+        side_effect=AssertionError("overlay must not be built on the fast path"),
+    ):
+        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None
+    assert second.id == first.id
+
+
+def test_if_needed_builds_overlay_on_cache_miss(db_session):
+    _seed_black_opening_session(db_session)
+
+    with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
+        batch = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert batch is not None
+    assert spy.called
+
+
+def test_if_needed_builds_overlay_on_real_change(db_session):
+    session = _seed_black_opening_session(db_session)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    move = _black_move(db_session, session)
+    move.eval_delta = 500
+    db_session.commit()
+
+    with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
+        second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert spy.called
+    assert second is not None
+    assert second.id != first.id
+
+
+def test_recompute_default_computes_fingerprint_before_overlay(db_session):
+    # Race-safety: the stored fingerprint must reflect inputs at-or-before the
+    # scored overlay, never newer. Computing the digest first guarantees that, so
+    # a later fast-path can never serve scores older than their fingerprint.
+    _seed_black_opening_session(db_session)
+    order: list[str] = []
+    real_fp = opening_score_raw_inputs_fingerprint
+    real_overlay = _real_overlay_evidence
+
+    def spy_fp(*args, **kwargs):
+        order.append("fingerprint")
+        return real_fp(*args, **kwargs)
+
+    def spy_overlay(*args, **kwargs):
+        order.append("overlay")
+        return real_overlay(*args, **kwargs)
+
+    with (
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", side_effect=spy_fp),
+        patch("app.opening_cache.overlay_evidence", side_effect=spy_overlay),
+    ):
+        recompute_opening_scores(db_session, 123, "black")
+
+    assert order == ["fingerprint", "overlay"]
+
+
+def test_recompute_rejects_overlay_without_fingerprint(db_session):
+    # Passing a prebuilt overlay without its matching fingerprint is unsafe (the
+    # function cannot derive a fingerprint that is guaranteed not-newer than the
+    # overlay) and must be rejected before any generation is reserved.
+    _seed_black_opening_session(db_session)
+    overlay = _real_overlay_evidence(db_session, 123, "black", _make_graph())
+
+    with pytest.raises(ValueError, match="inputs_fingerprint is required"):
+        recompute_opening_scores(db_session, 123, "black", overlay=overlay)
+
+    assert _count_batches(db_session, 123, "black") == 0
+
+
+def test_if_needed_builds_overlay_on_registry_drift(db_session, monkeypatch):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    monkeypatch.setattr("app.opening_cache.SCORE_MODEL_VERSION", "sm-v2-1-bumped")
+
+    with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
+        recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert spy.called

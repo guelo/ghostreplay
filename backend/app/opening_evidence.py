@@ -20,6 +20,7 @@ For opening-score v2 this module also:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -42,6 +43,27 @@ from app.opening_quality import cache_row_to_mover_evals, move_quality
 logger = logging.getLogger(__name__)
 
 PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/debug)
+
+# Evidence-derivation logic version. The cheap raw-input freshness digest
+# (``raw_evidence_inputs_digest``) hashes the RAW DB rows the overlay consumes,
+# not the derived overlay. A raw-row hash is blind to SEMANTIC changes in the
+# derivation code that change the overlay WITHOUT changing any raw row. This
+# version is folded into the digest to force a self-healing recompute on any
+# such change.
+#
+# BUMP DISCIPLINE — bump this on ANY change to evidence-derivation semantics,
+# including:
+#   - PASS_THRESHOLD (feeds live_passes → child selection/weights);
+#   - quality-source precedence/ordering in ``_apply_cache_fallbacks`` or
+#     ``move_quality`` consumption;
+#   - ``normalize_fen`` behavior or how/where it is applied;
+#   - the phase filter / divider application in ``_build_move_rows`` /
+#     ``is_opening_premove`` (the digest deliberately does NOT replay it);
+#   - the SQL projection or filters in ``raw_evidence_inputs_digest`` below; or
+#   - the set of columns the overlay consumes from any of these tables.
+# (DIVIDER_VERSION, QUALITY_VERSION, TAU_WC, TAU_CP, SCORE_MODEL_VERSION already
+# live in ``opening_score_inputs_fingerprint`` and remain there.)
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v1"
 
 # White-before-black ordering within a single (session, move_number).
 _COLOR_RANK = {"white": 0, "black": 1}
@@ -542,3 +564,151 @@ def overlay_evidence(
     _collect_ghost_targets(db, user_id, player_color, graph, overlay)
     _collect_reviews(db, user_id, player_color, graph, overlay)
     return overlay
+
+
+def _digest_ts(val: datetime | str | None) -> str:
+    """Canonicalise a timestamp for the digest, dialect-agnostically.
+
+    SQLite returns timestamps as strings and Postgres as datetimes; normalise
+    both through ``_parse_ts`` so the same stored instant hashes identically.
+    """
+    ts = _parse_ts(val)
+    return ts.isoformat() if ts is not None else ""
+
+
+def raw_evidence_inputs_digest(
+    db: Session,
+    user_id: int,
+    player_color: str,
+) -> str:
+    """Cheap freshness digest over the RAW DB rows ``overlay_evidence`` consumes.
+
+    Hashes a canonical, order-independent projection of exactly the raw rows the
+    overlay reads — and nothing derived. No python-chess, no board reconstruction,
+    no divider, no overlay build. Same raw inputs → identical digest → provably
+    identical overlay → identical scores, so a matching digest lets the cache
+    serve a batch without paying the per-session board-replay cost.
+
+    Scoping is INTENTIONALLY broad where it diverges from the overlay (e.g. all
+    session moves are hashed, not just opening-interval premoves; the
+    analysis_cache subset is keyed by fen only, not (fen, uci)): a broader digest
+    can only cause an unnecessary (still-correct) rebuild, never a missed change.
+    Semantic-only changes that leave every raw row unchanged are covered by
+    ``OPENING_EVIDENCE_INPUTS_VERSION``, folded in by the caller.
+    """
+    lines: list[str] = []
+
+    # 1. Session moves (mirrors _build_move_rows). Same SELECT, but we hash the
+    #    scalar columns and stop instead of replaying boards.
+    session_rows = db.execute(
+        text("""
+            SELECT sm.session_id, sm.move_number, sm.color,
+                   sm.fen_before, sm.fen_after, sm.move_san,
+                   sm.eval_delta, sm.eval_cp, sm.best_move_eval_cp,
+                   gs.started_at AS session_ts
+            FROM session_moves sm
+            JOIN game_sessions gs ON gs.id = sm.session_id
+            WHERE gs.user_id = :user_id
+              AND gs.player_color = :player_color
+              AND sm.fen_before IS NOT NULL
+              AND gs.session_mode IN ('normal', 'drill')
+        """),
+        {"user_id": user_id, "player_color": player_color},
+    ).fetchall()
+    for r in session_rows:
+        lines.append(
+            "SM|"
+            + "|".join(
+                (
+                    str(r.session_id),
+                    str(r.move_number),
+                    str(r.color),
+                    str(r.fen_before),
+                    str(r.fen_after),
+                    str(r.move_san),
+                    str(r.eval_delta),
+                    str(r.eval_cp),
+                    str(r.best_move_eval_cp),
+                    _digest_ts(r.session_ts),
+                )
+            )
+        )
+
+    # 2. analysis_cache fallback subset (mirrors _apply_cache_fallbacks). Bounded
+    #    to fen_before values that appear in THIS user's player-color session
+    #    moves lacking a primary eval — the only rows the overlay can consult.
+    cache_rows = db.execute(
+        text("""
+            SELECT ac.fen_before, ac.move_uci, ac.played_eval, ac.played_eval_mate,
+                   ac.best_eval, ac.best_eval_mate
+            FROM analysis_cache ac
+            WHERE ac.fen_before IN (
+                SELECT sm.fen_before
+                FROM session_moves sm
+                JOIN game_sessions gs ON gs.id = sm.session_id
+                WHERE gs.user_id = :user_id
+                  AND gs.player_color = :player_color
+                  AND sm.color = :player_color
+                  AND sm.fen_before IS NOT NULL
+                  AND (sm.eval_cp IS NULL OR sm.best_move_eval_cp IS NULL)
+                  AND gs.session_mode IN ('normal', 'drill')
+            )
+        """),
+        {"user_id": user_id, "player_color": player_color},
+    ).fetchall()
+    for r in cache_rows:
+        lines.append(
+            "AC|"
+            + "|".join(
+                (
+                    str(r.fen_before),
+                    str(r.move_uci),
+                    str(r.played_eval),
+                    str(r.played_eval_mate),
+                    str(r.best_eval),
+                    str(r.best_eval_mate),
+                )
+            )
+        )
+
+    # 3. Ghost targets (mirrors _collect_ghost_targets).
+    ghost_rows = db.execute(
+        text("""
+            SELECT p.fen_raw
+            FROM blunders b
+            JOIN positions p ON p.id = b.position_id
+            LEFT JOIN game_sessions gs ON gs.id = b.source_session_id
+            WHERE b.user_id = :user_id
+              AND (gs.player_color = :player_color
+                   OR (b.source_session_id IS NULL AND p.active_color = :player_color))
+              AND (gs.id IS NULL OR gs.session_mode IN ('normal', 'drill'))
+        """),
+        {"user_id": user_id, "player_color": player_color},
+    ).fetchall()
+    for (fen_raw,) in ghost_rows:
+        lines.append("GT|" + str(fen_raw))
+
+    # 4. Blunder reviews (mirrors _collect_reviews).
+    review_rows = db.execute(
+        text("""
+            SELECT p.fen_raw, br.passed, br.reviewed_at
+            FROM blunder_reviews br
+            JOIN blunders b ON b.id = br.blunder_id
+            JOIN positions p ON p.id = b.position_id
+            LEFT JOIN game_sessions gs ON gs.id = b.source_session_id
+            WHERE b.user_id = :user_id
+              AND (gs.player_color = :player_color
+                   OR (b.source_session_id IS NULL AND p.active_color = :player_color))
+              AND (gs.id IS NULL OR gs.session_mode IN ('normal', 'drill'))
+        """),
+        {"user_id": user_id, "player_color": player_color},
+    ).fetchall()
+    for fen_raw, passed, reviewed_at in review_rows:
+        lines.append(
+            "BR|" + "|".join((str(fen_raw), str(bool(passed)), _digest_ts(reviewed_at)))
+        )
+
+    # Order-independent: sort the projected lines before hashing so the digest is
+    # invariant to row return order. The version is folded in by the caller.
+    lines.sort()
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
