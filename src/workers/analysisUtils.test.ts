@@ -483,7 +483,7 @@ describe('failsDrill vs isRecordableFailure boundaries (separate comparators)', 
     })
   }
 
-  it('drill: 0cp passes any strictness, including 0', () => {
+  it('drill comparator: 0cp eval loss does not fail by itself', () => {
     expect(failsDrill(0, 0)).toBe(false)
     expect(failsDrill(0, 50)).toBe(false)
   })
@@ -502,12 +502,18 @@ describe('failsDrill vs isRecordableFailure boundaries (separate comparators)', 
 })
 
 describe('gradeDrillMove / gradeRecordableMove tri-state', () => {
-  it('drill: unavailable for null/non-finite, pass at/below strictness, fail above', () => {
-    expect(gradeDrillMove(null, 35)).toBe('unavailable')
-    expect(gradeDrillMove(NaN, 35)).toBe('unavailable')
-    expect(gradeDrillMove(35, 35)).toBe('pass') // boundary passes
-    expect(gradeDrillMove(0, 35)).toBe('pass')
-    expect(gradeDrillMove(36, 35)).toBe('fail')
+  it('drill: unavailable for null/non-finite, pass at/below nonzero strictness, fail above', () => {
+    expect(gradeDrillMove(null, 35, false)).toBe('unavailable')
+    expect(gradeDrillMove(NaN, 35, false)).toBe('unavailable')
+    expect(gradeDrillMove(35, 35, false)).toBe('pass') // boundary passes
+    expect(gradeDrillMove(0, 35, false)).toBe('pass')
+    expect(gradeDrillMove(36, 35, true)).toBe('fail')
+  })
+
+  it('drill: 0cp strictness requires the exact best move', () => {
+    expect(gradeDrillMove(0, 0, true)).toBe('pass')
+    expect(gradeDrillMove(0, 0, false)).toBe('fail')
+    expect(gradeDrillMove(-4, 0, false)).toBe('fail')
   })
 
   it('recordable: unavailable for null, pass below 50, fail at/above 50', () => {

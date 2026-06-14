@@ -3731,7 +3731,13 @@ describe("ChessGame post-root drill outcome stability (AC4)", () => {
   it.each(SCENARIOS)(
     "strictness=%i, delta=%i grades deterministically",
     async (threshold, delta) => {
-      const shouldFail = delta > threshold; // failsDrill: strict `>`
+      // `: string` widens the literals so `bestMove !== playedMove` isn't a
+      // compile-time-constant comparison TS rejects as having no type overlap.
+      const playedMove: string = "e2e4";
+      const bestMove: string = "d2d4";
+      const shouldFail =
+        (threshold <= 0 && bestMove !== playedMove) ||
+        delta > threshold; // nonzero thresholds use failsDrill: strict `>`
 
       useGameStore.setState({
         sessionId: "drill-matrix",
@@ -3751,8 +3757,8 @@ describe("ChessGame post-root drill outcome stability (AC4)", () => {
 
       mockCoordinator.waitForAnalysis.mockResolvedValue({
         id: "analysis-e4",
-        move: "e2e4",
-        bestMove: "d2d4",
+        move: playedMove,
+        bestMove,
         bestEval: delta,
         playedEval: 0,
         currentPositionEval: 0,
@@ -3783,6 +3789,50 @@ describe("ChessGame post-root drill outcome stability (AC4)", () => {
       }
     },
   );
+
+  it("allows the exact best move at 0cp strictness", async () => {
+    useGameStore.setState({
+      sessionId: "drill-matrix",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 0,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 0,
+    });
+
+    mockCoordinator.waitForAnalysis.mockResolvedValue({
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "e2e4",
+      bestEval: 0,
+      playedEval: 0,
+      currentPositionEval: 0,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: 0,
+      classification: "best",
+      blunder: false,
+      recordable: false,
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalled();
+    });
+    expect(failDrillMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState().drillState).not.toBe("failed");
+  });
 });
 
 describe("ChessGame return to drill after analyze (g-65ve)", () => {

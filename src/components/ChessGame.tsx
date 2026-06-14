@@ -1091,9 +1091,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         );
         // Tri-state grade: a missing/non-finite eval is `unavailable` (NOT a
         // pass) and routes to the same recovery path as a failed analysis fetch
-        // so the drill never silently advances on ungraded moves. The boundary
-        // value and 0cp PASS (failsDrill uses strict `>`).
-        const grade = gradeDrillMove(analysis.delta, threshold);
+        // so the drill never silently advances on ungraded moves. At 0cp the
+        // drill requires the exact best move; above 0cp, the eval-loss boundary
+        // passes (failsDrill uses strict `>`).
+        const grade = gradeDrillMove(
+          analysis.delta,
+          threshold,
+          analysis.bestMove === result.moveUci,
+        );
         if (grade === "unavailable") {
           setDrillRecovery({ kind: "analysis", result });
           setEngineMessage(

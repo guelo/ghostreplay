@@ -192,9 +192,10 @@ export const evalLoss = (delta: number | null | undefined): number | null => {
 }
 
 /**
- * Drill-accuracy comparator: a move FAILS only when its eval loss strictly
- * EXCEEDS the configured strictness (the boundary value PASSES). Distinct from
- * the recording/SRS comparator on purpose — do not merge the two thresholds.
+ * Drill-accuracy comparator for nonzero strictness: a move FAILS only when its
+ * eval loss strictly EXCEEDS the configured strictness (the boundary value
+ * PASSES). Distinct from the recording/SRS comparator on purpose — do not merge
+ * the two thresholds.
  */
 export const failsDrill = (
   delta: number | null | undefined,
@@ -215,15 +216,17 @@ export const isRecordableFailure = (delta: number | null | undefined): boolean =
 }
 
 /**
- * Tri-state drill grade. `unavailable` when the eval is missing/non-finite;
- * otherwise `fail` when failsDrill (> strictness), else `pass` (boundary and
- * 0cp pass regardless of best-move equality).
+ * Tri-state drill grade. `unavailable` when the eval is missing/non-finite.
+ * A 0cp strictness means exact-best only; above 0cp, the grade is eval-loss
+ * based and the boundary value passes.
  */
 export const gradeDrillMove = (
   delta: number | null | undefined,
   strictnessCp: number,
+  isBestMove: boolean,
 ): MoveGrade => {
   if (evalLoss(delta) === null) return 'unavailable'
+  if (strictnessCp <= 0) return isBestMove ? 'pass' : 'fail'
   return failsDrill(delta, strictnessCp) ? 'fail' : 'pass'
 }
 

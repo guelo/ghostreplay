@@ -2411,6 +2411,8 @@ Strictness controls the centipawn threshold for accuracy failures after `root_re
 | `lenient` | 50 |
 
 A custom `strictness_cp` integer (0–50) overrides the tier value.
+At `strictness_cp = 0`, the drill requires the exact engine best move; non-best
+moves fail even when post-move eval noise resolves to 0cp loss or better.
 
 ### 17.4 Route Check
 
