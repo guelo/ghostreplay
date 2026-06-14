@@ -668,20 +668,27 @@ discontinuity across the old 49↔50cp pass/fail boundary (asserted by
 `test_no_49_50_discontinuity` / `test_context_sensitivity` in
 `backend/test_opening_quality.py`). No change.
 
-### Grade thresholds — **retained**
+### Grade thresholds — **retained** (insufficient evidence to re-centre)
 
 `A ≥ 85`, `B ≥ 70`, `C ≥ 55`, `D ≥ 45`, `F < 45`; tones `alert < 45`,
-`watch < 65` (`src/openings/format.ts`). Because `OpeningScore = 100 · S/PerfectS`
-normalizes against an all-quality-1.0 ideal on the same tree, a user whose
-average move quality is ~0.63 lands mid-band (~C), which matches the product
-intent ("playable but improvable"); strong, near-best repertoires push into A/B.
-The boundaries are retained rather than re-centred.
+`watch < 65` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
 
-> **Re-centring is data-gated.** Re-centring on observed percentiles requires a
-> populated cohort. When a dataset with pairs at/above `--min-observations`
-> exists, re-run the script and, if the pooled and per-user-median distributions
-> argue for a shift, edit `getPriorityLabel` / `getPriorityTone` and add
-> `src/openings/format.test.ts` asserting the new boundaries.
+The populated calibration run *did* show a low-skewed distribution that would
+argue for re-centring — pooled named-score mean **32.1**, p5 **19.7** / p25
+**27.3** / p50 **33.3** / p75 **34.1** / p95 **47.2** (n=278), per-user medians
+**30.8–33.3** (median-of-medians **32.4**), synthetic-hero p50 **33.9**. Under the
+current scale ~90% of those positions grade F and none reach B/A. **However, the
+cohort is too thin to act on:** ≈95% of the 278 samples come from a single user
+(`user 14`: 266 of 278), and only 2 of the 4 included pairs carry large
+observation counts. Moving a product-facing scale on one user's distribution is
+not justified, so the boundaries are **retained**.
+
+> **Re-centring stays data-gated.** Re-run once more pairs sit at/above
+> `--min-observations` with a spread of distinct users. If the pooled and
+> per-user-median distributions still argue for a shift, edit `getPriorityLabel`
+> / `getPriorityTone` and update `src/openings/format.test.ts` to assert the new
+> boundaries. Grade/tone are display of an unchanged stored score, so a re-centre
+> is display-only and does **not** bump `QUALITY_VERSION`.
 
 ### Source mix & horizon
 
@@ -692,10 +699,16 @@ distribution; raw-middlegame vs unscored root counts kept distinct).
 ### Numeric gates (release bar)
 
 - One-pass in-memory scoring per pair (full ~11k-root registry): **< 5 s**.
+  Observed on the populated run: median **3.4 s/pair**, max **3.6 s** (total 23.6 s
+  across 4 pairs / 11,274 named roots) → **PASS**.
 - Cache read (`list_cached_opening_scores` after one isolated recompute, under
-  `--write-bench`): **< 50 ms**.
+  `--write-bench`): **< 50 ms**. Observed **38.96 ms** over 216 cached rows on an
+  isolated `ghostreplay_calibrate` Postgres copy → **PASS**.
 
-Fill exact medians from the first populated run and record them as the pass bar.
+**Source mix (populated run):** 100% `session_eval` / 0.0% `analysis_cache`
+(8,850 samples; 26 sessions excluded for broken continuity). **Horizon:**
+opening-interval length mean 19.7 plies; 689 of 900 samples reached middlegame.
+**Cohort:** 4 of 8 candidate pairs included (`min_observations = 20`).
 
 ## Why This Is The Final Recommendation
 

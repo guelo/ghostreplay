@@ -33,6 +33,11 @@ export function formatGames(value: number | null): string {
   return value.toLocaleString();
 }
 
+// Grade/tone boundaries retained at the original A≥85…F<45 scale. The first
+// populated v2 calibration (g-m36y) showed a low-skewed distribution that would
+// argue for re-centring, but the cohort was ~95% one user — too thin to move a
+// product-facing scale. Revisit when more populated pairs exist. See
+// docs/openingscore_final.md "Calibration Outcome (v2)".
 export function getPriorityTone(score: number | null): OpeningTone {
   if (score === null) {
     return "muted";
