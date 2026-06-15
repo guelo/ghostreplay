@@ -220,6 +220,10 @@ let capturedPieceDrop:
 let capturedSquareClick: ((args: { square: string }) => void) | null = null;
 
 vi.mock("react-chessboard", () => ({
+  defaultPieces: {
+    wK: () => <svg data-testid="piece-wK" />,
+    bK: () => <svg data-testid="piece-bK" />,
+  },
   Chessboard: ({ options }: { options: Record<string, unknown> }) => {
     capturedPieceDrop = options.onPieceDrop as typeof capturedPieceDrop;
     capturedSquareClick = options.onSquareClick as typeof capturedSquareClick;
@@ -1527,8 +1531,10 @@ describe("ChessGame characterization safeguards", () => {
     // Store values win over localStorage: engine 1500 (not 800), white (not black).
     expect(useGameStore.getState().engineElo).toBe(1500);
     // Drill side is now local state, decoupled from the store playerColorChoice;
-    // the White side toggle should be active (from the store's player_color).
-    expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass("active");
+    // the White side king button should be active (from the store's player_color).
+    expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass(
+      "play-side-button--active",
+    );
     // Exact 20cp strictness from the store, not the rounded 50 from localStorage.
     await waitFor(() => {
       expect(screen.getByText(/20 cp loss allowed/i)).toBeInTheDocument();

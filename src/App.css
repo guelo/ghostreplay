@@ -2970,6 +2970,72 @@
     justify-content: center;
 }
 
+/* Play-side buttons: a king piece above a small label (g-lgi5). */
+.play-side-button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.75rem 1rem;
+    min-width: 5rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.play-side-button:hover:not(:disabled) {
+    border-color: var(--brand-primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.play-side-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Selected side in a toggle context (drill setup): brand-accented thumb. */
+.play-side-button--active {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    box-shadow: var(--shadow-md);
+}
+
+.play-side-button--active:disabled {
+    opacity: 0.7;
+}
+
+.play-side-button__piece {
+    width: 3rem;
+    height: 3rem;
+}
+
+.play-side-button__label {
+    font-size: 0.9rem;
+    font-weight: 600;
+}
+
+.play-side-button__piece--split {
+    position: relative;
+}
+
+.play-side-king {
+    position: absolute;
+    inset: 0;
+}
+
+.play-side-king--left {
+    clip-path: inset(0 50% 0 0);
+}
+
+.play-side-king--right {
+    clip-path: inset(0 0 0 50%);
+}
+
 .chess-start-error {
     margin: 0;
     font-size: 0.9rem;
@@ -2994,6 +3060,18 @@
     flex-shrink: 0;
 }
 
+/* Segmented toggle: a single inset track holding equal-width segments with a
+   raised, brand-accented active thumb (g-lgi5). */
+.segmented-toggle {
+    display: flex;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+}
+
+/* Standalone toggle (e.g. Blunder Library filter): pill with its own border. */
 .chess-button.toggle {
     border-color: var(--border-color-strong);
     background: var(--bg-tertiary);
@@ -3004,6 +3082,33 @@
     color: var(--text-on-gradient);
     border-color: transparent;
     box-shadow: var(--shadow-md);
+}
+
+/* Inside a segmented track the toggle becomes a borderless segment / thumb. */
+.segmented-toggle .chess-button.toggle {
+    flex: 1 1 0;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 999px;
+    padding: 0.4rem 1rem;
+    box-shadow: none;
+    text-align: center;
+}
+
+.segmented-toggle .chess-button.toggle:hover:not(.active) {
+    color: var(--text-primary);
+}
+
+.segmented-toggle .chess-button.toggle.active {
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    box-shadow: var(--shadow-md);
+}
+
+.segmented-toggle .chess-button.toggle:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .overlay-button {
@@ -8240,8 +8345,7 @@ button.openings-shell__crumb:hover {
 }
 
 .mode-toggle-row {
-    display: flex;
-    gap: 0.5rem;
+    /* Layout comes from .segmented-toggle; keep only the centering intent. */
     justify-content: center;
 }
 
@@ -8337,8 +8441,7 @@ button.openings-shell__crumb:hover {
 }
 
 .opening-picker__toggle {
-    display: flex;
-    gap: 0.5rem;
+    /* Layout comes from .segmented-toggle; keep only the centering intent. */
     justify-content: center;
 }
 

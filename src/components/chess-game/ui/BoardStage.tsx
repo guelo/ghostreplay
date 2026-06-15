@@ -1,4 +1,4 @@
-import { Chessboard } from "react-chessboard";
+import { Chessboard, defaultPieces } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo, useRef } from "react";
 import type { OpeningRootItem } from "../../../utils/api";
@@ -8,6 +8,9 @@ import DrillSetupPanel from "./DrillSetupPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 
 type BoardOrientation = "white" | "black";
+
+const WhiteKing = defaultPieces.wK;
+const BlackKing = defaultPieces.bK;
 
 type BoardStageProps = {
   boardInstanceKey: number;
@@ -174,7 +177,7 @@ const BoardStage = ({
                   ×
                 </button>
 
-                <div className="mode-toggle-row">
+                <div className="mode-toggle-row segmented-toggle">
                   <button
                     className={`chess-button toggle${!isDrillMode ? " active" : ""}`}
                     type="button"
@@ -252,28 +255,45 @@ const BoardStage = ({
                       <p className="chess-start-title">Side</p>
                       <div className="chess-start-options">
                         <button
-                          className="chess-button primary"
+                          className="play-side-button"
                           type="button"
+                          aria-label="Play White"
                           onClick={onPlayWhite}
                           disabled={isStartingGame}
                         >
-                          Play White
+                          <span className="play-side-button__piece">
+                            <WhiteKing />
+                          </span>
+                          <span className="play-side-button__label">White</span>
                         </button>
                         <button
-                          className="chess-button primary"
+                          className="play-side-button"
                           type="button"
+                          aria-label="Play Random"
                           onClick={onPlayRandom}
                           disabled={isStartingGame}
                         >
-                          Play Random
+                          <span className="play-side-button__piece play-side-button__piece--split">
+                            <span className="play-side-king play-side-king--left">
+                              <WhiteKing />
+                            </span>
+                            <span className="play-side-king play-side-king--right">
+                              <BlackKing />
+                            </span>
+                          </span>
+                          <span className="play-side-button__label">Random</span>
                         </button>
                         <button
-                          className="chess-button primary"
+                          className="play-side-button"
                           type="button"
+                          aria-label="Play Black"
                           onClick={onPlayBlack}
                           disabled={isStartingGame}
                         >
-                          Play Black
+                          <span className="play-side-button__piece">
+                            <BlackKing />
+                          </span>
+                          <span className="play-side-button__label">Black</span>
                         </button>
                       </div>
                       {startError && <p className="chess-start-error">{startError}</p>}

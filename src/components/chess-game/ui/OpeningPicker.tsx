@@ -298,7 +298,7 @@ const OpeningPicker = ({
             className="opening-picker__popover"
             style={popoverStyle}
           >
-            <div className="opening-picker__toggle" role="tablist">
+            <div className="opening-picker__toggle segmented-toggle" role="tablist">
               <button
                 type="button"
                 role="tab"

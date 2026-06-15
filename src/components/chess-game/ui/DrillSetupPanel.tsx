@@ -1,8 +1,12 @@
 import { memo } from "react";
+import { defaultPieces } from "react-chessboard";
 import type { OpeningRootItem } from "../../../utils/api";
 import OpponentAvatar from "./OpponentAvatar";
 import OpeningPicker from "./OpeningPicker";
 import { strictnessFromCp } from "./DrillSetupPanel.helpers";
+
+const WhiteKing = defaultPieces.wK;
+const BlackKing = defaultPieces.bK;
 
 type DrillSetupPanelProps = {
   // Data
@@ -74,20 +78,26 @@ const DrillSetupPanel = ({
         <span className="drill-field__label">Side</span>
         <div className="drill-field__control chess-start-options">
           <button
-            className={`chess-button toggle${playerColor === "white" ? " active" : ""}`}
+            className={`play-side-button${playerColor === "white" ? " play-side-button--active" : ""}`}
             type="button"
             onClick={() => onPlayerColorChange("white")}
             disabled={isStarting}
           >
-            White
+            <span className="play-side-button__piece">
+              <WhiteKing />
+            </span>
+            <span className="play-side-button__label">White</span>
           </button>
           <button
-            className={`chess-button toggle${playerColor === "black" ? " active" : ""}`}
+            className={`play-side-button${playerColor === "black" ? " play-side-button--active" : ""}`}
             type="button"
             onClick={() => onPlayerColorChange("black")}
             disabled={isStarting}
           >
-            Black
+            <span className="play-side-button__piece">
+              <BlackKing />
+            </span>
+            <span className="play-side-button__label">Black</span>
           </button>
         </div>
       </div>

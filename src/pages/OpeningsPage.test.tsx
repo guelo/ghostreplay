@@ -44,6 +44,10 @@ vi.mock("../utils/api", async () => {
 });
 
 vi.mock("react-chessboard", () => ({
+  defaultPieces: {
+    wK: () => <svg data-testid="piece-wK" />,
+    bK: () => <svg data-testid="piece-bK" />,
+  },
   Chessboard: ({ options }: { options: Record<string, unknown> }) => (
     <div
       data-testid="opening-card-board"

@@ -10,10 +10,12 @@ let nextBoardInstanceId = 1;
 
 vi.mock("react-chessboard", () => ({
   defaultPieces: {
+    wK: () => <svg data-testid="piece-wK" />,
     wQ: () => <svg data-testid="piece-wQ" />,
     wR: () => <svg data-testid="piece-wR" />,
     wB: () => <svg data-testid="piece-wB" />,
     wN: () => <svg data-testid="piece-wN" />,
+    bK: () => <svg data-testid="piece-bK" />,
     bQ: () => <svg data-testid="piece-bQ" />,
     bR: () => <svg data-testid="piece-bR" />,
     bB: () => <svg data-testid="piece-bB" />,
