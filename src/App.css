@@ -4340,7 +4340,7 @@
 /* What-if (variation) mode: wash out the board so it reads as a
    hypothetical, disabled-looking exploration rather than the live line. */
 .analysis-board__board-frame--variation {
-    filter: saturate(0.55) brightness(0.92) contrast(0.95);
+    filter: saturate(0.55) brightness(1.06) contrast(0.95);
     transition: filter 0.2s ease;
 }
 
