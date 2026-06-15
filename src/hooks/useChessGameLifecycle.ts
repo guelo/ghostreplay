@@ -249,9 +249,6 @@ export const useChessGameLifecycle = ({
           result.type === "draw")
       ) {
         try {
-          coordinator.flushPendingUploads().catch((err) =>
-            console.error("[SessionMoves] Flush failed:", err),
-          );
           const contract = await naturalEndDrill(
             store.sessionId,
             result.type,
@@ -264,6 +261,10 @@ export const useChessGameLifecycle = ({
           s.setDrillState(contract.drill_state);
           s.setDrillTerminalReason(contract.terminal_reason ?? null);
           s.setIsRated(false);
+          // Natural-ended drills remain hidden and unrated unless converted.
+          // Persisted evidence is best-effort, so discard any resolved upload
+          // tail that had not already reached the server.
+          coordinator.stopSessionUploads();
           finishLocalGame(result, {
             preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
             playEndGameAudio: true,
@@ -480,12 +481,13 @@ export const useChessGameLifecycle = ({
           // game being abandoned (durable resolved slots survive).
           coordinator.decisionOwner.cancelPendingSrsReviews();
           setResolvedReview(null);
-          coordinator.flushPendingUploads().catch((err) =>
-            console.error("[SessionMoves] Flush failed:", err),
-          );
-          if (store.drillOpeningKey) {
+          if (store.drillOpeningKey && store.drillState !== "converted") {
             await abandonDrill(store.sessionId);
+            coordinator.stopSessionUploads();
           } else {
+            coordinator.flushPendingUploads().catch((err) =>
+              console.error("[SessionMoves] Flush failed:", err),
+            );
             await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
           }
         }
@@ -607,12 +609,13 @@ export const useChessGameLifecycle = ({
           // Cancel pending SRS reviews BEFORE the awaited abandon/endGame.
           coordinator.decisionOwner.cancelPendingSrsReviews();
           setResolvedReview(null);
-          coordinator.flushPendingUploads().catch((err) =>
-            console.error("[SessionMoves] Flush failed:", err),
-          );
-          if (store.drillOpeningKey) {
+          if (store.drillOpeningKey && store.drillState !== "converted") {
             await abandonDrill(store.sessionId);
+            coordinator.stopSessionUploads();
           } else {
+            coordinator.flushPendingUploads().catch((err) =>
+              console.error("[SessionMoves] Flush failed:", err),
+            );
             await endGame(store.sessionId, "abandon", chess.pgn(), store.isRated);
           }
         }
@@ -767,6 +770,7 @@ export const useChessGameLifecycle = ({
       if (useGameStore.getState().sessionId !== finalizingSessionId) {
         return;
       }
+      coordinator.stopSessionUploads();
       const s = useGameStore.getState();
       s.setDrillState(contract.drill_state);
       s.setIsRated(false);
@@ -797,15 +801,12 @@ export const useChessGameLifecycle = ({
     }
 
     try {
-      coordinator.flushPendingUploads().catch((err) =>
-        console.error("[SessionMoves] Flush failed:", err),
-      );
-
       if (store.drillOpeningKey && store.drillState !== "converted") {
         const contract = await abandonDrill(store.sessionId);
         if (useGameStore.getState().sessionId !== finalizingSessionId) {
           return;
         }
+        coordinator.stopSessionUploads();
         const s = useGameStore.getState();
         s.setDrillState(contract.drill_state);
         s.setIsRated(false);
@@ -815,6 +816,10 @@ export const useChessGameLifecycle = ({
         );
         return;
       }
+
+      coordinator.flushPendingUploads().catch((err) =>
+        console.error("[SessionMoves] Flush failed:", err),
+      );
 
       const endResponse = await endGame(
         store.sessionId,
@@ -878,6 +883,9 @@ export const useChessGameLifecycle = ({
     setLiveOpening(null);
     openingHistoryRef.current = [];
     resetEngine();
+    if (store.drillOpeningKey && store.drillState !== "converted") {
+      coordinator.stopSessionUploads();
+    }
     coordinator.clearSession();
     clearBlunderBoardOverride?.();
     setBlunderAlert(null);

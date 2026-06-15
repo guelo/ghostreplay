@@ -1211,7 +1211,7 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("abandons an unconverted drill instead of ending it as a game", async () => {
-    const { result } = setup({
+    const { result, coordinator } = setup({
       isGameActive: true,
       isRated: false,
       playerColor: "white",
@@ -1250,6 +1250,8 @@ describe("useChessGameLifecycle", () => {
       expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-123"),
     );
     expect(endGameMock).not.toHaveBeenCalled();
+    expect(coordinator.flushPendingUploads).not.toHaveBeenCalled();
+    expect(coordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
     expect(useGameStore.getState()).toEqual(
       expect.objectContaining({
         isGameActive: false,
@@ -1265,7 +1267,7 @@ describe("useChessGameLifecycle", () => {
   });
 
   it("abandonStoppedDrill finalizes the failed drill unrated without ending it as a game", async () => {
-    const { result } = setup({
+    const { result, coordinator } = setup({
       isGameActive: true,
       isRated: false,
       playerColor: "white",
@@ -1288,6 +1290,7 @@ describe("useChessGameLifecycle", () => {
 
     expect(abandonDrillMock).toHaveBeenCalledWith("drill-session-456");
     expect(endGameMock).not.toHaveBeenCalled();
+    expect(coordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
     expect(useGameStore.getState()).toEqual(
       expect.objectContaining({
         isGameActive: false,

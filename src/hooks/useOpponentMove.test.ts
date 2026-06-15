@@ -198,6 +198,27 @@ describe("useOpponentMove", () => {
     expect(onApplyLocalFallback).toHaveBeenCalled();
   });
 
+  it("does not use local engine for a null-session request when the stale guard rejects it", async () => {
+    const onApplyBackendMove = vi.fn().mockResolvedValue(undefined);
+    const onApplyLocalFallback = vi.fn().mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useOpponentMove({
+        sessionId: null,
+        canApplyResult: () => false,
+        onApplyBackendMove,
+        onApplyLocalFallback,
+      })
+    );
+
+    await act(async () => {
+      await result.current.applyOpponentMove("test-fen");
+    });
+
+    expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+    expect(onApplyLocalFallback).not.toHaveBeenCalled();
+  });
+
   it("uses the latest sessionId immediately after rerender", async () => {
     getNextOpponentMoveMock.mockResolvedValueOnce(
       backendResponse("engine", "e4")

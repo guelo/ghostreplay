@@ -332,7 +332,18 @@ export const useChessGameController = ({
     try {
       const fenBeforeMove = chess.fen();
       const legalMoveCount = chess.moves().length;
+      const sessionIdBeforeMove = useGameStore.getState().sessionId;
       const result = await evaluatePosition(fenBeforeMove);
+
+      const storeAfterSearch = useGameStore.getState();
+      if (
+        storeAfterSearch.sessionId !== sessionIdBeforeMove ||
+        storeAfterSearch.liveFen !== fenBeforeMove ||
+        chess.fen() !== fenBeforeMove ||
+        !storeAfterSearch.isGameActive
+      ) {
+        return;
+      }
 
       if (result.move === "(none)") {
         setEngineMessage("Stockfish has no legal moves.");

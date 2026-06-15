@@ -189,6 +189,11 @@ const fromCachedAnalysis = (
   return {
     id: requestId,
     move,
+    // Fallback to the played move when the cache row lacks a best move. NOTE:
+    // 0cp drill grading reads `bestMove === playedMove` (g-l02q), so this would
+    // false-pass a non-best move at strictness 0 — but a null best_move_uci
+    // implies a null best_eval, hence a null eval_delta, which `gradeDrillMove`
+    // grades as `unavailable` (recovery) before the best-move check runs.
     bestMove: cached.best_move_uci ?? move,
     bestLine: cached.best_line_uci ?? null,
     bestEval,
@@ -209,6 +214,7 @@ type UploadState = {
   uploadedIndices: Set<number>
   dirtyIndices: Set<number>
   uploadInFlight: boolean
+  abortController: AbortController | null
   retryCount: number
   retryTimer: ReturnType<typeof setTimeout> | null
   /** True after the session is finalized — the interval timer is gone,
@@ -216,6 +222,12 @@ type UploadState = {
   detached: boolean
   uploadsEnabled: boolean
 }
+
+const isAbortError = (err: unknown): boolean =>
+  typeof err === 'object' &&
+  err !== null &&
+  'name' in err &&
+  err.name === 'AbortError'
 
 export class GameAnalysisCoordinator {
   // Worker state
@@ -535,6 +547,7 @@ export class GameAnalysisCoordinator {
       uploadedIndices: new Set(),
       dirtyIndices: new Set(),
       uploadInFlight: false,
+      abortController: null,
       retryCount: 0,
       retryTimer: null,
       detached: false,
@@ -573,6 +586,12 @@ export class GameAnalysisCoordinator {
     this.stopIncrementalUploadTimer()
 
     if (this.uploadState) {
+      if (!this.uploadState.uploadsEnabled) {
+        this.cancelUploadState(this.uploadState)
+        this.uploadState = null
+        return
+      }
+
       // Mark the upload state as detached so the in-flight success handler
       // knows to drain ALL remaining dirty indices (not just >= threshold).
       this.uploadState.detached = true
@@ -1224,6 +1243,18 @@ export class GameAnalysisCoordinator {
     }
   }
 
+  private cancelUploadState(state: UploadState) {
+    if (state.retryTimer) {
+      clearTimeout(state.retryTimer)
+      state.retryTimer = null
+    }
+    if (state.abortController) {
+      state.abortController.abort()
+      state.abortController = null
+    }
+    state.uploadInFlight = false
+  }
+
   /**
    * Build and send an upload for dirty indices. The payload is snapshotted
    * once from global state when this is first called for a batch. Retries
@@ -1257,14 +1288,28 @@ export class GameAnalysisCoordinator {
     }
 
     state.uploadInFlight = true
+    const controller = typeof AbortController !== 'undefined'
+      ? new AbortController()
+      : null
+    state.abortController = controller
 
-    uploadSessionMoves(state.sessionId, payload)
+    uploadSessionMoves(
+      state.sessionId,
+      payload,
+      controller ? { signal: controller.signal } : undefined,
+    )
       .then(() => {
+        if (state.abortController === controller) {
+          state.abortController = null
+        }
         for (const idx of indicesToUpload) {
           state.uploadedIndices.add(idx)
         }
         state.retryCount = 0
         state.uploadInFlight = false
+        if (!state.uploadsEnabled) {
+          return
+        }
 
         // If more dirty indices accumulated during upload, flush again.
         // When detached (session finalized), drain unconditionally since
@@ -1275,8 +1320,14 @@ export class GameAnalysisCoordinator {
         }
       })
       .catch((err) => {
-        console.error('[Coordinator] Incremental upload failed:', err)
+        if (state.abortController === controller) {
+          state.abortController = null
+        }
         state.uploadInFlight = false
+        if (!state.uploadsEnabled || isAbortError(err)) {
+          return
+        }
+        console.error('[Coordinator] Incremental upload failed:', err)
 
         // Retry with exponential backoff, re-using the frozen payload
         state.retryCount++
@@ -1312,10 +1363,7 @@ export class GameAnalysisCoordinator {
     if (!this.uploadState) return
     this.uploadState.uploadsEnabled = false
     this.uploadState.dirtyIndices.clear()
-    if (this.uploadState.retryTimer) {
-      clearTimeout(this.uploadState.retryTimer)
-      this.uploadState.retryTimer = null
-    }
+    this.cancelUploadState(this.uploadState)
   }
 
   // --- Teardown ---

@@ -1024,7 +1024,7 @@ Engine evaluations fluctuate during iterative deepening. The protocol uses **dep
 
 **Batching:** Worker B evaluates moves asynchronously. During fast play, evaluations queue; moves are processed in order. Each move index tracks its latest request ID so that stale results from retried analysis are discarded.
 
-**Memory:** Each evaluation result is stored in `createAnalysisStore.analysisMap` during the game and batch-uploaded on game end (see Section 7.4).
+**Memory:** Each evaluation result is stored in `createAnalysisStore.analysisMap` during the game and uploaded through the coordinator's incremental session-move uploader, with a final best-effort flush on game end (see Section 7.4).
 
 **Error recovery:** If Worker B fails to initialize (WASM load failure), the game continues without analysis. The `session_moves` table will be empty for that game, and no automatic blunders can be recorded (manual MoveList capture is still available).
 
@@ -1140,8 +1140,11 @@ CREATE INDEX idx_session_moves_session ON session_moves(session_id);
 **Data Flow:**
 1. User plays move → Worker B evaluates position
 2. Frontend stores eval data in memory during game
-3. On game end → Frontend sends full analysis batch to `POST /api/session/{id}/moves`
-4. Server bulk-inserts all `session_moves` records
+3. `GameAnalysisCoordinator` incrementally uploads resolved dirty moves to `POST /api/session/{id}/moves` and retries transient failures with a frozen payload
+4. On game end or conversion-sensitive transitions, the coordinator performs a best-effort flush of any remaining resolved moves
+5. Server bulk-upserts `session_moves` records
+
+**Upload cancellation:** Unconverted drill sessions are best-effort evidence until they are converted. When a drill is abandoned, naturally ended, reset, or replaced by another drill/normal game without conversion, the client disables and aborts that drill's pending session-move uploads so stale rounds do not occupy live gameplay request capacity. If a late upload for an already ended, unconverted drill still reaches the backend, the backend keeps the raw `session_moves` upsert idempotent but skips expensive evidence side effects (ghost graph, blunder opportunity, analysis-cache, and opening-score recompute).
 
 ### 7.5 First-Auto-Blunder Rule Enforcement
 

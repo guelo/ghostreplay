@@ -254,6 +254,9 @@ beforeEach(() => {
   bridgeLastEmittedIndex = -1;
   bridgeEmittedIndices.clear();
   mockCoordinator.addAnalysisOutcomeListener.mockClear();
+  mockCoordinator.flushPendingUploads.mockClear();
+  mockCoordinator.flushPendingUploads.mockResolvedValue(undefined);
+  mockCoordinator.stopSessionUploads.mockClear();
   gameAnalysisStore.getState().clearAll();
   gameAnalysisStore.getState().setStatus("ready");
   class MockAudio {
@@ -1278,6 +1281,8 @@ describe("ChessGame characterization safeguards", () => {
       drillStrictness: "lenient",
       drillStrictnessCp: 20,
     });
+    mockCoordinator.flushPendingUploads.mockClear();
+    mockCoordinator.stopSessionUploads.mockClear();
     startDrillMock.mockResolvedValueOnce(makeDrillResponse());
 
     const again = await screen.findByRole("button", { name: /^again$/i });
@@ -1295,6 +1300,8 @@ describe("ChessGame characterization safeguards", () => {
         strictness_cp: 20,
       });
     });
+    expect(mockCoordinator.flushPendingUploads).not.toHaveBeenCalled();
+    expect(mockCoordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
     expect(
       screen.queryByRole("button", { name: /start drill/i }),
     ).not.toBeInTheDocument();

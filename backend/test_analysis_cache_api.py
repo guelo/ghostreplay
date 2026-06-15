@@ -6,7 +6,7 @@ import pytest
 
 import uuid
 
-from app.models import AnalysisCache, GameSession
+from app.models import AnalysisCache, GameSession, SessionMove
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -370,6 +370,107 @@ def test_session_moves_active_drill_refreshes_opening_scores(
     _, args, _kwargs = refresh.mock_calls[0]
     assert args[0] == 123
     assert args[1] == "white"
+
+
+def test_session_moves_abandoned_drill_skips_expensive_evidence_side_effects(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    session_uuid = uuid.UUID(session_id)
+    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).one()
+    session.session_mode = "drill"
+    session.drill_state = "abandoned"
+    session.is_rated = False
+    db_session.commit()
+
+    with patch("app.api.session.request_recompute", return_value=None) as refresh:
+        response = client.post(
+            f"/api/session/{session_id}/moves",
+            json={
+                "moves": [
+                    {
+                        "move_number": 1,
+                        "color": "white",
+                        "move_san": "e4",
+                        "fen_after": AFTER_E4_FEN,
+                        "eval_cp": 20,
+                        "best_move_san": "e4",
+                        "best_move_eval_cp": 20,
+                        "eval_delta": 0,
+                        "classification": "best",
+                        "fen_before": STARTING_FEN,
+                        "move_uci": "e2e4",
+                        "best_move_uci": "e2e4",
+                    },
+                ]
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "moves_inserted": 1,
+        "drill_state": "abandoned",
+    }
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .count()
+        == 1
+    )
+    assert db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == STARTING_FEN,
+        AnalysisCache.move_uci == "e2e4",
+    ).first() is None
+    refresh.assert_not_called()
+
+
+def test_session_moves_natural_ended_drill_skips_expensive_evidence_side_effects(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    session_uuid = uuid.UUID(session_id)
+    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).one()
+    session.session_mode = "drill"
+    session.drill_state = "failed"
+    session.drill_terminal_reason = "natural_end"
+    session.status = "ended"
+    session.result = "draw"
+    session.is_rated = False
+    db_session.commit()
+
+    with patch("app.api.session.request_recompute", return_value=None) as refresh:
+        response = client.post(
+            f"/api/session/{session_id}/moves",
+            json={
+                "moves": [
+                    {
+                        "move_number": 1,
+                        "color": "white",
+                        "move_san": "e4",
+                        "fen_after": AFTER_E4_FEN,
+                        "eval_delta": 0,
+                        "classification": "best",
+                        "fen_before": STARTING_FEN,
+                        "move_uci": "e2e4",
+                        "best_move_uci": "e2e4",
+                    },
+                ]
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "moves_inserted": 1,
+        "drill_state": "failed",
+        "drill_terminal_reason": "natural_end",
+    }
+    assert db_session.query(AnalysisCache).filter(
+        AnalysisCache.fen_before == STARTING_FEN,
+        AnalysisCache.move_uci == "e2e4",
+    ).first() is None
+    refresh.assert_not_called()
 
 
 def test_lookup_returns_classification_when_present(client, auth_headers, db_session):

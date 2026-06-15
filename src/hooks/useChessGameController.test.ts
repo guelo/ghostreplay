@@ -35,6 +35,7 @@ type SetupOptions = {
   resolvedReview?: ResolvedReview | null;
   moveHistory?: MoveRecord[];
   sessionId?: string | null;
+  isGameActive?: boolean;
   decisionOwner?: DecisionOwnerSpy;
 };
 
@@ -47,6 +48,7 @@ const createSetup = ({
   resolvedReview = null,
   moveHistory = [],
   sessionId = "session-1",
+  isGameActive = true,
   decisionOwner = createDecisionOwnerSpy(),
 }: SetupOptions = {}) => {
   // Set up store state
@@ -54,6 +56,7 @@ const createSetup = ({
     ...initialStoreState,
     playerColor,
     sessionId,
+    isGameActive,
     liveFen: chess.fen(),
     moveHistory: [...moveHistory],
   });
@@ -412,6 +415,42 @@ describe("useChessGameController", () => {
     );
     expect(setEngineMessage).toHaveBeenCalledWith(null);
     expect(handleGameEnd).not.toHaveBeenCalled();
+  });
+
+  it("drops an engine result if the session changes during search", async () => {
+    const chess = new Chess();
+    const whiteMove = chess.move("e4");
+    if (!whiteMove) {
+      throw new Error("Unable to initialize engine test position");
+    }
+    const previousMove: MoveRecord = {
+      san: whiteMove.san,
+      fen: chess.fen(),
+      uci: `${whiteMove.from}${whiteMove.to}${whiteMove.promotion ?? ""}`,
+    };
+
+    let resolveSearch!: (value: { move: string; raw: string }) => void;
+    const { result, evaluatePosition, analyzeMove } = createSetup({
+      chess,
+      moveHistory: [previousMove],
+    });
+    evaluatePosition.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSearch = resolve;
+      }),
+    );
+
+    const pending = act(async () => {
+      await result.current.applyEngineMove();
+    });
+
+    useGameStore.getState().setSessionId("session-2");
+    resolveSearch({ move: "d7d5", raw: "bestmove d7d5" });
+    await pending;
+
+    const store = useGameStore.getState();
+    expect(store.moveHistory.length).toBe(1);
+    expect(analyzeMove).not.toHaveBeenCalled();
   });
 
   it("applies a ghost move and toggles review targeting state", async () => {

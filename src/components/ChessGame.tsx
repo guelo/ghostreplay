@@ -610,13 +610,27 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (!store.sessionId || !store.drillOpeningKey || store.drillState !== "active") {
         return true;
       }
+      const requestSessionId = store.sessionId;
+      const isStillCurrentRouteCheck = () => {
+        const current = useGameStore.getState();
+        return (
+          current.sessionId === requestSessionId &&
+          current.moveHistory[result.moveIndex]?.uci === result.moveUci &&
+          current.drillOpeningKey !== null &&
+          current.drillState === "active" &&
+          !isRevertPendingRef.current
+        );
+      };
 
       try {
-        const route = await checkDrillRoute(store.sessionId, {
+        const route = await checkDrillRoute(requestSessionId, {
           current_fen: result.fenAfter,
           previous_fen: result.fenBefore,
           played_uci: result.moveUci,
         });
+        if (!isStillCurrentRouteCheck()) {
+          return false;
+        }
         if (route.status === "failed") {
           setDrillRecovery(null);
           const reason = route.failure?.reason ?? null;
@@ -648,6 +662,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         setDrillRecovery(null);
         return true;
       } catch (error) {
+        if (!isStillCurrentRouteCheck()) {
+          return false;
+        }
         const message =
           error instanceof Error ? error.message : "Failed to check drill route.";
         setEngineMessage(message);

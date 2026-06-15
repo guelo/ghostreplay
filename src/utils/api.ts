@@ -673,6 +673,7 @@ export const fetchRatingHistory = async (
 export const uploadSessionMoves = async (
   sessionId: string,
   moves: SessionMoveUpload[],
+  options?: { signal?: AbortSignal },
 ): Promise<SessionMovesResponse> => {
   return requestJson<SessionMovesResponse>(
     `${API_BASE_URL}/api/session/${sessionId}/moves`,
@@ -680,6 +681,7 @@ export const uploadSessionMoves = async (
       method: 'POST',
       headers: getAuthHeaders(),
       body: JSON.stringify({ moves } satisfies SessionMovesRequest),
+      signal: options?.signal,
     },
     { fallbackMessage: 'Failed to upload session moves' },
   )

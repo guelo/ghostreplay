@@ -105,6 +105,12 @@ export const useOpponentMove = ({
       const requestSessionId = sessionId;
 
       if (!requestSessionId) {
+        if (
+          canApplyResultRef.current &&
+          !canApplyResultRef.current(requestSessionId)
+        ) {
+          return;
+        }
         setOpponentMode("engine");
         await onApplyLocalFallbackRef.current();
         return;

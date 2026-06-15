@@ -41,6 +41,7 @@ from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
     NORMAL_MOVE_SEGMENT,
+    VISIBLE_DRILL_STATE,
     is_visible_game_session,
     normal_play_started_at,
     segment_for_move,
@@ -517,6 +518,23 @@ def _upsert_analysis_cache(
     db.commit()
     write_analysis_cache_rows(db, cache_values)
 
+
+def _should_run_session_move_evidence(game_session: GameSession) -> bool:
+    # Ended, unconverted drills are hidden, unrated, and no longer recoverable
+    # as normal games. Late client uploads may still arrive after a restart or
+    # natural-end cleanup; keep raw rows idempotent but skip expensive evidence.
+    return not (
+        game_session.session_mode == DRILL_SESSION_MODE
+        and (
+            game_session.drill_state == "abandoned"
+            or (
+                game_session.drill_state != VISIBLE_DRILL_STATE
+                and game_session.status == "ended"
+            )
+        )
+    )
+
+
 @router.post(
     "/{session_id}/moves",
     response_model=SessionMovesResponse,
@@ -560,7 +578,11 @@ def upsert_session_moves(
     # Amended drill policy (2026-06-01): pre-continue drill-prefix moves feed the
     # same regular evidence side effects as normal moves, so every uploaded move
     # drives blunder opportunity, analysis-cache, and opening-score refresh.
-    evidence_moves = list(request.moves)
+    evidence_moves = (
+        list(request.moves)
+        if _should_run_session_move_evidence(game_session)
+        else []
+    )
 
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":

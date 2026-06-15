@@ -360,6 +360,20 @@ describe('uploadSessionMoves', () => {
     expect(result).toEqual(expected)
   })
 
+  it('passes an abort signal when provided', async () => {
+    mockResponse({ moves_inserted: 0 })
+    const controller = new AbortController()
+
+    await uploadSessionMoves('sess-1', [], { signal: controller.signal })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/session/sess-1/moves'),
+      expect.objectContaining({
+        signal: controller.signal,
+      }),
+    )
+  })
+
   it('throws on non-ok response', async () => {
     mockResponse({}, false, 'Unprocessable Entity', 422)
 

@@ -175,7 +175,11 @@ describe('GameAnalysisCoordinator', () => {
       await vi.advanceTimersByTimeAsync(0) // flush upload promise rejection
 
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
-      expect(uploadSessionMovesMock).toHaveBeenCalledWith('session-old', expect.any(Array))
+      expect(uploadSessionMovesMock).toHaveBeenCalledWith(
+        'session-old',
+        expect.any(Array),
+        expect.objectContaining({ signal: expect.any(Object) }),
+      )
 
       // Capture the payload that was sent
       const firstPayload = uploadSessionMovesMock.mock.calls[0][1]
@@ -425,6 +429,7 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
+          trusted_for_resolution: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -433,6 +438,41 @@ describe('GameAnalysisCoordinator', () => {
       await vi.advanceTimersByTimeAsync(0)
 
       expect(uploadSessionMovesMock).not.toHaveBeenCalled()
+    })
+
+    it('aborts an in-flight upload when session uploads are disabled', async () => {
+      coordinator.startSession('session-practice')
+      useGameStore.setState({ moveHistory: makeMoveHistory(1) })
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+
+      resolveLookup(new Map([
+        ['fen-0::uci-0', {
+          move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          best_line_uci: ['uci-0', 'reply-0'],
+          played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
+          trusted_for_resolution: true,
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      uploadSessionMovesMock.mockReturnValueOnce(new Promise(() => {}))
+      vi.advanceTimersByTime(3000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      const signal = uploadSessionMovesMock.mock.calls[0][2]?.signal as AbortSignal
+      expect(signal.aborted).toBe(false)
+
+      coordinator.stopSessionUploads()
+
+      expect(signal.aborted).toBe(true)
     })
   })
 
