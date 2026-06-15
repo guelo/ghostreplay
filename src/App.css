@@ -3398,6 +3398,104 @@
     border-bottom: none;
 }
 
+/*
+ * Wide viewport (>=1100px): /history and /game adopt the same 3-column grid as
+ * /play (.chess-layout). The stats + openings footer moves into a full-height
+ * LEFT panel, the board sits center-top with the eval graph directly beneath
+ * it, and the move list fills a full-height RIGHT column that stretches down
+ * past the board+graph stack toward the bottom of the viewport.
+ *
+ * The intermediate flex wrappers (__layout and __graph-row) collapse via
+ * display:contents so .analysis-board__board-col, __moves-col, the graph and
+ * __graph-footer become direct grid items and drop into named areas. Several
+ * flex-era width caps used min(..., calc(100% - 250px)); under the grid 100%
+ * resolves to the (narrower) track width, so they are reset to none here.
+ * Excludes drill-analysis, whose footer is a one-line note, not stats/openings.
+ */
+@media (min-width: 1100px) {
+    .history-page:not(.drill-analysis-page) .analysis-board {
+        --analysis-side-width: 260px;
+        display: grid;
+        /*
+         * Center track is minmax(0, --board-size): it prefers the height-derived
+         * board size but SHRINKS when the three fixed tracks (side + board + side
+         * + 3rem gaps) would exceed the available width — e.g. a narrow-tall
+         * 1100-1280px viewport. Without the minmax floor of 0 the grid's
+         * min-content would stay at the full board size and overflow horizontally.
+         */
+        grid-template-columns:
+            var(--analysis-side-width)
+            minmax(0, var(--board-size))
+            var(--analysis-side-width);
+        grid-template-areas:
+            "panel board moves"
+            "panel graph moves";
+        column-gap: 1.5rem;
+        row-gap: 0.75rem;
+        align-items: start;
+        justify-content: center;
+        max-width: 100%;
+    }
+
+    /* Collapse the flex wrappers so their children join the board grid. */
+    .history-page:not(.drill-analysis-page) .analysis-board__layout,
+    .history-page:not(.drill-analysis-page) .analysis-board__graph-row {
+        display: contents;
+    }
+
+    /* Fill the (possibly shrunk) center track instead of forcing --board-size,
+       so the board scales down with the track rather than overflowing it. */
+    .history-page:not(.drill-analysis-page) .analysis-board__board-col {
+        grid-area: board;
+        width: 100%;
+        max-width: 100%;
+    }
+
+    /*
+     * Graph sits beneath the board in the center column. Use width:auto so the
+     * grid stretches its MARGIN box to fill the column; the --with-axis
+     * margin-right:2.8rem then reserves room for the absolutely-positioned
+     * y-axis (left:100%) inside the column instead of letting it spill past the
+     * edge and overlap the move list.
+     */
+    .history-page:not(.drill-analysis-page)
+        .analysis-board__graph-row
+        .analysis-graph {
+        grid-area: graph;
+        width: auto;
+        max-width: none;
+    }
+
+    /*
+     * Stats + openings become the left panel. The height:0 / min-height:100%
+     * trick (mirrors .moves-column on /play) lets it fill the board+graph
+     * column height WITHOUT contributing to row sizing — otherwise a long
+     * opening lineage would inflate the grid, push the graph below the fold
+     * and stretch the move list past the viewport. A taller lineage scrolls
+     * inside the panel instead.
+     */
+    .history-page:not(.drill-analysis-page) .analysis-board__graph-footer {
+        grid-area: panel;
+        align-self: stretch;
+        height: 0;
+        min-height: 100%;
+        max-height: 100%;
+        overflow-y: auto;
+        max-width: none;
+    }
+
+    /* Move list fills the right column down to the bottom of board+graph; same
+       height:0 / min-height:100% trick so it never overflows the viewport. */
+    .history-page:not(.drill-analysis-page) .analysis-board__moves-col {
+        grid-area: moves;
+        align-self: stretch;
+        height: 0;
+        min-height: 100%;
+        max-height: 100%;
+        max-width: none;
+    }
+}
+
 @media (max-width: 720px) {
     .analysis-board__graph-row {
         flex-direction: column;
