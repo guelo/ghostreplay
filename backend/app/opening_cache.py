@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from app.game_phase import DIVIDER_VERSION
 from app.models import OpeningScoreBatch, OpeningScoreCursor, UserOpeningScore
-from app.opening_aggregate import _batch_has_stale_branch_keys
+from app.opening_aggregate import (
+    CachedOpeningScoreRow,
+    _batch_has_stale_branch_keys,
+    _snapshot_cached_rows,
+)
 from app.opening_evidence import (
     OPENING_EVIDENCE_INPUTS_VERSION,
     EvidenceOverlay,
@@ -268,6 +272,39 @@ def list_cached_opening_scores(
         .all()
     )
     return batch, rows
+
+
+def load_cached_rows(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+) -> tuple[OpeningScoreBatch | None, list[CachedOpeningScoreRow]]:
+    """Stale-while-revalidate reader for the /opening read endpoints.
+
+    WARM (a batch exists): serve the currently-cached batch immediately and
+    schedule a coalesced BACKGROUND recompute via the debounced scheduler —
+    non-blocking. The g-6zhp gate (``recompute_opening_scores_if_needed``) runs
+    the real, content-based freshness check on the worker thread, OFF the request
+    path, and rebuilds the batch only when evidence actually changed.
+
+    COLD (no batch yet): compute an initial batch once synchronously via the
+    bounded ``refresh_now`` flush/await, then re-list.
+
+    ``request_recompute`` on every warm read is load-bearing, not redundant: it is
+    the trigger that lets the gate catch evidence changes with no write-path
+    enqueue (out-of-process scripts, post-restart first read).
+    """
+    # Lazy import: opening_score_scheduler imports opening_cache at module load,
+    # so a module-level import here would create a cycle.
+    from app.opening_score_scheduler import refresh_now, request_recompute
+
+    batch, rows = list_cached_opening_scores(db, user_id, player_color)
+    if batch is None:
+        refresh_now(user_id, player_color)
+        batch, rows = list_cached_opening_scores(db, user_id, player_color)
+    else:
+        request_recompute(user_id, player_color)
+    return batch, _snapshot_cached_rows(rows)
 
 
 def list_opening_score_candidate_pairs(

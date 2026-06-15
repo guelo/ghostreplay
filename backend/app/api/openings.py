@@ -11,14 +11,12 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import OpeningScoreBatch
 from app.opening_aggregate import (
     CachedOpeningScoreRow,
-    _snapshot_cached_rows,
     _weakest_root,
     direct_branch_view,
 )
-from app.opening_cache import list_cached_opening_scores
+from app.opening_cache import load_cached_rows
 from app.opening_evidence import overlay_evidence
 from app.opening_graph import get_opening_graph
 from app.opening_rootcalc import (
@@ -28,7 +26,6 @@ from app.opening_rootcalc import (
     compute_root_score,
 )
 from app.opening_roots import OpeningRoots, get_opening_roots
-from app.opening_score_scheduler import refresh_now
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/openings", tags=["openings"])
@@ -218,23 +215,6 @@ class ChildrenResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
-
-def _load_cached_rows(
-    db: Session,
-    user_id: int,
-    player_color: Literal["white", "black"],
-) -> tuple[OpeningScoreBatch | None, list[CachedOpeningScoreRow]]:
-    """Reader entry point: flush/await any pending recompute (best-effort), then
-    serve the current cached batch unconditionally.
-
-    All recompute decisions (registry drift, stale branch keys, cache miss,
-    evidence change) happen inside the scheduler's serialized worker via
-    ``recompute_opening_scores_if_needed``; the reader never writes a batch.
-    """
-    refresh_now(user_id, player_color)
-    batch, rows = list_cached_opening_scores(db, user_id, player_color)
-    return batch, _snapshot_cached_rows(rows)
-
 
 def _direct_branch_stats(row: CachedOpeningScoreRow | None) -> CurrentBranchStats:
     """Direct-row current-branch stats. ``root_count`` is direct-row presence."""
@@ -635,7 +615,7 @@ def get_family_scores(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> FamilyScoresResponse:
-    batch, row_views = _load_cached_rows(db, user.user_id, player_color)
+    batch, row_views = load_cached_rows(db, user.user_id, player_color)
     computed_at = batch.computed_at if batch is not None else None
     families = build_family_scores(row_views)
     return FamilyScoresResponse(
@@ -657,7 +637,7 @@ def get_family_drill_down(
     if not roots_registry.get_family(family_name):
         raise HTTPException(status_code=404, detail="Unknown opening family")
 
-    batch, row_views = _load_cached_rows(db, user.user_id, player_color)
+    batch, row_views = load_cached_rows(db, user.user_id, player_color)
     computed_at = batch.computed_at if batch is not None else None
 
     # Branch summaries are persisted from the shared calculation; read them
@@ -689,7 +669,7 @@ def get_opening_children(
     if parent_key is not None and roots_registry.get_root(parent_key) is None:
         raise HTTPException(status_code=404, detail="Unknown opening root")
 
-    batch, row_views = _load_cached_rows(db, user.user_id, player_color)
+    batch, row_views = load_cached_rows(db, user.user_id, player_color)
     computed_at = batch.computed_at if batch is not None else None
 
     rows_by_key = {row.opening_key: row for row in row_views}

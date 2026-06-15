@@ -33,11 +33,13 @@ _STUB_GRAPH = _stub_graph()
 
 @pytest.fixture(autouse=True)
 def _stub_singletons():
-    # The lineage reader flushes via refresh_now (best-effort) then serves cached
-    # rows; stub it to a no-op so unit tests serve seeded rows directly.
+    # The lineage reader goes through opening_cache.load_cached_rows, which lazy-
+    # imports the scheduler funcs from app.opening_score_scheduler. Stub them there
+    # (warm-path request_recompute + cold-path refresh_now) so unit tests serve
+    # seeded rows directly without spawning the worker thread.
     with (
-        patch("app.api.session.request_recompute", return_value=None),
-        patch("app.api.session.refresh_now", return_value=False),
+        patch("app.opening_score_scheduler.request_recompute", return_value=None),
+        patch("app.opening_score_scheduler.refresh_now", return_value=False),
     ):
         yield
 
@@ -364,9 +366,10 @@ def test_openings_score_parity_with_build_opening_children(client, auth_headers,
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(ruy_children[MORPHY_KEY].subtree_score)
 
 
-def test_openings_lineage_flushes_via_refresh_now_then_serves_cached(client, auth_headers, create_game_session, db_session):
-    """The lineage reader flushes via refresh_now (the worker repairs staleness)
-    and serves whatever list_cached then returns — no reader-side recompute."""
+def test_openings_lineage_warm_serves_cached_and_schedules_background(client, auth_headers, create_game_session, db_session):
+    """Warm cache: the lineage reader serves the cached batch and schedules a
+    background recompute via request_recompute — it never blocks on refresh_now
+    and does no reader-side recompute (the worker repairs staleness)."""
     session_id = create_game_session(user_id=123, player_color="white")
     _insert_moves(db_session, session_id, RUY_SANS)
     roots = _ruy_roots()
@@ -392,13 +395,15 @@ def test_openings_lineage_flushes_via_refresh_now_then_serves_cached(client, aut
 
     with (
         patch(PATCH_ROOTS, return_value=roots),
-        patch("app.api.session.refresh_now") as mock_refresh,
-        patch("app.api.session.list_cached_opening_scores", return_value=(batch, fresh_rows)),
+        patch("app.opening_score_scheduler.request_recompute") as mock_recompute,
+        patch("app.opening_score_scheduler.refresh_now") as mock_refresh,
+        patch("app.opening_cache.list_cached_opening_scores", return_value=(batch, fresh_rows)),
     ):
         resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
 
     assert resp.status_code == 200
-    mock_refresh.assert_called_once_with(123, "white")
+    mock_recompute.assert_called_once_with(123, "white")
+    mock_refresh.assert_not_called()
     lineage = {item["opening_key"]: item for item in resp.json()["lineage"]}
-    # Score reflects the (post-flush) cached batch.
+    # Score reflects the cached batch.
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(90.0)

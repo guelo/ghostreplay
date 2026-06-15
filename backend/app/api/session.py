@@ -23,9 +23,8 @@ from app.accuracy import (
     expected_total_moves_from_pgn,
 )
 from app.fen import active_color, fen_hash, normalize_fen
-from app.opening_aggregate import _snapshot_cached_rows
-from app.opening_cache import list_cached_opening_scores
-from app.opening_score_scheduler import refresh_now, request_recompute
+from app.opening_cache import load_cached_rows
+from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.models import (
     Blunder,
@@ -827,11 +826,11 @@ def get_session_openings(
     if not chain:
         return SessionOpeningsResponse(player_color=player_color, lineage=[])
 
-    # Direct-row lineage scores (matching the /openings card). Flush/await any
-    # pending recompute (best-effort) via the scheduler, then serve cached rows.
-    refresh_now(user.user_id, player_color)
-    _, cached_rows = list_cached_opening_scores(db, user.user_id, player_color)
-    rows_by_key = {row.opening_key: row for row in _snapshot_cached_rows(cached_rows)}
+    # Direct-row lineage scores (matching the /openings card). Stale-while-
+    # revalidate reader: warm reads serve the cached batch and schedule a
+    # background recompute; only a cold cache blocks on the initial compute.
+    _, cached_rows = load_cached_rows(db, user.user_id, player_color)
+    rows_by_key = {row.opening_key: row for row in cached_rows}  # already snapshotted
 
     lineage: list[OpeningLineageItem] = []
     for index, root in enumerate(chain):

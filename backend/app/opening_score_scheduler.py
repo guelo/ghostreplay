@@ -16,18 +16,21 @@ IMPORTANT — single-process assumption:
     horizontal replicas reverts coalescing to per-process and needs shared-state
     (advisory-lock / external queue) coordination instead.
 
-Read-side flush/await:
-    Reader endpoints call ``refresh_now(user_id, player_color)`` — a keyed
-    flush/await that enqueues an immediate recompute for that one key and waits
-    for a covering, successful run to reach quiescence (bounded by ``timeout``).
-    It runs only the matching key's work through the single serialized worker, so
-    one user's read never triggers unrelated users' recomputes. On ``True`` the
-    reader reloads and serves fresh rows; on ``False`` (timeout/failure/shutdown)
-    it serves the current cached batch and lets the worker finish in the
-    background. All recompute decisions (cache miss, registry drift, stale branch
-    keys, evidence change) are consolidated in
-    ``recompute_opening_scores_if_needed`` so the worker is the only reader-driven
-    path that writes a batch.
+Read side (stale-while-revalidate):
+    Reader endpoints go through ``opening_cache.load_cached_rows``. A WARM reader
+    (a batch already exists) calls ``request_recompute(user_id, player_color)`` to
+    schedule a coalesced BACKGROUND recompute and serves the currently-cached
+    batch immediately — it never blocks. Only a COLD reader (no batch yet) calls
+    ``refresh_now(user_id, player_color)`` — a keyed flush/await that enqueues an
+    immediate recompute for that one key and waits for a covering, successful run
+    to reach quiescence (bounded by ``timeout``). It runs only the matching key's
+    work through the single serialized worker, so one user's read never triggers
+    unrelated users' recomputes. On ``True`` the cold reader reloads and serves the
+    freshly-built rows; on ``False`` (timeout/failure/shutdown) it serves whatever
+    is cached (possibly empty) and lets the worker finish in the background. All
+    recompute decisions (cache miss, registry drift, stale branch keys, evidence
+    change) are consolidated in ``recompute_opening_scores_if_needed`` so the
+    worker is the only reader-driven path that writes a batch.
 """
 
 from __future__ import annotations

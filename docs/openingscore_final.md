@@ -510,8 +510,10 @@ versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`,
 invalidates all prior snapshots on the next read. Recompute decisions (cache
 miss, registry drift, stale branch keys, evidence change) are consolidated in
 `recompute_opening_scores_if_needed()` and run only on the scheduler's single
-serialized worker. Readers call `refresh_now()` (best-effort keyed flush/await)
-and then serve the cached batch — they never recompute synchronously.
+serialized worker. Reads are stale-while-revalidate: a warm reader (batch
+present) calls `request_recompute()` to schedule a coalesced background
+convergence and serves the cached batch immediately, never blocking; only a cold
+reader (no batch yet) blocks on `refresh_now()` for the one-time initial compute.
 
 ## Output Per Opening
 

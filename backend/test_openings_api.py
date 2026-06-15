@@ -94,13 +94,16 @@ _PATCH_OVERLAY = "app.api.openings.overlay_evidence"
 
 @pytest.fixture(autouse=True)
 def _mock_singletons():
-    # refresh_now is the reader's best-effort flush/await; in unit tests we stub it
-    # to a no-op so the reader simply serves whatever list_cached returns. Recompute
+    # load_cached_rows lazy-imports the scheduler funcs from
+    # app.opening_score_scheduler, so stub them there: refresh_now (cold path) and
+    # request_recompute (warm path) become no-ops so the reader simply serves
+    # whatever list_cached returns without spawning the worker thread. Recompute
     # decisions are covered by the worker-path tests in test_opening_cache.
     with (
         patch(_PATCH_GRAPH, return_value=_make_graph()),
         patch(_PATCH_ROOTS, return_value=_make_roots()),
-        patch("app.api.openings.refresh_now", return_value=False),
+        patch("app.opening_score_scheduler.refresh_now", return_value=False),
+        patch("app.opening_score_scheduler.request_recompute"),
     ):
         yield
 
@@ -239,12 +242,13 @@ def test_roots_no_auth_returns_401(client):
 
 _FAMILIES_URL = "/api/openings/families/scores"
 
-# Patch targets for cache functions in the openings module namespace. Readers now
-# call list_cached_opening_scores directly (after a best-effort refresh_now), so
-# _PATCH_ENSURE points at the cached-row reader; it returns (batch, rows) just like
-# the old ensure_opening_scores contract.
-_PATCH_ENSURE = "app.api.openings.list_cached_opening_scores"
-_PATCH_LIST_CACHED = "app.api.openings.list_cached_opening_scores"
+# Patch targets for cache functions. Readers now go through
+# opening_cache.load_cached_rows, which calls list_cached_opening_scores in its own
+# module — so patch the row fetch at its source (app.opening_cache), NOT in the
+# openings module namespace. It returns (batch, rows) just like the old
+# ensure_opening_scores contract; load_cached_rows snapshots the rows.
+_PATCH_ENSURE = "app.opening_cache.list_cached_opening_scores"
+_PATCH_LIST_CACHED = "app.opening_cache.list_cached_opening_scores"
 _PATCH_RECOMPUTE = "app.opening_cache.recompute_opening_scores"
 
 
@@ -629,7 +633,7 @@ def test_family_scores_bootstrap_on_cache_miss(client, auth_headers, db_session)
     with (
         patch("app.opening_cache.get_opening_graph", return_value=_make_graph()),
         patch("app.opening_cache.get_opening_roots", return_value=_make_roots()),
-        patch("app.api.openings.refresh_now", side_effect=_drive_refresh),
+        patch("app.opening_score_scheduler.refresh_now", side_effect=_drive_refresh),
     ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "black"}, headers=auth_headers())
 
@@ -950,9 +954,10 @@ def test_family_scores_computed_at_from_batch(client, auth_headers, db_session):
     assert "2024" not in data["computed_at"]
 
 
-def test_family_scores_reader_flushes_then_serves_cached(client, auth_headers):
-    # Registry drift / staleness is resolved by the scheduler worker; the reader
-    # just flushes via refresh_now and serves whatever list_cached then returns.
+def test_family_scores_reader_serves_cache_and_schedules_background(client, auth_headers):
+    # Warm cache: the reader serves the cached batch immediately and schedules a
+    # coalesced BACKGROUND recompute via request_recompute — it never blocks on
+    # refresh_now. Registry drift / staleness is resolved by the scheduler worker.
     roots = _make_drill_roots()
     fresh_batch = _make_batch_for_roots(
         roots,
@@ -972,21 +977,24 @@ def test_family_scores_reader_flushes_then_serves_cached(client, auth_headers):
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.api.openings.refresh_now") as refresh_mock,
+        patch("app.opening_score_scheduler.request_recompute") as recompute_mock,
+        patch("app.opening_score_scheduler.refresh_now") as refresh_mock,
         patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
     ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     assert resp.status_code == 200
-    refresh_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(123, "white")
+    refresh_mock.assert_not_called()
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
     assert data["families"][0]["family_name"] == DRILL_FAMILY_RUY
 
 
-def test_family_scores_refresh_false_serves_current_batch(client, auth_headers):
-    # refresh_now returns False (timeout/failure): the reader serves the current
-    # (possibly stale/empty) batch and initiates no recompute itself.
+def test_family_scores_warm_serves_current_batch_without_recompute(client, auth_headers):
+    # Warm cache: the reader serves the current batch and initiates no synchronous
+    # recompute itself — it only schedules a background convergence and never blocks
+    # on refresh_now.
     roots = _make_drill_roots()
     batch = _make_batch_for_roots(
         roots,
@@ -995,13 +1003,15 @@ def test_family_scores_refresh_false_serves_current_batch(client, auth_headers):
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.api.openings.refresh_now", return_value=False),
+        patch("app.opening_score_scheduler.request_recompute") as recompute_mock,
+        patch("app.opening_score_scheduler.refresh_now", side_effect=AssertionError("warm read must not block on refresh_now")),
         patch("app.opening_cache.recompute_opening_scores", side_effect=AssertionError("no reader recompute")),
         patch(_PATCH_LIST_CACHED, return_value=(batch, [])),
     ):
         resp = client.get(_FAMILIES_URL, params={"player_color": "white"}, headers=auth_headers())
 
     assert resp.status_code == 200
+    recompute_mock.assert_called_once_with(123, "white")
     data = resp.json()
     assert data["families"] == []
     assert "2026-03-01" in data["computed_at"]
@@ -1026,9 +1036,9 @@ def test_family_scores_empty_batch_with_current_registry_fingerprint_is_cache_hi
     assert "2026-03-01" in data["computed_at"]
 
 
-def test_family_drill_reader_flushes_then_serves_cached(client, auth_headers):
-    # The drill-down reader flushes via refresh_now (worker resolves drift/staleness)
-    # and serves whatever list_cached returns.
+def test_family_drill_reader_serves_cache_and_schedules_background(client, auth_headers):
+    # The drill-down reader serves the cached batch immediately and schedules a
+    # background recompute (worker resolves drift/staleness) — never blocking.
     roots = _make_drill_roots()
     fresh_batch = _make_batch_for_roots(
         roots,
@@ -1048,7 +1058,8 @@ def test_family_drill_reader_flushes_then_serves_cached(client, auth_headers):
 
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.api.openings.refresh_now") as refresh_mock,
+        patch("app.opening_score_scheduler.request_recompute") as recompute_mock,
+        patch("app.opening_score_scheduler.refresh_now") as refresh_mock,
         patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
     ):
         resp = client.get(
@@ -1058,7 +1069,8 @@ def test_family_drill_reader_flushes_then_serves_cached(client, auth_headers):
         )
 
     assert resp.status_code == 200
-    refresh_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(123, "white")
+    refresh_mock.assert_not_called()
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
     assert data["scored_roots"] == 1
@@ -1508,8 +1520,8 @@ def test_family_drill_uses_registry_for_membership_name_depth_and_eco(client, au
 
 
 def test_family_drill_serves_refreshed_branch_keys(client, auth_headers):
-    # Legacy/stale branch-key rows are repaired by the worker; the reader serves
-    # whatever list_cached returns after the refresh_now flush.
+    # Legacy/stale branch-key rows are repaired by the worker; the warm reader
+    # serves whatever list_cached returns and schedules a background recompute.
     roots = _make_drill_roots()
     fresh_batch = _make_batch_for_roots(
         roots,
@@ -1529,7 +1541,8 @@ def test_family_drill_serves_refreshed_branch_keys(client, auth_headers):
     ]
     with (
         patch(_PATCH_ROOTS, return_value=roots),
-        patch("app.api.openings.refresh_now") as refresh_mock,
+        patch("app.opening_score_scheduler.request_recompute") as recompute_mock,
+        patch("app.opening_score_scheduler.refresh_now") as refresh_mock,
         patch(_PATCH_LIST_CACHED, return_value=(fresh_batch, fresh_rows)),
     ):
         resp = client.get(
@@ -1538,7 +1551,8 @@ def test_family_drill_serves_refreshed_branch_keys(client, auth_headers):
             headers=auth_headers(),
         )
 
-    refresh_mock.assert_called_once_with(123, "white")
+    recompute_mock.assert_called_once_with(123, "white")
+    refresh_mock.assert_not_called()
     data = resp.json()
     assert "2026-03-02" in data["computed_at"]
     assert data["roots"][0]["strongest_branch"]["opening_key"] == DRILL_KEY_SICILIAN_NAJDORF

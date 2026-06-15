@@ -23,6 +23,7 @@ from app.opening_cache import (
     ensure_opening_scores,
     get_latest_opening_score_batch,
     list_cached_opening_scores,
+    load_cached_rows,
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
@@ -1118,3 +1119,78 @@ def test_if_needed_builds_overlay_on_registry_drift(db_session, monkeypatch):
         recompute_opening_scores_if_needed(db_session, 123, "black")
 
     assert spy.called
+
+
+# ---------------------------------------------------------------------------
+# load_cached_rows — stale-while-revalidate reader (Approach A)
+#
+# The scheduler funcs are lazy-imported INSIDE load_cached_rows, so they are
+# patched at the source module (app.opening_score_scheduler). The row fetch is
+# patched at app.opening_cache.list_cached_opening_scores.
+# ---------------------------------------------------------------------------
+
+def test_load_cached_rows_warm_serves_cache_and_schedules_background():
+    """Warm (batch present): serve cached rows + background recompute, no block."""
+    sentinel_batch = object()
+    sentinel_rows = object()
+    snapshotted = object()
+    with patch(
+        "app.opening_cache.list_cached_opening_scores",
+        return_value=(sentinel_batch, sentinel_rows),
+    ) as list_cached, patch(
+        "app.opening_cache._snapshot_cached_rows", return_value=snapshotted
+    ) as snapshot, patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows = load_cached_rows("db", 123, "black")
+
+    assert batch is sentinel_batch
+    assert rows is snapshotted
+    snapshot.assert_called_once_with(sentinel_rows)
+    request_recompute.assert_called_once_with(123, "black")
+    refresh_now.assert_not_called()
+    list_cached.assert_called_once()
+
+
+def test_load_cached_rows_cold_blocks_then_serves_computed_batch():
+    """Cold (no batch): block on refresh_now once, then re-list and serve."""
+    sentinel_batch = object()
+    sentinel_rows = object()
+    snapshotted = object()
+    with patch(
+        "app.opening_cache.list_cached_opening_scores",
+        side_effect=[(None, []), (sentinel_batch, sentinel_rows)],
+    ) as list_cached, patch(
+        "app.opening_cache._snapshot_cached_rows", return_value=snapshotted
+    ), patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows = load_cached_rows("db", 123, "black")
+
+    assert batch is sentinel_batch
+    assert rows is snapshotted
+    refresh_now.assert_called_once_with(123, "black")
+    request_recompute.assert_not_called()
+    assert list_cached.call_count == 2
+
+
+def test_load_cached_rows_cold_no_evidence_serves_empty():
+    """Cold with no evidence: refresh_now once, still no batch, serve empty."""
+    with patch(
+        "app.opening_cache.list_cached_opening_scores",
+        side_effect=[(None, []), (None, [])],
+    ), patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows = load_cached_rows("db", 123, "black")
+
+    assert batch is None
+    assert rows == []
+    refresh_now.assert_called_once_with(123, "black")
+    request_recompute.assert_not_called()
