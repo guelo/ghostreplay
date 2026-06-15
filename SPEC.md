@@ -1948,6 +1948,11 @@ Returns full analysis for a completed game session.
 }
 ```
 
+The summary's blunder/mistake/inaccuracy counts and `average_centipawn_loss`
+are player-only: only moves whose `color` matches `player_color` contribute.
+Average centipawn loss is nonnegative; negative `eval_delta` values are treated
+as `0` for display/summary purposes.
+
 ### 9.5 Entry Points
 
 The analysis screen (`/game?id=<session_id>`) is accessible from:
@@ -2117,6 +2122,10 @@ Returns list of user's completed games (newest first).
   ]
 }
 ```
+
+History summaries follow the same player-only rule as session analysis for
+blunder/mistake/inaccuracy counts and `average_centipawn_loss`. ACPL also clamps
+negative eval deltas to zero, including legacy stored rows.
 
 ### 10.6 Empty State
 

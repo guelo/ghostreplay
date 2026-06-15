@@ -13,6 +13,7 @@ from app.accuracy import (
     compute_game_accuracy,
     expected_total_moves_from_pgn,
 )
+from app.centipawn_loss import centipawn_loss_expr
 from app.db import get_db
 from app.models import GameSession, SessionMove
 from app.opening_roots import deepest_opening_name, get_opening_roots
@@ -69,15 +70,30 @@ def get_history(
 
     session_ids = [s.id for s in sessions]
 
+    player_loss_expr = case(
+        (
+            SessionMove.color == GameSession.player_color,
+            centipawn_loss_expr(SessionMove.eval_delta),
+        ),
+        else_=None,
+    )
+    player_move_expr = SessionMove.color == GameSession.player_color
     stats_rows = (
         db.query(
             SessionMove.session_id,
             func.count().label("total_moves"),
-            func.sum(case((SessionMove.classification == "blunder", 1), else_=0)).label("blunders"),
-            func.sum(case((SessionMove.classification == "mistake", 1), else_=0)).label("mistakes"),
-            func.sum(case((SessionMove.classification == "inaccuracy", 1), else_=0)).label("inaccuracies"),
-            func.avg(SessionMove.eval_delta).label("avg_cpl"),
+            func.sum(
+                case((player_move_expr & (SessionMove.classification == "blunder"), 1), else_=0)
+            ).label("blunders"),
+            func.sum(
+                case((player_move_expr & (SessionMove.classification == "mistake"), 1), else_=0)
+            ).label("mistakes"),
+            func.sum(
+                case((player_move_expr & (SessionMove.classification == "inaccuracy"), 1), else_=0)
+            ).label("inaccuracies"),
+            func.avg(player_loss_expr).label("avg_cpl"),
         )
+        .join(GameSession, GameSession.id == SessionMove.session_id)
         .filter(SessionMove.session_id.in_(session_ids))
         .group_by(SessionMove.session_id)
         .all()

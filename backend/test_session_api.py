@@ -514,10 +514,10 @@ def test_session_analysis_success(client, auth_headers, create_game_session):
     assert data["result"] == "checkmate_win"
     assert data["pgn"] == "1. e4 e5 2. Nf3"
     assert data["summary"] == {
-        "blunders": 1,
-        "mistakes": 1,
+        "blunders": 0,
+        "mistakes": 0,
         "inaccuracies": 1,
-        "average_centipawn_loss": 15,
+        "average_centipawn_loss": 0,
         "accuracy": 100,
     }
     assert [move["move_san"] for move in data["moves"]] == ["e4", "e5", "Nf3", "Nc6"]
@@ -539,6 +539,90 @@ def test_session_analysis_empty_moves_returns_zero_summary(client, auth_headers,
         "average_centipawn_loss": 0,
         "accuracy": None,
     }
+
+
+def test_session_analysis_average_cpl_uses_player_moves_and_clamps_negative_delta(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123, player_color="black")
+
+    end_response = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "draw",
+            "pgn": "1. e4 e5 2. Nf3 Nc6",
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert end_response.status_code == 200
+
+    upload_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": "fen-1w",
+                    "eval_delta": 200,
+                    "classification": "blunder",
+                },
+                {
+                    "move_number": 1,
+                    "color": "black",
+                    "move_san": "e5",
+                    "fen_after": "fen-1b",
+                    "eval_delta": -30,
+                    "classification": "best",
+                },
+                {
+                    "move_number": 2,
+                    "color": "black",
+                    "move_san": "Nc6",
+                    "fen_after": "fen-2b",
+                    "eval_delta": 40,
+                    "classification": "mistake",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert upload_response.status_code == 200
+    stored_negative = (
+        db_session.query(SessionMove)
+        .filter(
+            SessionMove.session_id == uuid.UUID(session_id),
+            SessionMove.move_number == 1,
+            SessionMove.color == "black",
+        )
+        .one()
+    )
+    assert stored_negative.eval_delta == 0
+
+    # Simulate historical rows that predate write-side normalization.
+    db_session.execute(
+        text("""
+            UPDATE session_moves
+            SET eval_delta = -30
+            WHERE session_id = :session_id AND move_number = 1 AND color = 'black'
+        """),
+        {"session_id": session_id},
+    )
+    db_session.commit()
+
+    response = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["summary"]["blunders"] == 0
+    assert data["summary"]["mistakes"] == 1
+    assert data["summary"]["average_centipawn_loss"] == 20  # black moves: (0+40)/2
+    assert [move["eval_delta"] for move in data["moves"]] == [200, 0, 40]
 
 
 def test_session_analysis_session_not_found(client, auth_headers):
@@ -587,8 +671,8 @@ def _convert_to_drill(db_session, session_id: str, rated_start_ply: int) -> None
 def test_session_analysis_converted_drill_includes_drill_prefix_summary(
     client, auth_headers, create_game_session, db_session
 ):
-    # Amended drill policy (2026-06-01): a converted drill is one full normal game,
-    # so segment='drill' prefix moves count toward CPL/blunder/mistake summaries.
+    # Amended drill policy (2026-06-01): a converted drill is one full normal game.
+    # Player prefix classifications still count; CPL averages the player's moves only.
     session_id = create_game_session(user_id=123, player_color="white")
     end_response = client.post(
         "/api/game/end",
@@ -605,12 +689,11 @@ def test_session_analysis_converted_drill_includes_drill_prefix_summary(
             "moves": [
                 {
                     "move_number": 1, "color": "white", "move_san": "e4",
-                    "fen_after": "fen-1w", "eval_delta": 10, "classification": "good",
+                    "fen_after": "fen-1w", "eval_delta": 200, "classification": "blunder",
                 },
                 {
-                    # Drill-prefix blunder (ply 2) — must still be counted.
                     "move_number": 1, "color": "black", "move_san": "e5",
-                    "fen_after": "fen-1b", "eval_delta": 200, "classification": "blunder",
+                    "fen_after": "fen-1b", "eval_delta": 10, "classification": "good",
                 },
                 {
                     # Normal-segment mistake (ply 3).
@@ -629,7 +712,7 @@ def test_session_analysis_converted_drill_includes_drill_prefix_summary(
     )
     assert response.status_code == 200
     summary = response.json()["summary"]
-    # Drill-prefix blunder is included; CPL averages all three moves (10+200+40)/3.
+    # Drill-prefix blunder is counted; CPL averages only the player's moves.
     assert summary["blunders"] == 1
     assert summary["mistakes"] == 1
-    assert summary["average_centipawn_loss"] == round((10 + 200 + 40) / 3)
+    assert summary["average_centipawn_loss"] == round((200 + 40) / 2)

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.analysis_cache_repo import write_analysis_cache_rows
 from app.analysis_profiles import BROWSER_PROFILE_ID
+from app.centipawn_loss import centipawn_loss, centipawn_loss_expr
 from app.evidence_contracts import select_browser_contract
 from app.db import get_db
 from app.accuracy import (
@@ -483,7 +484,7 @@ def _upsert_analysis_cache(
         # Mate count flips perspective by sign-negation, same as cp.
         played_eval_mate = move.eval_mate * sign if move.eval_mate is not None else None
         best_eval = move.best_move_eval_cp * sign if move.best_move_eval_cp is not None else None
-        eval_delta = move.eval_delta  # already unsigned (best - played >= 0)
+        eval_delta = centipawn_loss(move.eval_delta)
 
         row = {
             "fen_before": move.fen_before,
@@ -563,7 +564,7 @@ def upsert_session_moves(
             "eval_mate": move.eval_mate,
             "best_move_san": move.best_move_san,
             "best_move_eval_cp": move.best_move_eval_cp,
-            "eval_delta": move.eval_delta,
+            "eval_delta": centipawn_loss(move.eval_delta),
             "classification": move.classification.value if move.classification else None,
             "fen_before": move.fen_before,
             "best_move_uci": move.best_move_uci,
@@ -704,18 +705,47 @@ def get_session_analysis(
     # pre-continue drill-prefix moves.
     summary_filter = [SessionMove.session_id == session_id]
 
+    player_loss_expr = case(
+        (
+            SessionMove.color == game_session.player_color,
+            centipawn_loss_expr(SessionMove.eval_delta),
+        ),
+        else_=None,
+    )
+    player_move_expr = SessionMove.color == game_session.player_color
     summary_row = (
         db.query(
-            func.sum(case((SessionMove.classification == MoveClassification.BLUNDER.value, 1), else_=0)).label(
-                "blunders"
-            ),
-            func.sum(case((SessionMove.classification == MoveClassification.MISTAKE.value, 1), else_=0)).label(
-                "mistakes"
-            ),
             func.sum(
-                case((SessionMove.classification == MoveClassification.INACCURACY.value, 1), else_=0)
+                case(
+                    (
+                        player_move_expr
+                        & (SessionMove.classification == MoveClassification.BLUNDER.value),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("blunders"),
+            func.sum(
+                case(
+                    (
+                        player_move_expr
+                        & (SessionMove.classification == MoveClassification.MISTAKE.value),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("mistakes"),
+            func.sum(
+                case(
+                    (
+                        player_move_expr
+                        & (SessionMove.classification == MoveClassification.INACCURACY.value),
+                        1,
+                    ),
+                    else_=0,
+                )
             ).label("inaccuracies"),
-            func.avg(SessionMove.eval_delta).label("average_centipawn_loss"),
+            func.avg(player_loss_expr).label("average_centipawn_loss"),
         )
         .filter(*summary_filter)
         .one()
@@ -774,7 +804,7 @@ def get_session_analysis(
                 eval_mate=move.eval_mate,
                 best_move_san=move.best_move_san,
                 best_move_eval_cp=move.best_move_eval_cp,
-                eval_delta=move.eval_delta,
+                eval_delta=centipawn_loss(move.eval_delta),
                 classification=move.classification,
                 segment=move.segment,
             )

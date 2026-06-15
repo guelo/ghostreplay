@@ -2,6 +2,8 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+from sqlalchemy import text
+
 from app.models import GameSession
 from app.opening_roots import OpeningRoot, _normalize_opening_key
 
@@ -76,9 +78,49 @@ def test_history_includes_summary_stats(client, auth_headers, create_game_sessio
     game = response.json()["games"][0]
     assert game["summary"]["total_moves"] == 4
     assert game["summary"]["blunders"] == 1
-    assert game["summary"]["mistakes"] == 1
+    assert game["summary"]["mistakes"] == 0
     assert game["summary"]["inaccuracies"] == 0
-    assert game["summary"]["average_centipawn_loss"] == 20  # (0+10+50+20)/4
+    assert game["summary"]["average_centipawn_loss"] == 25  # user's white moves: (0+50)/2
+
+
+def test_history_average_cpl_uses_player_moves_and_clamps_negative_delta(
+    client, auth_headers, create_game_session, db_session
+):
+    session_id = create_game_session(user_id=123, player_color="black")
+    _end_game(client, auth_headers, session_id)
+
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            # Opponent move: should not affect player summary counts or CPL.
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 200, "classification": "blunder",
+        },
+        {
+            # This is normalized on write; force a legacy negative row below.
+            "move_number": 1, "color": "black", "move_san": "e5",
+            "fen_after": "fen-1b", "eval_delta": -30, "classification": "best",
+        },
+        {
+            "move_number": 2, "color": "black", "move_san": "Nc6",
+            "fen_after": "fen-2b", "eval_delta": 40, "classification": "mistake",
+        },
+    ])
+    db_session.execute(
+        text("""
+            UPDATE session_moves
+            SET eval_delta = -30
+            WHERE session_id = :session_id AND move_number = 1 AND color = 'black'
+        """),
+        {"session_id": session_id},
+    )
+    db_session.commit()
+
+    response = client.get("/api/history", headers=auth_headers(user_id=123))
+    game = response.json()["games"][0]
+    assert game["summary"]["total_moves"] == 3
+    assert game["summary"]["blunders"] == 0
+    assert game["summary"]["mistakes"] == 1
+    assert game["summary"]["average_centipawn_loss"] == 20  # black moves: (0+40)/2
 
 
 def test_history_empty_when_no_ended_games(client, auth_headers):
@@ -222,8 +264,8 @@ def _convert_to_drill(db_session, session_id, rated_start_ply):
 def test_history_converted_drill_summary_includes_drill_prefix(
     client, auth_headers, create_game_session, db_session
 ):
-    # Amended drill policy (2026-06-01): a converted drill is one full normal game,
-    # so segment='drill' prefix moves count toward history CPL/blunder/mistake stats.
+    # Amended drill policy (2026-06-01): a converted drill is one full normal game.
+    # Player prefix classifications still count; CPL averages the player's moves only.
     session_id = create_game_session(user_id=123)
     _end_game(client, auth_headers, session_id)
     # ply boundary 2: move 1 (white+black) is drill-prefix, move 2 onward is normal.
@@ -231,13 +273,13 @@ def test_history_converted_drill_summary_includes_drill_prefix(
 
     _upload_moves(client, auth_headers, session_id, [
         {
+            # Drill-prefix player blunder — must still be counted.
             "move_number": 1, "color": "white", "move_san": "e4",
-            "fen_after": "fen-1w", "eval_delta": 0, "classification": "best",
+            "fen_after": "fen-1w", "eval_delta": 200, "classification": "blunder",
         },
         {
-            # Drill-prefix blunder — must still be counted.
             "move_number": 1, "color": "black", "move_san": "e5",
-            "fen_after": "fen-1b", "eval_delta": 200, "classification": "blunder",
+            "fen_after": "fen-1b", "eval_delta": 10, "classification": "good",
         },
         {
             # Normal-segment mistake.
@@ -252,4 +294,4 @@ def test_history_converted_drill_summary_includes_drill_prefix(
     assert game["summary"]["total_moves"] == 3
     assert game["summary"]["blunders"] == 1
     assert game["summary"]["mistakes"] == 1
-    assert game["summary"]["average_centipawn_loss"] == round((0 + 200 + 40) / 3)
+    assert game["summary"]["average_centipawn_loss"] == round((200 + 40) / 2)
