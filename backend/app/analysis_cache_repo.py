@@ -29,6 +29,7 @@ from app.analysis_cache_policy import (
 )
 from app.analysis_profiles import IDENTITY_FIELDS, get_profile
 from app.evidence_contracts import contract_satisfied, get_contract
+from app.fen import normalize_fen
 from app.models import AnalysisCache
 
 log = logging.getLogger("analysis_cache_repo")
@@ -161,6 +162,19 @@ def _row_to_dict(row: AnalysisCache) -> dict:
 
 def _key(data: dict) -> tuple[str, str]:
     return (data["fen_before"], data["move_uci"])
+
+
+def _normalized(fen: str) -> str | None:
+    """Normalized 4-field FEN for the indexed transposition fallback, or None.
+
+    Derived from the immutable ``fen_before`` key — set only on INSERT (the key,
+    and therefore this value, never changes on REPLACE/MERGE). Returns None on an
+    unparseable FEN so the row still serves exact-key lookups.
+    """
+    try:
+        return normalize_fen(fen)
+    except Exception:
+        return None
 
 
 def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, str], Reason]]]:
@@ -333,7 +347,9 @@ def _process_row(session: Session, data: dict) -> Reason:
     decision, reason = decide_analysis_cache_replacement(existing_proj, incoming_proj)
 
     if decision is Decision.INSERT:
-        session.add(AnalysisCache(**{k: data.get(k) for k in ("fen_before", "move_uci", *_WRITABLE_FIELDS) if k in data}))
+        cols = {k: data.get(k) for k in ("fen_before", "move_uci", *_WRITABLE_FIELDS) if k in data}
+        cols["normalized_fen_before"] = _normalized(data["fen_before"])
+        session.add(AnalysisCache(**cols))
     elif decision is Decision.REPLACE:
         _apply_update(existing_row, data, full=True)
     elif decision is Decision.MERGE:
@@ -449,6 +465,7 @@ def _process_pg_row(session: Session, data: dict) -> Reason:
         for k in ("fen_before", "move_uci", *_WRITABLE_FIELDS)
         if k in data
     }
+    insert_cols["normalized_fen_before"] = _normalized(data["fen_before"])
     stmt = (
         postgresql_insert(AnalysisCache)
         .values(insert_cols)

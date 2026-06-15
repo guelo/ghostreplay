@@ -303,10 +303,16 @@ class AnalysisCache(Base):
     __table_args__ = (
         UniqueConstraint("fen_before", "move_uci", name="uq_analysis_cache_fen_move"),
         Index("idx_analysis_cache_fen", "fen_before"),
+        Index("idx_analysis_cache_norm_move", "normalized_fen_before", "move_uci"),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
     fen_before: Mapped[str] = mapped_column(Text, nullable=False)
+    # Normalized 4-field FEN of fen_before (see app.fen.normalize_fen). Derived from
+    # the immutable key, indexed with move_uci so the opening tree can resolve an
+    # eval via transposition fallback without scanning. NULL on rows whose FEN
+    # failed to parse during backfill.
+    normalized_fen_before: Mapped[str | None] = mapped_column(Text)
     move_uci: Mapped[str] = mapped_column(String(5), nullable=False)
     move_san: Mapped[str] = mapped_column(String(10), nullable=False)
     best_move_uci: Mapped[str | None] = mapped_column(String(5))

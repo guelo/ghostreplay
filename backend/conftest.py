@@ -189,6 +189,7 @@ def _create_test_schema(conn) -> None:
         CREATE TABLE IF NOT EXISTS analysis_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fen_before TEXT NOT NULL,
+            normalized_fen_before TEXT,
             move_uci VARCHAR(5) NOT NULL,
             move_san VARCHAR(10) NOT NULL,
             best_move_uci VARCHAR(5),
@@ -220,6 +221,10 @@ def _create_test_schema(conn) -> None:
             UNIQUE(fen_before, move_uci)
         )
     """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_analysis_cache_norm_move "
+        "ON analysis_cache(normalized_fen_before, move_uci)"
+    ))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS opening_score_batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -383,14 +383,17 @@ Caches move-level analysis results keyed by `(fen_before, move_uci)` to avoid re
 ```sql
 CREATE TABLE analysis_cache (
     id BIGSERIAL PRIMARY KEY,
-    fen_before TEXT NOT NULL,               -- Position before the move
+    fen_before TEXT NOT NULL,               -- Position before the move (full 6-field FEN)
+    normalized_fen_before TEXT,             -- Normalized 4-field FEN of fen_before (transposition key)
     move_uci VARCHAR(5) NOT NULL,           -- Move in UCI notation (e.g., "e2e4")
     move_san VARCHAR(10) NOT NULL,          -- Move in SAN notation (e.g., "e4")
     best_move_uci VARCHAR(5),               -- Engine's best move in UCI
     best_move_san VARCHAR(10),              -- Engine's best move in SAN
     best_line_uci TEXT,                     -- Space-joined root best-move PV
-    played_eval INTEGER,                    -- Eval after the played move (centipawns)
-    best_eval INTEGER,                      -- Eval of best move (centipawns)
+    played_eval INTEGER,                    -- Eval after the played move (centipawns, white-relative)
+    played_eval_mate INTEGER,               -- White-relative mate count for the played move (NULL = not mate)
+    best_eval INTEGER,                      -- Eval of best move (centipawns, white-relative)
+    best_eval_mate INTEGER,                 -- White-relative mate count for the best move (NULL = not mate)
     eval_delta INTEGER,                     -- best_eval - played_eval (positive = lost advantage)
     classification VARCHAR(20),             -- Move classification
     source VARCHAR(20) NOT NULL DEFAULT 'game',  -- Provenance only: 'game' | 'precomputed' | 'jeffml-scores'
@@ -405,6 +408,10 @@ CREATE TABLE analysis_cache (
     threads INTEGER,
     hash_mb INTEGER,
     multipv INTEGER,
+    eval_file_id TEXT,                      -- Full NNUE big-net identity "<filename>:<hash>"
+    eval_file_small_id TEXT,                -- Full NNUE small-net identity "<filename>:<hash>"
+    analyzer_protocol_version VARCHAR(64),  -- Version of the analyzer output contract
+    profile_manifest_digest VARCHAR(64),    -- Digest of the producing profile's identity bits
     evidence_contract_id VARCHAR(64),       -- id into the evidence-contract registry
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
@@ -412,12 +419,35 @@ CREATE TABLE analysis_cache (
 );
 
 CREATE INDEX idx_analysis_cache_fen ON analysis_cache(fen_before);
+-- Composite index for the opening-tree normalized transposition fallback.
+CREATE INDEX idx_analysis_cache_norm_move ON analysis_cache(normalized_fen_before, move_uci);
 ```
 
 **Key semantics:**
 - The `(fen_before, move_uci)` unique pair enables O(1) lookup: "has this exact position+move been analyzed before?"
+- `normalized_fen_before` is **derived** from `fen_before` (`app/fen.py::normalize_fen`) and set only on INSERT in the shared writer; it is the indexed key for the opening-tree transposition fallback (see below). NULL on rows whose FEN failed to parse during backfill.
+- `played_eval` / `best_eval` (and their `_mate` companions) are **white-relative**: positive favors White regardless of side to move.
 - `source` records provenance only (`game`, `precomputed`, `jeffml-scores`); it is **not** the quality comparator.
 - The frontend races its own local Stockfish worker against this cache to avoid redundant computation
+
+**Opening-tree eval lookup (`backend/app/tree_eval.py`).** The horizontal opening
+tree reads a per-node eval from this cache and never runs its own engine. A move
+node has key `(parent_fen, move_uci)`, but the tree replays the UCI line from the
+initial board so `parent_fen` is a full 6-field FEN whose clocks may differ from a
+stored `fen_before` (transpositions). `lookup_move_evals` resolves each node in at
+most two indexed, batched queries (never a scan, never one query per child):
+1. **Exact `(fen_before, move_uci)` wins** when its row has a usable played eval.
+2. Otherwise an **indexed normalized fallback** over `(normalized_fen_before, move_uci)`
+   selects deterministically: prefer rows with mate data, then `source=precomputed` >
+   `game` > other, then lowest `id`.
+The returned value prefers `played_eval_mate` over `played_eval` (mate over cp). The
+column-0 root uses `lookup_root_eval`, returning the position's `best_eval`/`best_eval_mate`
+(the eval under the engine's best move — a property of the position); any row at the
+starting FEN with a usable best eval qualifies, with the complete best-move row
+(`move_uci == best_move_uci`) merely preferred in ranking. Values stay white-relative;
+`eval_for_perspective` negates cp and mate for Black. Missing eval is a normal null
+state (rendered as an em dash), never an error and never a trigger for browser engine
+analysis.
 
 **Quality-aware writes (rows are NOT immutable).** Every writer — session/game
 uploads, opening precompute, and JeffML score ingestion — routes through one
