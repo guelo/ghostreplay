@@ -12,6 +12,7 @@ from app.models import (
     Blunder,
     BlunderReview,
     GameSession,
+    OpeningPositionScore,
     OpeningScoreBatch,
     OpeningScoreCursor,
     Position,
@@ -23,7 +24,9 @@ from app.opening_cache import (
     ensure_opening_scores,
     get_latest_opening_score_batch,
     list_cached_opening_scores,
+    list_position_scores,
     load_cached_rows,
+    lookup_position_scores,
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
@@ -214,7 +217,7 @@ def test_recompute_releases_db_transaction_before_scoring(db_session):
 
     def fake_build_cached_scores(*args, **kwargs):
         observed_transactions.append(db_session.in_transaction())
-        return []
+        return [], []
 
     with patch("app.opening_cache._build_cached_scores", side_effect=fake_build_cached_scores):
         recompute_opening_scores(db_session, 123, "black")
@@ -1194,3 +1197,125 @@ def test_load_cached_rows_cold_no_evidence_serves_empty():
     assert rows == []
     refresh_now.assert_called_once_with(123, "black")
     request_recompute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Direct position-score read model persistence + lookup (g-tree-score-model).
+# ---------------------------------------------------------------------------
+
+
+def test_recompute_writes_direct_position_rows(db_session):
+    _seed_black_opening_session(db_session)
+
+    batch = recompute_opening_scores(db_session, 123, "black")
+    found_batch, rows = list_position_scores(db_session, 123, "black")
+
+    assert found_batch.id == batch.id
+    fens = {row.normalized_fen for row in rows}
+    # Scoreable in-book positions along the played line get direct rows...
+    assert {START_FEN, KINGS_PAWN_FEN, OPEN_GAME_FEN, KNIGHT_OPENING_FEN} <= fens
+    # ...but TWO_KNIGHTS is an in-book leaf with no evidence below: not materialized.
+    assert TWO_KNIGHTS_FEN not in fens
+    assert all(row.batch_id == batch.id for row in rows)
+    assert all(row.user_id == 123 and row.player_color == "black" for row in rows)
+    assert all(row.in_book and row.has_evidence for row in rows)
+    assert all(row.computed_at == batch.computed_at for row in rows)
+    kings_pawn = next(row for row in rows if row.normalized_fen == KINGS_PAWN_FEN)
+    assert kings_pawn.opening_score is not None
+    assert kings_pawn.confidence is not None
+    assert kings_pawn.coverage is not None
+
+
+def test_position_rows_match_named_root_metrics(db_session):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores(db_session, 123, "black")
+
+    _, named_rows = list_cached_opening_scores(db_session, 123, "black")
+    named_by_key = {row.opening_key: row for row in named_rows}
+    _, position_rows = list_position_scores(db_session, 123, "black")
+    position_by_fen = {row.normalized_fen: row for row in position_rows}
+
+    # The named-root row and the direct position row for the same FEN come from one
+    # shared traversal, so their metrics agree exactly.
+    for key in (KINGS_PAWN_FEN, KNIGHT_OPENING_FEN):
+        named = named_by_key[key]
+        position = position_by_fen[key]
+        assert position.opening_score == pytest.approx(named.opening_score)
+        assert position.confidence == pytest.approx(named.confidence)
+        assert position.coverage == pytest.approx(named.coverage)
+        assert position.sample_size == named.sample_size
+        assert position.game_count == named.game_count
+
+
+def test_position_rows_cascade_through_batch_retention(db_session):
+    _seed_black_opening_session(db_session)
+
+    for _ in range(5):
+        recompute_opening_scores(db_session, 123, "black")
+
+    remaining = (
+        db_session.query(OpeningScoreBatch)
+        .filter(OpeningScoreBatch.user_id == 123, OpeningScoreBatch.player_color == "black")
+        .all()
+    )
+    kept_ids = {b.id for b in remaining}
+    assert len(kept_ids) == 2
+
+    # Every surviving batch still has position rows...
+    assert (
+        db_session.query(OpeningPositionScore)
+        .filter(OpeningPositionScore.batch_id.in_(kept_ids))
+        .count()
+        > 0
+    )
+    # ...and pruned batches' position rows are gone via ON DELETE CASCADE.
+    orphan_positions = (
+        db_session.query(OpeningPositionScore)
+        .filter(OpeningPositionScore.batch_id.notin_(kept_ids))
+        .count()
+    )
+    assert orphan_positions == 0
+
+
+def test_lookup_position_scores_normalizes_raw_fens(db_session):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores(db_session, 123, "black")
+
+    # Raw six-field FENs (with clocks) from a tree UI must normalize before lookup.
+    batch, found = lookup_position_scores(
+        db_session, 123, "black", [KINGS_PAWN_FULL, KNIGHT_OPENING_FULL]
+    )
+    assert batch is not None
+    assert KINGS_PAWN_FEN in found
+    assert KNIGHT_OPENING_FEN in found
+    assert found[KINGS_PAWN_FEN].opening_score is not None
+
+
+def test_lookup_position_scores_in_graph_no_evidence_is_no_data(db_session):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores(db_session, 123, "black")
+
+    # TWO_KNIGHTS is in the OpeningGraph but has no evidence below, so it was not
+    # materialized: the lookup omits it and the API renders no-data.
+    batch, found = lookup_position_scores(db_session, 123, "black", [TWO_KNIGHTS_FULL])
+    assert batch is not None
+    assert TWO_KNIGHTS_FEN not in found
+
+
+def test_lookup_position_scores_without_batch_returns_empty(db_session):
+    batch, found = lookup_position_scores(db_session, 123, "black", [KINGS_PAWN_FULL])
+    assert batch is None
+    assert found == {}
+
+
+def test_lookup_position_scores_normalizes_four_field_noncanonical_ep(db_session):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores(db_session, 123, "black")
+
+    # A four-field FEN with a stated-but-impossible en passant square must be
+    # canonicalized (EP -> "-") before lookup, hitting the stored normalized key
+    # instead of silently missing.
+    noncanonical = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3"
+    batch, found = lookup_position_scores(db_session, 123, "black", [noncanonical])
+    assert batch is not None
+    assert KINGS_PAWN_FEN in found

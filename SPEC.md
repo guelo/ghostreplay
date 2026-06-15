@@ -534,6 +534,45 @@ CREATE INDEX idx_user_opening_scores_user_color ON user_opening_scores(user_id, 
 - `inputs_fingerprint` is a **cheap raw-input freshness digest** (`opening_score_raw_inputs_fingerprint`): it hashes a canonical, order-independent projection of exactly the raw DB rows the evidence overlay consumes (session_moves + the bounded analysis_cache fallback subset, ghost-target blunders/positions, and blunder_reviews) **without any python-chess board replay or overlay build**, folded together with `registry_fingerprint` and an explicit `OPENING_EVIDENCE_INPUTS_VERSION`. The latter is bumped on any evidence-derivation semantic change a raw-row hash is blind to (e.g. `PASS_THRESHOLD`, quality-source precedence, FEN normalization, phase-filter application, or the digest's own projection/filters). The overlay is a pure deterministic function of these inputs, so a matching digest provably implies identical scores.
 - `recompute_opening_scores_if_needed()` is the single recompute-decision function, run on the scheduler's serialized worker. It computes the raw-input digest first (cheap SQL) and serves the cached batch on the fast path **without building the expensive overlay** when nothing changed; the overlay (per-session board reconstruction + Lichess phase divider) is rebuilt only on a cache miss, registry drift, stale branch keys, a digest change, or decay-staleness. Reads are stale-while-revalidate: a **warm** reader (batch present) calls `request_recompute()` to schedule a coalesced background convergence and serves the cached batch immediately — never blocking; only a **cold** reader (no batch yet) blocks on `refresh_now()` for the one-time initial compute.
 
+#### 5.7.4 `opening_position_scores` (Direct Tree Position Metrics)
+
+Sibling read model to `user_opening_scores`, persisted under the **same** `opening_score_batches` generation but keyed by `(batch_id, normalized_fen)` instead of a named-root key. It supplies direct per-position metrics for the horizontal opening tree (`/openings`), so the tree read path serves intermediate move nodes — not only the named boundary roots — **without running a full root calculation per visible card**.
+
+```sql
+CREATE TABLE opening_position_scores (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id BIGINT NOT NULL REFERENCES opening_score_batches(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
+    normalized_fen TEXT NOT NULL,          -- Normalized 4-field FEN — the position identity
+    in_book BOOLEAN NOT NULL,              -- True when the FEN is a reference OpeningGraph position
+    has_evidence BOOLEAN NOT NULL,         -- True when mastery evidence exists at/below the FEN
+    opening_score FLOAT,                   -- 0-100 mastery (NULL when has_evidence is false: no-data)
+    confidence FLOAT,                      -- NULL when no-data
+    coverage FLOAT,                        -- NULL when no-data
+    weighted_depth FLOAT,                  -- NULL when no-data
+    sample_size INTEGER NOT NULL DEFAULT 0,-- Move-observation count over the reachable subtree
+    game_count INTEGER NOT NULL DEFAULT 0, -- Distinct games over the reachable subtree
+    last_practiced_at TIMESTAMP,           -- Max live/review touch over the reachable subtree (NULL no-data)
+    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
+    UNIQUE (batch_id, normalized_fen)
+);
+
+CREATE INDEX idx_opening_position_scores_batch_fen ON opening_position_scores(batch_id, normalized_fen);
+CREATE INDEX idx_opening_position_scores_user_color ON opening_position_scores(user_id, player_color);
+```
+
+**Read-model contract:**
+- **One shared traversal.** All rows for a batch are produced by a single `_SharedCalculator` pass (`opening_rootcalc.compute_all_scores` → `compute_position_scores`). The named-root rows, the synthetic repertoire row, and every direct position row reuse the same memoized `_metrics`, SCC cut, weights, and reachable caches — so named and direct metrics can never disagree, and the cost is at most two metric records (natural + perfect) per reachable FEN, never one root walk per card. The metric formulas are identical to the named-root path (`_base_root_score`).
+- **Sparse persistence (no full structural materialization).** Only rows the database actually needs are written: in-book positions with mastery evidence at/below the FEN, plus connected observed off-book positions. **Static in-book positions with no evidence below are intentionally not materialized** — they are already represented by `OpeningGraph`, so the read path returns no-data for an in-graph FEN absent from the batch. (Full per-book-FEN materialization is deferred pending a separate row-volume/write/storage benchmark; ~15.5k book nodes per batch per color is not written by default.)
+- **No-data gating.** A row exists for a connected observed off-book node even without evidence so the API can tell a navigable observed off-book node from an arbitrary unknown FEN, but its four metric columns are NULL and its counts are zero. Visibility is gated purely by evidence at/below the FEN regardless of side to move: a no-evidence user-turn row never surfaces the alpha/beta prior, and a no-evidence opponent-turn leaf never surfaces `_calc`'s perfect-looking `(1.0, 1.0, 1.0, 0.0)` result.
+- **Observed off-book domain.** Off-book positions enter the scorer only by reachable observed `overlay.edges` (book-boundary exit → observed continuation), matching the tree's navigable data; disconnected off-book blunders/reviews are not seeded. `opening_evidence.observed_off_book_fens()` is the explicit contract for the candidate off-book endpoints.
+- **Transposition-safe identity.** The key is the normalized 4-field FEN, so transposed routes reached through different UCI lines share one row. `opening_cache.lookup_position_scores()` **normalizes every incoming (possibly raw, clock-bearing) FEN before lookup**, so halfmove/fullmove differences and transpositions hit the same row instead of silently missing.
+- **Distinct game count.** `game_count` is the number of distinct sessions reaching the scored subtree (union of per-node `session_ids`), never `sample_size` (move-observations) relabeled.
+- **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `user_opening_scores`, so `prune_old_opening_score_batches` removes direct rows through the same generation-retention path (keep=2) — no unbounded leak across recomputes. Rows are written in the same transaction as the named rows of the batch.
+
 ### 5.8 Authentication
 
 **Method:** Anonymous-first with stateless JWT tokens
@@ -2209,9 +2248,9 @@ The opening score system computes per-user 0-100 mastery scores (higher = better
 Computation runs are not overwritten in-place. Instead:
 
 1. A new `opening_score_batches` row is created with a monotonically increasing `generation`.
-2. `user_opening_scores` rows for the new batch are written.
+2. `user_opening_scores` (named-root) rows and `opening_position_scores` (direct tree-position) rows for the new batch are written from one shared calculation, in the same transaction (see §5.7.4).
 3. The `opening_score_cursors` row for `(user_id, player_color)` is updated to point to the new generation.
-4. Stale batches are pruned.
+4. Stale batches are pruned (cascading both score tables through `batch_id ON DELETE CASCADE`).
 
 This ensures the current scores are always available atomically and reads never see a partially-computed state.
 

@@ -573,6 +573,32 @@ def overlay_evidence(
     return overlay
 
 
+def observed_off_book_fens(
+    overlay: EvidenceOverlay, graph: OpeningGraph
+) -> set[str]:
+    """Normalized off-book FENs that appear as observed-edge endpoints.
+
+    Explicit contract for the tree position-score read model (g-tree-score-model):
+    these are the candidate observed off-book scorer positions — endpoints of the
+    user's observed continuation edges (``overlay.edges``) that are not reference
+    ``OpeningGraph`` positions. ``overlay.edges`` keys are already normalized
+    4-field FENs (``_record_edge`` keys on the move row's ``norm_before`` /
+    ``norm_after``), so no renormalization is needed.
+
+    This is a superset of what actually gets scored: the calculator admits only the
+    subset reachable from book seeds via observed edges (its domain enumeration over
+    ``_structural_children``). Disconnected off-book endpoints — e.g. a manually
+    seeded blunder with no observed path into the book — are deliberately not
+    seeded into the scorer, matching the off-book seed semantics in the design.
+    """
+    result: set[str] = set()
+    for parent_fen, child_fen in overlay.edges:
+        for endpoint in (parent_fen, child_fen):
+            if not graph.has_position(endpoint):
+                result.add(endpoint)
+    return result
+
+
 def _digest_ts(val: datetime | str | None) -> str:
     """Canonicalise a timestamp for the digest, dialect-agnostically.
 

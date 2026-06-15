@@ -2,20 +2,29 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Iterable, Literal
 
 from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from app.fen import normalize_fen
 from app.game_phase import DIVIDER_VERSION
-from app.models import OpeningScoreBatch, OpeningScoreCursor, UserOpeningScore
+from app.models import (
+    OpeningPositionScore,
+    OpeningScoreBatch,
+    OpeningScoreCursor,
+    UserOpeningScore,
+)
 from app.opening_aggregate import (
     CachedOpeningScoreRow,
+    CachedPositionScoreRow,
     _batch_has_stale_branch_keys,
     _snapshot_cached_rows,
+    _snapshot_position_rows,
 )
 from app.opening_evidence import (
     OPENING_EVIDENCE_INPUTS_VERSION,
@@ -26,9 +35,11 @@ from app.opening_evidence import (
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
 from app.opening_rootcalc import (
+    PositionCalcTelemetry,
+    PositionScore,
     RootCalcConfig,
     RootScore,
-    compute_all_root_scores,
+    compute_all_scores,
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoots, get_opening_roots
@@ -40,8 +51,15 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 
 # Explicit score-model version. Bump on any change to the scoring model that is
 # not already captured by graph/roots/config/quality fingerprints, to force a
-# full recompute and invalidate stale v1 snapshots.
-SCORE_MODEL_VERSION = "sm-v2-1"
+# full recompute and invalidate stale snapshots.
+#
+# sm-v2-2: the batch now also carries opening_position_scores (the direct
+# tree position read model, g-tree-score-model). Batches written before this
+# version match the old fingerprint but hold zero position rows, so the fast path
+# (recompute_opening_scores_if_needed) would serve them with no direct rows. The
+# bump changes registry_fingerprint -> registry drift -> exactly one recompute per
+# (user, color) on first read after deploy, backfilling position rows.
+SCORE_MODEL_VERSION = "sm-v2-2"
 
 # Number of latest batches to retain per (user_id, player_color). keep=2 protects
 # a concurrent reader that holds the previous batch when a recompute lands; it does
@@ -154,14 +172,33 @@ def prune_old_opening_score_batches(
         return 0
 
 
+def _normalize_lookup_fen(fen: str) -> str:
+    """Normalize an incoming FEN to the read-model key.
+
+    Position rows are keyed by the canonical normalized 4-field FEN. ``normalize_fen``
+    accepts both 4- and 6-field inputs and additionally canonicalizes the en-passant
+    field (dropping a stated EP square that has no legal capture), exactly as the
+    stored keys were produced. Normalizing *every* incoming FEN — not just 6-field
+    ones — is what makes raw clock-bearing FENs, transpositions, and 4-field FENs
+    with a non-canonical EP square hit the same row instead of silently missing.
+    """
+    return normalize_fen(fen)
+
+
 def _build_cached_scores(
     player_color: PlayerColor,
     graph: OpeningGraph,
     overlay: EvidenceOverlay,
     roots: OpeningRoots,
     computed_at: datetime,
-) -> list[RootScore]:
-    scores, _ = compute_all_root_scores(
+) -> tuple[list[RootScore], list[PositionScore]]:
+    """Build named-root rows and direct position rows from one shared traversal.
+
+    Both row sets come from a single ``compute_all_scores`` call (one
+    ``_SharedCalculator``), so named and direct metrics can never disagree.
+    """
+    position_telemetry = PositionCalcTelemetry()
+    scores, _, position_scores = compute_all_scores(
         player_color,
         graph,
         overlay,
@@ -170,8 +207,20 @@ def _build_cached_scores(
         computed_at,
         include_branch_summaries=True,
         include_synthetic_root=True,
+        position_telemetry=position_telemetry,
     )
-    return list(scores.values())
+    logger.info(
+        "opening position-score rows computed",
+        extra={
+            "player_color": player_color,
+            "domain_count": position_telemetry.domain_count,
+            "scoreable_position_count": position_telemetry.scoreable_position_count,
+            "observed_off_book_row_count": position_telemetry.observed_off_book_row_count,
+            "persisted_row_count": position_telemetry.persisted_row_count,
+            "metric_key_count": position_telemetry.metric_key_count,
+        },
+    )
+    return list(scores.values()), position_scores
 
 
 def get_latest_opening_score_batch(
@@ -307,6 +356,68 @@ def load_cached_rows(
     return batch, _snapshot_cached_rows(rows)
 
 
+def list_position_scores(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+) -> tuple[OpeningScoreBatch | None, list[OpeningPositionScore]]:
+    """All direct position rows for the latest batch of (user_id, player_color)."""
+    _validate_player_color(player_color)
+    batch = get_latest_opening_score_batch(db, user_id, player_color)
+    if batch is None:
+        return None, []
+    rows = (
+        db.query(OpeningPositionScore)
+        .filter(
+            OpeningPositionScore.batch_id == batch.id,
+            OpeningPositionScore.user_id == user_id,
+            OpeningPositionScore.player_color == player_color,
+        )
+        .order_by(OpeningPositionScore.normalized_fen.asc())
+        .all()
+    )
+    return batch, rows
+
+
+def lookup_position_scores(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+    fens: Iterable[str],
+) -> tuple[OpeningScoreBatch | None, dict[str, CachedPositionScoreRow]]:
+    """Look up direct position rows for ``fens`` in the latest batch.
+
+    Every incoming FEN is normalized to the 4-field read-model key before lookup
+    (raw tree-UI FENs carry clocks), so transpositions and halfmove/fullmove
+    differences resolve to the same row instead of silently missing. The returned
+    map is keyed by normalized FEN and contains only FENs that have a persisted row.
+
+    An absent entry is the read model's no-data representation, and the API layer
+    decides how to render it: a normalized FEN that is in ``OpeningGraph`` but absent
+    here is a static in-book no-evidence node (expected no-data); a normalized FEN
+    absent from both graph and batch is outside the current connected scorer domain
+    (also no-data). This repository does not consult the graph; it only resolves
+    persisted rows by normalized key.
+    """
+    _validate_player_color(player_color)
+    normalized = {_normalize_lookup_fen(fen) for fen in fens}
+    if not normalized:
+        return get_latest_opening_score_batch(db, user_id, player_color), {}
+    batch = get_latest_opening_score_batch(db, user_id, player_color)
+    if batch is None:
+        return None, {}
+    rows = (
+        db.query(OpeningPositionScore)
+        .filter(
+            OpeningPositionScore.batch_id == batch.id,
+            OpeningPositionScore.normalized_fen.in_(normalized),
+        )
+        .all()
+    )
+    snapshots = _snapshot_position_rows(rows)
+    return batch, {snapshot.normalized_fen: snapshot for snapshot in snapshots}
+
+
 def list_opening_score_candidate_pairs(
     db: Session,
     *,
@@ -416,7 +527,9 @@ def recompute_opening_scores(
     # Without this, repeated requests can sit idle in transaction and exhaust
     # the pool while score computation is still running.
     db.rollback()
-    scores = _build_cached_scores(player_color, graph, overlay, roots, computed_at)
+    scores, position_scores = _build_cached_scores(
+        player_color, graph, overlay, roots, computed_at
+    )
 
     batch = OpeningScoreBatch(
         user_id=user_id,
@@ -477,6 +590,39 @@ def recompute_opening_scores(
                     )
                     for score in scores
                 ]
+            )
+
+        if position_scores:
+            insert_started = time.monotonic()
+            db.add_all(
+                [
+                    OpeningPositionScore(
+                        batch_id=batch.id,
+                        user_id=user_id,
+                        player_color=player_color,
+                        normalized_fen=position.normalized_fen,
+                        in_book=position.in_book,
+                        has_evidence=position.has_evidence,
+                        opening_score=position.opening_score,
+                        confidence=position.confidence,
+                        coverage=position.coverage,
+                        weighted_depth=position.weighted_depth,
+                        sample_size=position.sample_size,
+                        game_count=position.game_count,
+                        last_practiced_at=position.last_practiced_at,
+                        computed_at=computed_at,
+                    )
+                    for position in position_scores
+                ]
+            )
+            logger.info(
+                "opening position-score rows staged",
+                extra={
+                    "user_id": user_id,
+                    "player_color": player_color,
+                    "position_row_count": len(position_scores),
+                    "stage_seconds": round(time.monotonic() - insert_started, 4),
+                },
             )
 
         db.commit()

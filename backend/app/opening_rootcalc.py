@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from app.fen import active_color, normalize_fen
 from app.game_phase import is_middlegame_position
-from app.opening_evidence import EvidenceOverlay
+from app.opening_evidence import EvidenceOverlay, observed_off_book_fens
 from app.opening_graph import OpeningGraph
 from app.opening_roots import OpeningRoot, OpeningRoots
 
@@ -127,6 +127,50 @@ class RootScore:
     underexposed_branch: BranchSummary | None
     computed_at: datetime
     debug_nodes: list[NodeDebug]
+
+
+@dataclass(frozen=True)
+class PositionScore:
+    """One direct position-score read-model row (see ``OpeningPositionScore``).
+
+    ``normalized_fen`` is the normalized 4-field FEN identity. ``in_book`` marks a
+    reference ``OpeningGraph`` position; a row with ``in_book`` false is a connected
+    observed off-book node. ``has_evidence`` is the no-data gate: when false the four
+    metric values are ``None`` and the counts are zero, because no mastery evidence
+    exists at or below the FEN. The metrics, when present, come from the same
+    formulas as :meth:`_SharedCalculator._base_root_score`.
+    """
+
+    normalized_fen: str
+    player_color: str
+    in_book: bool
+    has_evidence: bool
+    opening_score: float | None
+    confidence: float | None
+    coverage: float | None
+    weighted_depth: float | None
+    sample_size: int
+    game_count: int
+    last_practiced_at: datetime | None
+    computed_at: datetime
+
+
+@dataclass
+class PositionCalcTelemetry:
+    """Optional out-param for :meth:`_SharedCalculator.compute_position_scores`.
+
+    Mutated in place, never read by scoring. Lets the batch builder log row-volume
+    drift if user evidence grows beyond the spike's measured range (~15.5k book
+    nodes + observed edges). ``persisted_row_count == scoreable_position_count +
+    observed_off_book_row_count`` minus any overlap (an off-book FEN that is itself
+    scoreable is counted under both classes but persisted once).
+    """
+
+    domain_count: int = 0
+    scoreable_position_count: int = 0
+    observed_off_book_row_count: int = 0
+    persisted_row_count: int = 0
+    metric_key_count: int = 0
 
 
 def _normalized(fen: str) -> str:
@@ -616,50 +660,164 @@ class _SharedCalculator:
             self._score_reachable_cache[fen] = reachable
         return self._score_reachable_cache[fen]
 
-    def _base_root_score(self, root: OpeningRoot) -> RootScore:
-        key = _normalized(root.opening_key)
-        score, confidence, coverage, depth = self._calc(key, False)
-        perfect_score, perfect_confidence, _, _ = self._calc(key, True)
-        reachable = self._get_reachable(key)
+    def _aggregate_metadata(
+        self, fen: str
+    ) -> tuple[int, int, datetime | None]:
+        """Transposition-safe sample/game/last-practiced metadata for a position.
+
+        Shared by named-root rows and arbitrary position rows so both report
+        identical evidence semantics over the structural reachable set:
+
+        - ``sample_size``: summed ``quality_count`` (move-observations);
+        - ``game_count``: distinct ``session_ids`` (a game played through nine
+          subtree positions counts once, unlike ``sample_size``);
+        - ``last_practiced_at``: max live/review touch.
+        """
+        reachable = self._get_reachable(_normalized(fen))
         sample_size = sum(
             node.quality_count
-            for fen in reachable
-            if (node := self._overlay_nodes.get(fen)) is not None
+            for reached in reachable
+            if (node := self._overlay_nodes.get(reached)) is not None
         )
-        # Distinct games over the reachable subtree: union of per-node session
-        # ids. Unlike ``sample_size`` (move-observations), a single game played
-        # through nine subtree positions counts once.
         game_count = len(
             {
                 session_id
-                for fen in reachable
-                if (node := self._overlay_nodes.get(fen)) is not None
+                for reached in reachable
+                if (node := self._overlay_nodes.get(reached)) is not None
                 for session_id in node.session_ids
             }
         )
         touches = [
             touch
-            for fen in reachable
-            if (node := self._overlay_nodes.get(fen)) is not None
+            for reached in reachable
+            if (node := self._overlay_nodes.get(reached)) is not None
             for touch in (node.last_live_at, node.last_review_at)
             if touch is not None
         ]
+        return sample_size, game_count, (max(touches) if touches else None)
+
+    def _direct_metrics(
+        self, fen: str
+    ) -> tuple[float, float, float, float]:
+        """Direct opening_score/confidence/coverage/weighted_depth for a FEN.
+
+        Same formulas as :meth:`_base_root_score`, but usable for any scoreable
+        position. Reuses the one shared memoized ``_calc`` traversal: at most two
+        metric records per reachable FEN (natural + perfect), never one root walk
+        per position.
+        """
+        key = _normalized(fen)
+        score, confidence, coverage, depth = self._calc(key, False)
+        perfect_score, perfect_confidence, _, _ = self._calc(key, True)
+        return (
+            100.0 * score / perfect_score if perfect_score > 0 else 0.0,
+            (
+                100.0 * confidence / perfect_confidence
+                if perfect_confidence > 0
+                else 0.0
+            ),
+            100.0 * coverage,
+            depth,
+        )
+
+    def compute_position_scores(
+        self, *, telemetry: PositionCalcTelemetry | None = None
+    ) -> list[PositionScore]:
+        """Direct position-score rows for the tree read model (g-tree-score-model).
+
+        Iterates the selected scorer domain once, reusing this calculator's
+        ``_metrics``/SCC-cut/weights/reachable caches (the same ones the named-root
+        rows use), and emits only the rows the database needs:
+
+        - in-book positions with mastery evidence at/below the FEN — full metrics;
+        - connected observed off-book positions (not in ``OpeningGraph``) — metrics
+          when evidence exists at/below, otherwise a no-data row so the API can
+          distinguish a navigable observed off-book node from an unknown FEN.
+
+        Static in-book positions with no evidence below are intentionally skipped:
+        they are represented by ``OpeningGraph``, and the API returns no-data for an
+        in-graph FEN absent from the batch. Score visibility is gated purely by
+        ``has_mastery_below`` regardless of side to move, so a no-evidence user-turn
+        row never surfaces the alpha/beta prior and a no-evidence opponent-turn leaf
+        never surfaces ``_calc``'s perfect-looking ``(1.0, 1.0, 1.0, 0.0)`` result.
+        """
+        results: list[PositionScore] = []
+        scoreable_count = 0
+        off_book_count = 0
+        for fen in sorted(self._domain):
+            in_book = fen in self._graph_nodes
+            has_evidence = self.has_mastery_below(fen)
+            if not has_evidence and in_book:
+                # Static in-book no-evidence node: represented by OpeningGraph, not
+                # materialized here.
+                continue
+            if not in_book:
+                off_book_count += 1
+            if has_evidence:
+                scoreable_count += 1
+                opening_score, confidence, coverage, depth = self._direct_metrics(fen)
+                sample_size, game_count, last_practiced_at = self._aggregate_metadata(
+                    fen
+                )
+                results.append(
+                    PositionScore(
+                        normalized_fen=fen,
+                        player_color=self.player_color,
+                        in_book=in_book,
+                        has_evidence=True,
+                        opening_score=opening_score,
+                        confidence=confidence,
+                        coverage=coverage,
+                        weighted_depth=depth,
+                        sample_size=sample_size,
+                        game_count=game_count,
+                        last_practiced_at=last_practiced_at,
+                        computed_at=self.now,
+                    )
+                )
+            else:
+                # Connected observed off-book node with no evidence at/below: a
+                # navigable no-data row, never a fabricated prior.
+                results.append(
+                    PositionScore(
+                        normalized_fen=fen,
+                        player_color=self.player_color,
+                        in_book=False,
+                        has_evidence=False,
+                        opening_score=None,
+                        confidence=None,
+                        coverage=None,
+                        weighted_depth=None,
+                        sample_size=0,
+                        game_count=0,
+                        last_practiced_at=None,
+                        computed_at=self.now,
+                    )
+                )
+        if telemetry is not None:
+            telemetry.domain_count = len(self._domain)
+            telemetry.scoreable_position_count = scoreable_count
+            telemetry.observed_off_book_row_count = off_book_count
+            telemetry.persisted_row_count = len(results)
+            telemetry.metric_key_count = len(self._metrics)
+        return results
+
+    def _base_root_score(self, root: OpeningRoot) -> RootScore:
+        key = _normalized(root.opening_key)
+        opening_score, confidence, coverage, depth = self._direct_metrics(key)
+        sample_size, game_count, last_practiced_at = self._aggregate_metadata(key)
         return RootScore(
             opening_key=root.opening_key,
             opening_name=root.opening_name,
             opening_family=root.opening_family,
             player_color=self.player_color,
-            opening_score=100.0 * score / perfect_score if perfect_score > 0 else 0.0,
-            confidence=(
-                100.0 * confidence / perfect_confidence
-                if perfect_confidence > 0
-                else 0.0
-            ),
-            coverage=100.0 * coverage,
+            opening_score=opening_score,
+            confidence=confidence,
+            coverage=coverage,
             weighted_depth=depth,
             sample_size=sample_size,
             game_count=game_count,
-            last_practiced_at=max(touches) if touches else None,
+            last_practiced_at=last_practiced_at,
             strongest_branch=None,
             weakest_branch=None,
             underexposed_branch=None,
@@ -748,6 +906,111 @@ class _SharedCalculator:
         return enriched
 
 
+def _select_named_roots(
+    calculator: _SharedCalculator,
+    named_roots: list[OpeningRoot],
+    *,
+    include_synthetic_root: bool,
+) -> tuple[list[OpeningRoot], set[str]]:
+    eligible = {
+        root.opening_key
+        for root in named_roots
+        if calculator.has_mastery_below(root.opening_key)
+    }
+    selected = [root for root in named_roots if root.opening_key in eligible]
+    if include_synthetic_root and not any(
+        root.opening_key == SYNTHETIC_INITIAL_FEN for root in selected
+    ):
+        # Reuse the same calculator/DAG pass for the whole-repertoire hero row.
+        selected = [_synthetic_initial_root(), *selected]
+    return selected, eligible
+
+
+def _populate_root_telemetry(
+    telemetry: CalcTelemetry,
+    calculator: _SharedCalculator,
+    named_roots: list[OpeningRoot],
+    result: dict[str, RootScore],
+) -> None:
+    telemetry.named_root_count = len(named_roots)
+    telemetry.actual_key_count = sum(1 for key in calculator._metrics if not key[1])
+    telemetry.perfect_key_count = sum(1 for key in calculator._metrics if key[1])
+    telemetry.calculation_misses = calculator.calculation_misses
+    telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(named_roots)
+    telemetry.unscored_root_count = sum(
+        1 for root in named_roots if root.opening_key not in result
+    )
+
+
+def _compute_scores(
+    player_color: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    roots: OpeningRoots,
+    config: RootCalcConfig | None,
+    now: datetime | None,
+    *,
+    debug: bool,
+    include_branch_summaries: bool,
+    include_synthetic_root: bool,
+    telemetry: CalcTelemetry | None,
+    include_position_scores: bool,
+    position_telemetry: PositionCalcTelemetry | None,
+) -> tuple[dict[str, RootScore], set[str], list[PositionScore]]:
+    """Build one shared calculator and derive named-root and direct position rows.
+
+    Single source of truth behind ``compute_all_root_scores`` (root rows only) and
+    ``compute_all_scores`` (root + position rows). One ``_SharedCalculator`` per call
+    means the named rows, the synthetic repertoire row, and the direct FEN rows all
+    reuse the same ``_metrics``, SCC cut, weights, and reachable caches.
+    """
+    config = config or RootCalcConfig()
+    now = now or datetime.now(timezone.utc)
+    named_roots = _iter_named_roots(roots)
+    has_quality = any(node.quality_count > 0 for node in overlay.nodes.values())
+    if not has_quality:
+        # No quality evidence anywhere: no named root and no in-book position is
+        # scoreable. Connected observed off-book positions still deserve navigable
+        # no-data rows (so the API can tell them from unknown FENs), so only the
+        # presence of such off-book endpoints justifies building the calculator on
+        # the position path. Otherwise return before any calculator is built.
+        need_off_book_rows = include_position_scores and bool(
+            observed_off_book_fens(overlay, graph)
+        )
+        if not need_off_book_rows:
+            # Populate telemetry with well-formed zeros (+ structural root counts)
+            # so empty/low-evidence pairs get counters rather than None.
+            if telemetry is not None:
+                telemetry.named_root_count = len(named_roots)
+                telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(
+                    named_roots
+                )
+                telemetry.unscored_root_count = len(named_roots)
+            return {}, set(), []
+    calculator = _SharedCalculator(
+        player_color, graph, overlay, roots, config, now, debug=debug
+    )
+    if has_quality:
+        selected, eligible = _select_named_roots(
+            calculator, named_roots, include_synthetic_root=include_synthetic_root
+        )
+        result = calculator.compute_roots(
+            selected, include_branch_summaries=include_branch_summaries
+        )
+    else:
+        # No quality: emit no named-root rows and no synthetic repertoire row — only
+        # the connected observed off-book no-data position rows computed below.
+        eligible, result = set(), {}
+    position_scores = (
+        calculator.compute_position_scores(telemetry=position_telemetry)
+        if include_position_scores
+        else []
+    )
+    if telemetry is not None:
+        _populate_root_telemetry(telemetry, calculator, named_roots, result)
+    return result, eligible, position_scores
+
+
 def compute_all_root_scores(
     player_color: str,
     graph: OpeningGraph,
@@ -761,49 +1024,59 @@ def compute_all_root_scores(
     include_synthetic_root: bool = False,
     telemetry: CalcTelemetry | None = None,
 ) -> tuple[dict[str, RootScore], set[str]]:
-    config = config or RootCalcConfig()
-    now = now or datetime.now(timezone.utc)
-    named_roots = _iter_named_roots(roots)
-    if not any(node.quality_count > 0 for node in overlay.nodes.values()):
-        # Early return before any calculator is built. Still populate telemetry
-        # with well-formed zeros (+ structural root counts) so empty/low-evidence
-        # pairs get counters rather than None.
-        if telemetry is not None:
-            telemetry.named_root_count = len(named_roots)
-            telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(named_roots)
-            telemetry.unscored_root_count = len(named_roots)
-        return {}, set()
-    calculator = _SharedCalculator(
-        player_color, graph, overlay, roots, config, now, debug=debug
+    result, eligible, _ = _compute_scores(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        config,
+        now,
+        debug=debug,
+        include_branch_summaries=include_branch_summaries,
+        include_synthetic_root=include_synthetic_root,
+        telemetry=telemetry,
+        include_position_scores=False,
+        position_telemetry=None,
     )
-    eligible = {
-        root.opening_key
-        for root in named_roots
-        if calculator.has_mastery_below(root.opening_key)
-    }
-    selected = [root for root in named_roots if root.opening_key in eligible]
-    if include_synthetic_root and not any(
-        root.opening_key == SYNTHETIC_INITIAL_FEN for root in selected
-    ):
-        # Reuse the same calculator/DAG pass for the whole-repertoire hero row.
-        selected = [_synthetic_initial_root(), *selected]
-    result = calculator.compute_roots(
-        selected, include_branch_summaries=include_branch_summaries
-    )
-    if telemetry is not None:
-        telemetry.named_root_count = len(named_roots)
-        telemetry.actual_key_count = sum(
-            1 for key in calculator._metrics if not key[1]
-        )
-        telemetry.perfect_key_count = sum(
-            1 for key in calculator._metrics if key[1]
-        )
-        telemetry.calculation_misses = calculator.calculation_misses
-        telemetry.raw_middlegame_root_count = _raw_middlegame_root_count(named_roots)
-        telemetry.unscored_root_count = sum(
-            1 for root in named_roots if root.opening_key not in result
-        )
     return result, eligible
+
+
+def compute_all_scores(
+    player_color: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    roots: OpeningRoots,
+    config: RootCalcConfig | None = None,
+    now: datetime | None = None,
+    *,
+    debug: bool = False,
+    include_branch_summaries: bool = True,
+    include_synthetic_root: bool = False,
+    telemetry: CalcTelemetry | None = None,
+    position_telemetry: PositionCalcTelemetry | None = None,
+) -> tuple[dict[str, RootScore], set[str], list[PositionScore]]:
+    """Named-root scores plus direct position-score rows from one shared traversal.
+
+    The position-row generation path for the opening tree read model: it returns
+    the same ``(scores, eligible)`` pair as :func:`compute_all_root_scores` together
+    with the list of :class:`PositionScore` rows to persist for ``(batch_id,
+    normalized_fen)`` lookup. Both share a single ``_SharedCalculator`` so named and
+    direct metrics can never disagree.
+    """
+    return _compute_scores(
+        player_color,
+        graph,
+        overlay,
+        roots,
+        config,
+        now,
+        debug=debug,
+        include_branch_summaries=include_branch_summaries,
+        include_synthetic_root=include_synthetic_root,
+        telemetry=telemetry,
+        include_position_scores=True,
+        position_telemetry=position_telemetry,
+    )
 
 
 def compute_root_score(

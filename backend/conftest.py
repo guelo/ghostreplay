@@ -271,6 +271,27 @@ def _create_test_schema(conn) -> None:
         )
     """))
     conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opening_position_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            player_color VARCHAR(5) NOT NULL,
+            normalized_fen TEXT NOT NULL,
+            in_book BOOLEAN NOT NULL,
+            has_evidence BOOLEAN NOT NULL,
+            opening_score FLOAT,
+            confidence FLOAT,
+            coverage FLOAT,
+            weighted_depth FLOAT,
+            sample_size INTEGER NOT NULL DEFAULT 0,
+            game_count INTEGER NOT NULL DEFAULT 0,
+            last_practiced_at TIMESTAMP,
+            computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, normalized_fen),
+            FOREIGN KEY (batch_id) REFERENCES opening_score_batches(id) ON DELETE CASCADE
+        )
+    """))
+    conn.execute(text("""
         CREATE TABLE IF NOT EXISTS blunder_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             blunder_id INTEGER NOT NULL,
@@ -292,6 +313,7 @@ def _create_test_schema(conn) -> None:
 def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS blunder_reviews"))
     conn.execute(text("DROP TABLE IF EXISTS blunder_opportunity_events"))
+    conn.execute(text("DROP TABLE IF EXISTS opening_position_scores"))
     conn.execute(text("DROP TABLE IF EXISTS user_opening_scores"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))

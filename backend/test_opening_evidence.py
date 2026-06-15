@@ -14,8 +14,19 @@ import pytest
 from sqlalchemy import text
 
 from app.fen import normalize_fen
-from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence, overlay_evidence
-from app.opening_graph import OpeningGraph, _fen_from_board, build_opening_graph
+from app.opening_evidence import (
+    EdgeEvidence,
+    EvidenceOverlay,
+    NodeEvidence,
+    observed_off_book_fens,
+    overlay_evidence,
+)
+from app.opening_graph import (
+    OpeningGraph,
+    OpeningGraphNode,
+    _fen_from_board,
+    build_opening_graph,
+)
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 
@@ -1093,3 +1104,52 @@ class TestReviews:
 
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
         assert ov.nodes == {}
+
+
+# ---------------------------------------------------------------------------
+# observed_off_book_fens: explicit contract for the tree position-score model.
+# ---------------------------------------------------------------------------
+
+
+def _two_node_graph() -> OpeningGraph:
+    nodes = {
+        FEN_ROOT: OpeningGraphNode(FEN_ROOT, "white"),
+        FEN_E4: OpeningGraphNode(FEN_E4, "black"),
+    }
+    nodes[FEN_ROOT].children["e2e4"] = FEN_E4
+    nodes[FEN_E4].parents.add((FEN_ROOT, "e2e4"))
+    graph = OpeningGraph(nodes, FEN_ROOT)
+    graph.freeze()
+    return graph
+
+
+def test_observed_off_book_fens_returns_only_off_book_endpoints():
+    graph = _two_node_graph()  # FEN_ROOT and FEN_E4 are in-book
+    off_book = FEN_E4C5  # not in the graph
+    overlay = EvidenceOverlay(1, "white")
+    # An in-book edge (both endpoints in graph) contributes nothing.
+    overlay.edges[(FEN_ROOT, FEN_E4)] = EdgeEvidence(FEN_ROOT, FEN_E4, "e2e4")
+    # An observed continuation off the book surfaces its off-book endpoint.
+    overlay.edges[(FEN_E4, off_book)] = EdgeEvidence(FEN_E4, off_book, "c7c5")
+
+    assert observed_off_book_fens(overlay, graph) == {off_book}
+
+
+def test_observed_off_book_fens_includes_both_off_book_endpoints():
+    graph = _two_node_graph()
+    off_book_parent = FEN_E4C5
+    off_book_child = FEN_E4E5NF3  # reuse another non-graph FEN for the deeper node
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(off_book_parent, off_book_child)] = EdgeEvidence(
+        off_book_parent, off_book_child, "g1f3"
+    )
+
+    assert observed_off_book_fens(overlay, graph) == {off_book_parent, off_book_child}
+
+
+def test_observed_off_book_fens_empty_when_all_edges_in_book():
+    graph = _two_node_graph()
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(FEN_ROOT, FEN_E4)] = EdgeEvidence(FEN_ROOT, FEN_E4, "e2e4")
+
+    assert observed_off_book_fens(overlay, graph) == set()

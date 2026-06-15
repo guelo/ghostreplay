@@ -370,6 +370,83 @@ class OpeningScoreBatch(Base):
     )
 
 
+class OpeningPositionScore(Base):
+    """Generation-scoped direct position-score read model for the opening tree.
+
+    Sibling of :class:`UserOpeningScore`, persisted under the same
+    ``opening_score_batches`` generation but keyed by ``(batch_id, normalized_fen)``
+    instead of a named-root contract. Holds direct per-position metrics for the
+    horizontal move tree so the tree read path never runs ``compute_root_score``
+    once per visible card.
+
+    Only rows the database actually needs are written (see
+    ``opening_rootcalc.compute_position_scores``):
+
+    - in-book positions with mastery evidence at/below the FEN (``has_evidence``);
+    - connected observed off-book positions (``in_book`` is false), which may carry
+      no-data metrics so the API can tell a navigable observed off-book node from
+      an arbitrary unknown FEN.
+
+    Static in-book positions with no evidence below are intentionally NOT
+    materialized — they are already represented by ``OpeningGraph``; the API returns
+    no-data for an in-graph FEN that is absent from the latest position batch. The
+    four metric columns are nullable: ``has_evidence`` false means no-data (null
+    score/confidence/coverage/weighted_depth, zero sample/game counts).
+
+    ``batch_id`` cascades on delete from ``opening_score_batches`` exactly like
+    ``user_opening_scores`` so retention pruning removes direct rows through the
+    same generation-retention path.
+    """
+
+    __tablename__ = "opening_position_scores"
+    __table_args__ = (
+        CheckConstraint(
+            "player_color in ('white','black')",
+            name="ck_opening_position_scores_player_color",
+        ),
+        UniqueConstraint(
+            "batch_id", "normalized_fen", name="uq_opening_position_scores_batch_fen"
+        ),
+        Index(
+            "idx_opening_position_scores_batch_fen", "batch_id", "normalized_fen"
+        ),
+        Index(
+            "idx_opening_position_scores_user_color", "user_id", "player_color"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("opening_score_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    # Normalized 4-field FEN — the position-score identity. Transpositions that
+    # differ only in halfmove/fullmove clocks collapse to one row here.
+    normalized_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    # True when the FEN is a reference OpeningGraph position. A persisted row with
+    # in_book=False is a connected observed off-book node.
+    in_book: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # True when mastery evidence exists at/below the FEN. False => no-data row:
+    # the four metric columns are null and sample/game counts are zero.
+    has_evidence: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    opening_score: Mapped[float | None] = mapped_column(Float)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    coverage: Mapped[float | None] = mapped_column(Float)
+    weighted_depth: Mapped[float | None] = mapped_column(Float)
+    sample_size: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Distinct games over the reachable subtree (see RootScore.game_count).
+    game_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_practiced_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
+    computed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class OpeningScoreCursor(Base):
     __tablename__ = "opening_score_cursors"
     __table_args__ = (

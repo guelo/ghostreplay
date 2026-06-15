@@ -12,9 +12,11 @@ from app.opening_rootcalc import (
     SYNTHETIC_ROOT_FAMILY,
     SYNTHETIC_ROOT_NAME,
     CalcTelemetry,
+    PositionCalcTelemetry,
     RootCalcConfig,
     _SharedCalculator,
     compute_all_root_scores,
+    compute_all_scores,
     compute_root_score,
     root_calc_config_fingerprint,
 )
@@ -582,3 +584,276 @@ def test_telemetry_populated_on_empty_early_return():
     assert tel.unscored_root_count == 2
     # Structural, so still reported even though no calculator was built.
     assert tel.raw_middlegame_root_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Direct position-score read model (g-tree-score-model).
+#
+# compute_position_scores emits one direct row per evidence-bearing reachable
+# position plus connected observed off-book nodes, reusing the SAME shared
+# calculator/_metrics traversal the named-root rows use (no per-position root
+# walk). Rows are keyed by normalized FEN; no-evidence in-book nodes are not
+# materialized; no-evidence connected off-book nodes are no-data rows.
+# ---------------------------------------------------------------------------
+
+
+def _position_rows(calculator, *, telemetry=None):
+    return {row.normalized_fen: row for row in calculator.compute_position_scores(telemetry=telemetry)}
+
+
+def _calculator(graph, overlay, roots, *, seeds=None, now=None):
+    return _SharedCalculator(
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(),
+        now or datetime.now(timezone.utc),
+        seeds=seeds,
+    )
+
+
+def test_position_row_metrics_match_named_root_score():
+    # A scoreable position's direct row carries the SAME opening_score/confidence/
+    # coverage/weighted_depth/sample_size as the named-root computation for that FEN.
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root, "Mainline"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.nodes[root] = _quality(root, 0.5, at=datetime(2026, 1, 1, tzinfo=timezone.utc))
+    overlay.nodes[e5] = _quality(e5, 0.5, at=datetime(2026, 1, 2, tzinfo=timezone.utc))
+    now = datetime(2026, 1, 3, tzinfo=timezone.utc)
+
+    named = compute_root_score(root, "white", graph, overlay, roots, now=now)
+    rows = _position_rows(_calculator(graph, overlay, roots, now=now))
+
+    assert root in rows
+    row = rows[root]
+    assert row.in_book is True
+    assert row.has_evidence is True
+    assert row.opening_score == pytest.approx(named.opening_score)
+    assert row.confidence == pytest.approx(named.confidence)
+    assert row.coverage == pytest.approx(named.coverage)
+    assert row.weighted_depth == pytest.approx(named.weighted_depth)
+    assert row.sample_size == named.sample_size
+    assert row.game_count == named.game_count
+    assert row.last_practiced_at == named.last_practiced_at
+
+
+def test_position_rows_skip_in_book_no_evidence_nodes():
+    # Static in-book positions with no evidence below are represented by the graph,
+    # not materialized as rows. The no-evidence opponent-turn leaf must NOT surface
+    # _calc's perfect-looking (1.0, 1.0, 1.0, 0.0) result.
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    unplayed = _positions(["d2d4"])[1]  # in-book sibling with no evidence below
+    graph = _graph([["e2e4", "e7e5"], ["d2d4"]])
+    roots = _roots(_root(root, "Mainline"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.nodes[e5] = _quality(e5, 0.5)  # evidence only deep on the e4 line
+
+    rows = _position_rows(_calculator(graph, overlay, roots))
+
+    # The user-turn leaf e5 (has its own quality) and its ancestors are scored.
+    assert e5 in rows and rows[e5].has_evidence is True
+    assert root in rows and rows[root].has_evidence is True
+    assert e4 in rows and rows[e4].has_evidence is True
+    # The opponent-turn no-evidence in-book sibling is absent — no fabricated score.
+    assert unplayed not in rows
+
+
+def test_position_rows_include_connected_observed_off_book_as_no_data():
+    # An observed off-book continuation with no evidence at/below is persisted as a
+    # navigable no-data row (in_book False, metrics None) so the API can tell it
+    # apart from an arbitrary unknown FEN.
+    root = _positions([])[0]
+    off_book = "8/8/8/8/8/8/4k3/4K3 b - -"  # not in graph
+    graph = _graph([[]])
+    roots = _roots(_root(root, "Start"))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(root, off_book)] = EdgeEvidence(root, off_book, "observed")
+    overlay.nodes[root] = _quality(root, 0.5)  # evidence at root, none at/below off_book
+
+    rows = _position_rows(_calculator(graph, overlay, roots))
+
+    assert off_book in rows
+    off_row = rows[off_book]
+    assert off_row.in_book is False
+    assert off_row.has_evidence is False
+    assert off_row.opening_score is None
+    assert off_row.confidence is None
+    assert off_row.coverage is None
+    assert off_row.weighted_depth is None
+    assert off_row.sample_size == 0
+    assert off_row.game_count == 0
+    assert off_row.last_practiced_at is None
+
+
+def test_position_rows_score_observed_off_book_with_evidence_below():
+    # An observed off-book node WITH quality at/below gets a scored row (in_book
+    # False, has_evidence True).
+    root = _positions([])[0]
+    off_book = "8/8/8/8/8/8/4k3/4K3 b - -"
+    graph = _graph([[]])
+    roots = _roots(_root(root, "Start"))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(root, off_book)] = EdgeEvidence(root, off_book, "observed")
+    overlay.nodes[off_book] = _quality(off_book, 1.0)
+
+    rows = _position_rows(_calculator(graph, overlay, roots))
+
+    assert off_book in rows
+    off_row = rows[off_book]
+    assert off_row.in_book is False
+    assert off_row.has_evidence is True
+    assert off_row.opening_score is not None
+    assert off_row.sample_size == 1
+
+
+def test_position_rows_dedupe_transpositions_to_one_row_per_fen():
+    # Two distinct UCI lines that reach the same normalized FEN collapse to ONE
+    # position row (position identity is normalized FEN).
+    root = _positions([])[0]
+    left = _positions(["e2e4"])[1]
+    right = _positions(["d2d4"])[1]
+    leaf = _positions(["e2e4", "e7e5"])[2]
+    graph = _graph([["e2e4"], ["d2d4"]])
+    graph._nodes.setdefault(leaf, OpeningGraphNode(leaf, active_color(leaf)))
+    graph._nodes[left].children["left-leaf"] = leaf
+    graph._nodes[right].children["right-leaf"] = leaf
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, left, "e2e4")
+    _prepared(overlay, root, right, "d2d4")
+    overlay.edges[(left, leaf)] = EdgeEvidence(left, leaf, "left-leaf")
+    overlay.edges[(right, leaf)] = EdgeEvidence(right, leaf, "right-leaf")
+    overlay.nodes[root] = _quality(root, 0.8)
+    overlay.nodes[leaf] = _quality(leaf, 0.9)
+
+    all_rows = _calculator(graph, overlay, roots).compute_position_scores()
+    leaf_rows = [row for row in all_rows if row.normalized_fen == leaf]
+    assert len(leaf_rows) == 1
+
+
+def test_position_rows_stop_at_book_middlegame_boundary():
+    # Reference-only book branches stop at the raw middlegame predicate, so a
+    # book middlegame child gets no position row; an observed continuation that
+    # crosses the boundary off-book still does.
+    root = _positions([])[0]
+    observed_middle = "8/8/8/8/8/8/4k3/4K3 b - -"
+    observed_continuation = "8/8/8/8/8/4k3/8/4K3 w - -"
+    book_middle = "8/8/8/8/8/8/3k4/4K3 b - -"
+    graph = _graph([[]])
+    graph._nodes[observed_middle] = OpeningGraphNode(observed_middle, "black")
+    graph._nodes[observed_continuation] = OpeningGraphNode(observed_continuation, "white")
+    graph._nodes[book_middle] = OpeningGraphNode(book_middle, "black")
+    graph._nodes[root].children = {"observed": observed_middle, "reference": book_middle}
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, observed_middle, "observed")
+    overlay.edges[(observed_middle, observed_continuation)] = EdgeEvidence(
+        observed_middle, observed_continuation, "continuation"
+    )
+    overlay.nodes[observed_continuation] = _quality(observed_continuation, 1.0)
+
+    rows = _position_rows(_calculator(graph, overlay, roots))
+
+    assert observed_continuation in rows
+    assert book_middle not in rows
+
+
+def test_position_scores_share_one_memoized_traversal():
+    # Direct rows for every scoreable position come from ONE shared memoized
+    # traversal: at most two _metrics records (natural + perfect) per reachable
+    # FEN, never one independent root walk per visible card.
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    deep = _positions(["e2e4", "e7e5", "g1f3"])[3]
+    graph = _graph([["e2e4", "e7e5", "g1f3"]])
+    roots = _roots(_root(root, "Mainline"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    _prepared(overlay, e5, deep, "g1f3")
+    overlay.nodes[root] = _quality(root, 0.5)
+    overlay.nodes[e5] = _quality(e5, 0.6)
+    overlay.nodes[deep] = _quality(deep, 0.7)
+    calculator = _calculator(graph, overlay, roots)
+
+    tel = PositionCalcTelemetry()
+    rows = calculator.compute_position_scores(telemetry=tel)
+
+    # Several scoreable positions, but the metric key count stays bounded by
+    # 2 * domain (one actual + one perfect per reachable FEN).
+    assert tel.scoreable_position_count >= 3
+    assert tel.metric_key_count == len(calculator._metrics)
+    assert tel.metric_key_count <= 2 * tel.domain_count
+    assert tel.persisted_row_count == len(rows)
+
+
+def test_compute_all_scores_shares_calculator_with_named_rows():
+    # compute_all_scores returns named rows AND position rows from one calculator;
+    # the named row and the position row for the same FEN carry identical metrics.
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root, "Mainline"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.nodes[root] = _quality(root, 0.5)
+    overlay.nodes[e5] = _quality(e5, 0.5)
+    now = datetime(2026, 1, 3, tzinfo=timezone.utc)
+
+    scores, eligible, positions = compute_all_scores(
+        "white", graph, overlay, roots, now=now, include_synthetic_root=True
+    )
+    by_fen = {row.normalized_fen: row for row in positions}
+
+    assert root in eligible
+    assert scores[root].opening_score == pytest.approx(by_fen[root].opening_score)
+    assert scores[root].coverage == pytest.approx(by_fen[root].coverage)
+    assert scores[root].sample_size == by_fen[root].sample_size
+    # The synthetic repertoire row anchors at the initial FEN, which is also the
+    # scored position row for that FEN (one shared traversal).
+    assert SYNTHETIC_INITIAL_FEN == root
+    assert by_fen[root].has_evidence is True
+
+
+def test_compute_all_scores_returns_no_positions_without_evidence():
+    root = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(root, "Start"))
+    overlay = EvidenceOverlay(1, "white")  # no quality and no observed edges
+
+    scores, eligible, positions = compute_all_scores("white", graph, overlay, roots)
+
+    assert scores == {}
+    assert eligible == set()
+    assert positions == []
+
+
+def test_compute_all_scores_emits_off_book_no_data_rows_without_any_quality():
+    # An overlay with a connected observed off-book edge but ZERO quality anywhere
+    # (e.g. a played game not yet analyzed) must still surface the navigable off-book
+    # no-data row. The named-root early-return optimization must not drop it, and it
+    # must NOT fabricate a named/synthetic row.
+    root = _positions([])[0]
+    off_book = "8/8/8/8/8/8/4k3/4K3 b - -"  # not in graph
+    graph = _graph([[]])
+    roots = _roots(_root(root, "Start"))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.edges[(root, off_book)] = EdgeEvidence(root, off_book, "observed")
+
+    scores, eligible, positions = compute_all_scores(
+        "white", graph, overlay, roots, include_synthetic_root=True
+    )
+
+    # No named/synthetic rows without quality...
+    assert scores == {}
+    assert eligible == set()
+    assert SYNTHETIC_INITIAL_FEN not in scores
+    # ...but the connected observed off-book node is a navigable no-data row,
+    # matching compute_position_scores() called directly.
+    by_fen = {row.normalized_fen: row for row in positions}
+    assert off_book in by_fen
+    assert by_fen[off_book].in_book is False
+    assert by_fen[off_book].has_evidence is False
+    assert by_fen[off_book].opening_score is None

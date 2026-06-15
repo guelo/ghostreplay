@@ -10,8 +10,50 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.models import UserOpeningScore
+from app.models import OpeningPositionScore, UserOpeningScore
 from app.opening_roots import OpeningRoots
+
+
+@dataclass(frozen=True)
+class CachedPositionScoreRow:
+    """Detached snapshot of one ``OpeningPositionScore`` row.
+
+    Mirrors the persisted direct position-score read model. ``has_evidence`` false
+    is a no-data row: the four metric fields are ``None`` and the counts are zero.
+    """
+
+    normalized_fen: str
+    player_color: str
+    in_book: bool
+    has_evidence: bool
+    opening_score: float | None
+    confidence: float | None
+    coverage: float | None
+    weighted_depth: float | None
+    sample_size: int
+    game_count: int
+    last_practiced_at: datetime | None
+
+
+def _snapshot_position_rows(
+    rows: list[OpeningPositionScore],
+) -> list[CachedPositionScoreRow]:
+    return [
+        CachedPositionScoreRow(
+            normalized_fen=row.normalized_fen,
+            player_color=row.player_color,
+            in_book=row.in_book,
+            has_evidence=row.has_evidence,
+            opening_score=row.opening_score,
+            confidence=row.confidence,
+            coverage=row.coverage,
+            weighted_depth=row.weighted_depth,
+            sample_size=row.sample_size,
+            game_count=row.game_count,
+            last_practiced_at=row.last_practiced_at,
+        )
+        for row in rows
+    ]
 
 
 @dataclass(frozen=True)
