@@ -2352,6 +2352,30 @@ The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree
 
 **Batched lookups** (one of each per request): the evidence overlay; the persisted position rows via `load_tree_position_rows` (stale-while-revalidate, mirroring §13.1 — warm schedules a background recompute, cold bootstraps once so a new user's tree is never permanently empty); the move-eval batch; and one root-eval for the column-0 start position. The response also returns `batch_computed_at` and `model_version` (`SCORE_MODEL_VERSION`).
 
+**Frontend `/openings` URL contract.** The canonical frontend URL is
+`/openings?color=white|black` plus a repeated UCI param `move=<uci>` (one per
+ply along the selected line). `src/openings/route.ts` owns this contract:
+`buildOpeningsSearchParams` builds the query for **all** callers, and
+`parseOpeningsSearchParams` / `buildCanonicalReplacement` parse and canonicalize
+the **new tree route**. The legacy `OpeningsPage` grid still parses
+`color`/`opening`/`path` inline; it adopts these parse/canonical helpers when it
+is rewritten (g-tree-page-state), after which no component hand-builds or
+inline-parses an `/openings` query string.
+
+- **Param mapping is 1:1 with the tree API request _except the color param is
+  renamed_:** frontend `color` → API **`player_color`**; `move` and `opening`
+  keep their names. A future tree API client must send `player_color=`, not
+  `color=` (the endpoint requires `player_color` and 422s on a bad/missing one).
+- `opening=<normalized FEN>` is the legacy deep-link entry, honored only when no
+  `move` is present, and is rewritten to the resolved `move=` line on response
+  (the frontend replaces the URL with `canonical_line` via
+  `buildCanonicalReplacement`, which returns `null` — no history write — when the
+  URL is already canonical).
+- The legacy `opening`+`path` named-grid URL form remains until `OpeningsPage` is
+  replaced (g-tree-page-state) and removed (g-tree-cleanup); during migration
+  `buildOpeningsSearchParams` still emits it byte-identically for callers that
+  pass `openingKey`/`path`.
+
 The legacy `GET /api/openings/children` card-grid endpoint stays available during the migration.
 
 ---
