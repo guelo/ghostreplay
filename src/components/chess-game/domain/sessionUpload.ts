@@ -158,10 +158,17 @@ export const buildDrillAnalysisSnapshot = (
     }
   });
 
+  // Start the review one ply BEFORE the player's last bad move (g-eflo), so the
+  // board shows the position they had to choose from rather than the mistake
+  // already played. Index -1 is AnalysisBoard's "starting position" sentinel, so
+  // a first-ply failure (failedMoveIndex === 0) correctly opens at the start.
+  // A null failedMoveIndex is a defensive fallback to the last move.
   const initialMoveIndex =
     moves.length === 0
       ? 0
-      : Math.min(Math.max(failedMoveIndex ?? 0, 0), moves.length - 1);
+      : failedMoveIndex === null
+        ? moves.length - 1
+        : Math.min(Math.max(failedMoveIndex - 1, -1), moves.length - 1);
 
   return { moves, positionAnalysis, playerColor, initialMoveIndex, sourceSessionId };
 };

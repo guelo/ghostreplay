@@ -80,18 +80,30 @@ describe("buildDrillAnalysisSnapshot", () => {
     expect(entry.best_line_uci).toEqual(["d2d4", "d7d5"]);
   });
 
-  it("clamps initialMoveIndex into range", () => {
-    const history = buildHistory();
+  it("starts one ply before the bad move, clamped into range (g-eflo)", () => {
+    const history = buildHistory(); // 3 plies, so last index is 2
     const analyses = new Map<number, AnalysisResult>();
 
+    // Out-of-range failedMoveIndex still clamps to the last move.
     expect(
       buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", 99, "sess-1")
         .initialMoveIndex,
     ).toBe(2);
+    // null failedMoveIndex is a defensive fallback to the last move.
     expect(
       buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", null, "sess-1")
         .initialMoveIndex,
-    ).toBe(0);
+    ).toBe(2);
+    // Bad move at index 2 -> open at index 1 (the position moved from).
+    expect(
+      buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", 2, "sess-1")
+        .initialMoveIndex,
+    ).toBe(1);
+    // Bad move is the first ply -> -1 == starting position sentinel.
+    expect(
+      buildDrillAnalysisSnapshot(history, analyses, STARTING_FEN, "white", 0, "sess-1")
+        .initialMoveIndex,
+    ).toBe(-1);
   });
 
   it("returns empty moves and initialMoveIndex 0 for empty history", () => {

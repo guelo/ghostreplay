@@ -788,7 +788,9 @@ describe("ChessGame characterization safeguards", () => {
     const snapshot = useDrillAnalysisStore.getState().snapshot!;
     // The late-resolved failed move's eval is included in the snapshot.
     expect(snapshot.moves[0]).toMatchObject({ move_san: "e4", eval_cp: 10 });
-    expect(snapshot.initialMoveIndex).toBe(0);
+    // First-ply failure (failedMoveIndex 0) resolves one ply earlier, to the
+    // starting-position sentinel (-1) (g-eflo).
+    expect(snapshot.initialMoveIndex).toBe(-1);
     expect(snapshot.warning).toBeNull();
   });
 
