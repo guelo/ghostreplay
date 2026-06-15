@@ -26,6 +26,7 @@ from app.opening_cache import (
     list_cached_opening_scores,
     list_position_scores,
     load_cached_rows,
+    load_tree_position_rows,
     lookup_position_scores,
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
@@ -1197,6 +1198,47 @@ def test_load_cached_rows_cold_no_evidence_serves_empty():
     assert rows == []
     refresh_now.assert_called_once_with(123, "black")
     request_recompute.assert_not_called()
+
+
+def test_load_tree_position_rows_warm_schedules_background():
+    """Warm (batch present): schedule a background recompute, then look up rows."""
+    sentinel = object()
+    with patch(
+        "app.opening_cache.get_latest_opening_score_batch", return_value=sentinel
+    ), patch(
+        "app.opening_cache.lookup_position_scores", return_value=(sentinel, {"x": 1})
+    ) as lookup, patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows = load_tree_position_rows("db", 123, "black", ["fen"])
+
+    assert batch is sentinel
+    assert rows == {"x": 1}
+    request_recompute.assert_called_once_with(123, "black")
+    refresh_now.assert_not_called()
+    lookup.assert_called_once_with("db", 123, "black", ["fen"])
+
+
+def test_load_tree_position_rows_cold_blocks_then_looks_up():
+    """Cold (no batch): block once on refresh_now (Bug F), then look up rows."""
+    with patch(
+        "app.opening_cache.get_latest_opening_score_batch", return_value=None
+    ), patch(
+        "app.opening_cache.lookup_position_scores", return_value=(None, {})
+    ) as lookup, patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows = load_tree_position_rows("db", 123, "black", ["fen"])
+
+    assert batch is None
+    assert rows == {}
+    refresh_now.assert_called_once_with(123, "black")
+    request_recompute.assert_not_called()
+    lookup.assert_called_once_with("db", 123, "black", ["fen"])
 
 
 # ---------------------------------------------------------------------------

@@ -418,6 +418,36 @@ def lookup_position_scores(
     return batch, {snapshot.normalized_fen: snapshot for snapshot in snapshots}
 
 
+def load_tree_position_rows(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+    fens: Iterable[str],
+) -> tuple[OpeningScoreBatch | None, dict[str, CachedPositionScoreRow]]:
+    """Stale-while-revalidate position-row reader for the opening tree endpoint.
+
+    Mirrors ``load_cached_rows``' freshness trigger so the tree shares the same
+    convergence behaviour as the card-grid readers: a WARM user (a batch exists)
+    is served the current rows immediately while a coalesced BACKGROUND recompute
+    is scheduled; a COLD user (no batch yet) gets one bounded synchronous compute
+    so the tree is not left permanently empty.
+
+    ``lookup_position_scores`` alone schedules nothing — calling it on a cold user
+    would return ``{}`` forever. Driving the scheduler here (and only here) keeps
+    the endpoint itself free of any scheduling logic and never does per-request
+    scoring on the request thread beyond the cold bootstrap.
+    """
+    # Lazy import mirrors load_cached_rows: opening_score_scheduler imports this
+    # module at load, so a module-level import would create a cycle.
+    from app.opening_score_scheduler import refresh_now, request_recompute
+
+    if get_latest_opening_score_batch(db, user_id, player_color) is None:
+        refresh_now(user_id, player_color)
+    else:
+        request_recompute(user_id, player_color)
+    return lookup_position_scores(db, user_id, player_color, fens)
+
+
 def list_opening_score_candidate_pairs(
     db: Session,
     *,

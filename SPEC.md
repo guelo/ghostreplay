@@ -2327,6 +2327,33 @@ The `/history` analysis footer renders an opening-lineage stack (`GameOpeningLin
 - **Single-action chip:** Each chip is one button. Clicking it (1) toggles the inline `OpeningFamilyCard` (analysis variant) and (2) selects that opening's root position on the board/MoveList/graph by jumping to the game move whose `fen_after` matches the opening key. A second click on the same chip collapses its card. If no game move matches the opening key, the board selection is a no-op (the card still toggles).
 - **In-card actions:** The link to `/openings` ("View in Openings") and the **Start Drill** button live inside the expanded card. Start Drill is a new opening-drill entry point from history — it navigates to `/play` with `drillSetup: { openingKey, playerColor }`.
 
+### 13.5 Opening Tree API (`GET /api/openings/tree`)
+
+The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree`. One request returns one hydrated **column** per position along a canonical move line, so a deep link or refresh renders in a single round trip. The endpoint does **zero per-request scoring**: structural shape comes from the opening graph + evidence overlay, direct metrics from the persisted batch (§5.7.4), and engine evals from `analysis_cache` (§14, via `app/tree_eval.py`).
+
+**Request.** `player_color=white|black` (required; bad color → 422). The selected line is given either as a repeated UCI param `move=e2e4&move=c7c5`, or — legacy, only when `move` is empty — as `opening=<normalized FEN>`. With neither, the line is empty (root).
+
+**Canonicalization contract.** The response `canonical_line` is the deepest valid navigable prefix of the request; the frontend caches and addresses by `(player_color, canonical_line)`.
+- A **malformed** UCI token, or an `opening` FEN that fails to parse, is a client error → **422** (never a silent truncate, never a 500).
+- A well-formed-but-stale move **truncates** the line (canonical-URL behavior) when it is not a navigable child, is illegal on the board (legality is checked **before** replay so a corrupt overlay edge cannot corrupt the line), revisits a position (cycle), or exceeds the 80-ply ceiling.
+- A legacy `opening` resolves via a deterministic shortest-path book BFS (explicit visited set, UCI tie-break) **re-validated through the same move validator**, so legacy and `move` entrypoints never diverge. An `opening` that parses but is unreachable / out of graph resolves to the empty line (root), not a 404.
+
+**Two child sets (parity with the scorer).** Per position:
+- `_structural_children` = observed edges (**always** — phase-authoritative) ∪ reference book children whose child is **not** a middlegame position. This is the **navigable** set and is identical to the scorer's domain (`opening_rootcalc._structural_children`); only a move in this set may enter `canonical_line` (`is_navigable`).
+- `_column_children` = the navigable set **plus**, when the parent is itself not a middlegame, the parent's middlegame book children as **display-only, non-navigable boundary** nodes. So `_column_children ⊇ _structural_children` always.
+
+**Terminal reasons** (precedence, checked via the board first so a short mate is never mislabeled): `checkmate` → `stalemate` → not navigable ⇒ `opening_boundary` (a display-only middlegame book boundary) → navigable dead-end ⇒ `opening_boundary` when the child is a middlegame position else `no_children` → null. The selected position's `selected_is_terminal` / `selected_terminal_reason` are derived directly from `pos[k]`, independent of columns; a leaf deepest position yields no column `k`.
+
+**Node hydration.** Each node carries `san`, `ply`, opening `name`/`eco` (a child without its own graph name inherits the deepest named ancestor along the line), `in_book` / `is_observed` / `is_prepared`, `user_choice_count` (edge live attempts) and `encounter_count` (edge traversals), the persisted direct metrics (`opening_score`, `confidence`, `coverage`, `sample_size`, `game_count`, `last_practiced_at`; absent ⇒ no-data), `eval_cp` / `eval_mate` (**white-relative**; the frontend converts per perspective), `drill_opening_key` (set only on named roots), and `is_selected`. In-book middlegame boundary nodes are outside the scorer domain, so their null metrics are structural-by-design.
+
+**Sorting** depends on the parent's side to move; **engine eval never reorders**. On the user's turn: observed first, then most-chosen, then weakest mastery (null last). On the opponent's turn: most-encountered first, then weakest mastery (null last). A destination/source/promotion/UCI tail makes distinct UCIs a total order.
+
+**Color specificity.** The reference book skeleton and the white-relative eval values are color-independent; the observed node set, counts, metrics, and sort are color-specific (the overlay filters by user **and** color). The backend holds no cross-color cache.
+
+**Batched lookups** (one of each per request): the evidence overlay; the persisted position rows via `load_tree_position_rows` (stale-while-revalidate, mirroring §13.1 — warm schedules a background recompute, cold bootstraps once so a new user's tree is never permanently empty); the move-eval batch; and one root-eval for the column-0 start position. The response also returns `batch_computed_at` and `model_version` (`SCORE_MODEL_VERSION`).
+
+The legacy `GET /api/openings/children` card-grid endpoint stays available during the migration.
+
 ---
 
 ## 14. Analysis Cache
