@@ -17,8 +17,6 @@ type DrillSetupPanelProps = {
   strictnessCp: number;
   maiaEloBins: readonly number[];
   botLabel: string;
-  winDelta: number;
-  lossDelta: number;
 
   // State
   isLoadingOpenings: boolean;
@@ -48,8 +46,6 @@ const DrillSetupPanel = ({
   strictnessCp,
   maiaEloBins,
   botLabel,
-  winDelta,
-  lossDelta,
   isLoadingOpenings,
   isStarting,
   startError,
@@ -128,11 +124,6 @@ const DrillSetupPanel = ({
           </div>
         </div>
       </div>
-      <p className="elo-stakes">
-        <span className="elo-stakes__win">Win +{winDelta}</span>
-        {" / "}
-        <span className="elo-stakes__loss">Loss {lossDelta}</span>
-      </p>
 
       <div className="drill-field">
         <span className="drill-field__label">Strictness</span>

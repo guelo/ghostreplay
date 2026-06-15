@@ -43,8 +43,6 @@ const makeProps = () => {
     strictnessCp: 25,
     maiaEloBins: [800, 1000, 1200] as const,
     botLabel: "Ghost Master 1000",
-    winDelta: 12,
-    lossDelta: -8,
     isLoadingOpenings: false,
     isStarting: false,
     startError: null,
