@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { buildEngineArrows, engineArrowColor } from "./AnalysisBoard.helpers";
 import type { EngineInfo } from "../workers/stockfishMessages";
 
-const BEST_MOVE_COLOR = "rgba(59, 130, 246, 0.85)";
-const DEFAULT_GREY = "rgba(150, 150, 150, 0.45)";
+const BEST_MOVE_COLOR = "rgba(59, 130, 246, 1.00)";
+const DEFAULT_BLUE = "rgba(59, 130, 246, 0.45)";
 
 const line = (
   uci: string,
@@ -28,7 +28,7 @@ describe("buildEngineArrows", () => {
   });
 
   describe("cp-loss ordering", () => {
-    it("best move is blue, others are grey with decreasing opacity", () => {
+    it("best move is solid blue, others are faded blue with decreasing opacity", () => {
       const lines: EngineInfo[] = [
         line("e2e4", { type: "cp", value: 30 }),
         line("d2d4", { type: "cp", value: 20 }),
@@ -38,9 +38,9 @@ describe("buildEngineArrows", () => {
 
       expect(arrows).toHaveLength(3);
       expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
-      // Both non-best arrows should be grey
-      expect(arrows[1].color).toMatch(/^rgba\(150, 150, 150,/);
-      expect(arrows[2].color).toMatch(/^rgba\(150, 150, 150,/);
+      // Both non-best arrows should be blue
+      expect(arrows[1].color).toMatch(/^rgba\(59, 130, 246,/);
+      expect(arrows[2].color).toMatch(/^rgba\(59, 130, 246,/);
       // Larger loss → lower opacity
       const opacity1 = parseFloat(arrows[1].color.match(/[\d.]+\)$/)![0]);
       const opacity2 = parseFloat(arrows[2].color.match(/[\d.]+\)$/)![0]);
@@ -49,7 +49,7 @@ describe("buildEngineArrows", () => {
   });
 
   describe("mate-vs-cp ordering", () => {
-    it("mate best move is blue, cp lines are grey at minimum opacity", () => {
+    it("mate best move is blue, cp lines are faded blue at minimum opacity", () => {
       const lines: EngineInfo[] = [
         line("e2e4", { type: "mate", value: 3 }),
         line("d2d4", { type: "cp", value: 200 }),
@@ -58,13 +58,13 @@ describe("buildEngineArrows", () => {
       const arrows = buildEngineArrows(lines);
 
       expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
-      expect(arrows[1].color).toMatch(/^rgba\(150, 150, 150,/);
-      expect(arrows[2].color).toMatch(/^rgba\(150, 150, 150,/);
+      expect(arrows[1].color).toMatch(/^rgba\(59, 130, 246,/);
+      expect(arrows[2].color).toMatch(/^rgba\(59, 130, 246,/);
       // Loss relative to mate is so large both cp lines hit minimum opacity
       const opacity1 = parseFloat(arrows[1].color.match(/[\d.]+\)$/)![0]);
       const opacity2 = parseFloat(arrows[2].color.match(/[\d.]+\)$/)![0]);
-      expect(opacity1).toBe(0.2);
-      expect(opacity2).toBe(0.2);
+      expect(opacity1).toBe(0.05);
+      expect(opacity2).toBe(0.05);
     });
 
     it("two mate lines get correct relative styling", () => {
@@ -75,12 +75,12 @@ describe("buildEngineArrows", () => {
       const arrows = buildEngineArrows(lines);
 
       expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
-      // mate-in-5 is worse than mate-in-1, so grey
-      expect(arrows[1].color).toMatch(/^rgba\(150, 150, 150,/);
+      // mate-in-5 is worse than mate-in-1, so faded blue
+      expect(arrows[1].color).toMatch(/^rgba\(59, 130, 246,/);
     });
   });
 
-  it("live line scoring higher than cached best stays at max grey opacity", () => {
+  it("live line scoring higher than cached best stays at max opacity", () => {
     const lines: EngineInfo[] = [
       line("e2e4", { type: "cp", value: 30 }),  // cached best
       line("d2d4", { type: "cp", value: 50 }),  // live line evaluates higher
@@ -88,14 +88,14 @@ describe("buildEngineArrows", () => {
     const arrows = buildEngineArrows(lines);
 
     expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
-    // Negative cpLoss must be clamped — grey arrow should not exceed 0.70
+    // Negative cpLoss must be clamped — alternate opacity caps at 0.75
     const opacity = parseFloat(arrows[1].color.match(/[\d.]+\)$/)![0]);
-    expect(opacity).toBeLessThanOrEqual(0.7);
-    expect(arrows[1].color).toBe("rgba(150, 150, 150, 0.70)");
+    expect(opacity).toBeLessThanOrEqual(0.75);
+    expect(arrows[1].color).toBe("rgba(59, 130, 246, 0.75)");
   });
 
   describe("missing-score fallback", () => {
-    it("scoreless first line is blue, scored later lines are grey", () => {
+    it("scoreless first line is blue, scored later lines are faded blue", () => {
       const lines: EngineInfo[] = [
         line("e2e4"), // cached best, no score
         line("d2d4", { type: "cp", value: 20 }),
@@ -104,11 +104,11 @@ describe("buildEngineArrows", () => {
       const arrows = buildEngineArrows(lines);
 
       expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
-      expect(arrows[1].color).toMatch(/^rgba\(150, 150, 150,/);
-      expect(arrows[2].color).toMatch(/^rgba\(150, 150, 150,/);
+      expect(arrows[1].color).toMatch(/^rgba\(59, 130, 246,/);
+      expect(arrows[2].color).toMatch(/^rgba\(59, 130, 246,/);
     });
 
-    it("all scoreless lines: first blue, rest default grey", () => {
+    it("all scoreless lines: first solid blue, rest default blue", () => {
       const lines: EngineInfo[] = [
         line("e2e4"),
         line("d2d4"),
@@ -117,8 +117,8 @@ describe("buildEngineArrows", () => {
       const arrows = buildEngineArrows(lines);
 
       expect(arrows[0].color).toBe(BEST_MOVE_COLOR);
-      expect(arrows[1].color).toBe(DEFAULT_GREY);
-      expect(arrows[2].color).toBe(DEFAULT_GREY);
+      expect(arrows[1].color).toBe(DEFAULT_BLUE);
+      expect(arrows[2].color).toBe(DEFAULT_BLUE);
     });
   });
 
@@ -145,25 +145,25 @@ describe("buildEngineArrows", () => {
 });
 
 describe("engineArrowColor", () => {
-  it("returns max opacity for 0 cp loss", () => {
-    expect(engineArrowColor(0)).toBe("rgba(150, 150, 150, 0.70)");
+  it("returns max opacity (0.75) for 0 cp loss", () => {
+    expect(engineArrowColor(0)).toBe("rgba(59, 130, 246, 0.75)");
   });
 
   it("returns min opacity for large cp loss", () => {
-    expect(engineArrowColor(500)).toBe("rgba(150, 150, 150, 0.20)");
+    expect(engineArrowColor(500)).toBe("rgba(59, 130, 246, 0.05)");
   });
 
   it("scales opacity between bounds", () => {
-    const color = engineArrowColor(100);
+    const color = engineArrowColor(30);
     const opacity = parseFloat(color.match(/[\d.]+\)$/)![0]);
-    expect(opacity).toBeGreaterThan(0.2);
-    expect(opacity).toBeLessThan(0.7);
+    expect(opacity).toBeGreaterThan(0.05);
+    expect(opacity).toBeLessThan(0.75);
   });
 
-  it("clamps negative cpLoss so opacity never exceeds 0.70", () => {
+  it("clamps negative cpLoss so opacity never exceeds 0.75", () => {
     const color = engineArrowColor(-50);
     const opacity = parseFloat(color.match(/[\d.]+\)$/)![0]);
-    expect(opacity).toBeLessThanOrEqual(0.7);
-    expect(engineArrowColor(-50)).toBe("rgba(150, 150, 150, 0.70)");
+    expect(opacity).toBeLessThanOrEqual(0.75);
+    expect(engineArrowColor(-50)).toBe("rgba(59, 130, 246, 0.75)");
   });
 });

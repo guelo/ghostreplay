@@ -2,7 +2,7 @@ import { forwardRef, memo, Profiler, useCallback, useEffect, useId, useImperativ
 import type { ProfilerOnRenderCallback } from "react";
 import { Chess } from "chess.js";
 import type { Square } from "chess.js";
-import { Chessboard } from "react-chessboard";
+import { Chessboard, defaultArrowOptions } from "react-chessboard";
 import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, PositionAnalysis } from "../utils/api";
 import type { EngineInfo } from "../workers/stockfishMessages";
@@ -1309,6 +1309,10 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                   animationDurationInMs: 200,
                   squareStyles,
                   arrows: allArrows,
+                  // Drive arrow opacity solely via each arrow's rgba alpha (best
+                  // move reaches a true 1.0) instead of the 0.65 default global
+                  // multiplier. arrowOptions is full-replace, so spread defaults.
+                  arrowOptions: { ...defaultArrowOptions, opacity: 1 },
                   boardStyle: {
                     borderRadius: "0",
                     boxShadow: "0 20px 45px rgba(2, 6, 23, 0.5)",

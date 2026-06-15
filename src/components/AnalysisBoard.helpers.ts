@@ -8,16 +8,20 @@ const uciToSquares = (uci: string) => ({
   endSquare: uci.slice(2, 4),
 });
 
-const BEST_MOVE_ARROW_COLOR = "rgba(59, 130, 246, 0.85)";
+const BEST_MOVE_ARROW_COLOR = "rgba(59, 130, 246, 1.00)";
 
-/** Grey arrow whose opacity fades as centipawn loss grows. */
+/**
+ * Blue arrow for the 2nd/3rd lines, opacity fading as centipawn loss grows.
+ * Caps at 0.8 (the best move is a separate, solid 1.0) so alternatives stay
+ * visibly distinct from the best move even when their evals are nearly equal.
+ */
 export const engineArrowColor = (cpLoss: number): string => {
   const clamped = Math.max(0, cpLoss);
-  const opacity = Math.max(0.2, Math.min(0.7, 0.7 - clamped / 300));
-  return `rgba(150, 150, 150, ${opacity.toFixed(2)})`;
+  const opacity = Math.max(0.05, Math.min(0.75, 0.75 - clamped / 100));
+  return `rgba(59, 130, 246, ${opacity.toFixed(2)})`;
 };
 
-const DEFAULT_GREY_ARROW = "rgba(150, 150, 150, 0.45)";
+const DEFAULT_BLUE_ARROW = "rgba(59, 130, 246, 0.45)";
 
 type MoveArrow = { startSquare: string; endSquare: string; color: string };
 
@@ -51,7 +55,7 @@ export function buildEngineArrows(
     } else if (bestScore !== null && scores[i] !== null) {
       color = engineArrowColor(bestScore - scores[i]!);
     } else {
-      color = DEFAULT_GREY_ARROW;
+      color = DEFAULT_BLUE_ARROW;
     }
 
     result.push({ ...squares, color });
