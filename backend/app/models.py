@@ -406,6 +406,10 @@ class UserOpeningScore(Base):
     coverage: Mapped[float] = mapped_column(Float, nullable=False)
     weighted_depth: Mapped[float] = mapped_column(Float, nullable=False)
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Distinct games over the opening's reachable subtree (see RootScore.game_count).
+    # server_default backfills batches written before this column existed; they
+    # repopulate on the next recompute (forced by the OPENING_EVIDENCE_INPUTS_VERSION bump).
+    game_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     last_practiced_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True))
     strongest_branch_name: Mapped[str | None] = mapped_column(Text)
     strongest_branch_key: Mapped[str | None] = mapped_column(Text)

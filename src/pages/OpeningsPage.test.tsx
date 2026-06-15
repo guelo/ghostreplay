@@ -94,6 +94,15 @@ function makeCurrentBranchStats(
     sample_size: 56,
     root_count: 4,
     ...overrides,
+    // Default the games count to the fixture's sample_size unless overridden, so
+    // existing "Games" assertions (which used to read sample_size) keep passing.
+    // Mirror sample_size INCLUDING null so the unscored hero still shows "—".
+    game_count:
+      overrides.game_count !== undefined
+        ? overrides.game_count
+        : overrides.sample_size !== undefined
+          ? overrides.sample_size
+          : 56,
   };
 }
 
@@ -116,6 +125,9 @@ function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
     weakest_root_family: "Root 1",
     weakest_root_score: 50,
     ...overrides,
+    // Mirror subtree_sample_size unless overridden so card "Games" assertions hold.
+    subtree_game_count:
+      overrides.subtree_game_count ?? overrides.subtree_sample_size ?? 10,
   };
 
   return {
@@ -400,6 +412,62 @@ describe("OpeningsPage", () => {
     });
     expect(within(heroStats).getByText("Repertoire-wide")).toBeInTheDocument();
     expect(heroStats).toHaveClass("openings-shell__stats-card--watch");
+  });
+
+  it("labels 'Games' with game_count, never sample_size (one game, nine plies)", async () => {
+    // Regression for the real bug: a single game played nine plies deep yields
+    // sample_size=9 but is ONE game. The "Games" metric must read game_count (1),
+    // not sample_size (9), in BOTH the hero stats and the opening card. Values are
+    // deliberately distinct so this proves the label reads the right field.
+    getOpeningBookMock.mockResolvedValueOnce({ entries: [] });
+    getOpeningChildrenMock.mockResolvedValueOnce(
+      makeResponse({
+        current_branch_stats: makeCurrentBranchStats({
+          score: 18,
+          confidence: 0.16,
+          coverage: 0,
+          sample_size: 9,
+          game_count: 1,
+          root_count: 1,
+        }),
+        children: [
+          makeChild({
+            opening_key: "polish-qid",
+            opening_name: "Polish Opening: Queen's Indian Variation",
+            child_count: 0,
+            subtree_score: 18,
+            subtree_sample_size: 9,
+            subtree_game_count: 1,
+          }),
+        ],
+      }),
+    );
+
+    renderPage();
+
+    // Hero: the Games metric shows game_count (1), and sample_size (9) appears nowhere.
+    const heroStats = screen.getByLabelText("Current branch stats");
+    await waitFor(() => {
+      expect(within(heroStats).getByText("Games")).toBeInTheDocument();
+    });
+    const heroGames = within(heroStats)
+      .getByText("Games")
+      .closest(".openings-shell__stats-metric")!;
+    expect(heroGames.querySelector("dd")?.textContent).toBe("1");
+    expect(within(heroStats).queryByText("9")).not.toBeInTheDocument();
+
+    // Card: same — the Games metric is the game_count, not the ply-derived sample_size.
+    const grid = await screen.findByRole("region", { name: "White openings" });
+    const card = within(grid)
+      .getByRole("heading", {
+        name: "Polish Opening: Queen's Indian Variation",
+      })
+      .closest("article")!;
+    const cardGames = within(card)
+      .getByText("Games")
+      .closest(".opening-family-card__metric")!;
+    expect(cardGames.querySelector("dd")?.textContent).toBe("1");
+    expect(within(card).queryByText("9")).not.toBeInTheDocument();
   });
 
   it("renders populated opening cards strongest-first with normalized percentages", async () => {

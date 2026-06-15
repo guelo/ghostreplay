@@ -24,6 +24,7 @@ class CachedOpeningScoreRow:
     coverage: float
     weighted_depth: float
     sample_size: int
+    game_count: int
     last_practiced_at: datetime | None
     strongest_branch_name: str | None
     strongest_branch_key: str | None
@@ -122,6 +123,7 @@ def _snapshot_cached_rows(rows: list[UserOpeningScore]) -> list[CachedOpeningSco
             coverage=row.coverage,
             weighted_depth=row.weighted_depth,
             sample_size=row.sample_size,
+            game_count=row.game_count,
             last_practiced_at=row.last_practiced_at,
             strongest_branch_name=row.strongest_branch_name,
             strongest_branch_key=row.strongest_branch_key,

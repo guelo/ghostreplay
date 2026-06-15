@@ -25,8 +25,8 @@ export function formatPercent(value: number | null): string {
   return `${Math.round(normalizePercentValue(value))}%`;
 }
 
-export function formatGames(value: number | null): string {
-  if (value === null) {
+export function formatGames(value: number | null | undefined): string {
+  if (value == null) {
     return "—";
   }
 

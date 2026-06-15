@@ -86,6 +86,7 @@ class RootScoreResponse(BaseModel):
     coverage: float
     weighted_depth: float
     sample_size: int
+    game_count: int
     last_practiced_at: datetime | None
     strongest_branch: BranchSummaryResponse | None
     weakest_branch: BranchSummaryResponse | None
@@ -150,6 +151,7 @@ class DrillDownRootItem(BaseModel):
     coverage: float | None
     weighted_depth: float | None
     sample_size: int | None
+    game_count: int | None
     last_practiced_at: datetime | None
     strongest_branch: DrillDownBranchSummary | None
     weakest_branch: DrillDownBranchSummary | None
@@ -176,6 +178,7 @@ class OpeningChildItem(BaseModel):
     subtree_confidence: float | None
     subtree_coverage: float | None
     subtree_sample_size: int
+    subtree_game_count: int
     subtree_root_count: int
     last_practiced_at: datetime | None
     weakest_root_key: str | None
@@ -195,6 +198,7 @@ class CurrentBranchStats(BaseModel):
     confidence: float | None
     coverage: float | None
     sample_size: int | None
+    game_count: int | None
     root_count: int
 
 
@@ -236,13 +240,19 @@ def _direct_branch_stats(row: CachedOpeningScoreRow | None) -> CurrentBranchStat
     """Direct-row current-branch stats. ``root_count`` is direct-row presence."""
     if row is None:
         return CurrentBranchStats(
-            score=None, confidence=None, coverage=None, sample_size=None, root_count=0
+            score=None,
+            confidence=None,
+            coverage=None,
+            sample_size=None,
+            game_count=None,
+            root_count=0,
         )
     return CurrentBranchStats(
         score=row.opening_score,
         confidence=row.confidence,
         coverage=row.coverage,
         sample_size=row.sample_size,
+        game_count=row.game_count,
         root_count=1,
     )
 
@@ -334,6 +344,7 @@ def build_drill_down_roots(
                     coverage=None,
                     weighted_depth=None,
                     sample_size=None,
+                    game_count=None,
                     last_practiced_at=None,
                     strongest_branch=None,
                     weakest_branch=None,
@@ -356,6 +367,7 @@ def build_drill_down_roots(
                 coverage=row.coverage,
                 weighted_depth=row.weighted_depth,
                 sample_size=row.sample_size,
+                game_count=row.game_count,
                 last_practiced_at=row.last_practiced_at,
                 strongest_branch=_make_drill_branch(
                     (
@@ -435,6 +447,7 @@ def build_opening_children(
                 subtree_confidence=direct.confidence if direct is not None else None,
                 subtree_coverage=direct.coverage if direct is not None else None,
                 subtree_sample_size=direct.sample_size if direct is not None else 0,
+                subtree_game_count=direct.game_count if direct is not None else 0,
                 # Navigation metadata only — count of scored named rows in subtree.
                 subtree_root_count=view.scored_root_count,
                 last_practiced_at=direct.last_practiced_at if direct is not None else None,
@@ -541,6 +554,7 @@ def _root_score_to_response(rs: RootScore) -> RootScoreResponse:
         coverage=rs.coverage,
         weighted_depth=rs.weighted_depth,
         sample_size=rs.sample_size,
+        game_count=rs.game_count,
         last_practiced_at=rs.last_practiced_at,
         strongest_branch=_branch_to_response(rs.strongest_branch),
         weakest_branch=_branch_to_response(rs.weakest_branch),

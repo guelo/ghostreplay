@@ -63,7 +63,7 @@ PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/deb
 #   - the set of columns the overlay consumes from any of these tables.
 # (DIVIDER_VERSION, QUALITY_VERSION, TAU_WC, TAU_CP, SCORE_MODEL_VERSION already
 # live in ``opening_score_inputs_fingerprint`` and remain there.)
-OPENING_EVIDENCE_INPUTS_VERSION = "raw-v1"
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v2"
 
 # White-before-black ordering within a single (session, move_number).
 _COLOR_RANK = {"white": 0, "black": 1}
@@ -93,6 +93,12 @@ class NodeEvidence:
     # mastery from these, not from the binary pass/fail counts above.
     quality_sum: float = 0.0
     quality_count: int = 0
+    # Distinct game_sessions that contributed live (played) evidence at this node.
+    # Counts games, not move-observations: a single game that revisits the same
+    # position adds one session id. The score calculator unions these across a
+    # reachable subtree to surface a true "Games" count (distinct from
+    # ``quality_count``, which counts move-observations).
+    session_ids: set[str] = field(default_factory=set)
     last_live_at: datetime | None = None
     review_attempts: int = 0
     review_passes: int = 0
@@ -213,6 +219,7 @@ def _record_node(overlay: EvidenceOverlay, mr: _MoveRow) -> None:
     if mr.eval_delta is None and mr.quality is None:
         return
     node = _get_or_create_node(overlay.nodes, mr.norm_before)
+    node.session_ids.add(mr.session_id)
     if mr.eval_delta is not None:
         node.live_attempts += 1
         if mr.eval_delta < PASS_THRESHOLD:

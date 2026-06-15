@@ -153,6 +153,7 @@ class OpeningLineageItem(BaseModel):
     confidence: float | None
     coverage: float | None
     sample_size: int | None
+    game_count: int | None
     path: list[str]
 
 
@@ -825,6 +826,7 @@ def get_session_openings(
                 confidence=direct.confidence if scored else None,
                 coverage=direct.coverage if scored else None,
                 sample_size=direct.sample_size if scored else None,
+                game_count=direct.game_count if scored else None,
                 path=[prev.opening_key for prev in chain[:index]],
             )
         )

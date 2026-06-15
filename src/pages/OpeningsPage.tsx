@@ -368,7 +368,7 @@ function OpeningsPage() {
                   </div>
                   <div className="openings-shell__stats-metric">
                     <dt>Games</dt>
-                    <dd>{formatGames(currentBranchStats?.sample_size ?? null)}</dd>
+                    <dd>{formatGames(currentBranchStats?.game_count ?? null)}</dd>
                   </div>
                   <div className="openings-shell__stats-metric">
                     <dt>Confidence</dt>
@@ -532,7 +532,7 @@ function OpeningsPage() {
                       playerColor={playerColor}
                       score={child.subtree_score}
                       coverage={child.subtree_coverage}
-                      sampleSize={child.subtree_sample_size}
+                      gameCount={child.subtree_game_count}
                       confidence={child.subtree_confidence}
                       isUnscored={isUnscored}
                       moveLine={openingMoveLine}

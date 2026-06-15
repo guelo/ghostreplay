@@ -22,6 +22,7 @@ function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
     confidence: 0.5,
     coverage: 0.5,
     sample_size: 5,
+    game_count: 2,
     path: [],
     ...overrides,
   };

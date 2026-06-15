@@ -20,7 +20,7 @@ const baseProps = {
   playerColor: "white" as const,
   score: 72,
   coverage: 0.5,
-  sampleSize: 10,
+  gameCount: 10,
   confidence: 0.8,
   isUnscored: false,
 };

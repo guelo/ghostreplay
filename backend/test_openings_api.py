@@ -293,6 +293,7 @@ def _make_row(batch_id: int = 1, user_id: int = 123, player_color: str = "white"
               opening_family: str = "Family A", opening_score: float = 60.0,
               confidence: float = 0.8, coverage: float = 0.5,
               weighted_depth: float = 3.0, sample_size: int = 10,
+              game_count: int = 1,
               last_practiced_at: datetime | None = None,
               strongest_branch_name: str | None = None,
               strongest_branch_key: str | None = None,
@@ -317,6 +318,7 @@ def _make_row(batch_id: int = 1, user_id: int = 123, player_color: str = "white"
         coverage=coverage,
         weighted_depth=weighted_depth,
         sample_size=sample_size,
+        game_count=game_count,
         last_practiced_at=last_practiced_at,
         strongest_branch_name=strongest_branch_name,
         strongest_branch_key=strongest_branch_key,
@@ -1392,6 +1394,7 @@ def test_family_drill_lazy_enrichment_does_not_reload_expired_cache_rows(
         coverage=0.7,
         weighted_depth=3.0,
         sample_size=12,
+        game_count=3,
         last_practiced_at=None,
         strongest_branch=BranchSummary(
             opening_key=DRILL_KEY_RUY_EXCHANGE,
@@ -1644,6 +1647,7 @@ def test_children_top_level_returns_structural_roots_without_scores(client, auth
         "confidence": None,
         "coverage": None,
         "sample_size": None,
+        "game_count": None,
         "root_count": 0,
     }
     assert data["computed_at"] is None
@@ -1693,6 +1697,7 @@ def test_children_top_level_current_branch_stats_use_synthetic_initial_row(
             "confidence": 0.66,
             "coverage": 0.5,
             "sample_size": 30,
+            "game_count": 1,
             "root_count": 1,
         }
     )
@@ -1744,6 +1749,7 @@ def test_children_drill_down_returns_immediate_children(client, auth_headers):
             "confidence": 0.4,
             "coverage": 0.6,
             "sample_size": 6,
+            "game_count": 1,
             "root_count": 1,
         }
     )
@@ -1838,6 +1844,7 @@ def test_children_canonicalizes_inconsistent_path_to_deepest_valid_prefix(
             "confidence": 0.4,
             "coverage": 0.6,
             "sample_size": 6,
+            "game_count": 1,
             "root_count": 1,
         }
     )
@@ -1946,6 +1953,7 @@ def test_children_subtree_aggregation_deduplicates_shared_descendants(client, au
     assert polish_item["subtree_root_count"] == 4
     # Direct-row semantics: card score/sample/coverage/last come from POLISH's own row.
     assert polish_item["subtree_sample_size"] == 6
+    assert polish_item["subtree_game_count"] == 1
     assert polish_item["subtree_score"] == pytest.approx(60.0)
     assert polish_item["subtree_confidence"] == pytest.approx(0.4)
     assert polish_item["subtree_coverage"] == pytest.approx(0.6)
@@ -1980,6 +1988,7 @@ def test_children_current_branch_stats_deduplicate_shared_descendants_for_drill_
         "confidence": None,
         "coverage": None,
         "sample_size": None,
+        "game_count": None,
         "root_count": 0,
     }
 

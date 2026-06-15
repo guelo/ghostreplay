@@ -17,7 +17,7 @@ export interface OpeningFamilyCardProps {
   playerColor: OpeningPlayerColor;
   score: number | null;
   coverage: number | null;
-  sampleSize: number | null;
+  gameCount: number | null;
   confidence: number | null;
   isUnscored: boolean;
   /** Full variant only: the move line for this opening. */
@@ -54,7 +54,7 @@ function OpeningFamilyCard({
   playerColor,
   score,
   coverage,
-  sampleSize,
+  gameCount,
   confidence,
   isUnscored,
   moveLine,
@@ -137,7 +137,7 @@ function OpeningFamilyCard({
         </div>
         <div className="opening-family-card__metric">
           <dt>Games</dt>
-          <dd>{formatGames(sampleSize)}</dd>
+          <dd>{formatGames(gameCount)}</dd>
         </div>
         <div className="opening-family-card__metric">
           <dt>Confidence</dt>

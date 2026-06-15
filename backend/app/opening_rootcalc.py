@@ -120,6 +120,7 @@ class RootScore:
     coverage: float
     weighted_depth: float
     sample_size: int
+    game_count: int
     last_practiced_at: datetime | None
     strongest_branch: BranchSummary | None
     weakest_branch: BranchSummary | None
@@ -625,6 +626,17 @@ class _SharedCalculator:
             for fen in reachable
             if (node := self._overlay_nodes.get(fen)) is not None
         )
+        # Distinct games over the reachable subtree: union of per-node session
+        # ids. Unlike ``sample_size`` (move-observations), a single game played
+        # through nine subtree positions counts once.
+        game_count = len(
+            {
+                session_id
+                for fen in reachable
+                if (node := self._overlay_nodes.get(fen)) is not None
+                for session_id in node.session_ids
+            }
+        )
         touches = [
             touch
             for fen in reachable
@@ -646,6 +658,7 @@ class _SharedCalculator:
             coverage=100.0 * coverage,
             weighted_depth=depth,
             sample_size=sample_size,
+            game_count=game_count,
             last_practiced_at=max(touches) if touches else None,
             strongest_branch=None,
             weakest_branch=None,

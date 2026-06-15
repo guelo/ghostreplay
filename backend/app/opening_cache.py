@@ -409,6 +409,7 @@ def recompute_opening_scores(
                         coverage=score.coverage,
                         weighted_depth=score.weighted_depth,
                         sample_size=score.sample_size,
+                        game_count=score.game_count,
                         last_practiced_at=score.last_practiced_at,
                         strongest_branch_name=(
                             score.strongest_branch.opening_name if score.strongest_branch else None

@@ -254,6 +254,7 @@ def _create_test_schema(conn) -> None:
             coverage FLOAT NOT NULL,
             weighted_depth FLOAT NOT NULL,
             sample_size INTEGER NOT NULL,
+            game_count INTEGER NOT NULL DEFAULT 0,
             last_practiced_at TIMESTAMP,
             strongest_branch_name TEXT,
             strongest_branch_key TEXT,

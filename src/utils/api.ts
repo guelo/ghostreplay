@@ -917,6 +917,7 @@ export interface OpeningLineageItem {
   confidence: number | null
   coverage: number | null
   sample_size: number | null
+  game_count: number | null
   path: string[]
 }
 
@@ -1077,6 +1078,7 @@ export interface OpeningChildItem {
   subtree_confidence: number | null
   subtree_coverage: number | null
   subtree_sample_size: number
+  subtree_game_count: number
   subtree_root_count: number
   last_practiced_at: string | null
   weakest_root_key: string | null
@@ -1096,6 +1098,7 @@ export interface CurrentBranchStats {
   confidence: number | null
   coverage: number | null
   sample_size: number | null
+  game_count: number | null
   root_count: number
 }
 

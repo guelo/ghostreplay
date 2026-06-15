@@ -70,7 +70,7 @@ function GameOpeningLineage({
                     playerColor={playerColor}
                     score={item.score}
                     coverage={item.coverage}
-                    sampleSize={item.sample_size}
+                    gameCount={item.game_count}
                     confidence={item.confidence}
                     isUnscored={isUnscored}
                     openingsHref={openingsHref}
