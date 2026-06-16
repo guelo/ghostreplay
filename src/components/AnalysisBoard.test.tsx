@@ -117,6 +117,17 @@ vi.mock('react-chessboard', () => ({
     }
     return <div data-testid={`${kind}-chessboard`} />
   },
+  defaultArrowOptions: {
+    color: '#ffaa00',
+    secondaryColor: '#4caf50',
+    tertiaryColor: '#f44336',
+    arrowLengthReducerDenominator: 8,
+    sameTargetArrowLengthReducerDenominator: 4,
+    arrowWidthDenominator: 5,
+    activeArrowWidthMultiplier: 0.9,
+    opacity: 0.65,
+    activeOpacity: 0.5,
+  },
 }))
 
 let capturedEvalBarProps: Record<string, unknown> = {}
