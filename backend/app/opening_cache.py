@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.fen import normalize_fen
 from app.game_phase import DIVIDER_VERSION
 from app.models import (
+    OpeningPositionEdge,
     OpeningPositionScore,
     OpeningScoreBatch,
     OpeningScoreCursor,
@@ -28,6 +29,7 @@ from app.opening_aggregate import (
 )
 from app.opening_evidence import (
     OPENING_EVIDENCE_INPUTS_VERSION,
+    EdgeEvidence,
     EvidenceOverlay,
     overlay_evidence,
     raw_evidence_inputs_digest,
@@ -62,6 +64,23 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # (user, color) on first read after deploy, backfilling position rows.
 SCORE_MODEL_VERSION = "sm-v2-2"
 
+# Persisted-read-model schema version. Bump when the SET of persisted batch
+# read-model tables/columns changes (NOT the scoring math — that is
+# SCORE_MODEL_VERSION). Folded into the registry fingerprint so a batch built
+# before the change reports registry drift and recomputes once per (user, color)
+# on first read, materializing the new rows.
+#
+# edges-v1: the batch now also carries opening_position_edges (the observed-edge
+# tree read model, g-tree-fast-cache). A batch predating this version matches no
+# current registry fingerprint, so the /tree path BLOCKS for a one-time bootstrap
+# (see ensure_tree_cache) rather than serving a book-only tree that silently hides
+# the user's observed moves until a later recompute lands.
+OPENING_SCORE_CACHE_SCHEMA_VERSION = "edges-v1"
+
+# Generous timeout for the one-time /tree bootstrap recompute: a heavy user pays
+# the full overlay rebuild once, inline, so edges exist before the tree is served.
+TREE_BOOTSTRAP_TIMEOUT = 30.0
+
 # Number of latest batches to retain per (user_id, player_color). keep=2 protects
 # a concurrent reader that holds the previous batch when a recompute lands; it does
 # not guarantee safety against two rapid recomputes (see g-prune-score-cache plan).
@@ -86,6 +105,7 @@ def opening_score_inputs_fingerprint(
         f"{graph.fingerprint}:{roots.fingerprint}:{root_calc_config_fingerprint()}"
         f":{SCORE_MODEL_VERSION}:{DIVIDER_VERSION}"
         f":{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
+        f":{OPENING_SCORE_CACHE_SCHEMA_VERSION}"
     )
 
 
@@ -419,34 +439,157 @@ def lookup_position_scores(
     return batch, {snapshot.normalized_fen: snapshot for snapshot in snapshots}
 
 
-def load_tree_position_rows(
+def ensure_tree_cache(
     db: Session,
     user_id: int,
     player_color: PlayerColor,
-    fens: Iterable[str],
-) -> tuple[OpeningScoreBatch | None, dict[str, CachedPositionScoreRow]]:
-    """Stale-while-revalidate position-row reader for the opening tree endpoint.
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+) -> tuple[int | None, datetime | None, str]:
+    """Resolve the batch the ``/api/openings/tree`` read path will serve from, and
+    fire the single stale-while-revalidate trigger for that request.
 
-    Mirrors ``load_cached_rows``' freshness trigger so the tree shares the same
-    convergence behaviour as the card-grid readers: a WARM user (a batch exists)
-    is served the current rows immediately while a coalesced BACKGROUND recompute
-    is scheduled; a COLD user (no batch yet) gets one bounded synchronous compute
-    so the tree is not left permanently empty.
+    Unlike the card-grid readers, the tree CANNOT tolerate serving a registry-stale
+    batch: a batch built before ``edges-v1`` carries zero ``opening_position_edges``
+    rows, so plain background revalidation would render a book-only tree and silently
+    hide the user's observed moves until a later recompute lands. Because the
+    read-model schema version is folded into the registry fingerprint, that case is
+    exactly "the latest batch's ``registry_fingerprint`` does not match the current
+    one," so on the tree path we upgrade registry/schema drift from background
+    revalidate to a BLOCKING bootstrap:
 
-    ``lookup_position_scores`` alone schedules nothing — calling it on a cold user
-    would return ``{}`` forever. Driving the scheduler here (and only here) keeps
-    the endpoint itself free of any scheduling logic and never does per-request
-    scoring on the request thread beyond the cold bootstrap.
+      - WARM-FRESH (a batch exists and its registry fingerprint matches): the edge
+        rows are present, so schedule a coalesced BACKGROUND recompute (evidence /
+        decay revalidation) and serve the cached batch immediately — non-blocking.
+      - COLD (no batch) or registry/schema drift (predates ``edges-v1`` ⇒ no edge
+        rows): BLOCK on ``refresh_now`` so the served tree carries its observed
+        edges. ``refresh_now`` is serialized through the scheduler's single writer
+        thread, so the recompute never runs on this request thread.
+
+    Returns the resolved ``(batch_id, batch_computed_at, cache_state)`` where the two
+    scalars are captured BEFORE the caller's ``db.rollback()`` (which expires every
+    ORM instance), so the builder never reads an ORM batch field after the rollback.
+    ``cache_state`` is diagnostic for the route timing log: ``"warm_fresh"`` (served
+    cached, background revalidate), ``"bootstrapped"`` (blocked on a recompute that
+    left a current-registry batch — cold-with-evidence or registry/schema drift,
+    edges now present), ``"book_only"`` (``refresh_now`` reached quiescence but wrote
+    no batch — a user with no evidence), or ``"bootstrap_timeout"`` (``refresh_now``
+    timed out and the latest batch is still missing or registry-stale, so this one
+    request degrades to a book-only tree while the background recompute finishes).
+
+    A pathologically heavy user whose bootstrap ``refresh_now`` times out is served
+    the registry-stale batch for that one request (``lookup_observed_edges_for_parent``
+    returns ``[]`` ⇒ book-only); the background recompute finishes and the next read
+    is correct and fast. That rare, logged degradation is preferred over serving a
+    wrong tree on every warm read.
     """
+    _validate_player_color(player_color)
     # Lazy import mirrors load_cached_rows: opening_score_scheduler imports this
     # module at load, so a module-level import would create a cycle.
     from app.opening_score_scheduler import refresh_now, request_recompute
 
-    if get_latest_opening_score_batch(db, user_id, player_color) is None:
-        refresh_now(user_id, player_color)
-    else:
+    current_registry = opening_score_inputs_fingerprint(graph, roots)
+    batch = get_latest_opening_score_batch(db, user_id, player_color)
+    warm_fresh = batch is not None and batch.registry_fingerprint == current_registry
+    if warm_fresh:
         request_recompute(user_id, player_color)
-    return lookup_position_scores(db, user_id, player_color, fens)
+        cache_state = "warm_fresh"
+    else:
+        refreshed = refresh_now(user_id, player_color, timeout=TREE_BOOTSTRAP_TIMEOUT)
+        if not refreshed:
+            logger.warning(
+                "tree_cache_bootstrap_timeout user_id=%s player_color=%s",
+                user_id,
+                player_color,
+            )
+        batch = get_latest_opening_score_batch(db, user_id, player_color)
+        # The bootstrap genuinely succeeded only if it left a batch whose registry
+        # matches the current one (so it carries this read model's edge rows). A
+        # timed-out refresh can leave the latest batch still registry-stale/edgeless
+        # — that single request degrades to a book-only tree, so report it distinctly
+        # ("bootstrap_timeout") rather than claiming a clean "bootstrapped" run. A
+        # quiescent refresh that simply wrote no batch is a genuine no-evidence user
+        # ("book_only").
+        if batch is not None and batch.registry_fingerprint == current_registry:
+            cache_state = "bootstrapped"
+        elif refreshed:
+            cache_state = "book_only"
+        else:
+            cache_state = "bootstrap_timeout"
+    # Snapshot scalars BEFORE the caller rolls back and expires the ORM row.
+    if batch is None:
+        return None, None, cache_state
+    return batch.id, batch.computed_at, cache_state
+
+
+def lookup_position_scores_for_batch(
+    db: Session,
+    batch_id: int,
+    fens: Iterable[str],
+) -> dict[str, CachedPositionScoreRow]:
+    """Look up direct position rows for ``fens`` within a specific batch.
+
+    Like ``lookup_position_scores`` but takes the already-resolved ``batch_id`` (the
+    tree route resolves it once via ``ensure_tree_cache``) instead of re-querying the
+    latest batch, so it neither re-triggers the scheduler nor touches the ORM batch
+    row after the route's ``db.rollback()``. Every incoming FEN is normalized to the
+    4-field read-model key before lookup. The returned map is keyed by normalized FEN
+    and contains only FENs that have a persisted row.
+    """
+    normalized = {_normalize_lookup_fen(fen) for fen in fens}
+    if not normalized:
+        return {}
+    rows = (
+        db.query(OpeningPositionScore)
+        .filter(
+            OpeningPositionScore.batch_id == batch_id,
+            OpeningPositionScore.normalized_fen.in_(normalized),
+        )
+        .all()
+    )
+    snapshots = _snapshot_position_rows(rows)
+    return {snapshot.normalized_fen: snapshot for snapshot in snapshots}
+
+
+def lookup_observed_edges_for_parent(
+    db: Session,
+    batch_id: int,
+    parent_fen: str,
+) -> list[EdgeEvidence]:
+    """Observed edges out of ``parent_fen`` for one batch, as ``EdgeEvidence``.
+
+    Powers the tree builder's bounded per-parent read via the
+    ``idx_opening_position_edges_batch_parent`` index: the builder discovers exactly
+    the parents it needs (visible line positions ∪ rendered frontier children) and
+    loads each lazily. ``parent_fen`` is the normalized 4-field key the edges were
+    stored under, matching the builder's ``norm_fen``, so no renormalization.
+
+    The tree never reads quality, so the reconstructed ``EdgeEvidence`` carries
+    ``quality_sum=0.0, quality_count=0`` (the columns are not persisted; see
+    ``OpeningPositionEdge``).
+    """
+    rows = (
+        db.query(OpeningPositionEdge)
+        .filter(
+            OpeningPositionEdge.batch_id == batch_id,
+            OpeningPositionEdge.parent_fen == parent_fen,
+        )
+        .all()
+    )
+    return [
+        EdgeEvidence(
+            parent_fen=row.parent_fen,
+            child_fen=row.child_fen,
+            uci=row.uci,
+            traversal_count=row.traversal_count,
+            live_attempts=row.live_attempts,
+            live_passes=row.live_passes,
+            live_fails=row.live_fails,
+            quality_sum=0.0,
+            quality_count=0,
+        )
+        for row in rows
+    ]
 
 
 def list_opening_score_candidate_pairs(
@@ -653,6 +796,36 @@ def recompute_opening_scores(
                     "player_color": player_color,
                     "position_row_count": len(position_scores),
                     "stage_seconds": round(time.monotonic() - insert_started, 4),
+                },
+            )
+
+        if overlay.edges:
+            edge_insert_started = time.monotonic()
+            db.add_all(
+                [
+                    OpeningPositionEdge(
+                        batch_id=batch.id,
+                        user_id=user_id,
+                        player_color=player_color,
+                        parent_fen=edge.parent_fen,
+                        child_fen=edge.child_fen,
+                        uci=edge.uci,
+                        traversal_count=edge.traversal_count,
+                        live_attempts=edge.live_attempts,
+                        live_passes=edge.live_passes,
+                        live_fails=edge.live_fails,
+                        computed_at=computed_at,
+                    )
+                    for edge in overlay.edges.values()
+                ]
+            )
+            logger.info(
+                "opening position-edge rows staged",
+                extra={
+                    "user_id": user_id,
+                    "player_color": player_color,
+                    "edge_row_count": len(overlay.edges),
+                    "stage_seconds": round(time.monotonic() - edge_insert_started, 4),
                 },
             )
 

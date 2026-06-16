@@ -12,6 +12,7 @@ from app.models import (
     Blunder,
     BlunderReview,
     GameSession,
+    OpeningPositionEdge,
     OpeningPositionScore,
     OpeningScoreBatch,
     OpeningScoreCursor,
@@ -22,12 +23,14 @@ from app.models import (
 from app.opening_cache import (
     OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
     ensure_opening_scores,
+    ensure_tree_cache,
     get_latest_opening_score_batch,
     list_cached_opening_scores,
     list_position_scores,
     load_cached_rows,
-    load_tree_position_rows,
+    lookup_observed_edges_for_parent,
     lookup_position_scores,
+    lookup_position_scores_for_batch,
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
@@ -812,7 +815,8 @@ def test_if_needed_recomputes_when_batch_stale_for_decay(db_session):
 
 @pytest.mark.parametrize(
     "const",
-    ["SCORE_MODEL_VERSION", "DIVIDER_VERSION", "QUALITY_VERSION", "TAU_WC", "TAU_CP"],
+    ["SCORE_MODEL_VERSION", "DIVIDER_VERSION", "QUALITY_VERSION", "TAU_WC", "TAU_CP",
+     "OPENING_SCORE_CACHE_SCHEMA_VERSION"],
 )
 def test_inputs_fingerprint_changes_with_model_curve_versions(monkeypatch, const):
     graph = get_opening_graph()
@@ -840,6 +844,37 @@ def test_model_version_bump_invalidates_existing_batch(db_session, monkeypatch):
     assert second.id != first.id
     assert second.generation > first.generation
     assert _count_batches(db_session, 123, "black") <= 2
+
+
+def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkeypatch):
+    """A read-model schema-version bump (folded into the registry fingerprint) drifts
+    a pre-existing batch and forces exactly one recompute on the next gated read, so a
+    batch built before the edge read model existed self-heals (materializing edges)."""
+    _seed_black_opening_session(db_session)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert first is not None
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == first.id)
+        .count()
+        > 0
+    )
+
+    monkeypatch.setattr(
+        "app.opening_cache.OPENING_SCORE_CACHE_SCHEMA_VERSION", "edges-v2"
+    )
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None
+    assert second.id != first.id  # registry drift forced a fresh batch
+    assert second.generation > first.generation
+    # The fresh batch carries its own edge rows.
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == second.id)
+        .count()
+        > 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1200,45 +1235,134 @@ def test_load_cached_rows_cold_no_evidence_serves_empty():
     request_recompute.assert_not_called()
 
 
-def test_load_tree_position_rows_warm_schedules_background():
-    """Warm (batch present): schedule a background recompute, then look up rows."""
-    sentinel = object()
-    with patch(
-        "app.opening_cache.get_latest_opening_score_batch", return_value=sentinel
-    ), patch(
-        "app.opening_cache.lookup_position_scores", return_value=(sentinel, {"x": 1})
-    ) as lookup, patch(
-        "app.opening_score_scheduler.refresh_now"
-    ) as refresh_now, patch(
+def test_ensure_tree_cache_warm_fresh_serves_without_blocking(db_session):
+    """Warm-fresh (batch present, registry matches): background revalidate, no block."""
+    graph = _make_graph()
+    roots = _make_roots()
+    batch = OpeningScoreBatch(
+        user_id=123, player_color="black", generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+        computed_at=datetime(2026, 6, 15, tzinfo=timezone.utc),
+    )
+    db_session.add(batch)
+    db_session.commit()
+
+    with patch("app.opening_score_scheduler.refresh_now") as refresh_now, patch(
         "app.opening_score_scheduler.request_recompute"
     ) as request_recompute:
-        batch, rows = load_tree_position_rows("db", 123, "black", ["fen"])
+        batch_id, computed_at, state = ensure_tree_cache(
+            db_session, 123, "black", graph, roots
+        )
 
-    assert batch is sentinel
-    assert rows == {"x": 1}
     request_recompute.assert_called_once_with(123, "black")
     refresh_now.assert_not_called()
-    lookup.assert_called_once_with("db", 123, "black", ["fen"])
+    assert batch_id == batch.id
+    # SQLite round-trips datetimes tz-naive; compare wall-clock components.
+    assert computed_at.replace(tzinfo=None) == datetime(2026, 6, 15)
+    assert state == "warm_fresh"
 
 
-def test_load_tree_position_rows_cold_blocks_then_looks_up():
-    """Cold (no batch): block once on refresh_now (Bug F), then look up rows."""
+def test_ensure_tree_cache_legacy_edgeless_batch_blocks_and_bootstraps(db_session):
+    """Finding #1: a batch predating edges-v1 (registry mismatch ⇒ no edge rows) must
+    BLOCK on refresh_now (not background-revalidate), so the served tree carries its
+    observed edges instead of silently rendering book-only. The resolved batch is the
+    freshly bootstrapped one, not the stale edgeless one."""
+    graph = _make_graph()
+    roots = _make_roots()
+    current_fp = opening_score_inputs_fingerprint(graph, roots)
+    stale = OpeningScoreBatch(
+        user_id=123, player_color="black", generation=1,
+        registry_fingerprint="pre-edges-v1",
+        computed_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(stale)
+    db_session.commit()
+
+    def _bootstrap(user_id, player_color, timeout=30.0):
+        # Stand in for the scheduler landing a fresh edges-v1 batch with edge rows.
+        fresh = OpeningScoreBatch(
+            user_id=user_id, player_color=player_color, generation=2,
+            registry_fingerprint=current_fp,
+            computed_at=datetime(2026, 6, 15, tzinfo=timezone.utc),
+        )
+        db_session.add(fresh)
+        db_session.commit()
+        return True
+
     with patch(
-        "app.opening_cache.get_latest_opening_score_batch", return_value=None
-    ), patch(
-        "app.opening_cache.lookup_position_scores", return_value=(None, {})
-    ) as lookup, patch(
-        "app.opening_score_scheduler.refresh_now"
+        "app.opening_score_scheduler.refresh_now", side_effect=_bootstrap
     ) as refresh_now, patch(
         "app.opening_score_scheduler.request_recompute"
     ) as request_recompute:
-        batch, rows = load_tree_position_rows("db", 123, "black", ["fen"])
+        batch_id, computed_at, state = ensure_tree_cache(
+            db_session, 123, "black", graph, roots
+        )
 
-    assert batch is None
-    assert rows == {}
-    refresh_now.assert_called_once_with(123, "black")
+    refresh_now.assert_called_once()  # BLOCKED on the bootstrap, did not background
     request_recompute.assert_not_called()
-    lookup.assert_called_once_with("db", 123, "black", ["fen"])
+    assert state == "bootstrapped"
+    assert computed_at.replace(tzinfo=None) == datetime(2026, 6, 15)
+    resolved = get_latest_opening_score_batch(db_session, 123, "black")
+    assert batch_id == resolved.id
+    assert batch_id != stale.id
+
+
+def test_ensure_tree_cache_no_evidence_returns_book_only(db_session):
+    """Cold user with no evidence: refresh_now writes no batch ⇒ (None, None, book_only)."""
+    graph = _make_graph()
+    roots = _make_roots()
+    with patch(
+        "app.opening_score_scheduler.refresh_now", return_value=True
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        result = ensure_tree_cache(db_session, 999, "white", graph, roots)
+
+    refresh_now.assert_called_once()
+    request_recompute.assert_not_called()
+    assert result == (None, None, "book_only")
+
+
+def test_ensure_tree_cache_bootstrap_timeout_no_batch_logs_warning(db_session, caplog):
+    """A bootstrap that times out (refresh_now False) with no batch logs a WARNING and
+    reports the degraded state distinctly (not a clean book-only)."""
+    graph = _make_graph()
+    roots = _make_roots()
+    with patch(
+        "app.opening_score_scheduler.refresh_now", return_value=False
+    ), patch("app.opening_score_scheduler.request_recompute"):
+        with caplog.at_level("WARNING"):
+            result = ensure_tree_cache(db_session, 999, "white", graph, roots)
+
+    assert result == (None, None, "bootstrap_timeout")
+    assert any("tree_cache_bootstrap_timeout" in r.message for r in caplog.records)
+
+
+def test_ensure_tree_cache_bootstrap_timeout_serves_stale_batch_distinctly(db_session):
+    """Finding: a timed-out bootstrap that leaves a registry-stale (edgeless) batch is
+    served for that one request but reported as 'bootstrap_timeout', never as a clean
+    'bootstrapped' — the timing log must not claim a successful bootstrap happened."""
+    graph = _make_graph()
+    roots = _make_roots()
+    stale = OpeningScoreBatch(
+        user_id=123, player_color="black", generation=1,
+        registry_fingerprint="pre-edges-v1",
+        computed_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(stale)
+    db_session.commit()
+
+    # refresh_now times out without landing a fresh batch (recompute still running).
+    with patch(
+        "app.opening_score_scheduler.refresh_now", return_value=False
+    ), patch("app.opening_score_scheduler.request_recompute"):
+        batch_id, _computed_at, state = ensure_tree_cache(
+            db_session, 123, "black", graph, roots
+        )
+
+    assert state == "bootstrap_timeout"
+    # The stale batch is still served (degraded read), not dropped to book_only-None.
+    assert batch_id == stale.id
 
 
 # ---------------------------------------------------------------------------
@@ -1361,3 +1485,111 @@ def test_lookup_position_scores_normalizes_four_field_noncanonical_ep(db_session
     batch, found = lookup_position_scores(db_session, 123, "black", [noncanonical])
     assert batch is not None
     assert KINGS_PAWN_FEN in found
+
+
+# ---------------------------------------------------------------------------
+# Observed-edge read model persistence + lookup (g-tree-fast-cache).
+# ---------------------------------------------------------------------------
+
+
+def test_recompute_persists_observed_edges(db_session):
+    """One OpeningPositionEdge per overlay.edges, with matching counters, so the tree
+    read path never rebuilds the overlay."""
+    _seed_black_opening_session(db_session)
+
+    # The overlay the scorer builds during recompute is a pure function of the same
+    # committed session_moves, so its edges are exactly what should be persisted.
+    overlay = _real_overlay_evidence(db_session, 123, "black", _make_graph())
+    expected = {
+        (e.parent_fen, e.child_fen): e for e in overlay.edges.values()
+    }
+    assert expected, "fixture should yield observed edges"
+
+    batch = recompute_opening_scores(db_session, 123, "black")
+
+    rows = (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch.id)
+        .all()
+    )
+    assert len(rows) == len(expected)
+    by_key = {(r.parent_fen, r.child_fen): r for r in rows}
+    assert set(by_key) == set(expected)
+    for key, row in by_key.items():
+        edge = expected[key]
+        assert row.uci == edge.uci
+        assert row.traversal_count == edge.traversal_count
+        assert row.live_attempts == edge.live_attempts
+        assert row.live_passes == edge.live_passes
+        assert row.live_fails == edge.live_fails
+        assert row.user_id == 123 and row.player_color == "black"
+        assert row.computed_at == batch.computed_at
+
+
+def test_edge_rows_cascade_through_batch_retention(db_session):
+    """Edge rows ride the same keep=2 generation retention + ON DELETE CASCADE as
+    position rows — pruned batches leave no orphan edge rows (exercises g-9zoe FK)."""
+    _seed_black_opening_session(db_session)
+
+    for _ in range(5):
+        recompute_opening_scores(db_session, 123, "black")
+
+    kept_ids = {
+        b.id
+        for b in db_session.query(OpeningScoreBatch)
+        .filter(
+            OpeningScoreBatch.user_id == 123,
+            OpeningScoreBatch.player_color == "black",
+        )
+        .all()
+    }
+    assert len(kept_ids) == 2
+    # Surviving batches still carry their edge rows...
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id.in_(kept_ids))
+        .count()
+        > 0
+    )
+    # ...and pruned batches' edge rows are gone (no orphans).
+    assert (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id.notin_(kept_ids))
+        .count()
+        == 0
+    )
+
+
+def test_lookup_observed_edges_for_parent_reconstructs_edge_evidence(db_session):
+    """The read side returns EdgeEvidence with quality zeroed (not persisted), keyed
+    to one parent via the bounded per-parent index."""
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores(db_session, 123, "black")
+
+    edges = lookup_observed_edges_for_parent(db_session, batch.id, KINGS_PAWN_FEN)
+    assert edges, "1.e4 e5 is an observed edge out of KINGS_PAWN_FEN"
+    edge = next(e for e in edges if e.uci == "e7e5")
+    assert edge.parent_fen == KINGS_PAWN_FEN
+    assert edge.child_fen == OPEN_GAME_FEN
+    assert edge.traversal_count >= 1
+    # Quality columns are not persisted; the tree never reads them.
+    assert edge.quality_sum == 0.0
+    assert edge.quality_count == 0
+    # A parent with no observed edges resolves to an empty list (book-only).
+    assert lookup_observed_edges_for_parent(db_session, batch.id, TWO_KNIGHTS_FEN) == []
+
+
+def test_lookup_position_scores_for_batch_resolves_by_batch(db_session):
+    """The batch-scoped position lookup normalizes raw FENs and resolves rows for the
+    given batch_id without re-querying the latest batch or touching the ORM row."""
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores(db_session, 123, "black")
+
+    found = lookup_position_scores_for_batch(
+        db_session, batch.id, [KINGS_PAWN_FULL, KNIGHT_OPENING_FULL]
+    )
+    assert KINGS_PAWN_FEN in found
+    assert KNIGHT_OPENING_FEN in found
+    assert found[KINGS_PAWN_FEN].opening_score is not None
+    # Empty input short-circuits.
+    assert lookup_position_scores_for_batch(db_session, batch.id, []) == {}

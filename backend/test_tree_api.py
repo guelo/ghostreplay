@@ -12,15 +12,22 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import chess
 import pytest
 
 from app.fen import normalize_fen
-from app.models import AnalysisCache, OpeningPositionScore, OpeningScoreBatch
+from app.models import (
+    AnalysisCache,
+    OpeningPositionEdge,
+    OpeningPositionScore,
+    OpeningScoreBatch,
+)
 from app.opening_aggregate import CachedPositionScoreRow
+from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -110,6 +117,19 @@ def _obs_edge(ucis: list[str], **counts) -> tuple[tuple[str, str], EdgeEvidence]
     return (parent, child), edge
 
 
+def _observed_by_parent(overlay: EvidenceOverlay) -> dict[str, list[EdgeEvidence]]:
+    """Group an overlay's observed edges by normalized parent FEN.
+
+    The persisted ``opening_position_edges`` read model is keyed by
+    ``(batch_id, parent_fen)``; this reproduces that grouping in memory so the
+    patched ``lookup_observed_edges_for_parent`` can serve each parent's edges.
+    """
+    by_parent: dict[str, list[EdgeEvidence]] = defaultdict(list)
+    for (parent_fen, _child_fen), edge in overlay.edges.items():
+        by_parent[parent_fen].append(edge)
+    return by_parent
+
+
 def _full_fen(ucis: list[str]) -> str:
     board = chess.Board()
     for uci in ucis:
@@ -144,15 +164,36 @@ def _pos_row(fen: str, *, score=None, confidence=None, coverage=None,
 def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
           batch=None, position_rows=None, move_evals=None, root_eval=None,
           mid_fens=None, user_id=123):
-    """Issue a GET /tree with all DB-touching collaborators patched."""
+    """Issue a GET /tree with all DB-touching collaborators patched.
+
+    The persisted tree read models are simulated in memory: ``ensure_tree_cache``
+    resolves a ``(batch_id, computed_at, cache_state)`` triple, observed edges are
+    served from the ``overlay`` fixture via the patched per-parent lookup, and
+    position rows from ``position_rows`` via the patched batch lookup. ``batch_id`` is
+    non-None whenever the fixture carries any cache content (a batch, observed edges,
+    or position rows); the cold/no-evidence book-only path is modelled by leaving all
+    three empty so ``batch_id`` resolves to None.
+    """
     graph = graph or _make_graph()
     roots = roots or _make_roots()
     overlay = overlay if overlay is not None else _overlay("white")
     position_rows = position_rows or {}
     move_evals = move_evals or {}
+    observed_by_parent = _observed_by_parent(overlay)
 
-    def _ltpr(db, uid, color, fens):
-        return batch, position_rows
+    has_cache = batch is not None or bool(observed_by_parent) or bool(position_rows)
+    batch_id = (batch.id if batch is not None else 1) if has_cache else None
+    batch_computed_at = batch.computed_at if batch is not None else None
+    cache_state = "book_only" if batch_id is None else "warm_fresh"
+
+    def _ensure(db, uid, color, g, r):
+        return batch_id, batch_computed_at, cache_state
+
+    def _loep(db, b_id, parent_fen):
+        return list(observed_by_parent.get(parent_fen, []))
+
+    def _lpsfb(db, b_id, fens):
+        return position_rows
 
     def _lme(db, requests):
         # move_evals may be keyed by uci (tests use unique ucis per column).
@@ -164,8 +205,9 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
     cms = [
         patch("app.api.openings.get_opening_graph", return_value=graph),
         patch("app.api.openings.get_opening_roots", return_value=roots),
-        patch("app.api.openings.overlay_evidence", return_value=overlay),
-        patch("app.api.openings.load_tree_position_rows", side_effect=_ltpr),
+        patch("app.api.openings.ensure_tree_cache", side_effect=_ensure),
+        patch("app.api.openings.lookup_observed_edges_for_parent", side_effect=_loep),
+        patch("app.api.openings.lookup_position_scores_for_batch", side_effect=_lpsfb),
         patch("app.api.openings.lookup_move_evals", side_effect=_lme),
         patch("app.api.openings.lookup_root_eval", side_effect=_lre),
     ]
@@ -176,6 +218,29 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
         for cm in cms:
             stack.enter_context(cm)
         return client.get(TREE_URL, params=params, headers=auth_headers(user_id=user_id))
+
+
+def _make_builder(graph, roots, overlay, player_color="white", *, batch_id=1,
+                  batch_computed_at=None, user_id=123):
+    """Construct an _OpeningTreeBuilder whose observed edges resolve from ``overlay``.
+
+    Returns ``(builder, patch_cm)``: enter ``patch_cm`` around any call that reaches
+    ``_observed_children`` so the per-parent lookup is served from the in-memory
+    overlay instead of the real ``opening_position_edges`` table.
+    """
+    from app.api.openings import _OpeningTreeBuilder
+
+    by_parent = _observed_by_parent(overlay)
+
+    def _loep(db, b_id, parent_fen):
+        return list(by_parent.get(parent_fen, []))
+
+    builder = _OpeningTreeBuilder(
+        None, graph, roots, batch_id, batch_computed_at, player_color, user_id
+    )
+    return builder, patch(
+        "app.api.openings.lookup_observed_edges_for_parent", side_effect=_loep
+    )
 
 
 def _ucis(column: dict) -> list[str]:
@@ -241,7 +306,9 @@ def test_tree_timing_log_can_be_forced(client, auth_headers, monkeypatch, caplog
     assert resp.status_code == 200
     messages = [record.getMessage() for record in caplog.records]
     timing = next(message for message in messages if message.startswith("opening_tree timing"))
-    assert "overlay_ms=" in timing
+    assert "ensure_cache_ms=" in timing
+    assert "cache_state=" in timing
+    assert "observed_edge_queries=" in timing
     assert "position_rows_ms=" in timing
     assert "move_evals_ms=" in timing
     assert "total_ms=" in timing
@@ -311,16 +378,15 @@ def test_tree_cycle_truncates():
     # A knight round-trip (Nf3 Nf6 Ng1 Ng8) returns to START's normalized FEN. The
     # visited-set guard must truncate before re-entering it. Drive the builder's
     # resolver directly with observed edges forming the cycle.
-    from app.api.openings import _OpeningTreeBuilder
-
     round_trip = ["g1f3", "g8f6", "f3g1", "f6g8"]
     edges = dict(_obs_edge(round_trip[: i + 1], traversal_count=1)
                  for i in range(len(round_trip)))
     overlay = _overlay("white", edges=edges)
     root_only = OpeningGraph({START: _node(START)}, START)
-    builder = _OpeningTreeBuilder(None, root_only, _make_roots(), overlay, "white", 123)
-    # The 4th move would revisit START (already seeded) -> truncate to 3 moves.
-    assert builder._resolve_moves(round_trip) == ["g1f3", "g8f6", "f3g1"]
+    builder, observed_patch = _make_builder(root_only, _make_roots(), overlay)
+    with observed_patch:
+        # The 4th move would revisit START (already seeded) -> truncate to 3 moves.
+        assert builder._resolve_moves(round_trip) == ["g1f3", "g8f6", "f3g1"]
 
 
 def test_tree_legacy_opening_resolves_via_bfs(client, auth_headers):
@@ -633,7 +699,6 @@ def test_tree_engine_eval_does_not_reorder(client, auth_headers):
 # --- parity with the scorer's structural domain (finding #2) -----------------
 
 def test_structural_children_parity_with_scorer(client, auth_headers):
-    from app.api.openings import _OpeningTreeBuilder
     from app.opening_rootcalc import RootCalcConfig, _SharedCalculator
 
     graph = _make_graph()
@@ -643,13 +708,14 @@ def test_structural_children_parity_with_scorer(client, auth_headers):
     overlay = _overlay("white", edges={edge_key: edge})
 
     now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    builder, observed_patch = _make_builder(graph, roots, overlay)
     # Patch the phase predicate in BOTH namespaces so API and scorer agree that
     # NC6 is a middlegame position (excluded from the navigable domain).
     with (
+        observed_patch,
         patch("app.api.openings.is_middlegame_position", side_effect=lambda f: f == NC6),
         patch("app.opening_rootcalc.is_middlegame_position", side_effect=lambda f: f == NC6),
     ):
-        builder = _OpeningTreeBuilder(None, graph, roots, overlay, "white", 123)
         calc = _SharedCalculator("white", graph, overlay, roots, RootCalcConfig(), now)
         for position in [START, E4, E4E5, NF3]:
             api_set = {ce.child_fen for ce in builder._structural_children(position).values()}
@@ -666,12 +732,21 @@ def test_structural_children_parity_with_scorer(client, auth_headers):
 # --- end-to-end: real position-row + eval lookups against a seeded DB ---------
 
 def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
-    """Exercise the real load_tree_position_rows + analysis_cache eval lookups
-    (only the graph/roots/overlay and the scheduler are stubbed)."""
+    """Exercise the real ensure_tree_cache + lookup_observed_edges_for_parent +
+    lookup_position_scores_for_batch + analysis_cache eval lookups against a seeded
+    batch (only the graph/roots and the scheduler are stubbed). The request path must
+    NOT rebuild overlay_evidence."""
+    graph = _make_graph()
+    roots = _make_roots()
     start_full = chess.Board().fen()
 
-    batch = OpeningScoreBatch(user_id=123, player_color="white", generation=1,
-                              computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc))
+    # Warm-fresh batch: its registry fingerprint matches the current graph/roots so
+    # ensure_tree_cache serves it without a blocking bootstrap.
+    batch = OpeningScoreBatch(
+        user_id=123, player_color="white", generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+        computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+    )
     db_session.add(batch)
     db_session.flush()
     db_session.add(OpeningPositionScore(
@@ -679,6 +754,14 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
         normalized_fen=E4E5, in_book=True, has_evidence=True,
         opening_score=64.0, confidence=0.5, coverage=0.4, weighted_depth=2.0,
         sample_size=7, game_count=2,
+        computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+    ))
+    # A persisted observed edge for the in-book 1...e5 reply, read by the real
+    # lookup_observed_edges_for_parent (no overlay rebuild).
+    db_session.add(OpeningPositionEdge(
+        batch_id=batch.id, user_id=123, player_color="white",
+        parent_fen=E4, child_fen=E4E5, uci="e7e5",
+        traversal_count=6, live_attempts=2, live_passes=1, live_fails=1,
         computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
     ))
     # Eval rows: a played eval for 1.e4 and a best eval at the start position.
@@ -690,9 +773,9 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
     db_session.commit()
 
     with (
-        patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
-        patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
-        patch("app.api.openings.overlay_evidence", return_value=_overlay("white")),
+        patch("app.api.openings.get_opening_graph", return_value=graph),
+        patch("app.api.openings.get_opening_roots", return_value=roots),
+        patch("app.api.openings.overlay_evidence") as overlay_spy,
         patch("app.opening_score_scheduler.request_recompute"),
         patch("app.opening_score_scheduler.refresh_now", return_value=False),
     ):
@@ -701,13 +784,75 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
                           headers=auth_headers())
 
     assert resp.status_code == 200
+    # The hot read path never rebuilds the evidence overlay.
+    overlay_spy.assert_not_called()
     data = resp.json()
     assert "2026-06-12" in data["batch_computed_at"]
     # Root eval comes from the start position's best_eval.
     assert data["root_eval_cp"] == 28
     # The 1.e4 node carries its played eval.
     assert _by_uci(data["columns"][0], "e2e4")["eval_cp"] == 33
-    # The e7e5 node hydrates the persisted E4E5 metric row.
+    # The e7e5 node hydrates the persisted E4E5 metric row AND the observed edge.
     e5 = _by_uci(data["columns"][1], "e7e5")
     assert e5["opening_score"] == pytest.approx(64.0)
     assert e5["sample_size"] == 7 and e5["game_count"] == 2
+    assert e5["is_observed"] is True
+    assert e5["encounter_count"] == 6
+    assert e5["user_choice_count"] == 2
+
+
+# --- warm read: no overlay rebuild, bounded per-parent edge lookups -----------
+
+def test_tree_warm_read_no_overlay_rebuild_and_bounded_edge_queries(client, auth_headers):
+    """A warm read serves observed edges from the cache via bounded per-parent point
+    queries and never rebuilds overlay_evidence on the request thread."""
+    edge_key, edge = _obs_edge(["e2e4", "e7e5", "d2d4"], traversal_count=2,
+                               live_attempts=1)
+    overlay = _overlay("white", edges={edge_key: edge})
+    by_parent = _observed_by_parent(overlay)
+    loep = MagicMock(side_effect=lambda db, b_id, parent_fen: list(by_parent.get(parent_fen, [])))
+
+    with (
+        patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
+        patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
+        patch("app.api.openings.ensure_tree_cache", return_value=(1, None, "warm_fresh")),
+        patch("app.api.openings.lookup_observed_edges_for_parent", loep),
+        patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
+        patch("app.api.openings.lookup_move_evals",
+              side_effect=lambda db, reqs: {r: None for r in reqs}),
+        patch("app.api.openings.lookup_root_eval", return_value=None),
+        patch("app.api.openings.overlay_evidence") as overlay_spy,
+    ):
+        resp = client.get(TREE_URL,
+                          params={"player_color": "white", "move": ["e2e4", "e7e5"]},
+                          headers=auth_headers())
+
+    assert resp.status_code == 200
+    overlay_spy.assert_not_called()
+    # The observed off-book move is served from the cache.
+    assert "d2d4" in _ucis(resp.json()["columns"][2])
+    # Bounded by visited parents (line positions ∪ rendered frontier), not the total
+    # observed-edge count — a handful of memoized per-parent point queries.
+    assert 0 < loep.call_count <= 20
+    # Each lookup is a per-parent point query: (db, batch_id, parent_fen).
+    for call in loep.call_args_list:
+        assert len(call.args) == 3
+
+
+def test_tree_builder_holds_scalars_not_orm_batch(client, auth_headers):
+    """Finding #2: the builder must hold only the (batch_id, batch_computed_at)
+    scalars the route captured before db.rollback() — never an ORM batch/overlay that
+    could fire a surprise refresh SELECT after the rollback."""
+    batch = _batch(datetime(2026, 6, 9, tzinfo=timezone.utc))
+    resp = _call(client, auth_headers, batch=batch,
+                 params={"player_color": "white", "move": ["e2e4"]})
+    # The pre-rollback scalar flows straight through to the response.
+    assert "2026-06-09" in resp.json()["batch_computed_at"]
+
+    builder, _ = _make_builder(_make_graph(), _make_roots(), _overlay("white"),
+                               batch_id=batch.id, batch_computed_at=batch.computed_at)
+    assert builder.batch_id == batch.id
+    assert builder.batch_computed_at == batch.computed_at
+    # No ORM batch / overlay retained on the builder.
+    assert not hasattr(builder, "overlay")
+    assert not hasattr(builder, "batch")

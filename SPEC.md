@@ -603,6 +603,40 @@ CREATE INDEX idx_opening_position_scores_user_color ON opening_position_scores(u
 - **Distinct game count.** `game_count` is the number of distinct sessions reaching the scored subtree (union of per-node `session_ids`), never `sample_size` (move-observations) relabeled.
 - **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `user_opening_scores`, so `prune_old_opening_score_batches` removes direct rows through the same generation-retention path (keep=2) — no unbounded leak across recomputes. Rows are written in the same transaction as the named rows of the batch.
 
+#### 5.7.5 `opening_position_edges` (Observed Tree Edges)
+
+Sibling read model to `opening_position_scores`, persisted under the **same** `opening_score_batches` generation but keyed by `(batch_id, parent_fen, child_fen)` — mirroring the `EvidenceOverlay` edge key. It supplies the **observed move edges** (structural shape plus the `traversal_count` / `live_attempts` / `live_passes` counters) the `/api/openings/tree` builder needs, so the tree read path **no longer rebuilds `overlay_evidence` on the request thread** (that rebuild — a full replay of every session board line through the Lichess phase divider — previously dominated warm-read latency, scaling with total game count rather than visible nodes).
+
+```sql
+CREATE TABLE opening_position_edges (
+    id BIGSERIAL PRIMARY KEY,
+    batch_id BIGINT NOT NULL REFERENCES opening_score_batches(id) ON DELETE CASCADE,
+    user_id BIGINT NOT NULL,
+    player_color VARCHAR(5) NOT NULL,      -- 'white' or 'black'
+    parent_fen TEXT NOT NULL,              -- Normalized 4-field FEN — observed edge parent
+    child_fen TEXT NOT NULL,               -- Normalized 4-field FEN — observed edge child
+    uci TEXT NOT NULL,                     -- The move connecting parent_fen -> child_fen
+    traversal_count INTEGER NOT NULL DEFAULT 0,  -- Times the edge was observed (encounter_count)
+    live_attempts INTEGER NOT NULL DEFAULT 0,    -- User-choice live attempts on this edge
+    live_passes INTEGER NOT NULL DEFAULT 0,      -- Live passes (drives is_prepared)
+    live_fails INTEGER NOT NULL DEFAULT 0,       -- EdgeEvidence parity; not read by the tree
+    computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
+    UNIQUE (batch_id, parent_fen, child_fen)
+);
+
+CREATE INDEX idx_opening_position_edges_batch_parent ON opening_position_edges(batch_id, parent_fen);
+CREATE INDEX idx_opening_position_edges_user_color ON opening_position_edges(user_id, player_color);
+```
+
+**Read-model contract:**
+- **Bounded per-parent reads.** The tree builder loads observed edges lazily via `opening_cache.lookup_observed_edges_for_parent(db, batch_id, parent_fen)` — one indexed point query per parent it actually visits (the visible line positions ∪ their rendered frontier children), so a warm read is proportional to rendered nodes, not to total session history. The reconstructed `EdgeEvidence` carries `quality_sum=0.0, quality_count=0` because the tree never reads quality.
+- **Quality columns omitted.** `quality_sum` / `quality_count` are deliberately not persisted: the tree never reads them, and the scorer builds its own in-memory overlay during recompute. If the scorer is ever changed to read scores from this table, the two quality columns must be added.
+- **Same write transaction.** One `OpeningPositionEdge` per `overlay.edges` value is written in the same transaction as the named and direct position rows of the batch.
+- **Generation retention.** `batch_id` cascades on delete from `opening_score_batches` exactly like `opening_position_scores`, so `prune_old_opening_score_batches` removes edge rows through the same keep=2 generation-retention path.
+- **Schema-version self-healing.** The set of persisted read-model tables is versioned by `OPENING_SCORE_CACHE_SCHEMA_VERSION` (`edges-v1`), folded into the **registry fingerprint**. A batch built before this read model existed therefore reports registry drift and recomputes once per `(user, color)` on first read, materializing its edge rows. On the `/api/openings/tree` path this drift forces a **blocking one-time bootstrap** (`ensure_tree_cache` → `refresh_now`) rather than a background revalidate, because serving a registry-stale (edgeless) batch would render a book-only tree that silently hides the user's observed moves; warm-fresh batches serve immediately while a background recompute revalidates evidence/decay. The card-grid `/openings` read path keeps its existing background revalidate (stale scores are tolerable there).
+
 ### 5.8 Authentication
 
 **Method:** Anonymous-first with stateless JWT tokens
@@ -2293,7 +2327,7 @@ Computation runs are not overwritten in-place. Instead:
 
 This ensures the current scores are always available atomically and reads never see a partially-computed state.
 
-`registry_fingerprint` captures a hash of the opening registry **plus** the score-model, phase-divider, and quality-curve versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`, `TAU_CP`) at compute time. If it changes (new openings, or a model/divider/curve change), the next trigger forces a full recompute and all prior snapshots are invalidated.
+`registry_fingerprint` captures a hash of the opening registry **plus** the score-model, phase-divider, and quality-curve versions (`SCORE_MODEL_VERSION`, `DIVIDER_VERSION`, `QUALITY_VERSION`, `TAU_WC`, `TAU_CP`) and the persisted-read-model schema version (`OPENING_SCORE_CACHE_SCHEMA_VERSION`, bumped when the **set** of persisted batch read-model tables/columns changes, independent of the scoring math) at compute time. If it changes (new openings, a model/divider/curve change, or a read-model schema change), the next trigger forces a full recompute and all prior snapshots are invalidated.
 
 `inputs_fingerprint` is the **raw-input freshness digest** (`opening_score_raw_inputs_fingerprint`) used to decide whether evidence changed. It hashes a canonical, order-independent projection of exactly the raw DB rows the evidence overlay reads — session_moves (+ game_sessions), the bounded analysis_cache fallback subset, ghost-target blunders/positions, and blunder_reviews — with **no overlay build and no python-chess board replay**, folded together with `registry_fingerprint` and an explicit `OPENING_EVIDENCE_INPUTS_VERSION`. Because the overlay is a pure deterministic function of these inputs, an unchanged digest provably implies identical scores, so the worker can fast-path. `OPENING_EVIDENCE_INPUTS_VERSION` must be bumped on any evidence-derivation semantic change a raw-row hash cannot see (e.g. `PASS_THRESHOLD`, quality-source precedence, FEN normalization, phase-filter application, or the digest's own SQL projection/filters); on first read after such a change (or after deploy) the stored fingerprint mismatches and self-heals with exactly one recompute per (user, color). Scoping that is broader than the overlay (all session moves, analysis_cache keyed by FEN only) is correctness-safe: it can only cause an unnecessary, never a missed, recompute. The digest is computed **before** the overlay in `recompute_opening_scores`, so a stored fingerprint can never be newer than the scored inputs.
 
@@ -2329,7 +2363,7 @@ The `/history` analysis footer renders an opening-lineage stack (`GameOpeningLin
 
 ### 13.5 Opening Tree API (`GET /api/openings/tree`)
 
-The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree`. One request returns one hydrated **column** per position along a canonical move line, so a deep link or refresh renders in a single round trip. The endpoint does **zero per-request scoring**: structural shape comes from the opening graph + evidence overlay, direct metrics from the persisted batch (§5.7.4), and engine evals from `analysis_cache` (§14, via `app/tree_eval.py`).
+The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree`. One request returns one hydrated **column** per position along a canonical move line, so a deep link or refresh renders in a single round trip. The endpoint does **zero per-request scoring** and **no per-request overlay rebuild**: structural shape comes from the opening graph + the persisted observed-edge read model (§5.7.5, read by bounded per-parent indexed lookups), direct metrics from the persisted batch (§5.7.4), and engine evals from `analysis_cache` (§14, via `app/tree_eval.py`). A warm read therefore scales with the rendered line/frontier size and indexed DB lookups, not with the user's total session history. The single stale-while-revalidate trigger (`ensure_tree_cache`) serves a warm-fresh batch immediately while scheduling a background recompute, and **blocks** for a one-time bootstrap only when the latest batch is cold or registry/schema-stale (predating the §5.7.5 read model) so observed moves are never hidden.
 
 **Request.** `player_color=white|black` (required; bad color → 422). The selected line is given either as a repeated UCI param `move=e2e4&move=c7c5`, or — legacy, only when `move` is empty — as `opening=<normalized FEN>`. With neither, the line is empty (root).
 
@@ -2350,7 +2384,7 @@ The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree
 
 **Color specificity.** The reference book skeleton and the white-relative eval values are color-independent; the observed node set, counts, metrics, and sort are color-specific (the overlay filters by user **and** color). The backend holds no cross-color cache.
 
-**Batched lookups** (one of each per request): the evidence overlay; the persisted position rows via `load_tree_position_rows` (stale-while-revalidate, mirroring §13.1 — warm schedules a background recompute, cold bootstraps once so a new user's tree is never permanently empty); the move-eval batch; and one root-eval for the column-0 start position. The response also returns `batch_computed_at` and `model_version` (`SCORE_MODEL_VERSION`).
+**Cache resolution + batched lookups** (per request, no overlay rebuild): `ensure_tree_cache` resolves the batch to serve from and fires the single stale-while-revalidate trigger (warm-fresh schedules a background recompute and serves immediately; cold or registry/schema-stale blocks once on `refresh_now` so observed edges are materialized before serving — §5.7.5); observed move edges come from `lookup_observed_edges_for_parent` via bounded per-parent indexed point queries over `opening_position_edges`; the persisted direct metrics from `lookup_position_scores_for_batch` (the same resolved `batch_id`, §5.7.4); the move-eval batch; and one root-eval for the column-0 start position. `ensure_tree_cache` captures `batch_id` / `batch_computed_at` as plain scalars **before** the request's `db.rollback()`, so the builder reads no ORM batch field afterward. The response also returns `batch_computed_at` and `model_version` (`SCORE_MODEL_VERSION`).
 
 **Frontend `/openings` URL contract.** The canonical frontend URL is
 `/openings?color=white|black` plus a repeated UCI param `move=<uci>` (one per

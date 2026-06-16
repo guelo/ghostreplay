@@ -453,6 +453,73 @@ class OpeningPositionScore(Base):
     )
 
 
+class OpeningPositionEdge(Base):
+    """Generation-scoped observed-edge read model for the opening tree.
+
+    Sibling of :class:`OpeningPositionScore`, persisted under the same
+    ``opening_score_batches`` generation but keyed by ``(batch_id, parent_fen,
+    child_fen)`` — mirroring the ``EvidenceOverlay`` edge key. It materializes the
+    observed move edges (structural shape plus the ``traversal_count`` /
+    ``live_attempts`` / ``live_passes`` counters) the ``/api/openings/tree`` builder
+    needs, so the tree read path no longer rebuilds ``overlay_evidence`` (a full
+    session-history replay) on the request thread. The builder loads rows lazily by
+    ``(batch_id, parent_fen)`` so a warm read costs only bounded per-parent indexed
+    lookups for the visible line and its rendered frontier.
+
+    ``quality_sum`` / ``quality_count`` are deliberately OMITTED: the tree never
+    reads them, and the scorer builds its own in-memory overlay during recompute.
+    Edges are reconstructed for the tree as ``EdgeEvidence(..., quality_sum=0.0,
+    quality_count=0)``. If the scorer is ever changed to read scores from this table
+    instead of its own overlay, the two quality columns must be added here.
+
+    ``batch_id`` cascades on delete from ``opening_score_batches`` exactly like
+    ``opening_position_scores`` so retention pruning removes edge rows through the
+    same generation-retention path.
+    """
+
+    __tablename__ = "opening_position_edges"
+    __table_args__ = (
+        CheckConstraint(
+            "player_color in ('white','black')",
+            name="ck_opening_position_edges_player_color",
+        ),
+        UniqueConstraint(
+            "batch_id", "parent_fen", "child_fen",
+            name="uq_opening_position_edges_batch_parent_child",
+        ),
+        Index(
+            "idx_opening_position_edges_batch_parent", "batch_id", "parent_fen"
+        ),
+        Index(
+            "idx_opening_position_edges_user_color", "user_id", "player_color"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("opening_score_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    player_color: Mapped[str] = mapped_column(String(5), nullable=False)
+    # Normalized 4-field FENs — the EvidenceOverlay edge identity. Transpositions
+    # that differ only in clocks collapse to the same parent/child keys.
+    parent_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    child_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    uci: Mapped[str] = mapped_column(Text, nullable=False)
+    traversal_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    live_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    live_passes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # EdgeEvidence parity; not read by the tree.
+    live_fails: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    computed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
 class OpeningScoreCursor(Base):
     __tablename__ = "opening_score_cursors"
     __table_args__ = (
