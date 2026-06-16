@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
 from app.opening_score_scheduler import request_recompute
+from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
 from app.srs_math import as_utc, calculate_priority, expected_interval_hours
 
@@ -183,7 +184,19 @@ def review_blunder(
         return _srs_response_from_review(blunder, existing)
 
     player_color = _get_blunder_player_color(db, blunder)
-    if player_color is not None:
+    recompute_queued = player_color is not None
+    if recompute_queued:
         request_recompute(user.user_id, player_color)
+
+    capture(
+        str(user.user_id),
+        "srs_review_recorded",
+        {
+            "passed": request.passed,
+            "pass_streak": blunder.pass_streak,
+            "eval_delta": request.eval_delta,
+            "recompute_queued": recompute_queued,
+        },
+    )
 
     return _srs_response_for(blunder, reviewed_at=reviewed_at)

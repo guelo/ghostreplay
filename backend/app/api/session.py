@@ -27,6 +27,7 @@ from app.fen import active_color, fen_hash, normalize_fen
 from app.opening_cache import load_cached_rows
 from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain
+from app.posthog_client import capture
 from app.models import (
     Blunder,
     BlunderOpportunityEvent,
@@ -535,6 +536,21 @@ def _should_run_session_move_evidence(game_session: GameSession) -> bool:
     )
 
 
+def _emit_session_moves_uploaded(
+    user_id: int, *, move_count: int, recompute_queued: bool
+) -> None:
+    """Emit ``session_moves_uploaded`` once an upload is durably committed.
+
+    Shared by both the SQLite/Postgres and generic-dialect return paths so the
+    event reflects a persisted upload, not merely a received request.
+    """
+    capture(
+        str(user_id),
+        "session_moves_uploaded",
+        {"move_count": move_count, "recompute_queued": recompute_queued},
+    )
+
+
 @router.post(
     "/{session_id}/moves",
     response_model=SessionMovesResponse,
@@ -629,6 +645,11 @@ def upsert_session_moves(
             )
             _upsert_analysis_cache(db, evidence_moves)
             request_recompute(user.user_id, game_session.player_color)
+        # Emitted only after the upload is durable (post-commit) so a failed
+        # insert/commit never produces a successful-looking analytics event.
+        _emit_session_moves_uploaded(
+            user.user_id, move_count=len(values), recompute_queued=bool(evidence_moves)
+        )
         return SessionMovesResponse(
             moves_inserted=len(values),
             drill_state=game_session.drill_state,
@@ -676,6 +697,11 @@ def upsert_session_moves(
         _upsert_analysis_cache(db, evidence_moves)
         request_recompute(user.user_id, game_session.player_color)
 
+    # Emitted only after the upload is durable (post-commit) so a failed
+    # insert/commit never produces a successful-looking analytics event.
+    _emit_session_moves_uploaded(
+        user.user_id, move_count=len(values), recompute_queued=bool(evidence_moves)
+    )
     return SessionMovesResponse(
         moves_inserted=len(values),
         drill_state=game_session.drill_state,

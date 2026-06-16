@@ -14,11 +14,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.accuracy import expected_total_moves_from_pgn
 from app.db import get_db
 from app.drill_steering import get_drill_route_map, route_preserving_moves
 from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory
 from app.opening_graph import get_opening_graph
+from app.posthog_client import capture
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
 from app.rating_scores import compute_rating_tracks, latest_rating_order, rating_score, scores_for_row
@@ -621,6 +623,16 @@ def start_game(
     db.commit()
     db.refresh(session)
 
+    capture(
+        str(user.user_id),
+        "game_started",
+        {
+            "engine_elo": session.engine_elo,
+            "player_color": session.player_color,
+            "is_rated": session.is_rated,
+        },
+    )
+
     return GameStartResponse(
         session_id=session.id,
         engine_elo=session.engine_elo,
@@ -743,6 +755,23 @@ def end_game(
     db.commit()
     db.refresh(session)
 
+    capture(
+        str(user.user_id),
+        "game_ended",
+        {
+            "result": session.result,
+            "is_rated": effective_is_rated,
+            "rating_before": rating_change.rating_before if rating_change else None,
+            "rating_after": rating_change.rating_after if rating_change else None,
+            "rating_delta": (
+                rating_change.rating_after - rating_change.rating_before
+                if rating_change
+                else None
+            ),
+            "ply_count": expected_total_moves_from_pgn(session.pgn),
+        },
+    )
+
     return GameEndResponse(
         session_id=session.id,
         result=session.result,
@@ -793,6 +822,13 @@ def get_next_opponent_move(
             engine_ms,
             len(request.moves),
             has_target_blunder,
+        )
+
+    def _emit_served(mode: OpponentMoveMode, has_target_blunder: bool) -> None:
+        capture(
+            str(user.user_id),
+            "opponent_move_served",
+            {"decision_source": mode.value, "has_target_blunder": has_target_blunder},
         )
 
     # Fetch and validate session
@@ -849,6 +885,7 @@ def get_next_opponent_move(
             session.drill_state = "root_reached"
             db.commit()
 
+        _emit_served(OpponentMoveMode.GHOST, False)
         _log_slow(OpponentMoveMode.GHOST, DecisionSource.GHOST_PATH, False)
         return NextOpponentMoveResponse(
             mode=OpponentMoveMode.GHOST,
@@ -917,6 +954,7 @@ def get_next_opponent_move(
 
             target_fen = blunder_row[1] if blunder_row else None
 
+            _emit_served(OpponentMoveMode.GHOST, target_blunder_id is not None)
             _log_slow(
                 OpponentMoveMode.GHOST,
                 DecisionSource.GHOST_PATH,
@@ -962,6 +1000,7 @@ def get_next_opponent_move(
         )
         engine_ms = _elapsed_ms(engine_started)
 
+        _emit_served(OpponentMoveMode.ENGINE, False)
         _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
         return NextOpponentMoveResponse(
             mode=OpponentMoveMode.ENGINE,

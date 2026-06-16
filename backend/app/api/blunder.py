@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, aliased
 from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import Blunder, BlunderReview, GameSession, Move, Position
+from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
 from app.srs_opportunity import (
     OpportunityCounters,
@@ -397,7 +398,7 @@ def record_blunder(
             detail={"error_code": "LEGACY_AMBIGUOUS"},
         )
 
-    return _record_target(
+    response = _record_target(
         db=db,
         session=session,
         user=user,
@@ -411,6 +412,18 @@ def record_blunder(
         max_full_moves=AUTO_RECORDING_MAX_FULL_MOVES,
         idempotency_key=request.idempotency_key,
     )
+    # Only the genuine recording path reaches here (already-recorded retries echo
+    # earlier); blunder_id is None only for the skipped first-move no-op.
+    if response.blunder_id is not None:
+        capture(
+            str(user.user_id),
+            "blunder_recorded",
+            {
+                "eval_loss_cp": request.eval_before - request.eval_after,
+                "opening_family": detect_opening_family(request.fen),
+            },
+        )
+    return response
 
 
 @router.post("/manual", response_model=BlunderResponse, status_code=201)
@@ -427,7 +440,7 @@ def record_manual_blunder(
     eval_before = request.eval_before if request.eval_before is not None else 0
     eval_after = request.eval_after if request.eval_after is not None else eval_before
 
-    return _record_target(
+    response = _record_target(
         db=db,
         session=session,
         user=user,
@@ -439,6 +452,9 @@ def record_manual_blunder(
         eval_after=eval_after,
         mark_first_blunder_recorded=False,
     )
+    if response.blunder_id is not None:
+        capture(str(user.user_id), "blunder_added_manual", {})
+    return response
 
 
 # ---------------------------------------------------------------------------

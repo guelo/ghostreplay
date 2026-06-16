@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Literal
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -43,6 +43,7 @@ from app.opening_rootcalc import (
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoots, get_opening_roots
+from app.posthog_client import capture
 
 logger = logging.getLogger(__name__)
 
@@ -681,6 +682,52 @@ def ensure_opening_scores(
     return list_cached_opening_scores(db, user_id, player_color)
 
 
+def _emit_opening_scores_recomputed(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+    batch: OpeningScoreBatch,
+    *,
+    duration_ms: float,
+    reason: str,
+    cache_miss: bool,
+    registry_drift: bool,
+    stale_branch_keys: bool,
+    evidence_change: bool,
+    decay_staleness: bool,
+) -> None:
+    """Emit the ``opening_scores_recomputed`` perf event for a real recompute.
+
+    Best-effort: a count/analytics failure must never break the scheduler worker
+    (``capture`` already swallows its own errors; the count query is guarded too).
+    Runs only on the serialized recompute worker, off the request hot path.
+    """
+    try:
+        batch_size = (
+            db.query(func.count(UserOpeningScore.id))
+            .filter(UserOpeningScore.batch_id == batch.id)
+            .scalar()
+        )
+    except Exception:
+        logger.debug("opening_scores_recomputed batch_size query failed", exc_info=True)
+        batch_size = None
+    capture(
+        str(user_id),
+        "opening_scores_recomputed",
+        {
+            "duration_ms": duration_ms,
+            "reason": reason,
+            "cache_miss": cache_miss,
+            "registry_drift": registry_drift,
+            "stale_branch_keys": stale_branch_keys,
+            "evidence_change": evidence_change,
+            "decay_staleness": decay_staleness,
+            "batch_size": batch_size,
+            "player_color": player_color,
+        },
+    )
+
+
 def recompute_opening_scores_if_needed(
     db: Session,
     user_id: int,
@@ -695,6 +742,9 @@ def recompute_opening_scores_if_needed(
         time-decay interval when nothing else changed,
       - the ``registry_fingerprint`` drifted (graph/roots/config/model versions),
       - the batch has legacy/stale branch-key rows.
+
+    Emits ``opening_scores_recomputed`` (with timing + the trigger reason) ONLY
+    when an actual recompute runs — never on the fast cached-batch return.
     """
     now = datetime.now(timezone.utc)
     graph = get_opening_graph()
@@ -709,8 +759,9 @@ def recompute_opening_scores_if_needed(
     if batch is None:
         if not has_opening_evidence(db, user_id, player_color):
             return None
+        started = time.monotonic()
         overlay = overlay_evidence(db, user_id, player_color, graph)
-        return recompute_opening_scores(
+        result = recompute_opening_scores(
             db,
             user_id,
             player_color,
@@ -718,11 +769,27 @@ def recompute_opening_scores_if_needed(
             inputs_fingerprint=raw_fingerprint,
             computed_at=now,
         )
+        _emit_opening_scores_recomputed(
+            db,
+            user_id,
+            player_color,
+            result,
+            duration_ms=round((time.monotonic() - started) * 1000, 3),
+            reason="cache_miss",
+            cache_miss=True,
+            registry_drift=False,
+            stale_branch_keys=False,
+            evidence_change=False,
+            decay_staleness=False,
+        )
+        return result
 
     registry_drift = batch.registry_fingerprint != registry_fingerprint
     stale_branch_keys = _batch_has_stale_branch_keys(rows)
+    evidence_change = batch.inputs_fingerprint != raw_fingerprint
+    decay_staleness = False
 
-    if not registry_drift and not stale_branch_keys and batch.inputs_fingerprint == raw_fingerprint:
+    if not registry_drift and not stale_branch_keys and not evidence_change:
         # Inputs/registry/config unchanged → overlay provably identical. Serve the
         # cached batch WITHOUT building the overlay, unless the batch is stale
         # enough that wall-clock time decay should be re-applied. Reuse
@@ -730,14 +797,25 @@ def recompute_opening_scores_if_needed(
         computed_at = batch.computed_at
         if computed_at.tzinfo is None:
             computed_at = computed_at.replace(tzinfo=timezone.utc)
-        stale_for_decay = computed_at < now - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
-        if not stale_for_decay:
+        decay_staleness = computed_at < now - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
+        if not decay_staleness:
             return batch
+
+    # Trigger reason in priority order (the dominant cause of THIS recompute).
+    if registry_drift:
+        reason = "registry_drift"
+    elif stale_branch_keys:
+        reason = "stale_branch_keys"
+    elif evidence_change:
+        reason = "evidence_change"
+    else:
+        reason = "decay_staleness"
 
     # Change / registry drift / stale branch keys / decay-staleness: build the
     # overlay and recompute.
+    started = time.monotonic()
     overlay = overlay_evidence(db, user_id, player_color, graph)
-    return recompute_opening_scores(
+    result = recompute_opening_scores(
         db,
         user_id,
         player_color,
@@ -745,3 +823,17 @@ def recompute_opening_scores_if_needed(
         inputs_fingerprint=raw_fingerprint,
         computed_at=now,
     )
+    _emit_opening_scores_recomputed(
+        db,
+        user_id,
+        player_color,
+        result,
+        duration_ms=round((time.monotonic() - started) * 1000, 3),
+        reason=reason,
+        cache_miss=False,
+        registry_drift=registry_drift,
+        stale_branch_keys=stale_branch_keys,
+        evidence_change=evidence_change,
+        decay_staleness=decay_staleness,
+    )
+    return result

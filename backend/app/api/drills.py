@@ -20,6 +20,7 @@ from app.fen import normalize_fen
 from app.models import GameSession
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots
+from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
@@ -183,7 +184,20 @@ def start_drill(
     db.add(session)
     db.commit()
     db.refresh(session)
-    return _contract(session)
+    contract = _contract(session)
+    capture(
+        str(user.user_id),
+        "drill_started",
+        {
+            "opening_key": contract.opening_key,
+            "family": contract.opening_family,
+            "eco": contract.eco,
+            "player_color": contract.player_color,
+            "engine_elo": contract.engine_elo,
+            "strictness": contract.strictness,
+        },
+    )
+    return contract
 
 
 @router.get("/{session_id}", response_model=DrillSessionContract)
@@ -216,6 +230,7 @@ def fail_drill(
     session.drill_terminal_reason = "accuracy"
     db.commit()
     db.refresh(session)
+    capture(str(user.user_id), "drill_failed", {"reason": session.drill_terminal_reason})
     return _contract(session)
 
 
@@ -248,6 +263,7 @@ def continue_drill(
     resegment_session_moves(db, session)
     db.commit()
     db.refresh(session)
+    capture(str(user.user_id), "drill_continued", {})
     return _contract(session)
 
 
@@ -320,6 +336,10 @@ def check_drill_route(
     session.drill_state = "failed"
     session.drill_terminal_reason = "off_route"
     db.commit()
+    # A route-check off-route transition is a drill failure too (the spec defines
+    # failed = off_route | accuracy); emit it here so analytics don't undercount
+    # by only seeing the /fail accuracy path.
+    capture(str(user.user_id), "drill_failed", {"reason": "off_route"})
     # reason="off_route" even if the move also exceeds the centipawn threshold —
     # leaving the route is the primary signal; staying on route is the first correction.
     return DrillRouteCheckResponse(
@@ -365,6 +385,7 @@ def natural_end_drill(
         session.pgn = request.pgn
     db.commit()
     db.refresh(session)
+    capture(str(user.user_id), "drill_natural_end", {"result": request.result})
     return _contract(session)
 
 
@@ -392,4 +413,5 @@ def abandon_drill(
         session.is_rated = False
         db.commit()
         db.refresh(session)
+        capture(str(user.user_id), "drill_abandoned", {})
     return _contract(session)

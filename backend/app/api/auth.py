@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import User
+from app.posthog_client import capture
 from app.security import create_access_token, decode_access_token, hash_password, verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -68,6 +69,8 @@ def register(
         is_anonymous=user.is_anonymous,
     )
 
+    capture(str(user.id), "user_registered", {"is_anonymous": user.is_anonymous})
+
     return RegisterResponse(
         token=token,
         user_id=user.id,
@@ -95,6 +98,8 @@ def login(
         username=user.username,
         is_anonymous=user.is_anonymous,
     )
+
+    capture(str(user.id), "user_logged_in", {"is_anonymous": user.is_anonymous})
 
     return LoginResponse(
         token=token,
@@ -173,6 +178,8 @@ def claim(
         username=user.username,
         is_anonymous=user.is_anonymous,
     )
+
+    capture(str(user.id), "user_claimed", {"is_anonymous": user.is_anonymous})
 
     return ClaimResponse(
         token=new_token,
