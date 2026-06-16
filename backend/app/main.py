@@ -22,6 +22,7 @@ from app.api.session import router as session_router
 from app.api.srs import router as srs_router
 from app.db import engine
 from app.opening_score_scheduler import get_scheduler
+from app.posthog_client import shutdown as posthog_shutdown
 from app.security import AuthMiddleware
 from app.http_logging import HTTPLoggingMiddleware
 from app.logging_config import configure_logging
@@ -52,6 +53,13 @@ async def lifespan(app: FastAPI):
             get_scheduler().shutdown(drain=True)
         except Exception:
             logging.getLogger(__name__).exception("opening score scheduler shutdown failed")
+        # Flush queued analytics before disposing the engine so events aren't
+        # dropped on deploy/restart. shutdown() is already defensive; wrap it
+        # anyway so teardown never wedges on engine.dispose().
+        try:
+            posthog_shutdown()
+        except Exception:
+            logging.getLogger(__name__).exception("posthog shutdown failed")
         engine.dispose()
 
 

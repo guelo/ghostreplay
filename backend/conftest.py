@@ -12,6 +12,13 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 os.environ.setdefault("JWT_SECRET", "test-secret-32-bytes-minimum-length")
+# Analytics must never emit during tests. Force-disable UNCONDITIONALLY: a plain
+# setdefault would preserve an ambient POSTHOG_DISABLED=false, which combined with
+# an ambient POSTHOG_PROJECT_TOKEN makes get_client() build a live client that
+# sends real events. Also drop any ambient token so get_client() can never build
+# a client even if the disable flag is later changed.
+os.environ["POSTHOG_DISABLED"] = "true"
+os.environ.pop("POSTHOG_PROJECT_TOKEN", None)
 
 from app.database_url import _normalize_postgres_scheme
 from app.db import get_db

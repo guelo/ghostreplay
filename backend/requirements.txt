@@ -6,6 +6,9 @@ uvicorn[standard]
 bcrypt
 PyJWT
 chess
+# Server-side product/latency analytics (instance API: Posthog(token, host=...);
+# capture(distinct_id=, event=, properties=); shutdown() flushes the sender thread)
+posthog>=3.25,<4
 # Server-side Stockfish for VMU centipawn-loss evaluation
 stockfish>=3.28.0
 # Maia-2 engine dependencies (requires Python 3.12 or earlier)

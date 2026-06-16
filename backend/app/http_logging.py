@@ -7,6 +7,8 @@ import time
 import urllib.parse
 import uuid
 
+from app.posthog_client import capture
+
 _SECRET_KEYS = {"password", "token", "secret", "jwt"}
 
 BODY_BUFFER_CAP = 4096
@@ -120,6 +122,65 @@ def _process_body(chunks: list[bytes], content_type: str) -> str:
         return raw.decode("utf-8")[:BODY_LOG_CAP]
 
 
+def _route_template(scope) -> str:
+    """Low-cardinality route label for analytics.
+
+    Starlette populates ``scope["route"]`` during routing (available by the time
+    control returns to the outermost middleware's ``finally``). ``route.path`` is
+    the template (e.g. ``/api/session/{session_id}/moves``), never the concrete
+    path. Falls back to ``"unmatched"`` for 404s / early short-circuits where no
+    route was matched, so cardinality stays bounded.
+    """
+    route = scope.get("route")
+    if route is not None:
+        template = getattr(route, "path_format", None) or getattr(route, "path", None)
+        if template:
+            return template
+    return "unmatched"
+
+
+def _skip_analytics(path: str) -> bool:
+    return (
+        path == "/"
+        or path.startswith("/health")
+        or path == "/openapi.json"
+        or path.startswith("/docs")
+        or path.startswith("/redoc")
+    )
+
+
+def _capture_api_request(
+    scope,
+    method: str,
+    status_code: int,
+    duration_ms: float,
+    request_id: str,
+    user_id: object,
+) -> None:
+    """Emit the per-request ``api_request`` latency event.
+
+    Wrapped by the caller in try/except — an analytics failure must never alter
+    the response. Skips OPTIONS, health checks, root and docs to keep volume and
+    cardinality sane.
+    """
+    path = scope.get("path", "")
+    if method == "OPTIONS" or _skip_analytics(path):
+        return
+    capture(
+        str(user_id) if user_id is not None else "anon",
+        "api_request",
+        {
+            "route": _route_template(scope),
+            "method": method,
+            "status_code": status_code,
+            "duration_ms": duration_ms,
+            "ok": status_code < 400,
+            "status_class": f"{status_code // 100}xx",
+            "request_id": request_id,
+        },
+    )
+
+
 class HTTPLoggingMiddleware:
     def __init__(self, app) -> None:
         self.app = app
@@ -218,3 +279,17 @@ class HTTPLoggingMiddleware:
                     http_fields["response_body"] = _process_body(res_body_chunks, res_content_type)
 
             logger.info(_build_http_message(http_fields), extra={"http": http_fields})
+
+            # Per-request latency analytics (the g-e8wz baseline signal). Never
+            # let an analytics failure alter the response or mask the request.
+            try:
+                _capture_api_request(
+                    scope,
+                    method,
+                    status_code,
+                    http_fields["duration_ms"],
+                    request_id,
+                    user_id,
+                )
+            except Exception:
+                logger.debug("api_request analytics capture failed", exc_info=True)

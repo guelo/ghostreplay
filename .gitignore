@@ -23,6 +23,13 @@ dist-ssr
 *.sln
 *.sw?
 
+# Env files (keep *.env.example tracked). The PostHog ingestion token is a
+# public key, but committing env files is poor hygiene.
+.env
+backend/.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
