@@ -1,20 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Chessboard } from "react-chessboard";
+import type { PieceDropHandlerArgs } from "react-chessboard";
 import AppNav from "../components/AppNav";
-import OpeningFamilyCard from "../components/OpeningFamilyCard";
-import { getOpeningBook } from "../openings/openingBook";
-import { buildOpeningsSearchParams, type OpeningRoute } from "../openings/route";
+import OpeningTreeNodeCard from "../components/OpeningTreeNodeCard";
 import {
-  formatGames,
-  formatPercent,
-  formatScore,
-  getPriorityTone,
-} from "../openings/format";
-import {
-  getOpeningChildren,
-  type ChildrenResponse,
-  type OpeningPlayerColor,
-} from "../utils/api";
+  buildCanonicalReplacement,
+  buildOpeningsSearchParams,
+  parseOpeningsSearchParams,
+} from "../openings/route";
+import { resolveDrop, type DisplayColumn } from "../openings/treeView";
+import { useOpeningsTree } from "../hooks/useOpeningsTree";
+import type { OpeningPlayerColor } from "../utils/api";
 import "../App.css";
 
 const COLOR_OPTIONS: Array<{ label: string; value: OpeningPlayerColor }> = [
@@ -22,553 +19,305 @@ const COLOR_OPTIONS: Array<{ label: string; value: OpeningPlayerColor }> = [
   { label: "Black", value: "black" },
 ];
 
-const LOADING_CARD_COUNT = 3;
+const LAST_MOVE_HIGHLIGHT: React.CSSProperties = {
+  background: "rgba(56, 189, 248, 0.35)",
+};
 
-function getColorLabel(playerColor: OpeningPlayerColor): string {
-  return playerColor === "white" ? "White" : "Black";
+/** One vertical column of tree node cards; the deepest selected node expands. */
+function TreeColumnView({
+  column,
+  onSelect,
+  onStartDrill,
+}: {
+  column: DisplayColumn;
+  onSelect: (line: string[]) => void;
+  onStartDrill: (openingKey: string) => void;
+}) {
+  return (
+    <div
+      className="openings-tree-column"
+      data-testid="tree-column"
+      data-line-index={column.lineIndex}
+    >
+      {column.nodes.map((node) => {
+        if (node.isExpanded) {
+          const drillKey = node.view.drillOpeningKey;
+          return (
+            <OpeningTreeNodeCard
+              key={node.key}
+              variant="expanded"
+              node={node.view}
+              onStartDrill={
+                drillKey != null ? () => onStartDrill(drillKey) : undefined
+              }
+            />
+          );
+        }
+
+        return (
+          <OpeningTreeNodeCard
+            key={node.key}
+            variant="compact"
+            node={node.view}
+            // A non-navigable boundary node renders as a plain (non-button)
+            // card; clicking it would only push a URL the backend truncates.
+            onSelect={
+              node.isSelectable ? () => onSelect(node.selectLine) : undefined
+            }
+            isSelected={node.isSelected}
+          />
+        );
+      })}
+    </div>
+  );
 }
 
-function formatChildCount(childCount: number): string {
-  if (childCount === 0) {
-    return "No children";
-  }
-
-  return `${childCount} ${childCount === 1 ? "child" : "children"}`;
-}
-
-function formatOpeningMoveLine(pgn: string): string {
-  return pgn.replace(/(\d+)\.\s+/g, "$1.");
-}
-
-function getOpeningMoveLine(
-  openingKey: string,
-  moveLinesByFen: Map<string, string> | null,
-): string | null {
-  if (!moveLinesByFen) {
-    return null;
-  }
-
-  const line = moveLinesByFen.get(openingKey);
-  return line ? formatOpeningMoveLine(line) : null;
-}
-
-function sortChildrenByStrength(
-  children: ChildrenResponse["children"],
-): ChildrenResponse["children"] {
-  return [...children].sort((left, right) => {
-    if (left.subtree_score === null && right.subtree_score !== null) {
-      return 1;
-    }
-
-    if (left.subtree_score !== null && right.subtree_score === null) {
-      return -1;
-    }
-
-    if (left.subtree_score !== null && right.subtree_score !== null) {
-      if (left.subtree_score !== right.subtree_score) {
-        return right.subtree_score - left.subtree_score;
-      }
-    }
-
-    if (left.weakest_root_score !== null && right.weakest_root_score !== null) {
-      if (left.weakest_root_score !== right.weakest_root_score) {
-        return right.weakest_root_score - left.weakest_root_score;
-      }
-    }
-
-    return left.opening_name.localeCompare(right.opening_name);
-  });
-}
-
+/**
+ * `/openings` — chesstree.net-style horizontal move tree synced with a board.
+ * The page parses the URL line, drives {@link useOpeningsTree}, renders the
+ * board + columns of {@link OpeningTreeNodeCard}, and owns selection / board
+ * drops / perspective / canonicalization / Start Drill / the five states.
+ * Detailed viewport layout is a sibling bead (g-tree-layout).
+ */
 function OpeningsPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [response, setResponse] = useState<ChildrenResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [retryCount, setRetryCount] = useState(0);
-  const [moveLinesByFen, setMoveLinesByFen] = useState<Map<
-    string,
-    string
-  > | null>(null);
-  const requestVersionRef = useRef(0);
+  const { playerColor, moves, opening } =
+    parseOpeningsSearchParams(searchParams);
 
-  const rawColor = searchParams.get("color");
-  const playerColor: OpeningPlayerColor =
-    rawColor === "black" ? "black" : "white";
-  const requestedOpeningKey = searchParams.get("opening");
-  const rawPath = searchParams.getAll("path");
-  const requestedPath = requestedOpeningKey ? rawPath : [];
-  const requestedRoute = buildOpeningsSearchParams({
-    playerColor,
-    openingKey: requestedOpeningKey ?? undefined,
-    path: requestedPath,
-  });
-  const requestedRouteString = requestedRoute.toString();
-  const requestedPathKey = JSON.stringify(requestedPath);
-  const needsInitialCanonicalization =
-    rawColor !== playerColor || (!requestedOpeningKey && rawPath.length > 0);
+  const {
+    view,
+    pageStatus,
+    appendStatus,
+    error,
+    canonicalLine,
+    isSettled,
+    batchComputedAt,
+    retry,
+  } = useOpeningsTree({ playerColor, moves, opening });
 
-  const invalidatePendingRequests = () => {
-    requestVersionRef.current += 1;
-  };
-
-  const navigateToRoute = (route: OpeningRoute, replace = false) => {
-    invalidatePendingRequests();
-    setLoading(true);
-    setError(null);
-    setResponse(null);
-    setSearchParams(buildOpeningsSearchParams(route), { replace });
-  };
-
+  // Canonicalize the URL only when the rendered view is settled for the current
+  // route, so a stale response kept on screen during a refetch can never rewrite
+  // a freshly-selected line backward. Rewrites legacy opening=<fen> → move=,
+  // truncates invalid/stale lines, and normalizes color; null => already
+  // canonical (no history loop).
   useEffect(() => {
-    if (!needsInitialCanonicalization) {
+    if (!isSettled || !canonicalLine) {
       return;
     }
-
-    setSearchParams(
-      buildOpeningsSearchParams({
-        playerColor,
-        openingKey: requestedOpeningKey ?? undefined,
-        path: requestedPath,
-      }),
-      { replace: true },
-    );
-  }, [
-    needsInitialCanonicalization,
-    playerColor,
-    requestedOpeningKey,
-    requestedPathKey,
-    setSearchParams,
-  ]);
-
-  useEffect(() => {
-    let active = true;
-
-    getOpeningBook()
-      .then((book) => {
-        if (!active) {
-          return;
-        }
-
-        setMoveLinesByFen(
-          new Map(book.entries.map((entry) => [entry.epd, entry.pgn])),
-        );
-      })
-      .catch(() => {
-        if (!active) {
-          return;
-        }
-
-        setMoveLinesByFen(new Map());
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    const requestVersion = requestVersionRef.current + 1;
-    requestVersionRef.current = requestVersion;
-
-    // Reset request state before refetching when the requested path changes.
-    /* eslint-disable react-hooks/set-state-in-effect */
-    setLoading(true);
-    setError(null);
-    setResponse(null);
-    /* eslint-enable react-hooks/set-state-in-effect */
-
-    getOpeningChildren({
+    const replacement = buildCanonicalReplacement(
+      searchParams,
       playerColor,
-      parentKey: requestedOpeningKey ?? undefined,
-      path: requestedPath,
-    })
-      .then((data) => {
-        if (!active || requestVersionRef.current !== requestVersion) {
-          return;
-        }
+      canonicalLine,
+    );
+    if (replacement) {
+      setSearchParams(replacement, { replace: true });
+    }
+  }, [isSettled, canonicalLine, playerColor, searchParams, setSearchParams]);
 
-        const canonicalRoute = buildOpeningsSearchParams({
-          playerColor,
-          openingKey: data.canonical_opening_key ?? undefined,
-          path: data.canonical_path,
-        });
-        if (canonicalRoute.toString() !== requestedRouteString) {
-          setSearchParams(canonicalRoute, { replace: true });
-        }
+  // Selection pushes a new history entry (so Back works); truncation falls out
+  // of the shorter line each node computes.
+  const selectLine = (newLine: string[]) => {
+    setSearchParams(buildOpeningsSearchParams({ playerColor, moves: newLine }));
+  };
 
-        setResponse(data);
-      })
-      .catch((err: unknown) => {
-        if (!active || requestVersionRef.current !== requestVersion) {
-          return;
-        }
+  // Perspective switch keeps the shared line; the hook refetches (color in key)
+  // and the board orientation flips immediately, before the refetch resolves.
+  const switchColor = (color: OpeningPlayerColor) => {
+    if (color === playerColor) {
+      return;
+    }
+    setSearchParams(buildOpeningsSearchParams({ playerColor: color, moves }));
+  };
 
-        setResponse(null);
-        setError(
-          err instanceof Error ? err.message : "Failed to load openings",
-        );
-      })
-      .finally(() => {
-        if (!active || requestVersionRef.current !== requestVersion) {
-          return;
-        }
+  const startDrill = (openingKey: string) => {
+    navigate("/play", { state: { drillSetup: { openingKey, playerColor } } });
+  };
 
-        setLoading(false);
-      });
+  // Board → tree: accept a drag only when the children column of the deepest
+  // position is actually rendered (settled) and the move lands on a navigable
+  // node there. Otherwise reject (board snaps back) so board and tree can never
+  // diverge.
+  const handlePieceDrop = ({
+    sourceSquare,
+    targetSquare,
+  }: PieceDropHandlerArgs): boolean => {
+    if (!view || !isSettled || !targetSquare) {
+      return false;
+    }
+    const uci = resolveDrop(view.board.fen, sourceSquare, targetSquare);
+    if (!uci) {
+      return false;
+    }
+    const frontier = view.columns.find(
+      (column) =>
+        column.kind === "moves" &&
+        column.lineIndex === view.selectionLine.length,
+    );
+    const target = frontier?.nodes.find(
+      (node) => node.uci === uci && node.isNavigable,
+    );
+    if (!target) {
+      return false;
+    }
+    selectLine(target.selectLine);
+    return true;
+  };
 
-    return () => {
-      active = false;
-    };
-  }, [
-    playerColor,
-    requestedOpeningKey,
-    requestedPathKey,
-    requestedRouteString,
-    retryCount,
-    setSearchParams,
-  ]);
-
-  const selectedColorLabel = getColorLabel(playerColor);
-  const breadcrumbs = response?.breadcrumbs ?? [];
-  const fullBreadcrumbs = breadcrumbs.length
-    ? [
-        {
-          opening_key: "__start__",
-          opening_name: "Start",
-          is_current: false,
-        },
-        ...breadcrumbs,
-      ]
-    : [];
-  const currentBreadcrumb = breadcrumbs.at(-1) ?? null;
-  const currentTitle = currentBreadcrumb?.opening_name ?? "OPENING SCOREBOARD";
-  const currentBranchStats = response?.current_branch_stats ?? null;
-  const heroTone = getPriorityTone(currentBranchStats?.score ?? null);
-  const heroStatsLabel = currentBreadcrumb ? "Current branch" : "Repertoire-wide";
-  const heroStatsCaption = currentBreadcrumb
-    ? "Selected opening"
-    : "Whole repertoire from the start position";
-  // Direct-row semantics: scored state is the presence of a direct score, not a
-  // descendant root count.
-  const hasScoredCurrentBranch =
-    response !== null && response.current_branch_stats.score != null;
-  const isTrueNoEvidence =
-    response !== null && response.computed_at === null && !hasScoredCurrentBranch;
-  const isSnapshotEmpty =
-    response !== null && response.computed_at !== null && !hasScoredCurrentBranch;
-  const showChildrenGrid =
-    response !== null && response.children.length > 0 && hasScoredCurrentBranch;
-  const isStructuralLeaf =
-    response !== null &&
-    response.children.length === 0 &&
-    response.canonical_opening_key !== null &&
-    hasScoredCurrentBranch;
-  const sortedChildren = response
-    ? sortChildrenByStrength(response.children)
-    : [];
+  const colorLabel = playerColor === "white" ? "White" : "Black";
+  const lastMove = view?.board.lastMove ?? null;
+  const squareStyles = lastMove
+    ? {
+        [lastMove.from]: LAST_MOVE_HIGHLIGHT,
+        [lastMove.to]: LAST_MOVE_HIGHLIGHT,
+      }
+    : {};
 
   return (
     <main className="app-shell">
       <AppNav />
 
       <div className="constrained-content">
-        <section className="openings-shell">
-          <header className="openings-shell__hero">
-            <div className="openings-shell__copy">
-              <div className="openings-shell__title-row">
-                <h1 className="openings-shell__title">{currentTitle}</h1>
-                <span className="openings-shell__badge">
-                  {selectedColorLabel} repertoire
-                </span>
-              </div>
-              {fullBreadcrumbs.length > 0 && (
-                <nav
-                  className="openings-shell__breadcrumbs"
-                  aria-label="Opening breadcrumbs"
-                >
-                  {fullBreadcrumbs.map((breadcrumb, index) => {
-                    if (breadcrumb.opening_key === "__start__") {
-                      return (
-                        <button
-                          key={breadcrumb.opening_key}
-                          type="button"
-                          className="openings-shell__crumb"
-                          onClick={() => {
-                            navigateToRoute({
-                              playerColor,
-                            });
-                          }}
-                        >
-                          {breadcrumb.opening_name}
-                        </button>
-                      );
-                    }
-
-                    if (breadcrumb.is_current) {
-                      return (
-                        <span
-                          key={breadcrumb.opening_key}
-                          className="openings-shell__crumb openings-shell__crumb--current"
-                        >
-                          {breadcrumb.opening_name}
-                        </span>
-                      );
-                    }
-
-                    return (
-                      <button
-                        key={breadcrumb.opening_key}
-                        type="button"
-                        className="openings-shell__crumb"
-                        onClick={() => {
-                          navigateToRoute({
-                            playerColor,
-                            openingKey: breadcrumb.opening_key,
-                            path: fullBreadcrumbs
-                              .slice(1, index)
-                              .map((item) => item.opening_key),
-                          });
-                        }}
-                      >
-                        {breadcrumb.opening_name}
-                      </button>
-                    );
-                  })}
-                </nav>
-              )}
-              <p className="openings-shell__hint">
-                Score is your 0-100 result in this opening branch. Confidence
-                shows how solid the sample is, and coverage shows how much of
-                that branch you have actually played.
-              </p>
-            </div>
-
-            <div className="openings-shell__hero-rail">
-              <aside
-                className={`openings-shell__stats-card openings-shell__stats-card--${heroTone}`}
-                aria-label="Current branch stats"
-              >
-                <div className="openings-shell__stats-copy">
-                  <p className="openings-shell__stats-label">{heroStatsLabel}</p>
-                  <p className="openings-shell__stats-caption">
-                    {heroStatsCaption}
-                  </p>
-                </div>
-                <dl className="openings-shell__stats-grid">
-                  <div className="openings-shell__stats-metric">
-                    <dt>Score</dt>
-                    <dd>{formatScore(currentBranchStats?.score ?? null)}</dd>
-                  </div>
-                  <div className="openings-shell__stats-metric">
-                    <dt>Coverage</dt>
-                    <dd>{formatPercent(currentBranchStats?.coverage ?? null)}</dd>
-                  </div>
-                  <div className="openings-shell__stats-metric">
-                    <dt>Games</dt>
-                    <dd>{formatGames(currentBranchStats?.game_count ?? null)}</dd>
-                  </div>
-                  <div className="openings-shell__stats-metric">
-                    <dt>Confidence</dt>
-                    <dd>
-                      {formatPercent(currentBranchStats?.confidence ?? null)}
-                    </dd>
-                  </div>
-                </dl>
-              </aside>
-            </div>
-          </header>
-
-          <div className="openings-shell__toolbar">
+        <section className="openings-tree">
+          <header className="openings-tree__header">
+            <h1 className="openings-tree__title">Opening Tree</h1>
             <div
               className="openings-color-picker"
               role="group"
-              aria-label="Opening color"
+              aria-label="Playing as"
             >
+              <span className="openings-tree__color-label">Playing as:</span>
               {COLOR_OPTIONS.map((option) => (
                 <button
                   key={option.value}
                   type="button"
-                  className={`openings-color-picker__button${playerColor === option.value ? " openings-color-picker__button--active" : ""}`}
+                  className={`openings-color-picker__button${
+                    playerColor === option.value
+                      ? " openings-color-picker__button--active"
+                      : ""
+                  }`}
                   aria-pressed={playerColor === option.value}
-                  onClick={() => {
-                    if (playerColor === option.value) {
-                      return;
-                    }
-
-                    navigateToRoute({
-                      playerColor: option.value,
-                    });
-                  }}
+                  onClick={() => switchColor(option.value)}
                 >
                   {option.label}
                 </button>
               ))}
             </div>
+          </header>
 
-            <p className="openings-shell__toolbar-note">
-              Showing the strongest branches first, with unscored branches at
-              the end.
-            </p>
-          </div>
-
-          {loading && (
+          {pageStatus === "error" && !view ? (
+            <section
+              className="openings-state openings-state--error"
+              role="alert"
+            >
+              <p className="openings-state__title">
+                {error ?? "Failed to load openings"}
+              </p>
+              <p className="openings-state__body">
+                The {colorLabel.toLowerCase()} opening tree did not load. Retry
+                to fetch the latest cached scores.
+              </p>
+              <button
+                className="chess-button primary"
+                type="button"
+                onClick={retry}
+              >
+                Retry
+              </button>
+            </section>
+          ) : !view ? (
             <section
               className="openings-state openings-state--loading"
               aria-live="polite"
               aria-label="Loading openings"
             >
-              <p className="openings-state__title">Loading openings...</p>
-              <div className="openings-grid openings-grid--loading">
-                {Array.from({ length: LOADING_CARD_COUNT }).map((_, index) => (
-                  <article
-                    key={index}
-                    className="opening-family-card opening-family-card--skeleton"
-                    aria-hidden="true"
-                  >
-                    <div className="opening-family-card__skeleton-bar opening-family-card__skeleton-bar--short" />
-                    <div className="opening-family-card__skeleton-bar opening-family-card__skeleton-bar--title" />
-                    <div className="opening-family-card__skeleton-bar opening-family-card__skeleton-bar--long" />
-                    <div className="opening-family-card__metrics opening-family-card__metrics--skeleton">
-                      {Array.from({ length: 4 }).map((__, metricIndex) => (
-                        <div
-                          key={metricIndex}
-                          className="opening-family-card__metric opening-family-card__metric--skeleton"
-                        />
-                      ))}
-                    </div>
-                  </article>
-                ))}
+              <p className="openings-state__title">Loading openings…</p>
+              <div className="openings-tree-workspace openings-tree-workspace--loading">
+                <div
+                  className="openings-tree-board openings-tree-board--skeleton"
+                  aria-hidden="true"
+                />
+                <div className="openings-tree-columns">
+                  {Array.from({ length: 3 }).map((_, index) => (
+                    <div
+                      key={index}
+                      className="openings-tree-column openings-tree-column--skeleton"
+                      aria-hidden="true"
+                    />
+                  ))}
+                </div>
               </div>
             </section>
-          )}
+          ) : (
+            <>
+              {/* Only label the banner when the view is SETTLED for the current
+                  route: a provisional/append-error render keeps the previous
+                  response on screen, whose batch (and color) may not match the
+                  current playerColor. A settled response is always the current
+                  color (step-1/4 fetch or the same-color step-2 prefix). */}
+              {isSettled && batchComputedAt === null && (
+                <p className="openings-tree__nodata-banner" role="note">
+                  No games for {colorLabel} yet — showing the reference opening
+                  book.
+                </p>
+              )}
+              <div className="openings-tree-workspace">
+                <div className="openings-tree-board">
+                  <Chessboard
+                    options={{
+                      id: "openings-tree-board",
+                      position: view.board.fen,
+                      boardOrientation: playerColor,
+                      allowDragging: true,
+                      onPieceDrop: handlePieceDrop,
+                      animationDurationInMs: 150,
+                      squareStyles,
+                    }}
+                  />
+                </div>
 
-          {!loading && error && (
-            <section
-              className="openings-state openings-state--error"
-              role="alert"
-            >
-              <p className="openings-state__title">{error}</p>
-              <p className="openings-state__body">
-                The {selectedColorLabel.toLowerCase()} openings snapshot did not
-                load. Retry to fetch the latest cached scores.
-              </p>
-              <button
-                className="chess-button primary"
-                type="button"
-                onClick={() => {
-                  invalidatePendingRequests();
-                  setLoading(true);
-                  setError(null);
-                  setResponse(null);
-                  setRetryCount((value) => value + 1);
-                }}
-              >
-                Retry
-              </button>
-            </section>
-          )}
-
-          {!loading && !error && isTrueNoEvidence && (
-            <section className="openings-state openings-state--empty">
-              <p className="openings-state__title">
-                No opening evidence for {selectedColorLabel} yet.
-              </p>
-              <p className="openings-state__body">
-                Play a few games with this color to start building opening
-                stats.
-              </p>
-            </section>
-          )}
-
-          {!loading && !error && isSnapshotEmpty && (
-            <section className="openings-state openings-state--empty">
-              <p className="openings-state__title">
-                No scored openings are available for {selectedColorLabel} yet.
-              </p>
-              <p className="openings-state__body">
-                A snapshot exists, but this branch has no scored roots right
-                now.
-              </p>
-            </section>
-          )}
-
-          {!loading && !error && isStructuralLeaf && (
-            <section className="openings-state openings-state--empty">
-              <p className="openings-state__title">
-                No deeper named openings under {response?.parent_name}.
-              </p>
-              <p className="openings-state__body">
-                This branch is a structural leaf in the named opening tree.
-              </p>
-            </section>
-          )}
-
-          {!loading && !error && showChildrenGrid && response && (
-            <section
-              className="openings-grid"
-              aria-label={`${selectedColorLabel} openings`}
-            >
-              {sortedChildren.map((child) => {
-                const tone = getPriorityTone(child.subtree_score);
-                // Direct-row semantics: a card is unscored when it has no direct
-                // score (subtree_root_count is navigation metadata only).
-                const isUnscored = child.subtree_score == null;
-                const canDrillDown = child.child_count > 0;
-                const openingMoveLine = getOpeningMoveLine(
-                  child.opening_key,
-                  moveLinesByFen,
-                );
-                const cardClassName = `opening-family-card opening-family-card--${tone}${canDrillDown ? " opening-family-card--interactive" : ""}`;
-
-                return (
-                  <article key={child.opening_key} className={cardClassName}>
-                    <OpeningFamilyCard
-                      variant="full"
-                      openingName={child.opening_name}
-                      openingKey={child.opening_key}
-                      playerColor={playerColor}
-                      score={child.subtree_score}
-                      coverage={child.subtree_coverage}
-                      gameCount={child.subtree_game_count}
-                      confidence={child.subtree_confidence}
-                      isUnscored={isUnscored}
-                      moveLine={openingMoveLine}
-                      footerNote={formatChildCount(child.child_count)}
-                      drillDownLabel={canDrillDown ? "Drill down" : undefined}
-                      onDrillDown={
-                        canDrillDown
-                          ? () => {
-                              navigateToRoute({
-                                playerColor,
-                                openingKey: child.opening_key,
-                                path: response.canonical_opening_key
-                                  ? [
-                                      ...response.canonical_path,
-                                      response.canonical_opening_key,
-                                    ]
-                                  : [],
-                              });
-                            }
-                          : undefined
-                      }
-                      onStartDrill={() => {
-                        navigate("/play", {
-                          state: {
-                            drillSetup: {
-                              openingKey: child.opening_key,
-                              playerColor,
-                            },
-                          },
-                        });
-                      }}
+                <div
+                  className="openings-tree-columns"
+                  aria-label={`${colorLabel} opening tree`}
+                >
+                  {view.columns.map((column) => (
+                    <TreeColumnView
+                      key={`${column.kind}-${column.lineIndex}`}
+                      column={column}
+                      onSelect={selectLine}
+                      onStartDrill={startDrill}
                     />
-                  </article>
-                );
-              })}
-            </section>
+                  ))}
+
+                  {appendStatus === "loading" && (
+                    <div
+                      className="openings-tree-column openings-tree-append openings-tree-append--loading"
+                      aria-live="polite"
+                    >
+                      <p className="openings-tree-append__label">Loading…</p>
+                    </div>
+                  )}
+
+                  {appendStatus === "error" && (
+                    <div
+                      className="openings-tree-column openings-tree-append openings-tree-append--error"
+                      role="alert"
+                    >
+                      <p className="openings-tree-append__label">
+                        {error ?? "Failed to load moves"}
+                      </p>
+                      <button
+                        className="chess-button"
+                        type="button"
+                        onClick={retry}
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
           )}
         </section>
       </div>

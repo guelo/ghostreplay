@@ -1,1011 +1,668 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
+  act,
   fireEvent,
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { flushSync } from "react-dom";
-import { MemoryRouter, useLocation } from "react-router-dom";
-import type {
-  ChildrenResponse,
-  CurrentBranchStats,
-  OpeningChildItem,
-} from "../utils/api";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
+import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
 
-const mockLogout = vi.fn();
-const getOpeningChildrenMock = vi.fn();
-const getOpeningBookMock = vi.fn();
+const getOpeningTreeMock = vi.fn();
+
+// Capture the latest Chessboard options so tests can simulate board drops and
+// read the rendered position/orientation.
+let boardOptions: Record<string, unknown> = {};
 
 vi.mock("../contexts/useAuth", () => ({
   useAuth: () => ({
-    user: {
-      id: 1,
-      username: "tester",
-      isAnonymous: false,
-    },
-    logout: mockLogout,
+    user: { id: 1, username: "tester", isAnonymous: false },
+    logout: vi.fn(),
   }),
 }));
 
 vi.mock("../utils/api", async () => {
-  const actual = await vi.importActual<typeof import("../utils/api")>(
-    "../utils/api",
-  );
-
+  const actual =
+    await vi.importActual<typeof import("../utils/api")>("../utils/api");
   return {
     ...actual,
-    getOpeningChildren: (
-      ...args: Parameters<typeof actual.getOpeningChildren>
-    ) => getOpeningChildrenMock(...args),
+    getOpeningTree: (...args: Parameters<typeof actual.getOpeningTree>) =>
+      getOpeningTreeMock(...args),
   };
 });
 
 vi.mock("react-chessboard", () => ({
-  defaultPieces: {
-    wK: () => <svg data-testid="piece-wK" />,
-    bK: () => <svg data-testid="piece-bK" />,
+  Chessboard: ({ options }: { options: Record<string, unknown> }) => {
+    boardOptions = options;
+    return (
+      <div
+        data-testid="opening-card-board"
+        data-position={options.position as string}
+        data-orientation={options.boardOrientation as string}
+      />
+    );
   },
-  Chessboard: ({ options }: { options: Record<string, unknown> }) => (
-    <div
-      data-testid="opening-card-board"
-      data-position={options.position as string}
-      data-orientation={options.boardOrientation as string}
-    />
-  ),
 }));
 
-vi.mock("../openings/openingBook", () => ({
-  getOpeningBook: () => getOpeningBookMock(),
-}));
-
-import AppRoutes from "../AppRoutes";
 import OpeningsPage from "./OpeningsPage";
 
-const FEN_ROOT = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -";
-const FEN_PARENT = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -";
-const FEN_LEAF =
-  "rnbqkbnr/pppp1ppp/8/4p3/3PP3/8/PPP2PPP/RNBQKBNR b KQkq -";
+// ---- fixtures --------------------------------------------------------------
+
+function tn(overrides: Partial<TreeNode> & { uci: string }): TreeNode {
+  return {
+    parent_fen: "parent",
+    child_fen: "child",
+    san: overrides.uci,
+    ply: 1,
+    opening_name: null,
+    eco: null,
+    in_book: true,
+    is_navigable: true,
+    is_observed: false,
+    is_prepared: false,
+    user_choice_count: 0,
+    encounter_count: 0,
+    opening_score: 50,
+    confidence: 0.5,
+    coverage: 0.5,
+    sample_size: 10,
+    game_count: 10,
+    last_practiced_at: null,
+    eval_cp: 20,
+    eval_mate: null,
+    terminal_reason: null,
+    drill_opening_key: null,
+    is_selected: false,
+    ...overrides,
+  };
+}
+
+function tc(
+  ply: number,
+  nodes: TreeNode[],
+  selectedUci: string | null = null,
+): TreeColumn {
+  return { position_fen: `pos-${ply}`, ply, selected_uci: selectedUci, nodes };
+}
+
+function tr(overrides: Partial<TreeResponse> = {}): TreeResponse {
+  return {
+    player_color: "white",
+    canonical_line: [],
+    selected_fen: "sel",
+    selected_ply: 0,
+    selected_is_terminal: false,
+    selected_terminal_reason: null,
+    drill_opening_key: null,
+    root_eval_cp: 15,
+    root_eval_mate: null,
+    columns: [],
+    batch_computed_at: "2026-06-01T00:00:00Z",
+    model_version: "v2",
+    ...overrides,
+  };
+}
+
+const WHITE_ROOT = tr({
+  canonical_line: [],
+  columns: [
+    tc(0, [
+      tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: 61 }),
+      tn({ uci: "d2d4", san: "d4", ply: 1, opening_score: 55 }),
+    ]),
+  ],
+});
+
+const BLACK_ROOT = tr({
+  player_color: "black",
+  canonical_line: [],
+  columns: [
+    tc(0, [
+      tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: 40 }),
+      tn({ uci: "d2d4", san: "d4", ply: 1, opening_score: 38 }),
+    ]),
+  ],
+});
+
+const WHITE_E4 = tr({
+  canonical_line: ["e2e4"],
+  columns: [
+    tc(
+      0,
+      [
+        tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: 61 }),
+        tn({ uci: "d2d4", san: "d4", ply: 1, opening_score: 55 }),
+      ],
+      "e2e4",
+    ),
+    tc(1, [
+      tn({ uci: "c7c5", san: "c5", ply: 2, opening_score: 50 }),
+      tn({ uci: "e7e5", san: "e5", ply: 2, opening_score: 52 }),
+    ]),
+  ],
+});
+
+// e2e4,c7c5 with the deepest (c7c5) node carrying a drill key + a child column.
+const WHITE_SICILIAN = tr({
+  canonical_line: ["e2e4", "c7c5"],
+  drill_opening_key: "deep-line-key",
+  selected_is_terminal: false,
+  columns: [
+    tc(
+      0,
+      [
+        tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: 61 }),
+        tn({ uci: "d2d4", san: "d4", ply: 1, opening_score: 55 }),
+      ],
+      "e2e4",
+    ),
+    tc(
+      1,
+      [
+        tn({
+          uci: "c7c5",
+          san: "c5",
+          ply: 2,
+          opening_score: 50,
+          drill_opening_key: "sicilian-key",
+        }),
+        tn({ uci: "e7e5", san: "e5", ply: 2, opening_score: 52 }),
+      ],
+      "c7c5",
+    ),
+    tc(2, [tn({ uci: "g1f3", san: "Nf3", ply: 3, opening_score: 48 })]),
+  ],
+});
+
+const WHITE_E4_E5 = tr({
+  canonical_line: ["e2e4", "e7e5"],
+  columns: [
+    tc(
+      0,
+      [
+        tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: 61 }),
+        tn({ uci: "d2d4", san: "d4", ply: 1, opening_score: 55 }),
+      ],
+      "e2e4",
+    ),
+    tc(
+      1,
+      [
+        tn({ uci: "c7c5", san: "c5", ply: 2, opening_score: 50 }),
+        tn({ uci: "e7e5", san: "e5", ply: 2, opening_score: 52 }),
+      ],
+      "e7e5",
+    ),
+    tc(2, [tn({ uci: "g1f3", san: "Nf3", ply: 3, opening_score: 45 })]),
+  ],
+});
+
+// ---- harness ---------------------------------------------------------------
 
 function LocationProbe() {
   const location = useLocation();
-
   return (
-    <output data-testid="route-location">
+    <output
+      data-testid="route-location"
+      data-state={JSON.stringify(location.state ?? null)}
+    >
       {location.pathname}
       {location.search}
     </output>
   );
 }
 
-function makeBreadcrumb(
-  opening_key: string,
-  opening_name: string,
-  is_current = false,
-) {
-  return { opening_key, opening_name, is_current };
-}
-
-function makeCurrentBranchStats(
-  overrides: Partial<CurrentBranchStats> = {},
-): CurrentBranchStats {
-  return {
-    score: 61,
-    confidence: 0.72,
-    coverage: 0.48,
-    sample_size: 56,
-    root_count: 4,
-    ...overrides,
-    // Default the games count to the fixture's sample_size unless overridden, so
-    // existing "Games" assertions (which used to read sample_size) keep passing.
-    // Mirror sample_size INCLUDING null so the unscored hero still shows "—".
-    game_count:
-      overrides.game_count !== undefined
-        ? overrides.game_count
-        : overrides.sample_size !== undefined
-          ? overrides.sample_size
-          : 56,
-  };
-}
-
-function makeChild(overrides: Partial<OpeningChildItem>): OpeningChildItem {
-  const merged: OpeningChildItem = {
-    opening_key: "root-1",
-    opening_name: "Root 1",
-    opening_family: "Root 1",
-    eco: null,
-    depth: 1,
-    child_count: 0,
-    subtree_score: 50,
-    subtree_confidence: 0.5,
-    subtree_coverage: 0.5,
-    subtree_sample_size: 10,
-    subtree_root_count: 1,
-    last_practiced_at: "2026-03-29T10:00:00Z",
-    weakest_root_key: "root-1",
-    weakest_root_name: "Root 1",
-    weakest_root_family: "Root 1",
-    weakest_root_score: 50,
-    ...overrides,
-    // Mirror subtree_sample_size unless overridden so card "Games" assertions hold.
-    subtree_game_count:
-      overrides.subtree_game_count ?? overrides.subtree_sample_size ?? 10,
-  };
-
-  return {
-    ...merged,
-    weakest_root_key: overrides.weakest_root_key ?? merged.opening_key,
-    weakest_root_name: overrides.weakest_root_name ?? merged.opening_name,
-    weakest_root_family: overrides.weakest_root_family ?? merged.opening_family,
-  };
-}
-
-function makeResponse(
-  overrides: Partial<ChildrenResponse> & {
-    children?: OpeningChildItem[];
-  },
-): ChildrenResponse {
-  return {
-    player_color: "white",
-    parent_key: null,
-    parent_name: null,
-    canonical_opening_key: null,
-    canonical_path: [],
-    breadcrumbs: [],
-    current_branch_stats: makeCurrentBranchStats(),
-    children: [],
-    total_children: overrides.children?.length ?? 0,
-    computed_at: "2026-03-30T12:00:00Z",
-    ...overrides,
-  };
-}
-
-const whiteTopLevelResponse = makeResponse({
-  player_color: "white",
-  current_branch_stats: makeCurrentBranchStats({
-    score: 63,
-    confidence: 0.72,
-    coverage: 0.81,
-    sample_size: 144,
-    root_count: 7,
-  }),
-  children: [
-    makeChild({
-      opening_key: "sicilian",
-      opening_name: "Sicilian Defense",
-      child_count: 1,
-      subtree_score: 44,
-      subtree_confidence: 0.67,
-      subtree_coverage: 0.36,
-      subtree_sample_size: 12,
-      subtree_root_count: 2,
-      weakest_root_name: "Dragon Variation",
-      weakest_root_score: 33,
-    }),
-    makeChild({
-      opening_key: "french",
-      opening_name: "French Defense",
-      child_count: 0,
-      subtree_score: 52,
-      subtree_confidence: 0.82,
-      subtree_coverage: 0.58,
-      subtree_sample_size: 26,
-      subtree_root_count: 3,
-      weakest_root_name: "Winawer Variation",
-      weakest_root_score: 33,
-    }),
-    makeChild({
-      opening_key: "caro",
-      opening_name: "Caro-Kann Defense",
-      child_count: 2,
-      subtree_score: 49.2,
-      subtree_confidence: 0.71,
-      subtree_coverage: 0.44,
-      subtree_sample_size: 18,
-      subtree_root_count: 2,
-      weakest_root_name: "Advance Variation",
-      weakest_root_score: 41,
-    }),
-  ],
-});
-
-const blackTopLevelResponse = makeResponse({
-  player_color: "black",
-  current_branch_stats: makeCurrentBranchStats({
-    score: 74,
-    confidence: 0.69,
-    coverage: 0.62,
-    sample_size: 88,
-    root_count: 3,
-  }),
-  children: [
-    makeChild({
-      opening_key: "kings-indian",
-      opening_name: "King's Indian Defense",
-      child_count: 1,
-      subtree_score: 61,
-      subtree_confidence: 0.74,
-      subtree_coverage: 0.52,
-      subtree_sample_size: 21,
-      subtree_root_count: 2,
-      weakest_root_name: "Classical Variation",
-      weakest_root_score: 47,
-    }),
-  ],
-});
-
-const polishResponse = makeResponse({
-  parent_key: "polish",
-  parent_name: "Polish Opening",
-  canonical_opening_key: "polish",
-  canonical_path: [],
-  breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
-  current_branch_stats: makeCurrentBranchStats({
-    score: 67,
-    confidence: 0.59,
-    coverage: 0.38,
-    sample_size: 23,
-    root_count: 2,
-  }),
-  children: [
-    makeChild({
-      opening_key: "polish-e6",
-      opening_name: "Polish Opening, 1...e6",
-      child_count: 1,
-      subtree_score: 42,
-      subtree_confidence: 0.55,
-      subtree_coverage: 0.33,
-      subtree_sample_size: 8,
-      subtree_root_count: 1,
-      weakest_root_key: "polish-e6",
-      weakest_root_name: "Polish Opening, 1...e6",
-      weakest_root_family: "Polish Opening",
-      weakest_root_score: 42,
-    }),
-  ],
-});
-
-const polishE6Response = makeResponse({
-  parent_key: "polish-e6",
-  parent_name: "Polish Opening, 1...e6",
-  canonical_opening_key: "polish-e6",
-  canonical_path: ["polish"],
-  breadcrumbs: [
-    makeBreadcrumb("polish", "Polish Opening"),
-    makeBreadcrumb("polish-e6", "Polish Opening, 1...e6", true),
-  ],
-  current_branch_stats: makeCurrentBranchStats({
-    score: 31,
-    confidence: 0.44,
-    coverage: 0.29,
-    sample_size: 9,
-    root_count: 1,
-  }),
-  children: [
-    makeChild({
-      opening_key: "polish-leaf",
-      opening_name: "Polish Leaf",
-      child_count: 1,
-      subtree_score: 39,
-      subtree_confidence: 0.48,
-      subtree_coverage: 0.27,
-      subtree_sample_size: 5,
-      subtree_root_count: 1,
-      weakest_root_key: "polish-leaf",
-      weakest_root_name: "Polish Leaf",
-      weakest_root_family: "Polish Opening",
-      weakest_root_score: 39,
-    }),
-  ],
-});
-
-const polishLeafResponse = makeResponse({
-  parent_key: "polish-leaf",
-  parent_name: "Polish Leaf",
-  canonical_opening_key: "polish-leaf",
-  canonical_path: ["polish", "polish-e6"],
-  breadcrumbs: [
-    makeBreadcrumb("polish", "Polish Opening"),
-    makeBreadcrumb("polish-e6", "Polish Opening, 1...e6"),
-    makeBreadcrumb("polish-leaf", "Polish Leaf", true),
-  ],
-  current_branch_stats: makeCurrentBranchStats({
-    score: 28,
-    confidence: 0.33,
-    coverage: 0.21,
-    sample_size: 4,
-    root_count: 1,
-  }),
-  children: [],
-});
-
-function renderPage(path = "/openings?color=white") {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <OpeningsPage />
-      <LocationProbe />
-    </MemoryRouter>,
+function Nav({ to, label }: { to: string; label: string }) {
+  const navigate = useNavigate();
+  return (
+    <button type="button" onClick={() => navigate(to)}>
+      {label}
+    </button>
   );
 }
 
-function renderRoute(path = "/openings?color=white") {
-  return render(
-    <MemoryRouter initialEntries={[path]}>
-      <AppRoutes />
-      <LocationProbe />
-    </MemoryRouter>,
-  );
-}
-
-function createDeferred<T>() {
+function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
-
   const promise = new Promise<T>((res, rej) => {
     resolve = res;
     reject = rej;
   });
-
   return { promise, resolve, reject };
 }
 
-function createNeverSettlingPromise<T>() {
-  return new Promise<T>(() => undefined);
+function renderAt(entry: string, extra?: React.ReactNode) {
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
+      <LocationProbe />
+      {extra}
+      <Routes>
+        <Route path="/openings" element={<OpeningsPage />} />
+        <Route path="/play" element={<div data-testid="play-stub" />} />
+      </Routes>
+    </MemoryRouter>,
+  );
 }
 
-describe("OpeningsPage", () => {
-  beforeEach(() => {
-    getOpeningChildrenMock.mockReset();
-    mockLogout.mockReset();
-    getOpeningBookMock.mockReset();
-    getOpeningBookMock.mockImplementation(() => createNeverSettlingPromise());
+function location(): string {
+  return screen.getByTestId("route-location").textContent ?? "";
+}
+
+function lineIndexes(): number[] {
+  return screen
+    .getAllByTestId("tree-column")
+    .map((el) => Number(el.getAttribute("data-line-index")));
+}
+
+/** Click a compact node card by its SAN move text. */
+function clickMove(san: string) {
+  const moveSpan = screen.getByText(san, {
+    selector: ".tree-node-card__move",
+  });
+  fireEvent.click(moveSpan.closest("button") as HTMLButtonElement);
+}
+
+beforeEach(() => {
+  getOpeningTreeMock.mockReset();
+  boardOptions = {};
+});
+
+// ---- tests -----------------------------------------------------------------
+
+describe("OpeningsPage tree", () => {
+  it("renders the board + root column and stays canonical at the root", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
+    renderAt("/openings?color=white");
+
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    expect(lineIndexes()).toEqual([-1, 0]);
+    expect(screen.getByTestId("opening-card-board")).toHaveAttribute(
+      "data-orientation",
+      "white",
+    );
+    expect(location()).toBe("/openings?color=white");
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("registers a dedicated /openings route and nav link", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
+  it("restores a deep line and expands only the deepest selected node", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_SICILIAN);
+    const { container } = renderAt(
+      "/openings?color=white&move=e2e4&move=c7c5",
+    );
 
-    renderRoute("/openings?color=white");
+    await screen.findAllByTestId("tree-column");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
 
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenCalledWith({
-        playerColor: "white",
-        path: [],
-        parentKey: undefined,
-      });
+    const expanded = container.querySelectorAll(".tree-node-card--expanded");
+    expect(expanded).toHaveLength(1);
+    // The single expanded card is the deepest selected node (c5).
+    expect(expanded[0].textContent).toContain("c5");
+    // URL already canonical → no rewrite, one fetch.
+    expect(location()).toBe("/openings?color=white&move=e2e4&move=c7c5");
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("canonicalizes a non-canonical line by replacing the URL", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_E4);
+    renderAt("/openings?color=white&move=e2e4&move=z9z9");
+
+    await waitFor(() =>
+      expect(location()).toBe("/openings?color=white&move=e2e4"),
+    );
+    // The truncated canonical line is cached under its canonical key, so the
+    // follow-up render is a cache hit (no second network call).
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects a sibling: pushes a truncated line and drops deeper columns immediately", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_SICILIAN);
+    renderAt("/openings?color=white&move=e2e4&move=c7c5");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
+
+    // Keep the sibling refetch pending so we can observe the immediate clip.
+    const pending = deferred<TreeResponse>();
+    getOpeningTreeMock.mockReturnValueOnce(pending.promise);
+
+    clickMove("e5"); // sibling of c5 in column 1
+
+    // URL truncates c7c5 and pushes e7e5.
+    expect(location()).toBe("/openings?color=white&move=e2e4&move=e7e5");
+    // Column 2 (children of the old pos) drops before the refetch resolves.
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
+
+    await act(async () => {
+      pending.resolve(WHITE_E4_E5);
     });
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
+  });
 
+  it("syncs a navigable board drop to the tree and rejects off-tree drops", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Off-tree but legal (a2a3 is not a node in the frontier column) → rejected.
+    let rejected: boolean | undefined;
+    act(() => {
+      rejected = (
+        boardOptions.onPieceDrop as (a: {
+          sourceSquare: string;
+          targetSquare: string;
+        }) => boolean
+      )({ sourceSquare: "a2", targetSquare: "a3" });
+    });
+    expect(rejected).toBe(false);
+    expect(location()).toBe("/openings?color=white");
+
+    // Navigable drop e2→e4 extends the line; board position follows immediately.
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = (
+        boardOptions.onPieceDrop as (a: {
+          sourceSquare: string;
+          targetSquare: string;
+        }) => boolean
+      )({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    expect(accepted).toBe(true);
+    expect(location()).toBe("/openings?color=white&move=e2e4");
+    expect(screen.getByTestId("opening-card-board").getAttribute("data-position"))
+      .toMatch(/4P3/);
+  });
+
+  it("switches perspective: flips orientation, preserves the line, refetches at root", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+
+    getOpeningTreeMock.mockResolvedValueOnce(BLACK_ROOT);
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+
+    // Orientation flips immediately and the line (root) is preserved.
+    expect(location()).toBe("/openings?color=black");
+    expect(screen.getByTestId("opening-card-board")).toHaveAttribute(
+      "data-orientation",
+      "black",
+    );
+    // Refetch fires even at the same (root) line.
+    await waitFor(() => expect(getOpeningTreeMock).toHaveBeenCalledTimes(2));
+    expect(getOpeningTreeMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ playerColor: "black", moves: [] }),
+      expect.anything(),
+    );
+    // Color-specific metric re-hydrates (e4 score 61 → 40).
+    await screen.findByText("40", { selector: ".tree-node-card__score" });
+  });
+
+  it("legacy opening= link never short-circuits a displayed response", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt(
+      "/openings?color=white",
+      <Nav to="/openings?color=white&opening=somefen" label="go-legacy" />,
+    );
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
+    fireEvent.click(screen.getByText("go-legacy"));
+
+    // The opening= link must hit the network (no []-prefix short-circuit)…
+    await waitFor(() => expect(getOpeningTreeMock).toHaveBeenCalledTimes(2));
+    expect(getOpeningTreeMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ opening: "somefen" }),
+      expect.anything(),
+    );
+    // …and the URL canonicalizes to the resolved move= line.
+    await waitFor(() =>
+      expect(location()).toBe("/openings?color=white&move=e2e4"),
+    );
+  });
+
+  it("prefix back-nav does not snap forward or refetch", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_SICILIAN);
+    renderAt(
+      "/openings?color=white&move=e2e4&move=c7c5",
+      <Nav to="/openings?color=white&move=e2e4" label="go-prefix" />,
+    );
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByText("go-prefix"));
+
+    // Clipped to e2e4 with no refetch; URL stays at the prefix.
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+    expect(location()).toBe("/openings?color=white&move=e2e4");
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not canonicalize backward while a fresh selection is still pending", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Keep the e2e4 fetch pending.
+    getOpeningTreeMock.mockReturnValueOnce(deferred<TreeResponse>().promise);
+    clickMove("e4");
+
+    expect(location()).toBe("/openings?color=white&move=e2e4");
+    // The stale (settled) root response must not rewrite the URL back to [].
+    await waitFor(() => expect(screen.getByText("Loading…")).toBeInTheDocument());
+    expect(location()).toBe("/openings?color=white&move=e2e4");
+  });
+
+  it("isolates clipped-view fields: back-nav to root shows no drill/terminal, no refetch", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_SICILIAN);
+    renderAt("/openings?color=white&move=e2e4&move=c7c5");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
+    // The deep selected node is drillable.
     expect(
-      screen.getByRole("heading", { name: "OPENING SCOREBOARD" }),
+      screen.getByRole("button", { name: /start drill/i }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Openings" })).toHaveAttribute(
-      "href",
-      "/openings",
+
+    clickMove("Start"); // the root column's compact card → selectLine([])
+
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0]));
+    expect(location()).toBe("/openings?color=white");
+    // Root card (now expanded) carries no drill from the deeper response.
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
+    // Reached via the prefix path — no refetch.
+    expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("separates render depth from selection depth on a deep stale URL", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt(
+      "/openings?color=white",
+      <Nav
+        to="/openings?color=white&move=e2e4&move=c7c5"
+        label="go-deep"
+      />,
     );
-    expect(screen.queryByText("Your Stats")).not.toBeInTheDocument();
-  });
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
 
-  it("shows a loading state before the first response", () => {
-    getOpeningChildrenMock.mockImplementation(
-      () => new Promise(() => undefined),
-    );
+    const pending = deferred<TreeResponse>();
+    getOpeningTreeMock.mockReturnValueOnce(pending.promise);
+    fireEvent.click(screen.getByText("go-deep"));
 
-    renderPage();
+    // Renders only through the divergence (ply 0); deeper columns are NOT leaked.
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0]));
+    const expanded = document.querySelectorAll(".tree-node-card--expanded");
+    expect(expanded).toHaveLength(1);
+    expect(expanded[0].textContent).toContain("e4");
 
-    expect(screen.getByText("Loading openings...")).toBeInTheDocument();
-    expect(getOpeningChildrenMock).toHaveBeenCalledWith({
-      playerColor: "white",
-      path: [],
-      parentKey: undefined,
+    await act(async () => {
+      pending.resolve(WHITE_SICILIAN);
     });
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
   });
 
-  it("shows repertoire-wide hero stats at Start", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
-
-    renderPage();
-
-    const heroStats = screen.getByLabelText("Current branch stats");
-
-    await waitFor(() => {
-      expect(within(heroStats).getByText("63")).toBeInTheDocument();
-      expect(within(heroStats).getByText("81%")).toBeInTheDocument();
-      expect(within(heroStats).getByText("144")).toBeInTheDocument();
-      expect(within(heroStats).getByText("72%")).toBeInTheDocument();
-    });
-    expect(within(heroStats).getByText("Repertoire-wide")).toBeInTheDocument();
-    expect(heroStats).toHaveClass("openings-shell__stats-card--watch");
-  });
-
-  it("labels 'Games' with game_count, never sample_size (one game, nine plies)", async () => {
-    // Regression for the real bug: a single game played nine plies deep yields
-    // sample_size=9 but is ONE game. The "Games" metric must read game_count (1),
-    // not sample_size (9), in BOTH the hero stats and the opening card. Values are
-    // deliberately distinct so this proves the label reads the right field.
-    getOpeningBookMock.mockResolvedValueOnce({ entries: [] });
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        current_branch_stats: makeCurrentBranchStats({
-          score: 18,
-          confidence: 0.16,
-          coverage: 0,
-          sample_size: 9,
-          game_count: 1,
-          root_count: 1,
-        }),
-        children: [
-          makeChild({
-            opening_key: "polish-qid",
-            opening_name: "Polish Opening: Queen's Indian Variation",
-            child_count: 0,
-            subtree_score: 18,
-            subtree_sample_size: 9,
-            subtree_game_count: 1,
-          }),
+  it("shows the no-data banner and stays navigable for a book-only tree", async () => {
+    getOpeningTreeMock.mockResolvedValue(
+      tr({
+        batch_computed_at: null,
+        columns: [
+          tc(0, [
+            tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: null }),
+          ]),
         ],
       }),
     );
+    renderAt("/openings?color=white");
 
-    renderPage();
-
-    // Hero: the Games metric shows game_count (1), and sample_size (9) appears nowhere.
-    const heroStats = screen.getByLabelText("Current branch stats");
-    await waitFor(() => {
-      expect(within(heroStats).getByText("Games")).toBeInTheDocument();
-    });
-    const heroGames = within(heroStats)
-      .getByText("Games")
-      .closest(".openings-shell__stats-metric")!;
-    expect(heroGames.querySelector("dd")?.textContent).toBe("1");
-    expect(within(heroStats).queryByText("9")).not.toBeInTheDocument();
-
-    // Card: same — the Games metric is the game_count, not the ply-derived sample_size.
-    const grid = await screen.findByRole("region", { name: "White openings" });
-    const card = within(grid)
-      .getByRole("heading", {
-        name: "Polish Opening: Queen's Indian Variation",
-      })
-      .closest("article")!;
-    const cardGames = within(card)
-      .getByText("Games")
-      .closest(".opening-family-card__metric")!;
-    expect(cardGames.querySelector("dd")?.textContent).toBe("1");
-    expect(within(card).queryByText("9")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/No games for White yet/i),
+    ).toBeInTheDocument();
+    // Null-metric node still renders and is selectable.
+    clickMove("e4");
+    expect(location()).toBe("/openings?color=white&move=e2e4");
   });
 
-  it("renders populated opening cards strongest-first with normalized percentages", async () => {
-    getOpeningBookMock.mockResolvedValueOnce({
-      entries: [
-        { epd: "french", pgn: "1. e4 e6 2. d4 d5" },
-        { epd: "sicilian", pgn: "1. e4 c5" },
-        { epd: "caro", pgn: "1. e4 c6" },
-      ],
-    });
-    getOpeningChildrenMock.mockResolvedValueOnce(whiteTopLevelResponse);
-
-    renderPage();
-
-    const grid = await screen.findByRole("region", {
-      name: "White openings",
-    });
-    const headings = within(grid)
-      .getAllByRole("heading", { level: 2 })
-      .map((heading) => heading.textContent);
-
-    expect(headings).toEqual([
-      "French Defense",
-      "Caro-Kann Defense",
-      "Sicilian Defense",
-    ]);
-
-    const firstCard = within(grid)
-      .getByRole("heading", { name: "French Defense" })
-      .closest("article");
-
-    expect(firstCard).not.toBeNull();
-    expect(within(firstCard!).getByText(/Moves:/)).toBeInTheDocument();
-    expect(within(firstCard!).getByText("1.e4 e6 2.d4 d5")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("D")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("Games")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("82%")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("58%")).toBeInTheDocument();
-    expect(within(firstCard!).getByText("No children")).toBeInTheDocument();
-    expect(within(firstCard!).getByTestId("opening-card-board")).toHaveAttribute(
-      "data-position",
-      "french",
+  it("renders non-navigable boundary nodes as non-clickable cards", async () => {
+    getOpeningTreeMock.mockResolvedValue(
+      tr({
+        columns: [
+          tc(0, [
+            tn({ uci: "e2e4", san: "e4", is_navigable: true }),
+            tn({ uci: "h2h4", san: "h4", is_navigable: false }),
+          ]),
+        ],
+      }),
     );
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // The navigable move is a selection button…
+    expect(
+      screen
+        .getByText("e4", { selector: ".tree-node-card__move" })
+        .closest("button"),
+    ).not.toBeNull();
+    // …the boundary move renders as a plain (non-button) card.
+    const boundary = screen.getByText("h4", {
+      selector: ".tree-node-card__move",
+    });
+    expect(boundary.closest("button")).toBeNull();
+
+    fireEvent.click(boundary);
+    expect(location()).toBe("/openings?color=white");
   });
 
-  it("shows branch hero stats on drill pages instead of reusing the child summary", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
+  it("does not mislabel the no-data banner during a color switch", async () => {
+    // White is book-only (batch_computed_at === null).
+    getOpeningTreeMock.mockResolvedValueOnce(
+      tr({
+        batch_computed_at: null,
+        columns: [tc(0, [tn({ uci: "e2e4", san: "e4" })])],
+      }),
+    );
+    renderAt("/openings?color=white");
+    expect(
+      await screen.findByText(/No games for White yet/i),
+    ).toBeInTheDocument();
 
-    renderPage("/openings?color=white&opening=polish");
+    // Switch to black with a pending fetch: the stale white (book-only) response
+    // kept on screen must NOT be relabeled "No games for Black yet".
+    getOpeningTreeMock.mockReturnValueOnce(deferred<TreeResponse>().promise);
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+    expect(location()).toBe("/openings?color=black");
 
-    const heroStats = screen.getByLabelText("Current branch stats");
+    await waitFor(() =>
+      expect(screen.getByText("Loading…")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/No games for Black yet/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No games for White yet/i)).not.toBeInTheDocument();
+  });
 
-    await waitFor(() => {
-      expect(within(heroStats).getByText("67")).toBeInTheDocument();
-      expect(within(heroStats).getByText("38%")).toBeInTheDocument();
-      expect(within(heroStats).getByText("23")).toBeInTheDocument();
-      expect(within(heroStats).getByText("59%")).toBeInTheDocument();
-    });
-    expect(within(heroStats).queryByText("42")).not.toBeInTheDocument();
-    expect(screen.getByText("42")).toBeInTheDocument();
+  it("recovers from a page error via Retry", async () => {
+    getOpeningTreeMock.mockRejectedValueOnce(new Error("snapshot down"));
+    renderAt("/openings?color=white");
+
+    expect(await screen.findByText("snapshot down")).toBeInTheDocument();
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    expect(lineIndexes()).toEqual([-1, 0]);
+  });
+
+  it("shows an append error + Retry while keeping the existing columns", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    getOpeningTreeMock.mockRejectedValueOnce(new Error("append down"));
+    clickMove("e4");
+
+    expect(await screen.findByText("append down")).toBeInTheDocument();
+    // Existing root columns remain visible.
+    expect(lineIndexes()).toEqual([-1, 0]);
+
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
   });
 
   it("ignores a stale response that settles during a color switch", async () => {
-    const whiteDeferred = createDeferred<typeof whiteTopLevelResponse>();
-    const blackDeferred = createDeferred<typeof blackTopLevelResponse>();
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
 
-    getOpeningChildrenMock.mockImplementationOnce(() => whiteDeferred.promise);
-    getOpeningChildrenMock.mockImplementationOnce(() => blackDeferred.promise);
+    // Switch to black with a pending (slow) black fetch…
+    const blackPending = deferred<TreeResponse>();
+    getOpeningTreeMock.mockReturnValueOnce(blackPending.promise);
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+    expect(location()).toBe("/openings?color=black");
 
-    renderPage();
+    // …then switch back to white (cache hit) before black settles.
+    fireEvent.click(screen.getByRole("button", { name: "White" }));
+    await waitFor(() => expect(location()).toBe("/openings?color=white"));
 
-    expect(getOpeningChildrenMock).toHaveBeenCalledWith({
-      playerColor: "white",
-      path: [],
-      parentKey: undefined,
+    // The late black response is dropped by the version guard.
+    await act(async () => {
+      blackPending.resolve(BLACK_ROOT);
     });
-
-    flushSync(() => {
-      fireEvent.click(screen.getByRole("button", { name: "Black" }));
-    });
-
-    expect(screen.getByRole("button", { name: "Black" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
+    expect(screen.getByTestId("opening-card-board")).toHaveAttribute(
+      "data-orientation",
+      "white",
     );
+    await screen.findByText("61", { selector: ".tree-node-card__score" });
+  });
 
-    whiteDeferred.resolve(whiteTopLevelResponse);
-    await Promise.resolve();
-    await Promise.resolve();
+  it("navigates to the drill with the drill setup from the expanded card", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_SICILIAN);
+    renderAt("/openings?color=white&move=e2e4&move=c7c5");
+    const drillButton = await screen.findByRole("button", {
+      name: /start drill/i,
+    });
 
-    expect(screen.getByText("Loading openings...")).toBeInTheDocument();
-    expect(screen.queryByText("Sicilian Defense")).not.toBeInTheDocument();
+    fireEvent.click(drillButton);
 
-    blackDeferred.resolve(blackTopLevelResponse);
+    const probe = screen.getByTestId("route-location");
+    expect(probe.textContent).toBe("/play");
+    expect(JSON.parse(probe.getAttribute("data-state") ?? "null")).toEqual({
+      drillSetup: { openingKey: "sicilian-key", playerColor: "white" },
+    });
+  });
+
+  it("omits Start Drill when the deepest node has no drill key", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_E4);
+    renderAt("/openings?color=white&move=e2e4");
+    // e2e4 is the deepest selected node here → expanded (move label "1. e4").
+    await screen.findByText("1. e4");
 
     expect(
-      await screen.findByRole("region", { name: "Black openings" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("King's Indian Defense")).toBeInTheDocument();
-  });
-
-  it("accepts deep links with FEN-shaped opening and repeated path params", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        player_color: "black",
-        parent_key: FEN_LEAF,
-        parent_name: "French Defense: Advance Variation",
-        canonical_opening_key: FEN_LEAF,
-        canonical_path: [FEN_ROOT, FEN_PARENT],
-        breadcrumbs: [
-          makeBreadcrumb(FEN_ROOT, "King's Pawn Game"),
-          makeBreadcrumb(FEN_PARENT, "King's Pawn Game: ...e5"),
-          makeBreadcrumb(FEN_LEAF, "French Defense: Advance Variation", true),
-        ],
-        children: [
-          makeChild({
-            opening_key: "fen-child",
-            opening_name: "Fen Child",
-            child_count: 0,
-          }),
-        ],
-      }),
-    );
-
-    renderRoute(
-      `/openings?color=black&opening=${encodeURIComponent(FEN_LEAF)}&path=${encodeURIComponent(FEN_ROOT)}&path=${encodeURIComponent(FEN_PARENT)}`,
-    );
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenCalledWith({
-        playerColor: "black",
-        parentKey: FEN_LEAF,
-        path: [FEN_ROOT, FEN_PARENT],
-      });
-    });
-
-    expect(
-      screen.getAllByText("French Defense: Advance Variation").length,
-    ).toBeGreaterThan(0);
-  });
-
-  it("card clicks update the URL and grow repeated path params", async () => {
-    const user = userEvent.setup();
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        children: [
-          makeChild({
-            opening_key: "polish",
-            opening_name: "Polish Opening",
-            child_count: 1,
-          }),
-        ],
-      }),
-    );
-    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
-    getOpeningChildrenMock.mockResolvedValueOnce(polishE6Response);
-
-    renderPage();
-
-    await screen.findByRole("region", { name: "White openings" });
-
-    await user.click(screen.getByRole("button", { name: /Polish Opening/ }));
-    await waitFor(() => {
-      expect(screen.getByTestId("route-location")).toHaveTextContent(
-        "/openings?color=white&opening=polish",
-      );
-    });
-
-    await user.click(screen.getByRole("button", { name: /Polish Opening, 1...e6/ }));
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(3, {
-        playerColor: "white",
-        parentKey: "polish-e6",
-        path: ["polish"],
-      });
-    });
-    expect(screen.getByTestId("route-location")).toHaveTextContent(
-      "/openings?color=white&opening=polish-e6&path=polish",
-    );
-  });
-
-  it("breadcrumb clicks navigate to an intermediate level", async () => {
-    const user = userEvent.setup();
-    getOpeningChildrenMock.mockResolvedValueOnce(polishLeafResponse);
-    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
-
-    renderPage(
-      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
-    );
-
-    await waitFor(() => {
-      expect(screen.getAllByText("Polish Leaf").length).toBeGreaterThan(0);
-    });
-
-    await user.click(
-      screen.getByRole("button", { name: "Polish Opening" }),
-    );
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, {
-        playerColor: "white",
-        parentKey: "polish",
-        path: [],
-      });
-    });
-    expect(screen.getByTestId("route-location")).toHaveTextContent(
-      "/openings?color=white&opening=polish",
-    );
-  });
-
-  it("invalid color canonicalizes to white", async () => {
-    getOpeningChildrenMock.mockResolvedValue(whiteTopLevelResponse);
-
-    renderRoute("/openings?color=chartreuse");
-
-    await screen.findByRole("region", { name: "White openings" });
-
-    expect(getOpeningChildrenMock).toHaveBeenCalledWith({
-      playerColor: "white",
-      parentKey: undefined,
-      path: [],
-    });
-    expect(screen.getByTestId("route-location")).toHaveTextContent(
-      "/openings?color=white",
-    );
-  });
-
-  it("invalid path canonicalizes to the deepest valid prefix", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        parent_key: "polish",
-        parent_name: "Polish Opening",
-        canonical_opening_key: "polish",
-        canonical_path: [],
-        breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
-        current_branch_stats: makeCurrentBranchStats({
-          score: 68,
-          confidence: 0.58,
-          coverage: 0.34,
-          sample_size: 21,
-          root_count: 2,
-        }),
-        children: [
-          makeChild({
-            opening_key: "polish-e6",
-            opening_name: "Polish Opening, 1...e6",
-            child_count: 0,
-          }),
-        ],
-      }),
-    );
-    getOpeningChildrenMock.mockResolvedValueOnce(polishResponse);
-
-    renderRoute("/openings?color=white&opening=shared&path=polish&path=english");
-
-    await waitFor(() => {
-      expect(screen.getByTestId("route-location")).toHaveTextContent(
-        "/openings?color=white&opening=polish",
-      );
-    });
-    await waitFor(() => {
-      expect(
-        within(screen.getByLabelText("Current branch stats")).getByText("67"),
-      ).toBeInTheDocument();
-    });
-    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(1, {
-      playerColor: "white",
-      parentKey: "shared",
-      path: ["polish", "english"],
-    });
-    expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, {
-      playerColor: "white",
-      parentKey: "polish",
-      path: [],
-    });
-  });
-
-  it("unknown opening preserves the URL and shows the error state", async () => {
-    getOpeningChildrenMock.mockRejectedValueOnce(
-      new Error("Unknown opening root"),
-    );
-
-    renderRoute("/openings?color=white&opening=missing-root&path=polish");
-
-    await waitFor(() => {
-      expect(screen.getByText("Unknown opening root")).toBeInTheDocument();
-    });
-
-    expect(screen.getByTestId("route-location")).toHaveTextContent(
-      "/openings?color=white&opening=missing-root&path=polish",
-    );
-  });
-
-  it("retry preserves the current search params", async () => {
-    const user = userEvent.setup();
-    getOpeningChildrenMock.mockRejectedValueOnce(
-      new Error("Opening children cache unavailable"),
-    );
-    getOpeningChildrenMock.mockResolvedValueOnce(polishLeafResponse);
-
-    renderRoute(
-      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Opening children cache unavailable"),
-      ).toBeInTheDocument();
-    });
-
-    await user.click(screen.getByRole("button", { name: "Retry" }));
-
-    await waitFor(() => {
-      expect(getOpeningChildrenMock).toHaveBeenNthCalledWith(2, {
-        playerColor: "white",
-        parentKey: "polish-leaf",
-        path: ["polish", "polish-e6"],
-      });
-    });
-    expect(screen.getByTestId("route-location")).toHaveTextContent(
-      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
-    );
-  });
-
-  it("direct deep links to a structural leaf show the leaf empty state", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(polishLeafResponse);
-
-    renderRoute(
-      "/openings?color=white&opening=polish-leaf&path=polish&path=polish-e6",
-    );
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("No deeper named openings under Polish Leaf."),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows the true no-evidence empty state when computed_at is null and all children are unscored", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        computed_at: null,
-        current_branch_stats: makeCurrentBranchStats({
-          score: null,
-          confidence: null,
-          coverage: null,
-          sample_size: null,
-          root_count: 0,
-        }),
-        children: [
-          makeChild({
-            opening_key: "polish",
-            opening_name: "Polish Opening",
-            child_count: 2,
-            subtree_score: null,
-            subtree_confidence: null,
-            subtree_coverage: null,
-            subtree_sample_size: 0,
-            subtree_root_count: 0,
-            weakest_root_key: null,
-            weakest_root_name: null,
-            weakest_root_family: null,
-            weakest_root_score: null,
-          }),
-        ],
-      }),
-    );
-
-    renderPage();
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("No opening evidence for White yet."),
-      ).toBeInTheDocument();
-    });
-    expect(
-      within(screen.getByLabelText("Current branch stats")).getAllByText("—"),
-    ).toHaveLength(4);
-  });
-
-  it("shows the computed snapshot empty state when all returned children are unscored", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        computed_at: "2026-03-30T12:00:00Z",
-        current_branch_stats: makeCurrentBranchStats({
-          score: null,
-          confidence: null,
-          coverage: null,
-          sample_size: null,
-          root_count: 0,
-        }),
-        children: [
-          makeChild({
-            opening_key: "polish",
-            opening_name: "Polish Opening",
-            child_count: 2,
-            subtree_score: null,
-            subtree_confidence: null,
-            subtree_coverage: null,
-            subtree_sample_size: 0,
-            subtree_root_count: 0,
-            weakest_root_key: null,
-            weakest_root_name: null,
-            weakest_root_family: null,
-            weakest_root_score: null,
-          }),
-        ],
-      }),
-    );
-
-    renderPage();
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("No scored openings are available for White yet."),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("keeps the normal content state when the current branch is scored but all listed children are unscored", async () => {
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        parent_key: "polish",
-        parent_name: "Polish Opening",
-        canonical_opening_key: "polish",
-        canonical_path: [],
-        breadcrumbs: [makeBreadcrumb("polish", "Polish Opening", true)],
-        current_branch_stats: makeCurrentBranchStats({
-          score: 61,
-          confidence: 0.52,
-          coverage: 0.37,
-          sample_size: 19,
-          root_count: 1,
-        }),
-        children: [
-          makeChild({
-            opening_key: "polish-e6",
-            opening_name: "Polish Opening, 1...e6",
-            child_count: 0,
-            subtree_score: null,
-            subtree_confidence: null,
-            subtree_coverage: null,
-            subtree_sample_size: 0,
-            subtree_root_count: 0,
-            weakest_root_key: null,
-            weakest_root_name: null,
-            weakest_root_family: null,
-            weakest_root_score: null,
-          }),
-        ],
-      }),
-    );
-
-    renderPage("/openings?color=white&opening=polish");
-
-    await waitFor(() => {
-      expect(
-        within(screen.getByLabelText("Current branch stats")).getByText("61"),
-      ).toBeInTheDocument();
-    });
-    expect(
-      screen.queryByText("No opening evidence for White yet."),
+      screen.queryByRole("button", { name: /start drill/i }),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText("No scored openings are available for White yet."),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "White openings" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Polish Opening, 1...e6" }),
-    ).toBeInTheDocument();
-  });
-
-  it("renders mixed scored and unscored children without switching to the empty state", async () => {
-    getOpeningBookMock.mockResolvedValueOnce({
-      entries: [
-        { epd: "polish", pgn: "1. b4" },
-        { epd: "bird", pgn: "1. f4" },
-      ],
-    });
-    getOpeningChildrenMock.mockResolvedValueOnce(
-      makeResponse({
-        children: [
-          makeChild({
-            opening_key: "polish",
-            opening_name: "Polish Opening",
-            child_count: 1,
-            subtree_score: 58,
-            subtree_confidence: 0.64,
-            subtree_coverage: 0.41,
-            subtree_sample_size: 14,
-            subtree_root_count: 3,
-            weakest_root_name: "Polish Opening, 1...e6",
-            weakest_root_score: 42,
-          }),
-          makeChild({
-            opening_key: "bird",
-            opening_name: "Bird Opening",
-            child_count: 0,
-            subtree_score: null,
-            subtree_confidence: null,
-            subtree_coverage: null,
-            subtree_sample_size: 0,
-            subtree_root_count: 0,
-            weakest_root_key: null,
-            weakest_root_name: null,
-            weakest_root_family: null,
-            weakest_root_score: null,
-          }),
-        ],
-      }),
-    );
-
-    renderPage();
-
-    const grid = await screen.findByRole("region", { name: "White openings" });
-    const headings = within(grid)
-      .getAllByRole("heading", { level: 2 })
-      .map((heading) => heading.textContent);
-
-    expect(headings).toEqual(["Polish Opening", "Bird Opening"]);
-    expect(screen.queryByText("No opening evidence for White yet.")).not.toBeInTheDocument();
-
-    const unscoredCard = within(grid)
-      .getByRole("heading", { name: "Bird Opening" })
-      .closest("article");
-    expect(unscoredCard).not.toBeNull();
-    expect(within(unscoredCard!).getByText("No Data")).toBeInTheDocument();
-    expect(within(unscoredCard!).getByText("1.f4")).toBeInTheDocument();
-    expect(
-      within(unscoredCard!).getByText("No scored roots in this subtree yet."),
-    ).toBeInTheDocument();
-    expect(within(unscoredCard!).getAllByText("—")).toHaveLength(3);
   });
 });

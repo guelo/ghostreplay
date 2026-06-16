@@ -1,0 +1,350 @@
+import { describe, it, expect } from "vitest";
+import {
+  buildTreeView,
+  flipEval,
+  nodeToView,
+  replayLine,
+  resolveDrop,
+  synthesizeRootView,
+} from "./treeView";
+import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
+
+const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+function makeNode(overrides: Partial<TreeNode> & { uci: string }): TreeNode {
+  return {
+    parent_fen: "parent",
+    child_fen: "child",
+    san: overrides.uci,
+    ply: 1,
+    opening_name: null,
+    eco: null,
+    in_book: true,
+    is_navigable: true,
+    is_observed: false,
+    is_prepared: false,
+    user_choice_count: 0,
+    encounter_count: 0,
+    opening_score: null,
+    confidence: null,
+    coverage: null,
+    sample_size: null,
+    game_count: null,
+    last_practiced_at: null,
+    eval_cp: null,
+    eval_mate: null,
+    terminal_reason: null,
+    drill_opening_key: null,
+    is_selected: false,
+    ...overrides,
+  };
+}
+
+function makeColumn(
+  ply: number,
+  nodes: TreeNode[],
+  selectedUci: string | null = null,
+): TreeColumn {
+  return { position_fen: `pos-${ply}`, ply, selected_uci: selectedUci, nodes };
+}
+
+function makeResponse(overrides: Partial<TreeResponse> = {}): TreeResponse {
+  return {
+    player_color: "white",
+    canonical_line: [],
+    selected_fen: "sel",
+    selected_ply: 0,
+    selected_is_terminal: false,
+    selected_terminal_reason: null,
+    drill_opening_key: null,
+    root_eval_cp: null,
+    root_eval_mate: null,
+    columns: [],
+    batch_computed_at: "2026-06-01T00:00:00Z",
+    model_version: "v2",
+    ...overrides,
+  };
+}
+
+// A two-ply Sicilian-ish response: columns[0]=moves out of start,
+// columns[1]=moves out of pos1, columns[2]=moves out of pos2.
+function sicilianResponse(): TreeResponse {
+  return makeResponse({
+    canonical_line: ["e2e4", "c7c5"],
+    columns: [
+      makeColumn(
+        0,
+        [
+          makeNode({ uci: "e2e4", ply: 1, eval_cp: 30 }),
+          makeNode({ uci: "d2d4", ply: 1, eval_cp: 20 }),
+        ],
+        "e2e4",
+      ),
+      makeColumn(
+        1,
+        [
+          makeNode({ uci: "c7c5", ply: 2, eval_cp: 25 }),
+          makeNode({ uci: "e7e5", ply: 2, eval_cp: 18 }),
+        ],
+        "c7c5",
+      ),
+      makeColumn(2, [makeNode({ uci: "g1f3", ply: 3, eval_cp: 22 })]),
+    ],
+  });
+}
+
+describe("flipEval", () => {
+  it("passes white through and negates for black; null stays null", () => {
+    expect(flipEval(50, "white")).toBe(50);
+    expect(flipEval(50, "black")).toBe(-50);
+    expect(flipEval(-3, "black")).toBe(3);
+    expect(flipEval(null, "black")).toBeNull();
+  });
+});
+
+describe("nodeToView", () => {
+  it("maps fields and flips evals to perspective", () => {
+    const node = makeNode({
+      uci: "e2e4",
+      san: "e4",
+      ply: 1,
+      opening_name: "King's Pawn",
+      eco: "B00",
+      opening_score: 61,
+      coverage: 0.4,
+      game_count: 12,
+      confidence: 0.7,
+      eval_cp: 40,
+      eval_mate: 3,
+    });
+
+    const white = nodeToView(node, "white");
+    expect(white.evalCp).toBe(40);
+    expect(white.evalMate).toBe(3);
+    expect(white.score).toBe(61);
+    expect(white.openingName).toBe("King's Pawn");
+    expect(white.isTerminal).toBe(false);
+
+    const black = nodeToView(node, "black");
+    expect(black.evalCp).toBe(-40);
+    expect(black.evalMate).toBe(-3);
+  });
+
+  it("marks terminal nodes from terminal_reason", () => {
+    const node = makeNode({ uci: "d8h4", terminal_reason: "checkmate" });
+    const view = nodeToView(node, "white");
+    expect(view.isTerminal).toBe(true);
+    expect(view.terminalReason).toBe("checkmate");
+  });
+});
+
+describe("synthesizeRootView", () => {
+  it("uses root eval (flipped) regardless of clipping", () => {
+    const response = makeResponse({ root_eval_cp: 30, root_eval_mate: null });
+    expect(synthesizeRootView(response, false, 2, "white").evalCp).toBe(30);
+    expect(synthesizeRootView(response, false, 2, "black").evalCp).toBe(-30);
+  });
+
+  it("propagates terminal/drill only when fetched for the root", () => {
+    const response = makeResponse({
+      root_eval_cp: 10,
+      selected_is_terminal: true,
+      selected_terminal_reason: "stalemate",
+      drill_opening_key: "kp-root",
+    });
+
+    const fetchedForRoot = synthesizeRootView(response, true, 0, "white");
+    expect(fetchedForRoot.isTerminal).toBe(true);
+    expect(fetchedForRoot.terminalReason).toBe("stalemate");
+    expect(fetchedForRoot.drillOpeningKey).toBe("kp-root");
+
+    // Exact line but deeper (k>0): the response's selected fields describe the
+    // deeper line, so they must not leak onto the root card.
+    const deeper = synthesizeRootView(response, true, 2, "white");
+    expect(deeper.isTerminal).toBe(false);
+    expect(deeper.terminalReason).toBeNull();
+    expect(deeper.drillOpeningKey).toBeNull();
+
+    // Clipped view (isExactResponseLine false) at the root: also suppressed.
+    const clipped = synthesizeRootView(response, false, 0, "white");
+    expect(clipped.drillOpeningKey).toBeNull();
+    expect(clipped.isTerminal).toBe(false);
+  });
+});
+
+describe("buildTreeView", () => {
+  it("prepends a root column and expands the deepest selected node", () => {
+    const view = buildTreeView(
+      sicilianResponse(),
+      {
+        selectionLine: ["e2e4", "c7c5"],
+        loadedThroughPly: 2,
+        isExactResponseLine: true,
+      },
+      "white",
+    );
+
+    expect(view.columns.map((c) => c.kind)).toEqual([
+      "root",
+      "moves",
+      "moves",
+      "moves",
+    ]);
+    expect(view.columns.map((c) => c.lineIndex)).toEqual([-1, 0, 1, 2]);
+
+    const [root, col0, col1] = view.columns;
+    // Root is on-path but not expanded once we are deeper than k=0.
+    expect(root.nodes[0].isSelected).toBe(true);
+    expect(root.nodes[0].isExpanded).toBe(false);
+
+    // e2e4 selected (on path) but NOT expanded (it is not the deepest).
+    const e2e4 = col0.nodes.find((n) => n.uci === "e2e4")!;
+    expect(e2e4.isSelected).toBe(true);
+    expect(e2e4.isExpanded).toBe(false);
+
+    // c7c5 is the deepest selected node → expanded.
+    const c7c5 = col1.nodes.find((n) => n.uci === "c7c5")!;
+    expect(c7c5.isSelected).toBe(true);
+    expect(c7c5.isExpanded).toBe(true);
+    expect(col1.nodes.find((n) => n.uci === "e7e5")!.isSelected).toBe(false);
+  });
+
+  it("expands the synthesized root at k === 0", () => {
+    const view = buildTreeView(
+      sicilianResponse(),
+      { selectionLine: [], loadedThroughPly: 0, isExactResponseLine: true },
+      "white",
+    );
+    expect(view.columns[0].nodes[0].isExpanded).toBe(true);
+    // Only the children-of-root column renders at loadedThroughPly 0.
+    expect(view.columns.map((c) => c.lineIndex)).toEqual([-1, 0]);
+  });
+
+  it("drops columns deeper than loadedThroughPly (clip a superset)", () => {
+    const view = buildTreeView(
+      sicilianResponse(),
+      {
+        selectionLine: ["e2e4"],
+        loadedThroughPly: 1,
+        isExactResponseLine: false,
+      },
+      "white",
+    );
+    // columns[2] (ply 2) is dropped; column ply 1 renders with nothing selected.
+    expect(view.columns.map((c) => c.lineIndex)).toEqual([-1, 0, 1]);
+    const col0 = view.columns[1];
+    expect(col0.nodes.find((n) => n.uci === "e2e4")!.isExpanded).toBe(true);
+    const col1 = view.columns[2];
+    expect(col1.nodes.every((n) => !n.isSelected)).toBe(true);
+  });
+
+  it("computes selectLine with truncation (sibling in a mid column)", () => {
+    const view = buildTreeView(
+      sicilianResponse(),
+      {
+        selectionLine: ["e2e4", "c7c5"],
+        loadedThroughPly: 2,
+        isExactResponseLine: true,
+      },
+      "white",
+    );
+    const col1 = view.columns.find((c) => c.lineIndex === 1)!;
+    // Selecting the sibling e7e5 truncates c7c5 off the line.
+    expect(col1.nodes.find((n) => n.uci === "e7e5")!.selectLine).toEqual([
+      "e2e4",
+      "e7e5",
+    ]);
+    // Selecting the root column resets to [].
+    expect(view.columns[0].nodes[0].selectLine).toEqual([]);
+    // A first-column move replaces the whole line.
+    const col0 = view.columns.find((c) => c.lineIndex === 0)!;
+    expect(col0.nodes.find((n) => n.uci === "d2d4")!.selectLine).toEqual([
+      "d2d4",
+    ]);
+  });
+
+  it("marks non-navigable boundary nodes as not selectable; root stays selectable", () => {
+    const view = buildTreeView(
+      makeResponse({
+        canonical_line: [],
+        columns: [
+          makeColumn(0, [
+            makeNode({ uci: "e2e4", ply: 1, is_navigable: true }),
+            makeNode({ uci: "h2h4", ply: 1, is_navigable: false }),
+          ]),
+        ],
+      }),
+      { selectionLine: [], loadedThroughPly: 0, isExactResponseLine: true },
+      "white",
+    );
+
+    // The synthesized root is always selectable even though it is not a drop
+    // target (`isNavigable` false).
+    expect(view.columns[0].nodes[0].isSelectable).toBe(true);
+    expect(view.columns[0].nodes[0].isNavigable).toBe(false);
+
+    const col0 = view.columns[1];
+    expect(col0.nodes.find((n) => n.uci === "e2e4")!.isSelectable).toBe(true);
+    expect(col0.nodes.find((n) => n.uci === "h2h4")!.isSelectable).toBe(false);
+  });
+
+  it("derives the board from the effective line, not selected_fen", () => {
+    const view = buildTreeView(
+      makeResponse({
+        canonical_line: ["e2e4"],
+        selected_fen: "should-not-be-used",
+        columns: [makeColumn(0, [makeNode({ uci: "e2e4", ply: 1 })], "e2e4")],
+      }),
+      {
+        selectionLine: ["e2e4"],
+        loadedThroughPly: 1,
+        isExactResponseLine: true,
+      },
+      "white",
+    );
+    expect(view.board.fen).toMatch(
+      /^rnbqkbnr\/pppppppp\/8\/8\/4P3\/8\/PPPP1PPP\/RNBQKBNR b/,
+    );
+    expect(view.board.lastMove).toEqual({ from: "e2", to: "e4" });
+    expect(view.selectionLine).toEqual(["e2e4"]);
+  });
+});
+
+describe("replayLine", () => {
+  it("returns the start position with no last move for an empty line", () => {
+    const board = replayLine([]);
+    expect(board.fen.startsWith(START_FEN.split(" ").slice(0, 1).join(""))).toBe(
+      true,
+    );
+    expect(board.fen).toMatch(/^rnbqkbnr\/pppppppp\/8\/8\/8\/8\/PPPPPPPP/);
+    expect(board.lastMove).toBeNull();
+  });
+
+  it("replays a line and reports the final last-move squares", () => {
+    const board = replayLine(["e2e4", "e7e5"]);
+    expect(board.fen).toMatch(/^rnbqkbnr\/pppp1ppp\/8\/4p3\/4P3\/8\/PPPP1PPP/);
+    expect(board.lastMove).toEqual({ from: "e7", to: "e5" });
+  });
+
+  it("stops at the first illegal move", () => {
+    const board = replayLine(["e2e4", "e2e4"]);
+    // Second e2e4 is illegal; board halts after the first move.
+    expect(board.fen).toMatch(/4P3.*b/);
+    expect(board.lastMove).toEqual({ from: "e2", to: "e4" });
+  });
+});
+
+describe("resolveDrop", () => {
+  it("returns the uci for a legal move", () => {
+    expect(resolveDrop(START_FEN, "e2", "e4")).toBe("e2e4");
+  });
+
+  it("returns null for an illegal move", () => {
+    expect(resolveDrop(START_FEN, "e2", "e5")).toBeNull();
+  });
+
+  it("appends the queen promotion suffix", () => {
+    const promoFen = "7k/P7/8/8/8/8/8/7K w - - 0 1";
+    expect(resolveDrop(promoFen, "a7", "a8")).toBe("a7a8q");
+  });
+});

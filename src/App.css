@@ -7139,6 +7139,110 @@ button.openings-shell__crumb:hover {
     background: color-mix(in srgb, var(--brand-primary) 8%, var(--card-bg));
 }
 
+/* ---------------------------------------------------------------------------
+ * Opening tree workspace (g-tree-page-state) — MINIMAL functional layout only.
+ * SVG connectors, viewport sizing, responsive stacking and polish are
+ * g-tree-layout. Just enough here for the board + columns to render and the
+ * behaviors to be testable.
+ * ------------------------------------------------------------------------- */
+.openings-tree {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.openings-tree__header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+}
+
+.openings-tree__title {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--text-primary);
+}
+
+.openings-tree__color-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+    color: var(--text-secondary);
+    padding-left: 0.2rem;
+}
+
+.openings-tree__nodata-banner {
+    margin: 0;
+    padding: 0.6rem 0.85rem;
+    border-radius: 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--brand-primary) 22%, var(--border-color));
+    background: color-mix(in srgb, var(--brand-primary) 6%, var(--card-bg));
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.openings-tree-workspace {
+    display: flex;
+    align-items: flex-start;
+    gap: 1.25rem;
+}
+
+.openings-tree-board {
+    width: min(360px, 100%);
+    flex-shrink: 0;
+}
+
+.openings-tree-board--skeleton {
+    aspect-ratio: 1 / 1;
+    border-radius: 0.6rem;
+    background: var(--bg-secondary);
+}
+
+.openings-tree-columns {
+    flex: 1;
+    display: flex;
+    align-items: flex-start;
+    gap: 1.5rem;
+    overflow-x: auto;
+    padding-bottom: 0.5rem;
+}
+
+.openings-tree-column {
+    min-width: 9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    max-height: 70vh;
+    overflow-y: auto;
+    /* Pin overflow-x so the browser does not auto-promote it to "auto" (which it
+       does when only overflow-y is non-visible) and give every column a
+       spurious horizontal scrollbar. Borrowed from the prototype. */
+    overflow-x: hidden;
+}
+
+.openings-tree-column--skeleton {
+    min-height: 6rem;
+    border-radius: 0.6rem;
+    background: var(--bg-secondary);
+}
+
+.openings-tree-append {
+    align-items: flex-start;
+    gap: 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.openings-tree-append__label {
+    margin: 0;
+}
+
+.openings-tree-append--error {
+    color: var(--error-text, var(--text-primary));
+}
+
 .openings-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));

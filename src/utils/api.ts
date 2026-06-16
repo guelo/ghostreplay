@@ -1162,6 +1162,95 @@ export const getOpeningChildren = async (
   )
 }
 
+// ---- Opening tree (horizontal move-graph) read model (epic g-d5cu) -----------
+// Mirrors the pydantic models in backend/app/api/openings.py. Evals are
+// WHITE-RELATIVE centipawns/mate; the page flips them to perspective-relative
+// before building card views.
+
+export interface TreeNode {
+  parent_fen: string
+  child_fen: string
+  uci: string
+  san: string
+  ply: number
+  opening_name: string | null
+  eco: string | null
+  in_book: boolean
+  /** uci is in the structural child set of parent → gates clicks/drops. */
+  is_navigable: boolean
+  is_observed: boolean
+  is_prepared: boolean
+  user_choice_count: number
+  encounter_count: number
+  opening_score: number | null
+  confidence: number | null
+  coverage: number | null
+  sample_size: number | null
+  game_count: number | null
+  last_practiced_at: string | null
+  eval_cp: number | null
+  eval_mate: number | null
+  terminal_reason: string | null
+  drill_opening_key: string | null
+  /** Backend-baked selection flag — the page derives selection from the URL
+   *  line instead, so a cached superset can be clipped/re-rendered. */
+  is_selected: boolean
+}
+
+export interface TreeColumn {
+  position_fen: string
+  ply: number
+  selected_uci: string | null
+  nodes: TreeNode[]
+}
+
+export interface TreeResponse {
+  player_color: OpeningPlayerColor
+  /** Resolved/normalized UCI line; invalid input lines truncate to this. */
+  canonical_line: string[]
+  selected_fen: string
+  selected_ply: number
+  selected_is_terminal: boolean
+  selected_terminal_reason: string | null
+  drill_opening_key: string | null
+  /** Start-position eval (white-relative); line-independent. */
+  root_eval_cp: number | null
+  root_eval_mate: number | null
+  columns: TreeColumn[]
+  batch_computed_at: string | null
+  model_version: string
+}
+
+/**
+ * Fetch the hydrated opening tree for one canonical move line in a single
+ * request. The line is built from repeated `move=<uci>`; a legacy `opening=<fen>`
+ * deep-link entry is honored only when no `move` is present. `options.signal`
+ * threads an AbortController so a superseded in-flight request can be cancelled.
+ */
+export const getOpeningTree = async (
+  params: {
+    playerColor: OpeningPlayerColor
+    moves?: string[]
+    opening?: string | null
+  },
+  options?: { signal?: AbortSignal },
+): Promise<TreeResponse> => {
+  const { playerColor, moves, opening } = params
+  const search = new URLSearchParams({ player_color: playerColor })
+  for (const move of moves ?? []) {
+    search.append('move', move)
+  }
+  if (opening && !moves?.length) {
+    search.set('opening', opening)
+  }
+
+  return requestJson<TreeResponse>(
+    `${API_BASE_URL}/api/openings/tree?${search}`,
+    { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
+    { fallbackMessage: 'Failed to load openings' },
+  )
+}
+
 export type StatsWindowDays = 0 | 7 | 30 | 90 | 365
 
 export interface StatsGameRecord {
