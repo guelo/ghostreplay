@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+import time
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -11,8 +14,14 @@ from app.models import AnalysisCache, decode_uci_line
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
+logger = logging.getLogger(__name__)
 
 MAX_LOOKUP_POSITIONS = 60
+SLOW_ANALYSIS_LOOKUP_LOG_MS = 500
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 3)
 
 
 class AnalysisLookupPosition(BaseModel):
@@ -102,14 +111,18 @@ def lookup_analysis(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> AnalysisLookupResponse:
+    started = time.perf_counter()
     fens = [p.fen for p in request.positions]
+    query_started = time.perf_counter()
     rows = (
         db.query(AnalysisCache)
         .filter(AnalysisCache.fen_before.in_(fens))
         .all()
     )
+    query_ms = _elapsed_ms(query_started)
 
     # Index rows by (fen, move_uci) for O(1) lookup
+    build_started = time.perf_counter()
     row_map: dict[tuple[str, str], AnalysisCache] = {}
     for row in rows:
         row_map[(row.fen_before, row.move_uci)] = row
@@ -139,5 +152,21 @@ def lookup_analysis(
                 contract_satisfied=satisfied,
                 trusted_for_resolution=trusted,
             )
+
+    build_ms = _elapsed_ms(build_started)
+    total_ms = _elapsed_ms(started)
+    if total_ms >= SLOW_ANALYSIS_LOOKUP_LOG_MS:
+        logger.info(
+            "analysis_lookup slow user_id=%s total_ms=%.3f query_ms=%.3f "
+            "build_ms=%.3f positions=%d unique_fens=%d rows=%d results=%d",
+            user.user_id,
+            total_ms,
+            query_ms,
+            build_ms,
+            len(request.positions),
+            len(set(fens)),
+            len(rows),
+            len(results),
+        )
 
     return AnalysisLookupResponse(results=results)

@@ -5,6 +5,7 @@ Translates a target ELO + UCI move list into a single opponent move
 by calling the maiachess.com Maia3 endpoint.
 """
 import logging
+import time
 from dataclasses import dataclass
 
 import requests
@@ -13,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 MAIA3_URL = "https://www.maiachess.com/api/v1/play/get_move"
 MAIA3_TIMEOUT_S = 5
+MAIA3_SLOW_LOG_MS = 1000
 
 ELO_BINS = [
     600, 800, 1000, 1100, 1200, 1300, 1400, 1500,
@@ -50,6 +52,7 @@ def get_move(moves: list[str], target_elo: int) -> Maia3Move:
     maia_name = elo_to_maia_name(target_elo)
     logger.info("Maia3 request: model=%s elo=%d moves=%d", maia_name, target_elo, len(moves))
 
+    started = time.perf_counter()
     try:
         resp = requests.post(
             MAIA3_URL,
@@ -67,7 +70,27 @@ def get_move(moves: list[str], target_elo: int) -> Maia3Move:
             timeout=MAIA3_TIMEOUT_S,
         )
     except requests.RequestException as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.warning(
+            "Maia3 request failed after %.0fms: model=%s elo=%d moves=%d error=%s",
+            elapsed_ms,
+            maia_name,
+            target_elo,
+            len(moves),
+            exc,
+        )
         raise Maia3Error(f"Maia3 request failed: {exc}") from exc
+
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if elapsed_ms >= MAIA3_SLOW_LOG_MS:
+        logger.info(
+            "Maia3 request slow: model=%s elo=%d moves=%d status=%d total_ms=%.0f",
+            maia_name,
+            target_elo,
+            len(moves),
+            resp.status_code,
+            elapsed_ms,
+        )
 
     if resp.status_code != 200:
         raise Maia3Error(

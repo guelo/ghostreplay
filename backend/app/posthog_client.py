@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 
 try:  # A missing/broken SDK must never prevent the app from starting.
     from posthog import Posthog
@@ -23,6 +24,7 @@ logger = logging.getLogger("ghostreplay.analytics")
 
 ANON_DISTINCT_ID = "anon"
 DEFAULT_HOST = "https://us.i.posthog.com"
+SLOW_CAPTURE_LOG_MS = 250
 
 _client: "Posthog | None" = None
 _initialized = False
@@ -67,17 +69,23 @@ def capture(distinct_id: str | None, event: str, properties: dict | None = None)
     with all keyword arguments so call sites are insulated from positional
     signature drift between SDK versions.
     """
-    client = get_client()
-    if client is None:
-        return
+    started = time.perf_counter()
     try:
-        client.capture(
-            distinct_id=distinct_id or ANON_DISTINCT_ID,
-            event=event,
-            properties=properties or {},
-        )
-    except Exception:
-        logger.debug("posthog capture failed for event %s", event, exc_info=True)
+        client = get_client()
+        if client is None:
+            return
+        try:
+            client.capture(
+                distinct_id=distinct_id or ANON_DISTINCT_ID,
+                event=event,
+                properties=properties or {},
+            )
+        except Exception:
+            logger.debug("posthog capture failed for event %s", event, exc_info=True)
+    finally:
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms >= SLOW_CAPTURE_LOG_MS:
+            logger.info("posthog capture slow event=%s duration_ms=%.3f", event, elapsed_ms)
 
 
 def shutdown() -> None:

@@ -770,7 +770,7 @@ After a user move, backend returns exactly one opponent move. It first tries Gho
        "target_blunder_id": null, "decision_source": "backend_engine" }
 ```
 
-**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200–500ms network latency per engine fallback call.
+**Performance Target:** Ghost-path lookup < 100ms for typical Ghost Move Libraries (< 10,000 positions). The 5-move depth cap keeps the search space small; full fallback (including Maia3 API call) should target sub-second p95 in MVP. The Maia3 remote API adds ~200–500ms network latency per engine fallback call. The backend must release the request DB transaction before waiting on the remote Maia fallback, so DNS/network stalls do not hold a database connection or read transaction. Slow-path logs are thresholded around ghost search, Maia fallback, analytics capture, and `/api/analysis/lookup` to distinguish DB time from remote-engine and request-lifecycle stalls.
 
 **Caching Consideration (Post-MVP):** Position lookups are hot-path. Consider caching:
 - FEN hash → position existence (simple boolean)

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session as SqlAlchemySession
 
 from app.fen import fen_hash
 
@@ -348,6 +349,41 @@ def test_next_opponent_move_engine_branch_happy_path(
     assert data["target_blunder_id"] is None
     assert data["move"]["uci"] == "e7e5"
     assert data["move"]["san"] == "e5"
+
+
+def test_next_opponent_move_releases_db_transaction_before_engine_fallback(
+    client, auth_headers, create_game_session, monkeypatch
+):
+    """A stalled remote fallback must not hold the request DB transaction open."""
+    from app.opponent_move_controller import ControllerMove
+
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    observed = {"rolled_back": False}
+    original_rollback = SqlAlchemySession.rollback
+
+    def spy_rollback(self):
+        observed["rolled_back"] = True
+        return original_rollback(self)
+
+    def fake_choose_move(**_kwargs):
+        assert observed["rolled_back"] is True
+        return ControllerMove(uci="e7e5", san="e5", method="maia3_api")
+
+    monkeypatch.setattr(SqlAlchemySession, "rollback", spy_rollback)
+    with patch("app.opponent_move_controller.choose_move", side_effect=fake_choose_move):
+        response = client.post(
+            "/api/game/next-opponent-move",
+            json={
+                "session_id": session_id,
+                "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+                "moves": ["e2e4"],
+            },
+            headers=auth_headers(user_id=user_id),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["decision_source"] == "backend_engine"
 
 
 def test_next_opponent_move_passes_moves_to_controller(

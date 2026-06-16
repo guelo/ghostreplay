@@ -1,6 +1,8 @@
 import hashlib
+import logging
 import math
 import random
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,6 +42,7 @@ from app.srs_opportunity import (
 )
 
 router = APIRouter(prefix="/api/game", tags=["game"])
+logger = logging.getLogger(__name__)
 
 STEERING_RADIUS = 5
 DISTANCE_DECAY_RATE = 0.35
@@ -49,7 +52,13 @@ SELECTION_WEIGHT_POWER = 0.5
 REPEAT_HISTORY_SCAN_LIMIT = 200
 REPEAT_PENALTY_LOOKBACK = 3
 REPEAT_PENALTY_FACTORS = (0.35, 0.60, 0.80)
+SLOW_GHOST_SEARCH_LOG_MS = 250
+SLOW_NEXT_OPPONENT_MOVE_LOG_MS = 1000
 T = TypeVar("T")
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 3)
 
 
 @dataclass(frozen=True)
@@ -251,17 +260,58 @@ def find_ghost_move(
         Tuple of (move_san, target_blunder_id, last_reviewed_at, created_at) if ghost path exists,
         else (None, None, None, None)
     """
+    search_started = time.perf_counter()
+    current_fen_hash = fen_hash(fen)
+    position_lookup_ms = 0.0
+    cte_ms = 0.0
+    opportunity_ms = 0.0
+    repeat_history_ms = 0.0
+
+    def _log_slow(
+        outcome: str,
+        *,
+        position_id: int | None = None,
+        candidate_count: int = 0,
+        scored_count: int = 0,
+        group_count: int = 0,
+    ) -> None:
+        total_ms = _elapsed_ms(search_started)
+        if total_ms < SLOW_GHOST_SEARCH_LOG_MS:
+            return
+        logger.info(
+            "ghost_move_search slow outcome=%s user_id=%s fen_hash=%s "
+            "player_color=%s total_ms=%.3f position_lookup_ms=%.3f "
+            "cte_ms=%.3f opportunity_ms=%.3f repeat_history_ms=%.3f "
+            "position_id=%s candidate_count=%d scored_count=%d group_count=%d",
+            outcome,
+            user_id,
+            current_fen_hash,
+            player_color,
+            total_ms,
+            position_lookup_ms,
+            cte_ms,
+            opportunity_ms,
+            repeat_history_ms,
+            position_id,
+            candidate_count,
+            scored_count,
+            group_count,
+        )
+
     # Look up current position by FEN hash
+    position_lookup_started = time.perf_counter()
     current_position = (
         db.query(Position)
         .filter(
             Position.user_id == user_id,
-            Position.fen_hash == fen_hash(fen),
+            Position.fen_hash == current_fen_hash,
         )
         .first()
     )
+    position_lookup_ms = _elapsed_ms(position_lookup_started)
 
     if not current_position:
+        _log_slow("no_position")
         return (None, None, None, None)
 
     # Recursive CTE to find candidate blunders up to the steering radius.
@@ -306,6 +356,7 @@ def find_ghost_move(
           AND r.first_move IS NOT NULL
     """)
 
+    cte_started = time.perf_counter()
     candidate_rows = db.execute(
         cte_query,
         {
@@ -315,13 +366,17 @@ def find_ghost_move(
             "steering_radius": STEERING_RADIUS,
         },
     ).fetchall()
+    cte_ms = _elapsed_ms(cte_started)
 
     if not candidate_rows:
+        _log_slow("no_candidates", position_id=current_position.id)
         return (None, None, None, None)
 
     now = datetime.now(timezone.utc)
     current_opening_family = detect_opening_family(fen) if any(row[7] for row in candidate_rows) else None
+    opportunity_started = time.perf_counter()
     opportunity_counters = load_opportunity_counters(db, [row[1] for row in candidate_rows], now=now)
+    opportunity_ms = _elapsed_ms(opportunity_started)
     scored: list[tuple[GhostMoveCandidate, float]] = []
 
     for row in candidate_rows:
@@ -351,6 +406,11 @@ def find_ghost_move(
         scored.append((candidate, candidate.score(now, current_opening_family)))
 
     if not scored:
+        _log_slow(
+            "no_eligible_candidates",
+            position_id=current_position.id,
+            candidate_count=len(candidate_rows),
+        )
         return (None, None, None, None)
 
     # A depth-1 candidate reaches the review position immediately after the
@@ -360,7 +420,10 @@ def find_ghost_move(
     selection_pool = replay_ready or scored
 
     deduped = _dedupe_path_candidates(selection_pool)
-    repeat_penalties = _repeat_penalties(_same_fen_recent_ghost_moves(db, user_id, fen))
+    repeat_history_started = time.perf_counter()
+    recent_same_fen_moves = _same_fen_recent_ghost_moves(db, user_id, fen)
+    repeat_history_ms = _elapsed_ms(repeat_history_started)
+    repeat_penalties = _repeat_penalties(recent_same_fen_moves)
     groups = _group_candidates_by_first_move(deduped, repeat_penalties)
     top_first_moves = groups[:TOP_K]
 
@@ -383,6 +446,13 @@ def find_ghost_move(
         rng,
     )
 
+    _log_slow(
+        "selected",
+        position_id=current_position.id,
+        candidate_count=len(candidate_rows),
+        scored_count=len(scored),
+        group_count=len(groups),
+    )
     return (chosen_candidate.first_move, chosen_candidate.blunder_id, chosen_candidate.last_reviewed_at, chosen_candidate.created_at)
 
 
@@ -702,6 +772,29 @@ def get_next_opponent_move(
     3. If ghost path exists, return ghost move
     4. Otherwise, fall back to backend engine inference (Maia)
     """
+    request_started = time.perf_counter()
+    ghost_search_ms = 0.0
+    engine_ms = 0.0
+
+    def _log_slow(mode: OpponentMoveMode, decision_source: DecisionSource, has_target_blunder: bool) -> None:
+        total_ms = _elapsed_ms(request_started)
+        if total_ms < SLOW_NEXT_OPPONENT_MOVE_LOG_MS:
+            return
+        logger.info(
+            "next_opponent_move slow mode=%s decision_source=%s user_id=%s "
+            "session_id=%s total_ms=%.3f ghost_search_ms=%.3f "
+            "engine_ms=%.3f moves_count=%d has_target_blunder=%s",
+            mode.value,
+            decision_source.value,
+            user.user_id,
+            request.session_id,
+            total_ms,
+            ghost_search_ms,
+            engine_ms,
+            len(request.moves),
+            has_target_blunder,
+        )
+
     # Fetch and validate session
     session = db.query(GameSession).filter(GameSession.id == request.session_id).first()
 
@@ -756,6 +849,7 @@ def get_next_opponent_move(
             session.drill_state = "root_reached"
             db.commit()
 
+        _log_slow(OpponentMoveMode.GHOST, DecisionSource.GHOST_PATH, False)
         return NextOpponentMoveResponse(
             mode=OpponentMoveMode.GHOST,
             move=MoveDetails(uci=move.uci, san=move.san),
@@ -773,6 +867,7 @@ def get_next_opponent_move(
 
     # Step 1: Ghost-first path traversal
     # Use shared ghost path traversal logic to find moves toward due blunders
+    ghost_search_started = time.perf_counter()
     move_san, target_blunder_id, blunder_last_reviewed, blunder_created_at = find_ghost_move(
         db=db,
         user_id=user.user_id,
@@ -780,6 +875,7 @@ def get_next_opponent_move(
         player_color=session.player_color,
         session_id=request.session_id,
     )
+    ghost_search_ms = _elapsed_ms(ghost_search_started)
 
     # If ghost path exists, convert SAN to both UCI and SAN formats
     if move_san is not None:
@@ -821,6 +917,11 @@ def get_next_opponent_move(
 
             target_fen = blunder_row[1] if blunder_row else None
 
+            _log_slow(
+                OpponentMoveMode.GHOST,
+                DecisionSource.GHOST_PATH,
+                target_blunder_id is not None,
+            )
             return NextOpponentMoveResponse(
                 mode=OpponentMoveMode.GHOST,
                 move=MoveDetails(
@@ -835,9 +936,11 @@ def get_next_opponent_move(
         except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError) as e:
             # If SAN parsing fails, log and fall through to engine fallback
             # This should not happen in normal operation but provides resilience
-            import logging
-            logging.warning(
-                f"Failed to parse ghost SAN move '{move_san}' for FEN '{request.fen}': {e}"
+            logger.warning(
+                "Failed to parse ghost SAN move %r for request session_id=%s: %s",
+                move_san,
+                request.session_id,
+                e,
             )
 
     # Step 2: Backend engine fallback — remote Maia3 API
@@ -845,12 +948,21 @@ def get_next_opponent_move(
         from app.maia3_client import Maia3Error
         from app.opponent_move_controller import choose_move
 
+        # The remote Maia call can stall on network/DNS outside the database.
+        # Safe: this fallback path has no pending writes. Release the read
+        # transaction/connection before waiting on that external dependency.
+        engine_elo = session.engine_elo
+        db.rollback()
+
+        engine_started = time.perf_counter()
         controller_move = choose_move(
             fen=request.fen,
-            target_elo=session.engine_elo,
+            target_elo=engine_elo,
             moves=request.moves,
         )
+        engine_ms = _elapsed_ms(engine_started)
 
+        _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
         return NextOpponentMoveResponse(
             mode=OpponentMoveMode.ENGINE,
             move=MoveDetails(
@@ -862,9 +974,15 @@ def get_next_opponent_move(
         )
 
     except Maia3Error as e:
+        if "engine_started" in locals():
+            engine_ms = _elapsed_ms(engine_started)
+        _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
         raise HTTPException(
             status_code=503,
             detail=f"Maia3 API unavailable: {e}",
         )
     except ValueError as e:
+        if "engine_started" in locals():
+            engine_ms = _elapsed_ms(engine_started)
+        _log_slow(OpponentMoveMode.ENGINE, DecisionSource.BACKEND_ENGINE, False)
         raise HTTPException(status_code=400, detail=f"Invalid input: {e}")
