@@ -826,15 +826,21 @@ test.describe("play", () => {
     await page.clock.runFor(3500);
     await expect(page.locator(".rehook-toast:visible")).toHaveCount(0);
 
-    // Pause the clock so the spotlight's hold/shrink timers don't advance and
-    // dismiss the scrim mid-capture.
-    await page.clock.pauseAt(FIXED_TIME);
-
-    // Play the recorded fail move (king move) to trigger the spotlight.
+    // Play the recorded fail move (king move) to trigger the spotlight. The
+    // clock MUST stay running across this move: the coordinator dispatches the
+    // move's analysis through a trailing cache-lookup debounce (a main-thread
+    // setTimeout, GameAnalysisCoordinator CACHE_LOOKUP_DEBOUNCE_MS). A paused
+    // clock freezes that timer, so the analysis — and therefore the SRS
+    // pass/fail grade that arms the spotlight — would never resolve. Pause only
+    // AFTER the scrim is up, to freeze its hold/shrink timers for the capture.
     await playMove(page, "e1", "e2");
     await expect(page.locator(".srs-fail-scrim")).toBeVisible({
       timeout: 15_000,
     });
+
+    // Pause the clock so the spotlight's hold/shrink timers don't advance and
+    // dismiss the scrim mid-capture.
+    await page.clock.pauseAt(FIXED_TIME);
 
     // Dedicated capture loop. The scrim's clip-path hole + headline position are
     // set from a board getBoundingClientRect() that re-measures on resize via a
