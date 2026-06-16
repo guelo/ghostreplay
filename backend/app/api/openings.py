@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 import math
+import os
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields as dc_fields
 from datetime import datetime
@@ -40,8 +43,51 @@ from app.tree_eval import lookup_move_evals, lookup_root_eval
 # Hard ply ceiling for a single resolved move line. Bounds replay/BFS work and
 # truncates a pathologically deep (or adversarial) deep-link URL.
 MAX_TREE_PLY = 80
+SLOW_OPENING_TREE_LOG_MS = 1000.0
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/openings", tags=["openings"])
+
+TreeTiming = dict[str, bool | float | int | None]
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000
+
+
+def _record_timing(timings: TreeTiming | None, key: str, start: float) -> None:
+    if timings is not None:
+        timings[key] = round(_elapsed_ms(start), 3)
+
+
+def _timing_ms(timings: TreeTiming, key: str) -> float:
+    value = timings.get(key)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _timing_count(timings: TreeTiming, key: str) -> int:
+    value = timings.get(key)
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _timing_enabled() -> bool:
+    return os.environ.get("OPENING_TREE_TIMING_LOG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _slow_tree_threshold_ms() -> float:
+    raw = os.environ.get("SLOW_OPENING_TREE_LOG_MS")
+    if raw is None:
+        return SLOW_OPENING_TREE_LOG_MS
+    try:
+        return float(raw)
+    except ValueError:
+        return SLOW_OPENING_TREE_LOG_MS
 
 
 # ---------------------------------------------------------------------------
@@ -1066,11 +1112,23 @@ class _OpeningTreeBuilder:
 
     # -- build --------------------------------------------------------------
 
-    def build(self, moves: list[str], opening: str | None) -> TreeResponse:
+    def build(
+        self,
+        moves: list[str],
+        opening: str | None,
+        *,
+        timings: TreeTiming | None = None,
+    ) -> TreeResponse:
+        build_started = time.perf_counter()
+        stage_started = time.perf_counter()
         line = self.resolve_line(moves, opening)
+        _record_timing(timings, "resolve_line_ms", stage_started)
+        if timings is not None:
+            timings["canonical_ply"] = len(line)
 
         # Replay the canonical line, keeping full FENs (eval keys) and normalized
         # FENs (graph/score identity) plus a board per ply for SAN + mate tests.
+        stage_started = time.perf_counter()
         board = chess.Board()
         pos_full = [board.fen()]
         pos_norm = [normalize_fen(pos_full[0])]
@@ -1085,9 +1143,11 @@ class _OpeningTreeBuilder:
             boards.append(board.copy())
         k = len(boards) - 1
         line = line[:k]
+        _record_timing(timings, "replay_line_ms", stage_started)
 
         # Deepest opening name/eco at or above each position along the line, so a
         # child without its own graph name inherits the deepest named ancestor.
+        stage_started = time.perf_counter()
         line_name: list[str | None] = [None] * (k + 1)
         line_eco: list[str | None] = [None] * (k + 1)
         cur_name = cur_eco = None
@@ -1097,8 +1157,10 @@ class _OpeningTreeBuilder:
                 cur_name, cur_eco = node_i.name, node_i.eco
             line_name[i] = cur_name
             line_eco[i] = cur_eco
+        _record_timing(timings, "line_names_ms", stage_started)
 
         # Pass 1: structural column build (board-derived fields) + lookup keys.
+        stage_started = time.perf_counter()
         raw_columns: list[tuple[int, str, str | None, list[_RawNode]]] = []
         eval_requests: list[tuple[str, str]] = []
         position_fens: set[str] = set()
@@ -1159,15 +1221,39 @@ class _OpeningTreeBuilder:
                 eval_requests.append((pos_full[i], uci))
                 position_fens.add(child.child_fen)
             raw_columns.append((i, norm_i, selected_uci, raw_nodes))
+        _record_timing(timings, "structural_columns_ms", stage_started)
+        if timings is not None:
+            timings["raw_column_count"] = len(raw_columns)
+            timings["raw_node_count"] = sum(len(nodes) for _, _, _, nodes in raw_columns)
+            timings["eval_request_count"] = len(eval_requests)
+            timings["position_fen_count"] = len(position_fens)
 
         # Batched DB lookups (epic: one overlay, one metric load, one eval batch).
+        stage_started = time.perf_counter()
         batch, position_rows = load_tree_position_rows(
             self.db, self.user_id, self.player_color, position_fens
         )
+        _record_timing(timings, "position_rows_ms", stage_started)
+        if timings is not None:
+            timings["batch_present"] = batch is not None
+            timings["position_row_count"] = len(position_rows)
+
+        stage_started = time.perf_counter()
         move_evals = lookup_move_evals(self.db, eval_requests)
+        _record_timing(timings, "move_evals_ms", stage_started)
+        if timings is not None:
+            timings["move_eval_hit_count"] = sum(
+                1 for ev in move_evals.values() if ev is not None
+            )
+
+        stage_started = time.perf_counter()
         root_eval = lookup_root_eval(self.db, pos_full[0])
+        _record_timing(timings, "root_eval_ms", stage_started)
+        if timings is not None:
+            timings["root_eval_hit"] = root_eval is not None
 
         # Pass 2: hydrate metrics/evals/names, mark selection, sort each column.
+        stage_started = time.perf_counter()
         columns: list[TreeColumn] = []
         for i, norm_i, selected_uci, raw_nodes in raw_columns:
             user_turn = active_color(norm_i) == self.player_color
@@ -1186,10 +1272,17 @@ class _OpeningTreeBuilder:
                     nodes=nodes,
                 )
             )
+        _record_timing(timings, "hydrate_sort_ms", stage_started)
 
+        stage_started = time.perf_counter()
         sel_norm = pos_norm[k]
         selected_terminal_reason = self._terminal_reason_for_position(boards[k], sel_norm)
         selected_root = self.roots.get_root(sel_norm)
+        _record_timing(timings, "selected_terminal_ms", stage_started)
+        if timings is not None:
+            timings["response_column_count"] = len(columns)
+            timings["response_node_count"] = sum(len(column.nodes) for column in columns)
+            timings["builder_total_ms"] = round(_elapsed_ms(build_started), 3)
         return TreeResponse(
             player_color=self.player_color,
             canonical_line=line,
@@ -1288,11 +1381,81 @@ def get_opening_tree(
     invalid lines canonicalize (truncate) to ``canonical_line``; a malformed UCI
     or a malformed ``opening`` FEN is a 422.
     """
+    request_started = time.perf_counter()
+    timings: TreeTiming = {}
+
+    stage_started = time.perf_counter()
     graph = get_opening_graph()
+    _record_timing(timings, "graph_ms", stage_started)
+
+    stage_started = time.perf_counter()
     roots = get_opening_roots()
+    _record_timing(timings, "roots_ms", stage_started)
+
+    stage_started = time.perf_counter()
     overlay = overlay_evidence(db, user.user_id, player_color, graph)
+    _record_timing(timings, "overlay_ms", stage_started)
+    timings["overlay_node_count"] = len(overlay.nodes)
+    timings["overlay_edge_count"] = len(overlay.edges)
+    timings["overlay_excluded_sessions"] = overlay.excluded_sessions
+
     # Release the checked-out connection before the (read-only) structural pass
     # and batched lookups, mirroring /score (openings.py).
+    stage_started = time.perf_counter()
     db.rollback()
+    _record_timing(timings, "rollback_ms", stage_started)
+
     builder = _OpeningTreeBuilder(db, graph, roots, overlay, player_color, user.user_id)
-    return builder.build(move, opening)
+    response = builder.build(move, opening, timings=timings)
+
+    total_ms = round(_elapsed_ms(request_started), 3)
+    timings["total_ms"] = total_ms
+    if _timing_enabled() or total_ms >= _slow_tree_threshold_ms():
+        logger.info(
+            "opening_tree timing user_id=%s player_color=%s total_ms=%.3f "
+            "move_count=%d has_opening_param=%s canonical_ply=%d graph_ms=%.3f "
+            "roots_ms=%.3f overlay_ms=%.3f rollback_ms=%.3f resolve_line_ms=%.3f "
+            "replay_line_ms=%.3f line_names_ms=%.3f structural_columns_ms=%.3f "
+            "position_rows_ms=%.3f move_evals_ms=%.3f root_eval_ms=%.3f "
+            "hydrate_sort_ms=%.3f selected_terminal_ms=%.3f builder_total_ms=%.3f "
+            "overlay_nodes=%d overlay_edges=%d excluded_sessions=%d raw_columns=%d "
+            "raw_nodes=%d response_columns=%d response_nodes=%d position_fens=%d "
+            "position_rows=%d eval_requests=%d move_eval_hits=%d batch_present=%s "
+            "root_eval_hit=%s selected_terminal=%s",
+            user.user_id,
+            player_color,
+            total_ms,
+            len(move),
+            opening is not None,
+            _timing_count(timings, "canonical_ply"),
+            _timing_ms(timings, "graph_ms"),
+            _timing_ms(timings, "roots_ms"),
+            _timing_ms(timings, "overlay_ms"),
+            _timing_ms(timings, "rollback_ms"),
+            _timing_ms(timings, "resolve_line_ms"),
+            _timing_ms(timings, "replay_line_ms"),
+            _timing_ms(timings, "line_names_ms"),
+            _timing_ms(timings, "structural_columns_ms"),
+            _timing_ms(timings, "position_rows_ms"),
+            _timing_ms(timings, "move_evals_ms"),
+            _timing_ms(timings, "root_eval_ms"),
+            _timing_ms(timings, "hydrate_sort_ms"),
+            _timing_ms(timings, "selected_terminal_ms"),
+            _timing_ms(timings, "builder_total_ms"),
+            _timing_count(timings, "overlay_node_count"),
+            _timing_count(timings, "overlay_edge_count"),
+            _timing_count(timings, "overlay_excluded_sessions"),
+            _timing_count(timings, "raw_column_count"),
+            _timing_count(timings, "raw_node_count"),
+            _timing_count(timings, "response_column_count"),
+            _timing_count(timings, "response_node_count"),
+            _timing_count(timings, "position_fen_count"),
+            _timing_count(timings, "position_row_count"),
+            _timing_count(timings, "eval_request_count"),
+            _timing_count(timings, "move_eval_hit_count"),
+            timings.get("batch_present"),
+            timings.get("root_eval_hit"),
+            response.selected_is_terminal,
+        )
+
+    return response

@@ -11,6 +11,7 @@ logic itself lives in (and is tested by) test_tree_eval.py.
 from __future__ import annotations
 
 import contextlib
+import logging
 from datetime import datetime, timezone
 from unittest.mock import patch
 
@@ -229,6 +230,21 @@ def test_tree_default_root_lists_book_first_move(client, auth_headers):
     assert node["in_book"] is True and node["is_navigable"] is True
     assert node["san"] == "e4"
     assert node["ply"] == 1
+
+
+def test_tree_timing_log_can_be_forced(client, auth_headers, monkeypatch, caplog):
+    monkeypatch.setenv("OPENING_TREE_TIMING_LOG", "true")
+    caplog.set_level(logging.INFO, logger="app.api.openings")
+
+    resp = _call(client, auth_headers, params={"player_color": "white"})
+
+    assert resp.status_code == 200
+    messages = [record.getMessage() for record in caplog.records]
+    timing = next(message for message in messages if message.startswith("opening_tree timing"))
+    assert "overlay_ms=" in timing
+    assert "position_rows_ms=" in timing
+    assert "move_evals_ms=" in timing
+    assert "total_ms=" in timing
 
 
 def test_tree_columns_exclude_legal_but_unknown_moves(client, auth_headers):
