@@ -6,7 +6,12 @@ import {
   type ReactNode,
 } from 'react'
 import { AuthContext, type AuthState } from './authContextShared'
-import { resolveApiEndpointBaseUrl } from '../utils/api'
+import {
+  resolveApiEndpointBaseUrl,
+  reportApiRequest,
+  classifyNetworkError,
+  readRequestId,
+} from '../utils/api'
 import { identifyUser, resetAnalytics } from '../analytics/posthog'
 
 const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
@@ -100,6 +105,83 @@ class AuthError extends Error {
   }
 }
 
+type AuthFetchResult =
+  | { ok: true; data: AuthResponse }
+  | { ok: false; status: number; errorBody: { detail?: string } }
+
+/**
+ * The auth fetches bypass `requestJson` (they raise `AuthError` with a status
+ * the init flow branches on, and never retry), so this thin wrapper adds the
+ * SAME `api_request_client` timing capture without duplicating retry semantics.
+ * It returns a discriminated result so each caller keeps its own error
+ * type/message; exactly one event is emitted per call (success only after the
+ * body parses — a parse failure is reported as `parse`, not a success).
+ */
+const requestAuth = async (
+  url: string,
+  init: RequestInit,
+): Promise<AuthFetchResult> => {
+  const method = init.method ?? 'GET'
+  const start = performance.now()
+
+  let response: Response
+  try {
+    response = await fetch(url, init)
+  } catch (error) {
+    reportApiRequest({
+      url,
+      method,
+      status: 0,
+      ok: false,
+      durationMs: performance.now() - start,
+      attempts: 1,
+      errorKind: classifyNetworkError(error),
+    })
+    throw error
+  }
+
+  if (!response.ok) {
+    const errorBody = (await response.json().catch(() => ({}))) as { detail?: string }
+    reportApiRequest({
+      url,
+      method,
+      status: response.status,
+      ok: false,
+      durationMs: performance.now() - start,
+      attempts: 1,
+      errorKind: 'http',
+      requestId: readRequestId(response),
+    })
+    return { ok: false, status: response.status, errorBody }
+  }
+
+  try {
+    const data = (await response.json()) as AuthResponse
+    reportApiRequest({
+      url,
+      method,
+      status: response.status,
+      ok: true,
+      durationMs: performance.now() - start,
+      attempts: 1,
+      requestId: readRequestId(response),
+    })
+    return { ok: true, data }
+  } catch (error) {
+    reportApiRequest({
+      url,
+      method,
+      status: response.status,
+      ok: false,
+      durationMs: performance.now() - start,
+      attempts: 1,
+      errorKind: 'parse',
+      requestId: readRequestId(response),
+    })
+    throw error
+  }
+}
+
 /**
  * Call the login API
  */
@@ -107,18 +189,17 @@ const apiLogin = async (
   username: string,
   password: string
 ): Promise<AuthResponse> => {
-  const response = await fetch(`${API_BASE_URL}/api/auth/login`, {
+  const result = await requestAuth(`${API_BASE_URL}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   })
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new AuthError(error.detail || 'Login failed', response.status)
+  if (!result.ok) {
+    throw new AuthError(result.errorBody.detail || 'Login failed', result.status)
   }
 
-  return response.json()
+  return result.data
 }
 
 /**
@@ -129,7 +210,7 @@ const apiClaim = async (
   newUsername: string,
   newPassword: string,
 ): Promise<AuthResponse> => {
-  const response = await fetch(`${API_BASE_URL}/api/auth/claim`, {
+  const result = await requestAuth(`${API_BASE_URL}/api/auth/claim`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -138,12 +219,11 @@ const apiClaim = async (
     body: JSON.stringify({ new_username: newUsername, new_password: newPassword }),
   })
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new AuthError(error.detail || 'Account claim failed', response.status)
+  if (!result.ok) {
+    throw new AuthError(result.errorBody.detail || 'Account claim failed', result.status)
   }
 
-  return response.json()
+  return result.data
 }
 
 /**
@@ -153,18 +233,17 @@ const apiRegister = async (
   username: string,
   password: string
 ): Promise<AuthResponse> => {
-  const response = await fetch(`${API_BASE_URL}/api/auth/register`, {
+  const result = await requestAuth(`${API_BASE_URL}/api/auth/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   })
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}))
-    throw new Error(error.detail || 'Registration failed')
+  if (!result.ok) {
+    throw new Error(result.errorBody.detail || 'Registration failed')
   }
 
-  return response.json()
+  return result.data
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {

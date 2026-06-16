@@ -5,9 +5,15 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 const initMock = vi.fn()
 const identifyMock = vi.fn()
 const resetMock = vi.fn()
+const captureMock = vi.fn()
 
 vi.mock('posthog-js', () => ({
-  default: { init: initMock, identify: identifyMock, reset: resetMock },
+  default: {
+    init: initMock,
+    identify: identifyMock,
+    reset: resetMock,
+    capture: captureMock,
+  },
 }))
 
 describe('analytics/posthog', () => {
@@ -18,6 +24,7 @@ describe('analytics/posthog', () => {
     initMock.mockClear()
     identifyMock.mockClear()
     resetMock.mockClear()
+    captureMock.mockClear()
     vi.unstubAllEnvs()
   })
 
@@ -43,14 +50,16 @@ describe('analytics/posthog', () => {
     expect(mod.isAnalyticsEnabled()).toBe(false)
   })
 
-  it('no-ops identify/reset when disabled', async () => {
+  it('no-ops identify/reset/capture when disabled', async () => {
     vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', '')
     const mod = await import('./posthog')
     mod.initAnalytics()
     mod.identifyUser('1', { username: 'x', is_anonymous: true })
     mod.resetAnalytics()
+    mod.captureEvent('api_request_client', { route: '/api/x' })
     expect(identifyMock).not.toHaveBeenCalled()
     expect(resetMock).not.toHaveBeenCalled()
+    expect(captureMock).not.toHaveBeenCalled()
   })
 
   it('initializes with the expected config when a token is present', async () => {
@@ -106,5 +115,17 @@ describe('analytics/posthog', () => {
     })
     mod.resetAnalytics()
     expect(resetMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('forwards capture to the singleton when enabled', async () => {
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
+    const mod = await import('./posthog')
+    mod.initAnalytics()
+    mod.captureEvent('api_request_client', { route: '/api/game/start', ok: true })
+    expect(captureMock).toHaveBeenCalledWith('api_request_client', {
+      route: '/api/game/start',
+      ok: true,
+    })
   })
 })

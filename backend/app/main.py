@@ -75,6 +75,9 @@ def create_app() -> FastAPI:
         allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
+        # Let browser fetch read the request id during cross-origin dev so the
+        # client can attach it to its api_request_client analytics event.
+        expose_headers=["X-Request-ID"],
     )
     app.add_middleware(HTTPLoggingMiddleware)
 

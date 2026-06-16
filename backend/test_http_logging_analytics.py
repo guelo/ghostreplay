@@ -52,6 +52,25 @@ def test_route_is_template_not_concrete_path(recorded_captures):
     assert props["request_id"]
 
 
+def test_response_echoes_request_id_matching_captured_event(recorded_captures):
+    """The `X-Request-ID` response header is the client↔server correlation key:
+    it must equal the `request_id` on the captured `api_request` event."""
+    mini = FastAPI()
+    mini.add_middleware(HTTPLoggingMiddleware)
+
+    @mini.get("/api/ok")
+    async def ok():
+        return {"ok": True}
+
+    with TestClient(mini) as c:
+        r = c.get("/api/ok")
+    assert r.status_code == 200
+
+    header_id = r.headers.get("x-request-id")
+    assert header_id
+    assert _api_request_props(recorded_captures)["request_id"] == header_id
+
+
 def test_unmatched_route_falls_back_to_label(recorded_captures):
     mini = FastAPI()
     mini.add_middleware(HTTPLoggingMiddleware)

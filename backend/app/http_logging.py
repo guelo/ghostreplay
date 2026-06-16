@@ -232,6 +232,12 @@ class HTTPLoggingMiddleware:
             nonlocal body_truncated, body_byte_total, res_content_type
             if message["type"] == "http.response.start":
                 res_status[0] = message["status"]
+                # Echo the request id so the client can correlate its
+                # `api_request_client` event (and error reports) 1:1 with this
+                # server request and its logs. Exposed via CORS in main.py.
+                headers = list(message.get("headers", []))
+                headers.append((b"x-request-id", request_id.encode("ascii")))
+                message["headers"] = headers
                 if log_body:
                     for name, value in message.get("headers", []):
                         if name == b"content-type":

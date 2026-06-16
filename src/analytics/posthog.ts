@@ -71,4 +71,17 @@ export function resetAnalytics(): void {
   posthog.reset()
 }
 
+/**
+ * Capture a custom analytics event. No-ops when analytics is disabled, so call
+ * sites can fire unconditionally without guarding (and tests never emit). The
+ * enable decision lives here, NOT at the call site.
+ */
+export function captureEvent(
+  event: string,
+  properties?: Record<string, unknown>,
+): void {
+  if (!enabled) return
+  posthog.capture(event, properties)
+}
+
 export { posthog }

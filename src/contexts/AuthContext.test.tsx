@@ -11,6 +11,10 @@ vi.mock('../analytics/posthog', () => ({
   initAnalytics: vi.fn(),
   identifyUser: vi.fn(),
   resetAnalytics: vi.fn(),
+  // The real api.ts (loaded for resolveApiEndpointBaseUrl/reportApiRequest)
+  // imports captureEvent, so the mock must provide it or the auth fetch
+  // wrapper throws on undefined.
+  captureEvent: vi.fn(),
   isAnalyticsEnabled: vi.fn(() => false),
   posthog: { identify: vi.fn(), reset: vi.fn(), capture: vi.fn() },
 }))

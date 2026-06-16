@@ -1,6 +1,7 @@
 /**
  * API client for Ghost Replay backend
  */
+import { captureEvent } from '../analytics/posthog'
 
 const isLocalHostname = (hostname: string): boolean =>
   hostname === 'localhost' || hostname === '127.0.0.1'
@@ -55,6 +56,121 @@ export const resolveApiEndpointBaseUrl = (
 
 const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
 const RETRY_BASE_DELAY_MS = 200
+
+// ---- Client request timing (analytics) ----------------------------
+const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+const UUID_SEGMENT = new RegExp(`^${UUID_SOURCE}$`, 'i')
+const NUMERIC_SEGMENT = /^\d+$/
+
+/**
+ * Concrete dynamic API paths → the EXACT backend route template (FastAPI param
+ * names from Starlette's `route.path_format`, e.g. `{session_id}`). Matching the
+ * server's own labels — not a generic `{id}` — is what lets the client
+ * `api_request_client.route` join the server `api_request.route`
+ * (see docs/posthog-latency-dashboard.md and backend/app/http_logging.py).
+ * The dynamic segment is matched as a UUID so static siblings like
+ * `/api/drills/start` fall through to the generic rule below rather than being
+ * mislabeled `/api/drills/{session_id}`.
+ */
+const API_ROUTE_TEMPLATES: ReadonlyArray<readonly [RegExp, string]> = [
+  [new RegExp(`^/api/drills/${UUID_SOURCE}/fail$`, 'i'), '/api/drills/{session_id}/fail'],
+  [new RegExp(`^/api/drills/${UUID_SOURCE}/continue$`, 'i'), '/api/drills/{session_id}/continue'],
+  [new RegExp(`^/api/drills/${UUID_SOURCE}/route-check$`, 'i'), '/api/drills/{session_id}/route-check'],
+  [new RegExp(`^/api/drills/${UUID_SOURCE}/natural-end$`, 'i'), '/api/drills/{session_id}/natural-end'],
+  [new RegExp(`^/api/drills/${UUID_SOURCE}/abandon$`, 'i'), '/api/drills/{session_id}/abandon'],
+  [new RegExp(`^/api/drills/${UUID_SOURCE}$`, 'i'), '/api/drills/{session_id}'],
+  [new RegExp(`^/api/session/${UUID_SOURCE}/moves$`, 'i'), '/api/session/{session_id}/moves'],
+  [new RegExp(`^/api/session/${UUID_SOURCE}/analysis$`, 'i'), '/api/session/{session_id}/analysis'],
+  [new RegExp(`^/api/session/${UUID_SOURCE}/openings$`, 'i'), '/api/session/{session_id}/openings'],
+]
+
+/**
+ * Reduce a request URL to a low-cardinality route template for analytics: strip
+ * the origin/base URL and query string, map known dynamic routes to their exact
+ * backend template, then fall back to replacing UUID/bare-numeric segments with
+ * `{id}` for anything unrecognized (bounds cardinality for new/future routes).
+ */
+export const normalizeApiPath = (rawUrl: string): string => {
+  let path: string
+  try {
+    // A dummy base lets relative (`/api/...`) and absolute URLs both parse; the
+    // base is ignored when `rawUrl` is already absolute.
+    path = new URL(rawUrl, 'http://_').pathname
+  } catch {
+    path = rawUrl.split('?')[0].split('#')[0]
+  }
+  const known = API_ROUTE_TEMPLATES.find(([pattern]) => pattern.test(path))
+  if (known) return known[1]
+  return path
+    .split('/')
+    .map((segment) =>
+      UUID_SEGMENT.test(segment) || NUMERIC_SEGMENT.test(segment) ? '{id}' : segment,
+    )
+    .join('/')
+}
+
+/**
+ * Read the server-echoed request id (`X-Request-ID`) off a response so the
+ * client event can be correlated 1:1 with the server's `api_request` + logs.
+ * Guards the accessor like `createApiError` does, since test doubles omit it.
+ */
+export const readRequestId = (response: Response): string | null =>
+  typeof response.headers?.get === 'function'
+    ? response.headers.get('x-request-id')
+    : null
+
+export type ApiRequestErrorKind = 'http' | 'network' | 'timeout' | 'parse'
+
+/**
+ * Classify a thrown fetch (network-level) error for the `error_kind` property.
+ * A request the server never answered surfaces as a `TimeoutError` (deadline)
+ * or anything else (offline, DNS, CORS, abort) which we bucket as `network`.
+ * Keys off `.name` (not `instanceof Error`) because `AbortSignal.timeout()`
+ * rejects with a `DOMException`, which is not an `Error` in every runtime.
+ */
+export const classifyNetworkError = (error: unknown): ApiRequestErrorKind =>
+  (error as { name?: unknown } | null)?.name === 'TimeoutError'
+    ? 'timeout'
+    : 'network'
+
+/**
+ * A deliberately-cancelled request (superseded fetch via `AbortSignal`) rejects
+ * with an `AbortError`. That is not a round-trip outcome, so we skip reporting
+ * it to keep the client error rate free of self-inflicted "network" failures.
+ */
+export const isAbortError = (error: unknown): boolean =>
+  (error as { name?: unknown } | null)?.name === 'AbortError'
+
+/**
+ * Emit exactly one `api_request_client` event for the FINAL outcome of one
+ * logical request (never per retry attempt). No-ops when analytics is disabled.
+ * Client-side timing complements the server's `api_request`: it also sees
+ * retries, timeouts, offline, and CORS failures the server never records.
+ */
+export const reportApiRequest = (params: {
+  url: string
+  method: string
+  /** HTTP status, or 0 when the request never reached a response. */
+  status: number
+  ok: boolean
+  durationMs: number
+  attempts: number
+  errorKind?: ApiRequestErrorKind
+  /** Server-echoed request id, or null when no response was received. */
+  requestId?: string | null
+}): void => {
+  captureEvent('api_request_client', {
+    route: normalizeApiPath(params.url),
+    method: params.method,
+    status: params.status,
+    ok: params.ok,
+    duration_ms: Math.round(params.durationMs),
+    attempts: params.attempts,
+    error_kind: params.errorKind ?? null,
+    request_id: params.requestId ?? null,
+  })
+}
+// -------------------------------------------------------------------
 
 /**
  * Get headers for authenticated API requests, including JWT token if available.
@@ -192,32 +308,84 @@ const requestJson = async <T>(
   const method = init.method ?? 'GET'
   const fallbackMessage =
     options?.fallbackMessage ?? `Request failed: ${method} ${url}`
+  // Span the whole logical request (across retries) so duration/attempts reflect
+  // what the caller actually waited for.
+  const start = performance.now()
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const attempts = attempt + 1
+
+    let response: Response
     try {
-      const response = await fetch(url, init)
-      if (response.ok) {
-        return response.json() as Promise<T>
-      }
-
-      const apiError = await createApiError(response, fallbackMessage)
-      if (attempt < retries && apiError.retryable) {
-        await delay(RETRY_BASE_DELAY_MS * 2 ** attempt)
-        continue
-      }
-      throw apiError
+      response = await fetch(url, init)
     } catch (error) {
-      if (error instanceof ApiError) {
-        throw error
-      }
-
-      const isNetworkRetryable = attempt < retries
-      if (isNetworkRetryable) {
+      // Network-level failure (offline, DNS, CORS, timeout) — the server never
+      // answered. Retry transient ones; report only the final outcome. A
+      // deliberate cancellation is not an outcome, so it is never reported.
+      if (attempt < retries) {
         await delay(RETRY_BASE_DELAY_MS * 2 ** attempt)
         continue
+      }
+      if (!isAbortError(error)) {
+        reportApiRequest({
+          url,
+          method,
+          status: 0,
+          ok: false,
+          durationMs: performance.now() - start,
+          attempts,
+          errorKind: classifyNetworkError(error),
+        })
       }
       throw error
     }
+
+    if (response.ok) {
+      // Capture success only AFTER the body parses — a parse failure is NOT a
+      // successful request, so report it as `parse` rather than swallowing it.
+      try {
+        const parsed = (await response.json()) as T
+        reportApiRequest({
+          url,
+          method,
+          status: response.status,
+          ok: true,
+          durationMs: performance.now() - start,
+          attempts,
+          requestId: readRequestId(response),
+        })
+        return parsed
+      } catch (parseError) {
+        reportApiRequest({
+          url,
+          method,
+          status: response.status,
+          ok: false,
+          durationMs: performance.now() - start,
+          attempts,
+          errorKind: 'parse',
+          requestId: readRequestId(response),
+        })
+        throw parseError
+      }
+    }
+
+    const apiError = await createApiError(response, fallbackMessage)
+    if (attempt < retries && apiError.retryable) {
+      await delay(RETRY_BASE_DELAY_MS * 2 ** attempt)
+      continue
+    }
+    reportApiRequest({
+      url,
+      method,
+      status: response.status,
+      ok: false,
+      durationMs: performance.now() - start,
+      attempts,
+      errorKind: 'http',
+      requestId: readRequestId(response),
+    })
+    throw apiError
   }
 
   throw new Error('Unexpected retry loop exit')
