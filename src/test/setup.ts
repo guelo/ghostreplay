@@ -6,6 +6,11 @@ import { uninstallConsoleCapture } from '../utils/debugLog'
 
 expect.extend(matchers)
 
+// Force analytics OFF for the whole suite so PostHog never initializes or hits
+// the network. `initAnalytics()` reads this at call time and no-ops; tests that
+// exercise the enabled path override it locally with `vi.stubEnv`.
+import.meta.env.VITE_PUBLIC_POSTHOG_DISABLED = 'true'
+
 afterEach(() => {
   cleanup()
   // Restore console, remove window listeners, cancel timers, reset buffer +

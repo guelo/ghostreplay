@@ -20,7 +20,9 @@
     "test:e2e:screens": "playwright test e2e/screenshots"
   },
   "dependencies": {
+    "@posthog/react": "^1.10.2",
     "chess.js": "^1.4.0",
+    "posthog-js": "^1.386.8",
     "react": "^19.2.0",
     "react-chessboard": "^5.8.6",
     "react-dom": "^19.2.0",

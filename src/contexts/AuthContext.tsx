@@ -7,6 +7,7 @@ import {
 } from 'react'
 import { AuthContext, type AuthState } from './authContextShared'
 import { resolveApiEndpointBaseUrl } from '../utils/api'
+import { identifyUser, resetAnalytics } from '../analytics/posthog'
 
 const API_BASE_URL = resolveApiEndpointBaseUrl(import.meta.env.VITE_API_URL)
 
@@ -201,6 +202,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             isLoading: false,
             error: null,
           })
+          identifyUser(String(Number(payload.sub)), {
+            username: payload.username,
+            is_anonymous: payload.is_anonymous,
+          })
           return
         }
         // Token expired or malformed — clear it and fall through
@@ -218,15 +223,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           )
           localStorage.setItem(STORAGE_KEYS.token, response.token)
           const refreshedPayload = decodeToken(response.token)
+          const isAnonymous = refreshedPayload?.is_anonymous ?? true
           setState({
             user: {
               id: response.user_id,
               username: response.username,
-              isAnonymous: refreshedPayload?.is_anonymous ?? true,
+              isAnonymous,
             },
             token: response.token,
             isLoading: false,
             error: null,
+          })
+          identifyUser(String(response.user_id), {
+            username: response.username,
+            is_anonymous: isAnonymous,
           })
           return
         } catch (err) {
@@ -265,6 +275,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           isLoading: false,
           error: null,
         })
+        identifyUser(String(response.user_id), {
+          username: response.username,
+          is_anonymous: true,
+        })
       } catch (err) {
         setState({
           user: null,
@@ -293,6 +307,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         token: response.token,
         isLoading: false,
         error: null,
+      })
+      identifyUser(String(response.user_id), {
+        username: response.username,
+        is_anonymous: false,
       })
     } catch (err) {
       setState((prev) => ({
@@ -323,6 +341,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           isLoading: false,
           error: null,
         })
+        // Logout creates a NEW anonymous user: reset the old identity, then
+        // re-identify so client/server events keep joining on the new user_id.
+        resetAnalytics()
+        identifyUser(String(response.user_id), {
+          username: response.username,
+          is_anonymous: true,
+        })
       })
       .catch(() => {
         setState({
@@ -331,6 +356,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           isLoading: false,
           error: null,
         })
+        resetAnalytics()
       })
   }, [])
 
@@ -353,6 +379,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           token: response.token,
           isLoading: false,
           error: null,
+        })
+        // Claim upgrades the SAME user row (id stable), so we re-identify with
+        // updated properties rather than aliasing.
+        identifyUser(String(response.user_id), {
+          username: response.username,
+          is_anonymous: false,
         })
       } catch (err) {
         setState((prev) => ({

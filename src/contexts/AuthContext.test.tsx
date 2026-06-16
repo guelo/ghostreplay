@@ -3,6 +3,17 @@ import { render, screen, waitFor, act, cleanup } from '@testing-library/react'
 import { renderHook } from '@testing-library/react'
 import { AuthProvider } from './AuthContext'
 import { useAuth } from './useAuth'
+import { identifyUser, resetAnalytics } from '../analytics/posthog'
+
+// Mock the analytics module so identity transitions are observable and never
+// touch the real PostHog singleton / network.
+vi.mock('../analytics/posthog', () => ({
+  initAnalytics: vi.fn(),
+  identifyUser: vi.fn(),
+  resetAnalytics: vi.fn(),
+  isAnalyticsEnabled: vi.fn(() => false),
+  posthog: { identify: vi.fn(), reset: vi.fn(), capture: vi.fn() },
+}))
 
 /**
  * Build a fake JWT with the given payload (no real signature).
@@ -410,6 +421,163 @@ describe('AuthContext', () => {
       expect(() => {
         renderHook(() => useAuth())
       }).toThrow('useAuth must be used within an AuthProvider')
+    })
+  })
+
+  describe('analytics identity', () => {
+    it('identifies the user after anonymous auto-registration', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(vi.mocked(identifyUser)).toHaveBeenCalledWith('123', {
+        username: 'ghost_abc12345',
+        is_anonymous: true,
+      })
+    })
+
+    it('identifies the user when restoring from a stored JWT', async () => {
+      const token = makeJwt({
+        sub: '456',
+        username: 'claimed_user',
+        is_anonymous: false,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      mockLocalStorage['ghost_replay_token'] = token
+
+      render(
+        <AuthProvider>
+          <TestConsumer />
+        </AuthProvider>
+      )
+
+      await waitFor(() => {
+        expect(screen.getByTestId('loading')).toHaveTextContent('false')
+      })
+
+      expect(vi.mocked(identifyUser)).toHaveBeenCalledWith('456', {
+        username: 'claimed_user',
+        is_anonymous: false,
+      })
+    })
+
+    it('identifies the user on explicit login', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      vi.mocked(identifyUser).mockClear()
+
+      const loginResponse = {
+        token: 'new-token',
+        user_id: 456,
+        username: 'claimed_user',
+      }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(loginResponse),
+      })
+
+      await act(async () => {
+        await result.current.login('claimed_user', 'my-secure-password')
+      })
+
+      expect(vi.mocked(identifyUser)).toHaveBeenCalledWith('456', {
+        username: 'claimed_user',
+        is_anonymous: false,
+      })
+    })
+
+    it('resets then re-identifies the new anonymous user on logout', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockAuthResponse),
+      })
+
+      const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      vi.mocked(identifyUser).mockClear()
+      vi.mocked(resetAnalytics).mockClear()
+
+      const newAnonResponse = {
+        token: 'new-anon-token',
+        user_id: 789,
+        username: 'ghost_newanon',
+      }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(newAnonResponse),
+      })
+
+      act(() => {
+        result.current.logout()
+      })
+
+      await waitFor(() => {
+        expect(result.current.user?.id).toBe(789)
+      })
+
+      expect(vi.mocked(resetAnalytics)).toHaveBeenCalled()
+      expect(vi.mocked(identifyUser)).toHaveBeenCalledWith('789', {
+        username: 'ghost_newanon',
+        is_anonymous: true,
+      })
+    })
+
+    it('identifies the user on account claim', async () => {
+      const token = makeJwt({
+        sub: '123',
+        username: 'ghost_abc12345',
+        is_anonymous: true,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+      mockLocalStorage['ghost_replay_token'] = token
+
+      const { result } = renderHook(() => useAuth(), { wrapper: AuthProvider })
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false)
+      })
+      vi.mocked(identifyUser).mockClear()
+
+      const claimResponse = {
+        token: 'claimed-token',
+        user_id: 123,
+        username: 'claimed_user',
+      }
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(claimResponse),
+      })
+
+      await act(async () => {
+        await result.current.claimAccount('claimed_user', 'my-secure-password')
+      })
+
+      expect(vi.mocked(identifyUser)).toHaveBeenCalledWith('123', {
+        username: 'claimed_user',
+        is_anonymous: false,
+      })
     })
   })
 })
