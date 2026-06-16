@@ -10396,3 +10396,252 @@ button.openings-shell__crumb:hover {
         width: 100%;
     }
 }
+
+/* --- Opening tree node cards (g-tree-node-cards) -------------------------- */
+/* Width-agnostic presentational cards for opening-tree nodes. The left accent
+   border encodes the grade (--grade-accent); column widths/scroll belong to
+   g-tree-layout, not here. */
+.tree-node-card {
+    --grade-accent: var(--text-tertiary);
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.tree-node-card--grade-a {
+    --grade-accent: var(--color-green-600);
+}
+.tree-node-card--grade-b {
+    --grade-accent: var(--color-green-500);
+}
+.tree-node-card--grade-c {
+    --grade-accent: var(--color-yellow-600);
+}
+.tree-node-card--grade-d {
+    --grade-accent: var(--color-orange-500);
+}
+.tree-node-card--grade-f {
+    --grade-accent: var(--color-red-500);
+}
+.tree-node-card--grade-none {
+    --grade-accent: var(--text-tertiary);
+}
+
+/* --- Compact variant: two-line selection button -------------------------- */
+.tree-node-card--compact {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.4rem 0.55rem;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--grade-accent);
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--bg-secondary) 60%, var(--card-bg));
+    color: var(--text-primary);
+    font: inherit;
+    text-align: left;
+}
+
+button.tree-node-card--compact {
+    cursor: pointer;
+}
+
+/* Selected highlight via background + inset ring so the grade accent border
+   stays intact (one visual variable per concept). */
+.tree-node-card--compact.tree-node-card--selected {
+    background: color-mix(in srgb, var(--grade-accent) 16%, var(--card-bg));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--grade-accent) 45%, transparent);
+}
+
+.tree-node-card--compact:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
+    outline-offset: 1px;
+}
+
+.tree-node-card__line {
+    display: flex;
+    align-items: baseline;
+    min-width: 0;
+}
+
+.tree-node-card__line--primary {
+    justify-content: space-between;
+    gap: 0.5rem;
+    white-space: nowrap;
+}
+
+.tree-node-card__move {
+    font-weight: 600;
+    font-size: 0.8rem;
+}
+
+.tree-node-card__primary-right {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.tree-node-card__score {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 0.78rem;
+}
+
+.tree-node-card__grade {
+    flex: 0 0 auto;
+    padding: 0.05rem 0.3rem;
+    border: 1px solid color-mix(in srgb, var(--grade-accent) 45%, transparent);
+    border-radius: 0.3rem;
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1.2;
+    color: var(--grade-accent);
+}
+
+.tree-node-card__line--secondary {
+    gap: 0.4rem;
+}
+
+.tree-node-card__name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+.tree-node-card__eval {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+}
+
+/* --- Expanded variant: full metric panel --------------------------------- */
+.tree-node-card--expanded {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--grade-accent);
+    border-radius: 0.7rem;
+    background: color-mix(in srgb, var(--bg-secondary) 50%, var(--card-bg));
+    color: var(--text-primary);
+}
+
+.tree-node-card__header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.tree-node-card__move-label {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.tree-node-card--expanded .tree-node-card__name {
+    font-size: 0.78rem;
+}
+
+.tree-node-card__score-panel,
+.tree-node-card__metrics {
+    margin: 0;
+    display: grid;
+    gap: 0.5rem;
+}
+
+.tree-node-card__score-panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.tree-node-card__metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tree-node-card__score-metric,
+.tree-node-card__metric {
+    min-width: 0;
+    border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
+    border-radius: 0.55rem;
+    background: color-mix(in srgb, var(--color-white) 70%, var(--bg-primary));
+}
+
+.tree-node-card__score-metric {
+    padding: 0.5rem 0.6rem;
+}
+
+.tree-node-card__metric {
+    padding: 0.45rem 0.55rem;
+}
+
+.tree-node-card__score-metric dt,
+.tree-node-card__metric dt {
+    margin: 0;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    color: var(--text-tertiary);
+}
+
+.tree-node-card__score-metric dd {
+    margin: 0;
+    font-size: 1.4rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+}
+
+.tree-node-card__score-value {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.tree-node-card__metric dd {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+}
+
+.tree-node-card__terminal {
+    margin: 0;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.tree-node-card__drill-button {
+    align-self: stretch;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    border-radius: 999px;
+    background: var(--button-secondary-bg);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: border-color 200ms ease, background 200ms ease;
+}
+
+.tree-node-card__drill-button:hover {
+    border-color: var(--text-primary);
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+}
+
+.tree-node-card__drill-button:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
+    outline-offset: 2px;
+}

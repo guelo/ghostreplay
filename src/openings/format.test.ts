@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import {
   formatGames,
+  formatMoveLabel,
+  formatOpeningName,
   formatPercent,
   formatScore,
+  formatTerminalReason,
+  getGradeText,
+  getGradeToken,
   getPriorityLabel,
   getPriorityTone,
 } from './format'
@@ -65,5 +70,49 @@ describe('numeric formatters', () => {
   it('formatGames localizes counts and dashes nulls', () => {
     expect(formatGames(null)).toBe('—')
     expect(formatGames(7995)).toBe((7995).toLocaleString())
+  })
+})
+
+describe('tree-card helpers', () => {
+  it('getGradeToken tracks the getPriorityLabel boundaries', () => {
+    expect(getGradeToken(null)).toBe('none')
+    expect(getGradeToken(44.9)).toBe('f')
+    expect(getGradeToken(45)).toBe('d')
+    expect(getGradeToken(55)).toBe('c')
+    expect(getGradeToken(70)).toBe('b')
+    expect(getGradeToken(85)).toBe('a')
+  })
+
+  it('getGradeText spells out each grade and uses sentence-case "No data" for null', () => {
+    expect(getGradeText(90)).toBe('Grade A')
+    expect(getGradeText(72)).toBe('Grade B')
+    expect(getGradeText(60)).toBe('Grade C')
+    expect(getGradeText(48)).toBe('Grade D')
+    expect(getGradeText(20)).toBe('Grade F')
+
+    // Deliberate casing split: the accessible grade name is sentence case while
+    // the visible label stays title case. Pinned together so neither drifts.
+    expect(getGradeText(null)).toBe('No data')
+    expect(getPriorityLabel(null)).toBe('No Data')
+  })
+
+  it('formatMoveLabel labels the root and alternating colours', () => {
+    expect(formatMoveLabel(0, null)).toBe('Starting position')
+    expect(formatMoveLabel(1, 'e4')).toBe('1. e4')
+    expect(formatMoveLabel(2, 'e5')).toBe('1… e5')
+    expect(formatMoveLabel(3, 'Nf3')).toBe('2. Nf3')
+  })
+
+  it('formatTerminalReason maps each code and falls back to "End of line"', () => {
+    expect(formatTerminalReason('checkmate')).toBe('Checkmate')
+    expect(formatTerminalReason('stalemate')).toBe('Stalemate')
+    expect(formatTerminalReason('opening_boundary')).toBe('Opening boundary reached')
+    expect(formatTerminalReason('no_children')).toBe('End of line')
+    expect(formatTerminalReason(null)).toBe('End of line')
+  })
+
+  it('formatOpeningName passes through names and defaults null to "Unclassified"', () => {
+    expect(formatOpeningName('Sicilian Defense')).toBe('Sicilian Defense')
+    expect(formatOpeningName(null)).toBe('Unclassified')
   })
 })
