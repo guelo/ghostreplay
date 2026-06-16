@@ -24,6 +24,7 @@ import { gradeDrillMove } from "../workers/analysisUtils";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen, prewarmOpeningBook } from "../openings/openingBook";
 import { scheduleIdle } from "../utils/scheduleIdle";
+import { captureEvent } from "../analytics/posthog";
 import type { TargetBlunderSrs } from "../utils/api";
 import { getStatsAchievements } from "../utils/api";
 import {
@@ -1626,6 +1627,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const handleAgainDrill = useCallback(async () => {
     if (isStartingGame) return;
     const s = useGameStore.getState();
+    captureEvent("drill_again_clicked", {
+      opening_key: s.drillOpeningKey ?? null,
+      player_color: s.playerColor,
+      engine_elo: s.engineElo,
+    });
     // Exact replay is impossible without the exact cp — open the overlay instead.
     if (!s.drillOpeningKey || s.drillStrictness == null || s.drillStrictnessCp == null) {
       handleAgainSettings();

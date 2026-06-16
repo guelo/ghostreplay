@@ -11,6 +11,7 @@ import {
 } from "../openings/route";
 import { resolveDrop, type DisplayColumn } from "../openings/treeView";
 import { useOpeningsTree } from "../hooks/useOpeningsTree";
+import { captureEvent } from "../analytics/posthog";
 import type { OpeningPlayerColor } from "../utils/api";
 import "../App.css";
 
@@ -116,8 +117,15 @@ function OpeningsPage() {
   }, [isSettled, canonicalLine, playerColor, searchParams, setSearchParams]);
 
   // Selection pushes a new history entry (so Back works); truncation falls out
-  // of the shorter line each node computes.
+  // of the shorter line each node computes. Both entry points (node click and
+  // board drop) flow through here, so one capture covers all tree navigation.
   const selectLine = (newLine: string[]) => {
+    captureEvent("opening_explored", {
+      from_key: moves.join(","),
+      to_key: newLine.join(","),
+      depth: newLine.length,
+      player_color: playerColor,
+    });
     setSearchParams(buildOpeningsSearchParams({ playerColor, moves: newLine }));
   };
 

@@ -6,6 +6,11 @@ import StatsPage from "./StatsPage";
 
 const mockLogout = vi.fn();
 const getStatsSummaryMock = vi.fn();
+const captureEventMock = vi.fn();
+
+vi.mock("../analytics/posthog", () => ({
+  captureEvent: (...args: unknown[]) => captureEventMock(...args),
+}));
 
 vi.mock("../contexts/useAuth", () => ({
   useAuth: () => ({
@@ -116,6 +121,7 @@ describe("StatsPage", () => {
   beforeEach(() => {
     getStatsSummaryMock.mockReset();
     mockLogout.mockReset();
+    captureEventMock.mockReset();
   });
 
   it("loads and renders stats values", async () => {
@@ -228,6 +234,26 @@ describe("StatsPage", () => {
     });
 
     expect(screen.getAllByRole("button", { name: "90d" })[0]).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("captures stats_window_changed only when the window actually changes", async () => {
+    const user = userEvent.setup();
+    getStatsSummaryMock.mockResolvedValue(baseSummary);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("Games")).toBeInTheDocument();
+    });
+
+    // Clicking the already-active 30d button is a no-op for analytics.
+    await user.click(screen.getAllByRole("button", { name: "30d" })[0]);
+    expect(captureEventMock).not.toHaveBeenCalled();
+
+    await user.click(screen.getAllByRole("button", { name: "90d" })[0]);
+    expect(captureEventMock).toHaveBeenCalledWith("stats_window_changed", {
+      window_days: 90,
+    });
   });
 
   it("does not re-enter loading when clicking the already-active window button", async () => {

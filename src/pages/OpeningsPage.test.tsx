@@ -16,6 +16,11 @@ import {
 import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
 
 const getOpeningTreeMock = vi.fn();
+const captureEventMock = vi.fn();
+
+vi.mock("../analytics/posthog", () => ({
+  captureEvent: (...args: unknown[]) => captureEventMock(...args),
+}));
 
 // Capture the latest Chessboard options so tests can simulate board drops and
 // read the rendered position/orientation.
@@ -271,6 +276,7 @@ function clickMove(san: string) {
 
 beforeEach(() => {
   getOpeningTreeMock.mockReset();
+  captureEventMock.mockReset();
   boardOptions = {};
 });
 
@@ -289,6 +295,25 @@ describe("OpeningsPage tree", () => {
     );
     expect(location()).toBe("/openings?color=white");
     expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures opening_explored when a move node is selected", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
+    clickMove("e4");
+
+    // Await the refetch settling so the route/state updates triggered by the
+    // selection are flushed before we assert (keeps the run act()-warning free).
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+    expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      from_key: "",
+      to_key: "e2e4",
+      depth: 1,
+      player_color: "white",
+    });
   });
 
   it("restores a deep line and expands only the deepest selected node", async () => {
@@ -361,6 +386,8 @@ describe("OpeningsPage tree", () => {
     });
     expect(rejected).toBe(false);
     expect(location()).toBe("/openings?color=white");
+    // A rejected drop never reaches selectLine, so no exploration is captured.
+    expect(captureEventMock).not.toHaveBeenCalled();
 
     // Navigable drop e2→e4 extends the line; board position follows immediately.
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
@@ -377,6 +404,16 @@ describe("OpeningsPage tree", () => {
     expect(location()).toBe("/openings?color=white&move=e2e4");
     expect(screen.getByTestId("opening-card-board").getAttribute("data-position"))
       .toMatch(/4P3/);
+    // The board-drop path flows through selectLine too, so it captures directly.
+    expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      from_key: "",
+      to_key: "e2e4",
+      depth: 1,
+      player_color: "white",
+    });
+    // Let the post-drop refetch settle so its state update doesn't trail the
+    // test as an act() warning.
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
   });
 
   it("switches perspective: flips orientation, preserves the line, refetches at root", async () => {

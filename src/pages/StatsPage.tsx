@@ -6,6 +6,7 @@ import {
 } from "../utils/api";
 import AppNav from "../components/AppNav";
 import RatingGraph from "../components/RatingGraph";
+import { captureEvent } from "../analytics/posthog";
 import "../App.css";
 
 const WINDOW_OPTIONS: Array<{ label: string; value: StatsWindowDays }> = [
@@ -129,6 +130,9 @@ function StatsPage() {
                 aria-pressed={windowDays === option.value}
                 onClick={() => {
                   if (windowDays !== option.value) {
+                    captureEvent("stats_window_changed", {
+                      window_days: option.value,
+                    });
                     setLoading(true);
                     setError(null);
                     setWindowDays(option.value);

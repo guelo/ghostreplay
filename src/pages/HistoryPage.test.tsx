@@ -87,6 +87,11 @@ vi.mock('../components/AppNav', () => ({
   default: () => <nav data-testid="app-nav" />,
 }));
 
+const captureEventMock = vi.fn();
+vi.mock('../analytics/posthog', () => ({
+  captureEvent: (...args: unknown[]) => captureEventMock(...args),
+}));
+
 // Mock react-chessboard so expanding an opening card doesn't pull in real rendering.
 vi.mock('react-chessboard', () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => (
@@ -143,6 +148,40 @@ describe('HistoryPage', () => {
     expect(mockFetchHistory).toHaveBeenCalled();
     expect(mockFetchAnalysis).toHaveBeenCalledWith('abc-123');
     expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-initial-move', '0');
+  });
+
+  it('captures history_game_selected when a different game is chosen', async () => {
+    const user = userEvent.setup();
+    const twoGames = [
+      HISTORY_RESPONSE[0],
+      {
+        ...HISTORY_RESPONSE[0],
+        session_id: 'def-456',
+        result: 'resign',
+        opening_name: 'French Defense',
+      },
+    ];
+    mockFetchHistory.mockResolvedValue(twoGames);
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    // First game auto-selects on load (does not emit a selection event).
+    await screen.findByTestId('analysis-board');
+    expect(captureEventMock).not.toHaveBeenCalled();
+
+    // Open the dropdown and pick the second game.
+    await user.click(screen.getByRole('button', { name: /Win vs 1500/ }));
+    await user.click(screen.getAllByRole('option')[1]);
+
+    expect(captureEventMock).toHaveBeenCalledWith('history_game_selected', {
+      session_id: 'def-456',
+      result: 'resign',
+    });
   });
 
   it('places the game selector inside the analysis board on narrow screens', async () => {

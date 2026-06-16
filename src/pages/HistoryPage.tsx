@@ -17,6 +17,7 @@ import GameOpeningLineage from "../components/GameOpeningLineage";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { captureEvent } from "../analytics/posthog";
 import "../App.css";
 
 const POLL_INTERVAL_MS = 2000;
@@ -152,12 +153,16 @@ function HistoryPage() {
   const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
   const handleGameChange = useCallback((id: string) => {
     if (id && id !== selectedId) {
+      captureEvent("history_game_selected", {
+        session_id: id,
+        result: games.find((g) => g.session_id === id)?.result ?? null,
+      });
       setAnalysisLoading(true);
       setAnalysis(null);
       setOpeningLineage([]);
       setSelectedId(id);
     }
-  }, [selectedId]);
+  }, [selectedId, games]);
 
   const gameSelector = games.length > 0 ? (
     <div className="game-selector-row">

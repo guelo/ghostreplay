@@ -25,6 +25,11 @@ const fetchCurrentRatingMock = vi.fn();
 const getStatsAchievementsMock = vi.fn();
 const audioPlayMock = vi.fn();
 const audioCtorSpy = vi.fn();
+const captureEventMock = vi.fn();
+
+vi.mock("../analytics/posthog", () => ({
+  captureEvent: (...args: unknown[]) => captureEventMock(...args),
+}));
 
 // Spread the real module so ApiError/errorCodeOf stay intact — the
 // coordinator-owned DecisionOwner (g-2m0p) depends on them for retry
@@ -273,6 +278,7 @@ beforeEach(() => {
   }
   vi.stubGlobal("Audio", MockAudio);
   fetchCurrentRatingMock.mockReset();
+  captureEventMock.mockReset();
   getStatsAchievementsMock.mockReset();
   getStatsAchievementsMock.mockResolvedValue({
     perfect_streak: { personal_best: 0 },
@@ -1311,6 +1317,27 @@ describe("ChessGame characterization safeguards", () => {
     expect(
       screen.queryByRole("button", { name: /start drill/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("captures drill_again_clicked when Again is pressed", async () => {
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "white",
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+    });
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    expect(captureEventMock).toHaveBeenCalledWith("drill_again_clicked", {
+      opening_key: "target-fen",
+      player_color: "white",
+      engine_elo: expect.any(Number),
+    });
   });
 
   it("opens the setup overlay instead of restarting when exact cp is missing", async () => {

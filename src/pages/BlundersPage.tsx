@@ -12,6 +12,7 @@ import { normalize_fen } from "../utils/fen";
 import AnalysisBoard from "../components/AnalysisBoard";
 import AppNav from "../components/AppNav";
 import { lookupOpeningByFen, type OpeningLookupResult } from "../openings/openingBook";
+import { captureEvent } from "../analytics/posthog";
 import "../App.css";
 
 function formatDate(iso: string): string {
@@ -160,6 +161,14 @@ function BlundersPage() {
     setSelectedId(null);
     setAnalysis(null);
     setAnalysisLoading(false);
+  };
+
+  const handleSelectBlunder = (id: number) => {
+    captureEvent("blunder_selected", {
+      blunder_id: id,
+      filter: readyOnly ? "practice_ready" : "all",
+    });
+    setSelectedId(id);
   };
 
   useEffect(() => {
@@ -434,7 +443,7 @@ function BlundersPage() {
                       type="button"
                       role="option"
                       aria-selected={b.id === selectedId}
-                      onClick={() => setSelectedId(b.id)}
+                      onClick={() => handleSelectBlunder(b.id)}
                     >
                       <div className="blunder-card__info">
                         <div className="blunder-card__moves">

@@ -62,6 +62,11 @@ vi.mock('../components/AppNav', () => ({
   default: () => <nav data-testid="app-nav" />,
 }));
 
+const captureEventMock = vi.fn();
+vi.mock('../analytics/posthog', () => ({
+  captureEvent: (...args: unknown[]) => captureEventMock(...args),
+}));
+
 const BLUNDERS_RESPONSE = [
   {
     id: 1,
@@ -151,6 +156,25 @@ describe('BlundersPage', () => {
       expect.objectContaining({ initialMoveIndex: 4 }),
       undefined,
     );
+  });
+
+  it('captures blunder_selected with the active filter when a card is clicked', async () => {
+    mockFetchBlunders.mockResolvedValue(blunderEnvelope());
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    render(
+      <MemoryRouter>
+        <BlundersPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByText('Bc4');
+    fireEvent.click(screen.getByRole('option', { selected: false }));
+
+    expect(captureEventMock).toHaveBeenCalledWith('blunder_selected', {
+      blunder_id: 1,
+      filter: 'all',
+    });
   });
 
   it('displays UCI best moves as algebraic notation on blunder cards', async () => {
