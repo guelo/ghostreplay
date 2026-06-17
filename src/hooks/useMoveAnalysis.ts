@@ -47,7 +47,9 @@ export type AnalysisResult = {
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
 const CACHE_BATCH_MAX_AGE_MS = 400
 const ANALYSIS_RESOLUTION_TIMEOUT_MS = 2500
-const ANALYSIS_TOTAL_DEADLINE_MS = 8000
+// Matches GameAnalysisCoordinator: depth-17 analysis can legitimately exceed
+// the old 8s guard before all required searches finish.
+const ANALYSIS_TOTAL_DEADLINE_MS = 30_000
 
 type PendingCacheLookup = {
   requestId: string

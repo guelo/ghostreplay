@@ -391,7 +391,7 @@ describe('useMoveAnalysis', () => {
 
     // Fire the per-variation no-hang deadline (ANALYSIS_TOTAL_DEADLINE_MS).
     act(() => {
-      vi.advanceTimersByTime(8000)
+      vi.advanceTimersByTime(30_000)
     })
 
     expect(onVariationError).toHaveBeenCalledTimes(1)
@@ -1166,7 +1166,7 @@ describe('useMoveAnalysis', () => {
 
     // Cache misses (released, no buffered worker), worker never emits.
     await act(async () => { await vi.advanceTimersByTimeAsync(200) })
-    await act(async () => { await vi.advanceTimersByTimeAsync(8000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
 
     expect(store.getState().isAnalyzing).toBe(false)
     expect(store.getState().analyzingMove).toBeNull()
@@ -1183,7 +1183,7 @@ describe('useMoveAnalysis', () => {
     act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
 
     await act(async () => { await vi.advanceTimersByTimeAsync(200) })
-    await act(async () => { await vi.advanceTimersByTimeAsync(8000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
 
     // The deadline must tell the worker to abandon the request so its serial
     // queue cannot stay blocked behind a missing readyok.
@@ -1215,7 +1215,7 @@ describe('useMoveAnalysis', () => {
     ).toBe(false)
 
     // After the deadline: the worker request is canceled and streaming cleared.
-    await act(async () => { await vi.advanceTimersByTimeAsync(8000) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000) })
     expect(
       postMessageMock.mock.calls.some(
         ([m]) => m.type === 'cancel-analysis' && m.id === id,

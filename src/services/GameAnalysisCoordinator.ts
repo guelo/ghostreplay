@@ -50,8 +50,11 @@ const ANALYSIS_RESOLUTION_TIMEOUT_MS = 2500
  * Hard total-analysis deadline started at analyzeMove. Guarantees no-hang: if an
  * indexed request never resolves (worker never emits, cache missed, etc.) the
  * request is terminated as failed so analysis-dependent gameplay cannot deadlock.
+ * Depth-17 move analysis can run root + post-played + post-best searches, and
+ * one root phase alone can exceed 8s on real positions, so this guard must be
+ * loose enough for slow-but-finite analyses to publish.
  */
-const ANALYSIS_TOTAL_DEADLINE_MS = 8000
+const ANALYSIS_TOTAL_DEADLINE_MS = 30_000
 const INCREMENTAL_UPLOAD_INTERVAL_MS = 3000
 const INCREMENTAL_UPLOAD_BATCH_THRESHOLD = 4
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000 // 5 minutes

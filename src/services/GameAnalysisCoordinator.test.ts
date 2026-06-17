@@ -1010,9 +1010,29 @@ describe('GameAnalysisCoordinator', () => {
 
       // Cache misses (releases, no buffered worker), worker never emits.
       await vi.advanceTimersByTimeAsync(200)
-      await vi.advanceTimersByTimeAsync(8000)
+      await vi.advanceTimersByTimeAsync(30_000)
       await rejection
       expect((coordinator as any).resolutionState.size).toBe(0)
+    })
+
+    it('keeps a slow-but-finite worker analysis alive past the old 8s deadline', async () => {
+      coordinator.startSession('s')
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+
+      await vi.advanceTimersByTimeAsync(200)
+      await vi.advanceTimersByTimeAsync(8200)
+
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+      expect((coordinator as any).resolutionState.has(0)).toBe(true)
+
+      postWorker(id)
+
+      await expect(pending).resolves.toMatchObject({
+        id,
+        bestMove: 'worker-best',
+      })
+      expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(id)
     })
 
     it('timeout releases the worker; a late trusted hit is ignored (AC2, R3)', async () => {
