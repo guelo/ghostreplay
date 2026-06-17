@@ -7140,10 +7140,13 @@ button.openings-shell__crumb:hover {
 }
 
 /* ---------------------------------------------------------------------------
- * Opening tree workspace (g-tree-page-state) — MINIMAL functional layout only.
- * SVG connectors, viewport sizing, responsive stacking and polish are
- * g-tree-layout. Just enough here for the board + columns to render and the
- * behaviors to be testable.
+ * Opening tree workspace (g-tree-layout) — production viewport layout.
+ * Viewport-bounded columns with independent per-column vertical scroll +
+ * horizontal tree scroll (no whole-tree vertical scroll), a square sticky board
+ * that does not drive column height, measured selected-path SVG connectors, and
+ * a <=720px stacked layout. Connector geometry is measured in useTreeConnectors;
+ * connector style (dashed book-only / solid observed / encounter thickness) is
+ * applied at render from the model.
  * ------------------------------------------------------------------------- */
 .openings-tree {
     display: flex;
@@ -7186,12 +7189,17 @@ button.openings-shell__crumb:hover {
 .openings-tree-workspace {
     display: flex;
     align-items: flex-start;
-    gap: 1.25rem;
+    gap: clamp(1rem, 2vw, 1.5rem);
 }
 
+/* Square sticky board, clamped 280-380 (< the 420px column floor) so it never
+   dictates column height. */
 .openings-tree-board {
-    width: min(360px, 100%);
-    flex-shrink: 0;
+    width: clamp(280px, 30vw, 380px);
+    aspect-ratio: 1 / 1;
+    flex: 0 0 auto;
+    position: sticky;
+    top: 1rem;
 }
 
 .openings-tree-board--skeleton {
@@ -7200,21 +7208,49 @@ button.openings-shell__crumb:hover {
     background: var(--bg-secondary);
 }
 
-.openings-tree-columns {
-    flex: 1;
-    display: flex;
-    align-items: flex-start;
-    gap: 1.5rem;
+/* Horizontal tree scroller — the ONLY horizontally-scrolling axis. overflow-y
+   is hidden so the whole tree never scrolls vertically (each column does). */
+.openings-tree-scroll {
+    flex: 1 1 0;
+    min-width: 0;
     overflow-x: auto;
+    overflow-y: hidden;
     padding-bottom: 0.5rem;
 }
 
+/* Positioned/measured frame: the SVG overlay + connector coordinates are
+   relative to this, so they survive both scroll axes. width:max-content lets
+   the canvas span the full scroll width so the SVG covers every column. */
+.openings-tree-canvas {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 2rem;
+    width: max-content;
+}
+
+.openings-tree-connectors {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+    z-index: 5;
+    /* currentColor for strokes/markers → theme-aware connectors. */
+    color: var(--brand-primary);
+}
+
 .openings-tree-column {
-    min-width: 9rem;
+    flex: 0 0 9.25rem; /* 148px compact */
+    width: 9.25rem;
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    max-height: 70vh;
+    /* Independent per-column vertical scroll, viewport-bounded with a 420px
+       usable floor. The 13rem chrome estimate is intentionally generous; the
+       420px floor guarantees usability on short viewports regardless. */
+    max-height: clamp(420px, calc(100dvh - 13rem), 56rem);
     overflow-y: auto;
     /* Pin overflow-x so the browser does not auto-promote it to "auto" (which it
        does when only overflow-y is non-visible) and give every column a
@@ -7222,7 +7258,15 @@ button.openings-shell__crumb:hover {
     overflow-x: hidden;
 }
 
+/* The active column hosts the expanded card; the next compact column still
+   peeks beside it. */
+.openings-tree-column--active {
+    flex-basis: 14.5rem; /* 232px */
+    width: 14.5rem;
+}
+
 .openings-tree-column--skeleton {
+    flex: 0 0 9.25rem;
     min-height: 6rem;
     border-radius: 0.6rem;
     background: var(--bg-secondary);
@@ -7241,6 +7285,38 @@ button.openings-shell__crumb:hover {
 
 .openings-tree-append--error {
     color: var(--error-text, var(--text-primary));
+}
+
+/* Narrow: board stacks above the tree and un-sticks (the whole page scrolls
+   vertically); the tree still scrolls horizontally with one next column
+   peeking. */
+@media (max-width: 720px) {
+    .openings-tree-workspace {
+        flex-direction: column;
+    }
+
+    .openings-tree-board {
+        width: min(100%, 360px);
+        position: static;
+    }
+
+    /* Stacked layout. Two axis flips bite here:
+       - The workspace's base align-items:flex-start is a cross-axis (now width)
+         value, so without width:100% the scroller shrinks to its max-content
+         canvas — defeating the internal h-scroll and overflowing the page.
+       - The base flex:1 1 0 now sizes the MAIN axis (height): flex-basis 0 with
+         no free space in the (content-height) column workspace collapses the
+         scroller to ~0 (just its padding), and overflow-y:hidden clips the
+         canvas to that sliver. flex:0 0 auto lets the height follow the canvas. */
+    .openings-tree-scroll {
+        width: 100%;
+        flex: 0 0 auto;
+    }
+
+    .openings-tree-column {
+        min-height: 17.5rem; /* 280px tree band */
+        max-height: 45dvh;
+    }
 }
 
 .openings-grid {

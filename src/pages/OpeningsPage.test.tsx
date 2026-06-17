@@ -209,6 +209,59 @@ const WHITE_E4_E5 = tr({
   ],
 });
 
+// e2e4 selected, its edge BOOK-ONLY (in book, never observed) → dashed, base
+// width. col1 (ply1) is an unselected frontier replies column.
+const WHITE_E4_BOOK_ONLY = tr({
+  canonical_line: ["e2e4"],
+  columns: [
+    tc(
+      0,
+      [
+        tn({
+          uci: "e2e4",
+          san: "e4",
+          ply: 1,
+          in_book: true,
+          is_observed: false,
+          encounter_count: 0,
+        }),
+        tn({ uci: "d2d4", san: "d4", ply: 1 }),
+      ],
+      "e2e4",
+    ),
+    tc(1, [
+      tn({ uci: "c7c5", san: "c5", ply: 2 }),
+      tn({ uci: "e7e5", san: "e5", ply: 2 }),
+    ]),
+  ],
+});
+
+// e2e4 selected, its edge OBSERVED with 7 encounters → solid, width 2+log2(8)=5.
+const WHITE_E4_OBSERVED = tr({
+  canonical_line: ["e2e4"],
+  columns: [
+    tc(
+      0,
+      [
+        tn({
+          uci: "e2e4",
+          san: "e4",
+          ply: 1,
+          in_book: true,
+          is_observed: true,
+          encounter_count: 7,
+        }),
+        tn({ uci: "d2d4", san: "d4", ply: 1 }),
+      ],
+      "e2e4",
+    ),
+    tc(1, [
+      tn({ uci: "c7c5", san: "c5", ply: 2 }),
+      tn({ uci: "e7e5", san: "e5", ply: 2 }),
+    ]),
+  ],
+});
+
 // ---- harness ---------------------------------------------------------------
 
 function LocationProbe() {
@@ -701,5 +754,37 @@ describe("OpeningsPage tree", () => {
     expect(
       screen.queryByRole("button", { name: /start drill/i }),
     ).not.toBeInTheDocument();
+  });
+
+  // Data→style contract: connector style is applied at render from the selected
+  // child's metadata, so it reaches the DOM even with zero jsdom geometry.
+  it("draws a dashed, base-width connector for a book-only selected edge", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_E4_BOOK_ONLY);
+    const { container } = renderAt("/openings?color=white&move=e2e4");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+
+    const paths = container.querySelectorAll("path.openings-tree-connector");
+    expect(paths.length).toBeGreaterThan(0);
+    // The edge into e2e4 (book-only) is dashed at base width 2.
+    const bookOnly = Array.from(paths).find(
+      (p) => p.getAttribute("stroke-dasharray") === "5 4",
+    );
+    expect(bookOnly).toBeTruthy();
+    expect(bookOnly!.getAttribute("stroke-width")).toBe("2");
+  });
+
+  it("draws a solid, thicker connector for an observed selected edge", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_E4_OBSERVED);
+    const { container } = renderAt("/openings?color=white&move=e2e4");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+
+    const paths = container.querySelectorAll("path.openings-tree-connector");
+    expect(paths.length).toBeGreaterThan(0);
+    // The edge into e2e4 (observed, 7 encounters) is solid at width 5.
+    const observed = Array.from(paths).find(
+      (p) => p.getAttribute("stroke-width") === "5",
+    );
+    expect(observed).toBeTruthy();
+    expect(observed!.getAttribute("stroke-dasharray")).toBeNull();
   });
 });

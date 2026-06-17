@@ -55,6 +55,36 @@ export interface DisplayNode {
   isSelectable: boolean;
   /** The new selection line produced by selecting this node. */
   selectLine: string[];
+  /** Reference opening-book edge (the edge identity is this child) → drives a
+   *  dashed connector when in book but not yet played. */
+  inBook: boolean;
+  /** Edge traversed in the user's real sessions → solid connector. */
+  isObserved: boolean;
+  /** Times the user reached this edge → connector thickness. */
+  encounterCount: number;
+}
+
+export interface ConnectorStyle {
+  /** Reserved strictly for book-only (in book, not observed) edges. */
+  dashed: boolean;
+  /** Stroke width; clamps log2(encounters) into [2, 6]. */
+  width: number;
+}
+
+/**
+ * Style for the connector aimed at the selected child of a column — the edge
+ * identity is that child, so style derives from one node, not the whole column
+ * (no measuring of siblings). `null` → neutral frontier pointer (solid, base
+ * width). A book-only edge (in book, not yet observed) is dashed; an observed
+ * edge stays solid. Width grows with encounter count, clamped to [2, 6].
+ */
+export function connectorStyle(node: DisplayNode | null): ConnectorStyle {
+  if (!node) {
+    return { dashed: false, width: 2 };
+  }
+  const dashed = node.inBook && !node.isObserved;
+  const width = Math.max(2, Math.min(6, 2 + Math.log2(node.encounterCount + 1)));
+  return { dashed, width };
 }
 
 export interface DisplayColumn {
@@ -229,6 +259,10 @@ export function buildTreeView(
         isNavigable: false,
         isSelectable: true,
         selectLine: [],
+        // The root is only ever a connector *parent*, never a styled child.
+        inBook: false,
+        isObserved: false,
+        encounterCount: 0,
       },
     ],
   };
@@ -252,6 +286,9 @@ export function buildTreeView(
         isNavigable: node.is_navigable,
         isSelectable: node.is_navigable,
         selectLine: selectionLine.slice(0, lineIndex).concat(node.uci),
+        inBook: node.in_book,
+        isObserved: node.is_observed,
+        encounterCount: node.encounter_count,
       };
     });
     apiColumns.push({ kind: "moves", lineIndex, nodes });

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
@@ -9,7 +9,12 @@ import {
   buildOpeningsSearchParams,
   parseOpeningsSearchParams,
 } from "../openings/route";
-import { resolveDrop, type DisplayColumn } from "../openings/treeView";
+import {
+  connectorStyle,
+  resolveDrop,
+  type DisplayColumn,
+} from "../openings/treeView";
+import { useTreeConnectors } from "../openings/useTreeConnectors";
 import { useOpeningsTree } from "../hooks/useOpeningsTree";
 import { captureEvent } from "../analytics/posthog";
 import type { OpeningPlayerColor } from "../utils/api";
@@ -27,37 +32,44 @@ const LAST_MOVE_HIGHLIGHT: React.CSSProperties = {
 /** One vertical column of tree node cards; the deepest selected node expands. */
 function TreeColumnView({
   column,
+  columnIndex,
+  registerColumn,
+  registerSelectedNode,
   onSelect,
   onStartDrill,
 }: {
   column: DisplayColumn;
+  columnIndex: number;
+  registerColumn: (idx: number, el: HTMLElement | null) => void;
+  registerSelectedNode: (idx: number, el: HTMLElement | null) => void;
   onSelect: (line: string[]) => void;
   onStartDrill: (openingKey: string) => void;
 }) {
+  // The column hosting the expanded (deepest selected) card is the active one.
+  const isActive = column.nodes.some((node) => node.isExpanded);
+
   return (
     <div
-      className="openings-tree-column"
+      className={`openings-tree-column${
+        isActive ? " openings-tree-column--active" : ""
+      }`}
       data-testid="tree-column"
       data-line-index={column.lineIndex}
+      ref={(el) => registerColumn(columnIndex, el)}
     >
       {column.nodes.map((node) => {
-        if (node.isExpanded) {
-          const drillKey = node.view.drillOpeningKey;
-          return (
-            <OpeningTreeNodeCard
-              key={node.key}
-              variant="expanded"
-              node={node.view}
-              onStartDrill={
-                drillKey != null ? () => onStartDrill(drillKey) : undefined
-              }
-            />
-          );
-        }
-
-        return (
+        const card = node.isExpanded ? (
           <OpeningTreeNodeCard
-            key={node.key}
+            variant="expanded"
+            node={node.view}
+            onStartDrill={
+              node.view.drillOpeningKey != null
+                ? () => onStartDrill(node.view.drillOpeningKey as string)
+                : undefined
+            }
+          />
+        ) : (
+          <OpeningTreeNodeCard
             variant="compact"
             node={node.view}
             // A non-navigable boundary node renders as a plain (non-button)
@@ -68,6 +80,23 @@ function TreeColumnView({
             isSelected={node.isSelected}
           />
         );
+
+        // Wrap ONLY the selected node so the connector hook can measure its
+        // center (never siblings). The card is width:100%, so the wrapper box
+        // equals the card box and layout is unchanged.
+        if (node.isSelected) {
+          return (
+            <div
+              key={node.key}
+              ref={(el) => registerSelectedNode(columnIndex, el)}
+            >
+              {card}
+            </div>
+          );
+        }
+        return <div key={node.key}>{card}</div>;
+        // NB: every node renders inside a 1:1 wrapper div so the column's flex
+        // children are uniform; only the selected one carries a measure ref.
       })}
     </div>
   );
@@ -76,9 +105,9 @@ function TreeColumnView({
 /**
  * `/openings` — chesstree.net-style horizontal move tree synced with a board.
  * The page parses the URL line, drives {@link useOpeningsTree}, renders the
- * board + columns of {@link OpeningTreeNodeCard}, and owns selection / board
- * drops / perspective / canonicalization / Start Drill / the five states.
- * Detailed viewport layout is a sibling bead (g-tree-layout).
+ * board + a horizontally-scrolling canvas of {@link OpeningTreeNodeCard}
+ * columns with measured selected-path SVG connectors, and owns selection /
+ * board drops / perspective / canonicalization / Start Drill / the five states.
  */
 function OpeningsPage() {
   const navigate = useNavigate();
@@ -96,6 +125,72 @@ function OpeningsPage() {
     batchComputedAt,
     retry,
   } = useOpeningsTree({ playerColor, moves, opening });
+
+  // --- Connector measurement plumbing --------------------------------------
+  // The canvas is the positioned/measured frame; the scroller is the overflow-x
+  // wrapper. Stable Maps (held behind refs so the page can mutate them without
+  // tripping react-hooks/immutability) key the column + selected-node elements
+  // by display-column index, populated via ref-setter callbacks during commit.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const columnElsRef = useRef<Map<number, HTMLElement>>(new Map());
+  const selectedNodeElsRef = useRef<Map<number, HTMLElement>>(new Map());
+
+  const registerColumn = (idx: number, el: HTMLElement | null) => {
+    if (el) columnElsRef.current.set(idx, el);
+    else columnElsRef.current.delete(idx);
+  };
+  const registerSelectedNode = (idx: number, el: HTMLElement | null) => {
+    if (el) selectedNodeElsRef.current.set(idx, el);
+    else selectedNodeElsRef.current.delete(idx);
+  };
+
+  const columns = view?.columns ?? null;
+  const selectionLine = view?.selectionLine ?? [];
+  const columnCount = columns?.length ?? 0;
+  // Full line (not a depth count): a same-depth sibling switch changes which
+  // node is selected without changing columnCount and must re-aim the lines.
+  const selectionKey = `${playerColor}\u0000${selectionLine.join("\u0000")}`;
+
+  // Geometry only. Style is applied at render (below) so live in_book /
+  // is_observed / encounter_count metadata always reaches the DOM without a
+  // re-measure.
+  const connectors = useTreeConnectors({
+    canvasRef,
+    scrollRef,
+    columnElsRef,
+    selectedNodeElsRef,
+    columnCount,
+    selectionKey,
+  });
+
+  // Connector styles, derived purely from the model every render (NOT measured):
+  // the style for the pair (i, i+1) comes from the selected child of column
+  // i+1 — the edge identity is the child. Index-aligned with `connectors`
+  // because both walk the same `columns` adjacency.
+  const connectorStyles = useMemo(
+    () =>
+      (columns ?? [])
+        .slice(0, -1)
+        .map((_, i) =>
+          connectorStyle(
+            columns?.[i + 1]?.nodes.find((node) => node.isSelected) ?? null,
+          ),
+        ),
+    [columns],
+  );
+
+  // Autoscroll the active display column near the left edge so the expanded
+  // column sits left and the next compact column peeks. No-op when refs are
+  // missing (covers jsdom and the pre-settle frames).
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    const activeEl = columnElsRef.current.get(selectionLine.length);
+    if (!scroller || !activeEl) return;
+    const inset = 24;
+    scroller.scrollLeft = activeEl.offsetLeft - inset;
+    // selectionKey/columnCount move the active column; the ref Map is stable.
+  }, [selectionKey, columnCount, selectionLine.length]);
 
   // Canonicalize the URL only when the rendered view is settled for the current
   // route, so a stale response kept on screen during a refetch can never rewrite
@@ -245,14 +340,16 @@ function OpeningsPage() {
                   className="openings-tree-board openings-tree-board--skeleton"
                   aria-hidden="true"
                 />
-                <div className="openings-tree-columns">
-                  {Array.from({ length: 3 }).map((_, index) => (
-                    <div
-                      key={index}
-                      className="openings-tree-column openings-tree-column--skeleton"
-                      aria-hidden="true"
-                    />
-                  ))}
+                <div className="openings-tree-scroll">
+                  <div className="openings-tree-canvas">
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <div
+                        key={index}
+                        className="openings-tree-column openings-tree-column--skeleton"
+                        aria-hidden="true"
+                      />
+                    ))}
+                  </div>
                 </div>
               </div>
             </section>
@@ -284,45 +381,127 @@ function OpeningsPage() {
                   />
                 </div>
 
-                <div
-                  className="openings-tree-columns"
-                  aria-label={`${colorLabel} opening tree`}
-                >
-                  {view.columns.map((column) => (
-                    <TreeColumnView
-                      key={`${column.kind}-${column.lineIndex}`}
-                      column={column}
-                      onSelect={selectLine}
-                      onStartDrill={startDrill}
-                    />
-                  ))}
-
-                  {appendStatus === "loading" && (
-                    <div
-                      className="openings-tree-column openings-tree-append openings-tree-append--loading"
-                      aria-live="polite"
+                <div className="openings-tree-scroll" ref={scrollRef}>
+                  <div
+                    className="openings-tree-canvas"
+                    ref={canvasRef}
+                    aria-label={`${colorLabel} opening tree`}
+                  >
+                    <svg
+                      className="openings-tree-connectors"
+                      aria-hidden="true"
                     >
-                      <p className="openings-tree-append__label">Loading…</p>
-                    </div>
-                  )}
+                      <defs>
+                        <marker
+                          id="openings-tree-arrowhead"
+                          markerUnits="userSpaceOnUse"
+                          markerWidth="10"
+                          markerHeight="10"
+                          refX="0"
+                          refY="5"
+                          orient="auto"
+                        >
+                          <path d="M0,0 L9,5 L0,10 Z" fill="currentColor" />
+                        </marker>
+                      </defs>
+                      {connectors.map((c, i) => {
+                        const style = connectorStyles[i] ?? {
+                          dashed: false,
+                          width: 2,
+                        };
+                        // End the stroke short of the column by the arrowhead
+                        // length; the marker (refX=0) fills the gap so its tip
+                        // lands on the column. The bezier's end tangent is
+                        // horizontal, so shortening x keeps the tip on target.
+                        const ARROW = 9;
+                        const x2 = c.x2 - ARROW;
+                        const dx = Math.max(16, (x2 - c.x1) / 2);
+                        const d = `M ${c.x1} ${c.y1} C ${c.x1 + dx} ${c.y1}, ${
+                          x2 - dx
+                        } ${c.y2}, ${x2} ${c.y2}`;
+                        // When an endpoint's cell is scrolled out of its column,
+                        // mark the clamped edge with a small triangle pointing
+                        // toward the selection. Dash is reserved strictly for
+                        // book-only edges and never toggles on clamp.
+                        const clampTip = (
+                          cx: number,
+                          cy: number,
+                          off: -1 | 0 | 1,
+                        ) =>
+                          off === -1
+                            ? `M ${cx - 5} ${cy + 5} L ${cx} ${cy - 2} L ${
+                                cx + 5
+                              } ${cy + 5} Z`
+                            : off === 1
+                            ? `M ${cx - 5} ${cy - 5} L ${cx} ${cy + 2} L ${
+                                cx + 5
+                              } ${cy - 5} Z`
+                            : null;
+                        const tip = clampTip(c.x1, c.y1, c.off);
+                        const tip2 = clampTip(x2 - 7, c.y2, c.off2);
+                        const clamped = c.off || c.off2;
+                        return (
+                          <g key={i}>
+                            <path
+                              className="openings-tree-connector"
+                              d={d}
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth={style.width}
+                              strokeDasharray={style.dashed ? "5 4" : undefined}
+                              markerEnd="url(#openings-tree-arrowhead)"
+                              opacity={clamped ? 0.5 : 0.9}
+                            />
+                            {tip && (
+                              <path d={tip} fill="currentColor" opacity={0.8} />
+                            )}
+                            {tip2 && (
+                              <path d={tip2} fill="currentColor" opacity={0.8} />
+                            )}
+                          </g>
+                        );
+                      })}
+                    </svg>
 
-                  {appendStatus === "error" && (
-                    <div
-                      className="openings-tree-column openings-tree-append openings-tree-append--error"
-                      role="alert"
-                    >
-                      <p className="openings-tree-append__label">
-                        {error ?? "Failed to load moves"}
-                      </p>
-                      <button
-                        className="chess-button"
-                        type="button"
-                        onClick={retry}
+                    {view.columns.map((column, index) => (
+                      <TreeColumnView
+                        key={`${column.kind}-${column.lineIndex}`}
+                        column={column}
+                        columnIndex={index}
+                        registerColumn={registerColumn}
+                        registerSelectedNode={registerSelectedNode}
+                        onSelect={selectLine}
+                        onStartDrill={startDrill}
+                      />
+                    ))}
+
+                    {appendStatus === "loading" && (
+                      <div
+                        className="openings-tree-column openings-tree-append openings-tree-append--loading"
+                        aria-live="polite"
                       >
-                        Retry
-                      </button>
-                    </div>
-                  )}
+                        <p className="openings-tree-append__label">Loading…</p>
+                      </div>
+                    )}
+
+                    {appendStatus === "error" && (
+                      <div
+                        className="openings-tree-column openings-tree-append openings-tree-append--error"
+                        role="alert"
+                      >
+                        <p className="openings-tree-append__label">
+                          {error ?? "Failed to load moves"}
+                        </p>
+                        <button
+                          className="chess-button"
+                          type="button"
+                          onClick={retry}
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </>

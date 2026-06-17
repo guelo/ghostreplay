@@ -1,11 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   buildTreeView,
+  connectorStyle,
   flipEval,
   nodeToView,
   replayLine,
   resolveDrop,
   synthesizeRootView,
+  type DisplayNode,
 } from "./treeView";
 import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
 
@@ -288,6 +290,49 @@ describe("buildTreeView", () => {
     expect(col0.nodes.find((n) => n.uci === "h2h4")!.isSelectable).toBe(false);
   });
 
+  it("threads in_book/is_observed/encounter_count onto api nodes; defaults the root", () => {
+    const view = buildTreeView(
+      makeResponse({
+        columns: [
+          makeColumn(0, [
+            makeNode({
+              uci: "e2e4",
+              ply: 1,
+              in_book: true,
+              is_observed: true,
+              encounter_count: 9,
+            }),
+            makeNode({
+              uci: "d2d4",
+              ply: 1,
+              in_book: true,
+              is_observed: false,
+              encounter_count: 0,
+            }),
+          ]),
+        ],
+      }),
+      { selectionLine: [], loadedThroughPly: 0, isExactResponseLine: true },
+      "white",
+    );
+
+    // The synthesized root is only ever a connector parent — never styled.
+    const root = view.columns[0].nodes[0];
+    expect(root.inBook).toBe(false);
+    expect(root.isObserved).toBe(false);
+    expect(root.encounterCount).toBe(0);
+
+    const col0 = view.columns[1];
+    const e2e4 = col0.nodes.find((n) => n.uci === "e2e4")!;
+    expect(e2e4.inBook).toBe(true);
+    expect(e2e4.isObserved).toBe(true);
+    expect(e2e4.encounterCount).toBe(9);
+
+    const d2d4 = col0.nodes.find((n) => n.uci === "d2d4")!;
+    expect(d2d4.isObserved).toBe(false);
+    expect(d2d4.encounterCount).toBe(0);
+  });
+
   it("derives the board from the effective line, not selected_fen", () => {
     const view = buildTreeView(
       makeResponse({
@@ -307,6 +352,39 @@ describe("buildTreeView", () => {
     );
     expect(view.board.lastMove).toEqual({ from: "e2", to: "e4" });
     expect(view.selectionLine).toEqual(["e2e4"]);
+  });
+});
+
+describe("connectorStyle", () => {
+  // connectorStyle reads only the three edge-metadata fields.
+  const edge = (
+    inBook: boolean,
+    isObserved: boolean,
+    encounterCount: number,
+  ): DisplayNode =>
+    ({ inBook, isObserved, encounterCount }) as unknown as DisplayNode;
+
+  it("returns a neutral solid base-width pointer for a null (frontier) child", () => {
+    expect(connectorStyle(null)).toEqual({ dashed: false, width: 2 });
+  });
+
+  it("dashes a book-only edge (in book, not observed) at base width", () => {
+    expect(connectorStyle(edge(true, false, 0))).toEqual({
+      dashed: true,
+      width: 2,
+    });
+  });
+
+  it("keeps an observed edge solid even when also in book", () => {
+    const style = connectorStyle(edge(true, true, 7));
+    expect(style.dashed).toBe(false);
+    // 2 + log2(7 + 1) = 2 + 3 = 5.
+    expect(style.width).toBe(5);
+  });
+
+  it("clamps width into [2, 6] across encounter counts", () => {
+    expect(connectorStyle(edge(false, true, 0)).width).toBe(2);
+    expect(connectorStyle(edge(false, true, 100_000)).width).toBe(6);
   });
 });
 

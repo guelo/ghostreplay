@@ -225,13 +225,18 @@ test.describe("blunders", () => {
 // --- Openings ------------------------------------------------------------
 
 test.describe("openings", () => {
-  test("loading / empty / populated / error", async ({ page, loginAs }) => {
+  test("loading / populated / selected-line / no-data / error", async ({
+    page,
+    loginAs,
+  }) => {
     // The opening graph is a process-wide singleton with no build lock, so the
     // first cold request can take ~30s+ (longer under concurrent rebuilds).
     test.setTimeout(300_000);
     await prepareDeterministicPage(page);
+
+    // Loading: stall the tree fetch so the skeleton persists.
     await loginAs(page, "due");
-    await stallRoute(page, "**/api/openings/**");
+    await stallRoute(page, "**/api/openings/tree**");
     await page.goto("/openings");
     await captureAcrossViewports(page, test.info(), {
       pageKey: "openings",
@@ -240,65 +245,56 @@ test.describe("openings", () => {
     });
     await page.unrouteAll();
 
-    await loginAs(page, "empty");
+    // Populated: the due user has games → a scored tree workspace renders. The
+    // first real request warms the singleton graph; allow a wide window.
     await page.goto("/openings");
-    // First real request warms the singleton graph; allow a wide window.
     await expect(page.locator(".openings-state--loading")).toBeHidden({
       timeout: 180_000,
     });
     await captureAcrossViewports(page, test.info(), {
       pageKey: "openings",
-      state: "empty",
-      waitFor: (p) => p.locator(".openings-state--empty"),
+      state: "populated",
+      waitFor: (p) => p.locator(".openings-tree-workspace"),
     });
 
-    await loginAs(page, "due");
+    // Selected line: click a compact node card to expand a deeper column and
+    // draw the selected-path connectors. captureAcrossViewports only waits for
+    // the locator it is handed before each shot, so gate on the SETTLED selected
+    // state here before the capture loop, or it could catch a provisional frame.
+    // Crucially, the root state ALREADY has an expanded card (the "Starting
+    // position" root card), no append loading, and ≥1 connector — so first wait
+    // for SELECTION-specific evidence (URL gains move=, and the expanded card
+    // becomes a numbered move like "1. e4" rather than the root card), then for
+    // the deeper column to settle (append loading gone + a connector drawn).
+    await page.locator("button.tree-node-card--compact").first().click();
+    await page.waitForURL(/[?&]move=/);
+    await expect(
+      page.locator(".tree-node-card--expanded .tree-node-card__move-label"),
+    ).toHaveText(/^\d/);
+    await expect(page.locator(".openings-tree-append--loading")).toHaveCount(0);
+    await expect
+      .poll(() => page.locator("path.openings-tree-connector").count())
+      .toBeGreaterThan(0);
+    await captureAcrossViewports(page, test.info(), {
+      pageKey: "openings",
+      state: "selected-line",
+      waitFor: (p) => p.locator(".tree-node-card--expanded"),
+    });
+
+    // No-data: the empty user has no games → book-only tree + banner.
+    await loginAs(page, "empty");
     await page.goto("/openings");
-    // Wait for the graph-backed snapshot to finish loading before capturing.
     await expect(page.locator(".openings-state--loading")).toBeHidden({
       timeout: 60_000,
     });
     await captureAcrossViewports(page, test.info(), {
       pageKey: "openings",
-      state: "populated",
-      waitFor: (p) => p.locator(".openings-shell"),
+      state: "no-data",
+      waitFor: (p) => p.locator(".openings-tree__nodata-banner"),
     });
 
-    // Computed-snapshot empty: a snapshot exists (computed_at set) but no scored
-    // roots (root_count 0). Mock the children endpoint to force the branch.
-    await mockOpeningsChildren(page, {
-      computed_at: "2026-06-01T00:00:00Z",
-      current_branch_stats: emptyBranchStats(0),
-      children: [],
-      canonical_opening_key: null,
-    });
-    await page.goto("/openings");
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "openings",
-      state: "snapshot-empty",
-      waitFor: (p) =>
-        p.getByText(/No scored openings are available/i),
-    });
-    await page.unrouteAll();
-
-    // Structural leaf: scored branch (root_count > 0) with no deeper named
-    // children and a canonical key — the "structural leaf" empty state.
-    await mockOpeningsChildren(page, {
-      computed_at: "2026-06-01T00:00:00Z",
-      current_branch_stats: emptyBranchStats(2),
-      children: [],
-      canonical_opening_key: "leaf-key",
-      parent_name: "Ruy Lopez",
-    });
-    await page.goto("/openings");
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "openings",
-      state: "structural-leaf",
-      waitFor: (p) => p.getByText(/No deeper named openings/i),
-    });
-    await page.unrouteAll();
-
-    await failRoute(page, "**/api/openings/children**");
+    // Error: force a failure on the tree fetch.
+    await failRoute(page, "**/api/openings/tree**");
     await page.goto("/openings");
     await captureAcrossViewports(page, test.info(), {
       pageKey: "openings",
@@ -308,39 +304,6 @@ test.describe("openings", () => {
     await page.unrouteAll();
   });
 });
-
-const emptyBranchStats = (rootCount: number) => ({
-  score: rootCount > 0 ? 0.5 : null,
-  confidence: null,
-  coverage: null,
-  sample_size: null,
-  root_count: rootCount,
-});
-
-/** Fulfill /api/openings/children with a synthetic ChildrenResponse. */
-const mockOpeningsChildren = (
-  page: Page,
-  overrides: Record<string, unknown>,
-): Promise<void> =>
-  page.route("**/api/openings/children**", (route) =>
-    route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        player_color: "white",
-        parent_key: null,
-        parent_name: null,
-        canonical_opening_key: null,
-        canonical_path: [],
-        breadcrumbs: [],
-        current_branch_stats: emptyBranchStats(0),
-        children: [],
-        total_children: 0,
-        computed_at: null,
-        ...overrides,
-      }),
-    }),
-  );
 
 // --- Stats ---------------------------------------------------------------
 
