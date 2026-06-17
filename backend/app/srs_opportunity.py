@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -135,7 +136,17 @@ def load_opportunity_counters(
     blunder_ids: list[int],
     *,
     now: datetime | None = None,
+    exclude_session_id: uuid.UUID | None = None,
 ) -> dict[int, OpportunityCounters]:
+    """Per-blunder opportunity counters.
+
+    ``exclude_session_id`` drops that session's own opportunity events from the
+    aggregates. Ghost steering passes the in-progress game session here: the
+    game we are steering *toward* the blunder in must not count as a missed
+    opportunity against that blunder's dueness, or a single ancestor touch
+    early in the game would flip the target to "exactly due, not overdue" and
+    silently kill steering for the rest of that game.
+    """
     if not blunder_ids:
         return {}
 
@@ -205,7 +216,7 @@ def load_opportunity_counters(
         ),
     )
 
-    rows = (
+    rows_query = (
         db.query(
             BlunderOpportunityEvent.blunder_id.label("blunder_id"),
             func.count(BlunderOpportunityEvent.id).label("event_count"),
@@ -221,9 +232,10 @@ def load_opportunity_counters(
         .outerjoin(latest_review, BlunderOpportunityEvent.blunder_id == latest_review.c.blunder_id)
         .join(Blunder, Blunder.id == BlunderOpportunityEvent.blunder_id)
         .filter(BlunderOpportunityEvent.blunder_id.in_(unique_blunder_ids))
-        .group_by(BlunderOpportunityEvent.blunder_id)
-        .all()
     )
+    if exclude_session_id is not None:
+        rows_query = rows_query.filter(BlunderOpportunityEvent.session_id != exclude_session_id)
+    rows = rows_query.group_by(BlunderOpportunityEvent.blunder_id).all()
 
     for row in rows:
         counters[row.blunder_id] = OpportunityCounters(

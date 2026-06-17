@@ -377,7 +377,17 @@ def find_ghost_move(
     now = datetime.now(timezone.utc)
     current_opening_family = detect_opening_family(fen) if any(row[7] for row in candidate_rows) else None
     opportunity_started = time.perf_counter()
-    opportunity_counters = load_opportunity_counters(db, [row[1] for row in candidate_rows], now=now)
+    # Exclude the in-progress game session: the game we are steering toward the
+    # blunder in must not count as a missed opportunity against that blunder, or
+    # an early ancestor touch flips it to "exactly due, not overdue" and kills
+    # steering for the rest of the game (priority drops from time-based to
+    # opportunities_since_review/expected = 1/1.0 = 1.0, failing the > 1.0 gate).
+    opportunity_counters = load_opportunity_counters(
+        db,
+        [row[1] for row in candidate_rows],
+        now=now,
+        exclude_session_id=session_id,
+    )
     opportunity_ms = _elapsed_ms(opportunity_started)
     scored: list[tuple[GhostMoveCandidate, float]] = []
 

@@ -1183,6 +1183,86 @@ def test_find_ghost_move_selects_just_due_blunder(db_session):
     assert target_blunder_id is not None
 
 
+def test_find_ghost_move_ignores_current_session_opportunity(db_session):
+    """The in-progress game must not count as a missed opportunity against the
+    very blunder it is steering toward.
+
+    Regression for g-tgub: once the active session touches an ancestor of a due
+    blunder, _compute_blunder_opportunity_events records a BlunderOpportunityEvent
+    for that session. That single event flips srs_priority from the time-based
+    value to opportunities_since_review/expected = 1/1.0 = exactly 1.0, which
+    fails the (intentional) ``> 1.0`` due gate and silently kills steering for
+    the rest of the game. find_ghost_move must exclude the current session.
+    """
+    from app.api.game import find_ghost_move
+    from app.models import Blunder, BlunderOpportunityEvent, Move, Position
+    from app.fen import fen_hash
+
+    user_id = 123
+
+    fen_start = "8/8/8/8/8/8/K7/6k1 b - - 0 1"
+    fen_blunder = "8/8/8/8/8/8/1K6/6k1 w - - 0 2"
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_blunder = Position(user_id=user_id, fen_hash=fen_hash(fen_blunder), fen_raw=fen_blunder, active_color="white")
+    db_session.add_all([pos_start, pos_blunder])
+    db_session.flush()
+
+    db_session.add(Move(from_position_id=pos_start.id, move_san="m1", to_position_id=pos_blunder.id))
+
+    now = datetime.now(timezone.utc)
+    blunder = Blunder(
+        user_id=user_id,
+        position_id=pos_blunder.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        last_reviewed_at=now - timedelta(hours=5),  # time-based priority 1.25 (due)
+    )
+    db_session.add(blunder)
+    db_session.flush()
+
+    # The in-progress game generates its own opportunity event for this blunder.
+    current_session = GameSession(
+        id=uuid.uuid4(),
+        user_id=user_id,
+        started_at=now,
+        status="active",
+        engine_elo=1500,
+        is_rated=True,
+        player_color="white",
+    )
+    db_session.add(current_session)
+    db_session.flush()
+    db_session.add(BlunderOpportunityEvent(
+        blunder_id=blunder.id,
+        session_id=current_session.id,
+        occurred_at=now,
+        opportunity=True,
+        reached=False,
+    ))
+    db_session.commit()
+
+    # Without the current session excluded, its own event suppresses steering
+    # (priority collapses to exactly 1.0) — this is the failure mode.
+    suppressed_san, _, _, _ = find_ghost_move(
+        db=db_session, user_id=user_id, fen=fen_start, player_color="white",
+    )
+    assert suppressed_san is None
+
+    # Passing the in-progress session excludes its own event, so the blunder
+    # stays time-based due (1.25) and steering survives.
+    move_san, target_blunder_id, _, _ = find_ghost_move(
+        db=db_session,
+        user_id=user_id,
+        fen=fen_start,
+        player_color="white",
+        session_id=current_session.id,
+    )
+    assert move_san == "m1"
+    assert target_blunder_id == blunder.id
+
+
 def test_find_ghost_move_skips_mastered_blunder_high_pass_streak(db_session):
     """find_ghost_move skips a blunder with high pass_streak whose interval hasn't elapsed."""
     from app.api.game import find_ghost_move
