@@ -464,9 +464,11 @@ over two registries, never over raw numeric depth:
 - **Evidence-contract registry** (`backend/app/evidence_contracts.py`) — versioned
   data-shape contracts with per-contract semantic validation
   (`resolver-complete-v1` mirrors the worker's `canResolveCachedAnalysis`;
-  `minimal-played-eval-v1` / `minimal-best-eval-v1` cover eval-only rows).
-  Replacement/merge requires contract succession plus a populated-field superset
-  so no datum is ever silently dropped.
+  `resolver-complete-v2` is the fail-closed trust contract — full eval triple,
+  enum-valid classification, PV-first-equals-best, and active-color delta
+  consistency; `minimal-played-eval-v1` / `minimal-best-eval-v1` cover eval-only
+  rows). Replacement/merge requires contract succession plus a populated-field
+  superset so no datum is ever silently dropped.
 
 Net guarantees: a browser `game` upload is non-authoritative — it may fill keys
 that have no evidence but can never downgrade a canonical or legacy row; sparse
@@ -477,6 +479,35 @@ insert-first + `SELECT … FOR UPDATE`; file-backed SQLite uses `BEGIN IMMEDIATE
 response exposes `source`, `analysis_profile_id`, `engine_version`, `engine_build`,
 `evidence_contract_id`, and an `authoritative` trust flag derived from the same
 validation the writer uses.
+
+**Position-truth foundation (g-position-analysis, in progress).** `analysis_cache`
+conflates two grains on one row — *position* facts (the position's best move / best
+eval, keyed by normalized FEN) and *move* evidence (a played move's eval / loss /
+classification, keyed by `(fen_before, move_uci)`). Because mixed-provenance sibling
+rows can disagree about a position's best move (a canonical row and a browser row at
+the same FEN carrying opposite `best_move_uci`), consumers that read evidence without
+a trust gate can surface an untrusted answer. Two normalized-FEN-keyed storage tables
+lay the groundwork to separate the grains:
+- `position_analysis` — one trusted winner per `normalized_fen` (`best_move_uci` NOT
+  NULL, first-class `best_eval` / `best_eval_mate`, full profile identity +
+  `evidence_contract_id`, plus `updated_at` since winners are replaced over time).
+  Deliberately distinct from the full-FEN-keyed `position_analysis: dict[str,
+  PositionAnalysis]` session-wire field — a storage row is never returned as the
+  session map directly.
+- `position_analysis_conflicts` — append-only audit sink recording the disagreeing
+  candidate rows and per-axis disagreement when a position has no clear winner.
+
+Two grain-specific evidence contracts back the split: `position-complete-v1` (best
+move + multi-move PV starting with it + finite `best_eval` or explicit
+`best_eval_mate`; no played-move delta) and `move-complete-v1` (played eval or
+explicit played-mate + enum-valid classification; deliberately does **not** validate
+`eval_delta`, since a move-only row has no `best_eval`). Legacy-v2 projection helpers
+let an existing authoritative `resolver-complete-v2` row satisfy each grain during
+the transition. As of Phase 1 these tables and contracts are **foundation only** —
+nothing reads them yet; `tree_eval.py` and the session export still read
+`analysis_cache` as described above. Phase 2 backfills `position_analysis` from
+canonical cache rows, Phase 3 owns the write policy, and Phase 4 cuts the read path
+(and trust-gated consumers) over.
 
 ### 5.7 Opening Score Tables
 

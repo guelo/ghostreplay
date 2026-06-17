@@ -114,6 +114,41 @@ def _validate_resolver_complete_v2(data: dict) -> bool:
     return eval_delta == expected
 
 
+def _validate_position_complete(data: dict) -> bool:
+    """Grain-specific contract for a stored position winner (position grain).
+
+    Requires a best move, a multi-move best-line PV whose first move equals the
+    best move, AND a usable position eval: either a finite CP ``best_eval`` or an
+    explicit ``best_eval_mate``. Carries NO played-move delta — the position grain
+    has no ``fen_before``/``played_eval``/``eval_delta`` and does no board
+    construction (contrast ``_validate_resolver_complete_v2``).
+    """
+    if not _pv_first_equals_best(data):
+        return False
+    return _is_finite_int(data.get("best_eval")) or _is_finite_int(
+        data.get("best_eval_mate")
+    )
+
+
+def _validate_move_complete(data: dict) -> bool:
+    """Grain-specific contract for a per-move evidence row (move grain).
+
+    Requires a usable played eval — finite CP ``played_eval`` OR explicit
+    ``played_eval_mate`` — and an enum-valid ``classification``. Deliberately does
+    NOT validate ``eval_delta == f(best_eval, played_eval)``: a move-only row has no
+    ``best_eval``, which is exactly why post-split move rows cannot use
+    resolver-complete-v2. Snapshot provenance ("eval-loss snapshot retained only if
+    tied to the same canonical position winner") is a Phase-3 write-time concern,
+    not validated here.
+    """
+    has_played = _is_finite_int(data.get("played_eval")) or _is_finite_int(
+        data.get("played_eval_mate")
+    )
+    if not has_played:
+        return False
+    return data.get("classification") in VALID_CLASSIFICATIONS
+
+
 @dataclass(frozen=True)
 class Contract:
     contract_id: str
@@ -128,6 +163,14 @@ RESOLVER_COMPLETE = "resolver-complete-v1"
 RESOLVER_COMPLETE_V2 = "resolver-complete-v2"
 MINIMAL_PLAYED_EVAL = "minimal-played-eval-v1"
 MINIMAL_BEST_EVAL = "minimal-best-eval-v1"
+# Grain-specific contracts introduced for g-position-analysis. They are
+# independent of the resolver family (``supersedes=frozenset()``): legacy v2
+# canonical rows are projected into each grain by the helpers below, NOT by
+# registry supersession. resolver-complete-v2 stays the LEGACY read/projection
+# contract and is intentionally left registered/unchanged so existing canonical
+# rows stay trusted during the migration.
+POSITION_COMPLETE = "position-complete-v1"
+MOVE_COMPLETE = "move-complete-v1"
 
 _CONTRACTS: dict[str, Contract] = {
     RESOLVER_COMPLETE_V2: Contract(
@@ -172,6 +215,27 @@ _CONTRACTS: dict[str, Contract] = {
         required_fields=frozenset({"best_eval"}),
         supersedes=frozenset(),
         validate=_validate_minimal_best_eval,
+    ),
+    POSITION_COMPLETE: Contract(
+        contract_id=POSITION_COMPLETE,
+        # Both are unconditionally required. The best_eval/best_eval_mate
+        # disjunction is enforced by ``validate``, NOT listed here:
+        # ``required_fields`` is informational documentation only and must honestly
+        # describe always-required fields (it is never consulted by
+        # ``contract_satisfied`` — see test_evidence_contracts.py).
+        required_fields=frozenset({"best_move_uci", "best_line_uci"}),
+        supersedes=frozenset(),
+        validate=_validate_position_complete,
+    ),
+    MOVE_COMPLETE: Contract(
+        contract_id=MOVE_COMPLETE,
+        # ``classification`` is the only unconditionally-required field; played_eval
+        # is NOT always required because an explicit played-mate is an accepted
+        # alternative. The played_eval-OR-played_eval_mate disjunction is enforced
+        # by ``validate`` (``required_fields`` is informational only).
+        required_fields=frozenset({"classification"}),
+        supersedes=frozenset(),
+        validate=_validate_move_complete,
     ),
 }
 
@@ -227,3 +291,64 @@ def select_browser_contract(data: dict) -> str | None:
         if contract_satisfied(contract_id, data):
             return contract_id
     return None
+
+
+# --- Legacy-v2 grain projection (library-only; unwired in Phase 1) -------------
+#
+# Let an existing authoritative ``analysis_cache`` resolver-complete-v2 row project
+# into both grain-specific trust decisions during the transition, before backfill
+# exists. Phase 1 only defines + unit-tests these; nothing imports them yet. When
+# Phase 4/5 wires them, note that ``project_v2_to_move`` reads ``played_eval_mate``,
+# which ``analysis.py._row_contract_data`` does not yet include — that projection
+# must be extended then.
+
+
+def project_v2_to_position(data: dict) -> dict:
+    """Project a v2 cache-row dict into the position-grain contract shape."""
+    return {
+        "best_move_uci": data.get("best_move_uci"),
+        "best_line_uci": data.get("best_line_uci"),
+        "best_eval": data.get("best_eval"),
+        "best_eval_mate": data.get("best_eval_mate"),
+    }
+
+
+def project_v2_to_move(data: dict) -> dict:
+    """Project a v2 cache-row dict into the move-grain contract shape."""
+    return {
+        "played_eval": data.get("played_eval"),
+        "played_eval_mate": data.get("played_eval_mate"),
+        "classification": data.get("classification"),
+        "eval_delta": data.get("eval_delta"),
+    }
+
+
+def _is_declared_v2(data: dict) -> bool:
+    """True when the row DECLARES the resolver-complete-v2 contract.
+
+    The gate is the declared ``evidence_contract_id`` only — NOT full v2
+    re-validation. A v2 row is, by construction, both position-complete and
+    move-complete, so re-running ``_validate_resolver_complete_v2`` here would make
+    the grain projection below redundant and erase the grain distinction (e.g. a v2
+    row with a bad classification must satisfy the position grain but NOT the move
+    grain). The declared-id gate is what keeps these helpers honest to their name:
+    a browser/minimal/v1 row that merely happens to carry the projected fields is
+    not a legacy v2 projection and must fail closed.
+    """
+    return data.get("evidence_contract_id") == RESOLVER_COMPLETE_V2
+
+
+def legacy_v2_satisfies_position(data: dict) -> bool:
+    """True when a row DECLARED resolver-complete-v2, projected to the position
+    grain, is position-complete. Fails closed for any non-v2 row."""
+    if not _is_declared_v2(data):
+        return False
+    return _validate_position_complete(project_v2_to_position(data))
+
+
+def legacy_v2_satisfies_move(data: dict) -> bool:
+    """True when a row DECLARED resolver-complete-v2, projected to the move grain,
+    is move-complete. Fails closed for any non-v2 row."""
+    if not _is_declared_v2(data):
+        return False
+    return _validate_move_complete(project_v2_to_move(data))

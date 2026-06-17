@@ -232,6 +232,62 @@ def _create_test_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_analysis_cache_norm_move "
         "ON analysis_cache(normalized_fen_before, move_uci)"
     ))
+    # Trusted position winner (one per normalized_fen) — see PositionAnalysisRow.
+    # Distinct grain from analysis_cache; fen is provenance-only, normalized_fen is
+    # the lookup/uniqueness key. Mirrors the 20260617_01 migration.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS position_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            normalized_fen TEXT NOT NULL,
+            fen TEXT NOT NULL,
+            best_move_uci VARCHAR(5) NOT NULL,
+            best_move_san VARCHAR(10),
+            best_line_uci TEXT,
+            best_eval INTEGER,
+            best_eval_mate INTEGER,
+            source VARCHAR(20) NOT NULL DEFAULT 'precomputed',
+            analysis_profile_id VARCHAR(64),
+            engine_name VARCHAR(64),
+            engine_version VARCHAR(64),
+            engine_build VARCHAR(128),
+            network_id VARCHAR(128),
+            search_limit_type VARCHAR(16),
+            search_limit_value INTEGER,
+            threads INTEGER,
+            hash_mb INTEGER,
+            multipv INTEGER,
+            eval_file_id TEXT,
+            eval_file_small_id TEXT,
+            analyzer_protocol_version VARCHAR(64),
+            profile_manifest_digest VARCHAR(64),
+            evidence_contract_id VARCHAR(64),
+            source_cache_id INTEGER,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT uq_position_analysis_normalized_fen UNIQUE(normalized_fen)
+        )
+    """))
+    # Append-only disagreement audit sink — many rows per normalized_fen, so the
+    # FEN is indexed but not unique and there is no updated_at.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS position_analysis_conflicts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            normalized_fen TEXT NOT NULL,
+            position_analysis_id INTEGER,
+            candidate_cache_ids TEXT,
+            candidate_summaries TEXT,
+            best_move_disagreement TEXT,
+            pv_disagreement TEXT,
+            best_eval_disagreement TEXT,
+            best_eval_mate_disagreement TEXT,
+            policy_reason VARCHAR(64),
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_position_analysis_conflicts_norm "
+        "ON position_analysis_conflicts(normalized_fen)"
+    ))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS opening_score_batches (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -348,6 +404,8 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS user_opening_scores"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))
+    conn.execute(text("DROP TABLE IF EXISTS position_analysis_conflicts"))
+    conn.execute(text("DROP TABLE IF EXISTS position_analysis"))
     conn.execute(text("DROP TABLE IF EXISTS analysis_cache"))
     conn.execute(text("DROP TABLE IF EXISTS rating_history"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))

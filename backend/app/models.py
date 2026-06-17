@@ -353,6 +353,125 @@ class AnalysisCache(Base):
     )
 
 
+class PositionAnalysisRow(Base):
+    """Single trusted position winner keyed by ``normalized_fen`` (position grain).
+
+    DISTINCT from the ``PositionAnalysis`` pydantic model + ``position_analysis:
+    dict[str, PositionAnalysis]`` session response field in ``app/api/session.py``.
+    That map is full-``fen_before``-keyed *wire* grain (one entry per played
+    position in a game); this is normalized-FEN-keyed *storage* grain (one winning
+    analysis per canonical position). The two share a name on purpose to mark the
+    boundary — a storage row must NEVER be returned as the session map directly; an
+    adapter is required. See epic g-position-analysis.
+
+    Column conventions mirror :class:`AnalysisCache`, but this table is keyed by the
+    normalized FEN (not ``(fen_before, move_uci)``) and is replaced over time rather
+    than append-only, so it carries ``updated_at``. No Phase-1 code writes this
+    table; Phase 2 backfill and Phase 3 winner-replacement do.
+    """
+
+    __tablename__ = "position_analysis"
+    __table_args__ = (
+        UniqueConstraint("normalized_fen", name="uq_position_analysis_normalized_fen"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    # Canonical 4-field FEN (see app.fen.normalize_fen) — the single lookup key and
+    # the column the uniqueness winner-per-position invariant is enforced on.
+    normalized_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    # Representative full FEN of the winning run, kept for provenance/sampling only.
+    # NEVER used for lookup or uniqueness (that is normalized_fen's job).
+    fen: Mapped[str] = mapped_column(Text, nullable=False)
+    # A stored winner without a best move is meaningless, so this is NOT NULL.
+    best_move_uci: Mapped[str] = mapped_column(String(5), nullable=False)
+    best_move_san: Mapped[str | None] = mapped_column(String(10))
+    # Space-joined UCI moves of the best-move principal variation.
+    best_line_uci: Mapped[str | None] = mapped_column(Text)
+    best_eval: Mapped[int | None] = mapped_column(Integer)
+    # White-relative mate count for the best move (NULL when not a mate). First-class
+    # / unconditional: omitting it would silently lose forced-mate preference when
+    # Phase 4 cuts the tree root/move sort keys over to this table.
+    best_eval_mate: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="precomputed"
+    )
+    # Provenance / quality metadata (mirrors AnalysisCache; see app/analysis_profiles.py).
+    analysis_profile_id: Mapped[str | None] = mapped_column(String(64))
+    engine_name: Mapped[str | None] = mapped_column(String(64))
+    engine_version: Mapped[str | None] = mapped_column(String(64))
+    engine_build: Mapped[str | None] = mapped_column(String(128))
+    network_id: Mapped[str | None] = mapped_column(String(128))
+    search_limit_type: Mapped[str | None] = mapped_column(String(16))
+    search_limit_value: Mapped[int | None] = mapped_column(Integer)
+    threads: Mapped[int | None] = mapped_column(Integer)
+    hash_mb: Mapped[int | None] = mapped_column(Integer)
+    multipv: Mapped[int | None] = mapped_column(Integer)
+    eval_file_id: Mapped[str | None] = mapped_column(Text)
+    eval_file_small_id: Mapped[str | None] = mapped_column(Text)
+    analyzer_protocol_version: Mapped[str | None] = mapped_column(String(64))
+    profile_manifest_digest: Mapped[str | None] = mapped_column(String(64))
+    evidence_contract_id: Mapped[str | None] = mapped_column(String(64))
+    # The analysis_cache.id the winner was projected/backfilled from (Phase 2 audit
+    # trail). Plain nullable bigint, no FK, to keep backfill/delete ordering simple.
+    source_cache_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # CONTRACT FOR PHASES 2/3: ``onupdate=func.now()`` fires only on ORM-flush
+    # UPDATE and Core ``update()``. It does NOT fire on
+    # ``insert().on_conflict_do_update()`` / bulk upserts — the likely
+    # winner-replacement path. Any Core upsert/replacement MUST set ``updated_at``
+    # explicitly in its conflict-update set (or add a DB trigger / server_onupdate)
+    # so winner-replacement audit time is never silently stale.
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class PositionAnalysisConflict(Base):
+    """Append-only audit sink for backfill/recompute disagreements at a position.
+
+    A real storage table (never logs/comments): when Phase 2 backfill sees
+    candidate ``analysis_cache`` rows that disagree on the winner for a
+    ``normalized_fen``, it records the candidates and the per-axis disagreement
+    here. Many records may accrue per FEN across recomputes, so ``normalized_fen``
+    is indexed but NOT unique and there is no ``updated_at``. Only Phase 2 writes
+    this; Phase 1 just creates it.
+    """
+
+    __tablename__ = "position_analysis_conflicts"
+    __table_args__ = (
+        Index("idx_position_analysis_conflicts_norm", "normalized_fen"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    normalized_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    # The selected winner's position_analysis.id when one was chosen. Plain nullable
+    # bigint, no FK, to keep backfill/delete ordering simple in both Postgres and
+    # the FK-off SQLite test schema.
+    position_analysis_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    # JSON array of disagreeing analysis_cache.id values.
+    candidate_cache_ids: Mapped[str | None] = mapped_column(Text)
+    # JSON array of {cache_id, source, profile, contract, best_move_uci,
+    # best_line_uci, best_eval, best_eval_mate} candidate summaries.
+    candidate_summaries: Mapped[str | None] = mapped_column(Text)
+    # Per-axis disagreement: JSON array of the distinct candidate values for that
+    # axis, NULL when the axis agreed. Separate columns (not one blob) so Phase 2
+    # audits can filter by axis; mate disagreement is captured first-class.
+    best_move_disagreement: Mapped[str | None] = mapped_column(Text)
+    pv_disagreement: Mapped[str | None] = mapped_column(Text)
+    best_eval_disagreement: Mapped[str | None] = mapped_column(Text)
+    best_eval_mate_disagreement: Mapped[str | None] = mapped_column(Text)
+    # e.g. selected_dominant, conflict_quarantine, conflict_best_known_kept.
+    policy_reason: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
 class OpeningScoreBatch(Base):
     __tablename__ = "opening_score_batches"
     __table_args__ = (

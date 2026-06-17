@@ -1,0 +1,4402 @@
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "Firefox",
+      "version": "152.0"
+    },
+    "browser": {
+      "name": "Firefox",
+      "version": "152.0"
+    },
+    "pages": [
+      {
+        "id": "page_1",
+        "pageTimings": {
+          "onContentLoad": -2772800,
+          "onLoad": -2772385
+        },
+        "startedDateTime": "2026-06-15T21:47:32.824-07:00",
+        "title": "http://localhost:5173/play"
+      }
+    ],
+    "entries": [
+      // /api/drills/start
+      {
+        "startedDateTime": "2026-06-15T21:47:32.947-07:00",
+        "request": {
+          "bodySize": 157,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/start",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "157"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 690,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0}"
+          }
+        },
+        "response": {
+          "status": 201,
+          "statusText": "Created",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:32 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "453"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 453,
+            "text": "{\"session_id\":\"b7cb36e7-e39c-42e7-b976-123fecc140a6\",\"mode\":\"drill\",\"drill_state\":\"active\",\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"opening_name\":\"Queen's Pawn: 1...c6 2.Nf3\",\"opening_family\":\"Queen's Pawn\",\"eco\":\"A40\",\"depth\":3,\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0,\"is_rated\":false,\"rated_start_ply\":null,\"normal_started_at\":null,\"converted_at\":null,\"terminal_reason\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 163,
+          "bodySize": 616
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 77,
+          "receive": 0
+        },
+        "time": 77,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      // /route-check,
+      {
+        "startedDateTime": "2026-06-15T21:47:37.359-07:00",
+        "request": {
+          "bodySize": 170,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/route-check",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "170"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 0,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"current_fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"previous_fen\":\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\",\"played_uci\":\"d2d4\"}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:37 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "318"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 318,
+            "text": "{\"status\":\"on_route\",\"current_fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -\",\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"suggestions\":[{\"uci\":\"c7c6\",\"san\":\"c6\",\"resulting_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -\",\"plies_to_target\":1}],\"failure\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 476
+        },
+        "cache": {},
+        "timings": {
+          "blocked": -1,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 41,
+          "receive": 0
+        },
+        "time": 41,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      // /route-check,
+      {
+        "startedDateTime": "2026-06-15T21:47:37.497-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/route-check",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 581
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:37 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 2,
+          "receive": 0
+        },
+        "time": 2,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      // /analysis/lookup
+      {
+        "startedDateTime": "2026-06-15T21:47:37.509-07:00",
+        "request": {
+          "bodySize": 100,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "100"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\",\"move_uci\":\"d2d4\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:37 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "672"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 672,
+            "text": "{\"results\":{\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1::d2d4\":{\"move_san\":\"d4\",\"best_move_uci\":\"e2e4\",\"best_move_san\":\"e4\",\"best_line_uci\":[\"e2e4\",\"e7e5\",\"g1f3\",\"b8c6\",\"d2d4\",\"e5d4\",\"f3d4\",\"g8f6\",\"d4c6\",\"d7c6\",\"d1d8\",\"e8d8\",\"b1c3\",\"c8e6\",\"f2f3\",\"f8d6\",\"c1e3\"],\"played_eval\":25,\"played_eval_mate\":null,\"best_eval\":42,\"eval_delta\":17,\"classification\":\"good\",\"source\":\"game\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 830
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 42,
+          "receive": 0
+        },
+        "time": 42,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:37.595-07:00",
+        "request": {
+          "bodySize": 137,
+          "method": "POST",
+          "url": "http://localhost:8000/api/game/next-opponent-move",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "137"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 701,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"session_id\":\"b7cb36e7-e39c-42e7-b976-123fecc140a6\",\"fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"moves\":[\"d2d4\"]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:37 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "410"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 410,
+            "text": "{\"mode\":\"ghost\",\"move\":{\"uci\":\"c7c6\",\"san\":\"c6\"},\"target_blunder_id\":null,\"target_blunder_srs\":null,\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"decision_source\":\"ghost_path\",\"drill_route\":{\"status\":\"on_route\",\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"resulting_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -\",\"plies_to_target\":1}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 568
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 45,
+          "receive": 0
+        },
+        "time": 45,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:37.861-07:00",
+        "request": {
+          "bodySize": 102,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "102"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"move_uci\":\"c7c6\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:37 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "723"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 723,
+            "text": "{\"results\":{\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1::c7c6\":{\"move_san\":\"c6\",\"best_move_uci\":\"d7d5\",\"best_move_san\":\"d5\",\"best_line_uci\":[\"d7d5\",\"c2c4\",\"e7e6\",\"g1f3\",\"d5c4\",\"e2e3\",\"g8f6\",\"f1c4\",\"c7c5\",\"e1g1\",\"a7a6\",\"d4c5\",\"f8c5\",\"d1d8\",\"e8d8\",\"c1d2\",\"d8e7\",\"f1c1\",\"c5d6\",\"d2c3\",\"b7b5\",\"c4e2\",\"c8d7\"],\"played_eval\":48,\"played_eval_mate\":null,\"best_eval\":28,\"eval_delta\":20,\"classification\":\"good\",\"source\":\"precomputed\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 881
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 46,
+          "receive": 0
+        },
+        "time": 46,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:39.109-07:00",
+        "request": {
+          "bodySize": 1137,
+          "method": "POST",
+          "url": "http://localhost:8000/api/session/b7cb36e7-e39c-42e7-b976-123fecc140a6/moves",
+          "httpVersion": "",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "1137"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 729,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"moves\":[{\"move_number\":1,\"color\":\"white\",\"move_san\":\"d4\",\"fen_after\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"eval_cp\":25,\"eval_mate\":null,\"best_move_san\":\"e4\",\"best_move_eval_cp\":42,\"eval_delta\":17,\"classification\":\"good\",\"fen_before\":\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\",\"move_uci\":\"d2d4\",\"best_move_uci\":\"e2e4\",\"best_line_uci\":[\"e2e4\",\"e7e5\",\"g1f3\",\"b8c6\",\"d2d4\",\"e5d4\",\"f3d4\",\"g8f6\",\"d4c6\",\"d7c6\",\"d1d8\",\"e8d8\",\"b1c3\",\"c8e6\",\"f2f3\",\"f8d6\",\"c1e3\"],\"decision_source\":null,\"target_blunder_id\":null},{\"move_number\":1,\"color\":\"black\",\"move_san\":\"c6\",\"fen_after\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2\",\"eval_cp\":-48,\"eval_mate\":null,\"best_move_san\":\"d5\",\"best_move_eval_cp\":-28,\"eval_delta\":20,\"classification\":\"good\",\"fen_before\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"move_uci\":\"c7c6\",\"best_move_uci\":\"d7d5\",\"best_line_uci\":[\"d7d5\",\"c2c4\",\"e7e6\",\"g1f3\",\"d5c4\",\"e2e3\",\"g8f6\",\"f1c4\",\"c7c5\",\"e1g1\",\"a7a6\",\"d4c5\",\"f8c5\",\"d1d8\",\"e8d8\",\"c1d2\",\"d8e7\",\"f1c1\",\"c5d6\",\"d2c3\",\"b7b5\",\"c4e2\",\"c8d7\"],\"decision_source\":\"ghost_path\",\"target_blunder_id\":null}]}"
+          }
+        },
+        "response": {
+          "status": 0,
+          "statusText": "",
+          "httpVersion": "",
+          "headers": [],
+          "cookies": [],
+          "content": {
+            "mimeType": "",
+            "size": 0,
+            "encoding": "base64",
+            "text": ""
+          },
+          "redirectURL": "",
+          "headersSize": 0,
+          "bodySize": 1866
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 0,
+          "receive": 0
+        },
+        "time": 0,
+        "_securityState": "insecure",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:39.113-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/session/b7cb36e7-e39c-42e7-b976-123fecc140a6/moves",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 576
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:38 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 1,
+          "receive": 0
+        },
+        "time": 1,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:40.128-07:00",
+        "request": {
+          "bodySize": 178,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/route-check",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "178"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=0"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 733,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"current_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2\",\"previous_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2\",\"played_uci\":\"g1f3\"}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:39 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "206"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 206,
+            "text": "{\"status\":\"root_reached\",\"current_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"suggestions\":[],\"failure\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 364
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 52,
+          "receive": 0
+        },
+        "time": 52,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:40.235-07:00",
+        "request": {
+          "bodySize": 155,
+          "method": "POST",
+          "url": "http://localhost:8000/api/game/next-opponent-move",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "155"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 701,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"session_id\":\"b7cb36e7-e39c-42e7-b976-123fecc140a6\",\"fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2\",\"moves\":[\"d2d4\",\"c7c6\",\"g1f3\"]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:39 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "173"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 173,
+            "text": "{\"mode\":\"engine\",\"move\":{\"uci\":\"d7d5\",\"san\":\"d5\"},\"target_blunder_id\":null,\"target_blunder_srs\":null,\"target_fen\":null,\"decision_source\":\"backend_engine\",\"drill_route\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 331
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 255,
+          "receive": 0
+        },
+        "time": 255,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:40.288-07:00",
+        "request": {
+          "bodySize": 104,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "104"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2\",\"move_uci\":\"g1f3\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:39 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "733"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 733,
+            "text": "{\"results\":{\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2::g1f3\":{\"move_san\":\"Nf3\",\"best_move_uci\":\"g1f3\",\"best_move_san\":\"Nf3\",\"best_line_uci\":[\"g1f3\",\"g8f6\",\"c2c4\",\"d7d5\",\"e2e3\",\"c8f5\",\"b1c3\",\"e7e6\",\"f3h4\",\"f5g6\",\"h4g6\",\"h7g6\",\"d1b3\",\"d8b6\",\"h2h3\",\"b6c7\",\"c1d2\",\"f8e7\",\"b3c2\",\"e8g8\",\"e1c1\",\"d5c4\",\"f1c4\",\"c6c5\"],\"played_eval\":37,\"played_eval_mate\":null,\"best_eval\":37,\"eval_delta\":0,\"classification\":\"best\",\"source\":\"precomputed\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 891
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 142,
+          "receive": 0
+        },
+        "time": 142,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:40.693-07:00",
+        "request": {
+          "bodySize": 106,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "106"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2\",\"move_uci\":\"d7d5\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:40 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "608"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 608,
+            "text": "{\"results\":{\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2::d7d5\":{\"move_san\":\"d5\",\"best_move_uci\":\"d7d5\",\"best_move_san\":\"d5\",\"best_line_uci\":[\"d7d5\",\"c1f4\",\"c8f5\",\"e2e3\",\"e7e6\",\"c2c4\",\"f8d6\",\"f4d6\",\"d8d6\",\"b1c3\",\"g8f6\",\"f3h4\",\"f5g6\",\"d1b3\",\"d6c7\",\"c4d5\",\"e6d5\",\"b3a3\"],\"played_eval\":29,\"played_eval_mate\":null,\"best_eval\":29,\"eval_delta\":0,\"classification\":\"best\",\"source\":\"game\",\"analysis_profile_id\":\"browser-game-v1\",\"engine_version\":null,\"engine_build\":null,\"evidence_contract_id\":\"resolver-complete-v1\",\"authoritative\":false,\"contract_satisfied\":true,\"trusted_for_resolution\":false}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 766
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 32,
+          "receive": 0
+        },
+        "time": 32,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:43.494-07:00",
+        "request": {
+          "bodySize": 107,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "107"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pp2pppp/2p5/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 0 3\",\"move_uci\":\"c1f4\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:43 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "733"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 733,
+            "text": "{\"results\":{\"rnbqkbnr/pp2pppp/2p5/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 0 3::c1f4\":{\"move_san\":\"Bf4\",\"best_move_uci\":\"c2c4\",\"best_move_san\":\"c4\",\"best_line_uci\":[\"c2c4\",\"g8f6\",\"b1c3\",\"e7e6\",\"c1g5\",\"h7h6\",\"g5f6\",\"d8f6\",\"e2e3\",\"f8d6\",\"d1c2\",\"b8d7\",\"e1c1\",\"f6e7\",\"c1b1\",\"d7f6\",\"h2h4\",\"e8g8\",\"e3e4\",\"d5e4\",\"c3e4\",\"f6e4\",\"c2e4\"],\"played_eval\":44,\"played_eval_mate\":null,\"best_eval\":35,\"eval_delta\":0,\"classification\":\"excellent\",\"source\":\"precomputed\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 891
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 43,
+          "receive": 0
+        },
+        "time": 43,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:43.580-07:00",
+        "request": {
+          "bodySize": 30,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/fail",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "30"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 725,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"terminal_reason\":\"accuracy\"}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:43 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "459"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 459,
+            "text": "{\"session_id\":\"b7cb36e7-e39c-42e7-b976-123fecc140a6\",\"mode\":\"drill\",\"drill_state\":\"failed\",\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"opening_name\":\"Queen's Pawn: 1...c6 2.Nf3\",\"opening_family\":\"Queen's Pawn\",\"eco\":\"A40\",\"depth\":3,\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0,\"is_rated\":false,\"rated_start_ply\":null,\"normal_started_at\":null,\"converted_at\":null,\"terminal_reason\":\"accuracy\"}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 617
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 82,
+          "receive": 0
+        },
+        "time": 82,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:43.583-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/fail",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 574
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:43 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 1,
+          "receive": 0
+        },
+        "time": 1,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:46.626-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/abandon",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=0"
+            },
+            {
+              "name": "Content-Length",
+              "value": "0"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 727
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:46 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "462"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 462,
+            "text": "{\"session_id\":\"b7cb36e7-e39c-42e7-b976-123fecc140a6\",\"mode\":\"drill\",\"drill_state\":\"abandoned\",\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"opening_name\":\"Queen's Pawn: 1...c6 2.Nf3\",\"opening_family\":\"Queen's Pawn\",\"eco\":\"A40\",\"depth\":3,\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0,\"is_rated\":false,\"rated_start_ply\":null,\"normal_started_at\":null,\"converted_at\":null,\"terminal_reason\":\"accuracy\"}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 620
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 81,
+          "receive": 0
+        },
+        "time": 81,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:46.629-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/drills/b7cb36e7-e39c-42e7-b976-123fecc140a6/abandon",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 577
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:46 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 2,
+          "receive": 0
+        },
+        "time": 2,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:46.723-07:00",
+        "request": {
+          "bodySize": 157,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/start",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "157"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 690,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0}"
+          }
+        },
+        "response": {
+          "status": 201,
+          "statusText": "Created",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:46 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "453"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 453,
+            "text": "{\"session_id\":\"7e0699a6-37fe-4846-b67a-a77bdd68c359\",\"mode\":\"drill\",\"drill_state\":\"active\",\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"opening_name\":\"Queen's Pawn: 1...c6 2.Nf3\",\"opening_family\":\"Queen's Pawn\",\"eco\":\"A40\",\"depth\":3,\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0,\"is_rated\":false,\"rated_start_ply\":null,\"normal_started_at\":null,\"converted_at\":null,\"terminal_reason\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 163,
+          "bodySize": 616
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 77,
+          "receive": 0
+        },
+        "time": 77,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:51.914-07:00",
+        "request": {
+          "bodySize": 170,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/7e0699a6-37fe-4846-b67a-a77bdd68c359/route-check",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "170"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=0"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 733,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"current_fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"previous_fen\":\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\",\"played_uci\":\"d2d4\"}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:51 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "318"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 318,
+            "text": "{\"status\":\"on_route\",\"current_fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -\",\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"suggestions\":[{\"uci\":\"c7c6\",\"san\":\"c6\",\"resulting_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -\",\"plies_to_target\":1}],\"failure\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 476
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 37,
+          "receive": 0
+        },
+        "time": 37,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:51.922-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/drills/7e0699a6-37fe-4846-b67a-a77bdd68c359/route-check",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 581
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:51 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 1,
+          "receive": 0
+        },
+        "time": 1,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:52.065-07:00",
+        "request": {
+          "bodySize": 137,
+          "method": "POST",
+          "url": "http://localhost:8000/api/game/next-opponent-move",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "137"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 701,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"session_id\":\"7e0699a6-37fe-4846-b67a-a77bdd68c359\",\"fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"moves\":[\"d2d4\"]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:51 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "410"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 410,
+            "text": "{\"mode\":\"ghost\",\"move\":{\"uci\":\"c7c6\",\"san\":\"c6\"},\"target_blunder_id\":null,\"target_blunder_srs\":null,\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"decision_source\":\"ghost_path\",\"drill_route\":{\"status\":\"on_route\",\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"resulting_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -\",\"plies_to_target\":1}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 568
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 52,
+          "receive": 0
+        },
+        "time": 52,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:52.075-07:00",
+        "request": {
+          "bodySize": 100,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "100"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\",\"move_uci\":\"d2d4\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:51 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "672"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 672,
+            "text": "{\"results\":{\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1::d2d4\":{\"move_san\":\"d4\",\"best_move_uci\":\"e2e4\",\"best_move_san\":\"e4\",\"best_line_uci\":[\"e2e4\",\"e7e5\",\"g1f3\",\"b8c6\",\"d2d4\",\"e5d4\",\"f3d4\",\"g8f6\",\"d4c6\",\"d7c6\",\"d1d8\",\"e8d8\",\"b1c3\",\"c8e6\",\"f2f3\",\"f8d6\",\"c1e3\"],\"played_eval\":25,\"played_eval_mate\":null,\"best_eval\":42,\"eval_delta\":17,\"classification\":\"good\",\"source\":\"game\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 830
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 47,
+          "receive": 0
+        },
+        "time": 47,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:52.418-07:00",
+        "request": {
+          "bodySize": 102,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "102"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"move_uci\":\"c7c6\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:52 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "723"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 723,
+            "text": "{\"results\":{\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1::c7c6\":{\"move_san\":\"c6\",\"best_move_uci\":\"d7d5\",\"best_move_san\":\"d5\",\"best_line_uci\":[\"d7d5\",\"c2c4\",\"e7e6\",\"g1f3\",\"d5c4\",\"e2e3\",\"g8f6\",\"f1c4\",\"c7c5\",\"e1g1\",\"a7a6\",\"d4c5\",\"f8c5\",\"d1d8\",\"e8d8\",\"c1d2\",\"d8e7\",\"f1c1\",\"c5d6\",\"d2c3\",\"b7b5\",\"c4e2\",\"c8d7\"],\"played_eval\":48,\"played_eval_mate\":null,\"best_eval\":28,\"eval_delta\":20,\"classification\":\"good\",\"source\":\"precomputed\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 881
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 42,
+          "receive": 0
+        },
+        "time": 42,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:52.822-07:00",
+        "request": {
+          "bodySize": 1137,
+          "method": "POST",
+          "url": "http://localhost:8000/api/session/7e0699a6-37fe-4846-b67a-a77bdd68c359/moves",
+          "httpVersion": "",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "1137"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 729,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"moves\":[{\"move_number\":1,\"color\":\"white\",\"move_san\":\"d4\",\"fen_after\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"eval_cp\":25,\"eval_mate\":null,\"best_move_san\":\"e4\",\"best_move_eval_cp\":42,\"eval_delta\":17,\"classification\":\"good\",\"fen_before\":\"rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1\",\"move_uci\":\"d2d4\",\"best_move_uci\":\"e2e4\",\"best_line_uci\":[\"e2e4\",\"e7e5\",\"g1f3\",\"b8c6\",\"d2d4\",\"e5d4\",\"f3d4\",\"g8f6\",\"d4c6\",\"d7c6\",\"d1d8\",\"e8d8\",\"b1c3\",\"c8e6\",\"f2f3\",\"f8d6\",\"c1e3\"],\"decision_source\":null,\"target_blunder_id\":null},{\"move_number\":1,\"color\":\"black\",\"move_san\":\"c6\",\"fen_after\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2\",\"eval_cp\":-48,\"eval_mate\":null,\"best_move_san\":\"d5\",\"best_move_eval_cp\":-28,\"eval_delta\":20,\"classification\":\"good\",\"fen_before\":\"rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 1\",\"move_uci\":\"c7c6\",\"best_move_uci\":\"d7d5\",\"best_line_uci\":[\"d7d5\",\"c2c4\",\"e7e6\",\"g1f3\",\"d5c4\",\"e2e3\",\"g8f6\",\"f1c4\",\"c7c5\",\"e1g1\",\"a7a6\",\"d4c5\",\"f8c5\",\"d1d8\",\"e8d8\",\"c1d2\",\"d8e7\",\"f1c1\",\"c5d6\",\"d2c3\",\"b7b5\",\"c4e2\",\"c8d7\"],\"decision_source\":\"ghost_path\",\"target_blunder_id\":null}]}"
+          }
+        },
+        "response": {
+          "status": 0,
+          "statusText": "",
+          "httpVersion": "",
+          "headers": [],
+          "cookies": [],
+          "content": {
+            "text": ""
+          },
+          "redirectURL": "",
+          "headersSize": 0,
+          "bodySize": -1
+        },
+        "cache": {},
+        "timings": {},
+        "time": 0,
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:52.827-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/session/7e0699a6-37fe-4846-b67a-a77bdd68c359/moves",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 576
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:52 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 1,
+          "receive": 0
+        },
+        "time": 1,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:53.680-07:00",
+        "request": {
+          "bodySize": 178,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/7e0699a6-37fe-4846-b67a-a77bdd68c359/route-check",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "178"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=0"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 733,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"current_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2\",\"previous_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2\",\"played_uci\":\"g1f3\"}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:53 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "206"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 206,
+            "text": "{\"status\":\"root_reached\",\"current_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"target_fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"suggestions\":[],\"failure\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 364
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 60,
+          "receive": 0
+        },
+        "time": 60,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:53.792-07:00",
+        "request": {
+          "bodySize": 155,
+          "method": "POST",
+          "url": "http://localhost:8000/api/game/next-opponent-move",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "155"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 701,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"session_id\":\"7e0699a6-37fe-4846-b67a-a77bdd68c359\",\"fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2\",\"moves\":[\"d2d4\",\"c7c6\",\"g1f3\"]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:53 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "173"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 173,
+            "text": "{\"mode\":\"engine\",\"move\":{\"uci\":\"d7d5\",\"san\":\"d5\"},\"target_blunder_id\":null,\"target_blunder_srs\":null,\"target_fen\":null,\"decision_source\":\"backend_engine\",\"drill_route\":null}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 331
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 256,
+          "receive": 0
+        },
+        "time": 256,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:53.845-07:00",
+        "request": {
+          "bodySize": 104,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "104"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2\",\"move_uci\":\"g1f3\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:53 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "733"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 733,
+            "text": "{\"results\":{\"rnbqkbnr/pp1ppppp/2p5/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2::g1f3\":{\"move_san\":\"Nf3\",\"best_move_uci\":\"g1f3\",\"best_move_san\":\"Nf3\",\"best_line_uci\":[\"g1f3\",\"g8f6\",\"c2c4\",\"d7d5\",\"e2e3\",\"c8f5\",\"b1c3\",\"e7e6\",\"f3h4\",\"f5g6\",\"h4g6\",\"h7g6\",\"d1b3\",\"d8b6\",\"h2h3\",\"b6c7\",\"c1d2\",\"f8e7\",\"b3c2\",\"e8g8\",\"e1c1\",\"d5c4\",\"f1c4\",\"c6c5\"],\"played_eval\":37,\"played_eval_mate\":null,\"best_eval\":37,\"eval_delta\":0,\"classification\":\"best\",\"source\":\"precomputed\",\"analysis_profile_id\":\"canonical-sf18-depth24-linux-v1\",\"engine_version\":\"18\",\"engine_build\":\"11f054ee524fb08b8a8914f91dc4b78136100a9b02978e4c4234deed25695a3e\",\"evidence_contract_id\":\"resolver-complete-v2\",\"authoritative\":true,\"contract_satisfied\":true,\"trusted_for_resolution\":true}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 891
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 145,
+          "receive": 0
+        },
+        "time": 145,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:54.239-07:00",
+        "request": {
+          "bodySize": 106,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "106"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2\",\"move_uci\":\"d7d5\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:53 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "608"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 608,
+            "text": "{\"results\":{\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq - 1 2::d7d5\":{\"move_san\":\"d5\",\"best_move_uci\":\"d7d5\",\"best_move_san\":\"d5\",\"best_line_uci\":[\"d7d5\",\"c1f4\",\"c8f5\",\"e2e3\",\"e7e6\",\"c2c4\",\"f8d6\",\"f4d6\",\"d8d6\",\"b1c3\",\"g8f6\",\"f3h4\",\"f5g6\",\"d1b3\",\"d6c7\",\"c4d5\",\"e6d5\",\"b3a3\"],\"played_eval\":29,\"played_eval_mate\":null,\"best_eval\":29,\"eval_delta\":0,\"classification\":\"best\",\"source\":\"game\",\"analysis_profile_id\":\"browser-game-v1\",\"engine_version\":null,\"engine_build\":null,\"evidence_contract_id\":\"resolver-complete-v1\",\"authoritative\":false,\"contract_satisfied\":true,\"trusted_for_resolution\":false}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 766
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 35,
+          "receive": 0
+        },
+        "time": 35,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:56.298-07:00",
+        "request": {
+          "bodySize": 107,
+          "method": "POST",
+          "url": "http://localhost:8000/api/analysis/lookup",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "107"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 693,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"positions\":[{\"fen\":\"rnbqkbnr/pp2pppp/2p5/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 0 3\",\"move_uci\":\"c2c4\"}]}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:55 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "587"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 587,
+            "text": "{\"results\":{\"rnbqkbnr/pp2pppp/2p5/3p4/3P4/5N2/PPP1PPPP/RNBQKB1R w KQkq - 0 3::c2c4\":{\"move_san\":\"c4\",\"best_move_uci\":\"c1f4\",\"best_move_san\":\"Bf4\",\"best_line_uci\":[\"c1f4\",\"c8f5\",\"e2e3\",\"e7e6\",\"c2c4\",\"f8d6\",\"f4d6\",\"d8d6\",\"d1b3\",\"d6e7\",\"b1c3\",\"g8f6\",\"f3h4\",\"f5g4\"],\"played_eval\":42,\"played_eval_mate\":null,\"best_eval\":30,\"eval_delta\":0,\"classification\":\"excellent\",\"source\":\"game\",\"analysis_profile_id\":\"browser-game-v1\",\"engine_version\":null,\"engine_build\":null,\"evidence_contract_id\":\"resolver-complete-v1\",\"authoritative\":false,\"contract_satisfied\":true,\"trusted_for_resolution\":false}}}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 745
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 38,
+          "receive": 0
+        },
+        "time": 38,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:57.653-07:00",
+        "request": {
+          "bodySize": 30,
+          "method": "POST",
+          "url": "http://localhost:8000/api/drills/7e0699a6-37fe-4846-b67a-a77bdd68c359/fail",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNCIsInVzZXJuYW1lIjoibWlndWVsIiwiaXNfYW5vbnltb3VzIjpmYWxzZSwiZXhwIjoxNzgxNjUzNzI0fQ._C1Qwuz4G_uO6bkOuR1nfnKlG-FqsIwIjZO57Ys9gmQ"
+            },
+            {
+              "name": "Content-Length",
+              "value": "30"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 725,
+          "postData": {
+            "mimeType": "application/json",
+            "params": [],
+            "text": "{\"terminal_reason\":\"accuracy\"}"
+          }
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:57 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "content-length",
+              "value": "459"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "application/json",
+            "size": 459,
+            "text": "{\"session_id\":\"7e0699a6-37fe-4846-b67a-a77bdd68c359\",\"mode\":\"drill\",\"drill_state\":\"failed\",\"opening_key\":\"rnbqkbnr/pp1ppppp/2p5/8/3P4/5N2/PPP1PPPP/RNBQKB1R b KQkq -\",\"opening_name\":\"Queen's Pawn: 1...c6 2.Nf3\",\"opening_family\":\"Queen's Pawn\",\"eco\":\"A40\",\"depth\":3,\"player_color\":\"white\",\"engine_elo\":1400,\"strictness\":\"strict\",\"strictness_cp\":0,\"is_rated\":false,\"rated_start_ply\":null,\"normal_started_at\":null,\"converted_at\":null,\"terminal_reason\":\"accuracy\"}"
+          },
+          "redirectURL": "",
+          "headersSize": 158,
+          "bodySize": 617
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 91,
+          "receive": 0
+        },
+        "time": 91,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      },
+      {
+        "startedDateTime": "2026-06-15T21:47:57.659-07:00",
+        "request": {
+          "bodySize": 0,
+          "method": "OPTIONS",
+          "url": "http://localhost:8000/api/drills/7e0699a6-37fe-4846-b67a-a77bdd68c359/fail",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "Host",
+              "value": "localhost:8000"
+            },
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0"
+            },
+            {
+              "name": "Accept",
+              "value": "*/*"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            },
+            {
+              "name": "Accept-Encoding",
+              "value": "gzip, deflate, br, zstd"
+            },
+            {
+              "name": "Access-Control-Request-Method",
+              "value": "POST"
+            },
+            {
+              "name": "Access-Control-Request-Headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "Referer",
+              "value": "http://localhost:5173/"
+            },
+            {
+              "name": "Origin",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "DNT",
+              "value": "1"
+            },
+            {
+              "name": "Sec-GPC",
+              "value": "1"
+            },
+            {
+              "name": "Connection",
+              "value": "keep-alive"
+            },
+            {
+              "name": "Sec-Fetch-Dest",
+              "value": "empty"
+            },
+            {
+              "name": "Sec-Fetch-Mode",
+              "value": "cors"
+            },
+            {
+              "name": "Sec-Fetch-Site",
+              "value": "same-site"
+            },
+            {
+              "name": "Priority",
+              "value": "u=4"
+            }
+          ],
+          "cookies": [],
+          "queryString": [],
+          "headersSize": 574
+        },
+        "response": {
+          "status": 200,
+          "statusText": "OK",
+          "httpVersion": "HTTP/1.1",
+          "headers": [
+            {
+              "name": "date",
+              "value": "Tue, 16 Jun 2026 04:47:57 GMT"
+            },
+            {
+              "name": "server",
+              "value": "uvicorn"
+            },
+            {
+              "name": "access-control-allow-origin",
+              "value": "*"
+            },
+            {
+              "name": "access-control-allow-methods",
+              "value": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
+            },
+            {
+              "name": "access-control-max-age",
+              "value": "600"
+            },
+            {
+              "name": "access-control-allow-headers",
+              "value": "authorization,content-type"
+            },
+            {
+              "name": "content-length",
+              "value": "2"
+            },
+            {
+              "name": "content-type",
+              "value": "text/plain; charset=utf-8"
+            }
+          ],
+          "cookies": [],
+          "content": {
+            "mimeType": "text/plain; charset=utf-8",
+            "size": 2,
+            "text": "OK"
+          },
+          "redirectURL": "",
+          "headersSize": 328,
+          "bodySize": 330
+        },
+        "cache": {},
+        "timings": {
+          "blocked": 0,
+          "dns": 0,
+          "connect": 0,
+          "ssl": 0,
+          "send": 0,
+          "wait": 0,
+          "receive": 0
+        },
+        "time": 0,
+        "_securityState": "insecure",
+        "serverIPAddress": "127.0.0.1",
+        "connection": "8000",
+        "pageref": "page_1"
+      }
+    ]
+  }
+}
