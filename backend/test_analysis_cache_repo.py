@@ -11,6 +11,7 @@ from app.analysis_cache_repo import (
     UnsupportedDialectError,
     write_analysis_cache_rows,
 )
+from app.database_url import _normalize_postgres_scheme
 from app.analysis_profiles import (
     BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
@@ -453,7 +454,7 @@ pg_required = pytest.mark.skipif(
 
 @pytest.fixture
 def pg_db():
-    url = _pg_url()
+    url = _normalize_postgres_scheme(_pg_url())
     engine = create_engine(url)
     try:
         conn = engine.connect()

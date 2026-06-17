@@ -113,8 +113,9 @@ def _write_minimal_opening_data_dir(data_dir: Path) -> None:
 
 def _assert_resolves_to(data_dir: Path) -> None:
     eco_path, bypos_path = _resolve_default_opening_paths()
-    assert eco_path == data_dir / "eco.json"
-    assert bypos_path == data_dir / "eco.byPosition.json"
+    resolved_data_dir = data_dir.expanduser().resolve(strict=False)
+    assert eco_path == resolved_data_dir / "eco.json"
+    assert bypos_path == resolved_data_dir / "eco.byPosition.json"
 
 
 # -- Construction tests (real data) --
@@ -155,7 +156,8 @@ class TestConstruction:
     def test_default_paths_fall_back_to_runtime_cwd_layout(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        with tempfile.TemporaryDirectory(dir="/private/tmp") as temp_dir:
+        temp_parent = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+        with tempfile.TemporaryDirectory(dir=temp_parent) as temp_dir:
             temp_root = Path(temp_dir)
             cwd_root = temp_root / "cwd"
             module_root = temp_root / "module"
