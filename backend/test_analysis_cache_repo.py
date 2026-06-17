@@ -461,11 +461,13 @@ def pg_db():
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"PostgreSQL not reachable: {exc}")
     conn.close()
-    AnalysisCache.__table__.drop(engine, checkfirst=True)
-    AnalysisCache.__table__.create(engine)
+    AnalysisCache.__table__.create(engine, checkfirst=True)
+    with engine.begin() as cleanup:
+        cleanup.execute(AnalysisCache.__table__.delete())
     Factory = sessionmaker(bind=engine)
     yield engine, Factory
-    AnalysisCache.__table__.drop(engine, checkfirst=True)
+    with engine.begin() as cleanup:
+        cleanup.execute(AnalysisCache.__table__.delete())
     engine.dispose()
 
 
