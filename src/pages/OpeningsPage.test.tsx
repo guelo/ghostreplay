@@ -395,6 +395,35 @@ describe("OpeningsPage tree", () => {
     expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
   });
 
+  it("labels each column header with the selected move (Start / move / —)", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_SICILIAN);
+    renderAt("/openings?color=white&move=e2e4&move=c7c5");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
+
+    const headers = screen
+      .getAllByTestId("tree-column-header")
+      .map((el) => el.textContent);
+    // Root → "Start"; the two chosen columns → their move-number labels; the
+    // frontier column (no selection yet) → "—".
+    expect(headers).toEqual(["Start", "1. e4", `1${"…"} c5`, "—"]);
+  });
+
+  it("truncates the line when a column header is clicked", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_SICILIAN);
+    renderAt("/openings?color=white&move=e2e4&move=c7c5");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
+
+    // Click the e4 column's header → navigate back to just e2e4.
+    fireEvent.click(
+      screen.getByText("1. e4", {
+        selector: ".openings-tree-column__header",
+      }),
+    );
+    await waitFor(() =>
+      expect(location()).toBe("/openings?color=white&move=e2e4"),
+    );
+  });
+
   it("canonicalizes a non-canonical line by replacing the URL", async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_E4);
     renderAt("/openings?color=white&move=e2e4&move=z9z9");
@@ -757,7 +786,10 @@ describe("OpeningsPage tree", () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_E4);
     renderAt("/openings?color=white&move=e2e4");
     // e2e4 is the deepest selected node here → expanded (move label "1. e4").
-    await screen.findByText("1. e4");
+    // Scope to the expanded card's label (the column header now mirrors it).
+    await screen.findByText("1. e4", {
+      selector: ".tree-node-card__move-label",
+    });
 
     expect(
       screen.queryByRole("button", { name: /start drill/i }),

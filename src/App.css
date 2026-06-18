@@ -7278,14 +7278,26 @@ button.openings-shell__crumb:hover {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    /* Independent per-column vertical scroll, bounded to the canvas which the
-       .openings-page flex chain stretches to fill the viewport. The mobile
-       block below overrides this with a dvh band for the stacked layout. */
+    /* Bounded to the canvas which the .openings-page flex chain stretches to
+       fill the viewport; min-height:0 lets the inner nodes scroller shrink and
+       scroll. The header is a non-scrolling sibling — only __nodes scrolls (so
+       the scrollbar never runs alongside the header). The mobile block below
+       overrides max-height with a dvh band for the stacked layout. */
     max-height: 100%;
+    min-height: 0;
+}
+
+/* The per-column vertical scroller: holds the node cards while the header stays
+   pinned above it. Pin overflow-x so the browser does not auto-promote it to
+   "auto" (which it does when only overflow-y is non-visible) and give every
+   column a spurious horizontal scrollbar. Borrowed from the prototype. */
+.openings-tree-column__nodes {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    flex: 0 1 auto;
+    min-height: 0;
     overflow-y: auto;
-    /* Pin overflow-x so the browser does not auto-promote it to "auto" (which it
-       does when only overflow-y is non-visible) and give every column a
-       spurious horizontal scrollbar. Borrowed from the prototype. */
     overflow-x: hidden;
 }
 
@@ -7294,6 +7306,37 @@ button.openings-shell__crumb:hover {
 .openings-tree-column--active {
     flex-basis: 14.5rem; /* 232px */
     width: 14.5rem;
+}
+
+/* Per-column move header (ported from the tree prototype): the move chosen in
+   this column with its move number. A non-scrolling sibling above __nodes, so
+   its underline spans the full column width (no scrollbar gutter). */
+.openings-tree-column__header {
+    flex: 0 0 auto;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border-color);
+    border-radius: 0;
+    padding: 0.1rem 0 0.3rem;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 700;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+}
+
+/* A column on the selected path gets the brand accent; the frontier "—" header
+   keeps the muted default and is disabled (non-navigable). */
+.openings-tree-column__header--active {
+    color: var(--brand-primary);
+    border-bottom-color: var(--brand-primary);
+}
+
+.openings-tree-column__header:disabled {
+    cursor: default;
 }
 
 .openings-tree-column--skeleton {

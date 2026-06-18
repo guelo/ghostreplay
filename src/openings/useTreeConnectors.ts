@@ -67,9 +67,10 @@ export function useTreeConnectors({
       const t = canvas.getBoundingClientRect();
       const next: Connector[] = [];
       // Each adjacent display-column pair (i, i+1): the selected node in column
-      // i is the connector origin and the parent of column i+1. Both the column
-      // root and its visible scroll band are the same element here (the column
-      // *is* the per-column vertical scroller), so the y-clamp band is colR.
+      // i is the connector origin and the parent of column i+1. The registered
+      // element is the column's `__nodes` scroller (the header is a separate,
+      // non-scrolling sibling), so its rect doubles as the connector x-edge and
+      // the y-clamp band — both derive from colR.
       for (let i = 0; i < columnCount - 1; i++) {
         const col = columnEls.get(i);
         const selCell = selectedNodeEls.get(i);
@@ -107,7 +108,8 @@ export function useTreeConnectors({
         let off2: Connector["off2"] = 0;
         if (childCell) {
           const childCellR = childCell.getBoundingClientRect();
-          const childCellCenter = childCellR.top + childCellR.height / 2 - t.top;
+          const childCellCenter =
+            childCellR.top + childCellR.height / 2 - t.top;
           const childBandTop = childR.top - t.top;
           const childBandBottom = childR.bottom - t.top;
           y2 = childCellCenter;

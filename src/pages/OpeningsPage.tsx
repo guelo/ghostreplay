@@ -4,6 +4,7 @@ import { Chessboard, defaultPieces } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import OpeningTreeNodeCard from "../components/OpeningTreeNodeCard";
+import { formatMoveLabel } from "../openings/format";
 import {
   buildCanonicalReplacement,
   buildOpeningsSearchParams,
@@ -55,6 +56,21 @@ function TreeColumnView({
   // The column hosting the expanded (deepest selected) card is the active one.
   const isActive = column.nodes.some((node) => node.isExpanded);
 
+  // Header (copied from TreePrototype): the move chosen in this column, shown
+  // with its move number. "Start" at the root, the selected move label for a
+  // chosen column, "—" for the frontier column that has no selection yet.
+  const selectedNode = column.nodes.find((node) => node.isSelected) ?? null;
+  const headerLabel =
+    column.kind === "root"
+      ? "Start"
+      : selectedNode
+        ? formatMoveLabel(selectedNode.view.ply, selectedNode.view.san)
+        : "—";
+  // Where clicking the header navigates: the root jumps to the start; a chosen
+  // column truncates the line to its selection; the frontier header is inert.
+  const headerLine: string[] | null =
+    column.kind === "root" ? [] : (selectedNode?.selectLine ?? null);
+
   return (
     <div
       className={`openings-tree-column${
@@ -62,49 +78,70 @@ function TreeColumnView({
       }`}
       data-testid="tree-column"
       data-line-index={column.lineIndex}
-      ref={(el) => registerColumn(columnIndex, el)}
     >
-      {column.nodes.map((node) => {
-        const card = node.isExpanded ? (
-          <OpeningTreeNodeCard
-            variant="expanded"
-            node={node.view}
-            onStartDrill={
-              node.view.drillOpeningKey != null
-                ? () => onStartDrill(node.view.drillOpeningKey as string)
-                : undefined
-            }
-          />
-        ) : (
-          <OpeningTreeNodeCard
-            variant="compact"
-            node={node.view}
-            // A non-navigable boundary node renders as a plain (non-button)
-            // card; clicking it would only push a URL the backend truncates.
-            onSelect={
-              node.isSelectable ? () => onSelect(node.selectLine) : undefined
-            }
-            isSelected={node.isSelected}
-          />
-        );
-
-        // Wrap ONLY the selected node so the connector hook can measure its
-        // center (never siblings). The card is width:100%, so the wrapper box
-        // equals the card box and layout is unchanged.
-        if (node.isSelected) {
-          return (
-            <div
-              key={node.key}
-              ref={(el) => registerSelectedNode(columnIndex, el)}
-            >
-              {card}
-            </div>
+      {/* Header sits OUTSIDE the scroller (like TreePrototype) so the per-column
+          scrollbar spans only the cards — the header's underline stays full
+          column width. */}
+      <button
+        type="button"
+        className={`openings-tree-column__header${
+          selectedNode ? " openings-tree-column__header--active" : ""
+        }`}
+        data-testid="tree-column-header"
+        disabled={headerLine === null}
+        onClick={headerLine !== null ? () => onSelect(headerLine) : undefined}
+      >
+        {headerLabel}
+      </button>
+      {/* The nodes wrapper is the per-column vertical scroller, and the element
+          the connector hook measures (its rect is both the connector x-edge and
+          the y-clamp band). */}
+      <div
+        className="openings-tree-column__nodes"
+        ref={(el) => registerColumn(columnIndex, el)}
+      >
+        {column.nodes.map((node) => {
+          const card = node.isExpanded ? (
+            <OpeningTreeNodeCard
+              variant="expanded"
+              node={node.view}
+              onStartDrill={
+                node.view.drillOpeningKey != null
+                  ? () => onStartDrill(node.view.drillOpeningKey as string)
+                  : undefined
+              }
+            />
+          ) : (
+            <OpeningTreeNodeCard
+              variant="compact"
+              node={node.view}
+              // A non-navigable boundary node renders as a plain (non-button)
+              // card; clicking it would only push a URL the backend truncates.
+              onSelect={
+                node.isSelectable ? () => onSelect(node.selectLine) : undefined
+              }
+              isSelected={node.isSelected}
+            />
           );
-        }
-        return <div key={node.key}>{card}</div>;
-        // NB: every node renders inside a 1:1 wrapper div so the column's flex
-        // children are uniform; only the selected one carries a measure ref.
-      })}
+
+          // Wrap ONLY the selected node so the connector hook can measure its
+          // center (never siblings). The card is width:100%, so the wrapper box
+          // equals the card box and layout is unchanged.
+          if (node.isSelected) {
+            return (
+              <div
+                key={node.key}
+                ref={(el) => registerSelectedNode(columnIndex, el)}
+              >
+                {card}
+              </div>
+            );
+          }
+          return <div key={node.key}>{card}</div>;
+          // NB: every node renders inside a 1:1 wrapper div so the column's flex
+          // children are uniform; only the selected one carries a measure ref.
+        })}
+      </div>
     </div>
   );
 }
@@ -443,10 +480,10 @@ function OpeningsPage() {
                                 cx + 5
                               } ${cy + 5} Z`
                             : off === 1
-                            ? `M ${cx - 5} ${cy - 5} L ${cx} ${cy + 2} L ${
-                                cx + 5
-                              } ${cy - 5} Z`
-                            : null;
+                              ? `M ${cx - 5} ${cy - 5} L ${cx} ${cy + 2} L ${
+                                  cx + 5
+                                } ${cy - 5} Z`
+                              : null;
                         const tip = clampTip(c.x1, c.y1, c.off);
                         const tip2 = clampTip(x2 - 7, c.y2, c.off2);
                         const clamped = c.off || c.off2;
@@ -466,7 +503,11 @@ function OpeningsPage() {
                               <path d={tip} fill="currentColor" opacity={0.8} />
                             )}
                             {tip2 && (
-                              <path d={tip2} fill="currentColor" opacity={0.8} />
+                              <path
+                                d={tip2}
+                                fill="currentColor"
+                                opacity={0.8}
+                              />
                             )}
                           </g>
                         );
