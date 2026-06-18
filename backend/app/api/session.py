@@ -27,6 +27,7 @@ from app.fen import active_color, fen_hash, normalize_fen
 from app.opening_cache import load_cached_rows
 from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain
+from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
 from app.models import (
     Blunder,
@@ -129,6 +130,11 @@ class PositionAnalysis(BaseModel):
     best_move_san: str | None = None
     best_move_eval_cp: int | None = None  # side-to-move-relative
     best_line_uci: list[str] | None = None
+    # Backend trust decision for the POSITION evidence in this entry: True when it
+    # came from a trusted position_analysis winner / legacy v2 projection; False when
+    # it is an untrusted SessionMove seed. Set explicitly per entry — never defaulted
+    # so an untrusted seed can never read as trusted.
+    position_trusted: bool
 
 
 class SessionAnalysisResponse(BaseModel):
@@ -783,15 +789,50 @@ def get_session_analysis(
         else 0
     )
 
+    # Position-analysis export bridges two grains. Storage rows are keyed by
+    # normalized FEN, but the wire response keys by the ORIGINAL full
+    # ``move.fen_before`` (one entry per played position). For each distinct
+    # fen_before we resolve trusted position evidence (storage winner, else trusted
+    # legacy v2 projection) by its normalized FEN; only when none is trusted do we
+    # fall back to the (untrusted) SessionMove seed. The resolver lookups are batched
+    # over the distinct normalized FENs to avoid an N+1.
+    norm_by_fen: dict[str, str | None] = {}
+    for move in session_moves:
+        if move.fen_before and move.fen_before not in norm_by_fen:
+            try:
+                norm_by_fen[move.fen_before] = normalize_fen(move.fen_before)
+            except Exception:
+                norm_by_fen[move.fen_before] = None
+    resolved = resolve_trusted_positions(db, [n for n in norm_by_fen.values() if n])
+
     position_analysis: dict[str, PositionAnalysis] = {}
     for move in session_moves:
-        if move.fen_before and move.best_move_uci and move.fen_before not in position_analysis:
+        if not move.fen_before or move.fen_before in position_analysis:
+            continue
+        norm = norm_by_fen.get(move.fen_before)
+        tp = resolved.get(norm) if norm else None
+        if tp is not None:
+            # ``tp.best_eval`` is white-relative; the wire field is
+            # side-to-move-relative, so sign-convert by the active color.
+            sign = 1 if active_color(move.fen_before) == "white" else -1
+            best_move_eval_cp = tp.best_eval * sign if tp.best_eval is not None else None
+            position_analysis[move.fen_before] = PositionAnalysis(
+                best_move_uci=tp.best_move_uci,
+                best_move_san=tp.best_move_san,
+                best_move_eval_cp=best_move_eval_cp,
+                best_line_uci=tp.best_line_uci,
+                position_trusted=True,
+            )
+        elif move.best_move_uci:
+            # Untrusted legacy seed: SessionMove eval is already side-to-move-relative.
             position_analysis[move.fen_before] = PositionAnalysis(
                 best_move_uci=move.best_move_uci,
                 best_move_san=move.best_move_san,
                 best_move_eval_cp=move.best_move_eval_cp,
                 best_line_uci=decode_uci_line(move.best_line_uci),
+                position_trusted=False,
             )
+        # else: no usable best move at any trust level -> no entry.
 
     # Completion metadata: derive expected_total_moves from stored PGN
     expected_total_moves = expected_total_moves_from_pgn(game_session.pgn)

@@ -5,10 +5,15 @@ from sqlalchemy import create_engine, tuple_
 from sqlalchemy.orm import sessionmaker
 
 from app.analysis_cache_repo import write_analysis_cache_rows
-from app.analysis_profiles import BROWSER_PROFILE_ID
+from app.analysis_profiles import (
+    BROWSER_PROFILE_ID,
+    CANONICAL_PROFILE_ID,
+    IDENTITY_FIELDS,
+    get_profile,
+)
 from app.evidence_contracts import MINIMAL_PLAYED_EVAL
 from app.fen import normalize_fen
-from app.models import AnalysisCache, Base
+from app.models import AnalysisCache, Base, PositionAnalysisRow
 from app.tree_eval import (
     MoveEval,
     eval_for_perspective,
@@ -33,15 +38,40 @@ def session(tmp_path):
     engine.dispose()
 
 
-def _seed(session, *, fen, uci, source="game", **fields):
-    """Insert a cache row, computing normalized_fen_before like the real writer."""
+def _canon_identity(profile_id: str = CANONICAL_PROFILE_ID) -> dict:
+    """Full canonical identity + the legacy resolver-complete-v2 contract, so a
+    seeded row passes the Phase-4 move/position trust gates. Identity (not the
+    ``source`` column) is what grants trust, so callers may still vary ``source``."""
+    profile = get_profile(profile_id)
+    values = {
+        "analysis_profile_id": profile_id,
+        "evidence_contract_id": "resolver-complete-v2",
+    }
+    for field in IDENTITY_FIELDS:
+        values[field] = getattr(profile, field)
+    return values
+
+
+def _seed(session, *, fen, uci, source="game", trusted=True, **fields):
+    """Insert a cache row, computing normalized_fen_before like the real writer.
+
+    Rows are TRUSTED by default (full canonical identity + resolver-complete-v2 +
+    a classification, so they clear both the move- and position-grain trust gates the
+    Phase-4 lookups apply). Pass ``trusted=False`` for an untrusted no-identity row.
+    """
+    row_fields = dict(fields)
+    move_san = row_fields.pop("move_san", uci)
+    if trusted:
+        row_fields.setdefault("classification", "best")
+        for key, value in _canon_identity().items():
+            row_fields.setdefault(key, value)
     row = AnalysisCache(
         fen_before=fen,
         normalized_fen_before=normalize_fen(fen),
         move_uci=uci,
-        move_san=fields.pop("move_san", uci),
+        move_san=move_san,
         source=source,
-        **fields,
+        **row_fields,
     )
     session.add(row)
     session.commit()
@@ -131,20 +161,24 @@ def test_root_eval_from_non_best_move_row(session):
         uci="e2e4",
         played_eval=18,
         best_move_uci="d2d4",
+        best_line_uci="d2d4 g8f6",
         best_eval=30,
     )
     assert lookup_root_eval(session, START) == MoveEval(cp=30, mate=None)
 
 
 def test_root_eval_prefers_complete_best_move_row(session):
-    _seed(session, fen=START, uci="e2e4", best_move_uci="d2d4", best_eval=25)
-    _seed(session, fen=START, uci="d2d4", best_move_uci="d2d4", best_eval=31)
+    _seed(session, fen=START, uci="e2e4", best_move_uci="d2d4",
+          best_line_uci="d2d4 d7d5", best_eval=25)
+    _seed(session, fen=START, uci="d2d4", best_move_uci="d2d4",
+          best_line_uci="d2d4 d7d5", best_eval=31)
     # Both have usable best_eval; the row where move==best_move is preferred.
     assert lookup_root_eval(session, START) == MoveEval(cp=31, mate=None)
 
 
 def test_root_eval_mate(session):
-    _seed(session, fen=START, uci="e2e4", best_move_uci="e2e4", best_eval=20, best_eval_mate=5)
+    _seed(session, fen=START, uci="e2e4", best_move_uci="e2e4",
+          best_line_uci="e2e4 e7e5", best_eval=20, best_eval_mate=5)
     assert lookup_root_eval(session, START) == MoveEval(cp=None, mate=5)
 
 
@@ -181,6 +215,108 @@ def test_batch_mixes_exact_fallback_and_miss(session):
 
 def test_empty_requests(session):
     assert lookup_move_evals(session, []) == {}
+
+
+# --- Phase 4: trust gate + position_analysis storage resolution ---------------
+
+
+def _seed_position(
+    session,
+    *,
+    fen,
+    best_move_uci="f1c4",
+    best_line_uci="f1c4 g8f6",
+    best_eval=None,
+    best_eval_mate=None,
+    profile_id=CANONICAL_PROFILE_ID,
+):
+    """Insert a trusted position_analysis storage winner (position-complete-v1)."""
+    profile = get_profile(profile_id)
+    identity = {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+    row = PositionAnalysisRow(
+        normalized_fen=normalize_fen(fen),
+        fen=fen,
+        best_move_uci=best_move_uci,
+        best_move_san=best_move_uci,
+        best_line_uci=best_line_uci,
+        best_eval=best_eval,
+        best_eval_mate=best_eval_mate,
+        source="precomputed",
+        analysis_profile_id=profile_id,
+        evidence_contract_id="position-complete-v1",
+        **identity,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def test_root_eval_storage_winner_overrides_disagreeing_cache_sibling(session):
+    # A trusted storage winner drives the root eval; a disagreeing (even trusted)
+    # analysis_cache sibling is never consulted once storage resolves.
+    _seed_position(session, fen=POS_A, best_eval=42)
+    _seed(session, fen=POS_A, uci="f1c4", best_move_uci="f1c4",
+          best_line_uci="f1c4 g8f6", best_eval=99)
+    assert lookup_root_eval(session, POS_A) == MoveEval(cp=42, mate=None)
+
+
+def test_root_eval_storage_miss_uses_trusted_legacy_excludes_untrusted(session):
+    # No storage row: a trusted legacy v2 row supplies the root; an untrusted browser
+    # sibling at the same position is filtered out before ranking.
+    _seed(session, fen=POS_A, uci="f1c4", best_move_uci="f1c4",
+          best_line_uci="f1c4 g8f6", best_eval=35)
+    _seed(session, fen=POS_A, uci="c2c4", best_move_uci="c2c4",
+          best_line_uci="c2c4 d7d5", best_eval=99, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    assert lookup_root_eval(session, POS_A) == MoveEval(cp=35, mate=None)
+
+
+def test_root_eval_ranks_at_normalized_grain_not_exact_fen_first(session):
+    # Finding 4: the exact-FEN trusted row is CP-only; a trusted MATE row lives at a
+    # clock variant (same normalized FEN, different full FEN). Normalized-grain
+    # ranking must pick the mate row — the old exact-FEN-first behavior would have
+    # wrongly returned the CP eval of the exact row.
+    _seed(session, fen=POS_A, uci="f1c4", best_move_uci="f1c4",
+          best_line_uci="f1c4 g8f6", best_eval=20)
+    _seed(session, fen=POS_B, uci="f1c4", best_move_uci="f1c4",
+          best_line_uci="f1c4 g8f6", best_eval_mate=3)
+    assert lookup_root_eval(session, POS_A) == MoveEval(cp=None, mate=3)
+
+
+def test_move_eval_mate_outranks_cp_among_trusted(session):
+    # Move-grain mate ranking among trusted rows: a played-mate row outranks a
+    # CP-only row at the same normalized position+move.
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=10)
+    _seed(
+        session,
+        fen="r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 6 7",
+        uci="f1c4",
+        played_eval=20,
+        played_eval_mate=2,
+    )
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=None, mate=2)
+
+
+def test_move_eval_trust_filter_exact_path(session):
+    # An untrusted browser row on the EXACT key must not drive the eval; with no
+    # trusted alternative the result is None.
+    _seed(session, fen=POS_A, uci="f1c4", played_eval=77, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] is None
+
+
+def test_move_eval_trust_filter_lets_trusted_transposition_win(session):
+    # Untrusted exact row is rejected, but a trusted transposition still resolves.
+    _seed(session, fen=POS_A, uci="f1c4", played_eval=77, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=18)
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=18, mate=None)
 
 
 # --- perspective conversion ----------------------------------------------------
@@ -227,6 +363,9 @@ def test_writer_populates_normalized_fen_before(session):
     )
     row = session.query(AnalysisCache).one()
     assert row.normalized_fen_before == normalize_fen(POS_A)
-    # And the lookup resolves the clock-variant via that stored normalized value.
+    # The row is a non-authoritative browser row, so the Phase-4 move-trust gate keeps
+    # it out of the eval lookup even though its normalized column would resolve the
+    # clock variant. (Trusted transposition resolution is covered by the fallback
+    # tests above, which seed identity-bearing rows.)
     out = lookup_move_evals(session, [(POS_B, "f1c4")])
-    assert out[(POS_B, "f1c4")] == MoveEval(cp=25, mate=None)
+    assert out[(POS_B, "f1c4")] is None

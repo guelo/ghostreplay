@@ -22,13 +22,10 @@ from typing import Iterable
 from sqlalchemy import tuple_
 from sqlalchemy.orm import Session
 
+from app.analysis_trust import cache_row_as_move_dict, move_trust_flags, source_rank
 from app.fen import normalize_fen
 from app.models import AnalysisCache
-
-# Deterministic source preference for the normalized fallback: a precomputed
-# opening-book eval is preferred over a player-game eval, then any other source.
-_SOURCE_RANK = {"precomputed": 0, "game": 1}
-_OTHER_SOURCE_RANK = 2
+from app.position_analysis_repo import TrustedPosition, resolve_trusted_position
 
 
 @dataclass(frozen=True)
@@ -37,10 +34,6 @@ class MoveEval:
 
     cp: int | None
     mate: int | None
-
-
-def _source_rank(source: str | None) -> int:
-    return _SOURCE_RANK.get(source or "", _OTHER_SOURCE_RANK)
 
 
 def _played_eval(row: AnalysisCache) -> MoveEval | None:
@@ -52,30 +45,26 @@ def _played_eval(row: AnalysisCache) -> MoveEval | None:
     return None
 
 
-def _best_eval(row: AnalysisCache) -> MoveEval | None:
-    """Eval of the position under the engine's best move (mate preferred), or None."""
-    if row.best_eval_mate is not None:
-        return MoveEval(cp=None, mate=row.best_eval_mate)
-    if row.best_eval is not None:
-        return MoveEval(cp=row.best_eval, mate=None)
+def _best_move_eval(tp: TrustedPosition) -> MoveEval | None:
+    """White-relative position eval from a resolved trusted position (mate first)."""
+    if tp.best_eval_mate is not None:
+        return MoveEval(cp=None, mate=tp.best_eval_mate)
+    if tp.best_eval is not None:
+        return MoveEval(cp=tp.best_eval, mate=None)
     return None
 
 
+def _move_trusted(row: AnalysisCache) -> bool:
+    """True when the row's PLAYED-move evidence passes the move-grain trust gate."""
+    return move_trust_flags(cache_row_as_move_dict(row))[2]
+
+
 def _move_sort_key(row: AnalysisCache) -> tuple:
+    # Ranks an already move-trusted candidate list (trust filtering precedes this).
     # Prefer rows with mate data, then precomputed > game > other, then lowest id.
     return (
         0 if row.played_eval_mate is not None else 1,
-        _source_rank(row.source),
-        row.id,
-    )
-
-
-def _root_sort_key(row: AnalysisCache) -> tuple:
-    # Prefer mate data, then the canonical complete best-move row, then source, id.
-    return (
-        0 if row.best_eval_mate is not None else 1,
-        0 if (row.best_move_uci is not None and row.move_uci == row.best_move_uci) else 1,
-        _source_rank(row.source),
+        source_rank(row.source),
         row.id,
     )
 
@@ -88,9 +77,11 @@ def lookup_move_evals(
 
     Batched into at most two indexed queries regardless of node count: never scans
     ``analysis_cache`` and never queries once per child. Exact full-FEN+UCI match
-    wins; otherwise the indexed normalized-FEN transposition fallback is used, with
-    deterministic selection (mate data, then precomputed > game > other, then id).
-    An entry is ``None`` only when no usable eval exists.
+    wins; otherwise the indexed normalized-FEN transposition fallback is used. Both
+    paths apply the move-grain trust gate FIRST — an untrusted browser/legacy row can
+    never drive a played eval — then select deterministically among the trusted
+    survivors (mate data, then precomputed > game > other, then id). An entry is
+    ``None`` only when no usable trusted eval exists.
     """
     # Dedupe while preserving caller order; every request gets an entry.
     reqs = list(dict.fromkeys((f, u) for f, u in requests))
@@ -110,12 +101,12 @@ def lookup_move_evals(
     norm_of: dict[tuple[str, str], str] = {}
     for fen, uci in reqs:
         row = exact_map.get((fen, uci))
-        if row is not None:
+        if row is not None and _move_trusted(row):
             ev = _played_eval(row)
             if ev is not None:
                 result[(fen, uci)] = ev
                 continue
-        # Exact miss, or exact row carried no usable eval -> normalized fallback.
+        # Exact miss, untrusted exact row, or no usable eval -> normalized fallback.
         try:
             norm_of[(fen, uci)] = normalize_fen(fen)
         except Exception:
@@ -138,6 +129,9 @@ def lookup_move_evals(
     )
     by_norm_move: dict[tuple[str, str], list[AnalysisCache]] = {}
     for r in fallback_rows:
+        # Drop untrusted rows BEFORE ranking so an untrusted eval can never win.
+        if not _move_trusted(r):
+            continue
         if _played_eval(r) is None:
             continue
         by_norm_move.setdefault((r.normalized_fen_before, r.move_uci), []).append(r)
@@ -153,35 +147,23 @@ def lookup_move_evals(
 def lookup_root_eval(session: Session, starting_fen: str) -> MoveEval | None:
     """White-relative eval for a column-0 root (the to-move position itself).
 
-    Uses ``best_eval`` — the eval of the position under the engine's best move, which
-    is a property of the position, not of any one row's played move. Any row at the
-    starting FEN that carries a usable best eval qualifies; the canonical complete
-    best-move row (``move_uci == best_move_uci``) is merely preferred in ranking.
-    Exact FEN first, then normalized fallback. None when no usable best eval exists.
+    Position-grain evidence (``best_eval`` under the engine's best move) is resolved
+    by :func:`app.position_analysis_repo.resolve_trusted_position`: the
+    ``position_analysis`` storage winner, else a trusted legacy ``resolver-complete-v2``
+    projection at the normalized FEN. An untrusted browser/legacy sibling can never
+    surface here. The resolver ranks at the NORMALIZED grain (no exact-FEN-first
+    preference), so a trusted mate/stronger row at a clock variant is not missed.
+    ``None`` when no trusted position eval exists.
     """
     try:
         norm = normalize_fen(starting_fen)
     except Exception:
-        norm = None
-
-    rows = (
-        session.query(AnalysisCache)
-        .filter(AnalysisCache.fen_before == starting_fen)
-        .all()
-    )
-    usable = [r for r in rows if _best_eval(r) is not None]
-
-    if not usable and norm is not None:
-        rows = (
-            session.query(AnalysisCache)
-            .filter(AnalysisCache.normalized_fen_before == norm)
-            .all()
-        )
-        usable = [r for r in rows if _best_eval(r) is not None]
-
-    if not usable:
         return None
-    return _best_eval(min(usable, key=_root_sort_key))
+
+    tp = resolve_trusted_position(session, norm)
+    if tp is None:
+        return None
+    return _best_move_eval(tp)
 
 
 def eval_for_perspective(

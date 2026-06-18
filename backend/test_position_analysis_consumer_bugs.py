@@ -108,11 +108,6 @@ def _seed(session, *, fen, uci, **fields):
 # --- 1. lookup_move_evals: untrusted normalized-fallback read (tree_eval.py) ----
 
 
-@pytest.mark.xfail(
-    reason="g-position-analysis Phase 4 cutover — lookup_move_evals' normalized "
-    "fallback has no trust filter, so an untrusted browser eval currently drives it",
-    strict=True,
-)
 def test_lookup_move_evals_untrusted_normalized_fallback(session):
     # ONLY an untrusted browser row supplies a played_eval, stored under a
     # clock-variant FEN so the request resolves via the normalized fallback. No
@@ -184,12 +179,6 @@ def test_lookup_move_evals_trusted_canonical_still_resolves(session):
 # --- 2. g-ul4p mixed canonical/browser sibling case (tree_eval root ranking) ----
 
 
-@pytest.mark.xfail(
-    reason="g-position-analysis Phase 4 cutover — _root_sort_key has no "
-    "authoritative/contract/trust filter, so the untrusted browser sibling can "
-    "surface as the root eval",
-    strict=True,
-)
 def test_root_eval_gul4p_untrusted_sibling_does_not_surface(session):
     # Trusted canonical c1f4 row: the engine's best move here is c2c4 (so this row's
     # move != its best_move). Full linux-canonical identity + resolver-complete-v2.
@@ -280,12 +269,6 @@ def _position_entry(client, auth_headers, session_id, user_id):
     return response.json()["position_analysis"][STARTING_FEN]
 
 
-@pytest.mark.xfail(
-    reason="g-position-analysis Phase 4 cutover — the position_analysis export "
-    "surfaces an untrusted/legacy best-move seed with no trust signal; Phase 4 must "
-    "mark such seeds position_trusted=False",
-    strict=True,
-)
 def test_session_position_analysis_untrusted_seed_marked_untrusted(
     client, auth_headers, create_game_session
 ):
@@ -297,20 +280,18 @@ def test_session_position_analysis_untrusted_seed_marked_untrusted(
         _position_entry(client, auth_headers, session_id, user_id)
     )
 
-    # (a) the untrusted seed currently drives the exported best move, AND
+    # (a) the untrusted browser seed still supplies the exported best move (no
+    # trusted position_analysis row exists — browser rows cannot enter storage), AND
     assert entry.best_move_uci == "e2e4"
-    # (b) the correct outcome is an explicit untrusted marker. DIRECT attribute
-    # access: today PositionAnalysis (session.py) has no position_trusted field, so
-    # this raises AttributeError -> xfailed. After Phase 4 marks the seed it reads
-    # False -> passes -> xpass -> strict-fail tripwire.
+    # (b) it is explicitly marked untrusted at the position grain.
     assert entry.position_trusted is False
 
 
 def test_session_position_analysis_current_shape(
     client, auth_headers, create_game_session
 ):
-    # Green characterization (current shape). When Phase 4 adds position_trusted this
-    # MUST be updated — that is the point: it shows Phase 4 exactly what changes.
+    # Characterization of the post-Phase-4 shape: the untrusted browser seed is
+    # exported verbatim AND carries an explicit position_trusted=False signal.
     user_id = 123
     session_id = create_game_session(user_id=user_id, player_color="white")
     _seed_untrusted_session_move(client, auth_headers, session_id, user_id)
@@ -318,4 +299,4 @@ def test_session_position_analysis_current_shape(
     entry = _position_entry(client, auth_headers, session_id, user_id)
 
     assert entry["best_move_uci"] == "e2e4"  # raw seed, exported verbatim
-    assert "position_trusted" not in entry  # no trust signal today
+    assert entry["position_trusted"] is False  # explicit untrusted marker

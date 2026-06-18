@@ -40,14 +40,21 @@ Concurrency model (two axes):
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Iterable
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
 from app.analysis_profiles import IDENTITY_FIELDS, get_profile
+from app.analysis_trust import (
+    cache_row_as_position_dict,
+    position_trust_flags,
+    source_rank,
+)
 from app.evidence_contracts import contract_satisfied
-from app.models import PositionAnalysisRow
+from app.models import AnalysisCache, PositionAnalysisRow, decode_uci_line
 from app.position_analysis_policy import (
     POSITION_FACT_FIELDS,
     POSITION_METADATA_FIELDS,
@@ -245,3 +252,156 @@ def write_position_analysis_row(db: Session, data: dict) -> PositionReason:
     # KEEP: nothing to do.
     log.debug("position_analysis %s -> %s", normalized_fen, reason.value)
     return reason
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — read-only trusted-position resolution for payload consumers
+# ---------------------------------------------------------------------------
+#
+# The single resolver every payload-producing consumer (tree_eval, session export,
+# /api/analysis/lookup) calls so the "storage winner OR trusted legacy v2
+# projection" two-tier logic lives in exactly one tested place. It owns
+# position-grain ranking locally (``_legacy_position_sort_key``) rather than
+# importing ``tree_eval`` — that reverse edge would form a cycle
+# (position_analysis_repo → tree_eval → position_analysis_repo).
+
+
+@dataclass(frozen=True)
+class TrustedPosition:
+    """Trusted position-grain evidence resolved for one normalized FEN.
+
+    Evals are WHITE-RELATIVE (as stored). At least one of ``best_eval`` /
+    ``best_eval_mate`` is non-None for any resolved (trusted) position — the
+    position-complete contract guarantees a usable position eval — but callers
+    needing a side-to-move-relative eval must sign-convert themselves.
+    """
+
+    best_move_uci: str
+    best_move_san: str | None
+    best_line_uci: list[str] | None
+    best_eval: int | None  # white-relative
+    best_eval_mate: int | None  # white-relative
+
+
+def get_position_analysis(
+    db: Session, normalized_fen: str
+) -> PositionAnalysisRow | None:
+    """Read the stored winner for ``normalized_fen`` (no lock; read path).
+
+    Distinct from :func:`_load_existing`, which takes ``FOR UPDATE`` for the write
+    path. Consumers must never lock on a read.
+    """
+    return (
+        db.query(PositionAnalysisRow)
+        .filter(PositionAnalysisRow.normalized_fen == normalized_fen)
+        .first()
+    )
+
+
+def get_position_analyses(
+    db: Session, normalized_fens: Iterable[str]
+) -> dict[str, PositionAnalysisRow]:
+    """Batch-read stored winners for several normalized FENs (one ``IN`` query).
+
+    Required so ``tree_eval`` / ``session`` / ``lookup`` never issue one query per
+    position. Missing FENs are simply absent from the result map.
+    """
+    norms = list(dict.fromkeys(n for n in normalized_fens if n))
+    if not norms:
+        return {}
+    rows = (
+        db.query(PositionAnalysisRow)
+        .filter(PositionAnalysisRow.normalized_fen.in_(norms))
+        .all()
+    )
+    return {r.normalized_fen: r for r in rows}
+
+
+def _legacy_position_sort_key(row: AnalysisCache) -> tuple:
+    """Position-grain ranking over trusted legacy ``analysis_cache`` rows.
+
+    Mirrors the deleted ``tree_eval._root_sort_key``: prefer mate data, then the
+    canonical complete best-move row (``move_uci == best_move_uci``), then the
+    deterministic source preference, then lowest id. It ranks rows that have ALREADY
+    passed the position trust gate, at the NORMALIZED-FEN grain (callers must not
+    prefer an exact full-FEN row first — that could miss a trusted mate/stronger row
+    at a clock variant of the same normalized position).
+    """
+    return (
+        0 if row.best_eval_mate is not None else 1,
+        0 if (row.best_move_uci is not None and row.move_uci == row.best_move_uci) else 1,
+        source_rank(row.source),
+        row.id,
+    )
+
+
+def _trusted_position_from_row(row) -> TrustedPosition:
+    """Build a :class:`TrustedPosition` from a storage OR analysis_cache row.
+
+    Both row types expose the same five position columns; ``best_line_uci`` is
+    decoded from its space-joined storage form to a list.
+    """
+    return TrustedPosition(
+        best_move_uci=row.best_move_uci,
+        best_move_san=row.best_move_san,
+        best_line_uci=decode_uci_line(row.best_line_uci),
+        best_eval=row.best_eval,
+        best_eval_mate=row.best_eval_mate,
+    )
+
+
+def resolve_trusted_positions(
+    db: Session, normalized_fens: Iterable[str]
+) -> dict[str, TrustedPosition | None]:
+    """Resolve trusted position evidence for several normalized FENs (batched).
+
+    Two tiers per FEN, each as a single ``IN`` query to avoid N+1:
+
+    1. **Storage** — the ``position_analysis`` winner, used iff it is
+       position-trusted.
+    2. **Trusted legacy fallback** — the strongest position-trusted
+       ``resolver-complete-v2`` ``analysis_cache`` row at the SAME normalized FEN,
+       ranked by :func:`_legacy_position_sort_key` at the normalized grain.
+
+    A ``None`` value for a FEN means no trusted position exists; the caller takes
+    its own (untrusted) fallback.
+    """
+    norms = list(dict.fromkeys(n for n in normalized_fens if n))
+    result: dict[str, TrustedPosition | None] = {n: None for n in norms}
+    if not norms:
+        return result
+
+    storage = get_position_analyses(db, norms)
+    remaining: list[str] = []
+    for n in norms:
+        row = storage.get(n)
+        if row is not None and position_trust_flags(_row_to_dict(row))[2]:
+            result[n] = _trusted_position_from_row(row)
+        else:
+            remaining.append(n)
+
+    if not remaining:
+        return result
+
+    cache_rows = (
+        db.query(AnalysisCache)
+        .filter(AnalysisCache.normalized_fen_before.in_(remaining))
+        .all()
+    )
+    by_norm: dict[str, list[AnalysisCache]] = {}
+    for r in cache_rows:
+        if not position_trust_flags(cache_row_as_position_dict(r))[2]:
+            continue
+        by_norm.setdefault(r.normalized_fen_before, []).append(r)
+    for n in remaining:
+        rows = by_norm.get(n)
+        if rows:
+            result[n] = _trusted_position_from_row(min(rows, key=_legacy_position_sort_key))
+    return result
+
+
+def resolve_trusted_position(
+    db: Session, normalized_fen: str
+) -> TrustedPosition | None:
+    """Single-FEN convenience wrapper over :func:`resolve_trusted_positions`."""
+    return resolve_trusted_positions(db, [normalized_fen]).get(normalized_fen)

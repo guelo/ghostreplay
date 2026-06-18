@@ -40,12 +40,16 @@ from enum import Enum
 
 from app.analysis_profiles import (
     AUTHORITATIVE_PROFILE_PRIORITY,
-    IDENTITY_FIELDS,
     Profile,
     StrengthComparison,
     compare_search_strength,
     get_profile,
 )
+# Single definition of the dict-based authority gate lives in analysis_trust (the
+# neutral bottom-of-graph module shared with the read-time consumers). Re-exported
+# here so existing importers of ``position_analysis_policy._effectively_authoritative``
+# keep working.
+from app.analysis_trust import _effectively_authoritative
 from app.evidence_contracts import (
     POSITION_COMPLETE,
     is_strict_successor,
@@ -112,20 +116,6 @@ class WinnerSelection:
     # Candidates in deterministic preference order (winner is not necessarily
     # first: a strictly-stronger but preference-later candidate may have won).
     ordered: tuple[PositionCandidate, ...]
-
-
-def _effectively_authoritative(row: dict) -> bool:
-    """Profile is authoritative+active AND every IDENTITY_FIELDS column matches.
-
-    Same gate as ``api/analysis.py:_is_authoritative`` /
-    ``analysis_cache_repo._identity_verified``, expressed over a row dict so this
-    module stays DB-free. Excludes browser-game / JeffML (non-authoritative) and
-    any row whose stored identity does not back up its claimed profile.
-    """
-    profile = get_profile(row.get("analysis_profile_id"))
-    if profile is None or not profile.authoritative or not profile.active:
-        return False
-    return all(row.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
 
 
 def is_eligible_position_candidate(row: dict) -> bool:

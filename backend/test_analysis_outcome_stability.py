@@ -153,12 +153,16 @@ def test_session_analysis_and_cache_lookup_agree(
     ).json()
     cached = lookup["results"][f"{FEN}::e2e4"]
 
-    # AC7: the two surfaces agree on the values downstream decisions read.
+    # AC7: the two surfaces agree on the MOVE-grain values downstream decisions read.
     assert move["eval_delta"] == eval_delta == cached["eval_delta"]
     # AC5: the production classification round-trips through both surfaces.
     assert move["classification"] == classification == cached["classification"]
-    # White move => white-relative best eval agrees across surfaces.
-    assert move["best_move_eval_cp"] == best_eval == cached["best_eval"]
+    # Post g-position-analysis.4: best-move eval is a POSITION-grain fact. The session
+    # moves list still carries the uploaded seed, but the cache lookup trust-gates it
+    # and suppresses it for this untrusted browser upload (position_trusted False).
+    assert move["best_move_eval_cp"] == best_eval
+    assert cached["best_eval"] is None
+    assert cached["position_trusted"] is False
     # Boundary decision derived from the agreed delta is consistent.
     assert (eval_delta >= RECORDABLE_FAILURE_THRESHOLD_CP) == (eval_delta >= 50)
 

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import chess
 import pytest
 
+from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.fen import normalize_fen
 from app.models import (
     AnalysisCache,
@@ -787,11 +788,18 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
         traversal_count=6, live_attempts=2, live_passes=1, live_fails=1,
         computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
     ))
-    # Eval rows: a played eval for 1.e4 and a best eval at the start position.
+    # Eval rows: a played eval for 1.e4 and a best eval at the start position. The
+    # Phase-4 lookups apply the move/position trust gate, so this row carries full
+    # canonical identity + the legacy resolver-complete-v2 contract (otherwise an
+    # unidentified row would be rejected and both evals would read null).
+    canon = get_profile(CANONICAL_PROFILE_ID)
+    identity = {f: getattr(canon, f) for f in IDENTITY_FIELDS}
     db_session.add(AnalysisCache(
         fen_before=start_full, normalized_fen_before=normalize_fen(start_full),
         move_uci="e2e4", move_san="e4", played_eval=33, best_eval=28,
-        best_move_uci="e2e4", source="precomputed",
+        best_move_uci="e2e4", best_line_uci="e2e4 e7e5", classification="best",
+        source="precomputed", analysis_profile_id=CANONICAL_PROFILE_ID,
+        evidence_contract_id="resolver-complete-v2", **identity,
     ))
     db_session.commit()
 

@@ -6,7 +6,8 @@ import pytest
 
 import uuid
 
-from app.models import AnalysisCache, GameSession, SessionMove
+from app.fen import normalize_fen
+from app.models import AnalysisCache, GameSession, PositionAnalysisRow, SessionMove
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -45,10 +46,15 @@ def test_lookup_returns_cached_hit(client, auth_headers, db_session):
     assert key in data["results"]
     result = data["results"][key]
     assert result["move_san"] == "e4"
+    # Move-grain evidence stays from the exact (fen, move) row.
     assert result["played_eval"] == 20
-    assert result["best_eval"] == 20
     assert result["eval_delta"] == 0
     assert result["classification"] is None  # legacy row without classification
+    # Position-grain best_eval is now resolved separately and is null for this
+    # untrusted legacy row (no identity), never copied off the move row.
+    assert result["best_eval"] is None
+    assert result["position_trusted"] is False
+    assert result["move_trusted"] is False
 
 
 def test_lookup_returns_empty_for_miss(client, auth_headers):
@@ -503,8 +509,10 @@ def test_lookup_returns_classification_when_present(client, auth_headers, db_ses
 def test_best_line_uci_round_trips_through_cache_and_lookup(
     client, auth_headers, create_game_session, db_session
 ):
-    """best_line_uci is stored on both session_moves and analysis_cache and
-    served back through the /lookup cache hit path as a UCI move list."""
+    """best_line_uci is stored on both session_moves and analysis_cache from a
+    browser upload. Post-Phase-4 it is a POSITION-grain fact, so /lookup only serves
+    it from a TRUSTED position — a non-authoritative browser upload does not surface
+    it (null), even though it is persisted."""
     from app.models import SessionMove
 
     session_id = create_game_session(user_id=123, player_color="white")
@@ -555,7 +563,9 @@ def test_best_line_uci_round_trips_through_cache_and_lookup(
     )
     assert lookup.status_code == 200
     result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
-    assert result["best_line_uci"] == ["e2e4", "e7e5", "g1f3"]
+    # Browser upload is untrusted at the position grain -> best_line_uci is suppressed.
+    assert result["best_line_uci"] is None
+    assert result["position_trusted"] is False
 
 
 def test_session_analysis_position_analysis_includes_best_line_uci(
@@ -791,3 +801,158 @@ def test_trust_false_when_v2_validation_fails(client, auth_headers, db_session):
     assert result["authoritative"] is True
     assert result["contract_satisfied"] is False
     assert result["trusted_for_resolution"] is False
+
+
+# --- Phase 4: grain-split lookup (separate position + move evidence) -----------
+
+# Clock variants of one position (same normalized FEN) so the move row and the
+# position storage row live at different full FENs -> proves transposition.
+_REQ_FEN = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+_STORE_FEN = "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 6 7"
+
+
+def _seed_position_storage(db_session, *, fen, best_move_uci, best_line_uci,
+                           best_eval=None, best_eval_mate=None):
+    from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
+
+    profile = get_profile(CANONICAL_PROFILE_ID)
+    identity = {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+    db_session.add(PositionAnalysisRow(
+        normalized_fen=normalize_fen(fen), fen=fen,
+        best_move_uci=best_move_uci, best_move_san=best_move_uci,
+        best_line_uci=best_line_uci, best_eval=best_eval, best_eval_mate=best_eval_mate,
+        source="precomputed", analysis_profile_id=CANONICAL_PROFILE_ID,
+        evidence_contract_id="position-complete-v1", **identity,
+    ))
+    db_session.commit()
+
+
+def _lookup(client, auth_headers, fen, move_uci):
+    return client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": fen, "move_uci": move_uci}]},
+        headers=auth_headers(),
+    ).json()["results"]
+
+
+def test_lookup_both_grains_position_by_norm_move_by_exact(client, auth_headers, db_session):
+    # Move evidence comes from the exact (fen, move_uci) row; position evidence is
+    # resolved separately by NORMALIZED FEN from a clock-variant storage winner whose
+    # best move DIFFERS from the move row -> flattened best is derived from the
+    # position payload, never copied off the move row.
+    _seed_cache(db_session, [{
+        "fen_before": _REQ_FEN, "normalized_fen_before": normalize_fen(_REQ_FEN),
+        "move_uci": "f1c4", "move_san": "Bc4",
+        "best_move_uci": "f1c4", "best_move_san": "Bc4", "best_line_uci": "f1c4 g8f6",
+        "played_eval": 18, "best_eval": 18, "eval_delta": 0, "classification": "best",
+        "source": "precomputed", **_canonical_v2_seed_values(),
+    }])
+    _seed_position_storage(db_session, fen=_STORE_FEN, best_move_uci="f1b5",
+                           best_line_uci="f1b5 a7a6", best_eval=40)
+
+    result = _lookup(client, auth_headers, _REQ_FEN, "f1c4")[f"{_REQ_FEN}::f1c4"]
+    # Move grain (exact row).
+    assert result["played_eval"] == 18
+    assert result["classification"] == "best"
+    assert result["move_trusted"] is True
+    # Position grain (transposed storage winner), independent of the move grain.
+    assert result["position_trusted"] is True
+    assert result["best_move_uci"] == "f1b5"        # storage, not the f1c4 move row
+    assert result["best_line_uci"] == ["f1b5", "a7a6"]
+    assert result["best_eval"] == 40                # white-relative, no sign convert
+
+
+def test_lookup_move_only_untrusted_position_null(client, auth_headers, db_session):
+    # An untrusted/legacy move row with no trusted position: a result is still emitted
+    # (gated on the exact move row), but position_trusted is False and every flattened
+    # best-move field is null.
+    _seed_cache(db_session, [{
+        "fen_before": STARTING_FEN, "normalized_fen_before": normalize_fen(STARTING_FEN),
+        "move_uci": "e2e4", "move_san": "e4", "best_move_uci": "e2e4",
+        "best_line_uci": "e2e4 e7e5", "played_eval": 20, "best_eval": 20,
+        "eval_delta": 0, "classification": "best",
+    }])
+
+    results = _lookup(client, auth_headers, STARTING_FEN, "e2e4")
+    result = results[f"{STARTING_FEN}::e2e4"]
+    assert result["move_san"] == "e4"
+    assert result["played_eval"] == 20            # move grain retained
+    assert result["move_trusted"] is False
+    assert result["position_trusted"] is False
+    assert result["best_move_uci"] is None
+    assert result["best_line_uci"] is None
+    assert result["best_eval"] is None
+    assert result["best_eval_mate"] is None
+
+
+def test_lookup_position_only_no_move_row_suppressed(client, auth_headers, db_session):
+    # A trusted storage row exists but NO exact move row: no result is emitted
+    # (position-only hits are intentionally suppressed until Phase 5).
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="e2e4",
+                           best_line_uci="e2e4 e7e5", best_eval=25)
+
+    results = _lookup(client, auth_headers, STARTING_FEN, "e2e4")
+    assert results == {}
+
+
+def test_lookup_move_complete_mate_only_contract_satisfied(client, auth_headers, db_session):
+    # A native move-complete-v1 row whose played evidence is mate-only must read
+    # contract_satisfied=True (move-complete-v1 accepts played_eval_mate) and
+    # move_trusted=True -- the two diagnostics must agree.
+    from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
+
+    profile = get_profile(CANONICAL_PROFILE_ID)
+    identity = {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+    _seed_cache(db_session, [{
+        "fen_before": STARTING_FEN, "normalized_fen_before": normalize_fen(STARTING_FEN),
+        "move_uci": "e2e4", "move_san": "e4",
+        "played_eval": None, "played_eval_mate": 3, "classification": "best",
+        "source": "precomputed", "analysis_profile_id": CANONICAL_PROFILE_ID,
+        "evidence_contract_id": "move-complete-v1", **identity,
+    }])
+
+    result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert result["played_eval_mate"] == 3
+    assert result["contract_satisfied"] is True
+    assert result["move_trusted"] is True
+
+
+def test_lookup_batch_resolves_transposition_for_multiple_positions(
+    client, auth_headers, db_session
+):
+    # Two emitted positions that are clock variants of one another (same normalized
+    # FEN) both resolve their position evidence from a single storage winner via the
+    # batched resolver path.
+    _seed_cache(db_session, [
+        {
+            "fen_before": _REQ_FEN, "normalized_fen_before": normalize_fen(_REQ_FEN),
+            "move_uci": "f1c4", "move_san": "Bc4", "best_move_uci": "f1c4",
+            "best_line_uci": "f1c4 g8f6", "played_eval": 18, "best_eval": 18,
+            "eval_delta": 0, "classification": "best", "source": "precomputed",
+            **_canonical_v2_seed_values(),
+        },
+        {
+            "fen_before": _STORE_FEN, "normalized_fen_before": normalize_fen(_STORE_FEN),
+            "move_uci": "f1c4", "move_san": "Bc4", "best_move_uci": "f1c4",
+            "best_line_uci": "f1c4 g8f6", "played_eval": 12, "best_eval": 12,
+            "eval_delta": 0, "classification": "best", "source": "precomputed",
+            **_canonical_v2_seed_values(),
+        },
+    ])
+    _seed_position_storage(db_session, fen=_STORE_FEN, best_move_uci="f1b5",
+                           best_line_uci="f1b5 a7a6", best_eval=40)
+
+    results = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [
+            {"fen": _REQ_FEN, "move_uci": "f1c4"},
+            {"fen": _STORE_FEN, "move_uci": "f1c4"},
+        ]},
+        headers=auth_headers(),
+    ).json()["results"]
+    # Both clock variants resolve the same trusted storage winner.
+    for fen in (_REQ_FEN, _STORE_FEN):
+        entry = results[f"{fen}::f1c4"]
+        assert entry["position_trusted"] is True
+        assert entry["best_move_uci"] == "f1b5"
+        assert entry["best_eval"] == 40
