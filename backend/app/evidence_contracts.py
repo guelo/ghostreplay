@@ -293,6 +293,28 @@ def select_browser_contract(data: dict) -> str | None:
     return None
 
 
+def select_canonical_move_contract(data: dict) -> str | None:
+    """Contract a post-split canonical MOVE-grain write must declare.
+
+    Returns ``move-complete-v1`` when ``data`` satisfies the move-complete
+    contract, else ``None`` (the caller drops the row rather than store evidence
+    it does not satisfy — same convention as :func:`select_browser_contract`).
+
+    It NEVER returns ``resolver-complete-v2``. After the position/move grain split
+    a move row no longer carries the position facts (``best_eval`` etc.) that v2's
+    cross-grain ``eval_delta == f(best_eval, played_eval)`` invariant validates, so
+    a move-only row could not satisfy v2 anyway; and even a transitional row that
+    still happens to carry stale position facts must not claim the cross-grain v2
+    contract once position truth lives in ``position_analysis``. This is the
+    write-side enforcement seam the canonical producer uses at the Phase 4 cutover
+    (mirrors :func:`select_browser_contract` for the browser producer and
+    :func:`app.position_analysis_repo.write_position_analysis_row` for positions).
+    """
+    if contract_satisfied(MOVE_COMPLETE, data):
+        return MOVE_COMPLETE
+    return None
+
+
 # --- Legacy-v2 grain projection (library-only; unwired in Phase 1) -------------
 #
 # Let an existing authoritative ``analysis_cache`` resolver-complete-v2 row project
