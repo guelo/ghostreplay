@@ -1,18 +1,18 @@
-"""Pure position-grain primitives for the canonical-winner backfill (Phase 2).
+"""Pure position-grain primitives: backfill winner selection (Phase 2) and the
+live write decision (Phase 3).
 
-This module is intentionally DB-free: it decides, given the eligible
-``analysis_cache`` candidates for a single ``normalized_fen``, which one is the
-canonical winner and whether the group disagrees. The orchestration that reads
-rows, groups them, and writes ``position_analysis`` / ``position_analysis_conflicts``
-lives in :mod:`app.position_analysis_backfill`.
+This module is intentionally DB-free: all decision functions operate on plain
+dicts or dataclasses so they can be unit-tested without a database session.
 
-Winner selection is **group-then-pick**: never an ``INSERT ... ON CONFLICT``
-ordering trick. A candidate is promoted over the preference-earlier winner ONLY
-when it is *strictly stronger* under the guarded
+Phase 2 — backfill winner selection
+------------------------------------
+Given the eligible ``analysis_cache`` candidates for a single ``normalized_fen``,
+select exactly one canonical winner.  Winner selection is **group-then-pick**:
+never an ``INSERT ... ON CONFLICT`` ordering trick. A candidate is promoted over
+the preference-earlier winner ONLY when it is *strictly stronger* under the guarded
 :func:`app.analysis_profiles.compare_search_strength`; equal-strength /
 incomparable candidates resolve by a deterministic preference order
-(authoritative-profile priority, then higher ``cache_id``). Raw
-``search_limit_value`` is never a sort key outside the guarded comparator.
+(authoritative-profile priority, then higher ``cache_id``).
 
 The conflict trigger is best-move / mate-winner disagreement only (see
 :func:`position_signature`). PV-continuation and CP-only ``best_eval`` differences
@@ -20,13 +20,23 @@ are captured in the audit axes when such a conflict fires, but are NOT themselve
 triggers — ``position-complete-v1`` only requires the PV to start with the best
 move, so those differences do not change the canonical decision.
 
-Phase 3 will EXTEND this module with the live write decision
-(``decide_position_analysis_replacement``); the primitives here are shared.
+Phase 3 — live write decision
+------------------------------
+:func:`decide_position_analysis_replacement` governs every native live write to
+``position_analysis``.  The structural invariant: non-authoritative (browser-game)
+rows are rejected BEFORE any strength/dominance comparison.  This check runs even
+for new-key inserts so a browser write can never create a position truth row.
+
+The only accepted position-grain write contract is ``position-complete-v1``.
+``resolver-complete-v2`` is the legacy *read/projection* contract for migration; it
+is never written to ``position_analysis`` natively.  The DB-level orchestration
+(read-decide-write) lives in :mod:`app.position_analysis_repo`.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from enum import Enum
 
 from app.analysis_profiles import (
     AUTHORITATIVE_PROFILE_PRIORITY,
@@ -36,7 +46,12 @@ from app.analysis_profiles import (
     compare_search_strength,
     get_profile,
 )
-from app.evidence_contracts import legacy_v2_satisfies_position
+from app.evidence_contracts import (
+    POSITION_COMPLETE,
+    is_strict_successor,
+    is_superset_or_successor,
+    legacy_v2_satisfies_position,
+)
 
 # Provenance / quality columns copied verbatim from the winning analysis_cache row
 # onto position_analysis (mirrors AnalysisCache; excludes evidence_contract_id and
@@ -271,3 +286,170 @@ def conflict_signature(axes: dict, policy_reason: str) -> str:
         "policy_reason": policy_reason,
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — live write decision for position_analysis
+# ---------------------------------------------------------------------------
+
+# Only position-complete-v1 is accepted as the write contract for native
+# position_analysis rows. resolver-complete-v2 is the legacy *read/projection*
+# contract for existing analysis_cache rows during the migration window; it is
+# never written natively to position_analysis.
+_ALLOWED_POSITION_WRITE_CONTRACTS = frozenset({POSITION_COMPLETE})
+
+
+class PositionDecision(str, Enum):
+    INSERT = "insert"
+    REPLACE = "replace"
+    MERGE = "merge"
+    KEEP = "keep"
+
+
+class PositionReason(str, Enum):
+    NEW_KEY = "new_key"
+    INVALID_INCOMING_KEEP = "invalid_incoming_keep"
+    NON_AUTHORITATIVE_KEEP = "non_authoritative_keep"
+    DOMINATES_REPLACE = "dominates_replace"
+    LEGACY_REPLACED_BY_AUTH = "legacy_replaced_by_auth"
+    SAME_PROFILE_IDEMPOTENT = "same_profile_idempotent"
+    SAME_PROFILE_SUPERSET_MERGE = "same_profile_superset_merge"
+    SAME_PROFILE_CONTRACT_UPGRADE = "same_profile_contract_upgrade"
+    MERGE_CONFLICT_KEEP = "merge_conflict_keep"
+    INCOMPATIBLE_KEEP = "incompatible_keep"
+    INCOMING_LESS_COMPLETE_KEEP = "incoming_less_complete_keep"
+
+
+@dataclass(frozen=True)
+class PositionRow:
+    """Minimal projection used for the position_analysis write decision.
+
+    Mirrors :class:`app.analysis_cache_policy.CacheRow` but is scoped to the
+    position grain: only :data:`POSITION_FACT_FIELDS` participate in
+    ``populated_fields`` and ``values``.
+    """
+
+    analysis_profile_id: str | None
+    evidence_contract_id: str | None
+    identity_verified: bool
+    contract_satisfied: bool
+    populated_fields: frozenset[str]  # over POSITION_FACT_FIELDS
+    values: dict  # position fact field values for overlap/agree checks
+
+    def effective_profile_id(self) -> str | None:
+        if self.identity_verified:
+            return self.analysis_profile_id
+        return None
+
+    def is_effectively_authoritative(self) -> bool:
+        if not self.identity_verified:
+            return False
+        profile = get_profile(self.analysis_profile_id)
+        return bool(profile and profile.authoritative and profile.active)
+
+
+def position_populated_fields_of(data: dict) -> frozenset[str]:
+    """Position fact fields that are non-null in ``data``."""
+    return frozenset(f for f in POSITION_FACT_FIELDS if data.get(f) is not None)
+
+
+def _position_fields_agree(existing: PositionRow, incoming: PositionRow) -> bool:
+    """Every overlapping non-null position fact field must agree."""
+    for f in existing.populated_fields & incoming.populated_fields:
+        if existing.values.get(f) != incoming.values.get(f):
+            return False
+    return True
+
+
+def incoming_position_is_valid(incoming: PositionRow) -> bool:
+    """Validity gate applied before any insert/replace/merge.
+
+    Rejects rows that:
+    * do not declare ``position-complete-v1`` (the only write contract);
+    * fail that contract's semantic validation;
+    * claim an ``analysis_profile_id`` they cannot identity-verify.
+
+    Note: this gate does NOT enforce authoritative status.  The subsequent
+    :func:`decide_position_analysis_replacement` authority gate handles that
+    separately so rejections carry the right reason code.
+    """
+    if incoming.evidence_contract_id not in _ALLOWED_POSITION_WRITE_CONTRACTS:
+        return False
+    if not incoming.contract_satisfied:
+        return False
+    if incoming.analysis_profile_id is not None and not incoming.identity_verified:
+        return False
+    return True
+
+
+def decide_position_analysis_replacement(
+    existing: PositionRow | None,
+    incoming: PositionRow,
+) -> tuple[PositionDecision, PositionReason]:
+    """Decide what to do with ``incoming`` given ``existing`` (or None for a new key).
+
+    Rules mirror :func:`app.analysis_cache_policy.decide_analysis_cache_replacement`
+    with one critical addition: non-authoritative writes are rejected structurally
+    before any dominance / strength comparison, even for new-key inserts.  This
+    ensures a browser-game row can never become position truth.
+
+    The ``existing`` argument is ``None`` on a missing key.
+    """
+    if not incoming_position_is_valid(incoming):
+        return PositionDecision.KEEP, PositionReason.INVALID_INCOMING_KEEP
+
+    # Structural browser rejection: non-authoritative writes never become position
+    # truth, even for new keys.  This check precedes dominance comparison so it
+    # cannot be short-circuited by the g-mk1d strength-aware browser hierarchy
+    # (which lives in analysis_cache, not position_analysis).
+    if not incoming.is_effectively_authoritative():
+        return PositionDecision.KEEP, PositionReason.NON_AUTHORITATIVE_KEEP
+
+    if existing is None:
+        return PositionDecision.INSERT, PositionReason.NEW_KEY
+
+    existing_eff = existing.effective_profile_id()
+    incoming_eff = incoming.effective_profile_id()
+
+    # Rule: same effective (verified) profile.
+    if (
+        existing_eff is not None
+        and incoming_eff is not None
+        and existing_eff == incoming_eff
+    ):
+        if not (existing.is_effectively_authoritative() and incoming.is_effectively_authoritative()):
+            return PositionDecision.KEEP, PositionReason.SAME_PROFILE_IDEMPOTENT
+        if not is_superset_or_successor(
+            incoming.evidence_contract_id, existing.evidence_contract_id
+        ):
+            return PositionDecision.KEEP, PositionReason.SAME_PROFILE_IDEMPOTENT
+        if not _position_fields_agree(existing, incoming):
+            return PositionDecision.KEEP, PositionReason.MERGE_CONFLICT_KEEP
+        if incoming.populated_fields - existing.populated_fields:
+            return PositionDecision.MERGE, PositionReason.SAME_PROFILE_SUPERSET_MERGE
+        if is_strict_successor(
+            incoming.evidence_contract_id, existing.evidence_contract_id
+        ):
+            return PositionDecision.MERGE, PositionReason.SAME_PROFILE_CONTRACT_UPGRADE
+        return PositionDecision.KEEP, PositionReason.SAME_PROFILE_IDEMPOTENT
+
+    # Incoming is authoritative and on a different profile from existing.
+
+    # Existing is effectively legacy (NULL profile or unverified).
+    if existing_eff is None:
+        if incoming.populated_fields >= existing.populated_fields:
+            return PositionDecision.REPLACE, PositionReason.LEGACY_REPLACED_BY_AUTH
+        return PositionDecision.KEEP, PositionReason.INCOMING_LESS_COMPLETE_KEEP
+
+    # Different verified profiles.
+    incoming_profile = get_profile(incoming.analysis_profile_id)
+    has_dominates = bool(incoming_profile and existing_eff in incoming_profile.dominates)
+    if not has_dominates:
+        return PositionDecision.KEEP, PositionReason.INCOMPATIBLE_KEEP
+    contract_ok = is_superset_or_successor(
+        incoming.evidence_contract_id, existing.evidence_contract_id
+    )
+    superset_ok = incoming.populated_fields >= existing.populated_fields
+    if contract_ok and superset_ok:
+        return PositionDecision.REPLACE, PositionReason.DOMINATES_REPLACE
+    return PositionDecision.KEEP, PositionReason.INCOMING_LESS_COMPLETE_KEEP
