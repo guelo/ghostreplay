@@ -383,35 +383,23 @@ describe("buildTreeView", () => {
 });
 
 describe("connectorStyle", () => {
-  // connectorStyle reads only the three edge-metadata fields.
-  const edge = (
-    inBook: boolean,
-    isObserved: boolean,
-    encounterCount: number,
-  ): DisplayNode =>
-    ({ inBook, isObserved, encounterCount }) as unknown as DisplayNode;
+  // connectorStyle reads only encounterCount; dashing is a render-time, measured
+  // concern (an endpoint scrolled off-screen), not a model property.
+  const edge = (encounterCount: number): DisplayNode =>
+    ({ encounterCount }) as unknown as DisplayNode;
 
-  it("returns a neutral solid base-width pointer for a null (frontier) child", () => {
-    expect(connectorStyle(null)).toEqual({ dashed: false, width: 2 });
+  it("returns a base-width pointer for a null (frontier) child", () => {
+    expect(connectorStyle(null)).toEqual({ width: 2 });
   });
 
-  it("dashes a book-only edge (in book, not observed) at base width", () => {
-    expect(connectorStyle(edge(true, false, 0))).toEqual({
-      dashed: true,
-      width: 2,
-    });
-  });
-
-  it("keeps an observed edge solid even when also in book", () => {
-    const style = connectorStyle(edge(true, true, 7));
-    expect(style.dashed).toBe(false);
+  it("grows width with encounter count", () => {
     // 2 + log2(7 + 1) = 2 + 3 = 5.
-    expect(style.width).toBe(5);
+    expect(connectorStyle(edge(7)).width).toBe(5);
   });
 
   it("clamps width into [2, 6] across encounter counts", () => {
-    expect(connectorStyle(edge(false, true, 0)).width).toBe(2);
-    expect(connectorStyle(edge(false, true, 100_000)).width).toBe(6);
+    expect(connectorStyle(edge(0)).width).toBe(2);
+    expect(connectorStyle(edge(100_000)).width).toBe(6);
   });
 });
 

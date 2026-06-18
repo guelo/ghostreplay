@@ -452,10 +452,7 @@ function OpeningsPage() {
                         </marker>
                       </defs>
                       {connectors.map((c, i) => {
-                        const style = connectorStyles[i] ?? {
-                          dashed: false,
-                          width: 2,
-                        };
+                        const style = connectorStyles[i] ?? { width: 2 };
                         // End the stroke short of the column by the arrowhead
                         // length; the marker (refX=0) fills the gap so its tip
                         // lands on the column. The bezier's end tangent is
@@ -468,8 +465,9 @@ function OpeningsPage() {
                         } ${c.y2}, ${x2} ${c.y2}`;
                         // When an endpoint's cell is scrolled out of its column,
                         // mark the clamped edge with a small triangle pointing
-                        // toward the selection. Dash is reserved strictly for
-                        // book-only edges and never toggles on clamp.
+                        // toward the selection, and dash the line (matching
+                        // TreePrototype) so an off-screen endpoint reads as
+                        // "continues past the visible band."
                         const clampTip = (
                           cx: number,
                           cy: number,
@@ -495,7 +493,7 @@ function OpeningsPage() {
                               fill="none"
                               stroke="currentColor"
                               strokeWidth={style.width}
-                              strokeDasharray={style.dashed ? "5 4" : undefined}
+                              strokeDasharray={clamped ? "5 4" : undefined}
                               markerEnd="url(#openings-tree-arrowhead)"
                               opacity={clamped ? 0.5 : 0.9}
                             />

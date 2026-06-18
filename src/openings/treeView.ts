@@ -65,8 +65,6 @@ export interface DisplayNode {
 }
 
 export interface ConnectorStyle {
-  /** Reserved strictly for book-only (in book, not observed) edges. */
-  dashed: boolean;
   /** Stroke width; clamps log2(encounters) into [2, 6]. */
   width: number;
 }
@@ -74,17 +72,17 @@ export interface ConnectorStyle {
 /**
  * Style for the connector aimed at the selected child of a column — the edge
  * identity is that child, so style derives from one node, not the whole column
- * (no measuring of siblings). `null` → neutral frontier pointer (solid, base
- * width). A book-only edge (in book, not yet observed) is dashed; an observed
- * edge stays solid. Width grows with encounter count, clamped to [2, 6].
+ * (no measuring of siblings). `null` → neutral frontier pointer (base width).
+ * Width grows with encounter count, clamped to [2, 6]. Dashing is NOT decided
+ * here: it's a measured concern (an endpoint scrolled off-screen) applied at
+ * render time, not a model property.
  */
 export function connectorStyle(node: DisplayNode | null): ConnectorStyle {
   if (!node) {
-    return { dashed: false, width: 2 };
+    return { width: 2 };
   }
-  const dashed = node.inBook && !node.isObserved;
   const width = Math.max(2, Math.min(6, 2 + Math.log2(node.encounterCount + 1)));
-  return { dashed, width };
+  return { width };
 }
 
 export interface DisplayColumn {

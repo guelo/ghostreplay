@@ -796,21 +796,27 @@ describe("OpeningsPage tree", () => {
     ).not.toBeInTheDocument();
   });
 
-  // Data→style contract: connector style is applied at render from the selected
+  // Data→width contract: connector WIDTH is applied at render from the selected
   // child's metadata, so it reaches the DOM even with zero jsdom geometry.
-  it("draws a dashed, base-width connector for a book-only selected edge", async () => {
+  // Dashing is NOT a model property — it's reserved for endpoints scrolled
+  // off-screen (clamped), which never happens under jsdom's zero geometry — so
+  // every connector here stays solid regardless of book/observed status.
+  it("draws a solid, base-width connector for a book-only selected edge", async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_E4_BOOK_ONLY);
     const { container } = renderAt("/openings?color=white&move=e2e4");
     await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
 
-    const paths = container.querySelectorAll("path.openings-tree-connector");
-    expect(paths.length).toBeGreaterThan(0);
-    // The edge into e2e4 (book-only) is dashed at base width 2.
-    const bookOnly = Array.from(paths).find(
-      (p) => p.getAttribute("stroke-dasharray") === "5 4",
+    const paths = Array.from(
+      container.querySelectorAll("path.openings-tree-connector"),
     );
-    expect(bookOnly).toBeTruthy();
-    expect(bookOnly!.getAttribute("stroke-width")).toBe("2");
+    expect(paths.length).toBeGreaterThan(0);
+    // The edge into e2e4 (book-only, 0 encounters) keeps base width 2, and —
+    // unlike the old book-only rule — is no longer dashed. Nothing is off-screen
+    // under jsdom, so no connector dashes.
+    expect(paths.some((p) => p.getAttribute("stroke-width") === "2")).toBe(true);
+    expect(paths.every((p) => p.getAttribute("stroke-dasharray") === null)).toBe(
+      true,
+    );
   });
 
   it("draws a solid, thicker connector for an observed selected edge", async () => {
