@@ -20,7 +20,7 @@ import {
   AnalysisStoreProvider,
 } from "../stores/createAnalysisStore";
 import { useGameAnalysisCoordinator } from "../contexts/useGameAnalysisCoordinator";
-import { gradeDrillMove } from "../workers/analysisUtils";
+import type { DrillGrade } from "../services/GameAnalysisCoordinator";
 import type { OpeningLookupResult } from "../openings/openingBook";
 import { lookupOpeningByFen, prewarmOpeningBook } from "../openings/openingBook";
 import { scheduleIdle } from "../utils/scheduleIdle";
@@ -70,7 +70,6 @@ import {
   ConnectedMoveList,
 } from "./chess-game/AnalysisConnectors";
 import AnalysisEffects from "./chess-game/AnalysisEffects";
-import type { AnalysisResult } from "../hooks/useMoveAnalysis";
 
 type ChessGameProps = {
   onOpenHistory?: (options: OpenHistoryOptions) => void;
@@ -1046,7 +1045,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     async (
       sessionId: string,
       result: Extract<PlayerMoveApplyResult, { applied: true }>,
-      analysis: AnalysisResult,
+      bestMove: string | null,
     ) => {
       await failDrill(sessionId, "accuracy");
       if (!isPostRootMoveStillCurrent(sessionId, result)) {
@@ -1058,7 +1057,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       drillFailedMoveIndexRef.current = result.moveIndex;
       setDrillFailInfo({
         playedMoveUci: result.moveUci,
-        suggestionUcis: analysis.bestMove ? [analysis.bestMove] : [],
+        // Trusted position best move (or honest worker best move) — never the
+        // played move masquerading as best; null yields no suggestion.
+        suggestionUcis: bestMove ? [bestMove] : [],
         correctionFen: result.fenBefore,
         moveIndex: result.moveIndex,
       });
@@ -1085,9 +1086,23 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
 
       if (captured.drillOpeningKey && capturedDrillState === "root_reached") {
-        let analysis: AnalysisResult;
+        const threshold = resolveStrictnessCp(
+          useGameStore.getState().drillStrictnessCp,
+          useGameStore.getState().drillStrictness,
+        );
+        // Drill-truth-first grade (g-position-analysis Phase 6): strictness-0
+        // exact-best reads trusted position truth, and threshold grading reads
+        // the backend-derived loss — both WITHOUT waiting on the worker when the
+        // cache is sufficient. Falls back to the worker (waitForAnalysis) only
+        // when no cache loss exists. Rejects only when nothing is scheduled and
+        // no settled data exists (-> same recovery path as before).
+        let drill: DrillGrade;
         try {
-          analysis = await coordinator.waitForAnalysis(result.moveIndex);
+          drill = await coordinator.waitForDrillGrade(
+            result.moveIndex,
+            result.moveUci,
+            threshold,
+          );
         } catch (error) {
           if (!isPostRootMoveStillCurrent(capturedSessionId, result)) {
             return;
@@ -1103,30 +1118,21 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           return;
         }
 
-        const threshold = resolveStrictnessCp(
-          useGameStore.getState().drillStrictnessCp,
-          useGameStore.getState().drillStrictness,
-        );
         // Tri-state grade: a missing/non-finite eval is `unavailable` (NOT a
         // pass) and routes to the same recovery path as a failed analysis fetch
         // so the drill never silently advances on ungraded moves. At 0cp the
         // drill requires the exact best move; above 0cp, the eval-loss boundary
         // passes (failsDrill uses strict `>`).
-        const grade = gradeDrillMove(
-          analysis.delta,
-          threshold,
-          analysis.bestMove === result.moveUci,
-        );
-        if (grade === "unavailable") {
+        if (drill.grade === "unavailable") {
           setDrillRecovery({ kind: "analysis", result });
           setEngineMessage(
             "Move analysis is unavailable. Try again or abandon the drill.",
           );
           return;
         }
-        if (grade === "fail") {
+        if (drill.grade === "fail") {
           try {
-            await stopPostRootDrillForAccuracy(capturedSessionId, result, analysis);
+            await stopPostRootDrillForAccuracy(capturedSessionId, result, drill.bestMove);
           } catch (error) {
             if (!isPostRootMoveStillCurrent(capturedSessionId, result)) {
               return;

@@ -18,6 +18,7 @@ import {
   canResolvePositionAnalysis,
   canResolveMoveAnalysis,
   isTrustedPositionHit,
+  isTrustedExactBestHit,
   isTrustedMoveHit,
   hasCpEvalLoss,
   isMoveClassification,
@@ -513,10 +514,17 @@ describe('gradeDrillMove / gradeRecordableMove tri-state', () => {
     expect(gradeDrillMove(36, 35, true)).toBe('fail')
   })
 
-  it('drill: 0cp strictness requires the exact best move', () => {
+  it('drill: 0cp strictness grades on isBestMove only, independent of eval', () => {
     expect(gradeDrillMove(0, 0, true)).toBe('pass')
     expect(gradeDrillMove(0, 0, false)).toBe('fail')
     expect(gradeDrillMove(-4, 0, false)).toBe('fail')
+    // Phase 6: the strictness-0 branch runs BEFORE the eval-loss gate, so a
+    // missing/non-finite eval no longer blocks exact-best — a trusted position
+    // with no move-eval row still grades from isBestMove.
+    expect(gradeDrillMove(null, 0, true)).toBe('pass')
+    expect(gradeDrillMove(null, 0, false)).toBe('fail')
+    expect(gradeDrillMove(NaN, 0, true)).toBe('pass')
+    expect(gradeDrillMove(undefined, 0, false)).toBe('fail')
   })
 
   it('recordable: unavailable for null, pass below 50, fail at/above 50', () => {
@@ -982,6 +990,35 @@ describe('isTrustedPositionHit', () => {
 
   it('falls back to the worker when a trusted row lacks renderable PV structure', () => {
     expect(isTrustedPositionHit({ ...complete, best_line_uci: null })).toBe(false)
+  })
+})
+
+describe('isTrustedExactBestHit', () => {
+  it('trusts a position_trusted row with a best move and NO PV requirement', () => {
+    // Looser than isTrustedPositionHit: a renderable PV is NOT required, because
+    // backend position_trusted already guarantees the PV upstream.
+    expect(
+      isTrustedExactBestHit({ position_trusted: true, best_move_uci: 'c2c4' }),
+    ).toBe(true)
+    // Even with a missing/degenerate PV that isTrustedPositionHit would reject.
+    expect(
+      isTrustedExactBestHit({
+        position_trusted: true,
+        best_move_uci: 'c2c4',
+        best_line_uci: null,
+      } as { position_trusted?: boolean; best_move_uci?: string | null }),
+    ).toBe(true)
+  })
+
+  it('does NOT trust an untrusted position or a null best move', () => {
+    expect(
+      isTrustedExactBestHit({ position_trusted: false, best_move_uci: 'c2c4' }),
+    ).toBe(false)
+    expect(
+      isTrustedExactBestHit({ position_trusted: true, best_move_uci: null }),
+    ).toBe(false)
+    // No flag at all -> worker fallback.
+    expect(isTrustedExactBestHit({ best_move_uci: 'c2c4' })).toBe(false)
   })
 })
 

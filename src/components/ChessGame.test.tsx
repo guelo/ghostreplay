@@ -94,6 +94,7 @@ import {
   type DecisionOwnerGameState,
 } from "../services/DecisionOwner";
 import type { AnalysisOutcome } from "../services/GameAnalysisCoordinator";
+import { gradeDrillMove } from "../workers/analysisUtils";
 
 // Fresh coordinator-lifetime DecisionOwner per test (g-2m0p). The controller
 // registers blunder-context/SRS on this owner; AnalysisEffects leases its UI
@@ -140,6 +141,10 @@ const mockCoordinator = {
       ? Promise.resolve(analysis)
       : Promise.reject(new Error("Analysis was not scheduled for this move"));
   }),
+  // Default delegates to waitForAnalysis + the REAL gradeDrillMove so existing
+  // post-root tests (which mock waitForAnalysis) drive grading unchanged. Tests
+  // exercising the position-truth channel override this per call.
+  waitForDrillGrade: vi.fn(),
   restartAnalysisWorker: vi.fn(),
   clearAnalysis: vi.fn(),
   // Session changes drive the owner's full reset (in production via emitReset);
@@ -167,6 +172,23 @@ const mockCoordinator = {
 vi.mock("../contexts/useGameAnalysisCoordinator", () => ({
   useGameAnalysisCoordinator: () => mockCoordinator,
 }));
+
+// The default waitForDrillGrade: delegate to whatever waitForAnalysis is mocked
+// to return for the move and grade it with the real comparator, mirroring the
+// coordinator's worker-fallback path. Re-applied in beforeEach so a per-test
+// override never leaks.
+const defaultWaitForDrillGrade = async (
+  moveIndex: number,
+  playedMoveUci: string,
+  strictnessCp: number,
+) => {
+  const analysis = await mockCoordinator.waitForAnalysis(moveIndex);
+  return {
+    grade: gradeDrillMove(analysis.delta, strictnessCp, analysis.bestMove === playedMoveUci),
+    bestMove: analysis.bestMove,
+    source: "worker" as const,
+  };
+};
 
 // Production resolveAnalysisResult both writes the store AND emits a `resolved`
 // outcome into the coordinator-owned DecisionOwner. These integration tests
@@ -266,6 +288,9 @@ beforeEach(() => {
   mockCoordinator.flushPendingUploads.mockClear();
   mockCoordinator.flushPendingUploads.mockResolvedValue(undefined);
   mockCoordinator.stopSessionUploads.mockClear();
+  // Restore the delegating drill-grade default so a per-test override never leaks.
+  mockCoordinator.waitForDrillGrade.mockReset();
+  mockCoordinator.waitForDrillGrade.mockImplementation(defaultWaitForDrillGrade);
   gameAnalysisStore.getState().clearAll();
   gameAnalysisStore.getState().setStatus("ready");
   class MockAudio {
@@ -725,6 +750,88 @@ describe("ChessGame characterization safeguards", () => {
     });
     expect(failDrillMock).not.toHaveBeenCalled();
     expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
+  it("post-root fail from the position channel suggests the trusted best move (not the played move)", async () => {
+    useGameStore.setState({
+      sessionId: "session-position-fail",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 0,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 0,
+    });
+
+    failDrillMock.mockClear();
+    // Strictness-0 position-truth grade: played e2e4 is not the trusted best c2c4.
+    mockCoordinator.waitForDrillGrade.mockResolvedValueOnce({
+      grade: "fail",
+      bestMove: "c2c4",
+      source: "position",
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(failDrillMock).toHaveBeenCalledWith("session-position-fail", "accuracy");
+      expect(useGameStore.getState().drillState).toBe("failed");
+    });
+    expect(mockCoordinator.waitForDrillGrade).toHaveBeenCalledWith(0, "e2e4", 0);
+    // Red played-move arrow (e2e4) + green trusted-best suggestion (c2c4): the
+    // suggestion is the position best move, never the played move.
+    expect(screen.getByTestId("chessboard")).toHaveAttribute("data-arrow-count", "2");
+  });
+
+  it("post-root pass from the position channel advances the drill", async () => {
+    useGameStore.setState({
+      sessionId: "session-position-pass",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 0,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 0,
+    });
+
+    failDrillMock.mockClear();
+    getNextOpponentMoveMock.mockClear();
+    getNextOpponentMoveMock.mockResolvedValueOnce({
+      mode: "engine",
+      move: { uci: "g8f6", san: "Nf6" },
+      target_blunder_id: null,
+      decision_source: "backend_engine",
+    });
+    // Strictness-0 position-truth grade: played c2c4 IS the trusted best move.
+    mockCoordinator.waitForDrillGrade.mockResolvedValueOnce({
+      grade: "pass",
+      bestMove: "c2c4",
+      source: "position",
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "c2", targetSquare: "c4" });
+    });
+
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalled();
+    });
+    expect(failDrillMock).not.toHaveBeenCalled();
+    expect(useGameStore.getState().drillState).not.toBe("failed");
   });
 
   const driveOffRouteFail = async () => {

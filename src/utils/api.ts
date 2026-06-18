@@ -872,12 +872,26 @@ export const uploadSessionMoves = async (
  */
 export interface CachedAnalysis {
   // ── MOVE grain (exact (fen, move_uci) row) ──
-  move_san: string
+  /**
+   * Null on a POSITION-ONLY hit (trusted position resolved, no exact
+   * (fen, move_uci) move row): there is no played move, so no SAN.
+   */
+  move_san: string | null
   played_eval: number | null
   /** White-relative mate count for the played move, null when not a mate. */
   played_eval_mate: number | null
   eval_delta: number | null
   classification: MoveClassification | null
+  /**
+   * CROSS-GRAIN drill threshold loss (mover-relative CP, clamped >= 0),
+   * derived on the BACKEND from the trusted position `best_eval` and the trusted
+   * move `played_eval`. Non-null ONLY when both grains are trusted, both pure CP
+   * (no mate field on either), and their profiles are search-strength EQUAL.
+   * This — NOT `eval_delta` — is the trusted loss the drill grader reads;
+   * `eval_delta` is a canonical-run snapshot for blunder/SRS/display. The
+   * frontend does no eval arithmetic on it.
+   */
+  position_eval_loss_cp: number | null
 
   // ── POSITION grain (resolver-derived; null when no trusted position) ──
   best_move_uci: string | null

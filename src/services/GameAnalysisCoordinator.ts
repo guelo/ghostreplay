@@ -13,11 +13,13 @@ import {
   isRecordableFailure,
   isWithinRecordingMoveCap,
   classifyMove,
+  gradeDrillMove,
   isTrustedPositionHit,
+  isTrustedExactBestHit,
   isTrustedMoveHit,
   hasCpEvalLoss,
 } from '../workers/analysisUtils'
-import type { MoveClassification } from '../workers/analysisUtils'
+import type { MoveClassification, MoveGrade } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
 import type { CachedAnalysis, SessionMoveUpload } from '../utils/api'
 import { gameAnalysisStore } from '../stores/createAnalysisStore'
@@ -81,6 +83,35 @@ type AnalysisWaiter = {
 }
 
 type ReleaseReason = 'cache-miss' | 'untrusted' | 'cache-error' | 'timeout' | 'worker-error'
+
+/**
+ * Drill-only "position truth" resolved from a trusted-cache exact-best hit
+ * (g-position-analysis Phase 6). A SEPARATE side channel from the published
+ * `AnalysisResult` path: it is fed only from CACHE evidence (never the worker)
+ * and a position-only hit fulfils it WITHOUT publishing. `positionEvalLossCp` is
+ * the backend-derived threshold loss (null unless both grains were trusted, pure
+ * CP, and same search strength).
+ */
+type DrillTruth = { best_move_uci: string; positionEvalLossCp: number | null }
+
+type DrillTruthWaiter = {
+  generation: number
+  /** Bound at registration so a superseding request rejects a stale waiter. */
+  requestId: string
+  resolve: (truth: DrillTruth | null) => void
+  reject: (error: Error) => void
+}
+
+/**
+ * The result of `waitForDrillGrade`: the tri-state grade, the best move to
+ * surface as a correction suggestion (trusted position truth or honest worker
+ * best move — NEVER `?? playedMove`), and which channel produced it.
+ */
+export type DrillGrade = {
+  grade: MoveGrade
+  bestMove: string | null
+  source: 'position' | 'worker'
+}
 
 /**
  * Per-moveIndex resolution state machine. The worker result is buffered while
@@ -182,6 +213,10 @@ const fromCachedAnalysis = (
   const playedEval = toPlayerPerspective(cached.played_eval, playerColor)
   const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
   const playedEvalMate = mateToPlayerPerspective(cached.played_eval_mate, playerColor)
+  // `eval_delta` is the canonical-run snapshot retained for blunder/SRS/display
+  // on the published path; it is NOT the drill threshold loss. The drill grader
+  // reads the backend-derived, same-strength `position_eval_loss_cp` out-of-band
+  // (see `waitForDrillGrade`), never this browser-visible snapshot.
   const delta = cached.eval_delta
   const classification = (cached.classification as MoveClassification | null) ?? classifyMove(delta)
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2
@@ -194,11 +229,12 @@ const fromCachedAnalysis = (
   return {
     id: requestId,
     move,
-    // Under the grain gate this is only reached for an isTrustedPositionHit row,
-    // so `best_move_uci` is guaranteed non-null; the `?? move` fallback is now
-    // purely defensive (the old "null best → unavailable recovery" reasoning no
-    // longer applies because such rows never resolve from cache).
-    bestMove: cached.best_move_uci ?? move,
+    // The published gate only resolves an `isTrustedPositionHit` row, which
+    // guarantees `best_move_uci` is non-null — so use it directly. NEVER fall
+    // back to `?? move`: a published result's `bestMove` must be honest position
+    // truth, not the played move masquerading as best (the old g-l02q hazard,
+    // now owned by the drill-truth side channel for strictness-0 grading).
+    bestMove: cached.best_move_uci as string,
     bestLine: cached.best_line_uci ?? null,
     bestEval,
     playedEval,
@@ -280,6 +316,16 @@ export class GameAnalysisCoordinator {
    *  Worker handlers drop these FIRST; cleared on worker replacement. */
   private discardedRequestIds = new Set<string>()
   private analysisWaiters = new Map<number, Set<AnalysisWaiter>>()
+
+  // Drill-only "position truth" side channel (g-position-analysis Phase 6),
+  // request-bound. A present record means drill truth has SETTLED for that
+  // request (`truth` set = trusted exact-best resolved; `truth: null` = no
+  // trusted position). Supersession/clear delete stale records, so a present
+  // record is always for the current request — the `waitForDrillTruth` fast path
+  // relies on that invariant. The waiters fire from the cache `.then`/release
+  // paths; they never depend on the worker.
+  private drillTruth = new Map<number, { requestId: string; truth: DrillTruth | null }>()
+  private drillTruthWaiters = new Map<number, Set<DrillTruthWaiter>>()
 
   // Coordinator-lifetime recording/SRS decision owner (g-2m0p). Fed every
   // outcome/reset for the singleton's life; the React layer leases UI callbacks
@@ -412,6 +458,8 @@ export class GameAnalysisCoordinator {
         this.analysisWaiters.delete(idx)
         for (const waiter of waiters) waiter.reject(new Error('Analysis reverted'))
       }
+      // Drop drill truth (record + waiters) for the reverted index.
+      this.rejectAndClearDrillTruth(idx, new Error('Analysis reverted'))
       // Drop the skipped-dedup guard for this index's synthetic id so a replayed
       // move (deterministic `analysis-{idx}-{uci}` id) can emit `skipped` again
       // and re-terminate the frontier slot.
@@ -465,6 +513,176 @@ export class GameAnalysisCoordinator {
       }
     }
     this.analysisWaiters.clear()
+  }
+
+  // --- Drill-truth side channel (Phase 6) ---
+
+  /** Resolve drill-truth waiters bound to (moveIndex, requestId); a waiter for a
+   *  different request or stale generation is rejected (it was superseded). */
+  private fulfillDrillTruthWaiters(
+    moveIndex: number,
+    requestId: string,
+    truth: DrillTruth | null,
+  ) {
+    const waiters = this.drillTruthWaiters.get(moveIndex)
+    if (!waiters) return
+    this.drillTruthWaiters.delete(moveIndex)
+    for (const waiter of waiters) {
+      if (waiter.generation === this.sessionGeneration && waiter.requestId === requestId) {
+        waiter.resolve(truth)
+      } else {
+        waiter.reject(new Error('Analysis superseded'))
+      }
+    }
+  }
+
+  /** Record settled drill truth (trusted exact-best) for a request and drain its
+   *  waiters. A present record is the authoritative, current truth for the index. */
+  private recordDrillTruth(moveIndex: number, requestId: string, truth: DrillTruth) {
+    this.drillTruth.set(moveIndex, { requestId, truth })
+    this.fulfillDrillTruthWaiters(moveIndex, requestId, truth)
+  }
+
+  /** Settle drill truth as `null` (no trusted exact-best) for a request UNLESS a
+   *  truth record already exists. Called from every terminal cache path so a
+   *  drill grade waiter can never hang; idempotent via the existing-record guard.
+   *  The null record persists so a later `waitForDrillGrade` still settles fast. */
+  private settleDrillTruthNull(moveIndex: number, requestId: string) {
+    if (this.drillTruth.has(moveIndex)) return
+    this.drillTruth.set(moveIndex, { requestId, truth: null })
+    this.fulfillDrillTruthWaiters(moveIndex, requestId, null)
+  }
+
+  /** Reject every drill-truth waiter (lifecycle resets); mirrors
+   *  `rejectAnalysisWaiters`. Does NOT clear the record map — callers that reset
+   *  records (clearAllResolutionState / clearAnalysis / destroy) do that. */
+  private rejectDrillTruthWaiters(error: Error) {
+    for (const waiters of this.drillTruthWaiters.values()) {
+      for (const waiter of waiters) waiter.reject(error)
+    }
+    this.drillTruthWaiters.clear()
+  }
+
+  /** Reject only the drill-truth waiters bound to a specific request and drop the
+   *  index's truth record (supersession / per-request failure). */
+  private rejectDrillTruthForRequest(moveIndex: number, requestId: string, error: Error) {
+    this.drillTruth.delete(moveIndex)
+    const waiters = this.drillTruthWaiters.get(moveIndex)
+    if (!waiters) return
+    const remaining = new Set<DrillTruthWaiter>()
+    for (const waiter of waiters) {
+      if (waiter.requestId === requestId) waiter.reject(error)
+      else remaining.add(waiter)
+    }
+    if (remaining.size > 0) this.drillTruthWaiters.set(moveIndex, remaining)
+    else this.drillTruthWaiters.delete(moveIndex)
+  }
+
+  /** Drop an index's truth record and reject ALL its waiters (revert prune). */
+  private rejectAndClearDrillTruth(moveIndex: number, error: Error) {
+    this.drillTruth.delete(moveIndex)
+    const waiters = this.drillTruthWaiters.get(moveIndex)
+    if (!waiters) return
+    this.drillTruthWaiters.delete(moveIndex)
+    for (const waiter of waiters) waiter.reject(error)
+  }
+
+  /** Settled-aware read of drill truth for an index. Fast-path resolves a present
+   *  record (always current — supersession/clear remove stale ones). With no
+   *  record and no current request, resolves `null` (caller falls back to the
+   *  worker via `waitForAnalysis`). Otherwise registers a request-bound waiter. */
+  private waitForDrillTruth(
+    moveIndex: number,
+    requestId: string | undefined,
+    generation: number,
+  ): Promise<DrillTruth | null> {
+    const rec = this.drillTruth.get(moveIndex)
+    if (rec) return Promise.resolve(rec.truth)
+    // No settled record. Resolve null (NOT reject — that is the forbidden
+    // waitForAnalysis mirror) when there is no live request for this index:
+    // never scheduled (requestId undefined) OR already failed/torn down
+    // (requestId no longer pending). The caller delegates to waitForAnalysis,
+    // whose own analysisMap fast path returns any settled result and otherwise
+    // rejects to recovery — so a waiter that could never settle is never made.
+    if (requestId === undefined || !this.pendingMoveIndices.has(requestId)) {
+      return Promise.resolve(null)
+    }
+    return new Promise((resolve, reject) => {
+      const waiter: DrillTruthWaiter = { generation, requestId, resolve, reject }
+      const waiters = this.drillTruthWaiters.get(moveIndex) ?? new Set<DrillTruthWaiter>()
+      waiters.add(waiter)
+      this.drillTruthWaiters.set(moveIndex, waiters)
+    })
+  }
+
+  /**
+   * Drill-accuracy grade for a played move (g-position-analysis Phase 6).
+   * DRILL-TRUTH FIRST for BOTH strictness tiers: it reads the trusted-cache
+   * exact-best truth before ever touching the worker, so it grades from cache
+   * even when the PUBLISHED path released to the worker (a post-split move row
+   * can be CP-trusted yet carry no publishable `eval_delta`).
+   *
+   *  - strictness <= 0: exact-best. Truth present -> compare the played move to
+   *    `best_move_uci` (no eval needed). Truth null -> worker fallback.
+   *  - strictness  > 0: threshold. Truth with a non-null `positionEvalLossCp` ->
+   *    grade from that backend-derived loss WITHOUT awaiting the worker (mate /
+   *    cross-profile cases already left it null on the backend). Else -> worker.
+   *
+   * The worker fallback delegates to `waitForAnalysis`, which returns a settled
+   * result via its own `analysisMap` fast path and rejects only when nothing is
+   * scheduled/pending — so `waitForDrillGrade` works whether called BEFORE or
+   * AFTER settlement, and its sole reject path is "no request, no settled data"
+   * (handled by the caller's try/catch -> drill recovery).
+   */
+  async waitForDrillGrade(
+    moveIndex: number,
+    playedMoveUci: string,
+    strictnessCp: number,
+  ): Promise<DrillGrade> {
+    // Custom preamble (NOT a mirror of waitForAnalysis's pending-state reject):
+    // drillTruth / analysisMap may already hold the result after a fast
+    // settlement that tore down pending state, so do NOT reject on missing
+    // pending state here. The only reject is delegated to waitForAnalysis.
+    const generation = this.sessionGeneration
+    const requestId = this.latestRequestIds.get(moveIndex)
+    const truth = await this.waitForDrillTruth(moveIndex, requestId, generation)
+
+    if (strictnessCp <= 0) {
+      if (truth) {
+        return {
+          grade: gradeDrillMove(null, 0, playedMoveUci === truth.best_move_uci),
+          bestMove: truth.best_move_uci,
+          source: 'position',
+        }
+      }
+      return this.workerDrillFallback(moveIndex, playedMoveUci, strictnessCp)
+    }
+
+    if (truth && truth.positionEvalLossCp !== null) {
+      return {
+        grade: gradeDrillMove(
+          truth.positionEvalLossCp,
+          strictnessCp,
+          playedMoveUci === truth.best_move_uci,
+        ),
+        bestMove: truth.best_move_uci,
+        source: 'position',
+      }
+    }
+    return this.workerDrillFallback(moveIndex, playedMoveUci, strictnessCp)
+  }
+
+  private async workerDrillFallback(
+    moveIndex: number,
+    playedMoveUci: string,
+    strictnessCp: number,
+  ): Promise<DrillGrade> {
+    const analysis = await this.waitForAnalysis(moveIndex)
+    return {
+      grade: gradeDrillMove(analysis.delta, strictnessCp, analysis.bestMove === playedMoveUci),
+      bestMove: analysis.bestMove,
+      source: 'worker',
+    }
   }
 
   // --- Worker lifecycle ---
@@ -525,6 +743,7 @@ export class GameAnalysisCoordinator {
     this.lastRequestIdByMoveIndex.clear()
     this.skippedRequestIds.clear()
     this.rejectAnalysisWaiters(new Error('Analysis session changed'))
+    this.rejectDrillTruthWaiters(new Error('Analysis session changed'))
     this.clearAllResolutionState()
     this.resolvedIndices.clear()
     this.pendingMoveIndices.clear()
@@ -570,6 +789,7 @@ export class GameAnalysisCoordinator {
     this.lastRequestIdByMoveIndex.clear()
     this.skippedRequestIds.clear()
     this.rejectAnalysisWaiters(new Error('Analysis session cleared'))
+    this.rejectDrillTruthWaiters(new Error('Analysis session cleared'))
     this.clearAllResolutionState()
     this.store.getState().clearAll()
     this.resolvedIndices.clear()
@@ -642,6 +862,11 @@ export class GameAnalysisCoordinator {
         if (prevEntry.cacheTimer) clearTimeout(prevEntry.cacheTimer)
         this.rejectWaitersForRequest(moveIndex, prevEntry.requestId, new Error('Analysis superseded'))
       }
+      // Drop any prior drill truth for this index (record + waiters) so the
+      // fast-path invariant holds: a present drillTruth record is ALWAYS for the
+      // current request. Unconditional — an already-RESOLVED index (no prevEntry)
+      // can be re-opened here and would otherwise leave a stale record.
+      this.rejectAndClearDrillTruth(moveIndex, new Error('Analysis superseded'))
 
       this.store.getState().removeAnalysis(moveIndex)
       this.pendingMoveIndices.set(id, moveIndex)
@@ -706,6 +931,7 @@ export class GameAnalysisCoordinator {
     // than leaving them to hang until the total deadline (Finding R4).
     this.clearAllResolutionState()
     this.rejectAnalysisWaiters(new Error('Analysis worker restarted'))
+    this.rejectDrillTruthWaiters(new Error('Analysis worker restarted'))
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
     const s = this.store.getState()
@@ -727,6 +953,10 @@ export class GameAnalysisCoordinator {
     this.resolutionState.clear()
     this.requestIdToMoveIndex.clear()
     this.cacheBatchFirstEnqueuedAt = null
+    // Drop all settled drill-truth records (waiters are rejected by the callers
+    // that also reject analysisWaiters — clearAllResolutionState never strands a
+    // waiter because every caller pairs it with rejectDrillTruthWaiters).
+    this.drillTruth.clear()
   }
 
   waitForAnalysis(moveIndex: number): Promise<AnalysisResult> {
@@ -769,6 +999,10 @@ export class GameAnalysisCoordinator {
     this.resolutionState.clear()
     this.cacheBatchFirstEnqueuedAt = null
     this.rejectAnalysisWaiters(new Error('Analysis cleared'))
+    // clearAnalysis inlines its teardown (no clearAllResolutionState call), so
+    // clear the drill-truth records and reject their waiters here too.
+    this.drillTruth.clear()
+    this.rejectDrillTruthWaiters(new Error('Analysis cleared'))
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
     this.latestRequestIds.clear()
@@ -960,6 +1194,7 @@ export class GameAnalysisCoordinator {
       this.cacheFlushTimer = null
     }
     this.rejectAnalysisWaiters(new Error(errorText))
+    this.rejectDrillTruthWaiters(new Error(errorText))
     this.terminateWorker()
   }
 
@@ -1049,6 +1284,11 @@ export class GameAnalysisCoordinator {
     entry.cacheStatus = 'released'
     entry.releaseReason = reason
 
+    // The cache settled non-trusted for this request: no exact-best truth is
+    // coming, so settle drill truth null (no-op if a position-only hit already
+    // recorded truth) and the drill grade falls back to the worker.
+    this.settleDrillTruthNull(moveIndex, requestId)
+
     if (entry.bufferedWorker) {
       this.resolveAnalysisResult(moveIndex, entry.bufferedWorker)
       console.log(`[Analyst] resolve idx=${moveIndex} source=worker(${reason})`)
@@ -1082,6 +1322,10 @@ export class GameAnalysisCoordinator {
     this.pendingMeta.delete(requestId)
 
     this.rejectWaitersForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
+    // A hard terminal failure rejects any drill-truth waiter for this request and
+    // drops its record so a drill grade awaiting truth fails to recovery rather
+    // than hanging to the deadline.
+    this.rejectDrillTruthForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
     this.cancelWorkerAnalysis(requestId)
     this.clearActiveAnalysisStateIfCurrent(requestId)
     // Lineage retained so an immediate retry can migrate this index's context (L3).
@@ -1103,6 +1347,12 @@ export class GameAnalysisCoordinator {
     }
     this.pendingMoveIndices.delete(result.id)
     this.pendingMeta.delete(result.id)
+
+    // A terminal resolve from EITHER channel settles drill truth (no-op if a
+    // trusted exact-best hit already recorded it). The null record persists so a
+    // post-settlement waitForDrillGrade still settles fast (-> worker fallback,
+    // which reads the same resolved result via analysisMap).
+    this.settleDrillTruthNull(moveIndex, result.id)
 
     this.store.getState().resolveAnalysis(moveIndex, result)
     this.fulfillWaiters(moveIndex, result)
@@ -1187,22 +1437,43 @@ export class GameAnalysisCoordinator {
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
 
+          // Drill-truth side channel (Phase 6): record exact-best truth from a
+          // trusted position hit BEFORE and INDEPENDENT of the published gate. A
+          // position-only hit (no move row) feeds the drill but never publishes.
+          // Pure side-channel write — it must NOT touch resolutionState, the
+          // worker, uploads, or outcomes; the published gate below runs unchanged.
+          // settleDrillTruthNull on the terminal paths (release / resolve) covers
+          // every non-exact-best case, so a drill grade waiter can never hang.
+          if (cached && isTrustedExactBestHit(cached)) {
+            this.recordDrillTruth(pending.moveIndex, pending.requestId, {
+              best_move_uci: cached.best_move_uci as string,
+              positionEvalLossCp: cached.position_eval_loss_cp ?? null,
+            })
+          }
+
           if (
             !cached ||
             !isTrustedPositionHit(cached) ||
             !isTrustedMoveHit(cached) ||
             !hasCpEvalLoss(cached)
           ) {
-            // Release the worker fallback unless ALL three concerns pass:
+            // Release the worker fallback unless ALL three concerns pass. This
+            // is the PUBLISHED-path gate and it stays STRICT (Phase 6 does NOT
+            // relax it): regular-game blunder detection / SRS / uploads / the
+            // review board all consume this `AnalysisResult` and need a
+            // co-computed CP `eval_delta` snapshot.
             //  - isTrustedPositionHit: trusted, renderable best move/PV so
             //    `bestMove`/PV are grain-correct and exact-best is meaningful.
             //  - isTrustedMoveHit: trusted, renderable played evidence
             //    (classification + a played eval of either kind).
-            //  - hasCpEvalLoss: TRANSITIONAL — the current grader needs a CP
-            //    delta; mate-only rows lack one and fall back to the worker
-            //    until Phase 6. (Dropping this line is the Phase 6 change.)
-            // Preserves today's behavior exactly: position-untrusted (null best),
-            // move-untrusted, and move-trusted mate-only rows all fall back.
+            //  - hasCpEvalLoss: the published snapshot needs a finite CP
+            //    `eval_delta`; mate-only / post-split move rows lack one and the
+            //    worker publishes instead. The DRILL grade no longer depends on
+            //    this gate — it reads the backend-derived `position_eval_loss_cp`
+            //    via the drill-truth side channel recorded above (Phase 6), so a
+            //    release here does NOT block drill grading.
+            // Position-untrusted (null best), move-untrusted, and move-trusted
+            // mate-only rows all fall back on the published path.
             const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
             this.releaseFallback(pending.moveIndex, pending.requestId, reason)
             continue
@@ -1398,6 +1669,7 @@ export class GameAnalysisCoordinator {
     }
     this.clearAllResolutionState()
     this.rejectAnalysisWaiters(new Error('Analysis coordinator destroyed'))
+    this.rejectDrillTruthWaiters(new Error('Analysis coordinator destroyed'))
     this.pendingMoveIndices.clear()
     this.pendingMeta.clear()
     this.lastRequestIdByMoveIndex.clear()

@@ -216,21 +216,27 @@ export const isRecordableFailure = (delta: number | null | undefined): boolean =
 }
 
 /**
- * Tri-state drill grade. `unavailable` when the eval is missing/non-finite.
- * A 0cp strictness means exact-best only; above 0cp, the grade is eval-loss
- * based and the boundary value passes.
+ * Tri-state drill grade. A 0cp strictness means exact-best ONLY; above 0cp the
+ * grade is eval-loss based and the boundary value passes (`unavailable` when the
+ * eval is missing/non-finite at that tier).
+ *
+ * ORDERING IS INTENTIONAL (g-position-analysis Phase 6, epic g-l02q): the
+ * strictness-0 branch runs FIRST, BEFORE the `evalLoss(delta) === null` gate, so
+ * exact-best depends only on `isBestMove` and never on move-eval availability. A
+ * trusted position with no move-eval row (`gradeDrillMove(null, 0, true)`) now
+ * PASSES instead of returning `unavailable`. `isBestMove` is the caller's trust
+ * contract: `waitForDrillGrade` computes it from trusted position
+ * `best_move_uci` (see `isTrustedExactBestHit`) or an honest worker best move —
+ * never `bestMove ?? playedMove`. Do NOT restore the old ordering (eval-loss gate
+ * first); that would re-block strictness-0 on missing move evidence.
  */
 export const gradeDrillMove = (
   delta: number | null | undefined,
   strictnessCp: number,
   isBestMove: boolean,
 ): MoveGrade => {
-  // NOTE: at strictness 0 the grade is taken from `isBestMove` AFTER the CP
-  // eval-loss gate above. Reworking that ordering — strictness-0-from-position-
-  // alone, CP eval-loss derivation, and mate-aware grading — is Phase 6 (epic
-  // g-l02q); do not "fix" it here.
-  if (evalLoss(delta) === null) return 'unavailable'
   if (strictnessCp <= 0) return isBestMove ? 'pass' : 'fail'
+  if (evalLoss(delta) === null) return 'unavailable'
   return failsDrill(delta, strictnessCp) ? 'fail' : 'pass'
 }
 
@@ -348,6 +354,24 @@ export const isTrustedPositionHit = (input: {
   best_move_uci?: string | null | undefined
   best_line_uci?: string[] | null | undefined
 }): boolean => input.position_trusted === true && canResolvePositionAnalysis(input)
+
+/**
+ * DRILL exact-best trust: a backend-trusted position (`position_trusted === true`)
+ * carrying a `best_move_uci` to compare the played move against. Deliberately
+ * LOOSER than `isTrustedPositionHit` — it does NOT re-check the renderable PV,
+ * because drill strictness-0 only needs to know the canonical winning move, not
+ * render a line. This is a FRONTEND-only relaxation, NOT a backend trust change:
+ * `position_trusted` is gated server-side on the position-complete-v1 contract,
+ * which already REQUIRES a multi-move PV beginning with the best move
+ * (`_validate_position_complete` -> `_pv_first_equals_best`). So a
+ * `position_trusted` row is guaranteed a valid PV upstream. Do NOT "tighten" this
+ * to `isTrustedPositionHit` (it would needlessly block exact-best when the PV did
+ * not survive the wire) and do NOT weaken the backend contract to match it.
+ */
+export const isTrustedExactBestHit = (input: {
+  position_trusted?: boolean
+  best_move_uci?: string | null | undefined
+}): boolean => input.position_trusted === true && input.best_move_uci != null
 
 /**
  * MOVE-grain trust: the backend trusts the move row (`move_trusted === true`)

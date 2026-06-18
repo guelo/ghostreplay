@@ -860,6 +860,9 @@ def test_lookup_both_grains_position_by_norm_move_by_exact(client, auth_headers,
     assert result["best_move_uci"] == "f1b5"        # storage, not the f1c4 move row
     assert result["best_line_uci"] == ["f1b5", "a7a6"]
     assert result["best_eval"] == 40                # white-relative, no sign convert
+    # Backend-derived drill loss: white to move, max(best 40 - played 18, 0) = 22.
+    # Both grains pure CP, same canonical profile -> strength EQUAL -> derived.
+    assert result["position_eval_loss_cp"] == 22
 
 
 def test_lookup_move_only_untrusted_position_null(client, auth_headers, db_session):
@@ -883,17 +886,34 @@ def test_lookup_move_only_untrusted_position_null(client, auth_headers, db_sessi
     assert result["best_line_uci"] is None
     assert result["best_eval"] is None
     assert result["best_eval_mate"] is None
+    assert result["position_eval_loss_cp"] is None  # no trusted position, no loss
 
 
-def test_lookup_position_only_no_move_row_suppressed(client, auth_headers, db_session):
-    # A trusted storage row exists but NO exact move row: no result is emitted
-    # (position-only hits are intentionally suppressed; un-suppressing them is
-    # Phase 6, where strictness-0 exact-best from a trusted position needs them).
+def test_lookup_position_only_emits_position_grain(client, auth_headers, db_session):
+    # A trusted storage row exists but NO exact move row: Phase 6 emits the
+    # POSITION grain (was suppressed pre-Phase-6) so strictness-0 drill exact-best
+    # can grade against best_move_uci alone. The MOVE grain is null/untrusted and
+    # no threshold loss is derivable.
     _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="e2e4",
                            best_line_uci="e2e4 e7e5", best_eval=25)
 
-    results = _lookup(client, auth_headers, STARTING_FEN, "e2e4")
-    assert results == {}
+    result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    # Position grain present and trusted.
+    assert result["position_trusted"] is True
+    assert result["best_move_uci"] == "e2e4"
+    assert result["best_line_uci"] == ["e2e4", "e7e5"]
+    assert result["best_eval"] == 25
+    # Move grain null / untrusted — no played evidence, no derivable loss.
+    assert result["move_san"] is None
+    assert result["move_trusted"] is False
+    assert result["played_eval"] is None
+    assert result["played_eval_mate"] is None
+    assert result["eval_delta"] is None
+    assert result["classification"] is None
+    assert result["authoritative"] is False
+    assert result["contract_satisfied"] is False
+    assert result["trusted_for_resolution"] is False
+    assert result["position_eval_loss_cp"] is None
 
 
 def test_lookup_move_complete_mate_only_contract_satisfied(client, auth_headers, db_session):
@@ -957,3 +977,161 @@ def test_lookup_batch_resolves_transposition_for_multiple_positions(
         assert entry["position_trusted"] is True
         assert entry["best_move_uci"] == "f1b5"
         assert entry["best_eval"] == 40
+
+
+# --- Phase 6: backend-derived drill threshold loss (position_eval_loss_cp) -----
+
+
+def _seed_move_complete(db_session, *, fen, move_uci, played_eval=None,
+                        played_eval_mate=None, classification="good",
+                        profile_id=None):
+    """Seed a canonical move-complete-v1 move row (move grain, no eval_delta).
+
+    move-complete-v1 needs only a played eval (CP or mate) + classification, so
+    this is the cleanest trusted move row for exercising the cross-grain loss.
+    """
+    from app.analysis_profiles import (
+        CANONICAL_PROFILE_ID,
+        IDENTITY_FIELDS,
+        get_profile,
+    )
+
+    pid = profile_id or CANONICAL_PROFILE_ID
+    profile = get_profile(pid)
+    identity = {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+    _seed_cache(db_session, [{
+        "fen_before": fen, "normalized_fen_before": normalize_fen(fen),
+        "move_uci": move_uci, "move_san": move_uci,
+        "played_eval": played_eval, "played_eval_mate": played_eval_mate,
+        "classification": classification, "source": "precomputed",
+        "analysis_profile_id": pid, "evidence_contract_id": "move-complete-v1",
+        **identity,
+    }])
+
+
+def test_position_eval_loss_cp_white_to_move(client, auth_headers, db_session):
+    # White to move: loss = max(best_eval - played_eval, 0). Both grains pure CP,
+    # same canonical profile -> EQUAL strength -> derived on the backend.
+    _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4", played_eval=20)
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+
+    result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert result["move_trusted"] is True
+    assert result["position_trusted"] is True
+    assert result["position_eval_loss_cp"] == 30  # max(50 - 20, 0)
+
+
+def test_position_eval_loss_cp_black_to_move_sign(client, auth_headers, db_session):
+    # Black to move: loss = max(played_eval - best_eval, 0) on white-relative cp.
+    # best_eval -50 (black better by 50) vs played -20 (black gave back 30) -> 30.
+    _seed_move_complete(db_session, fen=AFTER_E4_FEN, move_uci="e7e5", played_eval=-20)
+    _seed_position_storage(db_session, fen=AFTER_E4_FEN, best_move_uci="c7c5",
+                           best_line_uci="c7c5 g1f3", best_eval=-50)
+
+    result = _lookup(client, auth_headers, AFTER_E4_FEN, "e7e5")[f"{AFTER_E4_FEN}::e7e5"]
+    assert result["position_eval_loss_cp"] == 30  # max(-20 - (-50), 0)
+
+
+def test_position_eval_loss_cp_null_when_move_grain_has_mate(client, auth_headers, db_session):
+    # A mate field on the MOVE grain disqualifies even though a CP value is present
+    # (producers store mate AND its CP conversion in the same row — finding #8).
+    _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4",
+                        played_eval=20, played_eval_mate=5)
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+
+    result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert result["move_trusted"] is True
+    assert result["position_trusted"] is True
+    assert result["position_eval_loss_cp"] is None
+
+
+def test_position_eval_loss_cp_null_when_position_grain_has_mate(client, auth_headers, db_session):
+    # A mate field on the POSITION grain disqualifies even with a CP best_eval.
+    _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4", played_eval=20)
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50, best_eval_mate=4)
+
+    result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert result["position_trusted"] is True
+    assert result["position_eval_loss_cp"] is None
+
+
+def test_position_eval_loss_cp_null_when_strength_not_equal(client, auth_headers, db_session):
+    # Both grains pure CP and trusted, but the profiles are not search-strength
+    # EQUAL: subtracting evals across different-strength runs is invalid (#9).
+    from app.analysis_profiles import StrengthComparison
+
+    _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4", played_eval=20)
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+
+    with patch(
+        "app.api.analysis.compare_search_strength",
+        return_value=StrengthComparison.A_STRONGER,
+    ):
+        result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert result["move_trusted"] is True
+    assert result["position_trusted"] is True
+    assert result["position_eval_loss_cp"] is None
+
+
+def test_position_eval_loss_cp_null_when_move_untrusted(client, auth_headers, db_session):
+    # Trusted position but an untrusted (legacy, no profile) move row -> no loss.
+    _seed_cache(db_session, [{
+        "fen_before": STARTING_FEN, "normalized_fen_before": normalize_fen(STARTING_FEN),
+        "move_uci": "e2e4", "move_san": "e4", "played_eval": 20,
+        "classification": "good",
+    }])
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+
+    result = _lookup(client, auth_headers, STARTING_FEN, "e2e4")[f"{STARTING_FEN}::e2e4"]
+    assert result["move_trusted"] is False
+    assert result["position_trusted"] is True
+    assert result["position_eval_loss_cp"] is None
+
+
+def test_lookup_batch_position_only_move_and_miss(client, auth_headers, db_session):
+    # A batch of [position-only, move+position, miss] returns the correct shapes
+    # and resolves all position evidence in a SINGLE batched resolver call.
+    from app.position_analysis_repo import resolve_trusted_positions as _real_resolve
+
+    # 1. Move + position hit at STARTING_FEN -> full grains + derived loss.
+    _seed_move_complete(db_session, fen=STARTING_FEN, move_uci="e2e4", played_eval=20)
+    _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                           best_line_uci="d2d4 d7d5", best_eval=50)
+    # 2. Position-only at AFTER_E4_FEN -> position grain, no move row.
+    _seed_position_storage(db_session, fen=AFTER_E4_FEN, best_move_uci="e7e5",
+                           best_line_uci="e7e5 g1f3", best_eval=-10)
+
+    miss_fen = "8/8/8/8/8/8/8/K6k w - - 0 1"
+    with patch(
+        "app.api.analysis.resolve_trusted_positions", wraps=_real_resolve,
+    ) as spy:
+        results = client.post(
+            "/api/analysis/lookup",
+            json={"positions": [
+                {"fen": STARTING_FEN, "move_uci": "e2e4"},   # move + position
+                {"fen": AFTER_E4_FEN, "move_uci": "e7e5"},   # position only
+                {"fen": miss_fen, "move_uci": "a1a2"},       # miss
+            ]},
+            headers=auth_headers(),
+        ).json()["results"]
+
+    assert spy.call_count == 1  # one batched resolver call for the whole request
+
+    full = results[f"{STARTING_FEN}::e2e4"]
+    assert full["move_trusted"] is True
+    assert full["position_trusted"] is True
+    assert full["position_eval_loss_cp"] == 30
+
+    pos_only = results[f"{AFTER_E4_FEN}::e7e5"]
+    assert pos_only["position_trusted"] is True
+    assert pos_only["move_trusted"] is False
+    assert pos_only["best_move_uci"] == "e7e5"
+    assert pos_only["move_san"] is None
+    assert pos_only["position_eval_loss_cp"] is None
+
+    assert f"{miss_fen}::a1a2" not in results  # nothing trusted -> skipped

@@ -371,6 +371,249 @@ describe('GameAnalysisCoordinator', () => {
   })
 
   // ---------------------------------------------------------------
+  // g-position-analysis Phase 6: drill-truth side channel
+  // ---------------------------------------------------------------
+  describe('waitForDrillGrade (drill-truth side channel)', () => {
+    const sendWorker = (
+      requestId: string | undefined,
+      over: Record<string, unknown> = {},
+    ) => {
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'e2e4',
+          bestMove: 'e2e4',
+          bestEval: 0,
+          playedEval: 0,
+          delta: 0,
+          classification: 'good',
+          ...over,
+        },
+      })
+    }
+
+    it('strictness-0 position-only hit: passes the exact best move without publishing', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          move_san: null, best_move_uci: 'c2c4', best_move_san: 'c2c4',
+          best_line_uci: null, best_eval: 25,
+          played_eval: null, played_eval_mate: null, eval_delta: null,
+          classification: null,
+          position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      const outcomes: any[] = []
+      coordinator.addAnalysisOutcomeListener((o) => outcomes.push(o))
+      const requestId = coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+
+      const grade = coordinator.waitForDrillGrade(0, 'c2c4', 0)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(grade).resolves.toEqual({
+        grade: 'pass', bestMove: 'c2c4', source: 'position',
+      })
+      // Pure side channel: no published result, no resolved outcome, worker not
+      // cancelled, uploads never dirtied (analysisMap stays empty).
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+      expect(outcomes.some((o) => o.status === 'resolved')).toBe(false)
+      expect(worker.postMessage).not.toHaveBeenCalledWith({
+        type: 'cancel-analysis', id: requestId,
+      })
+    })
+
+    it('strictness-0 position-only hit: fails when the played move is not the best move', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::g1f3', {
+          best_move_uci: 'c2c4', position_trusted: true,
+          move_trusted: false, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'g1f3', 'white', 0, 20)
+
+      const grade = coordinator.waitForDrillGrade(0, 'g1f3', 0)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(grade).resolves.toEqual({
+        grade: 'fail', bestMove: 'c2c4', source: 'position',
+      })
+    })
+
+    it('strictness-0 with no trusted position: falls back to the worker (truth settles null, no hang)', async () => {
+      coordinator.startSession('s') // default cache mock = miss
+      const requestId = coordinator.analyzeMove('fen-0', 'g1f3', 'white', 0, 20)
+
+      const grade = coordinator.waitForDrillGrade(0, 'g1f3', 0)
+      // Cache misses -> drill truth settles null -> worker fallback awaits waitForAnalysis.
+      await vi.advanceTimersByTimeAsync(200)
+      sendWorker(requestId, { move: 'g1f3', bestMove: 'g1f3', delta: 0 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      await expect(grade).resolves.toEqual({
+        grade: 'pass', bestMove: 'g1f3', source: 'worker',
+      })
+    })
+
+    it('strictness>0 grades from the backend loss WITHOUT awaiting the worker (finding #7)', async () => {
+      // The published gate releases to the worker (no eval_delta), but drill truth
+      // carries position_eval_loss_cp, so the drill grade resolves from cache.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::e2e4', {
+          best_move_uci: 'd2d4', best_move_san: 'd4', best_line_uci: ['d2d4', 'g8f6'],
+          best_eval: 50, played_eval: 20, played_eval_mate: null,
+          eval_delta: null, classification: 'good',
+          position_trusted: true, move_trusted: true, position_eval_loss_cp: 30,
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      // loss 30 > strictness 20 -> fail, from the position channel, no worker msg.
+      await expect(grade).resolves.toEqual({
+        grade: 'fail', bestMove: 'd2d4', source: 'position',
+      })
+      expect(coordinator.store.getState().analysisMap.size).toBe(0)
+    })
+
+    it('strictness>0 with null backend loss: falls back to the worker delta', async () => {
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::e2e4', {
+          best_move_uci: 'd2d4', best_line_uci: ['d2d4', 'g8f6'], best_eval: 50,
+          played_eval: 20, eval_delta: null, classification: 'good',
+          position_trusted: true, move_trusted: true, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 20)
+      await vi.advanceTimersByTimeAsync(200) // cache settles, truth loss null -> worker fallback
+      sendWorker(requestId, { move: 'e2e4', bestMove: 'e2e4', delta: 10 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      // Worker delta 10 <= strictness 20 -> pass, from the worker channel.
+      await expect(grade).resolves.toEqual({
+        grade: 'pass', bestMove: 'e2e4', source: 'worker',
+      })
+    })
+
+    it('fast settlement (finding #10): grades from settled drill truth called AFTER cache resolved', async () => {
+      // Full-trust cache hit publishes AND records drill truth, tearing down
+      // pending state. A waitForDrillGrade called afterwards must still grade.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4', best_move_uci: 'd2d4', best_move_san: 'd4',
+          best_line_uci: ['d2d4', 'g8f6'], best_eval: 50, played_eval: -150,
+          eval_delta: 200, classification: 'blunder',
+          position_trusted: true, move_trusted: true, position_eval_loss_cp: 30,
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      // Settled: published from cache, pending state torn down.
+      expect(coordinator.store.getState().analysisMap.get(0)?.delta).toBe(200)
+
+      const grade = await coordinator.waitForDrillGrade(0, 'e2e4', 20)
+      expect(grade).toEqual({ grade: 'fail', bestMove: 'd2d4', source: 'position' })
+    })
+
+    it('fast settlement worker source: grades from analysisMap when truth settled null', async () => {
+      coordinator.startSession('s') // cache miss
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      vi.advanceTimersByTime(200) // cache miss -> released, truth settles null
+      sendWorker(requestId, { move: 'e2e4', bestMove: 'd2d4', delta: 80 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(true)
+
+      // Called AFTER settlement; truth record is null -> worker fallback reads the
+      // settled analysisMap result, never rejecting "not pending".
+      const grade = await coordinator.waitForDrillGrade(0, 'e2e4', 20)
+      expect(grade).toEqual({ grade: 'fail', bestMove: 'd2d4', source: 'worker' })
+    })
+
+    it('full-trust hit publishes the snapshot delta while drill grades from the backend loss', async () => {
+      // eval_delta (snapshot, 200) and position_eval_loss_cp (drill, 30) are
+      // independent: the published result keeps the snapshot; the drill uses 30.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4', best_move_uci: 'd2d4', best_move_san: 'd4',
+          best_line_uci: ['d2d4', 'g8f6'], best_eval: 50, played_eval: -150,
+          eval_delta: 200, classification: 'blunder',
+          position_trusted: true, move_trusted: true, position_eval_loss_cp: 30,
+        }],
+      ]))
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 20)
+      vi.advanceTimersByTime(200)
+      await vi.advanceTimersByTimeAsync(0)
+
+      const published = coordinator.store.getState().analysisMap.get(0)
+      expect(published?.delta).toBe(200)            // snapshot unchanged
+      expect(published?.classification).toBe('blunder')
+      expect(published?.bestMove).toBe('d2d4')      // honest position best, never `?? move`
+      await expect(grade).resolves.toEqual({
+        grade: 'fail', bestMove: 'd2d4', source: 'position', // graded from 30, not 200
+      })
+    })
+
+    it('re-analyzing the same index rejects the awaiting drill-truth waiter', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 0)
+      // Supersede before the cache lookup dispatches.
+      coordinator.analyzeMove('fen-0b', 'd2d4', 'white', 0, 20)
+      await expect(grade).rejects.toThrow(/superseded/i)
+    })
+
+    it('pruneFromMoveIndex rejects and clears the awaiting drill-truth waiter', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 0)
+      coordinator.pruneFromMoveIndex(0)
+      await expect(grade).rejects.toThrow(/reverted/i)
+    })
+
+    it('clearAnalysis drains the awaiting drill-truth waiter', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 0)
+      coordinator.clearAnalysis()
+      await expect(grade).rejects.toThrow(/cleared/i)
+    })
+
+    it('a session change rejects the awaiting drill-truth waiter', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const grade = coordinator.waitForDrillGrade(0, 'e2e4', 0)
+      coordinator.startSession('s2')
+      await expect(grade).rejects.toThrow(/session changed/i)
+    })
+
+    it('an unscheduled index resolves drill truth null and rejects via the worker fallback (no hang)', async () => {
+      coordinator.startSession('s')
+      // Index 9 was never analyzed: no record, no current request -> truth null ->
+      // worker fallback delegates to waitForAnalysis, which rejects to recovery.
+      await expect(coordinator.waitForDrillGrade(9, 'e2e4', 0)).rejects.toThrow(/not scheduled/i)
+    })
+  })
+
+  // ---------------------------------------------------------------
   // Issue #3: startSession resets sticky error status
   // ---------------------------------------------------------------
   describe('startSession resets error status', () => {

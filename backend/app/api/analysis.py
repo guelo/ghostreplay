@@ -7,13 +7,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.analysis_profiles import IDENTITY_FIELDS, get_profile
+from app.analysis_profiles import (
+    IDENTITY_FIELDS,
+    StrengthComparison,
+    compare_search_strength,
+    get_profile,
+)
 from app.analysis_trust import cache_row_as_move_dict, move_trust_flags
 from app.db import get_db
 from app.evidence_contracts import RESOLVER_COMPLETE_V2, contract_satisfied
 from app.fen import normalize_fen
 from app.models import AnalysisCache
-from app.position_analysis_repo import resolve_trusted_positions
+from app.position_analysis_repo import TrustedPosition, resolve_trusted_positions
 from app.security import TokenPayload, get_current_user
 
 router = APIRouter(prefix="/api/analysis", tags=["analysis"])
@@ -39,7 +44,10 @@ class AnalysisLookupRequest(BaseModel):
 
 
 class CachedAnalysisResult(BaseModel):
-    move_san: str
+    # Nullable as of Phase 6: a POSITION-ONLY hit (trusted position resolved, no
+    # exact (fen, move_uci) move row) emits the position grain with no move row,
+    # so there is no played move SAN.
+    move_san: str | None = None
     # POSITION-grain evidence (properties of the position, not the played move).
     # Derived from the trusted-position resolver (storage winner / legacy v2
     # projection) keyed by NORMALIZED FEN — null when no trusted position exists,
@@ -54,6 +62,14 @@ class CachedAnalysisResult(BaseModel):
     played_eval_mate: int | None = None
     eval_delta: int | None = None
     classification: str | None = None
+    # CROSS-GRAIN: the drill threshold loss (mover-relative CP, clamped >= 0),
+    # derived on the BACKEND from the trusted position best_eval and the trusted
+    # move row played_eval. Non-null ONLY when both grains are trusted, both are
+    # pure CP (no mate field on either), and their profiles are search-strength
+    # EQUAL — see ``_position_eval_loss_cp``. Distinct from ``eval_delta``, which
+    # is a canonical-run snapshot for blunder/SRS/display; THIS is the trusted
+    # threshold loss the drill grader reads. The frontend does no eval arithmetic.
+    position_eval_loss_cp: int | None = None
     source: str | None = None
     analysis_profile_id: str | None = None
     engine_version: str | None = None
@@ -122,6 +138,61 @@ def _trust_flags(row: AnalysisCache) -> tuple[bool, bool, bool]:
     return authoritative, satisfied, trusted
 
 
+def _position_eval_loss_cp(
+    fen: str,
+    tp: TrustedPosition,
+    row: AnalysisCache,
+    move_trusted: bool,
+) -> int | None:
+    """Backend-derived drill threshold loss (CP), or None when un-derivable.
+
+    The drill threshold reads THIS, not ``eval_delta``: it is the only loss known
+    to come from the same canonical search on both grains. Emitted ONLY when every
+    guard holds:
+
+    * the move row is trusted (``move_trusted``) AND a trusted position resolved;
+    * BOTH grains are pure CP — no mate field set on EITHER, even when a CP value
+      is also present. Producers store mate AND a mate->CP conversion in the same
+      row, so "finite CP" alone is insufficient (g-position-analysis.6 #8);
+    * the position winner's profile and the move row's profile are search-strength
+      ``EQUAL``. There are multiple active authoritative profiles, and subtracting
+      evals across different-strength runs is invalid (#9). ``engine_build`` is
+      intentionally not strength-invariant, so the two canonical (x86-64 vs bmi2)
+      profiles stay comparable.
+
+    The loss is mover-relative and clamped >= 0, mirroring the producer
+    (``precompute_openings`` ``eval_delta``): white-to-move ``best - played``,
+    black-to-move ``played - best``. Inputs are white-relative as stored.
+    """
+    if not move_trusted:
+        return None
+    # Pure CP both grains (#8): a mate field on EITHER grain disqualifies.
+    if (
+        tp.best_eval is None
+        or tp.best_eval_mate is not None
+        or row.played_eval is None
+        or row.played_eval_mate is not None
+    ):
+        return None
+    # Same search strength (#9): cross-profile subtraction is invalid.
+    pp = get_profile(tp.analysis_profile_id)
+    mp = get_profile(row.analysis_profile_id)
+    if pp is None or mp is None:
+        return None
+    if compare_search_strength(pp, mp) is not StrengthComparison.EQUAL:
+        return None
+    parts = fen.split()
+    if len(parts) < 2:
+        return None
+    mover_is_white = parts[1] == "w"
+    loss = (
+        tp.best_eval - row.played_eval
+        if mover_is_white
+        else row.played_eval - tp.best_eval
+    )
+    return max(loss, 0)
+
+
 class AnalysisLookupResponse(BaseModel):
     results: dict[str, CachedAnalysisResult]
 
@@ -152,13 +223,14 @@ def lookup_analysis(
     for row in rows:
         row_map[(row.fen_before, row.move_uci)] = row
 
-    # Resolve POSITION evidence separately by NORMALIZED FEN (transposition). Only
-    # FENs that will emit a result (an exact move row exists) need resolving, and
-    # they are resolved in a single batched call so the whole endpoint adds at most
-    # two extra queries regardless of hit count (no per-row N+1). FEN normalization
-    # is the only failure narrowed here — resolver/DB errors propagate.
+    # Resolve POSITION evidence separately by NORMALIZED FEN (transposition).
+    # Phase 6: normalize ALL requested FENs (not just the move-row subset) so a
+    # POSITION-ONLY hit (trusted position, no exact move row) can still emit its
+    # position grain. Resolved in a single batched call so the whole endpoint adds
+    # at most two extra queries regardless of hit count (no per-row N+1). FEN
+    # normalization is the only failure narrowed here — resolver/DB errors propagate.
     norm_by_fen: dict[str, str | None] = {}
-    for fen in {p.fen for p in request.positions if (p.fen, p.move_uci) in row_map}:
+    for fen in {p.fen for p in request.positions}:
         try:
             norm_by_fen[fen] = normalize_fen(fen)
         except Exception:
@@ -167,20 +239,16 @@ def lookup_analysis(
 
     results: dict[str, CachedAnalysisResult] = {}
     for position in request.positions:
-        # A result is still emitted only when an exact (fen, move_uci) MOVE row
-        # exists; a position-only hit (storage row, no move row) is intentionally
-        # suppressed. Un-suppressing it is Phase 6, where strictness-0 exact-best
-        # from a trusted position with no exact move row needs it.
+        key = _make_cache_key(position.fen, position.move_uci)
         row = row_map.get((position.fen, position.move_uci))
+        norm = norm_by_fen.get(position.fen)
+        tp = resolved.get(norm) if norm else None
         if row is not None:
-            key = _make_cache_key(position.fen, position.move_uci)
             authoritative, satisfied, trusted = _trust_flags(row)
             _, _, move_trusted = move_trust_flags(cache_row_as_move_dict(row))
             # The flattened best-move fields are derived from the trusted position
             # payload (null when untrusted), never from this move row. The
             # white-relative eval is returned as-is here.
-            norm = norm_by_fen.get(position.fen)
-            tp = resolved.get(norm) if norm else None
             results[key] = CachedAnalysisResult(
                 move_san=row.move_san,
                 best_move_uci=tp.best_move_uci if tp else None,
@@ -202,7 +270,46 @@ def lookup_analysis(
                 trusted_for_resolution=trusted,
                 position_trusted=tp is not None,
                 move_trusted=move_trusted,
+                # Backend-derived trusted CP loss; null unless every guard passes
+                # (and necessarily null when no trusted position resolved).
+                position_eval_loss_cp=(
+                    _position_eval_loss_cp(position.fen, tp, row, move_trusted)
+                    if tp is not None
+                    else None
+                ),
             )
+        elif tp is not None:
+            # POSITION-ONLY hit (Phase 6): a trusted position resolved but no
+            # exact (fen, move_uci) move row exists. Pre-Phase-6 this was
+            # suppressed; now we emit the POSITION grain so strictness-0 drill
+            # exact-best can grade against ``best_move_uci`` alone. The MOVE grain
+            # is null/untrusted, and no threshold loss is derivable without a
+            # played eval (``position_eval_loss_cp`` is None). All move-row
+            # metadata (source/profile/engine/contract) is absent.
+            results[key] = CachedAnalysisResult(
+                move_san=None,
+                best_move_uci=tp.best_move_uci,
+                best_move_san=tp.best_move_san,
+                best_line_uci=tp.best_line_uci,
+                best_eval=tp.best_eval,
+                best_eval_mate=tp.best_eval_mate,
+                played_eval=None,
+                played_eval_mate=None,
+                eval_delta=None,
+                classification=None,
+                source=None,
+                analysis_profile_id=None,
+                engine_version=None,
+                engine_build=None,
+                evidence_contract_id=None,
+                authoritative=False,
+                contract_satisfied=False,
+                trusted_for_resolution=False,
+                position_trusted=True,
+                move_trusted=False,
+                position_eval_loss_cp=None,
+            )
+        # both None -> skip (no result emitted for this key).
 
     build_ms = _elapsed_ms(build_started)
     total_ms = _elapsed_ms(started)

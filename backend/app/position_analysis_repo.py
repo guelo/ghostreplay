@@ -281,6 +281,12 @@ class TrustedPosition:
     best_line_uci: list[str] | None
     best_eval: int | None  # white-relative
     best_eval_mate: int | None  # white-relative
+    # Profile the winning row was produced with. Carried so a consumer that
+    # derives a cross-grain eval loss (e.g. /api/analysis/lookup's Phase-6
+    # ``position_eval_loss_cp``) can prove the position best_eval and the move
+    # row's played_eval came from the SAME search strength before subtracting
+    # them (see ``compare_search_strength``). None for legacy/unknown ids.
+    analysis_profile_id: str | None
 
 
 def get_position_analysis(
@@ -338,8 +344,9 @@ def _legacy_position_sort_key(row: AnalysisCache) -> tuple:
 def _trusted_position_from_row(row) -> TrustedPosition:
     """Build a :class:`TrustedPosition` from a storage OR analysis_cache row.
 
-    Both row types expose the same five position columns; ``best_line_uci`` is
-    decoded from its space-joined storage form to a list.
+    Both row types expose the same position columns (plus
+    ``analysis_profile_id``); ``best_line_uci`` is decoded from its space-joined
+    storage form to a list.
     """
     return TrustedPosition(
         best_move_uci=row.best_move_uci,
@@ -347,6 +354,7 @@ def _trusted_position_from_row(row) -> TrustedPosition:
         best_line_uci=decode_uci_line(row.best_line_uci),
         best_eval=row.best_eval,
         best_eval_mate=row.best_eval_mate,
+        analysis_profile_id=row.analysis_profile_id,
     )
 
 
