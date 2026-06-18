@@ -193,7 +193,7 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
         return list(observed_by_parent.get(parent_fen, []))
 
     def _lpsfb(db, b_id, fens):
-        return position_rows
+        return {fen: row for fen, row in position_rows.items() if fen in fens}
 
     def _lme(db, requests):
         # move_evals may be keyed by uci (tests use unique ucis per column).
