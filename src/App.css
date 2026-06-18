@@ -10783,16 +10783,44 @@ button.tree-node-card--compact {
 }
 
 /* --- Expanded variant: full metric panel --------------------------------- */
+/* The expanded card is the selected deepest node, so it gets stronger emphasis
+   than the compact selected state: a full grade-accent border, an accent-tinted
+   background (matching the selected/collapsed cards) and a lifted shadow that
+   eases in to read as elevation above the surrounding tree. */
 .tree-node-card--expanded {
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
     padding: 0.75rem;
-    border: 1px solid var(--border-color);
+    border: 1px solid color-mix(in srgb, var(--grade-accent) 55%, var(--border-color));
     border-left: 3px solid var(--grade-accent);
     border-radius: 0.7rem;
-    background: color-mix(in srgb, var(--bg-secondary) 50%, var(--card-bg));
+    background: color-mix(in srgb, var(--grade-accent) 18%, var(--card-bg));
     color: var(--text-primary);
+    box-shadow:
+        0 6px 18px color-mix(in srgb, var(--grade-accent) 24%, transparent),
+        0 1px 3px color-mix(in srgb, var(--text-primary) 14%, transparent);
+    animation: tree-node-card-elevate 0.22s ease-out;
+}
+
+@keyframes tree-node-card-elevate {
+    from {
+        transform: translateY(5px) scale(0.985);
+        box-shadow:
+            0 0 0 transparent,
+            0 0 0 transparent;
+        opacity: 0.4;
+    }
+    to {
+        transform: translateY(0) scale(1);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tree-node-card--expanded {
+        animation: none;
+    }
 }
 
 .tree-node-card__header {
