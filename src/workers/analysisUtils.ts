@@ -225,6 +225,10 @@ export const gradeDrillMove = (
   strictnessCp: number,
   isBestMove: boolean,
 ): MoveGrade => {
+  // NOTE: at strictness 0 the grade is taken from `isBestMove` AFTER the CP
+  // eval-loss gate above. Reworking that ordering — strictness-0-from-position-
+  // alone, CP eval-loss derivation, and mate-aware grading — is Phase 6 (epic
+  // g-l02q); do not "fix" it here.
   if (evalLoss(delta) === null) return 'unavailable'
   if (strictnessCp <= 0) return isBestMove ? 'pass' : 'fail'
   return failsDrill(delta, strictnessCp) ? 'fail' : 'pass'
@@ -294,23 +298,16 @@ export const isMoveClassification = (
   MOVE_CLASSIFICATIONS.has(value as MoveClassification)
 
 /**
- * Local-build guard: a cached row carries enough VALID data to render a result
- * immediately and to preserve the cached best-move PV. Requires an enum-valid
- * classification, a finite non-negative eval_delta, a best move, and a
- * multi-move PV beginning with that best move. This guards local rendering, not
- * trust — trust is decided by the backend (see isTrustedCacheHit).
+ * POSITION-grain structure guard: the cached row carries a renderable best-move
+ * principal variation. Requires a best move plus a multi-move PV that begins
+ * with it. The PV belongs to the POSITION grain, not the move row. This guards
+ * local rendering, not trust — trust is decided by the backend (see
+ * isTrustedPositionHit).
  */
-export const canResolveCachedAnalysis = (input: {
+export const canResolvePositionAnalysis = (input: {
   best_move_uci?: string | null | undefined
   best_line_uci?: string[] | null | undefined
-  classification: MoveClassification | string | null | undefined
-  eval_delta: number | null | undefined
 }): boolean => {
-  if (!isMoveClassification(input.classification)) return false
-
-  const delta = input.eval_delta
-  if (delta == null || !Number.isFinite(delta) || delta < 0) return false
-
   if (!input.best_move_uci) return false
 
   return (
@@ -321,22 +318,63 @@ export const canResolveCachedAnalysis = (input: {
 }
 
 /**
- * A cached row may override local worker analysis only when the BACKEND marks it
- * trusted for resolution (`trusted_for_resolution === true` = authoritative
- * profile AND resolver-complete-v2 contract AND that contract's semantic
- * validation passes). The frontend does NOT reimplement the V2 validator; the
- * `authoritative`/`evidence_contract_id`/`contract_satisfied` fields are kept
- * for diagnostics only. The local-build guard is still applied so a trusted row
- * that somehow lacks renderable structure falls back to the worker.
+ * MOVE-grain structure guard: the cached row carries renderable played-move
+ * evidence. Mirrors the backend `move-complete-v1` contract — an enum-valid
+ * classification AND a usable played eval that may be CP (`played_eval`) OR mate
+ * (`played_eval_mate`). It DELIBERATELY does NOT require `eval_delta`: a
+ * move-trusted mate-only row has none. This guards local rendering, not trust —
+ * trust is decided by the backend (see isTrustedMoveHit).
  */
-export const isTrustedCacheHit = (input: {
-  trusted_for_resolution?: boolean
+export const canResolveMoveAnalysis = (input: {
+  classification: MoveClassification | string | null | undefined
+  played_eval?: number | null | undefined
+  played_eval_mate?: number | null | undefined
+}): boolean => {
+  if (!isMoveClassification(input.classification)) return false
+
+  return (
+    Number.isFinite(input.played_eval) || Number.isFinite(input.played_eval_mate)
+  )
+}
+
+/**
+ * POSITION-grain trust: the backend resolved a trusted position
+ * (`position_trusted === true`) AND the row carries a renderable best-move PV.
+ * The frontend does NOT re-derive trust — it only re-checks structure so a
+ * trusted row that somehow lacks renderable structure falls back to the worker.
+ */
+export const isTrustedPositionHit = (input: {
+  position_trusted?: boolean
   best_move_uci?: string | null | undefined
   best_line_uci?: string[] | null | undefined
+}): boolean => input.position_trusted === true && canResolvePositionAnalysis(input)
+
+/**
+ * MOVE-grain trust: the backend trusts the move row (`move_trusted === true`)
+ * AND the row carries renderable played evidence. NOTE: this is correctly TRUE
+ * for a move-trusted mate-only row (no `eval_delta`) — that satisfies the
+ * move-complete-v1 contract, which does not require a CP delta.
+ */
+export const isTrustedMoveHit = (input: {
+  move_trusted?: boolean
   classification: MoveClassification | string | null | undefined
-  eval_delta: number | null | undefined
+  played_eval?: number | null | undefined
+  played_eval_mate?: number | null | undefined
+}): boolean => input.move_trusted === true && canResolveMoveAnalysis(input)
+
+/**
+ * TRANSITIONAL CP-only grading usability gate — NOT a trust decision. The
+ * current live grader (`gradeDrillMove` / `evalLoss`) needs a finite,
+ * non-negative CP `eval_delta`; a move-trusted mate-only row lacks one and must
+ * fall back to the worker until Phase 6 adds mate-aware eval-loss grading (epic
+ * g-l02q). Preserves the old guard's finite-non-negative-delta rejection that
+ * `evalLoss` alone does not — `evalLoss(-1)` returns 0, not null.
+ */
+export const hasCpEvalLoss = (input: {
+  eval_delta?: number | null | undefined
 }): boolean => {
-  return input.trusted_for_resolution === true && canResolveCachedAnalysis(input)
+  const delta = input.eval_delta
+  return delta != null && Number.isFinite(delta) && delta >= 0
 }
 
 // ── Win-chance classifier (Lichess logistic model) ──────────────────

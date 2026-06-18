@@ -856,20 +856,43 @@ export const uploadSessionMoves = async (
 }
 
 /**
- * Cached analysis result from the backend analysis cache.
- * Evals are white-relative centipawns.
+ * Cached analysis result from the backend analysis cache (see backend
+ * CachedAnalysisResult). Carries TWO grains that must never be conflated:
+ *
+ *  - POSITION grain — resolver-derived for the NORMALIZED position and gated by
+ *    `position_trusted`. The flattened best-* fields (`best_move_uci`,
+ *    `best_move_san`, `best_line_uci`, `best_eval`, `best_eval_mate`) are this
+ *    grain; they are `null` when no trusted position resolved and are NEVER
+ *    copied from the move row.
+ *  - MOVE grain — the exact `(fen, move_uci)` row and gated by `move_trusted`:
+ *    `move_san`, `played_eval`, `played_eval_mate`, `eval_delta`,
+ *    `classification`.
+ *
+ * Evals are white-relative centipawns; mate counts are white-relative.
  */
 export interface CachedAnalysis {
+  // ── MOVE grain (exact (fen, move_uci) row) ──
   move_san: string
-  best_move_uci: string | null
-  best_move_san: string | null
-  best_line_uci: string[] | null
   played_eval: number | null
   /** White-relative mate count for the played move, null when not a mate. */
   played_eval_mate: number | null
-  best_eval: number | null
   eval_delta: number | null
   classification: MoveClassification | null
+
+  // ── POSITION grain (resolver-derived; null when no trusted position) ──
+  best_move_uci: string | null
+  best_move_san: string | null
+  best_line_uci: string[] | null
+  best_eval: number | null
+  /** White-relative mate count for the best move, null when not a mate. */
+  best_eval_mate: number | null
+
+  // ── Grain-specific trust (backend-decided; independent of one another) ──
+  /** A trusted position resolved → drives the POSITION-grain best_* fields. */
+  position_trusted: boolean
+  /** The move row's played evidence passes the move-grain (move-complete-v1) gate. */
+  move_trusted: boolean
+
   /**
    * Quality metadata from the backend (see backend CachedAnalysisResult).
    * `authoritative` is true only when the row's identity fields match an active
@@ -888,9 +911,9 @@ export interface CachedAnalysis {
    */
   contract_satisfied?: boolean
   /**
-   * Backend-computed trust decision: authoritative profile AND
-   * resolver-complete-v2 contract AND that contract's validation passed. The
-   * frontend's isTrustedCacheHit keys off this and does NOT re-derive trust.
+   * @deprecated Superseded by the grain-specific `position_trusted` /
+   * `move_trusted` pair. The backend still emits it transitionally, but the
+   * frontend no longer reads it — trust is now decided per grain.
    */
   trusted_for_resolution?: boolean
 }
@@ -1049,6 +1072,14 @@ export interface PositionAnalysis {
   best_move_eval_cp: number | null  // side-to-move-relative
   /** Root best-move principal variation (UCI). Starts with best_move_uci. */
   best_line_uci?: string[] | null
+  /**
+   * Whether the backend resolved this as a TRUSTED position (matches the backend
+   * pydantic model — required, never defaulted). Locally-built seeds (drill
+   * snapshots from worker results) set this `false`. Whether AnalysisBoard gates
+   * its restricted-search skip on this flag is g-54h5's call; this field only
+   * delivers the honest signal.
+   */
+  position_trusted: boolean
 }
 
 export interface SessionAnalysis {

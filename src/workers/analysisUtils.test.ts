@@ -15,8 +15,11 @@ import {
   isWithinRecordingMoveCap,
   classifyMove,
   classifyMoveAdvanced,
-  canResolveCachedAnalysis,
-  isTrustedCacheHit,
+  canResolvePositionAnalysis,
+  canResolveMoveAnalysis,
+  isTrustedPositionHit,
+  isTrustedMoveHit,
+  hasCpEvalLoss,
   isMoveClassification,
   evalLoss,
   failsDrill,
@@ -859,120 +862,164 @@ describe('classifyMoveAdvanced', () => {
   })
 })
 
-describe('canResolveCachedAnalysis', () => {
-  it('accepts a classified cache hit with a multi-move best line', () => {
+describe('canResolvePositionAnalysis', () => {
+  it('accepts a best move with a multi-move best line starting at that move', () => {
     expect(
-      canResolveCachedAnalysis({
+      canResolvePositionAnalysis({
         best_move_uci: 'e2e4',
         best_line_uci: ['e2e4', 'e7e5'],
-        classification: 'best',
-        eval_delta: 0,
       }),
     ).toBe(true)
   })
 
-  it('rejects cache hits with a best move but no usable best line', () => {
+  it('rejects a best move with no usable best line', () => {
+    // Null PV.
     expect(
-      canResolveCachedAnalysis({
-        best_move_uci: 'e2e4',
-        best_line_uci: null,
-        classification: 'best',
-        eval_delta: 0,
-      }),
+      canResolvePositionAnalysis({ best_move_uci: 'e2e4', best_line_uci: null }),
     ).toBe(false)
-
+    // Single-move PV.
     expect(
-      canResolveCachedAnalysis({
-        best_move_uci: 'e2e4',
-        best_line_uci: ['e2e4'],
-        classification: 'best',
-        eval_delta: 0,
-      }),
+      canResolvePositionAnalysis({ best_move_uci: 'e2e4', best_line_uci: ['e2e4'] }),
     ).toBe(false)
-
+    // PV[0] differs from the best move.
     expect(
-      canResolveCachedAnalysis({
+      canResolvePositionAnalysis({
         best_move_uci: 'e2e4',
         best_line_uci: ['d2d4', 'd7d5'],
-        classification: 'best',
-        eval_delta: 0,
       }),
     ).toBe(false)
   })
 
-  it('rejects rows whose classification is not a valid MoveClassification', () => {
+  it('rejects a row with no best move (cannot synthesize a PV-less best line)', () => {
     expect(
-      canResolveCachedAnalysis({
-        best_move_uci: 'e2e4',
-        best_line_uci: ['e2e4', 'e7e5'],
+      canResolvePositionAnalysis({ best_move_uci: null, best_line_uci: null }),
+    ).toBe(false)
+  })
+})
+
+describe('canResolveMoveAnalysis', () => {
+  it('accepts a valid classification with a finite CP played eval', () => {
+    expect(
+      canResolveMoveAnalysis({
+        classification: 'good',
+        played_eval: 12,
+        played_eval_mate: null,
+      }),
+    ).toBe(true)
+  })
+
+  it('accepts a mate-only row (played_eval_mate set, played_eval null) — DOES NOT require eval_delta', () => {
+    expect(
+      canResolveMoveAnalysis({
+        classification: 'blunder',
+        played_eval: null,
+        played_eval_mate: -2,
+      }),
+    ).toBe(true)
+  })
+
+  it('rejects when both played evals are null', () => {
+    expect(
+      canResolveMoveAnalysis({
+        classification: 'good',
+        played_eval: null,
+        played_eval_mate: null,
+      }),
+    ).toBe(false)
+  })
+
+  it('rejects an invalid or null classification even with a usable played eval', () => {
+    expect(
+      canResolveMoveAnalysis({
         classification: 'totally-not-a-classification',
-        eval_delta: 0,
+        played_eval: 12,
+        played_eval_mate: null,
       }),
     ).toBe(false)
-
     expect(
-      canResolveCachedAnalysis({
-        best_move_uci: 'e2e4',
-        best_line_uci: ['e2e4', 'e7e5'],
+      canResolveMoveAnalysis({
         classification: null,
-        eval_delta: 0,
-      }),
-    ).toBe(false)
-  })
-
-  it('rejects rows with a null/non-finite/negative eval_delta', () => {
-    const base = {
-      best_move_uci: 'e2e4',
-      best_line_uci: ['e2e4', 'e7e5'],
-      classification: 'best' as const,
-    }
-    expect(canResolveCachedAnalysis({ ...base, eval_delta: null })).toBe(false)
-    expect(canResolveCachedAnalysis({ ...base, eval_delta: -1 })).toBe(false)
-    expect(canResolveCachedAnalysis({ ...base, eval_delta: Infinity })).toBe(false)
-    expect(canResolveCachedAnalysis({ ...base, eval_delta: NaN })).toBe(false)
-  })
-
-  it('rejects rows that have no best move to avoid synthesizing a PV-less best line', () => {
-    expect(
-      canResolveCachedAnalysis({
-        best_move_uci: null,
-        best_line_uci: null,
-        classification: 'best',
-        eval_delta: 0,
+        played_eval: 12,
+        played_eval_mate: null,
       }),
     ).toBe(false)
   })
 })
 
-describe('isTrustedCacheHit', () => {
+describe('hasCpEvalLoss', () => {
+  it('is true only for a finite non-negative eval_delta', () => {
+    expect(hasCpEvalLoss({ eval_delta: 0 })).toBe(true)
+    expect(hasCpEvalLoss({ eval_delta: 42 })).toBe(true)
+  })
+
+  it('is false for null/undefined/non-finite/negative deltas', () => {
+    expect(hasCpEvalLoss({ eval_delta: null })).toBe(false)
+    expect(hasCpEvalLoss({ eval_delta: undefined })).toBe(false)
+    expect(hasCpEvalLoss({ eval_delta: Infinity })).toBe(false)
+    expect(hasCpEvalLoss({ eval_delta: NaN })).toBe(false)
+    expect(hasCpEvalLoss({ eval_delta: -1 })).toBe(false)
+  })
+})
+
+describe('isTrustedPositionHit', () => {
   const complete = {
+    position_trusted: true as boolean,
     best_move_uci: 'e2e4',
     best_line_uci: ['e2e4', 'e7e5'],
-    classification: 'best' as const,
-    eval_delta: 0,
   }
 
-  it('trusts a backend-marked trusted_for_resolution row, independent of the diagnostic fields', () => {
+  it('trusts a backend position_trusted row with renderable PV structure', () => {
+    expect(isTrustedPositionHit(complete)).toBe(true)
+  })
+
+  it('does NOT trust a row the backend left position-untrusted', () => {
+    expect(isTrustedPositionHit({ ...complete, position_trusted: false })).toBe(false)
+    // No flag at all -> worker fallback.
     expect(
-      isTrustedCacheHit({ ...complete, trusted_for_resolution: true }),
+      isTrustedPositionHit({ best_move_uci: 'e2e4', best_line_uci: ['e2e4', 'e7e5'] }),
+    ).toBe(false)
+  })
+
+  it('falls back to the worker when a trusted row lacks renderable PV structure', () => {
+    expect(isTrustedPositionHit({ ...complete, best_line_uci: null })).toBe(false)
+  })
+})
+
+describe('isTrustedMoveHit', () => {
+  const complete = {
+    move_trusted: true as boolean,
+    classification: 'good' as const,
+    played_eval: 12,
+    played_eval_mate: null as number | null,
+  }
+
+  it('trusts a backend move_trusted row with renderable played evidence', () => {
+    expect(isTrustedMoveHit(complete)).toBe(true)
+  })
+
+  it('is TRUE for a move-trusted mate-only row (eval_delta absent)', () => {
+    expect(
+      isTrustedMoveHit({
+        move_trusted: true,
+        classification: 'blunder',
+        played_eval: null,
+        played_eval_mate: -2,
+        // eval_delta intentionally omitted — move-complete-v1 does not require it.
+      }),
     ).toBe(true)
   })
 
-  it('does NOT trust a row the backend left untrusted, regardless of authoritative/contract surface', () => {
+  it('does NOT trust a row the backend left move-untrusted', () => {
+    expect(isTrustedMoveHit({ ...complete, move_trusted: false })).toBe(false)
+    // No flag at all -> worker fallback.
     expect(
-      isTrustedCacheHit({ ...complete, trusted_for_resolution: false }),
+      isTrustedMoveHit({ classification: 'good', played_eval: 12, played_eval_mate: null }),
     ).toBe(false)
-    // No trusted flag at all -> worker fallback.
-    expect(isTrustedCacheHit({ ...complete })).toBe(false)
   })
 
-  it('falls back to the worker when a trusted row lacks renderable structure', () => {
+  it('falls back to the worker when a trusted row lacks renderable played evidence', () => {
     expect(
-      isTrustedCacheHit({
-        ...complete,
-        best_line_uci: null,
-        trusted_for_resolution: true,
-      }),
+      isTrustedMoveHit({ ...complete, played_eval: null, played_eval_mate: null }),
     ).toBe(false)
   })
 })

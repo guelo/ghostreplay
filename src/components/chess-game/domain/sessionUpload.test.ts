@@ -78,6 +78,8 @@ describe("buildDrillAnalysisSnapshot", () => {
     expect(entry.best_move_uci).toBe("d2d4");
     expect(entry.best_move_san).toBe("d4");
     expect(entry.best_line_uci).toEqual(["d2d4", "d7d5"]);
+    // Locally-built seeds are not a backend trusted-position winner (g-54h5).
+    expect(entry.position_trusted).toBe(false);
   });
 
   it("starts one ply before the bad move, clamped into range (g-eflo)", () => {

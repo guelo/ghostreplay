@@ -159,7 +159,8 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0) // resolve cache promise
@@ -336,7 +337,8 @@ describe('GameAnalysisCoordinator', () => {
             best_eval: -9980,
             eval_delta: 0,
             classification: 'best',
-            trusted_for_resolution: true,
+            position_trusted: true,
+          move_trusted: true,
           }],
         ])),
       )
@@ -429,7 +431,8 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -457,7 +460,8 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -588,7 +592,8 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -631,7 +636,8 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -662,7 +668,8 @@ describe('GameAnalysisCoordinator', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -757,13 +764,15 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
           best_line_uci: ['uci-0', 'reply-0'],
           played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
         ['fen-1::uci-1', {
           move_san: 'm1', best_move_uci: 'uci-1', best_move_san: 'm1',
           best_line_uci: ['uci-1', 'reply-1'],
           played_eval: 5, best_eval: 5, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -793,7 +802,8 @@ describe('GameAnalysisCoordinator', () => {
           move_san: 'm2', best_move_uci: 'uci-2', best_move_san: 'm2',
           best_line_uci: ['uci-2', 'reply-2'],
           played_eval: 3, best_eval: 3, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
       await vi.advanceTimersByTimeAsync(0)
@@ -869,7 +879,10 @@ describe('GameAnalysisCoordinator', () => {
       best_eval: 25,
       eval_delta: 0,
       classification: 'best' as const,
-      trusted_for_resolution: true,
+      played_eval_mate: null,
+      best_eval_mate: null,
+      position_trusted: true,
+      move_trusted: true,
       analysis_profile_id: 'linux-sf18-d24',
       ...overrides,
     })
@@ -920,7 +933,62 @@ describe('GameAnalysisCoordinator', () => {
       postWorker(id)
 
       vi.advanceTimersByTime(200)
-      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { trusted_for_resolution: false })]]))
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { position_trusted: false, move_trusted: false })]]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    // Phase 5 grain split: the cache row resolves the move only when ALL of
+    // isTrustedPositionHit, isTrustedMoveHit, and hasCpEvalLoss hold. Each of the
+    // three concerns failing alone must fall back to the worker.
+    it('falls back to the worker when the position is trusted but the move is not (split case a)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(id)
+
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { move_trusted: false })]]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    it('falls back to the worker when the move is trusted but the position is not (split case b)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(id)
+
+      vi.advanceTimersByTime(200)
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', { position_trusted: false })]]))
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
+    })
+
+    it('falls back to the worker for a move-trusted mate-only row with no CP delta (split case c)', async () => {
+      coordinator.startSession('s')
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(new Promise((r) => { resolveLookup = r }))
+
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      postWorker(id)
+
+      vi.advanceTimersByTime(200)
+      // Both grains trusted, but eval_delta is null (mate-only) so the
+      // transitional hasCpEvalLoss gate keeps it on the worker until Phase 6.
+      resolveLookup(new Map([['fen-0::e2e4', trustedRow('e2e4', {
+        classification: 'blunder',
+        played_eval: null,
+        played_eval_mate: -2,
+        eval_delta: null,
+      })]]))
       await vi.advanceTimersByTimeAsync(0)
 
       expect(coordinator.store.getState().analysisMap.get(0)?.bestMove).toBe('worker-best')
@@ -1168,7 +1236,8 @@ describe('GameAnalysisCoordinator', () => {
             best_move_uci: 'd2d4', best_line_uci: ['d2d4', 'g8f6'], best_eval: 50,
             played_eval: -150, played_eval_mate: null, eval_delta: 200,
             classification: 'blunder', analysis_profile_id: 'p1',
-            trusted_for_resolution: true,
+            position_trusted: true,
+          move_trusted: true,
           }],
         ]),
       )

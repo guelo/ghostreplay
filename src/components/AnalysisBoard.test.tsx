@@ -516,6 +516,7 @@ describe('AnalysisBoard MoveList', () => {
             best_move_uci: 'g8f6',
             best_move_san: 'Nf6',
             best_move_eval_cp: 20,
+            position_trusted: true,
           },
         }}
       />,
@@ -760,6 +761,7 @@ describe('AnalysisBoard MoveList', () => {
             best_move_san: 'Nf3',
             best_move_eval_cp: 42,
             best_line_uci: ['g1f3', 'd7d6', 'd2d4'],
+            position_trusted: true,
           },
         }}
       />,
@@ -786,6 +788,7 @@ describe('AnalysisBoard MoveList', () => {
               best_move_san: 'Nf3',
               best_move_eval_cp: 42,
               best_line_uci: ['g1f3', 'd7d6', 'd2d4'],
+              position_trusted: true,
             },
           }}
         />,
@@ -829,6 +832,7 @@ describe('AnalysisBoard MoveList', () => {
             best_move_uci: 'g1f3',
             best_move_san: 'Nf3',
             best_move_eval_cp: 42,
+            position_trusted: true,
           },
         }}
       />,

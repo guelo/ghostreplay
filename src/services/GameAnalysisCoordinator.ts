@@ -13,7 +13,9 @@ import {
   isRecordableFailure,
   isWithinRecordingMoveCap,
   classifyMove,
-  isTrustedCacheHit,
+  isTrustedPositionHit,
+  isTrustedMoveHit,
+  hasCpEvalLoss,
 } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
@@ -192,11 +194,10 @@ const fromCachedAnalysis = (
   return {
     id: requestId,
     move,
-    // Fallback to the played move when the cache row lacks a best move. NOTE:
-    // 0cp drill grading reads `bestMove === playedMove` (g-l02q), so this would
-    // false-pass a non-best move at strictness 0 — but a null best_move_uci
-    // implies a null best_eval, hence a null eval_delta, which `gradeDrillMove`
-    // grades as `unavailable` (recovery) before the best-move check runs.
+    // Under the grain gate this is only reached for an isTrustedPositionHit row,
+    // so `best_move_uci` is guaranteed non-null; the `?? move` fallback is now
+    // purely defensive (the old "null best → unavailable recovery" reasoning no
+    // longer applies because such rows never resolve from cache).
     bestMove: cached.best_move_uci ?? move,
     bestLine: cached.best_line_uci ?? null,
     bestEval,
@@ -1186,9 +1187,22 @@ export class GameAnalysisCoordinator {
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
 
-          if (!cached || !isTrustedCacheHit(cached)) {
-            // Miss / no row / structurally-complete-but-untrusted → release the
-            // worker fallback.
+          if (
+            !cached ||
+            !isTrustedPositionHit(cached) ||
+            !isTrustedMoveHit(cached) ||
+            !hasCpEvalLoss(cached)
+          ) {
+            // Release the worker fallback unless ALL three concerns pass:
+            //  - isTrustedPositionHit: trusted, renderable best move/PV so
+            //    `bestMove`/PV are grain-correct and exact-best is meaningful.
+            //  - isTrustedMoveHit: trusted, renderable played evidence
+            //    (classification + a played eval of either kind).
+            //  - hasCpEvalLoss: TRANSITIONAL — the current grader needs a CP
+            //    delta; mate-only rows lack one and fall back to the worker
+            //    until Phase 6. (Dropping this line is the Phase 6 change.)
+            // Preserves today's behavior exactly: position-untrusted (null best),
+            // move-untrusted, and move-trusted mate-only rows all fall back.
             const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
             this.releaseFallback(pending.moveIndex, pending.requestId, reason)
             continue

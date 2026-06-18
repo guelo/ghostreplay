@@ -887,7 +887,8 @@ def test_lookup_move_only_untrusted_position_null(client, auth_headers, db_sessi
 
 def test_lookup_position_only_no_move_row_suppressed(client, auth_headers, db_session):
     # A trusted storage row exists but NO exact move row: no result is emitted
-    # (position-only hits are intentionally suppressed until Phase 5).
+    # (position-only hits are intentionally suppressed; un-suppressing them is
+    # Phase 6, where strictness-0 exact-best from a trusted position needs them).
     _seed_position_storage(db_session, fen=STARTING_FEN, best_move_uci="e2e4",
                            best_line_uci="e2e4 e7e5", best_eval=25)
 

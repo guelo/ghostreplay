@@ -936,7 +936,8 @@ describe('useMoveAnalysis', () => {
           best_eval: 25,
           eval_delta: 0,
           classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
     })
@@ -989,7 +990,8 @@ describe('useMoveAnalysis', () => {
           best_eval: -9980,
           eval_delta: 0,
           classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
     })
@@ -1244,7 +1246,8 @@ describe('useMoveAnalysis', () => {
           move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
           best_line_uci: ['e2e4', 'e7e5'],
           played_eval: 25, best_eval: 25, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
     })
@@ -1256,6 +1259,52 @@ describe('useMoveAnalysis', () => {
         ([m]) => m.type === 'cancel-analysis' && m.id === id,
       ),
     ).toBe(true)
+  })
+
+  // Phase 5 grain split: the cache row resolves the move only when ALL of
+  // isTrustedPositionHit, isTrustedMoveHit, and hasCpEvalLoss hold.
+  it.each([
+    ['position trusted, move untrusted (split case a)', { move_trusted: false }],
+    ['move trusted, position untrusted (split case b)', { position_trusted: false }],
+    [
+      'move-trusted mate-only row with no CP delta (split case c)',
+      { classification: 'blunder', played_eval: null, played_eval_mate: -2, eval_delta: null },
+    ],
+  ])('falls back to the worker when %s', async (_label, overrides) => {
+    vi.useFakeTimers()
+    let resolveLookup!: (value: Map<string, unknown>) => void
+    lookupAnalysisCacheMock.mockReturnValueOnce(
+      new Promise((resolve) => { resolveLookup = resolve }),
+    )
+
+    const { result } = renderHook(() => useMoveAnalysis(store))
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0, 20) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+    act(() => {
+      resolveLookup(new Map([
+        ['fen-0::e2e4', {
+          move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
+          best_line_uci: ['e2e4', 'e7e5'],
+          played_eval: 25, played_eval_mate: null,
+          best_eval: 25, best_eval_mate: null, eval_delta: 0, classification: 'best',
+          position_trusted: true, move_trusted: true,
+          ...overrides,
+        }],
+      ]))
+    })
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+    // The cache row did not resolve the move; the worker still owns it.
+    expect(store.getState().analysisMap.has(0)).toBe(false)
+    // The worker request is NOT cancelled (it must finish the analysis).
+    expect(
+      postMessageMock.mock.calls.some(
+        ([m]) => m.type === 'cancel-analysis' && m.id === id,
+      ),
+    ).toBe(false)
   })
 
   it('cancels the superseded worker request when the same index is re-analyzed', () => {
@@ -1338,7 +1387,8 @@ describe('useMoveAnalysis', () => {
           move_san: 'e4', best_move_uci: 'e2e4', best_move_san: 'e4',
           best_line_uci: ['e2e4', 'e7e5'],
           played_eval: 25, best_eval: 25, eval_delta: 0, classification: 'best',
-          trusted_for_resolution: true,
+          position_trusted: true,
+          move_trusted: true,
         }],
       ]))
     })

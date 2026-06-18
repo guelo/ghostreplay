@@ -154,6 +154,10 @@ export const buildDrillAnalysisSnapshot = (
         best_move_san: upload.best_move_san,
         best_move_eval_cp: upload.best_move_eval_cp,
         best_line_uci: upload.best_line_uci ?? null,
+        // Local worker results are not a backend trusted-position winner, so the
+        // honest flag is false. Whether AnalysisBoard re-searches on an untrusted
+        // seed is g-54h5's call; this phase only delivers the flag.
+        position_trusted: false,
       };
     }
   });

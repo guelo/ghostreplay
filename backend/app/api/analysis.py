@@ -67,9 +67,11 @@ class CachedAnalysisResult(BaseModel):
     # validation. Diagnostics only — trust additionally requires authoritative
     # identity and the resolver-complete-v2 contract (see trusted_for_resolution).
     contract_satisfied: bool = False
-    # The legacy backend-owned trust decision the Phase-5-pending frontend keys off:
-    # the move row is authoritative AND declares resolver-complete-v2 AND that
-    # contract's semantic validation passes. Kept unchanged until Phase 5.
+    # Legacy backend-owned trust decision: the move row is authoritative AND
+    # declares resolver-complete-v2 AND that contract's semantic validation
+    # passes. As of Phase 5 the frontend no longer reads this — it keys off the
+    # grain-specific position_trusted/move_trusted pair below. Still emitted
+    # transitionally; removal is a later cleanup once no consumer reads it.
     trusted_for_resolution: bool = False
     # Grain-specific trust (g-position-analysis Phase 4), independent of one another:
     #   position_trusted — a trusted position was resolved (drives the best_* fields).
@@ -167,7 +169,8 @@ def lookup_analysis(
     for position in request.positions:
         # A result is still emitted only when an exact (fen, move_uci) MOVE row
         # exists; a position-only hit (storage row, no move row) is intentionally
-        # suppressed until the Phase-5 frontend can consume the split shape.
+        # suppressed. Un-suppressing it is Phase 6, where strictness-0 exact-best
+        # from a trusted position with no exact move row needs it.
         row = row_map.get((position.fen, position.move_uci))
         if row is not None:
             key = _make_cache_key(position.fen, position.move_uci)

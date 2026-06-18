@@ -25,10 +25,13 @@ def _is_finite_int(value) -> bool:
 
 
 def _validate_resolver_complete(data: dict) -> bool:
-    """Mirror ``canResolveCachedAnalysis`` in src/workers/analysisUtils.ts.
+    """Semantic validation for the legacy resolver-complete (V2) contract.
 
     Requires a classification signal, a best move, and a multi-move best-line PV
-    whose first move equals the best move.
+    whose first move equals the best move. This is the move-grain combined check
+    backing ``trusted_for_resolution``; the Phase-5 frontend split it into the
+    position-grain (``canResolvePositionAnalysis``) and move-grain
+    (``canResolveMoveAnalysis``) guards in src/workers/analysisUtils.ts.
     """
     has_classification = (
         data.get("classification") is not None or data.get("eval_delta") is not None

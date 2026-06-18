@@ -3,7 +3,7 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedCacheHit } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedMoveHit, hasCpEvalLoss } from '../workers/analysisUtils'
 import type { MoveClassification } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
@@ -334,7 +334,17 @@ export const useMoveAnalysis = (
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
 
-          if (!cached || !isTrustedCacheHit(cached)) {
+          if (
+            !cached ||
+            !isTrustedPositionHit(cached) ||
+            !isTrustedMoveHit(cached) ||
+            !hasCpEvalLoss(cached)
+          ) {
+            // Release the worker fallback unless ALL three concerns pass:
+            // trusted+renderable POSITION (best move/PV), trusted+renderable
+            // MOVE evidence, and a CP eval-loss the current grader can use.
+            // `hasCpEvalLoss` is the TRANSITIONAL gate that keeps move-trusted
+            // mate-only rows on the worker until Phase 6 (epic g-l02q).
             const reason: ReleaseReason = cached ? 'untrusted' : 'cache-miss'
             releaseFallback(pending.moveIndex, pending.requestId, reason)
             continue
