@@ -7179,6 +7179,50 @@ button.openings-shell__crumb:hover {
     gap: clamp(1rem, 2vw, 1.5rem);
 }
 
+/* Viewport-height chain: bound the page main to a DEFINITE 100dvh and let the
+   available height flow down through constrained-content → tree → workspace so
+   the columns fill to the bottom of the viewport instead of stopping at content
+   height (which left body bg showing below as a phantom margin). Must be
+   `height`, not `min-height`: min-height lets the main grow with content, which
+   gives the % chain no ceiling to resolve against — the page scrolls instead of
+   each column. The mobile block below restores `auto` so the stacked layout
+   keeps its intended page-scroll. */
+/* Compound .app-shell.openings-page (0,2,0) so these beat the .app-shell
+   padding shorthands — including the @media(max-width:1099px) override, which is
+   a later same-specificity rule that would otherwise reset padding-bottom. */
+.app-shell.openings-page {
+    height: 100dvh;
+    /* .app-shell's bottom padding lives inside the border-box 100dvh, so it
+       renders as dead space below the columns. Drop it so content sits flush to
+       the viewport bottom in every layout (mobile only overrides height:auto,
+       inheriting this padding-bottom:0). */
+    padding-bottom: 0;
+}
+
+.openings-page .constrained-content {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.openings-page .openings-tree,
+.openings-page .openings-tree-workspace {
+    flex: 1;
+    min-height: 0;
+}
+
+/* The workspace is align-items:flex-start (keeps the board square), so the
+   scroller must opt back into stretching to fill the workspace height. The
+   canvas then fills the scroller so the columns' max-height:100% resolves. */
+.openings-page .openings-tree-scroll {
+    align-self: stretch;
+}
+
+.openings-page .openings-tree-canvas {
+    height: 100%;
+}
+
 /* Square sticky board, clamped 280-380 (< the 420px column floor) so it never
    dictates column height. */
 .openings-tree-board {
@@ -7234,10 +7278,10 @@ button.openings-shell__crumb:hover {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    /* Independent per-column vertical scroll, viewport-bounded with a 420px
-       usable floor. The 13rem chrome estimate is intentionally generous; the
-       420px floor guarantees usability on short viewports regardless. */
-    max-height: clamp(420px, calc(100dvh - 13rem), 56rem);
+    /* Independent per-column vertical scroll, bounded to the canvas which the
+       .openings-page flex chain stretches to fill the viewport. The mobile
+       block below overrides this with a dvh band for the stacked layout. */
+    max-height: 100%;
     overflow-y: auto;
     /* Pin overflow-x so the browser does not auto-promote it to "auto" (which it
        does when only overflow-y is non-visible) and give every column a
@@ -7278,6 +7322,13 @@ button.openings-shell__crumb:hover {
    vertically); the tree still scrolls horizontally with one next column
    peeking. */
 @media (max-width: 720px) {
+    /* Drop the definite 100dvh ceiling so the stacked layout grows with content
+       and the whole page scrolls (board un-sticks; each column keeps its dvh
+       band below). */
+    .app-shell.openings-page {
+        height: auto;
+    }
+
     .openings-tree-workspace {
         flex-direction: column;
     }

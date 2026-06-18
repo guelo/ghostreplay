@@ -284,7 +284,7 @@ function OpeningsPage() {
     : {};
 
   return (
-    <main className="app-shell">
+    <main className="app-shell openings-page">
       <AppNav />
 
       <div className="constrained-content">
