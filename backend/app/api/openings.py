@@ -826,6 +826,10 @@ class TreeResponse(BaseModel):
     drill_opening_key: str | None      # roots.get_root(selected_fen)
     root_eval_cp: int | None           # column-0 start position best_eval (white-rel)
     root_eval_mate: int | None
+    root_opening_score: float | None   # start-position metrics from position_rows (None when no evidence)
+    root_coverage: float | None
+    root_game_count: int | None
+    root_confidence: float | None
     columns: list[TreeColumn]
     batch_computed_at: datetime | None
     model_version: str
@@ -1257,6 +1261,9 @@ class _OpeningTreeBuilder:
                 eval_requests.append((pos_full[i], uci))
                 position_fens.add(child.child_fen)
             raw_columns.append((i, norm_i, selected_uci, raw_nodes))
+        # Always include the root position so we can expose its metrics on the
+        # Starting position card (the batch may have a row for it).
+        position_fens.add(pos_norm[0])
         _record_timing(timings, "structural_columns_ms", stage_started)
         if timings is not None:
             timings["raw_column_count"] = len(raw_columns)
@@ -1317,6 +1324,7 @@ class _OpeningTreeBuilder:
         sel_norm = pos_norm[k]
         selected_terminal_reason = self._terminal_reason_for_position(boards[k], sel_norm)
         selected_root = self.roots.get_root(sel_norm)
+        root_row = position_rows.get(pos_norm[0])
         _record_timing(timings, "selected_terminal_ms", stage_started)
         if timings is not None:
             timings["response_column_count"] = len(columns)
@@ -1334,6 +1342,10 @@ class _OpeningTreeBuilder:
             ),
             root_eval_cp=root_eval.cp if root_eval is not None else None,
             root_eval_mate=root_eval.mate if root_eval is not None else None,
+            root_opening_score=root_row.opening_score if root_row is not None else None,
+            root_coverage=root_row.coverage if root_row is not None else None,
+            root_game_count=root_row.game_count if root_row is not None else None,
+            root_confidence=root_row.confidence if root_row is not None else None,
             columns=columns,
             batch_computed_at=self.batch_computed_at,
             model_version=SCORE_MODEL_VERSION,

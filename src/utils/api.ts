@@ -1384,6 +1384,10 @@ export interface TreeResponse {
   /** Start-position eval (white-relative); line-independent. */
   root_eval_cp: number | null
   root_eval_mate: number | null
+  root_opening_score: number | null
+  root_coverage: number | null
+  root_game_count: number | null
+  root_confidence: number | null
   columns: TreeColumn[]
   batch_computed_at: string | null
   model_version: string

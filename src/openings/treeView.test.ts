@@ -61,6 +61,10 @@ function makeResponse(overrides: Partial<TreeResponse> = {}): TreeResponse {
     drill_opening_key: null,
     root_eval_cp: null,
     root_eval_mate: null,
+    root_opening_score: null,
+    root_coverage: null,
+    root_game_count: null,
+    root_confidence: null,
     columns: [],
     batch_computed_at: "2026-06-01T00:00:00Z",
     model_version: "v2",
@@ -145,6 +149,29 @@ describe("synthesizeRootView", () => {
     const response = makeResponse({ root_eval_cp: 30, root_eval_mate: null });
     expect(synthesizeRootView(response, false, 2, "white").evalCp).toBe(30);
     expect(synthesizeRootView(response, false, 2, "black").evalCp).toBe(-30);
+  });
+
+  it("propagates root metrics regardless of depth and clipping", () => {
+    const response = makeResponse({
+      root_opening_score: 72,
+      root_coverage: 0.6,
+      root_game_count: 15,
+      root_confidence: 0.8,
+    });
+    const view = synthesizeRootView(response, false, 2, "white");
+    expect(view.score).toBe(72);
+    expect(view.coverage).toBe(0.6);
+    expect(view.gameCount).toBe(15);
+    expect(view.confidence).toBe(0.8);
+  });
+
+  it("root metrics are null when response has no batch data", () => {
+    const response = makeResponse({});
+    const view = synthesizeRootView(response, true, 0, "white");
+    expect(view.score).toBeNull();
+    expect(view.coverage).toBeNull();
+    expect(view.gameCount).toBeNull();
+    expect(view.confidence).toBeNull();
   });
 
   it("propagates terminal/drill only when fetched for the root", () => {

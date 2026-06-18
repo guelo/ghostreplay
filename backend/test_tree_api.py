@@ -627,6 +627,29 @@ def test_tree_eval_mate_over_cp_and_miss_is_null(client, auth_headers):
     assert e4["eval_mate"] == 2 and e4["eval_cp"] is None
 
 
+def test_root_position_score_fields_populated_when_batch_has_start_row(client, auth_headers):
+    """Root metrics come from the starting position's CachedPositionScoreRow."""
+    start_row = _pos_row(START, score=72.5, confidence=0.8, coverage=0.6,
+                         game_count=15, has_evidence=True)
+    resp = _call(client, auth_headers, position_rows={START: start_row},
+                 params={"player_color": "white"})
+    data = resp.json()
+    assert data["root_opening_score"] == pytest.approx(72.5)
+    assert data["root_coverage"] == pytest.approx(0.6)
+    assert data["root_confidence"] == pytest.approx(0.8)
+    assert data["root_game_count"] == 15
+
+
+def test_root_position_score_fields_null_when_no_batch_row(client, auth_headers):
+    """Root metrics are null when the batch has no row for the starting position."""
+    resp = _call(client, auth_headers, params={"player_color": "white"})
+    data = resp.json()
+    assert data["root_opening_score"] is None
+    assert data["root_coverage"] is None
+    assert data["root_confidence"] is None
+    assert data["root_game_count"] is None
+
+
 # --- color specificity (finding #1) ------------------------------------------
 
 def test_tree_color_specificity_keeps_book_and_eval_but_differs_in_evidence(
