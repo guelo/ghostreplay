@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Chessboard } from "react-chessboard";
+import { Chessboard, defaultPieces } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import OpeningTreeNodeCard from "../components/OpeningTreeNodeCard";
@@ -20,9 +20,16 @@ import { captureEvent } from "../analytics/posthog";
 import type { OpeningPlayerColor } from "../utils/api";
 import "../App.css";
 
-const COLOR_OPTIONS: Array<{ label: string; value: OpeningPlayerColor }> = [
-  { label: "White", value: "white" },
-  { label: "Black", value: "black" },
+const WhiteKing = defaultPieces.wK;
+const BlackKing = defaultPieces.bK;
+
+const COLOR_OPTIONS: Array<{
+  label: string;
+  value: OpeningPlayerColor;
+  King: typeof WhiteKing;
+}> = [
+  { label: "White", value: "white", King: WhiteKing },
+  { label: "Black", value: "black", King: BlackKing },
 ];
 
 const LAST_MOVE_HIGHLIGHT: React.CSSProperties = {
@@ -283,28 +290,31 @@ function OpeningsPage() {
       <div className="constrained-content">
         <section className="openings-tree">
           <header className="openings-tree__header">
-            <h1 className="openings-tree__title">Opening Tree</h1>
+            <h1 className="openings-tree__title">Openings Tree</h1>
             <div
               className="openings-color-picker"
               role="group"
               aria-label="Playing as"
             >
               <span className="openings-tree__color-label">Playing as:</span>
-              {COLOR_OPTIONS.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`openings-color-picker__button${
-                    playerColor === option.value
-                      ? " openings-color-picker__button--active"
-                      : ""
-                  }`}
-                  aria-pressed={playerColor === option.value}
-                  onClick={() => switchColor(option.value)}
-                >
-                  {option.label}
-                </button>
-              ))}
+              <div className="mode-toggle-row segmented-toggle openings-color-picker__toggle">
+                {COLOR_OPTIONS.map(({ label, value, King }) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={`chess-button toggle${
+                      playerColor === value ? " active" : ""
+                    }`}
+                    aria-pressed={playerColor === value}
+                    onClick={() => switchColor(value)}
+                  >
+                    <span className="openings-color-picker__piece">
+                      <King />
+                    </span>
+                    {label}
+                  </button>
+                ))}
+              </div>
             </div>
           </header>
 

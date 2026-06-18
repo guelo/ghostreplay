@@ -7028,44 +7028,32 @@ button.openings-shell__crumb:hover {
     gap: 0.9rem;
 }
 
+/* "Playing as" picker: the label sits outside a segmented king toggle that
+   reuses the .mode-toggle-row / .segmented-toggle styling from the game setup. */
 .openings-color-picker {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* Size the toggle to its content (not full width) and lay the king icon
+   inline with the label inside each segment. */
+.openings-color-picker__toggle {
+    flex: 0 0 auto;
+}
+
+.openings-color-picker__toggle .chess-button.toggle {
     display: inline-flex;
-    flex-wrap: wrap;
-    gap: 0.4rem;
-    padding: 0.35rem;
-    border: 1px solid var(--border-color);
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-white) 72%, var(--bg-secondary));
-    box-shadow: var(--shadow-sm);
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
 }
 
-.openings-color-picker__button {
-    border: 1px solid transparent;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--text-secondary);
-    padding: 0.55rem 1rem;
-    font-size: 0.88rem;
-    font-weight: 700;
-    cursor: pointer;
-    transition:
-        transform 180ms ease,
-        background 180ms ease,
-        color 180ms ease,
-        border-color 180ms ease,
-        box-shadow 180ms ease;
-}
-
-.openings-color-picker__button:hover {
-    transform: translateY(-1px);
-    border-color: var(--border-color);
-    background: color-mix(in srgb, var(--color-white) 50%, var(--bg-secondary));
-}
-
-.openings-color-picker__button--active {
-    background: var(--gradient-brand);
-    color: var(--text-on-gradient);
-    box-shadow: var(--shadow-md);
+.openings-color-picker__piece {
+    display: inline-flex;
+    width: 1.25rem;
+    height: 1.25rem;
+    flex-shrink: 0;
 }
 
 .openings-shell__toolbar-note {
@@ -7156,9 +7144,8 @@ button.openings-shell__crumb:hover {
 
 .openings-tree__header {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 0.75rem;
 }
 
