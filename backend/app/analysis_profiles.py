@@ -35,6 +35,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 _FULL_SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -325,3 +326,98 @@ def stamp_identity(profile_id: str) -> dict:
         "analyzer_protocol_version": profile.analyzer_protocol_version,
         "profile_manifest_digest": profile.profile_manifest_digest,
     }
+
+
+# --- Cross-profile search-strength comparison (g-position-analysis Phase 2) -----
+#
+# A reusable, GUARDED comparator: it only ranks two profiles by search strength
+# when they share identical scoring semantics, so a deeper run on a *different*
+# net / multipv / analyzer protocol is never called "stronger". The move-grain
+# ``analysis_cache_policy`` does NOT use this — it orders purely by authority +
+# explicit ``dominates`` edges + completeness. Strength ranking is a position-grain
+# concern (which of two equally-trusted canonical runs is the better engine truth).
+
+
+class StrengthComparison(Enum):
+    """Result of :func:`compare_search_strength`."""
+
+    A_STRONGER = "a_stronger"
+    B_STRONGER = "b_stronger"
+    EQUAL = "equal"
+    INCOMPARABLE = "incomparable"
+
+
+# Scoring-semantics fields that MUST be identical before two profiles can be
+# ranked by search strength. If any differ the two runs measured the position
+# under different rules, so depth/version ordering is meaningless -> INCOMPARABLE.
+# ``engine_build`` is deliberately NOT here: the two canonical profiles differ
+# only by platform binary (x86-64 vs x86-64-bmi2) and must stay comparable.
+_STRENGTH_INVARIANT_FIELDS = (
+    "engine_name",
+    "eval_file_id",
+    "eval_file_small_id",
+    "multipv",
+    "analyzer_protocol_version",
+    "search_limit_type",
+)
+
+# Deterministic preference order for the equal-strength / incomparable tiebreak
+# in position-winner selection. The linux precompute profile is preferred. A new
+# authoritative canonical profile MUST be added here so its rows tiebreak
+# deterministically (and so the backfill pre-filter includes them). This is NOT a
+# strength ranking — strictly-stronger search always wins through
+# ``compare_search_strength`` regardless of this order.
+AUTHORITATIVE_PROFILE_PRIORITY = (
+    "canonical-sf18-depth24-linux-v1",
+    "canonical-sf18-depth24-v1",
+)
+
+
+def _parse_engine_version(version: str | None) -> int | None:
+    """Parse the leading integer of an engine_version (e.g. ``"18"`` -> 18).
+
+    Returns ``None`` when the value is missing or has no leading integer, so the
+    comparator can fall back to raw-string equality rather than mis-ranking.
+    """
+    if version is None:
+        return None
+    match = re.match(r"\d+", str(version))
+    return int(match.group()) if match else None
+
+
+def compare_search_strength(a: Profile, b: Profile) -> StrengthComparison:
+    """Rank two profiles by search strength, guarded for comparability.
+
+    INCOMPARABLE unless every :data:`_STRENGTH_INVARIANT_FIELDS` value is equal
+    (same nets, multipv, analyzer protocol, engine, search-limit *type*). When
+    comparable: compare ``engine_version`` (leading int; if either is non-numeric
+    and the raw versions differ -> INCOMPARABLE), then ``search_limit_value``
+    (higher = stronger). Equal on both axes -> EQUAL.
+    """
+    for f in _STRENGTH_INVARIANT_FIELDS:
+        if getattr(a, f) != getattr(b, f):
+            return StrengthComparison.INCOMPARABLE
+
+    a_ver = _parse_engine_version(a.engine_version)
+    b_ver = _parse_engine_version(b.engine_version)
+    if a_ver is not None and b_ver is not None:
+        if a_ver > b_ver:
+            return StrengthComparison.A_STRONGER
+        if b_ver > a_ver:
+            return StrengthComparison.B_STRONGER
+        # Equal engine version -> fall through to the search-limit comparison.
+    elif a.engine_version != b.engine_version:
+        # At least one version is non-numeric and they differ: cannot rank.
+        return StrengthComparison.INCOMPARABLE
+
+    a_lim, b_lim = a.search_limit_value, b.search_limit_value
+    if a_lim == b_lim:
+        return StrengthComparison.EQUAL
+    if isinstance(a_lim, int) and isinstance(b_lim, int):
+        return (
+            StrengthComparison.A_STRONGER
+            if a_lim > b_lim
+            else StrengthComparison.B_STRONGER
+        )
+    # One limit is missing while the other is set: not safely rankable.
+    return StrengthComparison.INCOMPARABLE

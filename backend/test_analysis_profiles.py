@@ -4,14 +4,19 @@ import dataclasses
 
 import app.analysis_profiles as profiles
 from app.analysis_profiles import (
+    AUTHORITATIVE_PROFILE_PRIORITY,
     CANONICAL_PROFILE_ID,
     RESOLUTION_FIELDS,
     BROWSER_PROFILE_ID,
     JEFFML_PROFILE_ID,
+    StrengthComparison,
+    compare_search_strength,
     get_profile,
     resolve_profile,
     stamp_identity,
 )
+
+LINUX_PROFILE_ID = "canonical-sf18-depth24-linux-v1"
 
 
 def test_canonical_manifest_loads_full_identity():
@@ -116,3 +121,68 @@ def test_stamp_identity_returns_full_columns():
     assert stamped["analyzer_protocol_version"] == p.analyzer_protocol_version
     assert stamped["profile_manifest_digest"] == p.profile_manifest_digest
     assert stamp_identity("unknown") == {}
+
+
+# --- compare_search_strength (g-position-analysis Phase 2) ---------------------
+
+
+def test_priority_lists_both_canonical_profiles_linux_first():
+    # The linux precompute profile is preferred for the equal-strength tiebreak.
+    assert AUTHORITATIVE_PROFILE_PRIORITY == (LINUX_PROFILE_ID, CANONICAL_PROFILE_ID)
+
+
+def test_strength_two_canonical_profiles_are_equal():
+    # Today's two canonical profiles differ only by platform binary (engine_build),
+    # which is NOT a strength invariant, so they rank EQUAL (both v18 / depth-24).
+    a = get_profile(CANONICAL_PROFILE_ID)
+    b = get_profile(LINUX_PROFILE_ID)
+    assert compare_search_strength(a, b) == StrengthComparison.EQUAL
+    assert compare_search_strength(b, a) == StrengthComparison.EQUAL
+
+
+def test_strength_deeper_search_on_same_net_wins():
+    base = get_profile(LINUX_PROFILE_ID)
+    deeper = dataclasses.replace(base, search_limit_value=30)
+    assert compare_search_strength(deeper, base) == StrengthComparison.A_STRONGER
+    assert compare_search_strength(base, deeper) == StrengthComparison.B_STRONGER
+
+
+def test_strength_higher_engine_version_wins_before_depth():
+    base = get_profile(LINUX_PROFILE_ID)
+    # Newer engine version with a SHALLOWER search still ranks stronger: version is
+    # compared before search_limit_value.
+    newer = dataclasses.replace(base, engine_version="19", search_limit_value=10)
+    assert compare_search_strength(newer, base) == StrengthComparison.A_STRONGER
+
+
+def test_strength_differing_net_is_incomparable():
+    base = get_profile(LINUX_PROFILE_ID)
+    other_net = dataclasses.replace(
+        base, eval_file_id="nn-deadbeefdead.nnue:" + "d" * 64, search_limit_value=30
+    )
+    # A deeper run on a DIFFERENT net is not "stronger" — it measured differently.
+    assert compare_search_strength(other_net, base) == StrengthComparison.INCOMPARABLE
+
+
+def test_strength_differing_multipv_protocol_or_limit_type_is_incomparable():
+    base = get_profile(LINUX_PROFILE_ID)
+    for override in (
+        {"multipv": 3},
+        {"analyzer_protocol_version": "analyzer-v2"},
+        {"search_limit_type": "nodes"},
+        {"engine_name": "Lc0"},
+    ):
+        variant = dataclasses.replace(base, **override)
+        assert (
+            compare_search_strength(variant, base) == StrengthComparison.INCOMPARABLE
+        )
+
+
+def test_strength_non_numeric_unequal_version_is_incomparable():
+    base = get_profile(LINUX_PROFILE_ID)
+    a = dataclasses.replace(base, engine_version="dev-a")
+    b = dataclasses.replace(base, engine_version="dev-b")
+    assert compare_search_strength(a, b) == StrengthComparison.INCOMPARABLE
+    # Same non-numeric version + equal depth falls through to EQUAL.
+    a2 = dataclasses.replace(base, engine_version="dev-a")
+    assert compare_search_strength(a, a2) == StrengthComparison.EQUAL
