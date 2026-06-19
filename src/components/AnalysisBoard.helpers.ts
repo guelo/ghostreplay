@@ -26,7 +26,7 @@ const DEFAULT_BLUE_ARROW = "rgba(59, 130, 246, 0.45)";
 type MoveArrow = { startSquare: string; endSquare: string; color: string };
 
 /** Convert an EngineScore to a single number (side-to-move relative). */
-const scoreToNum = (s: EngineInfo["score"]): number | null => {
+export const scoreToNum = (s: EngineInfo["score"]): number | null => {
   if (!s) return null;
   return s.type === "cp" ? s.value : mateToCp(s.value);
 };

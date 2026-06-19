@@ -23,6 +23,7 @@ import { formatWhiteEval } from "./MoveRow.helpers";
 import {
   buildEngineArrows,
   computeBoardEvalIcon,
+  scoreToNum,
   type BoardEvalIcon,
 } from "./AnalysisBoard.helpers";
 import {
@@ -95,6 +96,8 @@ type EngineLinePreview = {
   uciMoves: string[];
   evalText: string;
   depth: number;
+  /** "canonical" = stored deep best line (mixed-source eval); "live" = engine search at ENGINE_SEARCH_DEPTH. */
+  source: "canonical" | "live";
 };
 
 const toWhitePerspectiveMate = (
@@ -117,6 +120,7 @@ const buildEngineLinePreview = (
   sourceSlot: number,
   displayedFen: string,
   sideToMove: "w" | "b",
+  canonical: boolean,
 ): EngineLinePreview | null => {
   if (!line?.pv?.length) return null;
 
@@ -183,6 +187,7 @@ const buildEngineLinePreview = (
     uciMoves,
     evalText,
     depth: line.depth ?? 0,
+    source: canonical ? "canonical" : "live",
   };
 };
 
@@ -496,20 +501,32 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   // Cached best move for the displayed position (from pre-existing game analysis)
   const cachedBest = positionAnalysis?.[displayedFen] ?? null;
 
+  // Only a TRUSTED canonical position winner with a comparable cp eval may drive
+  // the search-skip optimization and the line-1 prepend (g-54h5). Untrusted seeds
+  // (browser-game rows, local drill-snapshot worker results) or seeds without a
+  // comparable cp eval fall through to a full multipv search so the live engine
+  // ranks every move at one depth — no "line 2 better than line 1" contradiction.
+  const trustedBest =
+    cachedBest &&
+    cachedBest.position_trusted === true &&
+    cachedBest.best_move_eval_cp != null
+      ? cachedBest
+      : null;
+
   // Legal moves excluding cached best move (for restricted engine search)
   const searchmoves = useMemo(() => {
-    if (!showEngineArrows || !cachedBest) return undefined;
+    if (!showEngineArrows || !trustedBest) return undefined;
     try {
       const chess = new Chess(displayedFen);
       const allMoves = chess.moves({ verbose: true });
       const filtered = allMoves
         .map((m) => m.from + m.to + (m.promotion ?? ""))
-        .filter((uci) => uci !== cachedBest.best_move_uci);
+        .filter((uci) => uci !== trustedBest.best_move_uci);
       return filtered.length > 0 ? filtered : undefined;
     } catch {
       return undefined;
     }
-  }, [displayedFen, cachedBest, showEngineArrows]);
+  }, [displayedFen, trustedBest, showEngineArrows]);
 
   // Start new evaluation after render
   useEffect(() => {
@@ -520,7 +537,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     stopSearch();
 
     const timerId = window.setTimeout(() => {
-      if (cachedBest && searchmoves && searchmoves.length > 0) {
+      if (trustedBest && searchmoves && searchmoves.length > 0) {
         evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 2, searchmoves }).catch(() => {});
       } else {
         evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 3 }).catch(() => {});
@@ -528,12 +545,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     }, ENGINE_EVALUATION_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timerId);
-  }, [displayedFen, evaluatePosition, showEngineArrows, cachedBest, searchmoves]);
+  }, [displayedFen, evaluatePosition, showEngineArrows, trustedBest, searchmoves]);
 
   // Whether the restricted search path is active (same condition as the engine request)
   const useRestrictedSearch = !!(
     showEngineArrows &&
-    cachedBest &&
+    trustedBest &&
     searchmoves &&
     searchmoves.length > 0
   );
@@ -552,33 +569,78 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   // side-to-move-relative, so we pass it through without sign conversion.
   const mergedEngineLines: EngineInfo[] = useMemo(() => {
     if (!showEngineArrows) return [];
-    if (!useRestrictedSearch || !cachedBest) return activeEngineLines;
+    if (!useRestrictedSearch || !trustedBest) return activeEngineLines;
 
     const cachedLine: EngineInfo = {
       // Prefer the stored root PV (validated to start with best_move_uci) so the
       // popup can render a full continuation; legacy rows fall back to one move.
       pv:
-        cachedBest.best_line_uci && cachedBest.best_line_uci.length > 0
-          ? cachedBest.best_line_uci
-          : [cachedBest.best_move_uci],
+        trustedBest.best_line_uci && trustedBest.best_line_uci.length > 0
+          ? trustedBest.best_line_uci
+          : [trustedBest.best_move_uci],
       score:
-        cachedBest.best_move_eval_cp != null
-          ? { type: "cp" as const, value: cachedBest.best_move_eval_cp }
+        trustedBest.best_move_eval_cp != null
+          ? { type: "cp" as const, value: trustedBest.best_move_eval_cp }
           : undefined,
       depth: undefined,
     };
 
-    return [cachedLine, ...activeEngineLines];
-  }, [showEngineArrows, useRestrictedSearch, cachedBest, activeEngineLines]);
+    // Re-rank by one consistent eval so displayed line 1 is always >= every other
+    // line (g-54h5). Stable: ties keep the trusted cached line first (canonical
+    // best preserved when live merely matches it). A higher searched line (depth/
+    // source mismatch) sorts above the cached line instead of "line 2 better than
+    // line 1". Both cachedLine.score and live scores are side-to-move-relative cp,
+    // so scoreToNum compares them on one scale.
+    //
+    // Filter holes first: useStockfishEngine fills slots by multipv index, so
+    // streaming output can be a sparse array (e.g. [<hole>, line2] before line 1
+    // arrives). The spread materializes that hole as `undefined`, which would
+    // crash the score map below — drop missing entries before scoring/sorting.
+    return [cachedLine, ...activeEngineLines]
+      .filter((line): line is EngineInfo => line != null)
+      .map((line, i) => ({ line, i, n: scoreToNum(line.score) }))
+      .sort((a, b) => {
+        if (a.n === b.n) return a.i - b.i; // stable tiebreak (keeps cached first)
+        if (a.n === null) return 1; // null eval sinks to the bottom
+        if (b.n === null) return -1;
+        return b.n - a.n; // higher eval first
+      })
+      .map((x) => x.line);
+  }, [showEngineArrows, useRestrictedSearch, trustedBest, activeEngineLines]);
 
   // Engine lines with SAN moves, replay FENs, and formatted evals for display/preview
   const engineLinesDisplay = useMemo(() => {
     if (!showEngineArrows) return [];
     if (mergedEngineLines.length === 0) return [];
-    return mergedEngineLines.map((line, index) =>
-      buildEngineLinePreview(line, index, displayedFen, sideToMove)
-    );
-  }, [showEngineArrows, mergedEngineLines, displayedFen, sideToMove]);
+    return mergedEngineLines.map((line, index) => {
+      // The cached canonical line is only ever prepended in the restricted-merge
+      // path; gate on useRestrictedSearch so we don't mislabel a live full-search
+      // line as canonical when trustedBest is set but the merge didn't happen
+      // (e.g. the trusted best is the only legal move → searchmoves undefined →
+      // full multipv:3 search returns live depth-21 output). Within that path the
+      // cached line is the only one whose first move is the trusted best (it's
+      // excluded from searchmoves, so no live line shares it), which identifies it
+      // wherever Edit 2's re-rank placed it.
+      const canonical =
+        useRestrictedSearch &&
+        !!trustedBest &&
+        line?.pv?.[0] === trustedBest.best_move_uci;
+      return buildEngineLinePreview(
+        line,
+        index,
+        displayedFen,
+        sideToMove,
+        canonical,
+      );
+    });
+  }, [
+    showEngineArrows,
+    mergedEngineLines,
+    displayedFen,
+    sideToMove,
+    trustedBest,
+    useRestrictedSearch,
+  ]);
 
   const selectedEngineLine =
     selectedEngineLineIndex === null
@@ -1392,6 +1454,15 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
                     <span className="analysis-board__engine-eval">
                       {line.evalText || "+0.0"}
                     </span>{" "}
+                    {line.source === "canonical" && (
+                      <span
+                        className="analysis-board__engine-source"
+                        title="Canonical deep analysis"
+                        aria-label="Canonical deep analysis"
+                      >
+                        C
+                      </span>
+                    )}
                     <span className="analysis-board__engine-pv">
                       {line.sanMoves[0]}
                     </span>
@@ -1462,10 +1533,16 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             <span className="analysis-board__engine-popup-eval">
               {selectedEngineLine.evalText || "+0.0"}
             </span>
-            {selectedEngineLine.depth > 0 && (
+            {selectedEngineLine.source === "canonical" ? (
               <span className="analysis-board__engine-popup-depth">
-                d{selectedEngineLine.depth}
+                Canonical
               </span>
+            ) : (
+              selectedEngineLine.depth > 0 && (
+                <span className="analysis-board__engine-popup-depth">
+                  d{selectedEngineLine.depth}
+                </span>
+              )
             )}
           </div>
           <div className="analysis-board__engine-popup-board">

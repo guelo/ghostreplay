@@ -845,6 +845,257 @@ describe('AnalysisBoard MoveList', () => {
     expect(dialog).not.toHaveTextContent('d6')
   })
 
+  it('runs a full multipv search for an untrusted cached seed instead of pinning it as line 1 (g-54h5)', () => {
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard
+          moves={moves}
+          boardOrientation="white"
+          positionAnalysis={{
+            [moves[1].fen_after]: {
+              best_move_uci: 'g1f3',
+              best_move_san: 'Nf3',
+              best_move_eval_cp: 42,
+              position_trusted: false,
+            },
+          }}
+        />,
+      )
+
+      act(() => {
+        vi.advanceTimersByTime(120)
+      })
+
+      // No searchmoves restriction — the untrusted best move is NOT excluded, so
+      // the live engine ranks every move at one depth (inverse of the restricted
+      // search test above).
+      expect(mockEvaluatePosition).toHaveBeenCalledWith(
+        moves[1].fen_after,
+        { depth: 21, multipv: 3 },
+      )
+      const calls = mockEvaluatePosition.mock.calls as unknown as Array<
+        [string, { searchmoves?: string[] }]
+      >
+      const call = calls.find(([fen]) => fen === moves[1].fen_after)
+      expect(call?.[1].searchmoves).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-ranks merged lines so a higher live line becomes line 1 and the canonical marker follows it (g-54h5)', () => {
+    // Cached canonical best is Nf3 with a LOW stored eval; the live restricted
+    // search returns Nc3 scoring higher. Pre-fix this pinned Nf3 (cached) as line
+    // 1 with the better Nc3 below it — the bead's "line 2 better than line 1".
+    mockEngineInfoRef.current = [
+      { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 50 }, depth: 21, multipv: 2 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [moves[1].fen_after]: {
+            best_move_uci: 'g1f3',
+            best_move_san: 'Nf3',
+            best_move_eval_cp: 10,
+            best_line_uci: ['g1f3', 'd7d6'],
+            position_trusted: true,
+          },
+        }}
+      />,
+    )
+
+    const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+    const line2 = screen.getByRole('button', { name: 'Show engine line 2' })
+
+    // Line 1 is now the live Nc3 line (higher eval), with NO canonical marker.
+    expect(line1.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nc3')
+    expect(line1.querySelector('.analysis-board__engine-eval')).toHaveTextContent('+0.5')
+    expect(line1.querySelector('.analysis-board__engine-source')).toBeNull()
+
+    // Line 2 is the cached canonical Nf3 line — the marker moved slots with it.
+    expect(line2.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nf3')
+    expect(line2.querySelector('.analysis-board__engine-eval')).toHaveTextContent('+0.1')
+    expect(line2.querySelector('.analysis-board__engine-source')).not.toBeNull()
+
+    // Downstream consumer follows: the solid-blue best-move arrow now points to
+    // the live best (Nc3 = b1->c3), not the demoted cached move.
+    const arrows = capturedChessboardProps.arrows as Array<{
+      startSquare: string
+      endSquare: string
+      color: string
+    }>
+    const bestArrow = arrows.find((a) => a.color === 'rgba(59, 130, 246, 1.00)')
+    expect(bestArrow).toEqual(
+      expect.objectContaining({ startSquare: 'b1', endSquare: 'c3' }),
+    )
+  })
+
+  it('survives sparse streaming MultiPV output when merging the cached line (g-54h5)', () => {
+    // useStockfishEngine fills slots by multipv index, so line 2 can arrive
+    // before line 1 — a sparse [<hole>, line2]. The merge spread materializes the
+    // hole as `undefined`; the re-rank must drop it instead of dereferencing it.
+    const sparseLines: EngineInfo[] = []
+    sparseLines[1] = { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 50 }, depth: 21, multipv: 2 }
+    mockEngineInfoRef.current = sparseLines
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    expect(() =>
+      render(
+        <AnalysisBoard
+          moves={moves}
+          boardOrientation="white"
+          positionAnalysis={{
+            [moves[1].fen_after]: {
+              best_move_uci: 'g1f3',
+              best_move_san: 'Nf3',
+              best_move_eval_cp: 10,
+              best_line_uci: ['g1f3', 'd7d6'],
+              position_trusted: true,
+            },
+          }}
+        />,
+      ),
+    ).not.toThrow()
+
+    // The hole is dropped: only the two real lines render, re-ranked by eval
+    // (live Nc3 +0.5 above the cached canonical Nf3 +0.1).
+    const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+    const line2 = screen.getByRole('button', { name: 'Show engine line 2' })
+    expect(line1.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nc3')
+    expect(line2.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nf3')
+    expect(line2.querySelector('.analysis-board__engine-source')).not.toBeNull()
+    expect(screen.queryByRole('button', { name: 'Show engine line 3' })).toBeNull()
+  })
+
+  it('does not mark a live line canonical when the trusted best is the only legal move (g-54h5)', () => {
+    // Only one legal move (Kg7) → searchmoves is empty → undefined → the restricted
+    // merge never runs, so the displayed line is LIVE depth-21 output even though
+    // its first move matches trustedBest. The canonical marker must stay off it.
+    const oneMoveFen = 'R6k/7p/8/8/8/8/8/7K b - - 0 1'
+    const oneMoveMoves: AnalysisMove[] = [
+      {
+        move_number: 1,
+        color: 'white',
+        move_san: 'Ra8+',
+        fen_after: oneMoveFen,
+        eval_cp: 0,
+        eval_mate: null,
+        best_move_san: 'Ra8+',
+        best_move_eval_cp: 0,
+        eval_delta: 0,
+        classification: 'best',
+      },
+    ]
+    mockEngineInfoRef.current = [
+      { pv: ['h8g7'], score: { type: 'cp', value: 30 }, depth: 21, multipv: 1 },
+    ]
+    mockEngineInfoFenRef.current = oneMoveFen
+
+    render(
+      <AnalysisBoard
+        moves={oneMoveMoves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [oneMoveFen]: {
+            best_move_uci: 'h8g7',
+            best_move_san: 'Kg7',
+            best_move_eval_cp: 42,
+            best_line_uci: ['h8g7'],
+            position_trusted: true,
+          },
+        }}
+      />,
+    )
+
+    const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+    expect(line1.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Kg7')
+    // Live line, not the cached canonical eval — no marker, and the popup shows
+    // the live depth chip (d21) rather than the "Canonical" label.
+    expect(line1.querySelector('.analysis-board__engine-source')).toBeNull()
+    fireEvent.click(line1)
+    const dialog = screen.getByRole('dialog', { name: 'Engine line preview' })
+    expect(dialog).toHaveTextContent('d21')
+    expect(dialog).not.toHaveTextContent('Canonical')
+  })
+
+  it('keeps the cached canonical line as line 1 when its eval already exceeds the live lines (g-54h5)', () => {
+    // Guard against over-rotating the sort: cached Nf3 (80) > live Nc3 (20) must
+    // stay line 1 with the canonical marker on line 1.
+    mockEngineInfoRef.current = [
+      { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 20 }, depth: 21, multipv: 2 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [moves[1].fen_after]: {
+            best_move_uci: 'g1f3',
+            best_move_san: 'Nf3',
+            best_move_eval_cp: 80,
+            best_line_uci: ['g1f3', 'd7d6'],
+            position_trusted: true,
+          },
+        }}
+      />,
+    )
+
+    const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+    const line2 = screen.getByRole('button', { name: 'Show engine line 2' })
+
+    expect(line1.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nf3')
+    expect(line1.querySelector('.analysis-board__engine-eval')).toHaveTextContent('+0.8')
+    expect(line1.querySelector('.analysis-board__engine-source')).not.toBeNull()
+
+    expect(line2.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nc3')
+    expect(line2.querySelector('.analysis-board__engine-source')).toBeNull()
+  })
+
+  it('runs a full multipv search when a trusted seed has no comparable cp eval (g-54h5)', () => {
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard
+          moves={moves}
+          boardOrientation="white"
+          positionAnalysis={{
+            [moves[1].fen_after]: {
+              best_move_uci: 'g1f3',
+              best_move_san: 'Nf3',
+              best_move_eval_cp: null,
+              position_trusted: true,
+            },
+          }}
+        />,
+      )
+
+      act(() => {
+        vi.advanceTimersByTime(120)
+      })
+
+      // A trusted seed without a cp eval can't be ranked against searched cp
+      // lines, so it falls through to a full search rather than seeding line 1.
+      expect(mockEvaluatePosition).toHaveBeenCalledWith(
+        moves[1].fen_after,
+        { depth: 21, multipv: 3 },
+      )
+      const calls = mockEvaluatePosition.mock.calls as unknown as Array<
+        [string, { searchmoves?: string[] }]
+      >
+      const call = calls.find(([fen]) => fen === moves[1].fen_after)
+      expect(call?.[1].searchmoves).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('updates only the preview board when clicking PV moves or using arrow keys', async () => {
     mockEngineInfoRef.current = [{ pv: ['g1f3', 'd7d6', 'd2d4'], score: { type: 'cp', value: 42 }, depth: 18 }]
     mockEngineInfoFenRef.current = moves[1].fen_after

@@ -4240,6 +4240,19 @@
     text-overflow: ellipsis;
 }
 
+/* Marks the canonical deep-analysis line, whose eval comes from a deeper search
+   than the live depth-21 lines next to it (g-54h5). */
+.analysis-board__engine-source {
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--text-tertiary, #64748b);
+    border: 1px solid var(--border-color);
+    border-radius: 0.2rem;
+    padding: 0.05rem 0.2rem;
+}
+
 .analysis-board__engine-popup {
     position: absolute;
     width: min(192px, calc(100vw - 2rem));
