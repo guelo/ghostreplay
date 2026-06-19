@@ -42,6 +42,9 @@ export interface DisplayNode {
   view: OpeningTreeNodeView;
   /** UCI that produces this node; null for the synthesized root. */
   uci: string | null;
+  /** Normalized FEN this node's move reaches — the drill target for a card
+   *  drill. null for the synthesized root (which is never drillable). */
+  childFen: string | null;
   /** On the selected path → compact highlight (or expanded when deepest). */
   isSelected: boolean;
   /** The single deepest selected node → renders the expanded card. */
@@ -251,6 +254,7 @@ export function buildTreeView(
         key: "root",
         view: synthesizeRootView(response, isExactResponseLine, k, color),
         uci: null,
+        childFen: null,
         // The root is always on the selected path; expanded only at k === 0.
         isSelected: true,
         isExpanded: k === 0,
@@ -278,6 +282,7 @@ export function buildTreeView(
         key: node.uci,
         view: nodeToView(node, color),
         uci: node.uci,
+        childFen: node.child_fen,
         isSelected,
         // Only the deepest selected node (in column k-1) expands.
         isExpanded: isSelected && lineIndex === k - 1,

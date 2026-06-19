@@ -63,6 +63,7 @@ def _create_test_schema(conn) -> None:
             session_mode VARCHAR(10) NOT NULL DEFAULT 'normal',
             drill_state VARCHAR(12),
             drill_opening_key TEXT,
+            drill_line TEXT,
             drill_strictness VARCHAR(12),
             drill_strictness_cp INTEGER,
             drill_terminal_reason VARCHAR(20),

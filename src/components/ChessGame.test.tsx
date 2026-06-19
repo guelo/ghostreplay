@@ -1742,6 +1742,53 @@ describe("ChessGame characterization safeguards", () => {
     expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
   });
 
+  it("ad-hoc card drill survives a getOpeningRoots() failure and sends its line", async () => {
+    // A /openings card navigates with the target FEN + full line. The roots
+    // fetch fails, but the synthetic selection must survive and Start Drill stay
+    // live — the ad-hoc drill carries everything it needs.
+    getOpeningRootsMock.mockRejectedValue(new Error("boom"));
+    mockLocation = {
+      state: {
+        drillSetup: {
+          targetFen: "target-fen",
+          line: ["e2e4", "c7c5"],
+          displayName: "Sicilian Defense",
+          eco: null,
+          playerColor: "white",
+        },
+      },
+      pathname: "/play",
+    };
+
+    render(<ChessGame />);
+
+    // The picker shows the synthesized name despite the failed roots fetch, and
+    // Start Drill is enabled (it gates on the selection, not the roots list).
+    const start = await screen.findByRole("button", { name: /start drill/i });
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent("Sicilian Defense");
+    });
+    expect(start).not.toBeDisabled();
+
+    startDrillMock.mockResolvedValueOnce(
+      makeDrillResponse({ opening_key: "target-fen", opening_name: "Sicilian Defense" }),
+    );
+    await act(async () => {
+      fireEvent.click(start);
+    });
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith({
+        opening_key: "target-fen",
+        player_color: "white",
+        engine_elo: expect.any(Number),
+        strictness: expect.any(String),
+        strictness_cp: expect.any(Number),
+        line: ["e2e4", "c7c5"],
+      });
+    });
+  });
+
   // Reaches the natural-end PostGameBanner ("Another drill") branch by resigning
   // a drill (abandonDrill -> drillState "failed", finishLocalGame sets
   // gameResult + showPostGamePrompt).
@@ -4116,6 +4163,45 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     });
     // White-to-move restart: no opponent move fired against the abandoned drill.
     expect(getNextOpponentMoveMock).not.toHaveBeenCalled();
+  });
+
+  it("reviewed-return Again replays an ad-hoc drill with its line from the durable store", async () => {
+    // The /drill-analysis round trip remounts ChessGame, wiping the component
+    // ref. The line lives in the durable store, so Again can still resend it —
+    // without it the backend 404s a non-root target FEN.
+    useGameStore.setState({
+      sessionId: "drill-1",
+      isGameActive: false,
+      drillOpeningKey: "target-fen",
+      drillLine: ["e2e4", "c7c5"],
+      drillOpeningName: "Sicilian Defense",
+      drillState: "abandoned",
+      drillStrictness: "standard",
+      drillStrictnessCp: 25,
+      playerColor: "white",
+      boardOrientation: "white",
+      engineElo: 1500,
+      isRated: false,
+      moveHistory: [{ san: "e4", fen: FEN_AFTER_E4, uci: "e2e4" }],
+      gameResult: { type: "resign", message: "Drill abandoned." },
+    });
+    useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
+    setReturnMarker("drill-1");
+
+    render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /^again$/i }));
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith({
+        opening_key: "target-fen",
+        player_color: "white",
+        engine_elo: 1500,
+        strictness: "standard",
+        strictness_cp: 25,
+        line: ["e2e4", "c7c5"],
+      });
+    });
   });
 
   it("Analyze re-opens the saved snapshot without rebuilding it", async () => {

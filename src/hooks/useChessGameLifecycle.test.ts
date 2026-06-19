@@ -1380,6 +1380,51 @@ describe("useChessGameLifecycle", () => {
     expect(store.isRated).toBe(false);
   });
 
+  it("handleNewDrill forwards the ad-hoc line to startDrill", async () => {
+    const { result } = setup();
+
+    startDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-line",
+      mode: "drill",
+      drill_state: "active",
+      opening_key: "target-fen",
+      opening_name: "Custom line",
+      opening_family: "Custom line",
+      eco: null,
+      depth: 2,
+      player_color: "white",
+      engine_elo: 1000,
+      strictness: "standard",
+      is_rated: false,
+      rated_start_ply: null,
+      normal_started_at: null,
+      converted_at: null,
+    });
+
+    getOpeningBookMock.mockResolvedValueOnce({ byEpd: new Map() });
+
+    await act(async () => {
+      await result.current.handleNewDrill({
+        openingKey: "target-fen",
+        playerColor: "white",
+        engineElo: 1000,
+        strictness: "standard",
+        strictnessCp: 25,
+        line: ["e2e4", "c7c5"],
+      });
+    });
+
+    // The card's UCI line rides along so the backend can validate + persist it.
+    expect(startDrillMock).toHaveBeenCalledWith({
+      opening_key: "target-fen",
+      player_color: "white",
+      engine_elo: 1000,
+      strictness: "standard",
+      strictness_cp: 25,
+      line: ["e2e4", "c7c5"],
+    });
+  });
+
   it("handleNewDrill starts from the initial position without replaying the root", async () => {
     const { result } = setup();
 

@@ -542,6 +542,7 @@ export const useChessGameLifecycle = ({
         s2.setIsRated(true);
         s2.setIsPracticeContinuation(false);
         s2.setDrillOpeningKey(null);
+        s2.setDrillLine(null);
         s2.setDrillOpeningName(null);
         s2.setDrillState(null);
         s2.setDrillStrictness(null);
@@ -597,6 +598,9 @@ export const useChessGameLifecycle = ({
       engineElo: number;
       strictness: DrillStrictness;
       strictnessCp: number;
+      // Ad-hoc card drills: the full UCI line to the target FEN. Omitted/undefined
+      // for registered-root drills (routed via the book BFS).
+      line?: string[];
     }) => {
       try {
         setIsStartingGame(true);
@@ -629,6 +633,7 @@ export const useChessGameLifecycle = ({
           engine_elo: options.engineElo,
           strictness: options.strictness,
           strictness_cp: options.strictnessCp,
+          line: options.line,
         });
 
         const tempChess = new Chess();
@@ -643,6 +648,9 @@ export const useChessGameLifecycle = ({
         s.setIsRated(false);
         s.setIsPracticeContinuation(false);
         s.setDrillOpeningKey(options.openingKey);
+        // Durable copy of the ad-hoc line (null for registered roots) so the
+        // reviewed-return "Again" survives the /drill-analysis remount.
+        s.setDrillLine(options.line ?? null);
         s.setDrillOpeningName(response.opening_name);
         s.setDrillState(response.drill_state);
         s.setDrillStrictness(options.strictness);
@@ -906,6 +914,7 @@ export const useChessGameLifecycle = ({
     store.setIsRated(true);
     store.setIsPracticeContinuation(false);
     store.setDrillOpeningKey(null);
+    store.setDrillLine(null);
     store.setDrillOpeningName(null);
     store.setDrillState(null);
     store.setDrillStrictness(null);

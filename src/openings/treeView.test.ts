@@ -317,7 +317,7 @@ describe("buildTreeView", () => {
     expect(col0.nodes.find((n) => n.uci === "h2h4")!.isSelectable).toBe(false);
   });
 
-  it("threads in_book/is_observed/encounter_count onto api nodes; defaults the root", () => {
+  it("threads in_book/is_observed/encounter_count/childFen onto api nodes; defaults the root", () => {
     const view = buildTreeView(
       makeResponse({
         columns: [
@@ -325,6 +325,7 @@ describe("buildTreeView", () => {
             makeNode({
               uci: "e2e4",
               ply: 1,
+              child_fen: "fen-after-e4",
               in_book: true,
               is_observed: true,
               encounter_count: 9,
@@ -332,6 +333,7 @@ describe("buildTreeView", () => {
             makeNode({
               uci: "d2d4",
               ply: 1,
+              child_fen: "fen-after-d4",
               in_book: true,
               is_observed: false,
               encounter_count: 0,
@@ -343,21 +345,26 @@ describe("buildTreeView", () => {
       "white",
     );
 
-    // The synthesized root is only ever a connector parent — never styled.
+    // The synthesized root is only ever a connector parent — never styled, and
+    // its childFen is null so the page never wires it as a drill target.
     const root = view.columns[0].nodes[0];
     expect(root.inBook).toBe(false);
     expect(root.isObserved).toBe(false);
     expect(root.encounterCount).toBe(0);
+    expect(root.childFen).toBeNull();
 
     const col0 = view.columns[1];
     const e2e4 = col0.nodes.find((n) => n.uci === "e2e4")!;
     expect(e2e4.inBook).toBe(true);
     expect(e2e4.isObserved).toBe(true);
     expect(e2e4.encounterCount).toBe(9);
+    // childFen is the move's resulting FEN — the drill target for a card drill.
+    expect(e2e4.childFen).toBe("fen-after-e4");
 
     const d2d4 = col0.nodes.find((n) => n.uci === "d2d4")!;
     expect(d2d4.isObserved).toBe(false);
     expect(d2d4.encounterCount).toBe(0);
+    expect(d2d4.childFen).toBe("fen-after-d4");
   });
 
   it("derives the board from the effective line, not selected_fen", () => {

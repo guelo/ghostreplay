@@ -20,6 +20,10 @@ class DrillRouteMove:
 class DrillRouteMap:
     target_fen: str
     plies_by_fen: dict[str, int]
+    # None  → book BFS map (transposition-tolerant; routing reads `graph`).
+    # dict  → strict played-line map (off-book target). Keyed by normalized FEN
+    #         to the single on-route next move; routing ignores `graph` entirely.
+    forward_moves: dict[str, list[DrillRouteMove]] | None = None
 
     def plies_to_target(self, fen: str) -> int | None:
         return self.plies_by_fen.get(normalize_fen(fen))
@@ -87,11 +91,80 @@ def get_drill_route_map(graph: OpeningGraph, target_fen: str) -> DrillRouteMap:
     return route_map
 
 
+def build_line_route_map(line_ucis: list[str]) -> DrillRouteMap:
+    """Strict route map for an exact played line (off-book targets).
+
+    Unlike the BFS book map, "on route" means *following this exact line*: each
+    position maps to the single next move that continues it, and success is
+    reaching the line's final position. Positions are normalized so the keys
+    match route-check FENs. Lines are short (≤ MAX_TREE_PLY) and built fresh, so
+    these maps are NOT cached.
+
+    Duplicate-position policy: a position is keyed only on its first occurrence,
+    keeping the route deterministic from the top if a line revisits a square.
+    """
+    board = chess.Board()
+    fens = [normalize_fen(board.fen())]
+    sans: list[str] = []
+    for uci in line_ucis:
+        move = chess.Move.from_uci(uci)
+        sans.append(board.san(move))
+        board.push(move)
+        fens.append(normalize_fen(board.fen()))
+
+    n = len(line_ucis)
+    target_fen = fens[n]
+    plies_by_fen: dict[str, int] = {}
+    forward_moves: dict[str, list[DrillRouteMove]] = {}
+    for i in range(n):
+        fen_i = fens[i]
+        if fen_i in plies_by_fen:
+            continue  # first-occurrence policy keeps the line deterministic
+        plies_by_fen[fen_i] = n - i
+        forward_moves[fen_i] = [
+            DrillRouteMove(
+                uci=line_ucis[i],
+                san=sans[i],
+                resulting_fen=fens[i + 1],
+                plies_to_target=n - (i + 1),
+            )
+        ]
+    # The target itself is on route at distance 0 with no forward move.
+    if target_fen not in plies_by_fen:
+        plies_by_fen[target_fen] = 0
+        forward_moves[target_fen] = []
+    return DrillRouteMap(
+        target_fen=target_fen,
+        plies_by_fen=plies_by_fen,
+        forward_moves=forward_moves,
+    )
+
+
+def route_map_for_target(
+    graph: OpeningGraph,
+    target_fen: str,
+    drill_line: list[str] | None,
+) -> DrillRouteMap:
+    """Pick the route strategy for a target. Shared by route-check + opponent
+    steering so the two never diverge. In-book targets keep the transposition-
+    tolerant book BFS; off-book targets use the strict played line."""
+    normalized_target = normalize_fen(target_fen)
+    if graph.has_position(normalized_target):
+        return get_drill_route_map(graph, normalized_target)
+    if not drill_line:
+        # Caller raises 400 on the resulting empty plies_by_fen.
+        return DrillRouteMap(target_fen=normalized_target, plies_by_fen={})
+    return build_line_route_map(drill_line)
+
+
 def route_preserving_moves(
     graph: OpeningGraph,
     route_map: DrillRouteMap,
     fen: str,
 ) -> list[DrillRouteMove]:
+    if route_map.forward_moves is not None:
+        # Strict line map: the single on-route continuation (no graph node).
+        return list(route_map.forward_moves.get(normalize_fen(fen), []))
     normalized_fen = normalize_fen(fen)
     current_distance = route_map.plies_by_fen.get(normalized_fen)
     node = graph.get_node(normalized_fen)
@@ -125,6 +198,12 @@ def route_move_for_uci(
     fen: str,
     uci: str,
 ) -> DrillRouteMove | None:
+    if route_map.forward_moves is not None:
+        # Strict line map: only the exact next line move matches (no graph node).
+        for move in route_map.forward_moves.get(normalize_fen(fen), []):
+            if move.uci == uci:
+                return move
+        return None
     normalized_fen = normalize_fen(fen)
     node = graph.get_node(normalized_fen)
     if node is None:

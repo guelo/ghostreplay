@@ -218,7 +218,9 @@ describe("OpeningTreeNodeCard — expanded", () => {
     expect(onStartDrill).toHaveBeenCalledTimes(1);
   });
 
-  it("omits Start Drill when there is no drill key or no handler", () => {
+  it("shows Start Drill whenever a handler is provided, even without a drill key", () => {
+    // drillOpeningKey no longer gates the button — every drillable card passes a
+    // handler (the page wires it for move cards, omits it for the root).
     const { rerender } = render(
       <OpeningTreeNodeCard
         variant="expanded"
@@ -227,9 +229,10 @@ describe("OpeningTreeNodeCard — expanded", () => {
       />,
     );
     expect(
-      screen.queryByRole("button", { name: "Start Drill" }),
-    ).toBeNull();
+      screen.getByRole("button", { name: "Start Drill" }),
+    ).toBeInTheDocument();
 
+    // No handler (e.g. the synthesized root) → no button.
     rerender(
       <OpeningTreeNodeCard
         variant="expanded"

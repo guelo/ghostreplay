@@ -4,22 +4,24 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
+import chess
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.openings import MAX_TREE_PLY
 from app.db import get_db
 from app.drill_steering import (
     DrillRouteMove,
-    get_drill_route_map,
+    route_map_for_target,
     route_move_for_uci,
     route_preserving_moves,
     safe_san_for_uci,
 )
 from app.fen import normalize_fen
-from app.models import GameSession
+from app.models import GameSession, decode_uci_line, encode_uci_line
 from app.opening_graph import get_opening_graph
-from app.opening_roots import get_opening_roots
+from app.opening_roots import derive_family, get_opening_roots
 from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
@@ -43,11 +45,15 @@ class DrillStrictness(str, Enum):
 
 
 class DrillStartRequest(BaseModel):
+    # opening_key is a registered root key OR an ad-hoc target FEN. For ad-hoc
+    # card drills, `line` carries the full UCI line from the start position to
+    # that target; the backend validates it by replay and persists it.
     opening_key: str = Field(..., min_length=1)
     player_color: PlayerColor
     engine_elo: int
     strictness: DrillStrictness
     strictness_cp: int | None = Field(None, ge=0, le=50)
+    line: list[str] | None = None
 
 
 class DrillContinueRequest(BaseModel):
@@ -118,13 +124,6 @@ def _ensure_owner(session: GameSession, user: TokenPayload) -> None:
         raise HTTPException(status_code=403, detail="Not authorized to access this drill")
 
 
-def _root_or_404(opening_key: str):
-    root = get_opening_roots().get_root(opening_key)
-    if root is None:
-        raise HTTPException(status_code=404, detail="Unknown opening root")
-    return root
-
-
 def _suggestion(move: DrillRouteMove) -> DrillRouteSuggestion:
     return DrillRouteSuggestion(
         uci=move.uci,
@@ -137,16 +136,51 @@ def _suggestion(move: DrillRouteMove) -> DrillRouteSuggestion:
 def _contract(session: GameSession) -> DrillSessionContract:
     if session.session_mode != DRILL_SESSION_MODE or not session.drill_opening_key:
         raise HTTPException(status_code=400, detail="Session is not a drill")
-    root = _root_or_404(session.drill_opening_key)
+
+    root = get_opening_roots().get_root(session.drill_opening_key)
+    if root is not None:
+        opening_key = root.opening_key
+        opening_name = root.opening_name
+        opening_family = root.opening_family
+        eco = root.eco
+        depth = root.depth
+    else:
+        # Ad-hoc card drill: every such session carries its played line, so the
+        # metadata is synthesized to match the card — deepest named book node
+        # along the line (the same inheritance /openings uses), depth = line
+        # length. No graph-node-only fallback: an ad-hoc session always has a
+        # line, and a line is what makes the inherited name resolvable.
+        line = decode_uci_line(session.drill_line)
+        if not line:
+            raise HTTPException(status_code=404, detail="Unknown opening root")
+        graph = get_opening_graph()
+        board = chess.Board()
+        name: str | None = None
+        eco = None
+        node = graph.get_node(normalize_fen(board.fen()))
+        if node is not None and node.name is not None:
+            name, eco = node.name, node.eco
+        for uci in line:
+            board.push(chess.Move.from_uci(uci))
+            node = graph.get_node(normalize_fen(board.fen()))
+            if node is not None and node.name is not None:
+                name, eco = node.name, node.eco
+        # Set the fallback name BEFORE deriving family so derive_family is never
+        # called on None.
+        opening_name = name or "Custom line"
+        opening_family = derive_family(opening_name)
+        opening_key = session.drill_opening_key  # already-normalized target FEN
+        depth = len(line)
+
     return DrillSessionContract(
         session_id=session.id,
         mode=session.session_mode,
         drill_state=session.drill_state or "active",
-        opening_key=root.opening_key,
-        opening_name=root.opening_name,
-        opening_family=root.opening_family,
-        eco=root.eco,
-        depth=root.depth,
+        opening_key=opening_key,
+        opening_name=opening_name,
+        opening_family=opening_family,
+        eco=eco,
+        depth=depth,
         player_color=session.player_color,
         engine_elo=session.engine_elo,
         strictness=session.drill_strictness or "standard",
@@ -165,7 +199,57 @@ def start_drill(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
-    _root_or_404(request.opening_key)
+    root = get_opening_roots().get_root(request.opening_key)
+    if root is not None:
+        # Registered-root drill keeps legacy behavior: the target is the root
+        # key and the line (if any) is ignored — routing uses the book BFS.
+        drill_opening_key = request.opening_key
+        drill_line: str | None = None
+    else:
+        # Ad-hoc card drill: a full UCI line to the target FEN is required and
+        # validated by replay (legality + reaches the claimed position). Every
+        # failure maps to a controlled 4xx, never a 500.
+        if not request.line:
+            raise HTTPException(status_code=404, detail="Unknown opening root")
+        if len(request.line) > MAX_TREE_PLY:
+            raise HTTPException(status_code=422, detail="Drill line is too long")
+        board = chess.Board()
+        final_fen = normalize_fen(board.fen())
+        seen_fens = {final_fen}
+        for uci in request.line:
+            try:
+                move = chess.Move.from_uci(uci)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422, detail=f"Invalid move in drill line: {uci}"
+                ) from exc
+            if move not in board.legal_moves:
+                raise HTTPException(
+                    status_code=422, detail=f"Illegal move in drill line: {uci}"
+                )
+            board.push(move)
+            final_fen = normalize_fen(board.fen())
+            # The strict line route map keys by normalized FEN and is_target is
+            # FEN-only, so a line that revisits a position is ambiguous (it could
+            # report the target reached early or suggest the wrong continuation).
+            # Reject it outright — real opening lines never transpose onto
+            # themselves; keeping the map unambiguous keeps routing strict.
+            if final_fen in seen_fens:
+                raise HTTPException(
+                    status_code=422, detail="Drill line revisits a position"
+                )
+            seen_fens.add(final_fen)
+        try:
+            normalized_target = normalize_fen(request.opening_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid target position") from exc
+        if final_fen != normalized_target:
+            raise HTTPException(
+                status_code=422, detail="Drill line does not reach the target position"
+            )
+        drill_opening_key = normalized_target
+        drill_line = encode_uci_line(request.line)
+
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -177,7 +261,8 @@ def start_drill(
         player_color=request.player_color.value,
         session_mode=DRILL_SESSION_MODE,
         drill_state="active",
-        drill_opening_key=request.opening_key,
+        drill_opening_key=drill_opening_key,
+        drill_line=drill_line,
         drill_strictness=request.strictness.value,
         drill_strictness_cp=request.strictness_cp,
     )
@@ -286,9 +371,11 @@ def check_drill_route(
         raise HTTPException(status_code=400, detail="previous_fen and played_uci must be provided together")
 
     graph = get_opening_graph()
-    route_map = get_drill_route_map(graph, session.drill_opening_key)
+    route_map = route_map_for_target(
+        graph, session.drill_opening_key, decode_uci_line(session.drill_line)
+    )
     if not route_map.plies_by_fen:
-        raise HTTPException(status_code=400, detail="Drill opening root is not in the opening graph")
+        raise HTTPException(status_code=400, detail="Drill route is unavailable")
 
     try:
         current_fen = normalize_fen(request.current_fen)

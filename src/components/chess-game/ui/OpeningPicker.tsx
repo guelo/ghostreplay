@@ -265,12 +265,14 @@ const OpeningPicker = ({
 
   // null families while not loading means the fetch failed.
   const loadFailed = !isLoading && openingFamilies === null;
-  const triggerLabel = isLoading
-    ? "Loading openings..."
-    : loadFailed
-      ? "Failed to load openings"
-      : selectedOpening
-        ? rootLabel(selectedOpening)
+  // A selection wins over loading/failed so an ad-hoc card drill shows its
+  // synthesized name even when the roots list is still loading or failed.
+  const triggerLabel = selectedOpening
+    ? rootLabel(selectedOpening)
+    : isLoading
+      ? "Loading openings..."
+      : loadFailed
+        ? "Failed to load openings"
         : "Select opening";
 
   return (

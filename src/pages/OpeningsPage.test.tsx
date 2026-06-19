@@ -777,23 +777,45 @@ describe("OpeningsPage tree", () => {
 
     const probe = screen.getByTestId("route-location");
     expect(probe.textContent).toBe("/play");
+    // Card drills carry the target FEN + full UCI line (not a root key); the
+    // backend validates the line and synthesizes metadata to match the card.
     expect(JSON.parse(probe.getAttribute("data-state") ?? "null")).toEqual({
-      drillSetup: { openingKey: "sicilian-key", playerColor: "white" },
+      drillSetup: {
+        targetFen: "child",
+        line: ["e2e4", "c7c5"],
+        displayName: null,
+        eco: null,
+        playerColor: "white",
+      },
     });
   });
 
-  it("omits Start Drill when the deepest node has no drill key", async () => {
+  it("omits Start Drill on the synthesized root card (no move selected)", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    // No move selected → the root column is the expanded card.
+    await screen.findByText("Starting position", {
+      selector: ".tree-node-card__move-label",
+    });
+
+    // Every expanded MOVE card is drillable, but the root never is.
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows Start Drill on a deep move card even without a drill key", async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_E4);
     renderAt("/openings?color=white&move=e2e4");
     // e2e4 is the deepest selected node here → expanded (move label "1. e4").
-    // Scope to the expanded card's label (the column header now mirrors it).
     await screen.findByText("1. e4", {
       selector: ".tree-node-card__move-label",
     });
 
+    // drill_opening_key is null on this node, but the card is still drillable.
     expect(
-      screen.queryByRole("button", { name: /start drill/i }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: /start drill/i }),
+    ).toBeInTheDocument();
   });
 
   // Data→width contract: connector WIDTH is applied at render from the selected

@@ -111,7 +111,11 @@ function ExpandedBody({
   const isRoot = node.san === null;
   const name = formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
-  const showDrill = node.drillOpeningKey != null && onStartDrill != null;
+  // Every expanded move card is drillable; the page decides drillability by
+  // passing onStartDrill (wired for move cards, omitted for the synthesized
+  // root). drillOpeningKey no longer gates this — it denotes named-root identity
+  // only, and cards inherit names far more broadly than roots are registered.
+  const showDrill = onStartDrill != null;
 
   return (
     <>

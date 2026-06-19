@@ -2410,7 +2410,7 @@ The chesstree.net-style horizontal move graph reads from `GET /api/openings/tree
 
 **Terminal reasons** (precedence, checked via the board first so a short mate is never mislabeled): `checkmate` → `stalemate` → not navigable ⇒ `opening_boundary` (a display-only middlegame book boundary) → navigable dead-end ⇒ `opening_boundary` when the child is a middlegame position else `no_children` → null. The selected position's `selected_is_terminal` / `selected_terminal_reason` are derived directly from `pos[k]`, independent of columns; a leaf deepest position yields no column `k`.
 
-**Node hydration.** Each node carries `san`, `ply`, opening `name`/`eco` (a child without its own graph name inherits the deepest named ancestor along the line), `in_book` / `is_observed` / `is_prepared`, `user_choice_count` (edge live attempts) and `encounter_count` (edge traversals), the persisted direct metrics (`opening_score`, `confidence`, `coverage`, `sample_size`, `game_count`, `last_practiced_at`; absent ⇒ no-data), `eval_cp` / `eval_mate` (**white-relative**; the frontend converts per perspective), `drill_opening_key` (set only on named roots), and `is_selected`. In-book middlegame boundary nodes are outside the scorer domain, so their null metrics are structural-by-design.
+**Node hydration.** Each node carries `san`, `ply`, opening `name`/`eco` (a child without its own graph name inherits the deepest named ancestor along the line), `in_book` / `is_observed` / `is_prepared`, `user_choice_count` (edge live attempts) and `encounter_count` (edge traversals), the persisted direct metrics (`opening_score`, `confidence`, `coverage`, `sample_size`, `game_count`, `last_practiced_at`; absent ⇒ no-data), `eval_cp` / `eval_mate` (**white-relative**; the frontend converts per perspective), `drill_opening_key` (still set only on named boundary roots, but it **no longer gates the Start Drill button** — every expanded move card is drillable; non-root / off-book cards drill via the reconstructed played line, so this field now denotes named-root identity only), and `is_selected`. In-book middlegame boundary nodes are outside the scorer domain, so their null metrics are structural-by-design.
 
 **Sorting** depends on the parent's side to move; **engine eval never reorders**. On the user's turn: observed first, then most-chosen, then weakest mastery (null last). On the opponent's turn: most-encountered first, then weakest mastery (null last). A destination/source/promotion/UCI tail makes distinct UCIs a total order.
 
@@ -2583,7 +2583,9 @@ Practice Continuation is the local free-play state a session enters when the use
 
 ## 17. Drill Mode
 
-Drill Mode is a structured opening practice feature. The user plays toward a specific target position from the opening graph, then optionally converts the session into a rated game from that point forward.
+Drill Mode is a structured opening practice feature. The user plays toward a specific target position — a registered boundary root, **or any `/openings` tree position reached via its played line** (every expanded move card is drillable) — then optionally converts the session into a rated game from that point forward.
+
+Card-initiated drills (ad-hoc, non-root) send the target FEN plus the full UCI line from the start position; `/api/drills/start` validates the line by replay (each move legal and the line reaching the claimed target, else `422`) and persists it as `game_sessions.drill_line` (space-joined UCI; `NULL` for registered-root drills). The session's display metadata (name/family/eco/depth) is synthesized to match the card: the deepest named book node along the line (the same name inheritance §16 uses), `depth = len(line)`.
 
 ### 17.1 Session Type
 
@@ -2617,7 +2619,12 @@ moves fail even when post-move eval noise resolves to 0cp loss or better.
 
 ### 17.4 Route Check
 
-`POST /api/drills/:id/route-check` is called after each move. The backend uses `DrillRouteMap` (a BFS-derived map from the opening graph) to classify the current position:
+`POST /api/drills/:id/route-check` is called after each move. The backend builds a `DrillRouteMap` to classify the current position, branching on whether the target is in the book graph (`route_map_for_target`):
+
+- **In-book target** (registered roots and named cards): a **BFS-derived** map from the opening graph — transposition-tolerant, so any move order reaching an on-route position counts.
+- **Off-book target** (a card's exact played line is the only route): a **strict played-line map** (`build_line_route_map`) where on-route = following the exact line, the single route-preserving suggestion is the next line move, and success = reaching the line's final position.
+
+The same `route_map_for_target` selector drives opponent steering (`/api/game/next-opponent-move`) so route-check and the opponent's reply never diverge. Status classification:
 
 | Status | Meaning |
 |--------|---------|

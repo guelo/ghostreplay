@@ -16,9 +16,9 @@ from sqlalchemy.orm import Session
 
 from app.accuracy import expected_total_moves_from_pgn
 from app.db import get_db
-from app.drill_steering import get_drill_route_map, route_preserving_moves
+from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
-from app.models import GameSession, Position, RatingHistory
+from app.models import GameSession, Position, RatingHistory, decode_uci_line
 from app.opening_graph import get_opening_graph
 from app.posthog_client import capture
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
@@ -879,9 +879,11 @@ def get_next_opponent_move(
         if not session.drill_opening_key:
             raise HTTPException(status_code=400, detail="Drill is missing an opening root")
         graph = get_opening_graph()
-        route_map = get_drill_route_map(graph, session.drill_opening_key)
+        route_map = route_map_for_target(
+            graph, session.drill_opening_key, decode_uci_line(session.drill_line)
+        )
         if not route_map.plies_by_fen:
-            raise HTTPException(status_code=400, detail="Drill opening root is not in the opening graph")
+            raise HTTPException(status_code=400, detail="Drill route is unavailable")
         if route_map.is_target(request.fen):
             session.drill_state = "root_reached"
             db.commit()

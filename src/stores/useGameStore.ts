@@ -58,6 +58,11 @@ export type GameState = {
   isRated: boolean;
   isPracticeContinuation: boolean;
   drillOpeningKey: string | null;
+  // Ad-hoc card drills: the full UCI line to the target FEN. Durable (not a
+  // component ref) so it survives the /drill-analysis route round trip and the
+  // reviewed-return "Again" can replay a non-root drill. null for registered
+  // roots (routed via the book BFS, no line needed).
+  drillLine: string[] | null;
   drillOpeningName: string | null;
   drillState: DrillSessionState | null;
   drillStrictness: DrillStrictness | null;
@@ -89,6 +94,7 @@ export type GameActions = {
   setIsRated: (update: SetStateAction<boolean>) => void;
   setIsPracticeContinuation: (update: SetStateAction<boolean>) => void;
   setDrillOpeningKey: (update: SetStateAction<string | null>) => void;
+  setDrillLine: (update: SetStateAction<string[] | null>) => void;
   setDrillOpeningName: (update: SetStateAction<string | null>) => void;
   setDrillState: (update: SetStateAction<DrillSessionState | null>) => void;
   setDrillStrictness: (
@@ -126,6 +132,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   isRated: true,
   isPracticeContinuation: false,
   drillOpeningKey: null,
+  drillLine: null,
   drillOpeningName: null,
   drillState: null,
   drillStrictness: null,
@@ -168,6 +175,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     })),
   setDrillOpeningKey: (u) =>
     set((s) => ({ drillOpeningKey: resolve(u, s.drillOpeningKey) })),
+  setDrillLine: (u) => set((s) => ({ drillLine: resolve(u, s.drillLine) })),
   setDrillOpeningName: (u) =>
     set((s) => ({ drillOpeningName: resolve(u, s.drillOpeningName) })),
   setDrillState: (u) =>

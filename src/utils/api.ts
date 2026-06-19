@@ -413,6 +413,9 @@ export interface DrillStartRequest {
   // Always required on new drills — the slider always produces a value.
   // The response type has strictness_cp? because legacy sessions may lack it.
   strictness_cp: number
+  // Ad-hoc card drills: the full UCI line from the start to the target FEN
+  // (opening_key). Omitted for registered-root drills.
+  line?: string[]
 }
 
 export interface DrillSessionContract {

@@ -204,6 +204,9 @@ class GameSession(Base):
     session_mode: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
     drill_state: Mapped[str | None] = mapped_column(String(12))
     drill_opening_key: Mapped[str | None] = mapped_column(Text)
+    # Space-joined UCI line from the start position to the ad-hoc drill target
+    # (encode_uci_line / decode_uci_line). NULL for registered-root drills.
+    drill_line: Mapped[str | None] = mapped_column(Text)
     drill_strictness: Mapped[str | None] = mapped_column(String(12))
     drill_strictness_cp: Mapped[int | None] = mapped_column(Integer)
     drill_terminal_reason: Mapped[str | None] = mapped_column(String(20))

@@ -313,6 +313,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Set when handleAgainSettings seeds the setup panel from live store state, so
   // the localStorage prefill effect doesn't clobber the exact store values.
   const skipStickyPrefillRef = useRef(false);
+  // Ad-hoc card drills (from /openings) carry their own UCI line + a synthetic
+  // selection, so they must NOT depend on the getOpeningRoots() list. adHocLineRef
+  // holds the line to send to startDrill (null → registered-root drill);
+  // navColorRef guards the localStorage prefill from clobbering the nav color.
+  const adHocLineRef = useRef<string[] | null>(null);
+  const navColorRef = useRef(false);
   const drillOpeningKey = useGameStore((s) => s.drillOpeningKey);
   const drillOpeningName = useGameStore((s) => s.drillOpeningName);
   const drillState = useGameStore((s) => s.drillState);
@@ -938,11 +944,48 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Intercept location.state from /openings navigation
   useEffect(() => {
-    const drillSetup = (location.state as { drillSetup?: { openingKey: string; playerColor: string } } | null)?.drillSetup;
+    const drillSetup = (
+      location.state as {
+        drillSetup?: {
+          openingKey?: string;
+          targetFen?: string;
+          line?: string[];
+          displayName?: string | null;
+          eco?: string | null;
+          playerColor: string;
+        };
+      } | null
+    )?.drillSetup;
     if (!drillSetup) return;
 
     setIsDrillMode(true);
-    pendingDrillSetupRef.current = drillSetup;
+
+    if (drillSetup.targetFen) {
+      // Ad-hoc card drill: everything needed is in the nav state, so preselect
+      // synthetically and DON'T wait for getOpeningRoots(). The roots list may be
+      // loading or fail — neither must block this drill (opening_family is left
+      // empty; the backend synthesizes display metadata from the line).
+      setSelectedDrillOpening({
+        opening_key: drillSetup.targetFen,
+        opening_name: drillSetup.displayName ?? "Custom line",
+        opening_family: "",
+        eco: drillSetup.eco ?? null,
+        depth: drillSetup.line?.length ?? 0,
+      });
+      adHocLineRef.current = drillSetup.line ?? [];
+      setDrillPlayerColor(drillSetup.playerColor === "black" ? "black" : "white");
+      navColorRef.current = true;
+      // Fully handled here — keep the roots-match effect from touching this.
+      pendingDrillSetupRef.current = null;
+    } else {
+      // Legacy registered-root path: defer selection to the roots-match effect.
+      adHocLineRef.current = null;
+      pendingDrillSetupRef.current = {
+        openingKey: drillSetup.openingKey ?? "",
+        playerColor: drillSetup.playerColor,
+      };
+    }
+
     setShowStartOverlay(true);
 
     navigate(location.pathname, { replace: true, state: null });
@@ -963,8 +1006,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         if (cancelled) return;
         setOpeningFamilies(null);
         // Drop any prior selection so a failed reload can't silently start a
-        // stale opening behind the "Failed to load openings" trigger.
-        setSelectedDrillOpening(null);
+        // stale opening behind the "Failed to load openings" trigger — but NOT
+        // an ad-hoc card selection, which carries everything it needs (line +
+        // synthesized metadata) and is startable without the roots list.
+        if (adHocLineRef.current == null) {
+          setSelectedDrillOpening(null);
+        }
       })
       .finally(() => {
         if (cancelled) return;
@@ -976,6 +1023,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Load sticky drill prefs when overlay opens
   useEffect(() => {
     if (!showStartOverlay) return;
+    // An ad-hoc nav drill already applied its color (intercept runs before this
+    // prefill on the overlay-open commit); don't let sticky prefs override it.
+    const skipNavColor = navColorRef.current;
+    navColorRef.current = false;
     // handleAgainSettings already seeded the panel from live store state; don't
     // let localStorage (which rounds strictness) clobber the exact values.
     if (skipStickyPrefillRef.current) {
@@ -992,13 +1043,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (typeof prefs.engineElo === "number") {
         setEngineElo(prefs.engineElo);
       }
-      if (prefs.playerColor === "white" || prefs.playerColor === "black") {
-        setDrillPlayerColor(prefs.playerColor);
-      } else if (prefs.playerColor === "random") {
-        // Legacy stored drill pref: coerce dropped "random" to White.
-        setDrillPlayerColor("white");
+      if (!skipNavColor) {
+        if (prefs.playerColor === "white" || prefs.playerColor === "black") {
+          setDrillPlayerColor(prefs.playerColor);
+        } else if (prefs.playerColor === "random") {
+          // Legacy stored drill pref: coerce dropped "random" to White.
+          setDrillPlayerColor("white");
+        }
       }
-      if (prefs.openingKey && !pendingDrillSetupRef.current) {
+      // Don't seed a registered-root pending setup while an ad-hoc drill is the
+      // active selection — its synthetic selection must not be overridden by the
+      // roots-match effect.
+      if (prefs.openingKey && !pendingDrillSetupRef.current && adHocLineRef.current == null) {
         pendingDrillSetupRef.current = {
           openingKey: prefs.openingKey,
           playerColor: prefs.playerColor ?? "random",
@@ -1012,6 +1068,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   // Match pending drill setup after openingFamilies loads
   useEffect(() => {
+    // Ad-hoc card drills are fully resolved in the intercept effect; the
+    // roots-match path is for the registered-root flow only.
+    if (adHocLineRef.current != null) return;
     if (!openingFamilies || !pendingDrillSetupRef.current) return;
     const opening = openingFamilies
       .flatMap((f) => f.roots)
@@ -1569,6 +1628,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
   }, []);
 
+  // Picking from the roots list is always a registered-root drill: drop any
+  // ad-hoc line so a stale line can't attach to a root drill (which would make
+  // the backend reject it as a non-root key with a mismatched line).
+  const handleSelectDrillOpening = useCallback((opening: OpeningRootItem | null) => {
+    adHocLineRef.current = null;
+    setSelectedDrillOpening(opening);
+  }, []);
+
   const handleStartDrill = useCallback(async () => {
     if (!selectedDrillOpening) return;
 
@@ -1578,6 +1645,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       engineElo: engineElo,
       strictness: strictnessFromCp(drillStrictnessCp),
       strictnessCp: drillStrictnessCp,
+      // null for a registered root → backend drills it via the book BFS; a line
+      // (incl. an off-book card's exact played line) drives the strict route.
+      line: adHocLineRef.current ?? undefined,
     });
 
     if (result) {
@@ -1616,10 +1686,26 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setDrillStrictnessCp(s.drillStrictnessCp ?? drillStrictnessCp);
       setEngineElo(s.engineElo);
       setDrillPlayerColor(s.playerColor === "black" ? "black" : "white");
-      pendingDrillSetupRef.current = {
-        openingKey: s.drillOpeningKey,
-        playerColor: s.playerColor,
-      };
+      if (s.drillLine != null) {
+        // Ad-hoc drill: restore the synthetic selection + line from the durable
+        // store. The roots list can't resolve a non-root target FEN, so seeding
+        // pendingDrillSetupRef would leave the overlay with no selection.
+        setSelectedDrillOpening({
+          opening_key: s.drillOpeningKey,
+          opening_name: s.drillOpeningName ?? "Custom line",
+          opening_family: "",
+          eco: null,
+          depth: s.drillLine.length,
+        });
+        adHocLineRef.current = s.drillLine;
+        pendingDrillSetupRef.current = null;
+      } else {
+        adHocLineRef.current = null;
+        pendingDrillSetupRef.current = {
+          openingKey: s.drillOpeningKey,
+          playerColor: s.playerColor,
+        };
+      }
     }
     // When no drill state exists, fall back to the localStorage-prefill effects.
 
@@ -1650,6 +1736,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       engineElo: s.engineElo,
       strictness: s.drillStrictness,
       strictnessCp: s.drillStrictnessCp,
+      // Replaying an ad-hoc drill needs its line: the store key is a target FEN,
+      // not a registered root, so without the line the backend would 404. Read
+      // it from the DURABLE store (not adHocLineRef) so the reviewed-return path
+      // works after the /drill-analysis route remounts this component.
+      line: s.drillLine ?? undefined,
     });
 
     if (result) {
@@ -1880,7 +1971,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 selectedDrillOpening={selectedDrillOpening}
                 drillPlayerColor={drillPlayerColor}
                 drillStrictnessCp={drillStrictnessCp}
-                onSelectDrillOpening={setSelectedDrillOpening}
+                onSelectDrillOpening={handleSelectDrillOpening}
                 onDrillPlayerColorChange={setDrillPlayerColor}
                 onDrillStrictnessChange={setDrillStrictnessCp}
                 onStartDrill={handleStartDrill}

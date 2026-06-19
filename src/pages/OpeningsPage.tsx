@@ -51,7 +51,12 @@ function TreeColumnView({
   registerColumn: (idx: number, el: HTMLElement | null) => void;
   registerSelectedNode: (idx: number, el: HTMLElement | null) => void;
   onSelect: (line: string[]) => void;
-  onStartDrill: (openingKey: string) => void;
+  onStartDrill: (p: {
+    targetFen: string;
+    line: string[];
+    displayName: string | null;
+    eco: string | null;
+  }) => void;
 }) {
   // The column hosting the expanded (deepest selected) card is the active one.
   const isActive = column.nodes.some((node) => node.isExpanded);
@@ -105,9 +110,17 @@ function TreeColumnView({
             <OpeningTreeNodeCard
               variant="expanded"
               node={node.view}
+              // Wire drill only for move cards (childFen present); the
+              // synthesized root has childFen === null → no Start Drill button.
               onStartDrill={
-                node.view.drillOpeningKey != null
-                  ? () => onStartDrill(node.view.drillOpeningKey as string)
+                node.childFen != null
+                  ? () =>
+                      onStartDrill({
+                        targetFen: node.childFen as string,
+                        line: node.selectLine,
+                        displayName: node.view.openingName,
+                        eco: node.view.eco,
+                      })
                   : undefined
               }
             />
@@ -277,8 +290,13 @@ function OpeningsPage() {
     setSearchParams(buildOpeningsSearchParams({ playerColor: color, moves }));
   };
 
-  const startDrill = (openingKey: string) => {
-    navigate("/play", { state: { drillSetup: { openingKey, playerColor } } });
+  const startDrill = (p: {
+    targetFen: string;
+    line: string[];
+    displayName: string | null;
+    eco: string | null;
+  }) => {
+    navigate("/play", { state: { drillSetup: { ...p, playerColor } } });
   };
 
   // Board → tree: accept a drag only when the children column of the deepest

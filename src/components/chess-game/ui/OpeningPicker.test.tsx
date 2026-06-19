@@ -298,4 +298,29 @@ describe("OpeningPicker", () => {
     expect(screen.getByRole("combobox")).toBeDisabled();
     expect(screen.getByText(/loading openings/i)).toBeInTheDocument();
   });
+
+  it("shows the selected opening label even when the roots list failed to load", () => {
+    // An ad-hoc card drill carries its own synthesized selection; the trigger
+    // must show it instead of the failed/loading placeholder so Start Drill is
+    // still meaningful when getOpeningRoots() is unavailable.
+    const adHoc: OpeningRootItem = {
+      opening_key: CARO_KANN_KEY,
+      opening_name: "Custom line",
+      opening_family: "",
+      eco: null,
+      depth: 2,
+    };
+    render(
+      <OpeningPicker
+        openingFamilies={null}
+        selectedOpening={adHoc}
+        isLoading={false}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Custom line")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/failed to load openings/i),
+    ).not.toBeInTheDocument();
+  });
 });
