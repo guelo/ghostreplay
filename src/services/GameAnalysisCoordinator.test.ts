@@ -22,7 +22,7 @@ class MockWorker {
 vi.stubGlobal('Worker', MockWorker)
 
 // Must import AFTER mocks are installed
-const { GameAnalysisCoordinator } = await import('./GameAnalysisCoordinator')
+const { GameAnalysisCoordinator, promoteToTrustedBest } = await import('./GameAnalysisCoordinator')
 
 const initialStoreState = useGameStore.getInitialState()
 
@@ -610,6 +610,112 @@ describe('GameAnalysisCoordinator', () => {
       // Index 9 was never analyzed: no record, no current request -> truth null ->
       // worker fallback delegates to waitForAnalysis, which rejects to recovery.
       await expect(coordinator.waitForDrillGrade(9, 'e2e4', 0)).rejects.toThrow(/not scheduled/i)
+    })
+  })
+
+  // ---------------------------------------------------------------
+  // g-move-best-icon: best-move star when the played move equals the
+  // trusted position best move (even on the worker-fallback path).
+  // ---------------------------------------------------------------
+  describe('best-move promotion from trusted position truth (g-move-best-icon)', () => {
+    const sendWorker = (
+      requestId: string | undefined,
+      over: Record<string, unknown> = {},
+    ) => {
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis',
+          id: requestId,
+          move: 'c2c4',
+          bestMove: 'g1f3',
+          bestLine: ['g1f3', 'd7d5'],
+          bestEval: 35,
+          playedEval: 42,
+          playedEvalMate: null,
+          delta: 7,
+          classification: 'excellent',
+          ...over,
+        },
+      })
+    }
+
+    it('promotes a worker-fallback result to best when the played move equals the trusted best move (the c4 case)', async () => {
+      // position_trusted but move_untrusted -> published gate releases to the
+      // worker, which under-rates c4 as 'excellent' with a different best move.
+      // The trusted position grain (best = c2c4 = played) must promote it to best.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c2c4', {
+          move_san: 'c4', best_move_uci: 'c2c4', best_move_san: 'c4',
+          best_line_uci: ['c2c4', 'g8f6'], best_eval: 35,
+          played_eval: 42, played_eval_mate: null, eval_delta: 0,
+          classification: 'excellent',
+          position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      const requestId = coordinator.analyzeMove('fen-0', 'c2c4', 'white', 0, 20)
+      await vi.advanceTimersByTimeAsync(200) // cache settles: records drill truth, releases fallback
+      sendWorker(requestId) // worker publishes 'excellent' with bestMove g1f3
+      await vi.advanceTimersByTimeAsync(0)
+
+      const result = coordinator.store.getState().analysisMap.get(0)
+      expect(result?.classification).toBe('best')
+      expect(result?.bestMove).toBe('c2c4')
+      expect(result?.bestLine).toEqual(['c2c4'])
+      expect(result?.delta).toBe(0)
+      expect(result?.blunder).toBe(false)
+    })
+
+    it('leaves a non-best played move classification untouched (the Bf4 case)', async () => {
+      // Trusted best is c2c4 but the played move is c1f4 (Bf4) — not the best move,
+      // so the excellent icon must stay.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::c1f4', {
+          move_san: 'Bf4', best_move_uci: 'c2c4', best_move_san: 'c4',
+          best_line_uci: ['c2c4', 'g8f6'], best_eval: 35,
+          played_eval: 44, played_eval_mate: null, eval_delta: 0,
+          classification: 'excellent',
+          position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      const requestId = coordinator.analyzeMove('fen-0', 'c1f4', 'white', 0, 20)
+      await vi.advanceTimersByTimeAsync(200)
+      sendWorker(requestId, { move: 'c1f4', bestMove: 'c2c4', delta: 9 })
+      await vi.advanceTimersByTimeAsync(0)
+
+      const result = coordinator.store.getState().analysisMap.get(0)
+      expect(result?.classification).toBe('excellent')
+    })
+
+    describe('promoteToTrustedBest (pure helper)', () => {
+      const base = {
+        id: 'r1', move: 'c2c4', bestMove: 'g1f3', bestLine: ['g1f3', 'd7d5'],
+        bestEval: 35, playedEval: 42, currentPositionEval: 42,
+        playedEvalMate: null, currentPositionEvalMate: null,
+        moveIndex: 0, delta: 7, classification: 'excellent' as const,
+        blunder: false, recordable: false,
+      }
+
+      it('normalizes to a coherent loss-0 best move when played === trusted best', () => {
+        const out = promoteToTrustedBest(base, 'c2c4')
+        expect(out).toMatchObject({
+          classification: 'best', bestMove: 'c2c4', bestLine: ['c2c4'],
+          bestEval: 42, delta: 0, blunder: false, recordable: false,
+          playedEval: 42, // eval magnitude preserved
+        })
+      })
+
+      it('is a no-op when the played move is not the trusted best', () => {
+        const out = promoteToTrustedBest(base, 'd2d4')
+        expect(out).toBe(base)
+      })
+
+      it('is a no-op when the result is already best', () => {
+        const alreadyBest = { ...base, classification: 'best' as const }
+        const out = promoteToTrustedBest(alreadyBest, 'c2c4')
+        expect(out).toBe(alreadyBest)
+      })
     })
   })
 
@@ -1280,7 +1386,10 @@ describe('GameAnalysisCoordinator', () => {
       // drill matrix composes on top of: the drill grades the settled result's
       // delta, so that delta must not depend on which side won. The cache row
       // and the worker carry the SAME delta; the winners differ (bestMove
-      // 'e2e4' vs 'worker-best') but the drill-relevant delta is stable.
+      // 'd2d4' vs 'worker-best') but the drill-relevant delta is stable.
+      // The played move (e2e4) is a genuine mistake whose best move differs, so
+      // the exact-best promotion (g-move-best-icon) does NOT fire — playing the
+      // trusted best move would instead be a coherent loss-0 'best'.
       const D = 30
 
       // Case A: trusted cache hit present; the worker finishes FIRST (buffered),
@@ -1293,11 +1402,14 @@ describe('GameAnalysisCoordinator', () => {
       vi.advanceTimersByTime(200)
       resolveLookup(new Map([[
         'fen-0::e2e4',
-        trustedRow('e2e4', { eval_delta: D, best_eval: D, played_eval: 0, classification: 'mistake' }),
+        trustedRow('e2e4', {
+          best_move_uci: 'd2d4', best_move_san: 'd4', best_line_uci: ['d2d4', 'zzzz'],
+          eval_delta: D, best_eval: D, played_eval: 0, classification: 'mistake',
+        }),
       ]]))
       await vi.advanceTimersByTimeAsync(0)
       const cacheWon = coordinator.store.getState().analysisMap.get(0)
-      expect(cacheWon?.bestMove).toBe('e2e4')
+      expect(cacheWon?.bestMove).toBe('d2d4')
       expect(cacheWon?.delta).toBe(D)
 
       // Case B: cache MISSES (default mock); the worker result wins.
