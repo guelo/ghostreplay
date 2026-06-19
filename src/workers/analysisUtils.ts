@@ -5,6 +5,13 @@
 
 import type { EngineScore } from './stockfishMessages'
 import { parseUciInfoLine } from './parseInfo'
+// MoveClassification and AnalysisResult live in the neutral types module so this
+// low-level module never imports from the hook layer (which would form a
+// workers -> hooks cycle). MoveClassification is re-exported below so existing
+// consumers that import it from analysisUtils keep working unchanged.
+import type { MoveClassification, AnalysisResult } from '../types/analysis'
+
+export type { MoveClassification }
 
 export const RECORDABLE_FAILURE_THRESHOLD_CP = 50
 export const RECORDING_MOVE_CAP_FULL_MOVES = 10
@@ -261,14 +268,6 @@ export const isWithinRecordingMoveCap = (
   return moveIndex < RECORDING_MOVE_CAP_PLY
 }
 
-export type MoveClassification =
-  | 'best'
-  | 'excellent'
-  | 'good'
-  | 'inaccuracy'
-  | 'mistake'
-  | 'blunder'
-
 /**
  * @deprecated Use classifyMoveAdvanced for new code. Kept as fallback for
  * legacy cache entries that lack a `classification` value.
@@ -399,6 +398,46 @@ export const hasCpEvalLoss = (input: {
 }): boolean => {
   const delta = input.eval_delta
   return delta != null && Number.isFinite(delta) && delta >= 0
+}
+
+/**
+ * Grain-split best promotion (g-move-best-icon). When the TRUSTED position grain
+ * names `trustedBestUci` as the position's best move and the played move equals
+ * it, the played move IS the best move — even though the published `result` came
+ * from a move-untrusted cache row or a shallower worker fallback that called it
+ * merely 'excellent'. "Is the played move best?" is a POSITION-grain question, so
+ * the trusted position grain's answer wins over a stale move-grain/worker
+ * classification (the same grain the drill grade already trusts).
+ *
+ * Normalize to a coherent loss-0 best move so the MoveList renders the best-move
+ * star (and best-move bling / perfect streak fire) and uploaded evidence is
+ * internally consistent. Only best-ness facts are rewritten; eval MAGNITUDES
+ * (playedEval/mate) stay the move/worker grain. Everything rewritten is derivable
+ * from the played move plus its own `playedEval` — no foreign position eval is
+ * pulled in, and `delta: 0` is exact by definition (playing the trusted best move
+ * loses exactly 0). No-op when the played move is not the trusted best, or the
+ * result is already 'best'.
+ *
+ * Shared single source between the live MoveList path (GameAnalysisCoordinator)
+ * and the post-game AnalysisBoard path (useMoveAnalysis) — see g-49e2.
+ */
+export const promoteToTrustedBest = (
+  result: AnalysisResult,
+  trustedBestUci: string,
+): AnalysisResult => {
+  if (result.classification === 'best' || result.move !== trustedBestUci) {
+    return result
+  }
+  return {
+    ...result,
+    classification: 'best',
+    bestMove: trustedBestUci,
+    bestLine: [trustedBestUci],
+    bestEval: result.playedEval,
+    delta: 0,
+    blunder: false,
+    recordable: false,
+  }
 }
 
 // ── Win-chance classifier (Lichess logistic model) ──────────────────

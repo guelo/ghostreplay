@@ -1435,4 +1435,104 @@ describe('useMoveAnalysis', () => {
     expect(store.getState().lastAnalysis).toBeNull()
     expect(store.getState().analysisMap.has(0)).toBe(false)
   })
+
+  // ── best-move promotion from trusted position truth (g-49e2) ─────────
+  // Same root cause as g-move-best-icon, but the post-game AnalysisBoard path
+  // (this hook) had no exact-best truth channel. A move-untrusted cache row whose
+  // played move equals the trusted best_move_uci falls back to the worker, which
+  // under-rates it 'excellent'; the trusted position grain must still promote it
+  // to the best-move star.
+  describe('best-move promotion from trusted position truth (g-49e2)', () => {
+    it('promotes a worker-fallback result to best when the played move equals the trusted best (the c4 case)', async () => {
+      vi.useFakeTimers()
+
+      let resolveLookup!: (value: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      const { result } = renderHook(() => useMoveAnalysis(store))
+      act(() => { simulateMessage({ type: 'ready' }) })
+      act(() => { result.current.analyzeMove('fen-0', 'c2c4', 'white', 0, 20) })
+      const requestId = postMessageMock.mock.calls[0][0].id
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+
+      // position_trusted but move_untrusted -> the published gate releases to the
+      // worker, but the exact-best truth (best == played == c2c4) is recorded.
+      act(() => {
+        resolveLookup(new Map([
+          ['fen-0::c2c4', {
+            move_san: 'c4', best_move_uci: 'c2c4', best_move_san: 'c4',
+            best_line_uci: ['c2c4', 'g8f6'], best_eval: 35,
+            played_eval: 42, played_eval_mate: null, eval_delta: 0,
+            classification: 'excellent',
+            position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+          }],
+        ]))
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+      // The worker under-rates c4 as 'excellent' with a different best move.
+      act(() => {
+        simulateMessage({
+          type: 'analysis', id: requestId, move: 'c2c4', bestMove: 'g1f3',
+          bestLine: ['g1f3', 'd7d5'], bestEval: 35, playedEval: 42,
+          playedEvalMate: null, delta: 7, classification: 'excellent',
+        })
+      })
+
+      const resolved = store.getState().analysisMap.get(0)
+      expect(resolved?.classification).toBe('best')
+      expect(resolved?.bestMove).toBe('c2c4')
+      expect(resolved?.bestLine).toEqual(['c2c4'])
+      expect(resolved?.delta).toBe(0)
+      expect(resolved?.blunder).toBe(false)
+      // Eval magnitude is preserved from the worker/move grain.
+      expect(resolved?.playedEval).toBe(42)
+    })
+
+    it('leaves a non-best played move classification untouched (the Bf4 case)', async () => {
+      vi.useFakeTimers()
+
+      let resolveLookup!: (value: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      const { result } = renderHook(() => useMoveAnalysis(store))
+      act(() => { simulateMessage({ type: 'ready' }) })
+      act(() => { result.current.analyzeMove('fen-0', 'c1f4', 'white', 0, 20) })
+      const requestId = postMessageMock.mock.calls[0][0].id
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+
+      // Trusted best is c2c4 but the played move is c1f4 (Bf4) — not the best,
+      // so the excellent icon must stay even though truth is recorded.
+      act(() => {
+        resolveLookup(new Map([
+          ['fen-0::c1f4', {
+            move_san: 'Bf4', best_move_uci: 'c2c4', best_move_san: 'c4',
+            best_line_uci: ['c2c4', 'g8f6'], best_eval: 35,
+            played_eval: 44, played_eval_mate: null, eval_delta: 0,
+            classification: 'excellent',
+            position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+          }],
+        ]))
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+      act(() => {
+        simulateMessage({
+          type: 'analysis', id: requestId, move: 'c1f4', bestMove: 'c2c4',
+          bestLine: ['c2c4', 'g8f6'], bestEval: 35, playedEval: 44,
+          playedEvalMate: null, delta: 9, classification: 'excellent',
+        })
+      })
+
+      const resolved = store.getState().analysisMap.get(0)
+      expect(resolved?.classification).toBe('excellent')
+      expect(resolved?.bestMove).toBe('c2c4')
+    })
+  })
 })

@@ -3,11 +3,15 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedMoveHit, hasCpEvalLoss } from '../workers/analysisUtils'
-import type { MoveClassification } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedExactBestHit, isTrustedMoveHit, hasCpEvalLoss, promoteToTrustedBest } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
+// AnalysisResult now lives in the neutral types module; re-exported here so its
+// existing consumers (stores, domain helpers, useVariationTree) are unaffected.
+import type { AnalysisResult, MoveClassification } from '../types/analysis'
+
+export type { AnalysisResult }
 
 const createRequestId = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -15,33 +19,6 @@ const createRequestId = () => {
   }
 
   return Math.random().toString(36).slice(2)
-}
-
-export type AnalysisResult = {
-  id: string
-  move: string
-  bestMove: string
-  /** Root best-move principal variation (UCI). Starts with bestMove. */
-  bestLine?: string[] | null
-  bestEval: number | null
-  playedEval: number | null
-  currentPositionEval: number | null
-  // NOTE on perspective: despite the historical "player" naming, every eval
-  // below is MOVER-relative — relative to the side that played the analyzed
-  // move (callers pass the mover's color as `playerColor`/`analysisColor`, see
-  // useChessGameController.commitAppliedMove). This is why downstream code
-  // converts to white via parity-based `toWhitePerspective(_, moveIndex)` rather
-  // than `playerToWhite(_, userColor)`. Keep that contract when wiring new
-  // consumers, or the sign will flip on black moves.
-  /** Mover-relative mate count for the played move, null when not a mate. */
-  playedEvalMate: number | null
-  /** Mover-relative mate count for the current position, null when not a mate. */
-  currentPositionEvalMate: number | null
-  moveIndex: number | null
-  delta: number | null
-  classification: MoveClassification | null
-  blunder: boolean
-  recordable: boolean
 }
 
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
@@ -178,6 +155,14 @@ export const useMoveAnalysis = (
   // Latest request id per index — guards every resolution against superseded
   // requests (Finding 2). The hook had no such guard before.
   const latestRequestIds = useRef<Map<number, string>>(new Map())
+  // Exact-best truth side channel (g-49e2): records the TRUSTED position's
+  // best_move_uci for an index so the terminal resolve can promote a played move
+  // that equals it to the best-move star, even when the published path fell back
+  // to the worker (which under-rates it). Minimal mirror of the coordinator's
+  // drillTruth — only the best move is needed here; the requestId guards against a
+  // stale record promoting a superseded request. Cleared on the same
+  // supersession/reset paths as the resolution state.
+  const exactBestTruth = useRef<Map<number, { requestId: string; bestUci: string }>>(new Map())
   // Retained until lifecycle cleanup so a late worker message for a settled
   // index is never mistaken for a non-indexed request (Finding G1).
   const requestIdToMoveIndex = useRef<Map<string, number>>(new Map())
@@ -196,6 +181,21 @@ export const useMoveAnalysis = (
       if (latestRequestIds.current.get(moveIndex) !== result.id) return false
       if (resolvedIndices.current.has(moveIndex)) return false
       resolvedIndices.current.add(moveIndex)
+
+      // Grain-split best promotion (g-49e2, same root cause as g-move-best-icon):
+      // if the trusted POSITION grain named the played move as the exact best
+      // move, publish it as 'best' so AnalysisBoard renders the best-move star,
+      // even when this result came from a move-untrusted cache row or a worker
+      // fallback that under-rated it. The requestId guard rejects a stale record
+      // from a superseded request (which is also cleared on supersession, so this
+      // is belt-and-braces); promoteToTrustedBest is itself a no-op unless the
+      // played move equals the trusted best.
+      const truth = exactBestTruth.current.get(moveIndex)
+      const published =
+        truth && truth.requestId === result.id
+          ? promoteToTrustedBest(result, truth.bestUci)
+          : result
+
       const entry = resolutionState.current.get(moveIndex)
       if (entry) {
         if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
@@ -204,7 +204,8 @@ export const useMoveAnalysis = (
       }
       pendingMoveIndices.current.delete(result.id)
       pendingMeta.current.delete(result.id)
-      store.getState().resolveAnalysis(moveIndex, result)
+      exactBestTruth.current.delete(moveIndex)
+      store.getState().resolveAnalysis(moveIndex, published)
       return true
     },
     [store],
@@ -239,6 +240,7 @@ export const useMoveAnalysis = (
       if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
       if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       resolutionState.current.delete(moveIndex)
+      exactBestTruth.current.delete(moveIndex)
       pendingMoveIndices.current.delete(requestId)
       pendingMeta.current.delete(requestId)
       cancelWorkerRequest(requestId)
@@ -334,6 +336,20 @@ export const useMoveAnalysis = (
           const key = makeCacheKey(pending.fen, pending.move)
           const cached = results.get(key)
 
+          // Exact-best truth side channel (g-49e2): record the trusted position's
+          // best move BEFORE the published gate / releaseFallback, so a played
+          // move that equals it is promoted to the best-move star at the terminal
+          // resolve even when this row is move-untrusted and falls back to the
+          // worker (which under-rates it). Pure side-channel write — it must NOT
+          // touch resolutionState, the worker, or outcomes; the gate below runs
+          // unchanged.
+          if (cached && isTrustedExactBestHit(cached)) {
+            exactBestTruth.current.set(pending.moveIndex, {
+              requestId: pending.requestId,
+              bestUci: cached.best_move_uci as string,
+            })
+          }
+
           if (
             !cached ||
             !isTrustedPositionHit(cached) ||
@@ -398,6 +414,7 @@ export const useMoveAnalysis = (
     }
     resolutionState.current.clear()
     latestRequestIds.current.clear()
+    exactBestTruth.current.clear()
     if (!keepTombstones) {
       requestIdToMoveIndex.current.clear()
     }
@@ -710,6 +727,7 @@ export const useMoveAnalysis = (
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       }
       resolutionState.current.clear()
+      exactBestTruth.current.clear()
       for (const timer of variationDeadlineTimers.current.values()) {
         clearTimeout(timer)
       }
@@ -749,6 +767,9 @@ export const useMoveAnalysis = (
         latestRequestIds.current.set(moveIndex, id)
         requestIdToMoveIndex.current.set(id, moveIndex)
         resolvedIndices.current.delete(moveIndex)
+        // Drop any stale exact-best truth for this index so a superseded
+        // request's record can't promote this new request (g-49e2).
+        exactBestTruth.current.delete(moveIndex)
 
         const token = mountToken.current
         const deadlineTimer = setTimeout(() => {

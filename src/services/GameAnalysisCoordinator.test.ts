@@ -22,7 +22,7 @@ class MockWorker {
 vi.stubGlobal('Worker', MockWorker)
 
 // Must import AFTER mocks are installed
-const { GameAnalysisCoordinator, promoteToTrustedBest } = await import('./GameAnalysisCoordinator')
+const { GameAnalysisCoordinator } = await import('./GameAnalysisCoordinator')
 
 const initialStoreState = useGameStore.getInitialState()
 
@@ -687,36 +687,9 @@ describe('GameAnalysisCoordinator', () => {
       const result = coordinator.store.getState().analysisMap.get(0)
       expect(result?.classification).toBe('excellent')
     })
-
-    describe('promoteToTrustedBest (pure helper)', () => {
-      const base = {
-        id: 'r1', move: 'c2c4', bestMove: 'g1f3', bestLine: ['g1f3', 'd7d5'],
-        bestEval: 35, playedEval: 42, currentPositionEval: 42,
-        playedEvalMate: null, currentPositionEvalMate: null,
-        moveIndex: 0, delta: 7, classification: 'excellent' as const,
-        blunder: false, recordable: false,
-      }
-
-      it('normalizes to a coherent loss-0 best move when played === trusted best', () => {
-        const out = promoteToTrustedBest(base, 'c2c4')
-        expect(out).toMatchObject({
-          classification: 'best', bestMove: 'c2c4', bestLine: ['c2c4'],
-          bestEval: 42, delta: 0, blunder: false, recordable: false,
-          playedEval: 42, // eval magnitude preserved
-        })
-      })
-
-      it('is a no-op when the played move is not the trusted best', () => {
-        const out = promoteToTrustedBest(base, 'd2d4')
-        expect(out).toBe(base)
-      })
-
-      it('is a no-op when the result is already best', () => {
-        const alreadyBest = { ...base, classification: 'best' as const }
-        const out = promoteToTrustedBest(alreadyBest, 'c2c4')
-        expect(out).toBe(alreadyBest)
-      })
-    })
+    // The pure `promoteToTrustedBest` unit tests live with the helper in
+    // src/workers/analysisUtils.test.ts (the helper moved there in g-49e2 so the
+    // coordinator and useMoveAnalysis share a single source).
   })
 
   // ---------------------------------------------------------------
