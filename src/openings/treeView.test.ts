@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   buildTreeView,
   connectorStyle,
-  flipEval,
   nodeToView,
   replayLine,
   resolveDrop,
@@ -99,17 +98,8 @@ function sicilianResponse(): TreeResponse {
   });
 }
 
-describe("flipEval", () => {
-  it("passes white through and negates for black; null stays null", () => {
-    expect(flipEval(50, "white")).toBe(50);
-    expect(flipEval(50, "black")).toBe(-50);
-    expect(flipEval(-3, "black")).toBe(3);
-    expect(flipEval(null, "black")).toBeNull();
-  });
-});
-
 describe("nodeToView", () => {
-  it("maps fields and flips evals to perspective", () => {
+  it("maps fields and keeps eval white-relative for both perspectives", () => {
     const node = makeNode({
       uci: "e2e4",
       san: "e4",
@@ -124,31 +114,28 @@ describe("nodeToView", () => {
       eval_mate: 3,
     });
 
-    const white = nodeToView(node, "white");
-    expect(white.evalCp).toBe(40);
-    expect(white.evalMate).toBe(3);
-    expect(white.score).toBe(61);
-    expect(white.openingName).toBe("King's Pawn");
-    expect(white.isTerminal).toBe(false);
-
-    const black = nodeToView(node, "black");
-    expect(black.evalCp).toBe(-40);
-    expect(black.evalMate).toBe(-3);
+    // The eval is white-relative regardless of which side's repertoire is shown
+    // (the +white / −black convention; the column SORT applies the perspective).
+    const view = nodeToView(node);
+    expect(view.evalCp).toBe(40);
+    expect(view.evalMate).toBe(3);
+    expect(view.score).toBe(61);
+    expect(view.openingName).toBe("King's Pawn");
+    expect(view.isTerminal).toBe(false);
   });
 
   it("marks terminal nodes from terminal_reason", () => {
     const node = makeNode({ uci: "d8h4", terminal_reason: "checkmate" });
-    const view = nodeToView(node, "white");
+    const view = nodeToView(node);
     expect(view.isTerminal).toBe(true);
     expect(view.terminalReason).toBe("checkmate");
   });
 });
 
 describe("synthesizeRootView", () => {
-  it("uses root eval (flipped) regardless of clipping", () => {
+  it("uses the white-relative root eval regardless of clipping", () => {
     const response = makeResponse({ root_eval_cp: 30, root_eval_mate: null });
-    expect(synthesizeRootView(response, false, 2, "white").evalCp).toBe(30);
-    expect(synthesizeRootView(response, false, 2, "black").evalCp).toBe(-30);
+    expect(synthesizeRootView(response, false, 2).evalCp).toBe(30);
   });
 
   it("propagates root metrics regardless of depth and clipping", () => {
@@ -158,7 +145,7 @@ describe("synthesizeRootView", () => {
       root_game_count: 15,
       root_confidence: 0.8,
     });
-    const view = synthesizeRootView(response, false, 2, "white");
+    const view = synthesizeRootView(response, false, 2);
     expect(view.score).toBe(72);
     expect(view.coverage).toBe(0.6);
     expect(view.gameCount).toBe(15);
@@ -167,7 +154,7 @@ describe("synthesizeRootView", () => {
 
   it("root metrics are null when response has no batch data", () => {
     const response = makeResponse({});
-    const view = synthesizeRootView(response, true, 0, "white");
+    const view = synthesizeRootView(response, true, 0);
     expect(view.score).toBeNull();
     expect(view.coverage).toBeNull();
     expect(view.gameCount).toBeNull();
@@ -182,20 +169,20 @@ describe("synthesizeRootView", () => {
       drill_opening_key: "kp-root",
     });
 
-    const fetchedForRoot = synthesizeRootView(response, true, 0, "white");
+    const fetchedForRoot = synthesizeRootView(response, true, 0);
     expect(fetchedForRoot.isTerminal).toBe(true);
     expect(fetchedForRoot.terminalReason).toBe("stalemate");
     expect(fetchedForRoot.drillOpeningKey).toBe("kp-root");
 
     // Exact line but deeper (k>0): the response's selected fields describe the
     // deeper line, so they must not leak onto the root card.
-    const deeper = synthesizeRootView(response, true, 2, "white");
+    const deeper = synthesizeRootView(response, true, 2);
     expect(deeper.isTerminal).toBe(false);
     expect(deeper.terminalReason).toBeNull();
     expect(deeper.drillOpeningKey).toBeNull();
 
     // Clipped view (isExactResponseLine false) at the root: also suppressed.
-    const clipped = synthesizeRootView(response, false, 0, "white");
+    const clipped = synthesizeRootView(response, false, 0);
     expect(clipped.drillOpeningKey).toBeNull();
     expect(clipped.isTerminal).toBe(false);
   });
@@ -210,7 +197,6 @@ describe("buildTreeView", () => {
         loadedThroughPly: 2,
         isExactResponseLine: true,
       },
-      "white",
     );
 
     expect(view.columns.map((c) => c.kind)).toEqual([
@@ -242,7 +228,6 @@ describe("buildTreeView", () => {
     const view = buildTreeView(
       sicilianResponse(),
       { selectionLine: [], loadedThroughPly: 0, isExactResponseLine: true },
-      "white",
     );
     expect(view.columns[0].nodes[0].isExpanded).toBe(true);
     // Only the children-of-root column renders at loadedThroughPly 0.
@@ -257,7 +242,6 @@ describe("buildTreeView", () => {
         loadedThroughPly: 1,
         isExactResponseLine: false,
       },
-      "white",
     );
     // columns[2] (ply 2) is dropped; column ply 1 renders with nothing selected.
     expect(view.columns.map((c) => c.lineIndex)).toEqual([-1, 0, 1]);
@@ -275,7 +259,6 @@ describe("buildTreeView", () => {
         loadedThroughPly: 2,
         isExactResponseLine: true,
       },
-      "white",
     );
     const col1 = view.columns.find((c) => c.lineIndex === 1)!;
     // Selecting the sibling e7e5 truncates c7c5 off the line.
@@ -304,7 +287,6 @@ describe("buildTreeView", () => {
         ],
       }),
       { selectionLine: [], loadedThroughPly: 0, isExactResponseLine: true },
-      "white",
     );
 
     // The synthesized root is always selectable even though it is not a drop
@@ -342,7 +324,6 @@ describe("buildTreeView", () => {
         ],
       }),
       { selectionLine: [], loadedThroughPly: 0, isExactResponseLine: true },
-      "white",
     );
 
     // The synthesized root is only ever a connector parent — never styled, and
@@ -379,7 +360,6 @@ describe("buildTreeView", () => {
         loadedThroughPly: 1,
         isExactResponseLine: true,
       },
-      "white",
     );
     expect(view.board.fen).toMatch(
       /^rnbqkbnr\/pppppppp\/8\/8\/4P3\/8\/PPPP1PPP\/RNBQKBNR b/,

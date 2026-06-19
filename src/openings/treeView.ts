@@ -1,10 +1,6 @@
 import { Chess } from "chess.js";
 import type { OpeningTreeNodeView } from "../components/OpeningTreeNodeCard";
-import type {
-  OpeningPlayerColor,
-  TreeNode,
-  TreeResponse,
-} from "../utils/api";
+import type { TreeNode, TreeResponse } from "../utils/api";
 
 /**
  * Pure (no-React) transform layer for the `/openings` move tree. Turns a
@@ -110,30 +106,18 @@ export interface BuildTreeViewOptions {
   isExactResponseLine: boolean;
 }
 
-/** Flip a white-relative cp/mate value to the player's perspective. */
-export function flipEval(
-  value: number | null,
-  color: OpeningPlayerColor,
-): number | null {
-  if (value == null) {
-    return null;
-  }
-  return color === "black" ? -value : value;
-}
-
-/** Map a raw API node to a perspective-relative card view. */
-export function nodeToView(
-  node: TreeNode,
-  color: OpeningPlayerColor,
-): OpeningTreeNodeView {
+/** Map a raw API node to a card view. Evals stay white-relative (the standard
+ *  +white / −black convention) so the column sort and the displayed number read
+ *  consistently regardless of which side's repertoire is shown. */
+export function nodeToView(node: TreeNode): OpeningTreeNodeView {
   return {
     ply: node.ply,
     san: node.san,
     openingName: node.opening_name,
     eco: node.eco,
     score: node.opening_score,
-    evalCp: flipEval(node.eval_cp, color),
-    evalMate: flipEval(node.eval_mate, color),
+    evalCp: node.eval_cp,
+    evalMate: node.eval_mate,
     coverage: node.coverage,
     gameCount: node.game_count,
     confidence: node.confidence,
@@ -154,7 +138,6 @@ export function synthesizeRootView(
   response: TreeResponse,
   isExactResponseLine: boolean,
   k: number,
-  color: OpeningPlayerColor,
 ): OpeningTreeNodeView {
   const fetchedForRoot = isExactResponseLine && k === 0;
   return {
@@ -163,8 +146,8 @@ export function synthesizeRootView(
     openingName: null,
     eco: null,
     score: response.root_opening_score ?? null,
-    evalCp: flipEval(response.root_eval_cp, color),
-    evalMate: flipEval(response.root_eval_mate, color),
+    evalCp: response.root_eval_cp,
+    evalMate: response.root_eval_mate,
     coverage: response.root_coverage ?? null,
     gameCount: response.root_game_count ?? null,
     confidence: response.root_confidence ?? null,
@@ -241,7 +224,6 @@ export function resolveDrop(
 export function buildTreeView(
   response: TreeResponse,
   options: BuildTreeViewOptions,
-  color: OpeningPlayerColor,
 ): TreeView {
   const { selectionLine, loadedThroughPly, isExactResponseLine } = options;
   const k = selectionLine.length;
@@ -252,7 +234,7 @@ export function buildTreeView(
     nodes: [
       {
         key: "root",
-        view: synthesizeRootView(response, isExactResponseLine, k, color),
+        view: synthesizeRootView(response, isExactResponseLine, k),
         uci: null,
         childFen: null,
         // The root is always on the selected path; expanded only at k === 0.
@@ -280,7 +262,7 @@ export function buildTreeView(
       const isSelected = node.uci === selectedUci;
       return {
         key: node.uci,
-        view: nodeToView(node, color),
+        view: nodeToView(node),
         uci: node.uci,
         childFen: node.child_fen,
         isSelected,

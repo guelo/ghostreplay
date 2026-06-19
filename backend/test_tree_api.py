@@ -44,6 +44,9 @@ BC4 = "r1bqkbnr/pppp1ppp/2n5/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R b KQkq -"
 PETROV = "rnbqkb1r/pppp1ppp/5n2/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -"
 PETROV_NXE5 = "rnbqkb1r/pppp1ppp/5n2/4N3/4P3/8/PPPP1PPP/RNBQKB1R b KQkq -"
 SICILIAN = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+# 1.e4 e5 2.Bc4 (Bishop's Opening) — a second white book reply at E4E5, used to
+# build a white-to-move branch column in the eval-sort tests.
+BISHOP = "rnbqkbnr/pppp1ppp/8/4p3/2B1P3/8/PPPP1PPP/RNBQK1NR b KQkq -"
 
 TREE_URL = "/api/openings/tree"
 
@@ -79,6 +82,24 @@ def _make_graph() -> OpeningGraph:
         (NF3, "g8f6", PETROV),
         (PETROV, "f3e5", PETROV_NXE5),
         (NC6, "f1c4", BC4),
+    ]
+    for parent, uci, child in edges:
+        nodes[parent].children[uci] = child
+        nodes[child].parents.add((parent, uci))
+    return OpeningGraph(nodes, START)
+
+
+def _white_branch_graph() -> OpeningGraph:
+    """1.e4 e5 with two white book replies — 2.Nf3 and 2.Bc4 — so the column at
+    E4E5 is a *white-to-move* branch with a play-frequency tie the eval sort can
+    break. The shared _make_graph branches only at black-to-move nodes (E4, NF3),
+    so it cannot exercise the white-column sort direction."""
+    nodes = {fen: _node(fen) for fen in (START, E4, E4E5, NF3, BISHOP)}
+    edges = [
+        (START, "e2e4", E4),
+        (E4, "e7e5", E4E5),
+        (E4E5, "g1f3", NF3),
+        (E4E5, "f1c4", BISHOP),
     ]
     for parent, uci, child in edges:
         nodes[parent].children[uci] = child
@@ -708,8 +729,9 @@ def test_tree_opponent_turn_orders_by_encounter(client, auth_headers):
     assert order[0] == "c7c5"  # encounter_count 9 > 1
 
 
-def test_tree_engine_eval_does_not_reorder(client, auth_headers):
-    # A large eval on the book move must not pull it ahead of an observed move.
+def test_tree_eval_does_not_override_play_frequency(client, auth_headers):
+    # Eval is only the SECONDARY key: a large eval on the book move must not pull
+    # it ahead of an observed move (play frequency stays primary).
     edge_key, edge = _obs_edge(["e2e4", "e7e5", "d2d4"], traversal_count=1,
                                live_attempts=1)
     overlay = _overlay("white", edges={edge_key: edge})
@@ -718,6 +740,95 @@ def test_tree_engine_eval_does_not_reorder(client, auth_headers):
                  params={"player_color": "white", "move": ["e2e4", "e7e5"]})
     order = _ucis(resp.json()["columns"][2])
     assert order[0] == "d2d4"  # observed still wins despite worse eval
+
+
+def test_tree_eval_breaks_ties_white_to_move_column(client, auth_headers):
+    # White-to-move column (the E4E5 replies): two equally-unplayed book moves
+    # tie on play frequency, so the eval sort breaks the tie toward the side to
+    # move — White — and the higher (white-relative) eval sorts first.
+    move_evals = {"g1f3": MoveEval(cp=50, mate=None),
+                  "f1c4": MoveEval(cp=-30, mate=None)}
+    resp = _call(client, auth_headers, graph=_white_branch_graph(),
+                 move_evals=move_evals,
+                 params={"player_color": "white", "move": ["e2e4", "e7e5"]})
+    order = _ucis(resp.json()["columns"][2])
+    assert order == ["g1f3", "f1c4"]  # +50 (best for White) on top
+
+
+def test_tree_eval_breaks_ties_black_to_move_column(client, auth_headers):
+    # Black-to-move column (the E4 replies): the eval sort breaks the
+    # play-frequency tie toward the side to move — Black — so the lower
+    # (most-negative, best-for-Black) white-relative eval sorts first.
+    move_evals = {"e7e5": MoveEval(cp=50, mate=None),
+                  "c7c5": MoveEval(cp=-30, mate=None)}
+    resp = _call(client, auth_headers, move_evals=move_evals,
+                 params={"player_color": "white", "move": ["e2e4"]})
+    order = _ucis(resp.json()["columns"][1])
+    assert order == ["c7c5", "e7e5"]  # -30 (best for Black) on top
+
+
+def test_tree_eval_tie_break_keys_on_column_side_not_repertoire_color(client, auth_headers):
+    # The eval tie-break keys on the COLUMN's side to move, not the repertoire
+    # color: the same black-to-move column sorts identically for a white and a
+    # black repertoire (best-for-Black first either way).
+    move_evals = {"e7e5": MoveEval(cp=50, mate=None),
+                  "c7c5": MoveEval(cp=-30, mate=None)}
+    white = _call(client, auth_headers, move_evals=move_evals,
+                  params={"player_color": "white", "move": ["e2e4"]})
+    black = _call(client, auth_headers, move_evals=move_evals,
+                  params={"player_color": "black", "move": ["e2e4"]})
+    assert _ucis(white.json()["columns"][1]) == ["c7c5", "e7e5"]
+    assert _ucis(black.json()["columns"][1]) == ["c7c5", "e7e5"]
+
+
+def test_tree_eval_mate_dominates_centipawns_white_to_move(client, auth_headers):
+    # White-to-move column: a forced mate for White outranks a large positive cp
+    # when play frequency ties.
+    move_evals = {"g1f3": MoveEval(cp=None, mate=3),    # White mates -> best
+                  "f1c4": MoveEval(cp=800, mate=None)}  # big cp, still below mate
+    resp = _call(client, auth_headers, graph=_white_branch_graph(),
+                 move_evals=move_evals,
+                 params={"player_color": "white", "move": ["e2e4", "e7e5"]})
+    order = _ucis(resp.json()["columns"][2])
+    assert order == ["g1f3", "f1c4"]  # mate-in-3 for White on top
+
+
+def test_tree_eval_mate_dominates_centipawns_black_to_move(client, auth_headers):
+    # Black-to-move column: a forced mate for Black (white-relative mate -3)
+    # outranks a large negative (good-for-Black) cp when play frequency ties.
+    move_evals = {"e7e5": MoveEval(cp=None, mate=-3),    # Black mates -> best
+                  "c7c5": MoveEval(cp=-800, mate=None)}  # big cp, still below mate
+    resp = _call(client, auth_headers, move_evals=move_evals,
+                 params={"player_color": "white", "move": ["e2e4"]})
+    order = _ucis(resp.json()["columns"][1])
+    assert order == ["e7e5", "c7c5"]  # mate-in-3 for Black on top
+
+
+def test_tree_eval_unknown_sorts_after_scored_in_tie_break(client, auth_headers):
+    # When play frequency ties, a move with no eval sorts after one that has an
+    # eval, even when the scored move is unfavorable for the side to move (here
+    # the black-to-move column: +500 is bad for Black, but still beats unknown).
+    move_evals = {"e7e5": MoveEval(cp=500, mate=None)}  # c7c5 has no eval
+    resp = _call(client, auth_headers, move_evals=move_evals,
+                 params={"player_color": "white", "move": ["e2e4"]})
+    order = _ucis(resp.json()["columns"][1])
+    assert order == ["e7e5", "c7c5"]  # scored (even if bad) before unknown
+
+
+def test_tree_eval_mate_zero_winner_is_unknown(client, auth_headers):
+    # A mate-0 (checkmate-on-board) carries no winner in the white-relative count
+    # alone, so it must NOT be read as a favorable mate for either side: when
+    # frequency ties it sorts LAST (as unknown), behind the scored reply. The
+    # white-relative count is color-independent, so both repertoires agree.
+    move_evals = {"e7e5": MoveEval(cp=None, mate=0),
+                  "c7c5": MoveEval(cp=20, mate=None)}
+    white = _call(client, auth_headers, move_evals=move_evals,
+                  params={"player_color": "white", "move": ["e2e4"]})
+    black = _call(client, auth_headers, move_evals=move_evals,
+                  params={"player_color": "black", "move": ["e2e4"]})
+    # mate-0 (e7e5) treated as unknown -> last, behind the scored c7c5.
+    assert _ucis(white.json()["columns"][1]) == ["c7c5", "e7e5"]
+    assert _ucis(black.json()["columns"][1]) == ["c7c5", "e7e5"]
 
 
 # --- parity with the scorer's structural domain (finding #2) -----------------

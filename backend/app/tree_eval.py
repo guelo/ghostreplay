@@ -11,8 +11,12 @@ whose move clocks may differ from the stored ``fen_before`` (transpositions). Lo
 therefore tries the exact key first, then falls back to the indexed normalized
 4-field FEN (``analysis_cache.normalized_fen_before`` + ``idx_analysis_cache_norm_move``).
 
-All evals are stored and returned **white-relative** (positive favors White). Render
-from a side's perspective with :func:`eval_for_perspective`.
+All evals are stored and returned **white-relative** (positive favors White), and
+the opening-tree cards render them as-is in that convention (+white / −black); the
+per-column secondary sort applies the column's side-to-move favorability on the
+backend (``openings._OpeningTreeBuilder._sort_key``), so nothing flips the displayed
+sign. :func:`eval_for_perspective` flips a white-relative eval to a chosen side's
+perspective for any caller that needs one (the tree no longer does).
 """
 from __future__ import annotations
 

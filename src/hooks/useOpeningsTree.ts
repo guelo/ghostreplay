@@ -302,16 +302,12 @@ export function useOpeningsTree(
     if (!render.response) {
       return null;
     }
-    return buildTreeView(
-      render.response,
-      {
-        selectionLine: render.selectionLine,
-        loadedThroughPly: render.loadedThroughPly,
-        isExactResponseLine: render.isExactResponseLine,
-      },
-      playerColor,
-    );
-  }, [render, playerColor]);
+    return buildTreeView(render.response, {
+      selectionLine: render.selectionLine,
+      loadedThroughPly: render.loadedThroughPly,
+      isExactResponseLine: render.isExactResponseLine,
+    });
+  }, [render]);
 
   // The render state lags the URL by one frame on a route change (the effect
   // runs after render). Only trust the settled/canonical fields when they were

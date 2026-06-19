@@ -32,6 +32,7 @@ from app.opening_cache import (
 )
 from app.opening_evidence import EdgeEvidence, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
+from app.opening_quality import mate_to_cp
 from app.opening_rootcalc import (
     SYNTHETIC_INITIAL_FEN,
     SYNTHETIC_ROOT_FAMILY,
@@ -1302,14 +1303,17 @@ class _OpeningTreeBuilder:
         stage_started = time.perf_counter()
         columns: list[TreeColumn] = []
         for i, norm_i, selected_uci, raw_nodes in raw_columns:
-            user_turn = active_color(norm_i) == self.player_color
+            side_to_move = active_color(norm_i)
+            user_turn = side_to_move == self.player_color
             nodes = [
                 self._hydrate_node(
                     rn, position_rows, move_evals, line_name[i], line_eco[i], selected_uci
                 )
                 for rn in raw_nodes
             ]
-            nodes.sort(key=lambda node: self._sort_key(node, user_turn))
+            nodes.sort(
+                key=lambda node: self._sort_key(node, user_turn, side_to_move)
+            )
             columns.append(
                 TreeColumn(
                     position_fen=norm_i,
@@ -1391,13 +1395,42 @@ class _OpeningTreeBuilder:
         )
 
     @staticmethod
-    def _sort_key(node: TreeNode, user_turn: bool) -> tuple:
-        """Relevance order per the parent's side to move. Engine eval NEVER orders.
+    def _eval_favorability(node: TreeNode, side_to_move: str) -> float | None:
+        """Engine favorability used as the secondary sort key, keyed to the
+        column's *side to move* (not the repertoire color): higher means better
+        for the side whose move this column ranks. Mirrors
+        ``opening_quality._white_cp``: prefer the centipawn value, fall back to a
+        non-zero (sign-recoverable) mate via :func:`mate_to_cp` (a closer mate is
+        more decisive and dominates any cp), and treat a mate-0 as unknown
+        (``None``) so it sorts last rather than being mistaken for a
+        White-favorable mate. A white-relative mate-0 has no recoverable winner —
+        the perspective sign-flip (``mate * sign``) zeroes it — and
+        ``tree_eval._played_eval`` collapses every mate row to mate-only, so the
+        disambiguating cp never reaches here; ranking it would require a
+        ``_played_eval`` change that drops the card's ``#`` checkmate display.
+        The stored eval is white-relative, so it is flipped when Black is to
+        move (a White column ranks highest white-relative first; a Black column
+        ranks lowest/most-negative first)."""
+        if node.eval_cp is not None:
+            white_cp = float(node.eval_cp)
+        elif node.eval_mate is not None and node.eval_mate != 0:
+            white_cp = float(mate_to_cp(node.eval_mate))
+        else:
+            return None
+        return white_cp if side_to_move == "white" else -white_cp
 
-        User turn: observed first, then most-chosen, then weakest mastery (null
-        last). Opponent turn: most-encountered first, then weakest mastery. The
-        deterministic destination/source/promotion/UCI tail makes distinct UCIs a
-        total order (they never tie)."""
+    @staticmethod
+    def _sort_key(node: TreeNode, user_turn: bool, side_to_move: str) -> tuple:
+        """Relevance order per the parent's side to move. Play frequency is the
+        primary key; engine eval breaks play-frequency ties in favor of the
+        side to move in this column (the best move for that column floats up).
+
+        User turn: observed first, then most-chosen. Opponent turn:
+        most-encountered first. Then engine eval (most favorable to the column's
+        side to move first — White columns highest-first, Black columns
+        lowest-first — unknown last) as the secondary key, then weakest mastery
+        (null last), then a deterministic destination/source/promotion/UCI tail
+        that makes distinct UCIs a total order (they never tie)."""
         move = chess.Move.from_uci(node.uci)
         tiebreak = (
             chess.square_file(move.to_square),
@@ -1407,14 +1440,33 @@ class _OpeningTreeBuilder:
             move.promotion or 0,
             node.uci,
         )
+        # Engine eval, most favorable to the column's side to move first, unknown
+        # last.
+        favorability = _OpeningTreeBuilder._eval_favorability(node, side_to_move)
+        eval_key = (
+            favorability is None,
+            -favorability if favorability is not None else 0.0,
+        )
         # Opening score ascending, null last.
         score_key = (
             node.opening_score is None,
             node.opening_score if node.opening_score is not None else 0.0,
         )
         if user_turn:
-            return (not node.is_observed, -node.user_choice_count, score_key, tiebreak)
-        return (node.encounter_count <= 0, -node.encounter_count, score_key, tiebreak)
+            return (
+                not node.is_observed,
+                -node.user_choice_count,
+                eval_key,
+                score_key,
+                tiebreak,
+            )
+        return (
+            node.encounter_count <= 0,
+            -node.encounter_count,
+            eval_key,
+            score_key,
+            tiebreak,
+        )
 
 
 @router.get("/tree", response_model=TreeResponse)

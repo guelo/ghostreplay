@@ -1380,8 +1380,9 @@ export const getOpeningChildren = async (
 
 // ---- Opening tree (horizontal move-graph) read model (epic g-d5cu) -----------
 // Mirrors the pydantic models in backend/app/api/openings.py. Evals are
-// WHITE-RELATIVE centipawns/mate; the page flips them to perspective-relative
-// before building card views.
+// WHITE-RELATIVE centipawns/mate and are rendered as-is on the card (standard
+// +white / −black convention); the column sort applies the column's
+// side-to-move favorability on the backend.
 
 export interface TreeNode {
   parent_fen: string

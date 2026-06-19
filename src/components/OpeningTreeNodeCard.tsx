@@ -15,8 +15,10 @@ import { formatWhiteEval } from "./MoveRow.helpers";
  * Presentational view-model for a single opening-tree node. Built by
  * `g-tree-page-state` from a `TreeNode` (or synthesized for the root); the card
  * is a pure render layer that already handles every null via the format
- * helpers. Eval fields are PERSPECTIVE-RELATIVE — the page flips white-relative
- * API values before constructing this view.
+ * helpers. Eval fields are WHITE-RELATIVE (+white / −black) — passed through
+ * unchanged from the API; the column SORT (backend) applies the column's
+ * side-to-move favorability, while the displayed number stays in the standard
+ * convention.
  */
 export interface OpeningTreeNodeView {
   /** 0 = root (start position); 1 = after White's first move. */
@@ -27,9 +29,9 @@ export interface OpeningTreeNodeView {
   eco: string | null;
   /** 0–100 opening score; null = no evidence. */
   score: number | null;
-  /** Perspective-relative centipawns; null when no best-move row. */
+  /** White-relative centipawns (+white / −black); null when no best-move row. */
   evalCp: number | null;
-  /** Perspective-relative mate-in-N; null when not a forced mate. */
+  /** White-relative mate-in-N (+white / −black); null when not a forced mate. */
   evalMate: number | null;
   coverage: number | null;
   /** Distinct sessions reaching this node (never raw sample_size). */
