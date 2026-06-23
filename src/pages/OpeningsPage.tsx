@@ -492,19 +492,17 @@ function OpeningsPage() {
                               : null;
                         // No next move selected yet: draw a short horizontal
                         // stub straight out of the source instead of an elbow
-                        // aimed at the column midpoint, and cap it with a small
-                        // "x" rather than an arrowhead so the dangling/frontier
-                        // state reads clearly.
+                        // aimed at the column midpoint, capped with a normal
+                        // arrowhead so the dangling/frontier state reads as a
+                        // direction-of-travel cue.
                         if (c.unconnected) {
                           const STUB = 16;
-                          const tx = c.x1 + STUB;
+                          const ARROW = 9;
+                          // End the line short of the stub tip so the arrowhead
+                          // marker (refX=0) fills the gap and its point lands at
+                          // the intended stub length within the 2rem gap.
+                          const tx = c.x1 + STUB - (c.off ? 0 : ARROW);
                           const ty = c.y1;
-                          const r = 4;
-                          const tip = c.off
-                            ? null
-                            : `M ${tx - r} ${ty - r} L ${tx + r} ${ty + r} M ${
-                                tx - r
-                              } ${ty + r} L ${tx + r} ${ty - r}`;
                           const stub = clampTip(c.x1, c.y1, c.off);
                           return (
                             <g key={i}>
@@ -515,18 +513,13 @@ function OpeningsPage() {
                                 stroke="currentColor"
                                 strokeWidth={style.width}
                                 strokeDasharray={c.off ? "5 4" : undefined}
+                                markerEnd={
+                                  c.off
+                                    ? undefined
+                                    : "url(#openings-tree-arrowhead)"
+                                }
                                 opacity={c.off ? 0.5 : 0.9}
                               />
-                              {tip && (
-                                <path
-                                  d={tip}
-                                  fill="none"
-                                  stroke="currentColor"
-                                  strokeWidth={2}
-                                  strokeLinecap="round"
-                                  opacity={0.9}
-                                />
-                              )}
                               {stub && (
                                 <path
                                   d={stub}
