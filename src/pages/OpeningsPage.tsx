@@ -4,6 +4,7 @@ import { Chessboard, defaultPieces } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import OpeningTreeNodeCard from "../components/OpeningTreeNodeCard";
+import OpeningsMetricsLegend from "../components/OpeningsMetricsLegend";
 import { formatMoveLabel } from "../openings/format";
 import {
   buildCanonicalReplacement,
@@ -372,30 +373,33 @@ function OpeningsPage() {
         <section className="openings-tree">
           <header className="openings-tree__header">
             <h1 className="openings-tree__title">Openings Tree</h1>
-            <div
-              className="openings-color-picker"
-              role="group"
-              aria-label="Playing as"
-            >
-              <span className="openings-tree__color-label">Playing as:</span>
-              <div className="mode-toggle-row segmented-toggle openings-color-picker__toggle">
-                {COLOR_OPTIONS.map(({ label, value, King }) => (
-                  <button
-                    key={value}
-                    type="button"
-                    className={`chess-button toggle${
-                      playerColor === value ? " active" : ""
-                    }`}
-                    aria-pressed={playerColor === value}
-                    onClick={() => switchColor(value)}
-                  >
-                    <span className="openings-color-picker__piece">
-                      <King />
-                    </span>
-                    {label}
-                  </button>
-                ))}
+            <div className="openings-tree__controls-row">
+              <div
+                className="openings-color-picker"
+                role="group"
+                aria-label="Playing as"
+              >
+                <span className="openings-tree__color-label">Playing as:</span>
+                <div className="mode-toggle-row segmented-toggle openings-color-picker__toggle">
+                  {COLOR_OPTIONS.map(({ label, value, King }) => (
+                    <button
+                      key={value}
+                      type="button"
+                      className={`chess-button toggle${
+                        playerColor === value ? " active" : ""
+                      }`}
+                      aria-pressed={playerColor === value}
+                      onClick={() => switchColor(value)}
+                    >
+                      <span className="openings-color-picker__piece">
+                        <King />
+                      </span>
+                      {label}
+                    </button>
+                  ))}
+                </div>
               </div>
+              <OpeningsMetricsLegend />
             </div>
           </header>
 

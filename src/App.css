@@ -3843,6 +3843,10 @@
     gap: 0.25rem;
 }
 
+/* Shared info (ⓘ) button + popover. Used by the game-review accuracy help and
+   the openings metrics legend; legacy `.history-stats-pane__info-*` selectors
+   are kept as aliases so existing markup keeps working. */
+.info-help-btn,
 .history-stats-pane__info-btn {
     all: unset;
     display: inline-flex;
@@ -3854,15 +3858,18 @@
     transition: color 0.15s;
 }
 
+.info-help-btn:hover,
 .history-stats-pane__info-btn:hover {
     color: var(--text-primary);
 }
 
+.info-help-btn:focus-visible,
 .history-stats-pane__info-btn:focus-visible {
     outline: 2px solid var(--text-primary);
     outline-offset: 1px;
 }
 
+.info-help-popup,
 .history-stats-pane__info-popup {
     position: absolute;
     top: calc(100% + 0.4rem);
@@ -3882,10 +3889,22 @@
     color: var(--text-secondary);
 }
 
+.info-help-popup--wide {
+    width: 300px;
+}
+
+/* Open leftward when the trigger sits near the right page edge. */
+.info-help-popup--right {
+    left: auto;
+    right: 0;
+}
+
+.info-help-popup p,
 .history-stats-pane__info-popup p {
     margin: 0;
 }
 
+.info-help-popup p + p,
 .history-stats-pane__info-popup p + p {
     margin-top: 0.5rem;
 }
@@ -7167,6 +7186,48 @@ button.openings-shell__crumb:hover {
     font-size: 1.4rem;
     font-weight: 800;
     color: var(--text-primary);
+}
+
+/* Color toggle on the left, metrics legend pushed to the right edge. */
+.openings-tree__controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    width: 100%;
+}
+
+/* Anchor for the absolutely-positioned legend popover. */
+.openings-metrics-legend {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.openings-metrics-legend__btn {
+    gap: 0.3rem;
+    color: var(--text-secondary);
+}
+
+.openings-metrics-legend__label {
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.openings-metrics-legend__list {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.openings-metrics-legend__list dt {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.openings-metrics-legend__list dd {
+    margin: 0.1rem 0 0;
 }
 
 .openings-tree__color-label {
