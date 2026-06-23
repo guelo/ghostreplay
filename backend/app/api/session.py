@@ -202,8 +202,24 @@ def _reverse_ancestor_position_ids(
     *,
     start_position_id: int,
     player_color: str,
+    user_id: int,
     radius_ply: int = OPPORTUNITY_ANCESTOR_RADIUS_PLY,
 ) -> set[int]:
+    """Opponent-color positions that can reach ``start_position_id`` within
+    ``radius_ply`` reverse plies.
+
+    No longer used by the request hot path — ``_compute_blunder_opportunity_events``
+    now classifies every blunder with one forward BFS (see
+    ``_forward_reachable_position_ids``). This per-blunder reverse walk is retained
+    for the offline ``scripts/recompute_srs_opportunities.py --blunder-id /
+    --all-blunders`` maintenance path, where ancestors of a single blunder are
+    computed once and reused across all of that blunder's sessions; it produces
+    results identical to the forward path by the same ancestor⇄reachable duality.
+
+    Like the forward path, each reverse expansion is constrained to ``user_id``'s
+    positions (``moves`` carries no ``user_id``) so a cross-user edge path can never
+    leak an ancestor — keeping the offline result identical to the scoped live one.
+    """
     opponent_color = "black" if player_color == "white" else "white"
     frontier = {start_position_id}
     visited = {start_position_id}
@@ -215,7 +231,8 @@ def _reverse_ancestor_position_ids(
         parent_ids = {
             row[0]
             for row in db.query(Move.from_position_id)
-            .filter(Move.to_position_id.in_(frontier))
+            .join(Position, Position.id == Move.from_position_id)
+            .filter(Move.to_position_id.in_(frontier), Position.user_id == user_id)
             .all()
         }
         parent_ids -= visited
@@ -234,6 +251,53 @@ def _reverse_ancestor_position_ids(
 
     ancestors.discard(start_position_id)
     return ancestors
+
+
+def _forward_reachable_position_ids(
+    db: Session,
+    *,
+    user_id: int,
+    start_ids: set[int],
+    radius_ply: int = OPPORTUNITY_ANCESTOR_RADIUS_PLY,
+) -> set[int]:
+    """Positions reachable from ``start_ids`` by ≤``radius_ply`` forward move-edges.
+
+    Forward dual of the old per-blunder reverse walk: a session position ``S``
+    makes blunder position ``B`` an opportunity iff ``B`` is forward-reachable
+    from an opponent-color session position ``S`` within ``radius_ply`` plies
+    (``S != B``). Seeding the BFS from the full opponent-color session set lets us
+    classify every blunder with a single 8-level traversal instead of one walk per
+    blunder.
+
+    ``moves`` carries no ``user_id`` (``models.py``), so each level explicitly
+    constrains expansion to this user's positions — preventing cross-user graph
+    leakage by construction even if two users share position ids in the edge set.
+    """
+    if not start_ids:
+        return set()
+
+    frontier = set(start_ids)
+    visited = set(start_ids)
+    reachable: set[int] = set()
+
+    for _ in range(radius_ply):
+        if not frontier:
+            break
+        child_ids = {
+            row[0]
+            for row in db.query(Move.to_position_id)
+            .join(Position, Position.id == Move.to_position_id)
+            .filter(Move.from_position_id.in_(frontier), Position.user_id == user_id)
+            .all()
+        }
+        child_ids -= visited
+        if not child_ids:
+            break
+        visited.update(child_ids)
+        reachable.update(child_ids)
+        frontier = child_ids
+
+    return reachable
 
 
 def _upsert_opportunity_event(
@@ -416,28 +480,31 @@ def _compute_blunder_opportunity_events(
                 session_hashes.add(fen_hash(move.fen_after))
             except ValueError:
                 pass
-    session_position_ids = (
-        {
-            row[0]
-            for row in db.query(Position.id)
+    opponent_color = "black" if player_color == "white" else "white"
+    session_position_ids: set[int] = set()
+    # Opponent-color session positions seed the forward BFS: only an opponent-move
+    # ancestor can "steer" the player into a blunder, so player-color positions are
+    # never opportunity sources (they were filtered out by the old reverse walk too).
+    opp_source: set[int] = set()
+    if session_hashes:
+        for position_id, active in (
+            db.query(Position.id, Position.active_color)
             .filter(Position.user_id == user_id, Position.fen_hash.in_(session_hashes))
             .all()
-        }
-        if session_hashes
-        else set()
-    )
+        ):
+            session_position_ids.add(position_id)
+            if active == opponent_color:
+                opp_source.add(position_id)
 
     matched: dict[int, tuple[bool, bool]] = {}
     if session_position_ids:
+        forward_reachable = _forward_reachable_position_ids(
+            db, user_id=user_id, start_ids=opp_source
+        )
         blunders = db.query(Blunder).filter(Blunder.user_id == user_id).all()
         for blunder in blunders:
             reached = blunder.position_id in session_position_ids
-            ancestor_ids = _reverse_ancestor_position_ids(
-                db,
-                start_position_id=blunder.position_id,
-                player_color=player_color,
-            )
-            opportunity_only = bool(session_position_ids.intersection(ancestor_ids))
+            opportunity_only = blunder.position_id in forward_reachable
             opportunity = opportunity_only or reached
             if opportunity:
                 matched[blunder.id] = (opportunity, reached)

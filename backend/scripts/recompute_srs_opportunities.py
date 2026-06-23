@@ -118,6 +118,7 @@ def recompute_one_blunder(
         db,
         start_position_id=blunder.position_id,
         player_color=blunder_position.active_color,
+        user_id=blunder.user_id,
     )
 
     existing_events = {
