@@ -145,6 +145,7 @@ def test_session_upload_records_reached_as_opportunity_and_replay_deletes_stale_
         user_id=user_id,
         player_color="white",
     )
+    db_session.commit()  # caller owns the commit (see _run_session_move_evidence_side_effects)
 
     event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
     assert event.opportunity is True
@@ -161,6 +162,7 @@ def test_session_upload_records_reached_as_opportunity_and_replay_deletes_stale_
         user_id=user_id,
         player_color="white",
     )
+    db_session.commit()  # caller owns the commit (see _run_session_move_evidence_side_effects)
     assert db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).count() == 0
 
 
@@ -200,6 +202,7 @@ def test_player_turn_ancestor_without_steer_point_is_not_opportunity(db_session)
         user_id=user_id,
         player_color="white",
     )
+    db_session.commit()  # caller owns the commit (see _run_session_move_evidence_side_effects)
 
     assert db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).count() == 0
 
@@ -227,6 +230,7 @@ def test_reached_position_counts_as_denominator_opportunity(db_session):
         user_id=user_id,
         player_color="white",
     )
+    db_session.commit()  # caller owns the commit (see _run_session_move_evidence_side_effects)
 
     event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
     assert event.opportunity is True
@@ -267,6 +271,7 @@ def test_converted_drill_opportunity_event_uses_started_at(db_session):
         user_id=user_id,
         player_color="white",
     )
+    db_session.commit()  # caller owns the commit (see _run_session_move_evidence_side_effects)
 
     event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
     assert event.occurred_at == old_started_at.replace(tzinfo=None)
@@ -313,6 +318,7 @@ def test_unconverted_drill_segment_move_creates_opportunity_event(db_session):
         user_id=user_id,
         player_color="white",
     )
+    db_session.commit()  # caller owns the commit (see _run_session_move_evidence_side_effects)
 
     event = db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
     assert event.reached is True

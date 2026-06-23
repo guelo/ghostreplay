@@ -204,6 +204,9 @@ def recompute_srs_opportunities(
             user_id=session.user_id,
             player_color=session.player_color,
         )
+        # The function no longer self-commits (the live path times the commit as a
+        # distinct stage); commit per session to preserve incremental durability.
+        db.commit()
         if progress_every > 0 and index % progress_every == 0:
             print(f"sessions={index}/{len(sessions)}", flush=True)
 

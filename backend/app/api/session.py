@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
@@ -529,7 +531,13 @@ def _compute_blunder_opportunity_events(
             opportunity=opportunity,
             reached=reached,
         )
-    db.commit()
+    # NB: no commit here. The caller owns the commit so the deferred ghost-graph
+    # edges (staged by _upsert_session_position_graph with autoflush off) are
+    # flushed under a distinct ``evidence_commit`` timing stage rather than being
+    # misattributed to this compute stage. The event INSERT/UPDATEs above already
+    # executed within this stage (sqlite/postgres issue them immediately via
+    # _upsert_opportunity_event); only their durability and any pending ORM deletes
+    # finalize at the caller's commit. Direct callers (tests/scripts) must commit.
 
 
 def _upsert_analysis_cache(
@@ -609,6 +617,101 @@ def _should_run_session_move_evidence(game_session: GameSession) -> bool:
     )
 
 
+@contextmanager
+def _timed_side_effect(
+    stage: str, *, session_id: uuid.UUID, user_id: int, move_count: int
+):
+    """Bracket one synchronous ``upsert_session_moves`` side effect with timing.
+
+    Emits a single ``stage`` log line with ``elapsed_ms`` plus ``session_id``,
+    ``user_id`` and ``move_count`` so prod logs can attribute /moves latency to a
+    specific side effect (see g-zuym). Logged in ``finally`` so a raising side
+    effect still records how long it ran before failing.
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        logger.info(
+            "upsert_session_moves side_effect=%s session_id=%s user_id=%s "
+            "move_count=%d elapsed_ms=%.1f",
+            stage,
+            session_id,
+            user_id,
+            move_count,
+            elapsed_ms,
+        )
+
+
+def _run_session_move_evidence_side_effects(
+    db: Session,
+    *,
+    session_id: uuid.UUID,
+    user_id: int,
+    player_color: str,
+    evidence_moves: list,
+    move_count: int,
+) -> None:
+    """Run the evidence side effects after the session_moves upsert, each timed.
+
+    Ordering mirrors the original inline flow: the ghost-graph upsert stages edge
+    rows without flushing (autoflush is off), the opportunity-event stage computes
+    and (on sqlite/postgres) issues its event INSERT/UPDATEs immediately, then a
+    single ``evidence_commit`` flushes the deferred graph edges + pending deletes
+    and finalizes durability, then the analysis-cache write and background-recompute
+    enqueue. Shared by the SQLite/Postgres and generic-dialect paths so both emit
+    the same per-stage timing and stay in sync.
+    """
+    with _timed_side_effect(
+        "ghost_graph_upsert",
+        session_id=session_id,
+        user_id=user_id,
+        move_count=move_count,
+    ):
+        _upsert_session_position_graph(db, user_id=user_id, moves=evidence_moves)
+    with _timed_side_effect(
+        "opportunity_events",
+        session_id=session_id,
+        user_id=user_id,
+        move_count=move_count,
+    ):
+        _compute_blunder_opportunity_events(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            player_color=player_color,
+        )
+    # Single commit that flushes the deferred ghost-graph edges staged above
+    # (db.add with autoflush off) plus any pending ORM event deletes, and finalizes
+    # durability. NB: for sqlite/postgres the opportunity-event INSERT/UPDATEs
+    # already executed inside the opportunity_events stage (they issue immediately),
+    # so this stage owns the graph-edge flush + commit cost — and IntegrityErrors
+    # surfacing only at flush/commit — not the per-event write round-trips. Timed
+    # separately so deferred-flush/commit cost is not misattributed to compute.
+    with _timed_side_effect(
+        "evidence_commit",
+        session_id=session_id,
+        user_id=user_id,
+        move_count=move_count,
+    ):
+        db.commit()
+    with _timed_side_effect(
+        "analysis_cache_write",
+        session_id=session_id,
+        user_id=user_id,
+        move_count=move_count,
+    ):
+        _upsert_analysis_cache(db, evidence_moves)
+    with _timed_side_effect(
+        "recompute_enqueue",
+        session_id=session_id,
+        user_id=user_id,
+        move_count=move_count,
+    ):
+        request_recompute(user_id, player_color)
+
+
 def _emit_session_moves_uploaded(
     user_id: int, *, move_count: int, recompute_queued: bool
 ) -> None:
@@ -679,50 +782,59 @@ def upsert_session_moves(
     elif dialect_name == "postgresql":
         statement = postgresql_insert(SessionMove).values(values)
     else:
-        for value in values:
-            existing_row = db.query(SessionMove).filter(
-                SessionMove.session_id == value["session_id"],
-                SessionMove.move_number == value["move_number"],
-                SessionMove.color == value["color"],
-            ).first()
-            if existing_row:
-                existing_row.move_san = value["move_san"]
-                existing_row.fen_after = value["fen_after"]
-                existing_row.eval_cp = value["eval_cp"]
-                existing_row.eval_mate = value["eval_mate"]
-                existing_row.best_move_san = value["best_move_san"]
-                existing_row.best_move_eval_cp = value["best_move_eval_cp"]
-                existing_row.eval_delta = value["eval_delta"]
-                existing_row.classification = value["classification"]
-                existing_row.fen_before = value["fen_before"]
-                existing_row.best_move_uci = value["best_move_uci"]
-                existing_row.best_line_uci = value["best_line_uci"]
-                existing_row.decision_source = value["decision_source"]
-                existing_row.target_blunder_id = value["target_blunder_id"]
-                existing_row.segment = value["segment"]
-            else:
-                db.add(SessionMove(**value))
+        with _timed_side_effect(
+            "session_moves_upsert",
+            session_id=session_id,
+            user_id=user.user_id,
+            move_count=len(values),
+        ):
+            for value in values:
+                existing_row = db.query(SessionMove).filter(
+                    SessionMove.session_id == value["session_id"],
+                    SessionMove.move_number == value["move_number"],
+                    SessionMove.color == value["color"],
+                ).first()
+                if existing_row:
+                    existing_row.move_san = value["move_san"]
+                    existing_row.fen_after = value["fen_after"]
+                    existing_row.eval_cp = value["eval_cp"]
+                    existing_row.eval_mate = value["eval_mate"]
+                    existing_row.best_move_san = value["best_move_san"]
+                    existing_row.best_move_eval_cp = value["best_move_eval_cp"]
+                    existing_row.eval_delta = value["eval_delta"]
+                    existing_row.classification = value["classification"]
+                    existing_row.fen_before = value["fen_before"]
+                    existing_row.best_move_uci = value["best_move_uci"]
+                    existing_row.best_line_uci = value["best_line_uci"]
+                    existing_row.decision_source = value["decision_source"]
+                    existing_row.target_blunder_id = value["target_blunder_id"]
+                    existing_row.segment = value["segment"]
+                else:
+                    db.add(SessionMove(**value))
 
-        db.commit()
+            db.commit()
         if evidence_moves:
-            _upsert_session_position_graph(
-                db,
-                user_id=user.user_id,
-                moves=evidence_moves,
-            )
-            _compute_blunder_opportunity_events(
+            _run_session_move_evidence_side_effects(
                 db,
                 session_id=session_id,
                 user_id=user.user_id,
                 player_color=game_session.player_color,
+                evidence_moves=evidence_moves,
+                move_count=len(values),
             )
-            _upsert_analysis_cache(db, evidence_moves)
-            request_recompute(user.user_id, game_session.player_color)
         # Emitted only after the upload is durable (post-commit) so a failed
         # insert/commit never produces a successful-looking analytics event.
-        _emit_session_moves_uploaded(
-            user.user_id, move_count=len(values), recompute_queued=bool(evidence_moves)
-        )
+        with _timed_side_effect(
+            "analytics",
+            session_id=session_id,
+            user_id=user.user_id,
+            move_count=len(values),
+        ):
+            _emit_session_moves_uploaded(
+                user.user_id,
+                move_count=len(values),
+                recompute_queued=bool(evidence_moves),
+            )
         return SessionMovesResponse(
             moves_inserted=len(values),
             drill_state=game_session.drill_state,
@@ -752,29 +864,38 @@ def upsert_session_moves(
             "segment": statement.excluded.segment,
         },
     )
-    db.execute(statement)
-    db.commit()
+    with _timed_side_effect(
+        "session_moves_upsert",
+        session_id=session_id,
+        user_id=user.user_id,
+        move_count=len(values),
+    ):
+        db.execute(statement)
+        db.commit()
 
     if evidence_moves:
-        _upsert_session_position_graph(
-            db,
-            user_id=user.user_id,
-            moves=evidence_moves,
-        )
-        _compute_blunder_opportunity_events(
+        _run_session_move_evidence_side_effects(
             db,
             session_id=session_id,
             user_id=user.user_id,
             player_color=game_session.player_color,
+            evidence_moves=evidence_moves,
+            move_count=len(values),
         )
-        _upsert_analysis_cache(db, evidence_moves)
-        request_recompute(user.user_id, game_session.player_color)
 
     # Emitted only after the upload is durable (post-commit) so a failed
     # insert/commit never produces a successful-looking analytics event.
-    _emit_session_moves_uploaded(
-        user.user_id, move_count=len(values), recompute_queued=bool(evidence_moves)
-    )
+    with _timed_side_effect(
+        "analytics",
+        session_id=session_id,
+        user_id=user.user_id,
+        move_count=len(values),
+    ):
+        _emit_session_moves_uploaded(
+            user.user_id,
+            move_count=len(values),
+            recompute_queued=bool(evidence_moves),
+        )
     return SessionMovesResponse(
         moves_inserted=len(values),
         drill_state=game_session.drill_state,
