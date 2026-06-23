@@ -18,7 +18,7 @@ import {
   isTrustedExactBestHit,
   isTrustedMoveHit,
   hasCpEvalLoss,
-  promoteToTrustedBest,
+  reconcileTrustedBest,
 } from '../workers/analysisUtils'
 import type { MoveClassification, MoveGrade } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
@@ -1339,17 +1339,18 @@ export class GameAnalysisCoordinator {
     if (this.resolvedIndices.has(moveIndex)) return
     this.resolvedIndices.add(moveIndex)
 
-    // Grain-split best promotion (g-move-best-icon): if the TRUSTED position grain
-    // named the played move as the exact best move (drill-truth is recorded before
-    // this terminal resolve on every cache/worker path), publish it as 'best' so
-    // the MoveList shows the best-move star, even when this result came from a
-    // move-untrusted cache row or a worker fallback that under-rated it. Read truth
+    // Grain-split best reconciliation (g-move-best-icon / g-jfdj): the TRUSTED
+    // position grain names the exact best move (drill-truth is recorded before this
+    // terminal resolve on every cache/worker path) and that answer wins over the
+    // published classification — promoting a played==best result to 'best' (star),
+    // and demoting a fallback that wrongly graded a non-best move 'best' down to
+    // 'excellent'. Read truth
     // BEFORE settleDrillTruthNull below; the requestId guard rejects a stale record
     // (supersession clears stale truth, but the result.id match is belt-and-braces).
     const truth = this.drillTruth.get(moveIndex)
     const published =
       truth?.truth && truth.requestId === result.id
-        ? promoteToTrustedBest(result, truth.truth.best_move_uci)
+        ? reconcileTrustedBest(result, truth.truth.best_move_uci)
         : result
 
     // Terminal: clear per-request state + both timers + pending metadata.

@@ -1534,5 +1534,50 @@ describe('useMoveAnalysis', () => {
       expect(resolved?.classification).toBe('excellent')
       expect(resolved?.bestMove).toBe('c2c4')
     })
+
+    it("demotes a fallback that wrongly graded a non-best move 'best' (the d5 vs Nf6 case, g-jfdj)", async () => {
+      vi.useFakeTimers()
+
+      let resolveLookup!: (value: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      const { result } = renderHook(() => useMoveAnalysis(store))
+      act(() => { simulateMessage({ type: 'ready' }) })
+      act(() => { result.current.analyzeMove('fen-0', 'd7d5', 'black', 0, 20) })
+      const requestId = postMessageMock.mock.calls[0][0].id
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(200) })
+
+      // Trusted best is g8f6 (Nf6); the played move d7d5 is NOT the best move,
+      // so the exact-best truth records g8f6 as the trusted best.
+      act(() => {
+        resolveLookup(new Map([
+          ['fen-0::d7d5', {
+            move_san: 'd5', best_move_uci: 'g8f6', best_move_san: 'Nf6',
+            best_line_uci: ['g8f6'], best_eval: 35,
+            played_eval: 20, played_eval_mate: null, eval_delta: 0,
+            classification: 'best',
+            position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+          }],
+        ]))
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+
+      // A browser-game-v1 fallback wrongly classifies d7d5 as 'best'.
+      act(() => {
+        simulateMessage({
+          type: 'analysis', id: requestId, move: 'd7d5', bestMove: 'd7d5',
+          bestLine: ['d7d5'], bestEval: 35, playedEval: 20,
+          playedEvalMate: null, delta: 0, classification: 'best',
+        })
+      })
+
+      const resolved = store.getState().analysisMap.get(0)
+      expect(resolved?.classification).toBe('excellent')
+      expect(resolved?.bestMove).toBe('g8f6')
+      expect(resolved?.bestLine).toEqual(['g8f6'])
+    })
   })
 })

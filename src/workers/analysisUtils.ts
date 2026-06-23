@@ -401,40 +401,64 @@ export const hasCpEvalLoss = (input: {
 }
 
 /**
- * Grain-split best promotion (g-move-best-icon). When the TRUSTED position grain
- * names `trustedBestUci` as the position's best move and the played move equals
- * it, the played move IS the best move — even though the published `result` came
- * from a move-untrusted cache row or a shallower worker fallback that called it
- * merely 'excellent'. "Is the played move best?" is a POSITION-grain question, so
- * the trusted position grain's answer wins over a stale move-grain/worker
- * classification (the same grain the drill grade already trusts).
+ * Grain-split best reconciliation (g-move-best-icon, g-jfdj). The TRUSTED position
+ * grain names `trustedBestUci` as the position's best move. "Is the played move
+ * best?" is a POSITION-grain question, so the trusted position grain's answer wins
+ * over a stale move-grain/worker classification (the same grain the drill grade
+ * already trusts). This reconciles best-ness in BOTH directions:
  *
- * Normalize to a coherent loss-0 best move so the MoveList renders the best-move
- * star (and best-move bling / perfect streak fire) and uploaded evidence is
- * internally consistent. Only best-ness facts are rewritten; eval MAGNITUDES
- * (playedEval/mate) stay the move/worker grain. Everything rewritten is derivable
- * from the played move plus its own `playedEval` — no foreign position eval is
- * pulled in, and `delta: 0` is exact by definition (playing the trusted best move
- * loses exactly 0). No-op when the played move is not the trusted best, or the
- * result is already 'best'.
+ * - PROMOTION (played == trustedBest): the played move IS best — even when the
+ *   published `result` came from a move-untrusted cache row or shallower worker
+ *   fallback that called it merely 'excellent'. Normalize to a coherent loss-0 best
+ *   move so the MoveList renders the best-move star (and best-move bling / perfect
+ *   streak fire) and uploaded evidence is internally consistent. Only best-ness
+ *   facts are rewritten; eval MAGNITUDES (playedEval/mate) stay the move/worker
+ *   grain. `delta: 0` is exact by definition (playing the trusted best loses 0).
+ *
+ * - DEMOTION (played != trustedBest but a fallback wrongly graded it 'best'): the
+ *   trusted position says best is elsewhere, so a published 'best' is wrong. Demote
+ *   to the 'excellent' floor and point bestMove/bestLine at the trusted best. No
+ *   trusted eval loss exists (move grain is untrusted; mixing it with the position
+ *   eval would be invented), so delta and bestEval are nulled rather than
+ *   fabricated. playedEval magnitude is kept.
+ *
+ * No-op for an already-non-best result whose played move is not the trusted best
+ * (the Bf4 case) — nothing the position grain can correct without inventing a loss.
  *
  * Shared single source between the live MoveList path (GameAnalysisCoordinator)
  * and the post-game AnalysisBoard path (useMoveAnalysis) — see g-49e2.
  */
-export const promoteToTrustedBest = (
+export const reconcileTrustedBest = (
   result: AnalysisResult,
   trustedBestUci: string,
 ): AnalysisResult => {
-  if (result.classification === 'best' || result.move !== trustedBestUci) {
-    return result
+  // Direction 1 — PROMOTION: played IS the trusted best → it is best (loss 0).
+  if (result.move === trustedBestUci) {
+    if (result.classification === 'best') return result
+    return {
+      ...result,
+      classification: 'best',
+      bestMove: trustedBestUci,
+      bestLine: [trustedBestUci],
+      bestEval: result.playedEval,
+      delta: 0,
+      blunder: false,
+      recordable: false,
+    }
   }
+  // played is NOT the trusted best.
+  // Direction 2 — already non-best: nothing the position grain can correct without
+  // inventing an eval loss; leave the move/worker grain untouched (the Bf4 case).
+  if (result.classification !== 'best') return result
+  // Direction 3 — DEMOTION: a fallback wrongly called a non-best move 'best'. Demote
+  // to the 'excellent' floor and point bestMove/bestLine at the trusted best.
   return {
     ...result,
-    classification: 'best',
+    classification: 'excellent',
     bestMove: trustedBestUci,
     bestLine: [trustedBestUci],
-    bestEval: result.playedEval,
-    delta: 0,
+    bestEval: null,
+    delta: null,
     blunder: false,
     recordable: false,
   }

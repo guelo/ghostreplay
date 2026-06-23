@@ -687,7 +687,38 @@ describe('GameAnalysisCoordinator', () => {
       const result = coordinator.store.getState().analysisMap.get(0)
       expect(result?.classification).toBe('excellent')
     })
-    // The pure `promoteToTrustedBest` unit tests live with the helper in
+
+    it("demotes a fallback that wrongly graded a non-best move 'best' (the d5 vs Nf6 case, g-jfdj)", async () => {
+      // Trusted best is g8f6 (Nf6) but a browser-game-v1 fallback classified the
+      // played move d7d5 as 'best'. The trusted position grain must demote it to
+      // the 'excellent' floor and point bestMove/bestLine at the trusted best.
+      lookupAnalysisCacheMock.mockResolvedValueOnce(new Map([
+        ['fen-0::d7d5', {
+          move_san: 'd5', best_move_uci: 'g8f6', best_move_san: 'Nf6',
+          best_line_uci: ['g8f6'], best_eval: 35,
+          played_eval: 20, played_eval_mate: null, eval_delta: 0,
+          classification: 'best',
+          position_trusted: true, move_trusted: false, position_eval_loss_cp: null,
+        }],
+      ]))
+      coordinator.startSession('s')
+      const requestId = coordinator.analyzeMove('fen-0', 'd7d5', 'black', 0, 20)
+      await vi.advanceTimersByTimeAsync(200)
+      // The sendWorker default classification is 'excellent'; override to 'best' so
+      // the demotion branch is exercised, and set a single-move bestLine so the test
+      // proves it is replaced with the trusted best.
+      sendWorker(requestId, {
+        move: 'd7d5', bestMove: 'd7d5', bestLine: ['d7d5'],
+        classification: 'best', delta: 0,
+      })
+      await vi.advanceTimersByTimeAsync(0)
+
+      const result = coordinator.store.getState().analysisMap.get(0)
+      expect(result?.classification).toBe('excellent')
+      expect(result?.bestMove).toBe('g8f6')
+      expect(result?.bestLine).toEqual(['g8f6'])
+    })
+    // The pure `reconcileTrustedBest` unit tests live with the helper in
     // src/workers/analysisUtils.test.ts (the helper moved there in g-49e2 so the
     // coordinator and useMoveAnalysis share a single source).
   })

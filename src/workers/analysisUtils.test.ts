@@ -21,7 +21,7 @@ import {
   isTrustedExactBestHit,
   isTrustedMoveHit,
   hasCpEvalLoss,
-  promoteToTrustedBest,
+  reconcileTrustedBest,
   isMoveClassification,
   evalLoss,
   failsDrill,
@@ -1089,7 +1089,7 @@ describe('classifyMoveAdvanced golden vectors (shared with backend)', () => {
   }
 })
 
-describe('promoteToTrustedBest (pure helper)', () => {
+describe('reconcileTrustedBest (pure helper)', () => {
   const base = {
     id: 'r1', move: 'c2c4', bestMove: 'g1f3', bestLine: ['g1f3', 'd7d5'],
     bestEval: 35, playedEval: 42, currentPositionEval: 42,
@@ -1099,7 +1099,7 @@ describe('promoteToTrustedBest (pure helper)', () => {
   }
 
   it('normalizes to a coherent loss-0 best move when played === trusted best', () => {
-    const out = promoteToTrustedBest(base, 'c2c4')
+    const out = reconcileTrustedBest(base, 'c2c4')
     expect(out).toMatchObject({
       classification: 'best', bestMove: 'c2c4', bestLine: ['c2c4'],
       bestEval: 42, delta: 0, blunder: false, recordable: false,
@@ -1108,13 +1108,23 @@ describe('promoteToTrustedBest (pure helper)', () => {
   })
 
   it('is a no-op when the played move is not the trusted best', () => {
-    const out = promoteToTrustedBest(base, 'd2d4')
+    const out = reconcileTrustedBest(base, 'd2d4')
     expect(out).toBe(base)
   })
 
   it('is a no-op when the result is already best', () => {
     const alreadyBest = { ...base, classification: 'best' as const }
-    const out = promoteToTrustedBest(alreadyBest, 'c2c4')
+    const out = reconcileTrustedBest(alreadyBest, 'c2c4')
     expect(out).toBe(alreadyBest)
+  })
+
+  it("demotes a wrongly-'best' fallback when played is not the trusted best (d5 vs Nf6)", () => {
+    const wronglyBest = { ...base, move: 'd7d5', classification: 'best' as const }
+    const out = reconcileTrustedBest(wronglyBest, 'g8f6')
+    expect(out).toMatchObject({
+      classification: 'excellent', bestMove: 'g8f6', bestLine: ['g8f6'],
+      bestEval: null, delta: null, blunder: false, recordable: false,
+      playedEval: 42, // eval magnitude preserved
+    })
   })
 })

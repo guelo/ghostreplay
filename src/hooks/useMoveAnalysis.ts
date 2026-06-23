@@ -3,7 +3,7 @@ import type {
   AnalyzeMoveMessage,
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
-import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedExactBestHit, isTrustedMoveHit, hasCpEvalLoss, promoteToTrustedBest } from '../workers/analysisUtils'
+import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedExactBestHit, isTrustedMoveHit, hasCpEvalLoss, reconcileTrustedBest } from '../workers/analysisUtils'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
@@ -182,18 +182,17 @@ export const useMoveAnalysis = (
       if (resolvedIndices.current.has(moveIndex)) return false
       resolvedIndices.current.add(moveIndex)
 
-      // Grain-split best promotion (g-49e2, same root cause as g-move-best-icon):
-      // if the trusted POSITION grain named the played move as the exact best
-      // move, publish it as 'best' so AnalysisBoard renders the best-move star,
-      // even when this result came from a move-untrusted cache row or a worker
-      // fallback that under-rated it. The requestId guard rejects a stale record
-      // from a superseded request (which is also cleared on supersession, so this
-      // is belt-and-braces); promoteToTrustedBest is itself a no-op unless the
-      // played move equals the trusted best.
+      // Grain-split best reconciliation (g-49e2 / g-jfdj, same root cause as
+      // g-move-best-icon): the trusted POSITION grain names the exact best move,
+      // and that answer wins over the published move-grain/worker classification.
+      // Promotes a played==best result to 'best' (star), and demotes a fallback
+      // that wrongly graded a non-best move 'best' down to the 'excellent' floor.
+      // The requestId guard rejects a stale record from a superseded request
+      // (which is also cleared on supersession, so this is belt-and-braces).
       const truth = exactBestTruth.current.get(moveIndex)
       const published =
         truth && truth.requestId === result.id
-          ? promoteToTrustedBest(result, truth.bestUci)
+          ? reconcileTrustedBest(result, truth.bestUci)
           : result
 
       const entry = resolutionState.current.get(moveIndex)
