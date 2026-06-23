@@ -463,12 +463,14 @@ over two registries, never over raw numeric depth:
   profile.
 - **Evidence-contract registry** (`backend/app/evidence_contracts.py`) — versioned
   data-shape contracts with per-contract semantic validation
-  (`resolver-complete-v1` mirrors the worker's `canResolveCachedAnalysis`;
+  (`resolver-complete-v1` mirrors the worker's old combined resolve guard;
   `resolver-complete-v2` is the fail-closed trust contract — full eval triple,
   enum-valid classification, PV-first-equals-best, and active-color delta
   consistency; `minimal-played-eval-v1` / `minimal-best-eval-v1` cover eval-only
-  rows). Replacement/merge requires contract succession plus a populated-field
-  superset so no datum is ever silently dropped.
+  rows; the grain-split `position-complete-v1` / `move-complete-v1` contracts —
+  §14.6.4 — mirror the worker's now-split `canResolvePositionAnalysis` /
+  `canResolveMoveAnalysis` guards). Replacement/merge requires contract succession
+  plus a populated-field superset so no datum is ever silently dropped.
 
 Net guarantees: a browser `game` upload is non-authoritative — it may fill keys
 that have no evidence but can never downgrade a canonical or legacy row; sparse
@@ -480,34 +482,31 @@ response exposes `source`, `analysis_profile_id`, `engine_version`, `engine_buil
 `evidence_contract_id`, and an `authoritative` trust flag derived from the same
 validation the writer uses.
 
-**Position-truth foundation (g-position-analysis, in progress).** `analysis_cache`
-conflates two grains on one row — *position* facts (the position's best move / best
-eval, keyed by normalized FEN) and *move* evidence (a played move's eval / loss /
-classification, keyed by `(fen_before, move_uci)`). Because mixed-provenance sibling
-rows can disagree about a position's best move (a canonical row and a browser row at
-the same FEN carrying opposite `best_move_uci`), consumers that read evidence without
-a trust gate can surface an untrusted answer. Two normalized-FEN-keyed storage tables
-lay the groundwork to separate the grains:
+**Position-truth foundation (g-position-analysis).** `analysis_cache` conflates two
+grains on one row — *position* facts (the position's best move / best line / best
+eval, properties of the normalized FEN) and *move* evidence (a played move's eval /
+loss / classification, keyed by `(fen_before, move_uci)`). Because mixed-provenance
+sibling rows for different played moves at the same FEN could disagree about a
+position's best move (a canonical row and a browser row carrying opposite
+`best_move_uci`), a consumer reading position facts off an untrusted move row could
+surface a wrong "best move" for the whole position. The split is now implemented:
+position truth lives in its own normalized-FEN-keyed storage, and `tree_eval.py`, the
+session drill-review export, and `/api/analysis/lookup` all read it (with a legacy-v2
+projection fallback during migration). The two storage tables are:
 - `position_analysis` — one trusted winner per `normalized_fen` (`best_move_uci` NOT
-  NULL, first-class `best_eval` / `best_eval_mate`, full profile identity +
-  `evidence_contract_id`, plus `updated_at` since winners are replaced over time).
-  Deliberately distinct from the full-FEN-keyed `position_analysis: dict[str,
-  PositionAnalysis]` session-wire field — a storage row is never returned as the
-  session map directly.
-- `position_analysis_conflicts` — append-only audit sink recording the disagreeing
-  candidate rows and per-axis disagreement when a position has no clear winner.
+  NULL; first-class `best_eval` / `best_eval_mate`; `best_line_uci`; full profile
+  identity + `evidence_contract_id`; representative `fen` and `source_cache_id` as
+  provenance only; `updated_at` since winners are replaced over time).
+  `UniqueConstraint("normalized_fen")`. Deliberately distinct from the full-FEN-keyed
+  `position_analysis: dict[str, PositionAnalysis]` session-wire field — a storage row
+  is never returned as the session map directly.
+- `position_analysis_conflicts` — append-only audit sink (indexed on `normalized_fen`,
+  not unique) recording the disagreeing candidate cache rows and per-axis disagreement
+  (`best_move`, `pv`, `best_eval`, `best_eval_mate`) plus a `policy_reason` when a
+  position has no clean winner.
 
-Two grain-specific evidence contracts back the split: `position-complete-v1` (best
-move + multi-move PV starting with it + finite `best_eval` or explicit
-`best_eval_mate`; no played-move delta) and `move-complete-v1` (played eval or
-explicit played-mate + enum-valid classification; deliberately does **not** validate
-`eval_delta`, since a move-only row has no `best_eval`). Legacy-v2 projection helpers
-let an existing authoritative `resolver-complete-v2` row satisfy each grain during
-the transition. As of Phase 1 these tables and contracts are **foundation only** —
-nothing reads them yet; `tree_eval.py` and the session export still read
-`analysis_cache` as described above. Phase 2 backfills `position_analysis` from
-canonical cache rows, Phase 3 owns the write policy, and Phase 4 cuts the read path
-(and trust-gated consumers) over.
+See **§14.6** for the full grain-ownership, trust-contract, write-policy, eval-loss,
+legacy-v2-transition, and migration model.
 
 ### 5.7 Opening Score Tables
 
@@ -1152,7 +1151,10 @@ Engine evaluations fluctuate during iterative deepening. The protocol uses **dep
 
 **Coordinator:** Analysis is managed by `GameAnalysisCoordinator` (`src/services/GameAnalysisCoordinator.ts`), a singleton that outlives individual route renders. This ensures in-flight analysis is not lost when the user navigates between `/play` and `/game`.
 
-**Analysis cache race:** On each move, the coordinator simultaneously dispatches to the analysis worker and queries `GET /api/analysis-cache`. If the cache responds first with a complete entry (`classification` or `eval_delta` present), it resolves immediately without waiting for the worker. Cache entries lacking both fields are treated as misses so the worker can produce a full result.
+**Analysis cache race:** On each move the coordinator dispatches to the analysis worker and, in parallel, batches a `POST /api/analysis/lookup` query (`src/utils/api.ts`). Two consumers read the result on separate paths:
+
+- **Published path** (the `AnalysisResult` consumed by recording / SRS / blunder display): a cache hit pre-empts the worker only when it passes the grain-specific trust gate — `isTrustedMoveHit` for played-move facts, `isTrustedPositionHit` for best-move / PV. Untrusted rows are treated as misses so the worker produces the authoritative result. Mere presence of `classification` / `eval_delta` no longer short-circuits: a post-split move row can be CP-trusted yet carry no publishable `eval_delta`, and an untrusted browser row must never drive the verdict.
+- **Drill-truth side channel** (`waitForDrillGrade`, g-position-analysis Phase 6): a separate, drill-only channel that records trusted exact-best *position* truth (`best_move_uci` plus the backend-derived `position_eval_loss_cp`) *beside* the published result. Strictness-0 grades by comparing the played move to the trusted `best_move_uci` with no eval needed; strictness > 0 grades from `position_eval_loss_cp` when present (both grains trusted, pure-CP, equal search strength), else falls back to the worker. Every terminal cache path settles the channel (to truth or `null`) so a drill grade waiter can never hang. See §14.6.
 
 **Classification model:** The worker uses `classifyMoveAdvanced` (Lichess logistic win-chance model, see §6.4.2) as the primary classifier. `classifyMove` (cp-based thresholds) is deprecated and used only as a fallback when a cache entry has `eval_delta` but no explicit `classification`.
 
@@ -1949,6 +1951,8 @@ Analysis data comes from two sources:
 
 Classifications are produced by `classifyMoveAdvanced` (win-chance model) during gameplay, stored alongside centipawn evals in `session_moves`.
 
+The response's `position_analysis` map is keyed by full `fen_before` (one entry per played position), but its best-move / best-line / best-eval truth is sourced at the *position* grain: `backend/app/api/session.py` resolves each entry by `normalize_fen(move.fen_before)` against the `position_analysis` storage table and emits it under the original full-FEN key. Each entry carries an explicit `position_trusted` flag — `true` for a trusted storage winner / legacy-v2 projection, `false` for an untrusted `SessionMove` seed fallback. `best_move_eval_cp` is side-to-move-relative (the white-relative storage `best_eval` sign-converted by active color). See §14.6.
+
 ```typescript
 interface MoveAnalysis {
   moveNumber: number;
@@ -2000,11 +2004,12 @@ Returns full analysis for a completed game session.
     "accuracy": "integer | null"
   },
   "position_analysis": {
-    "<fen_after>": {
+    "<fen_before>": {
       "best_move_uci": "string",
       "best_move_san": "string | null",
       "best_move_eval_cp": "integer | null",
-      "best_line_uci": ["string"] 
+      "best_line_uci": ["string"],
+      "position_trusted": "boolean"
     }
   },
   "expected_total_moves": "integer | null",
@@ -2452,13 +2457,13 @@ The analysis cache avoids re-running Stockfish on positions that have already be
 
 ### 14.1 Key Structure
 
-Each entry is keyed by `(fen_before, move_uci)` — the exact position before a move and the move played in UCI notation. This pair uniquely identifies an analysis result.
+Each entry is keyed by `(fen_before, move_uci)` — the exact position before a move and the move played in UCI notation. This pair uniquely identifies an analysis result. This is the *move-evidence* grain; position-level truth (best move / line / eval) is no longer authoritative here — it lives in the normalized-FEN-keyed `position_analysis` table. See **§14.6**.
 
 ### 14.2 Frontend Lookup
 
-`lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned).
+`lookupAnalysisCache(positions)` in `src/utils/api.ts` sends a batch `POST /api/analysis/lookup` request. It returns a `Map<string, CachedAnalysis>` keyed by `"fen::move_uci"` (only cache hits are returned). Each `CachedAnalysis` now carries the *position* grain (`best_move_uci`, `best_move_san`, `best_line_uci`, `best_eval`, `best_eval_mate`, `position_trusted`) and the *move* grain (`move_san` — nullable, `played_eval`, `played_eval_mate`, `eval_delta`, `classification`, `move_trusted`) independently, plus the cross-grain `position_eval_loss_cp`. Position-only hits (trusted position resolved, no exact `(fen, move_uci)` row) are emitted with a null `move_san`.
 
-Used in `GameAnalysisCoordinator` and `useMoveAnalysis` alongside Stockfish analysis tasks. Cache hits bypass the local engine only when `canResolveCachedAnalysis` can prove the row is complete: it must include classification data, `best_move_uci`, and a multi-move `best_line_uci` whose first move matches `best_move_uci`. Legacy, precomputed, eval-only, or one-token rows are treated as misses so the worker can backfill a full PV.
+Used in `GameAnalysisCoordinator` and `useMoveAnalysis` alongside Stockfish analysis tasks. The completeness check is split per grain: `canResolvePositionAnalysis` requires `best_move_uci` + a multi-move `best_line_uci` whose first move matches it; `canResolveMoveAnalysis` requires an enum-valid classification + a finite played eval. The trust gates (`isTrustedPositionHit`, `isTrustedExactBestHit`, `isTrustedMoveHit`) layer `position_trusted` / `move_trusted` on top. A cache row bypasses the local engine on a grain only when its grain gate passes; otherwise the worker backfills. (`trusted_for_resolution` is retained only as a deprecated, unread field.) See §14.6.
 
 ### 14.3 Staleness & Quality-Aware Replacement
 
@@ -2491,7 +2496,8 @@ The write guard (§5.6) only protects *new* writes. Rows that predate it —
 game-overwritten depth-17 results, partial legacy precompute rows, or rows that
 claim a profile they cannot back up — can still preserve unstable best moves,
 deltas, and classifications, which feed the eval-delta / win-chance fallbacks
-even though they never count as `trusted_for_resolution` hits.
+even though they never pass the grain-specific trust gates (`position_trusted` /
+`move_trusted`; §14.6.4).
 
 Repair has two halves, run **after** write protection is live:
 
@@ -2524,6 +2530,65 @@ The repair tool defaults to a non-destructive **audit** (per-category counts +
 JSON report); `--apply` performs the bounded, separately-committed, resumable
 deletes; `--verify` exits non-zero if any invalidation-eligible row remains.
 Deployment and rollback steps are in `backend/scripts/REPAIR_ANALYSIS_CACHE.md`.
+
+### 14.6 Position-vs-Move Grain Split (g-position-analysis)
+
+`analysis_cache` is keyed by `(fen_before, move_uci)` — the right grain for *move
+evidence*, but the same row also stored *position* facts that don't depend on which
+move was played. Duplicating those across sibling rows let a lower-trust browser row
+redefine a position's best move for any consumer that skipped the trust contract. The
+split makes position truth a separately-keyed, separately-trusted entity.
+
+**Grain ownership.** Best move / line / eval (and its mate companion) are properties of
+the *position*; everything about the played move stays move-grain.
+
+| Datum | Grain | Key | Stored in |
+|-------|-------|-----|-----------|
+| `best_move_uci`, `best_move_san`, `best_line_uci`, `best_eval`, `best_eval_mate` | **position** | `normalized_fen` | `position_analysis` |
+| `move_san`, `played_eval`, `played_eval_mate`, `classification`, `eval_delta` | **move** | `(fen_before, move_uci)` | `analysis_cache` |
+
+**Storage & trust.** `position_analysis` holds one winner per `normalized_fen` (storage
+tables in §5.6). Trust is computed per grain via two evidence contracts —
+`position-complete-v1` (best move + multi-move PV + a CP or mate eval) and
+`move-complete-v1` (played eval + classification) — surfaced as independent
+`position_trusted` / `move_trusted` flags that replace the old `trusted_for_resolution`.
+Position writes route through a dominance policy that mirrors the move-cache one and
+**structurally rejects non-authoritative browser rows before any comparison**, so they
+can never become position truth even on a new key. Backfill groups cache rows by
+normalized FEN and picks one winner per group; genuine disagreements are persisted to
+`position_analysis_conflicts` rather than logged.
+
+**Eval-loss ownership.** The drill threshold loss is the backend-derived
+`position_eval_loss_cp` on `/api/analysis/lookup` (position `best_eval` vs trusted move
+`played_eval`, mover-relative, clamped ≥ 0). It is CP-only and emitted only when both
+grains are trusted, pure-CP, and equal search strength; mate cases fall back to local
+worker recompute. `analysis_cache.eval_delta` is a separate canonical-run snapshot for
+blunder / SRS / display only and must not drive strict outcomes. `best_eval_mate` is
+stored first-class so exact-best and `tree_eval.py` mate ranking keep forced-mate
+preference.
+
+**Wire shape & consumers.** `POST /api/analysis/lookup` (renamed from the old
+`GET /api/analysis-cache`) returns both grains independently rather than one flattened
+row, including position-only hits (trusted position, no exact move row — `move_san`
+null). Trust-gated consumers — `tree_eval.py` root/move eval, the session drill-review
+export (below), and the split frontend guards — read position facts from
+`position_analysis` (legacy-v2 fallback during migration), never from raw `analysis_cache`
+position columns. For drill grading, strictness-0 compares the played move to the trusted
+`best_move_uci` alone (no move-eval needed); thresholds use `position_eval_loss_cp` or
+fall back to the worker (see §6.4.6).
+
+**Session-wire compatibility.** `GET /api/session/:id/analysis` keeps its full-`fen_before`
+wire grain: `session.py` looks up storage by `normalize_fen(move.fen_before)`, emits each
+entry under the original full FEN, and stamps an explicit `position_trusted` (untrusted
+`SessionMove` seeds stay `false`). The reused `position_analysis` name is intentional —
+storage is normalized-FEN-keyed, the wire map is full-FEN-keyed, and a storage row is
+never returned as the session map directly.
+
+**Migration.** `resolver-complete-v2` stays a legacy read/projection contract so existing
+canonical rows keep conferring trust; new writes use the grain-specific contracts, and
+full v2 deprecation is deferred to a follow-up after cutover is verified. The duplicated
+best-move columns still on `analysis_cache` remain (backfill source + v2 projection) but
+are no longer authoritative; dropping them is deferred to the same follow-up.
 
 ---
 
