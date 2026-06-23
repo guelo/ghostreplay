@@ -41,6 +41,7 @@ const LAST_MOVE_HIGHLIGHT: React.CSSProperties = {
 function TreeColumnView({
   column,
   columnIndex,
+  isNextAfterActive,
   registerColumn,
   registerSelectedNode,
   onSelect,
@@ -48,6 +49,9 @@ function TreeColumnView({
 }: {
   column: DisplayColumn;
   columnIndex: number;
+  // The column immediately right of the active one; widened (like the active
+  // column) so its collapsed opening names are easier to read.
+  isNextAfterActive: boolean;
   registerColumn: (idx: number, el: HTMLElement | null) => void;
   registerSelectedNode: (idx: number, el: HTMLElement | null) => void;
   onSelect: (line: string[]) => void;
@@ -80,7 +84,7 @@ function TreeColumnView({
     <div
       className={`openings-tree-column${
         isActive ? " openings-tree-column--active" : ""
-      }`}
+      }${isNextAfterActive ? " openings-tree-column--next" : ""}`}
       data-testid="tree-column"
       data-line-index={column.lineIndex}
     >
@@ -570,11 +574,20 @@ function OpeningsPage() {
                       })}
                     </svg>
 
-                    {view.columns.map((column, index) => (
+                    {view.columns.map((column, index, cols) => (
                       <TreeColumnView
                         key={`${column.kind}-${column.lineIndex}`}
                         column={column}
                         columnIndex={index}
+                        // Widen the column right of the active (expanded) one so
+                        // its collapsed opening names read more easily.
+                        isNextAfterActive={
+                          index > 0 &&
+                          (cols[index - 1]?.nodes.some(
+                            (node) => node.isExpanded,
+                          ) ??
+                            false)
+                        }
                         registerColumn={registerColumn}
                         registerSelectedNode={registerSelectedNode}
                         onSelect={selectLine}

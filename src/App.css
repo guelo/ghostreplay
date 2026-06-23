@@ -7320,9 +7320,11 @@ button.openings-shell__crumb:hover {
     overflow-x: hidden;
 }
 
-/* The active column hosts the expanded card; the next compact column still
-   peeks beside it. */
-.openings-tree-column--active {
+/* The active column hosts the expanded card. The column immediately right of it
+   gets the same wider width so its collapsed opening names are easier to read;
+   columns further out stay compact. */
+.openings-tree-column--active,
+.openings-tree-column--next {
     flex-basis: 14.5rem; /* 232px */
     width: 14.5rem;
 }
