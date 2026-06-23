@@ -222,6 +222,7 @@ class GameSession(Base):
 
 class Move(Base):
     __tablename__ = "moves"
+    __table_args__ = (Index("idx_moves_to_position_id", "to_position_id"),)
 
     from_position_id: Mapped[int] = mapped_column(
         BIGINT_SQLITE,

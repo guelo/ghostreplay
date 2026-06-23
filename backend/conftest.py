@@ -149,6 +149,10 @@ def _create_test_schema(conn) -> None:
             FOREIGN KEY (to_position_id) REFERENCES positions(id)
         )
     """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_moves_to_position_id "
+        "ON moves (to_position_id)"
+    ))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS session_moves (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
