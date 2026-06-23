@@ -7260,6 +7260,12 @@ button.openings-shell__crumb:hover {
     overflow-x: auto;
     overflow-y: hidden;
     padding-bottom: 0.5rem;
+    /* White background + reversed (inset) shading so this full-width,
+       horizontally-scrollable area reads as a distinct sunken surface. */
+    background: #fff;
+    border-radius: 0.6rem;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.18),
+                inset 0 0 0 1px rgba(0, 0, 0, 0.08);
 }
 
 /* Positioned/measured frame: the SVG overlay + connector coordinates are
