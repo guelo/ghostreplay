@@ -471,16 +471,6 @@ function OpeningsPage() {
                       </defs>
                       {connectors.map((c, i) => {
                         const style = connectorStyles[i] ?? { width: 2 };
-                        // End the stroke short of the column by the arrowhead
-                        // length; the marker (refX=0) fills the gap so its tip
-                        // lands on the column. The bezier's end tangent is
-                        // horizontal, so shortening x keeps the tip on target.
-                        const ARROW = 9;
-                        const x2 = c.x2 - ARROW;
-                        const dx = Math.max(16, (x2 - c.x1) / 2);
-                        const d = `M ${c.x1} ${c.y1} C ${c.x1 + dx} ${c.y1}, ${
-                          x2 - dx
-                        } ${c.y2}, ${x2} ${c.y2}`;
                         // When an endpoint's cell is scrolled out of its column,
                         // mark the clamped edge with a small triangle pointing
                         // toward the selection, and dash the line (matching
@@ -500,6 +490,63 @@ function OpeningsPage() {
                                   cx + 5
                                 } ${cy - 5} Z`
                               : null;
+                        // No next move selected yet: draw a short horizontal
+                        // stub straight out of the source instead of an elbow
+                        // aimed at the column midpoint, and cap it with a small
+                        // "x" rather than an arrowhead so the dangling/frontier
+                        // state reads clearly.
+                        if (c.unconnected) {
+                          const STUB = 16;
+                          const tx = c.x1 + STUB;
+                          const ty = c.y1;
+                          const r = 4;
+                          const tip = c.off
+                            ? null
+                            : `M ${tx - r} ${ty - r} L ${tx + r} ${ty + r} M ${
+                                tx - r
+                              } ${ty + r} L ${tx + r} ${ty - r}`;
+                          const stub = clampTip(c.x1, c.y1, c.off);
+                          return (
+                            <g key={i}>
+                              <path
+                                className="openings-tree-connector"
+                                d={`M ${c.x1} ${c.y1} L ${tx} ${ty}`}
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth={style.width}
+                                strokeDasharray={c.off ? "5 4" : undefined}
+                                opacity={c.off ? 0.5 : 0.9}
+                              />
+                              {tip && (
+                                <path
+                                  d={tip}
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth={2}
+                                  strokeLinecap="round"
+                                  opacity={0.9}
+                                />
+                              )}
+                              {stub && (
+                                <path
+                                  d={stub}
+                                  fill="currentColor"
+                                  opacity={0.8}
+                                />
+                              )}
+                            </g>
+                          );
+                        }
+                        // End the stroke short of the column by the arrowhead
+                        // length; the marker (refX=0) fills the gap so its tip
+                        // lands on the column. The bezier's end tangent is
+                        // horizontal, so shortening x keeps the tip on target.
+                        const ARROW = 9;
+                        const x2 = c.x2 - ARROW;
+                        const dx = Math.max(16, (x2 - c.x1) / 2);
+                        const d = `M ${c.x1} ${c.y1} C ${c.x1 + dx} ${c.y1}, ${
+                          x2 - dx
+                        } ${c.y2}, ${x2} ${c.y2}`;
                         const tip = clampTip(c.x1, c.y1, c.off);
                         const tip2 = clampTip(x2 - 7, c.y2, c.off2);
                         const clamped = c.off || c.off2;

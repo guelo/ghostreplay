@@ -29,6 +29,10 @@ export interface Connector {
   y2: number;
   off: -1 | 0 | 1;
   off2: -1 | 0 | 1;
+  /** True when the child column has no selection yet (the freshly-revealed
+   *  replies column). Rendered as a short horizontal stub tipped with an "x"
+   *  instead of an elbow that aims at the column midpoint. */
+  unconnected: boolean;
 }
 
 export interface UseTreeConnectorsArgs {
@@ -106,6 +110,7 @@ export function useTreeConnectors({
         const childCell = selectedNodeEls.get(i + 1);
         let y2: number;
         let off2: Connector["off2"] = 0;
+        const unconnected = !childCell;
         if (childCell) {
           const childCellR = childCell.getBoundingClientRect();
           const childCellCenter =
@@ -123,7 +128,7 @@ export function useTreeConnectors({
         } else {
           y2 = childR.top + childR.height / 2 - t.top;
         }
-        next.push({ x1, y1, x2, y2, off, off2 });
+        next.push({ x1, y1, x2, y2, off, off2, unconnected });
       }
       setConnectors(next);
     };
