@@ -6,7 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from app.fen import active_color
+from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
+from app.fen import active_color, normalize_fen
 from app.models import (
     AnalysisCache,
     Blunder,
@@ -17,6 +18,7 @@ from app.models import (
     OpeningScoreBatch,
     OpeningScoreCursor,
     Position,
+    PositionAnalysisRow,
     SessionMove,
     UserOpeningScore,
 )
@@ -1040,6 +1042,112 @@ def test_raw_fp_unaffected_by_unrelated_analysis_cache_row(db_session):
     db_session.commit()
 
     assert _raw_fp(db_session) == before
+
+
+def _canonical_identity_cols() -> dict:
+    profile = get_profile(CANONICAL_PROFILE_ID)
+    return {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+
+
+def test_raw_fp_flips_on_trusted_position_winner(db_session):
+    # A trusted position_analysis storage winner at a candidate normalized FEN
+    # (g-opening-score-trust): the fallback pairs ITS best_eval with the move row,
+    # so flipping the winner's best_eval must flip the digest.
+    _seed_black_opening_session(db_session)
+    winner = PositionAnalysisRow(
+        normalized_fen=normalize_fen(KNIGHT_OPENING_FULL),
+        fen=KNIGHT_OPENING_FULL,
+        best_move_uci="b8c6",
+        best_move_san="Nc6",
+        best_line_uci="b8c6 f1b5",
+        best_eval=30,
+        source="precomputed",
+        analysis_profile_id=CANONICAL_PROFILE_ID,
+        evidence_contract_id="position-complete-v1",
+        **_canonical_identity_cols(),
+    )
+    db_session.add(winner)
+    db_session.commit()
+    before = _raw_fp(db_session)
+
+    winner.best_eval = 250
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_move_trust_column(db_session):
+    # A move-trusted canonical analysis_cache row at a candidate fen: flipping a
+    # column the move-trust gate reads (classification) must flip the digest, since
+    # a move-trust change alters which played eval the fallback consumes.
+    _seed_black_opening_session(db_session)
+    row = AnalysisCache(
+        fen_before=KNIGHT_OPENING_FULL,
+        normalized_fen_before=normalize_fen(KNIGHT_OPENING_FULL),
+        move_uci="b8c6",
+        move_san="Nc6",
+        best_move_uci="b8c6",
+        best_move_san="Nc6",
+        best_line_uci="b8c6 f1b5",
+        played_eval=-30,
+        best_eval=20,
+        eval_delta=50,
+        classification="inaccuracy",
+        source="precomputed",
+        analysis_profile_id=CANONICAL_PROFILE_ID,
+        evidence_contract_id="resolver-complete-v2",
+        **_canonical_identity_cols(),
+    )
+    db_session.add(row)
+    db_session.commit()
+    before = _raw_fp(db_session)
+
+    row.classification = "blunder"
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_flips_on_legacy_fallback_normalized_key(db_session):
+    # resolve_trusted_positions GROUPS legacy analysis_cache rows by
+    # normalized_fen_before. A row whose normalized_fen_before is repaired from one
+    # candidate norm to ANOTHER stays inside the digest's IN-set (both norms are
+    # candidates) but is reassigned to a different position at runtime, so the
+    # digest must flip on that grouping column.
+    _seed_black_opening_session(db_session)
+    norm_a = normalize_fen(KINGS_PAWN_FULL)
+    norm_b = normalize_fen(KNIGHT_OPENING_FULL)
+    assert norm_a != norm_b
+    # A clock variant of KINGS_PAWN so the row sits only in the legacy POSITION
+    # subset (keyed by normalized_fen_before), not the exact-fen move subset.
+    clock_variant = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 5 9"
+    assert clock_variant not in (KINGS_PAWN_FULL, KNIGHT_OPENING_FULL)
+    row = AnalysisCache(
+        fen_before=clock_variant,
+        normalized_fen_before=norm_a,
+        move_uci="e7e5",
+        move_san="e5",
+        best_move_uci="e7e5",
+        best_move_san="e5",
+        best_line_uci="e7e5 g1f3",
+        played_eval=20,
+        best_eval=20,
+        eval_delta=0,
+        classification="best",
+        source="precomputed",
+        analysis_profile_id=CANONICAL_PROFILE_ID,
+        evidence_contract_id="resolver-complete-v2",
+        **_canonical_identity_cols(),
+    )
+    db_session.add(row)
+    db_session.commit()
+    before = _raw_fp(db_session)
+
+    # Repair the normalized key to the OTHER candidate norm (still in the IN-set).
+    row.normalized_fen_before = norm_b
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
 
 
 def test_raw_fp_flips_on_evidence_inputs_version_change(db_session, monkeypatch):

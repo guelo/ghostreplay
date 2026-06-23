@@ -30,6 +30,13 @@ import chess
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
+from app.analysis_profiles import (
+    IDENTITY_FIELDS,
+    StrengthComparison,
+    compare_search_strength,
+    get_profile,
+)
+from app.analysis_trust import cache_row_as_move_dict, move_trust_flags
 from app.fen import normalize_fen
 from app.game_phase import (
     ContinuityError,
@@ -37,8 +44,10 @@ from app.game_phase import (
     is_opening_premove,
     reconstruct_board_sequence,
 )
+from app.models import AnalysisCache
 from app.opening_graph import OpeningGraph
 from app.opening_quality import cache_row_to_mover_evals, move_quality
+from app.position_analysis_repo import resolve_trusted_positions
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +72,7 @@ PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/deb
 #   - the set of columns the overlay consumes from any of these tables.
 # (DIVIDER_VERSION, QUALITY_VERSION, TAU_WC, TAU_CP, SCORE_MODEL_VERSION already
 # live in ``opening_score_inputs_fingerprint`` and remain there.)
-OPENING_EVIDENCE_INPUTS_VERSION = "raw-v2"
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v3"
 
 # White-before-black ordering within a single (session, move_number).
 _COLOR_RANK = {"white": 0, "black": 1}
@@ -383,35 +392,60 @@ def _apply_cache_fallbacks(
     opening_moves: list[_MoveRow],
     candidates: list[tuple[int, str, str, str]],
 ) -> None:
-    """Upgrade eval_delta-only user moves to analysis_cache win-chance quality.
+    """Upgrade eval_delta-only user moves to trusted win-chance quality.
 
-    Looks up matching ``analysis_cache`` rows by ``(fen_before, move_uci)``,
-    converts their white-relative evals to mover perspective, and rescores. Only
-    applies when the primary session evals were absent, so it strictly improves
-    on the deterministic eval_delta fallback.
+    Pairs a TRUSTED position best eval with the MOVE-trusted played eval, then
+    rescores — never reading the move row's own (possibly duplicated/untrusted)
+    ``best_eval`` as position truth (the duplicated-best-move bug from the parent
+    epic). Mirrors the cross-grain pairing in
+    ``app.api.analysis._position_eval_loss_cp``:
+
+    * **Position best** from :func:`resolve_trusted_positions` — the
+      ``position_analysis`` storage winner or the strongest trusted legacy
+      ``resolver-complete-v2`` ``analysis_cache`` row at the normalized FEN.
+    * **Played eval** from the exact ``(fen_before, move_uci)`` ``analysis_cache``
+      row, gated by ``move_trust_flags``.
+    * **Equal search strength** — both profiles must be ``StrengthComparison.EQUAL``
+      before their win-chances are differenced; subtracting evals across
+      different-strength runs is invalid even through the saturating win-chance
+      curve.
+
+    Only applies when the primary session evals were absent, so it strictly
+    improves on the deterministic eval_delta fallback; on any failed guard the
+    move keeps its eval_delta quality.
     """
     if not candidates:
         return
 
     fen_set = sorted({fen for _, fen, _, _ in candidates})
-    stmt = text("""
-        SELECT fen_before, move_uci, played_eval, played_eval_mate,
-               best_eval, best_eval_mate
-        FROM analysis_cache
-        WHERE fen_before IN :fens
-    """).bindparams(bindparam("fens", expanding=True))
-    cache_rows = db.execute(stmt, {"fens": fen_set}).fetchall()
-    by_key = {(r.fen_before, r.move_uci): r for r in cache_rows}
+    rows = db.query(AnalysisCache).filter(AnalysisCache.fen_before.in_(fen_set)).all()
+    by_key = {(r.fen_before, r.move_uci): r for r in rows}
+
+    # Candidate fens already normalized successfully upstream (_build_move_rows
+    # calls normalize_fen unguarded before a candidate is appended), so this is safe.
+    norm_by_fen = {fen: normalize_fen(fen) for fen in fen_set}
+    trusted = resolve_trusted_positions(db, set(norm_by_fen.values()))
 
     for move_index, fen_before, uci, stm in candidates:
-        cache_row = by_key.get((fen_before, uci))
-        if cache_row is None:
+        row = by_key.get((fen_before, uci))
+        if row is None:
+            continue
+        tp = trusted.get(norm_by_fen[fen_before])
+        if tp is None:
+            continue
+        if not move_trust_flags(cache_row_as_move_dict(row))[2]:
+            continue
+        pp = get_profile(tp.analysis_profile_id)
+        mp = get_profile(row.analysis_profile_id)
+        if pp is None or mp is None:
+            continue
+        if compare_search_strength(pp, mp) is not StrengthComparison.EQUAL:
             continue
         mover_evals = cache_row_to_mover_evals(
-            cache_row.played_eval,
-            cache_row.played_eval_mate,
-            cache_row.best_eval,
-            cache_row.best_eval_mate,
+            row.played_eval,
+            row.played_eval_mate,
+            tp.best_eval,
+            tp.best_eval_mate,
             stm,
         )
         if mover_evals is None:
@@ -623,11 +657,22 @@ def raw_evidence_inputs_digest(
     serve a batch without paying the per-session board-replay cost.
 
     Scoping is INTENTIONALLY broad where it diverges from the overlay (e.g. all
-    session moves are hashed, not just opening-interval premoves; the
-    analysis_cache subset is keyed by fen only, not (fen, uci)): a broader digest
-    can only cause an unnecessary (still-correct) rebuild, never a missed change.
-    Semantic-only changes that leave every raw row unchanged are covered by
+    session moves are hashed, not just opening-interval premoves; the candidate
+    set is every player-color session move lacking a primary eval, not just
+    opening premoves): a broader digest can only cause an unnecessary
+    (still-correct) rebuild, never a missed change. Semantic-only changes that
+    leave every raw row unchanged are covered by
     ``OPENING_EVIDENCE_INPUTS_VERSION``, folded in by the caller.
+
+    The cache fallback now consumes TWO grains (a trusted position best paired
+    with a move-trusted played eval), so the digest tracks both: the exact
+    ``(fen_before, move_uci)`` move rows plus their trust columns, AND the trusted
+    position sources (``position_analysis`` storage winner and the legacy
+    ``analysis_cache`` rows that feed ``_legacy_position_sort_key``) at the
+    candidate NORMALIZED FENs. The normalized keys are derived with
+    ``normalize_fen`` in Python — exactly as the runtime consumer keys
+    ``resolve_trusted_positions`` — NOT from the nullable stored
+    ``normalized_fen_before`` column, so digest key == runtime key by construction.
     """
     lines: list[str] = []
 
@@ -667,42 +712,148 @@ def raw_evidence_inputs_digest(
             )
         )
 
-    # 2. analysis_cache fallback subset (mirrors _apply_cache_fallbacks). Bounded
-    #    to fen_before values that appear in THIS user's player-color session
-    #    moves lacking a primary eval — the only rows the overlay can consult.
-    cache_rows = db.execute(
+    # 2. Trusted-source fallback subset (mirrors _apply_cache_fallbacks /
+    #    resolve_trusted_positions). The cache fallback now pairs a TRUSTED
+    #    position best eval with a MOVE-trusted played eval, so the digest tracks
+    #    BOTH grains and their trust columns — not just the raw best_eval/
+    #    played_eval it used to hash.
+    #
+    #    Candidate fen_before set: this user's player-color session moves lacking a
+    #    primary eval (the only positions a fallback can consult). Normalized keys
+    #    are derived with normalize_fen IN PYTHON — exactly as the runtime keys
+    #    resolve_trusted_positions — NOT from the nullable stored
+    #    normalized_fen_before column (which may be NULL/stale on a still
+    #    move-trusted row), so digest key == runtime key by construction.
+    candidate_rows = db.execute(
         text("""
-            SELECT ac.fen_before, ac.move_uci, ac.played_eval, ac.played_eval_mate,
-                   ac.best_eval, ac.best_eval_mate
-            FROM analysis_cache ac
-            WHERE ac.fen_before IN (
-                SELECT sm.fen_before
-                FROM session_moves sm
-                JOIN game_sessions gs ON gs.id = sm.session_id
-                WHERE gs.user_id = :user_id
-                  AND gs.player_color = :player_color
-                  AND sm.color = :player_color
-                  AND sm.fen_before IS NOT NULL
-                  AND (sm.eval_cp IS NULL OR sm.best_move_eval_cp IS NULL)
-                  AND gs.session_mode IN ('normal', 'drill')
-            )
+            SELECT DISTINCT sm.fen_before
+            FROM session_moves sm
+            JOIN game_sessions gs ON gs.id = sm.session_id
+            WHERE gs.user_id = :user_id
+              AND gs.player_color = :player_color
+              AND sm.color = :player_color
+              AND sm.fen_before IS NOT NULL
+              AND (sm.eval_cp IS NULL OR sm.best_move_eval_cp IS NULL)
+              AND gs.session_mode IN ('normal', 'drill')
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
-    for r in cache_rows:
-        lines.append(
-            "AC|"
-            + "|".join(
-                (
-                    str(r.fen_before),
-                    str(r.move_uci),
-                    str(r.played_eval),
-                    str(r.played_eval_mate),
-                    str(r.best_eval),
-                    str(r.best_eval_mate),
+    candidate_fens = [fen for (fen,) in candidate_rows]
+    norm_keys: set[str] = set()
+    for fen in candidate_fens:
+        try:
+            norm_keys.add(normalize_fen(fen))
+        except Exception:
+            # A fen that fails to normalize never produces a consumed candidate at
+            # runtime (the overlay normalizes it unguarded upstream), so skipping
+            # it here cannot miss a change.
+            continue
+
+    ident_cols = ", ".join(IDENTITY_FIELDS)
+
+    def _ident(r) -> str:
+        return "|".join(str(getattr(r, f, None)) for f in IDENTITY_FIELDS)
+
+    # 2a. Move grain: the exact (fen_before, move_uci) analysis_cache rows the
+    #     fallback reads for a played eval, plus the columns the MOVE-trust gate
+    #     reads (a move-trust flip must change the digest): played eval, the
+    #     ``classification`` the move-complete contract requires, and the
+    #     profile/contract/IDENTITY trust columns. best_eval is no longer consumed
+    #     as truth from this row but is harmless to keep hashing.
+    if candidate_fens:
+        move_stmt = text(f"""
+            SELECT fen_before, move_uci, played_eval, played_eval_mate,
+                   best_eval, best_eval_mate, classification,
+                   analysis_profile_id, evidence_contract_id, {ident_cols}
+            FROM analysis_cache
+            WHERE fen_before IN :fens
+        """).bindparams(bindparam("fens", expanding=True))
+        for r in db.execute(move_stmt, {"fens": candidate_fens}).fetchall():
+            lines.append(
+                "AC|"
+                + "|".join(
+                    (
+                        str(r.fen_before),
+                        str(r.move_uci),
+                        str(r.played_eval),
+                        str(r.played_eval_mate),
+                        str(r.best_eval),
+                        str(r.best_eval_mate),
+                        str(r.classification),
+                        str(r.analysis_profile_id),
+                        str(r.evidence_contract_id),
+                        _ident(r),
+                    )
                 )
             )
-        )
+
+    # 2b. Position grain at the candidate NORMALIZED FENs (the two tiers
+    #     resolve_trusted_positions ranks).
+    if norm_keys:
+        norm_list = sorted(norm_keys)
+        # (i) position_analysis storage winner (tier 1).
+        pa_stmt = text(f"""
+            SELECT normalized_fen, best_move_uci, best_line_uci,
+                   best_eval, best_eval_mate,
+                   analysis_profile_id, evidence_contract_id, {ident_cols}
+            FROM position_analysis
+            WHERE normalized_fen IN :norms
+        """).bindparams(bindparam("norms", expanding=True))
+        for r in db.execute(pa_stmt, {"norms": norm_list}).fetchall():
+            lines.append(
+                "PA|"
+                + "|".join(
+                    (
+                        str(r.normalized_fen),
+                        str(r.best_move_uci),
+                        str(r.best_line_uci),
+                        str(r.best_eval),
+                        str(r.best_eval_mate),
+                        str(r.analysis_profile_id),
+                        str(r.evidence_contract_id),
+                        _ident(r),
+                    )
+                )
+            )
+        # (ii) Legacy trusted fallback (tier 2): the analysis_cache rows at each
+        #      candidate normalized_fen_before that feed _legacy_position_sort_key.
+        #      Hash the FULL sort-key input set (id, source, move_uci,
+        #      best_move_uci, best_eval, best_eval_mate) so the SELECTED legacy
+        #      winner cannot change without flipping the digest, PLUS the columns
+        #      the position-trust FILTER reads before ranking (best_line_uci, the
+        #      profile/contract/IDENTITY trust columns) so a trust flip that adds or
+        #      drops a candidate also flips the digest. ``normalized_fen_before`` is
+        #      hashed too: ``resolve_trusted_positions`` GROUPS by it
+        #      (position_analysis_repo._legacy_position_sort_key callsite), so a row
+        #      that moves between two candidate norms stays in this IN-set but is
+        #      reassigned to a different position — without the column hashed the
+        #      digest would miss that change and serve a stale overlay.
+        legacy_stmt = text(f"""
+            SELECT id, source, move_uci, normalized_fen_before,
+                   best_move_uci, best_line_uci, best_eval, best_eval_mate,
+                   analysis_profile_id, evidence_contract_id, {ident_cols}
+            FROM analysis_cache
+            WHERE normalized_fen_before IN :norms
+        """).bindparams(bindparam("norms", expanding=True))
+        for r in db.execute(legacy_stmt, {"norms": norm_list}).fetchall():
+            lines.append(
+                "ACP|"
+                + "|".join(
+                    (
+                        str(r.id),
+                        str(r.source),
+                        str(r.move_uci),
+                        str(r.normalized_fen_before),
+                        str(r.best_move_uci),
+                        str(r.best_line_uci),
+                        str(r.best_eval),
+                        str(r.best_eval_mate),
+                        str(r.analysis_profile_id),
+                        str(r.evidence_contract_id),
+                        _ident(r),
+                    )
+                )
+            )
 
     # 3. Ghost targets (mirrors _collect_ghost_targets).
     ghost_rows = db.execute(

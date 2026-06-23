@@ -11,11 +11,19 @@ Quality source precedence (see ``g-opening-score-v2`` design §2-§3):
 1. ``SESSION_EVAL`` — mover-relative ``session_moves.best_move_eval_cp`` and
    ``eval_cp``. These columns are already mate-converted at upload time by
    ``scoreForPlayer`` / ``mateToCp`` in ``src/workers/analysisUtils.ts``; we
-   consume them directly and must not convert mates a second time.
-2. ``ANALYSIS_CACHE`` — reconstructed from a matching ``analysis_cache`` row.
-   Those evals are white-relative with raw mate counts; the caller converts the
-   mate counts with :func:`mate_to_cp` and flips to mover perspective via
-   :func:`cache_row_to_mover_evals` before scoring.
+   consume them directly and must not convert mates a second time. This is
+   user-owned, SESSION-LOCAL analysis (not position truth): it is intentionally
+   retained as the highest-precedence evidence for a move the user actually played
+   in a session, and is NOT subject to the position/move trust split below.
+2. ``ANALYSIS_CACHE`` — reconstructed from the trusted position/move split. The
+   best (position) eval comes from the trusted ``position_analysis`` winner at the
+   normalized FEN (via ``resolve_trusted_positions``), and the played (move) eval
+   from a MOVE-trusted ``analysis_cache`` row at the exact ``(fen_before,
+   move_uci)``, paired only when both come from the SAME search strength. The
+   caller (``opening_evidence._apply_cache_fallbacks``) flips those white-relative
+   evals to mover perspective via :func:`cache_row_to_mover_evals` before scoring;
+   it NEVER reads the move row's own (possibly duplicated/untrusted) ``best_eval``
+   as position truth.
 3. ``EVAL_DELTA`` — a deterministic exponential fallback over the unsigned
    centipawn loss, for historical rows that have neither evaluation pair.
 
@@ -129,9 +137,16 @@ def cache_row_to_mover_evals(
     best_eval_mate: int | None,
     side_to_move: str,
 ) -> tuple[float, float] | None:
-    """Convert white-relative ``analysis_cache`` evals to ``(best, played)`` cp.
+    """Convert white-relative position/move evals to ``(best, played)`` cp.
 
-    ``analysis_cache`` stores ``played_eval`` / ``best_eval`` white-relative in
+    The ``best_eval`` / ``best_eval_mate`` args are sourced from the trusted
+    ``TrustedPosition`` winner (position grain); ``played_eval`` /
+    ``played_eval_mate`` from a MOVE-trusted ``analysis_cache`` row (move grain).
+    The signature is unchanged; only the provenance of the position-best inputs
+    moved to the trusted position resolver (the caller no longer passes the move
+    row's own ``best_eval``).
+
+    Both ``analysis_cache`` and ``position_analysis`` store evals white-relative in
     centipawns, already mate-converted at write time (a mate-in-2 for white is
     stored as ``mate_to_cp(2)``), with the raw white-relative mate distance kept
     separately in the ``*_mate`` columns. We therefore trust the centipawn column

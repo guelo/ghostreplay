@@ -13,7 +13,9 @@ import chess
 import pytest
 from sqlalchemy import text
 
+from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.fen import normalize_fen
+from app.models import AnalysisCache, PositionAnalysisRow
 from app.opening_evidence import (
     EdgeEvidence,
     EvidenceOverlay,
@@ -887,6 +889,26 @@ class TestDedupOnce:
         assert ov.edges[(norm_nc6, normalize_fen(raw_nc6_bc4))].live_attempts == 1
 
 
+_UNSET = object()
+
+
+def _identity_fields(profile_id: str = CANONICAL_PROFILE_ID) -> dict:
+    """Every IDENTITY_FIELDS column for ``profile_id`` so the read-time trust gate
+    (_effectively_authoritative) verifies the row's identity against the profile."""
+    profile = get_profile(profile_id)
+    return {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+
+
+def _v2_eval_delta(fen_before: str, played_eval: int, best_eval: int) -> int:
+    """White-relative best/played -> side-to-move delta clamped >=0.
+
+    Mirrors the resolver-complete-v2 invariant so a canonical row validates on the
+    move grain (white: best-played, black: played-best)."""
+    board = chess.Board(fen_before)
+    delta = best_eval - played_eval if board.turn == chess.WHITE else played_eval - best_eval
+    return max(delta, 0)
+
+
 def _insert_analysis_cache(
     db,
     fen_before: str,
@@ -896,17 +918,115 @@ def _insert_analysis_cache(
     played_eval_mate: int | None = None,
     best_eval: int | None = None,
     best_eval_mate: int | None = None,
-) -> None:
-    db.execute(text("""
-        INSERT INTO analysis_cache (fen_before, move_uci, move_san,
-            played_eval, played_eval_mate, best_eval, best_eval_mate, source)
-        VALUES (:fb, :u, :s, :pe, :pem, :be, :bem, 'game')
-    """), {
-        "fb": fen_before, "u": move_uci, "s": move_san,
-        "pe": played_eval, "pem": played_eval_mate,
-        "be": best_eval, "bem": best_eval_mate,
-    })
+    *,
+    normalized_fen_before=_UNSET,
+    source: str = "game",
+    best_move_uci: str | None = None,
+    best_move_san: str | None = None,
+    best_line_uci: str | None = None,
+    classification: str | None = None,
+    eval_delta: int | None = None,
+    analysis_profile_id: str | None = None,
+    evidence_contract_id: str | None = None,
+    identity: dict | None = None,
+) -> AnalysisCache:
+    """Low-level analysis_cache insert. Defaults produce an UNTRUSTED row (no
+    profile/identity/contract); pass the trust columns to make it trusted."""
+    row = AnalysisCache(
+        fen_before=fen_before,
+        normalized_fen_before=(
+            normalize_fen(fen_before)
+            if normalized_fen_before is _UNSET
+            else normalized_fen_before
+        ),
+        move_uci=move_uci,
+        move_san=move_san,
+        played_eval=played_eval,
+        played_eval_mate=played_eval_mate,
+        best_eval=best_eval,
+        best_eval_mate=best_eval_mate,
+        best_move_uci=best_move_uci,
+        best_move_san=best_move_san,
+        best_line_uci=best_line_uci,
+        classification=classification,
+        eval_delta=eval_delta,
+        source=source,
+        analysis_profile_id=analysis_profile_id,
+        evidence_contract_id=evidence_contract_id,
+        **(identity or {}),
+    )
+    db.add(row)
     db.commit()
+    return row
+
+
+def _insert_canonical_cache(
+    db,
+    fen_before: str,
+    move_uci: str,
+    move_san: str,
+    played_eval: int,
+    best_eval: int,
+    *,
+    best_move_uci: str,
+    best_line_uci: str,
+    classification: str = "inaccuracy",
+    profile_id: str = CANONICAL_PROFILE_ID,
+    source: str = "precomputed",
+) -> AnalysisCache:
+    """A full resolver-complete-v2 canonical row, trusted on BOTH grains.
+
+    One such row backs both ``resolve_trusted_positions`` (position grain) and the
+    ``move_trust_flags`` gate (move grain), so a single row covers the happy path.
+    ``eval_delta`` is derived to satisfy the v2 cross-grain invariant.
+    """
+    return _insert_analysis_cache(
+        db,
+        fen_before,
+        move_uci,
+        move_san,
+        played_eval=played_eval,
+        best_eval=best_eval,
+        best_move_uci=best_move_uci,
+        best_move_san=best_move_uci,
+        best_line_uci=best_line_uci,
+        classification=classification,
+        eval_delta=_v2_eval_delta(fen_before, played_eval, best_eval),
+        source=source,
+        analysis_profile_id=profile_id,
+        evidence_contract_id="resolver-complete-v2",
+        identity=_identity_fields(profile_id),
+    )
+
+
+def _insert_position_analysis(
+    db,
+    fen: str,
+    *,
+    best_move_uci: str,
+    best_line_uci: str,
+    best_eval: int | None = None,
+    best_eval_mate: int | None = None,
+    profile_id: str = CANONICAL_PROFILE_ID,
+) -> PositionAnalysisRow:
+    """A trusted position-complete-v1 storage winner (resolve_trusted_positions
+    tier 1)."""
+    row = PositionAnalysisRow(
+        normalized_fen=normalize_fen(fen),
+        fen=fen,
+        best_move_uci=best_move_uci,
+        best_move_san=best_move_uci,
+        best_line_uci=best_line_uci,
+        best_eval=best_eval,
+        best_eval_mate=best_eval_mate,
+        source="precomputed",
+        analysis_profile_id=profile_id,
+        evidence_contract_id="position-complete-v1",
+        **_identity_fields(profile_id),
+    )
+    db.add(row)
+    db.commit()
+    return row
 
 
 class TestAnalysisCacheFallback:
@@ -922,10 +1042,13 @@ class TestAnalysisCacheFallback:
         sid = _insert_session(db_session)
         # No eval_cp / best_move_eval_cp on the move → triggers cache lookup.
         _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
-        # White to move at the root, so white-relative evals are mover-relative.
-        _insert_analysis_cache(
+        # White to move at the root, so white-relative evals are mover-relative. A
+        # full canonical resolver-complete-v2 row is trusted on both grains, so the
+        # trusted position best (20) pairs with the move-trusted played eval (-30).
+        _insert_canonical_cache(
             db_session, RAW_ROOT, "e2e4", "e4",
             played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
         )
 
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
@@ -941,6 +1064,147 @@ class TestAnalysisCacheFallback:
         sid = _insert_session(db_session)
         _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
         # No cache row inserted → deterministic eval_delta fallback.
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(40))
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+
+
+class TestCacheFallbackTrust:
+    """The cache fallback consumes a TRUSTED position best paired with a
+    move-trusted played eval — never an untrusted/duplicated best_eval."""
+
+    def test_browser_sibling_best_eval_does_not_drive_quality(
+        self, db_session, branching_graph
+    ):
+        """At one normalized FEN a trusted canonical row and an untrusted browser
+        sibling (different best_eval) coexist. Quality must derive from the trusted
+        position best, NOT the browser sibling's best_eval."""
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            quality_from_win_chance_loss,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # Trusted canonical row for the played move: best_eval=20 is position truth.
+        _insert_canonical_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+        )
+        # Untrusted browser sibling at the SAME position with a DIFFERENT best_eval
+        # (+900). If it leaked in as position truth, quality would change.
+        _insert_analysis_cache(
+            db_session, RAW_ROOT, "b1c3", "Nc3",
+            played_eval=-30, best_eval=900,
+            best_move_uci="b1c3", best_move_san="Nc3",
+            best_line_uci="b1c3 b8c6", classification="good",
+            source="game", analysis_profile_id="browser-game-v1",
+            evidence_contract_id="resolver-complete-v1",
+        )
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        # (a) quality comes from the trusted best (20), not the browser best (900),
+        # AND (b) the positive outcome: it equals the trusted-pairing win-chance.
+        assert node.quality_sum == pytest.approx(quality_from_win_chance_loss(20, -30))
+        assert node.quality_sum != pytest.approx(quality_from_win_chance_loss(900, -30))
+        assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+    def test_browser_only_declines_to_eval_delta(self, db_session, branching_graph):
+        """A browser-only row (no trusted position, not move-trusted) does NOT
+        upgrade: quality stays eval_delta-sourced."""
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            SOURCE_EVAL_DELTA,
+            quality_from_eval_delta,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        _insert_analysis_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="e2e4", best_move_san="e4",
+            best_line_uci="e2e4 e7e5", classification="good",
+            source="game", analysis_profile_id="browser-game-v1",
+            evidence_contract_id="resolver-complete-v1",
+        )
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(40))
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+        assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 0
+
+    def test_storage_position_winner_pairs_with_move_row(
+        self, db_session, branching_graph
+    ):
+        """resolve_trusted_positions tier 1: the trusted position best comes from a
+        position_analysis storage winner, paired with a move-trusted cache row."""
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            quality_from_win_chance_loss,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # Storage winner supplies the position best (35); the move row supplies the
+        # played eval (-30). The move row's OWN best_eval (999) must be ignored.
+        _insert_position_analysis(
+            db_session, RAW_ROOT,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5", best_eval=35,
+        )
+        _insert_canonical_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=999,
+            best_move_uci="e2e4", best_line_uci="e2e4 e7e5",
+        )
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_sum == pytest.approx(quality_from_win_chance_loss(35, -30))
+        assert node.quality_sum != pytest.approx(quality_from_win_chance_loss(999, -30))
+        assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+    def test_search_strength_mismatch_declines(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """A trusted position from a different-strength profile than the move row
+        cannot be paired (cross-strength subtraction is invalid) → eval_delta."""
+        import dataclasses
+
+        from app import analysis_profiles
+        from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
+
+        # A second authoritative profile at a DEEPER search limit (so it is
+        # comparable to canonical but NOT equal strength).
+        base = get_profile(CANONICAL_PROFILE_ID)
+        deep = dataclasses.replace(
+            base, profile_id="canonical-sf18-depth30-test", search_limit_value=30
+        )
+        monkeypatch.setitem(analysis_profiles._REGISTRY, deep.profile_id, deep)
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        # Position winner from the DEEPER profile; move row from canonical → the two
+        # are EQUAL-strength-guard mismatched, so the pairing must decline.
+        _insert_position_analysis(
+            db_session, RAW_ROOT,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5", best_eval=35,
+            profile_id=deep.profile_id,
+        )
+        _insert_canonical_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="e2e4", best_line_uci="e2e4 e7e5",
+        )
 
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
         node = ov.nodes[FEN_ROOT]
@@ -973,8 +1237,9 @@ class TestRolloutTelemetry:
         )
         _insert_move(db_session, sid1, 1, "black", "e5", RAW_E4, RAW_E4E5, eval_delta=5)
         _insert_move(db_session, sid1, 2, "white", "Nf3", RAW_E4E5, RAW_E4E5NF3, eval_delta=40)
-        _insert_analysis_cache(
-            db_session, RAW_E4E5, "g1f3", "Nf3", played_eval=-20, best_eval=10
+        _insert_canonical_cache(
+            db_session, RAW_E4E5, "g1f3", "Nf3", played_eval=-20, best_eval=10,
+            best_move_uci="g1f3", best_line_uci="g1f3 b8c6",
         )
 
         # Session 2 (clean opening line): eval_delta-only user move → deterministic
