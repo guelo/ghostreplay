@@ -253,6 +253,28 @@ function OpeningsPage() {
     // selectionKey/columnCount move the active column; the ref Map is stable.
   }, [selectionKey, columnCount, selectionLine.length]);
 
+  // Vertical companion to the horizontal autoscroll: a selection made on the
+  // board can land far down a long children column, so bring the deepest
+  // selected card into view within its own column scroller. Touches only
+  // scrollTop (the effect above owns scrollLeft) and no-ops when the card is
+  // already visible, so it never fights a manual scroll between selections.
+  useEffect(() => {
+    const activeIdx = selectionLine.length;
+    const scroller = columnElsRef.current.get(activeIdx);
+    const card = selectedNodeElsRef.current.get(activeIdx);
+    if (!scroller || !card) return;
+    const sRect = scroller.getBoundingClientRect();
+    const cRect = card.getBoundingClientRect();
+    const pad = 12;
+    if (cRect.top < sRect.top + pad) {
+      scroller.scrollTop -= sRect.top + pad - cRect.top;
+    } else if (cRect.bottom > sRect.bottom - pad) {
+      scroller.scrollTop += cRect.bottom - (sRect.bottom - pad);
+    }
+    // Same triggers as the horizontal effect: a sibling switch changes the
+    // selected node without changing columnCount, so selectionKey is needed.
+  }, [selectionKey, columnCount, selectionLine.length]);
+
   // Canonicalize the URL only when the rendered view is settled for the current
   // route, so a stale response kept on screen during a refetch can never rewrite
   // a freshly-selected line backward. Rewrites legacy opening=<fen> → move=,
