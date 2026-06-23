@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import contextlib
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import chess
 import pytest
+from sqlalchemy import event
 
-from app.api.session import _compute_blunder_opportunity_events
+from app.api.session import (
+    _compute_blunder_opportunity_events,
+    _forward_reachable_position_ids,
+)
 from app.fen import fen_hash
 from app.models import (
     Blunder,
@@ -17,6 +24,7 @@ from app.models import (
     SessionMove,
 )
 from app.srs_math import (
+    OPPORTUNITY_ANCESTOR_RADIUS_PLY,
     calculate_opportunity_overdue,
     compute_p_reach,
     expected_opportunities,
@@ -596,6 +604,236 @@ def test_find_ghost_move_uses_due_opportunities_with_supported_reach_rate(db_ses
 
     assert move_san == "step"
     assert target_blunder_id == blunder.id
+
+
+# ---------------------------------------------------------------------------
+# Forward-BFS unit tests (g-ejum rewrite) + traversal perf guard (g-8y63)
+# ---------------------------------------------------------------------------
+
+
+def _distinct_king_fens(count: int, *, turn: str = "w") -> list[str]:
+    """Yield ``count`` distinct, python-chess-legal two-king FENs.
+
+    ``fen_hash`` strips move clocks (and canonicalizes en passant), so distinct
+    hashes require distinct *placements* — varying only the move counter collapses
+    to one hash. Lone-king boards are the cheapest legal positions; we walk king
+    square pairs (kings never adjacent) until we have enough.
+    """
+    fens: list[str] = []
+    for wk in range(64):
+        for bk in range(64):
+            if wk == bk or chess.square_distance(wk, bk) <= 1:
+                continue
+            board = chess.Board(None)
+            board.set_piece_at(wk, chess.Piece(chess.KING, chess.WHITE))
+            board.set_piece_at(bk, chess.Piece(chess.KING, chess.BLACK))
+            board.turn = chess.WHITE if turn == "w" else chess.BLACK
+            fens.append(board.fen())
+            if len(fens) >= count:
+                return fens
+    raise AssertionError(f"could only build {len(fens)} distinct fens, needed {count}")
+
+
+class _MovesTableQueryCounter:
+    r"""Count SQL statements that touch the global ``moves`` edge table.
+
+    The perf guard must isolate the forward-BFS *traversal* cost from the rest of
+    ``_compute_blunder_opportunity_events`` — the session_moves load, the per-user
+    Blunder load, the existing-events delete, and one upsert per matched blunder.
+    Only the BFS queries ``moves``, so counting moves-table statements measures
+    exactly the cost the g-ejum rewrite was meant to bound.
+
+    ``\bmoves\b`` deliberately matches the standalone ``moves`` table but not
+    ``session_moves``: ``_`` is a word character, so no word boundary precedes the
+    "moves" in "session_moves".
+    """
+
+    _MOVES_TABLE = re.compile(r"\bmoves\b")
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def __call__(self, conn, cursor, statement, parameters, context, executemany):
+        if self._MOVES_TABLE.search(statement.lower()):
+            self.count += 1
+
+
+@contextlib.contextmanager
+def _count_moves_queries(db_session):
+    counter = _MovesTableQueryCounter()
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", counter)
+    try:
+        yield counter
+    finally:
+        event.remove(engine, "before_cursor_execute", counter)
+
+
+def test_forward_reachable_multi_ply_and_radius_cutoff(db_session):
+    user_id = 123
+    fens = _distinct_king_fens(5)
+    nodes = [
+        _position(db_session, user_id=user_id, fen=fen, active_color="white")
+        for fen in fens
+    ]
+    # Chain: n0 -> n1 -> n2 -> n3 -> n4
+    db_session.add_all(
+        [
+            Move(from_position_id=nodes[i].id, move_san=f"m{i}", to_position_id=nodes[i + 1].id)
+            for i in range(len(nodes) - 1)
+        ]
+    )
+    db_session.commit()
+
+    full = _forward_reachable_position_ids(
+        db_session, user_id=user_id, start_ids={nodes[0].id}, radius_ply=8
+    )
+    assert full == {n.id for n in nodes[1:]}
+
+    # Radius cutoff stops at distance 2 (n1, n2); deeper nodes excluded.
+    capped = _forward_reachable_position_ids(
+        db_session, user_id=user_id, start_ids={nodes[0].id}, radius_ply=2
+    )
+    assert capped == {nodes[1].id, nodes[2].id}
+
+
+def test_forward_reachable_handles_cycles_and_transpositions(db_session):
+    user_id = 123
+    fens = _distinct_king_fens(3)
+    a, b, c = (
+        _position(db_session, user_id=user_id, fen=fen, active_color="white")
+        for fen in fens
+    )
+    # Cycle a -> b -> a, plus a transposition a -> c -> b (b reached two ways).
+    db_session.add_all(
+        [
+            Move(from_position_id=a.id, move_san="ab", to_position_id=b.id),
+            Move(from_position_id=b.id, move_san="ba", to_position_id=a.id),
+            Move(from_position_id=a.id, move_san="ac", to_position_id=c.id),
+            Move(from_position_id=c.id, move_san="cb", to_position_id=b.id),
+        ]
+    )
+    db_session.commit()
+
+    # The visited set must terminate the cycle and never re-yield the start.
+    reachable = _forward_reachable_position_ids(
+        db_session, user_id=user_id, start_ids={a.id}, radius_ply=8
+    )
+    assert reachable == {b.id, c.id}
+    assert a.id not in reachable
+
+
+def test_forward_reachable_is_user_scoped(db_session):
+    # moves carries no user_id; expansion must constrain reached positions to the
+    # querying user so a shared/foreign edge target cannot leak into the BFS.
+    owner_id = 123
+    other_id = 999
+    own_fens = _distinct_king_fens(2)
+    other_fen = _distinct_king_fens(1, turn="b")[0]
+    start = _position(db_session, user_id=owner_id, fen=own_fens[0], active_color="white")
+    own_child = _position(db_session, user_id=owner_id, fen=own_fens[1], active_color="white")
+    foreign_child = _position(db_session, user_id=other_id, fen=other_fen, active_color="black")
+    db_session.add_all(
+        [
+            Move(from_position_id=start.id, move_san="own", to_position_id=own_child.id),
+            Move(from_position_id=start.id, move_san="foreign", to_position_id=foreign_child.id),
+        ]
+    )
+    db_session.commit()
+
+    reachable = _forward_reachable_position_ids(
+        db_session, user_id=owner_id, start_ids={start.id}, radius_ply=8
+    )
+    assert reachable == {own_child.id}
+    assert foreign_child.id not in reachable
+
+
+def _build_chain_session_with_blunders(db_session, *, user_id: int, blunder_count: int):
+    """A session that seeds the forward BFS from one opponent-color position and
+    chains forward edges deeper than the radius, plus ``blunder_count`` blunders
+    that sit on *no* session/reachable position (so none of them match).
+
+    Because no blunder matches, ``_compute_blunder_opportunity_events`` issues
+    zero upserts and the only ``moves``-table queries come from the BFS — its cost
+    depends solely on the graph depth, never on ``blunder_count``.
+    """
+    chain_len = OPPORTUNITY_ANCESTOR_RADIUS_PLY + 2  # deeper than radius
+    # White player ⇒ opponent is black: the seed must be black-to-move to be an
+    # opportunity source. Chain + blunder FENs share one white-turn pool so they
+    # stay mutually distinct; the black-turn seed cannot collide with any of them.
+    pool = _distinct_king_fens(chain_len + blunder_count)
+    seed_fen = "8/8/8/8/8/8/8/K6k b - - 0 1"
+    seed = _position(db_session, user_id=user_id, fen=seed_fen, active_color="black")
+    chain = [seed]
+    chain_fens = [seed_fen]
+    for fen in pool[:chain_len]:
+        node = _position(db_session, user_id=user_id, fen=fen, active_color="white")
+        db_session.add(
+            Move(from_position_id=chain[-1].id, move_san=f"c{len(chain)}", to_position_id=node.id)
+        )
+        chain.append(node)
+        chain_fens.append(fen)
+
+    game_session = _session(db_session, user_id=user_id)
+    db_session.add(
+        SessionMove(
+            session_id=game_session.id,
+            move_number=1,
+            color="black",
+            move_san="seed",
+            fen_before=seed_fen,
+            fen_after=chain_fens[1],
+        )
+    )
+
+    # Blunders parked on positions that are neither session positions nor forward
+    # reachable from the seed: a separate batch of distinct FENs with no in-edges.
+    for fen in pool[chain_len:]:
+        pos = _position(db_session, user_id=user_id, fen=fen, active_color="white")
+        _blunder(db_session, user_id=user_id, position=pos)
+
+    db_session.commit()
+    return game_session
+
+
+def test_opportunity_traversal_cost_is_bounded_and_independent_of_blunder_count(db_session):
+    """Perf guard for the g-ejum forward-BFS rewrite.
+
+    The old per-blunder reverse walk ran ≈ ``blunders × radius`` unindexed scans of
+    ``moves``. The forward rewrite runs a single BFS, so the number of
+    ``moves``-table queries is bounded by the radius and is identical whether the
+    user has 5 blunders or 80. Counting only ``moves`` statements isolates traversal
+    cost from the per-matched-blunder upserts (framing #1 in the g-8y63 plan).
+    """
+    with _count_moves_queries(db_session) as few_counter:
+        _build_chain_session_with_blunders(db_session, user_id=201, blunder_count=5)
+        game_few = db_session.query(GameSession).filter_by(user_id=201).first()
+        # Reset the counter after fixture setup so we only measure the compute call.
+        few_counter.count = 0
+        _compute_blunder_opportunity_events(
+            db_session, session_id=game_few.id, user_id=201, player_color="white"
+        )
+        db_session.commit()
+    few_queries = few_counter.count
+
+    with _count_moves_queries(db_session) as many_counter:
+        _build_chain_session_with_blunders(db_session, user_id=202, blunder_count=80)
+        game_many = db_session.query(GameSession).filter_by(user_id=202).first()
+        many_counter.count = 0
+        _compute_blunder_opportunity_events(
+            db_session, session_id=game_many.id, user_id=202, player_color="white"
+        )
+        db_session.commit()
+    many_queries = many_counter.count
+
+    # Sanity: the BFS actually ran (guards against the counter silently matching
+    # nothing, which would make the bounds below pass at zero).
+    assert few_queries >= 1
+    # Traversal cost is bounded by the radius (one query per BFS level), not by the
+    # ~blunders×radius scans the old reverse walk produced.
+    assert few_queries <= OPPORTUNITY_ANCESTOR_RADIUS_PLY
+    # And it does not scale with blunder count: 16× more blunders, same query count.
+    assert many_queries == few_queries
 
 
 def test_find_ghost_move_prefers_immediate_review_over_deeper_route(db_session):
