@@ -131,6 +131,7 @@ class PositionAnalysis(BaseModel):
     best_move_uci: str
     best_move_san: str | None = None
     best_move_eval_cp: int | None = None  # side-to-move-relative
+    best_move_eval_mate: int | None = None  # side-to-move-relative
     best_line_uci: list[str] | None = None
     # Backend trust decision for the POSITION evidence in this entry: True when it
     # came from a trusted position_analysis winner / legacy v2 projection; False when
@@ -1004,10 +1005,14 @@ def get_session_analysis(
             # side-to-move-relative, so sign-convert by the active color.
             sign = 1 if active_color(move.fen_before) == "white" else -1
             best_move_eval_cp = tp.best_eval * sign if tp.best_eval is not None else None
+            best_move_eval_mate = (
+                tp.best_eval_mate * sign if tp.best_eval_mate is not None else None
+            )
             position_analysis[move.fen_before] = PositionAnalysis(
                 best_move_uci=tp.best_move_uci,
                 best_move_san=tp.best_move_san,
                 best_move_eval_cp=best_move_eval_cp,
+                best_move_eval_mate=best_move_eval_mate,
                 best_line_uci=tp.best_line_uci,
                 position_trusted=True,
             )

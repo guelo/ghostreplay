@@ -1951,7 +1951,7 @@ Analysis data comes from two sources:
 
 Classifications are produced by `classifyMoveAdvanced` (win-chance model) during gameplay, stored alongside centipawn evals in `session_moves`.
 
-The response's `position_analysis` map is keyed by full `fen_before` (one entry per played position), but its best-move / best-line / best-eval truth is sourced at the *position* grain: `backend/app/api/session.py` resolves each entry by `normalize_fen(move.fen_before)` against the `position_analysis` storage table and emits it under the original full-FEN key. Each entry carries an explicit `position_trusted` flag — `true` for a trusted storage winner / legacy-v2 projection, `false` for an untrusted `SessionMove` seed fallback. `best_move_eval_cp` is side-to-move-relative (the white-relative storage `best_eval` sign-converted by active color). See §14.6.
+The response's `position_analysis` map is keyed by full `fen_before` (one entry per played position), but its best-move / best-line / best-eval truth is sourced at the *position* grain: `backend/app/api/session.py` resolves each entry by `normalize_fen(move.fen_before)` against the `position_analysis` storage table and emits it under the original full-FEN key. Each entry carries an explicit `position_trusted` flag — `true` for a trusted storage winner / legacy-v2 projection, `false` for an untrusted `SessionMove` seed fallback. `best_move_eval_cp` is side-to-move-relative (the white-relative storage `best_eval` sign-converted by active color). `best_move_eval_mate` is likewise side-to-move-relative (the white-relative storage `best_eval_mate` sign-converted by active color) and is emitted whenever the trusted winner carries a mate eval — typically a mate-only winner (`best_eval=None`), but a superset merge of disagreeing runs (`backend/app/position_analysis_policy.py`) can retain *both* `best_eval` and `best_eval_mate`, in which case both wire fields are populated. Consumers treat mate as authoritative when both are present (mate-first, matching `tree_eval._best_move_eval`). See §14.6.
 
 ```typescript
 interface MoveAnalysis {
@@ -2008,6 +2008,7 @@ Returns full analysis for a completed game session.
       "best_move_uci": "string",
       "best_move_san": "string | null",
       "best_move_eval_cp": "integer | null",
+      "best_move_eval_mate": "integer | null",
       "best_line_uci": ["string"],
       "position_trusted": "boolean"
     }

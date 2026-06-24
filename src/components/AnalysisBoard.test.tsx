@@ -935,6 +935,96 @@ describe('AnalysisBoard MoveList', () => {
     )
   })
 
+  it('skip-optimizes a trusted mate-only winner and renders it as the canonical line 1 with a mate eval (g-jsac)', () => {
+    // Mate-only trusted winner: best_move_eval_cp is null but best_move_eval_mate
+    // is set. The widened trust gate must still drive the restricted search and
+    // prepend the canonical Nf3 line, which (mate >> cp via mateToCp) outranks the
+    // live Nc3 cp line and sorts to line 1 with the canonical marker + an Mn eval.
+    vi.useFakeTimers()
+    try {
+      mockEngineInfoRef.current = [
+        { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 50 }, depth: 21, multipv: 2 },
+      ]
+      mockEngineInfoFenRef.current = moves[1].fen_after
+
+      render(
+        <AnalysisBoard
+          moves={moves}
+          boardOrientation="white"
+          positionAnalysis={{
+            [moves[1].fen_after]: {
+              best_move_uci: 'g1f3',
+              best_move_san: 'Nf3',
+              best_move_eval_cp: null,
+              best_move_eval_mate: 3,
+              best_line_uci: ['g1f3', 'd7d6'],
+              position_trusted: true,
+            },
+          }}
+        />,
+      )
+
+      act(() => {
+        vi.advanceTimersByTime(120)
+      })
+
+      // Restricted search: the canonical best move Nf3 is excluded from searchmoves.
+      const calls = mockEvaluatePosition.mock.calls as unknown as Array<
+        [string, { multipv?: number; searchmoves?: string[] }]
+      >
+      const call = calls.find(([fen]) => fen === moves[1].fen_after)
+      expect(call?.[1].multipv).toBe(2)
+      expect(call?.[1].searchmoves).not.toContain('g1f3')
+      expect(call?.[1].searchmoves?.length).toBeGreaterThan(0)
+
+      // Line 1 is the cached canonical Nf3 line with an M3 eval + canonical marker.
+      const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+      expect(line1.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nf3')
+      expect(line1.querySelector('.analysis-board__engine-eval')).toHaveTextContent('M3')
+      expect(line1.querySelector('.analysis-board__engine-source')).not.toBeNull()
+
+      // Line 2 is the live Nc3 cp line, below the mate.
+      const line2 = screen.getByRole('button', { name: 'Show engine line 2' })
+      expect(line2.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nc3')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders the mate eval when a trusted winner carries both cp and mate (mate-first, g-jsac)', () => {
+    // A superset merge of disagreeing runs can deliver both best_move_eval_cp and
+    // best_move_eval_mate. The panel treats mate as authoritative (mate-first,
+    // matching backend tree_eval._best_move_eval) — the canonical line shows M3.
+    mockEngineInfoRef.current = [
+      { pv: ['b1c3', 'b8c6'], score: { type: 'cp', value: 50 }, depth: 21, multipv: 2 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+
+    render(
+      <AnalysisBoard
+        moves={moves}
+        boardOrientation="white"
+        positionAnalysis={{
+          [moves[1].fen_after]: {
+            best_move_uci: 'g1f3',
+            best_move_san: 'Nf3',
+            best_move_eval_cp: 35,
+            best_move_eval_mate: 3,
+            best_line_uci: ['g1f3', 'd7d6'],
+            position_trusted: true,
+          },
+        }}
+      />,
+    )
+
+    const line1 = screen.getByRole('button', { name: 'Show engine line 1' })
+    expect(line1.querySelector('.analysis-board__engine-pv')).toHaveTextContent('Nf3')
+    // mate wins over the +0.35 cp, and (mateToCp) outranks the live +0.5 cp line.
+    expect(line1.querySelector('.analysis-board__engine-eval')).toHaveTextContent('M3')
+    expect(line1.querySelector('.analysis-board__engine-eval')).not.toHaveTextContent('+0.3')
+    expect(line1.querySelector('.analysis-board__engine-source')).not.toBeNull()
+  })
+
   it('survives sparse streaming MultiPV output when merging the cached line (g-54h5)', () => {
     // useStockfishEngine fills slots by multipv index, so line 2 can arrive
     // before line 1 — a sparse [<hole>, line2]. The merge spread materializes the
@@ -1058,7 +1148,7 @@ describe('AnalysisBoard MoveList', () => {
     expect(line2.querySelector('.analysis-board__engine-source')).toBeNull()
   })
 
-  it('runs a full multipv search when a trusted seed has no comparable cp eval (g-54h5)', () => {
+  it('runs a full multipv search when a trusted seed has no comparable eval (g-54h5)', () => {
     vi.useFakeTimers()
     try {
       render(
@@ -1070,6 +1160,7 @@ describe('AnalysisBoard MoveList', () => {
               best_move_uci: 'g1f3',
               best_move_san: 'Nf3',
               best_move_eval_cp: null,
+              best_move_eval_mate: null,
               position_trusted: true,
             },
           }}
@@ -1080,8 +1171,8 @@ describe('AnalysisBoard MoveList', () => {
         vi.advanceTimersByTime(120)
       })
 
-      // A trusted seed without a cp eval can't be ranked against searched cp
-      // lines, so it falls through to a full search rather than seeding line 1.
+      // A trusted seed with neither a cp nor a mate eval can't be ranked against
+      // searched lines, so it falls through to a full search rather than line 1.
       expect(mockEvaluatePosition).toHaveBeenCalledWith(
         moves[1].fen_after,
         { depth: 21, multipv: 3 },

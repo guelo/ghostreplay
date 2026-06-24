@@ -1087,6 +1087,7 @@ export interface PositionAnalysis {
   best_move_uci: string
   best_move_san: string | null
   best_move_eval_cp: number | null  // side-to-move-relative
+  best_move_eval_mate?: number | null  // side-to-move-relative
   /** Root best-move principal variation (UCI). Starts with best_move_uci. */
   best_line_uci?: string[] | null
   /**

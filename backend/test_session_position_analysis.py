@@ -99,6 +99,8 @@ def test_trusted_storage_drives_entry_keyed_by_full_fen(
     assert entry["best_line_uci"] == ["d2d4", "d7d5"]
     # White to move -> white-relative 50 stays +50 side-to-move-relative.
     assert entry["best_move_eval_cp"] == 50
+    # cp-only winner: no mate eval emitted (no regression).
+    assert entry["best_move_eval_mate"] is None
 
 
 def test_trusted_storage_eval_sign_converted_for_black_to_move(
@@ -125,6 +127,93 @@ def test_trusted_storage_eval_sign_converted_for_black_to_move(
     # Black to move: white-relative +60 -> side-to-move-relative -60.
     assert pa[AFTER_E4_FEN]["position_trusted"] is True
     assert pa[AFTER_E4_FEN]["best_move_eval_cp"] == -60
+
+
+def test_trusted_storage_mate_eval_white_to_move(
+    client, auth_headers, create_game_session, db_session
+):
+    # Mate-only trusted winner (best_eval=None, best_eval_mate set). White to move:
+    # white-relative +5 stays +5 side-to-move-relative (side-favorable mate).
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    _upload_move(client, auth_headers, session_id, user_id,
+                 move_number=1, color="white", move_san="e4",
+                 fen_before=STARTING_FEN, fen_after=AFTER_E4_FEN,
+                 move_uci="e2e4", best_move_uci="e2e4")
+    _seed_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                  best_line_uci="d2d4 d7d5", best_eval_mate=5)
+
+    pa = _position_analysis(client, auth_headers, session_id, user_id)
+    entry = pa[STARTING_FEN]
+    assert entry["position_trusted"] is True
+    assert entry["best_move_eval_cp"] is None
+    assert entry["best_move_eval_mate"] == 5
+
+
+def test_trusted_storage_mate_eval_black_to_move_sign_flips_to_opponent(
+    client, auth_headers, create_game_session, db_session
+):
+    # White-relative +5 mate, black to move -> side-to-move-relative -5
+    # (opponent-favorable: white mates while it's black's turn).
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    _upload_move(client, auth_headers, session_id, user_id,
+                 move_number=1, color="black", move_san="e5",
+                 fen_before=AFTER_E4_FEN, fen_after=AFTER_E4E5_FEN,
+                 move_uci="e7e5", best_move_uci="e7e5")
+    _seed_storage(db_session, fen=AFTER_E4_FEN, best_move_uci="g8f6",
+                  best_line_uci="g8f6 b1c3", best_eval_mate=5)
+
+    pa = _position_analysis(client, auth_headers, session_id, user_id)
+    entry = pa[AFTER_E4_FEN]
+    assert entry["position_trusted"] is True
+    assert entry["best_move_eval_cp"] is None
+    assert entry["best_move_eval_mate"] == -5
+
+
+def test_trusted_storage_mate_eval_black_to_move_sign_flips_to_side(
+    client, auth_headers, create_game_session, db_session
+):
+    # White-relative -5 mate, black to move -> side-to-move-relative +5
+    # (side-favorable: black mates while it's black's turn).
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    _upload_move(client, auth_headers, session_id, user_id,
+                 move_number=1, color="black", move_san="e5",
+                 fen_before=AFTER_E4_FEN, fen_after=AFTER_E4E5_FEN,
+                 move_uci="e7e5", best_move_uci="e7e5")
+    _seed_storage(db_session, fen=AFTER_E4_FEN, best_move_uci="g8f6",
+                  best_line_uci="g8f6 b1c3", best_eval_mate=-5)
+
+    pa = _position_analysis(client, auth_headers, session_id, user_id)
+    entry = pa[AFTER_E4_FEN]
+    assert entry["position_trusted"] is True
+    assert entry["best_move_eval_cp"] is None
+    assert entry["best_move_eval_mate"] == 5
+
+
+def test_trusted_storage_emits_both_cp_and_mate_when_both_present(
+    client, auth_headers, create_game_session, db_session
+):
+    # A superset merge of disagreeing runs can retain BOTH best_eval and
+    # best_eval_mate on one row (see test_position_analysis_write_policy.py
+    # ::test_db_write_merge_adds_mate_field). Both wire fields are emitted; the
+    # panel treats mate as authoritative (mate-first, matching tree_eval).
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    _upload_move(client, auth_headers, session_id, user_id,
+                 move_number=1, color="white", move_san="e4",
+                 fen_before=STARTING_FEN, fen_after=AFTER_E4_FEN,
+                 move_uci="e2e4", best_move_uci="e2e4")
+    _seed_storage(db_session, fen=STARTING_FEN, best_move_uci="d2d4",
+                  best_line_uci="d2d4 d7d5", best_eval=35, best_eval_mate=5)
+
+    pa = _position_analysis(client, auth_headers, session_id, user_id)
+    entry = pa[STARTING_FEN]
+    assert entry["position_trusted"] is True
+    # White to move -> both fields pass through unchanged.
+    assert entry["best_move_eval_cp"] == 35
+    assert entry["best_move_eval_mate"] == 5
 
 
 def test_trusted_storage_emitted_even_when_session_seed_has_no_best_move(

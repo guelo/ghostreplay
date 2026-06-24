@@ -509,7 +509,8 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   const trustedBest =
     cachedBest &&
     cachedBest.position_trusted === true &&
-    cachedBest.best_move_eval_cp != null
+    (cachedBest.best_move_eval_cp != null ||
+      cachedBest.best_move_eval_mate != null)
       ? cachedBest
       : null;
 
@@ -579,9 +580,11 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
           ? trustedBest.best_line_uci
           : [trustedBest.best_move_uci],
       score:
-        trustedBest.best_move_eval_cp != null
-          ? { type: "cp" as const, value: trustedBest.best_move_eval_cp }
-          : undefined,
+        trustedBest.best_move_eval_mate != null
+          ? { type: "mate" as const, value: trustedBest.best_move_eval_mate }
+          : trustedBest.best_move_eval_cp != null
+            ? { type: "cp" as const, value: trustedBest.best_move_eval_cp }
+            : undefined,
       depth: undefined,
     };
 
