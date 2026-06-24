@@ -4397,7 +4397,9 @@
     border-radius: 999px;
     border: 1px solid;
     font-weight: 700;
-    font-size: 2cqw;
+    /* Glyph fills more of the badge so the classification mark reads clearly.
+       The circle (width/height) stays 5%; only the inner glyph grows. */
+    font-size: 3.2cqw;
     line-height: 1;
     box-shadow: 0 2px 6px rgba(2, 6, 23, 0.45);
 }
@@ -4407,6 +4409,10 @@
    the underlying square doesn't bleed through. */
 .board-eval-icon.move-icon--best {
     background: color-mix(in srgb, #2563eb 40%, var(--bg-secondary));
+    /* The star 'best' badge grows less aggressively than the glyph marks so the
+       emoji stays balanced, but enough that it doesn't read as smaller than the
+       larger '?'/'!' marks beside it. */
+    font-size: 2.8cqw;
 }
 
 .board-eval-icon.move-icon--excellent {
