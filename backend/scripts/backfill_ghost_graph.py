@@ -11,6 +11,14 @@ Rerunnable / idempotent: positions dedupe by (user_id, fen_hash) and moves by
 After this backfill, recompute opportunity events so newly-reachable blunders
 become due:
     python scripts/recompute_srs_opportunities.py --all-blunders
+
+NOT lock-coordinated (g-q0aw): this calls ``_upsert_session_position_graph``
+DIRECTLY, bypassing the live orchestrator, so it does NOT take the per-user
+``pg_advisory_xact_lock(user_id)`` and is NOT subject to lock_timeout /
+statement_timeout. That is intentional — this is a single-threaded admin
+migration over large graphs. It MUST NOT be run concurrently with live uploads:
+without the advisory lock it would race the live path's graph writes on the
+(user_id, fen_hash) unique index. Run it during a quiet window / maintenance.
 """
 
 from __future__ import annotations
@@ -107,6 +115,8 @@ def backfill_ghost_graph(
         if not moves:
             continue
 
+        # Direct call (not via the orchestrator): no advisory lock / timeouts.
+        # See the module docstring — never run concurrently with live uploads.
         stats = _upsert_session_position_graph(
             db,
             user_id=session.user_id,

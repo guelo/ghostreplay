@@ -10,9 +10,10 @@ from enum import Enum
 import chess
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func
+from sqlalchemy import case, func, text
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.analysis_cache_repo import write_analysis_cache_rows
@@ -54,6 +55,32 @@ from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
 
 router = APIRouter(prefix="/api/session", tags=["session"])
 logger = logging.getLogger(__name__)
+
+# Per-user graph-write serialization guardrails (g-q0aw, Postgres only).
+#
+# Concurrent same-opening drill replays take pg_advisory_xact_lock(user_id) so
+# they queue deterministically instead of racing the (user_id, fen_hash) unique
+# index. ``lock_timeout`` bounds how long acquisition waits on a stuck queue
+# (advisory locks go through the PG lock manager) and ``statement_timeout``
+# bounds any single pathological query, so a degenerate case fails fast (SQLSTATE
+# 55P03 / 57014) instead of hanging ~166s. Tunable by patching these constants in
+# tests to keep the timeout-path tests fast.
+GRAPH_LOCK_TIMEOUT = "5s"
+GRAPH_STATEMENT_TIMEOUT = "10s"
+# Postgres SQLSTATEs we treat as recoverable graph-write timeouts: lock_not_available
+# (55P03, from lock_timeout) and query_canceled (57014, from statement_timeout).
+_GRAPH_TIMEOUT_SQLSTATES = frozenset({"55P03", "57014"})
+
+
+def _graph_timeout_sqlstate(err: OperationalError) -> str | None:
+    """Return the SQLSTATE of ``err`` if it is a recoverable graph-write timeout.
+
+    psycopg3 exposes the SQLSTATE on the wrapped DBAPI error as ``.sqlstate``.
+    Returns the matched code (truthy) for lock/statement timeouts, else ``None`` so
+    callers re-raise connection failures and every other OperationalError unchanged.
+    """
+    sqlstate = getattr(getattr(err, "orig", None), "sqlstate", None)
+    return sqlstate if sqlstate in _GRAPH_TIMEOUT_SQLSTATES else None
 
 
 class MoveColor(str, Enum):
@@ -645,7 +672,7 @@ def _timed_side_effect(
         )
 
 
-def _run_session_move_evidence_side_effects(
+def _run_graph_evidence_txn(
     db: Session,
     *,
     session_id: uuid.UUID,
@@ -653,17 +680,47 @@ def _run_session_move_evidence_side_effects(
     player_color: str,
     evidence_moves: list,
     move_count: int,
+    dialect_name: str,
 ) -> None:
-    """Run the evidence side effects after the session_moves upsert, each timed.
+    """Acquire the per-user advisory lock, upsert the graph + opportunity events,
+    and commit — the graph-dependent failure boundary (g-q0aw).
 
-    Ordering mirrors the original inline flow: the ghost-graph upsert stages edge
-    rows without flushing (autoflush is off), the opportunity-event stage computes
-    and (on sqlite/postgres) issues its event INSERT/UPDATEs immediately, then a
-    single ``evidence_commit`` flushes the deferred graph edges + pending deletes
-    and finalizes durability, then the analysis-cache write and background-recompute
-    enqueue. Shared by the SQLite/Postgres and generic-dialect paths so both emit
-    the same per-stage timing and stay in sync.
+    This is the FIRST statement of a fresh autobegun txn (the prior
+    ``session_moves_upsert`` stage committed). On Postgres it takes
+    ``pg_advisory_xact_lock(user_id)`` so concurrent same-user uploads serialize
+    deterministically instead of racing the (user_id, fen_hash) unique index, and
+    sets txn-local ``lock_timeout``/``statement_timeout`` so a stuck queue or
+    pathological query aborts (SQLSTATE 55P03 / 57014) rather than hanging. The
+    advisory lock is xact-scoped and the SET LOCALs reset — both released by the
+    ``evidence_commit`` below, which is exactly the contention window
+    (graph_upsert + opportunity_events).
+
+    Raises ``OperationalError`` on timeout; the caller owns rollback + retry/degrade.
     """
+    with _timed_side_effect(
+        "graph_lock",
+        session_id=session_id,
+        user_id=user_id,
+        move_count=move_count,
+    ):
+        if dialect_name == "postgresql":
+            # set_config(name, value, is_local=true) is the txn-local form of
+            # `SET LOCAL` and accepts a normal bind param — PG utility statements
+            # like `SET LOCAL x = :v` are awkward/unsupported with server-side
+            # bind params. Both timeouts reset at the evidence_commit below.
+            db.execute(
+                text("SELECT set_config('lock_timeout', :v, true)").bindparams(
+                    v=GRAPH_LOCK_TIMEOUT
+                )
+            )
+            db.execute(
+                text("SELECT set_config('statement_timeout', :v, true)").bindparams(
+                    v=GRAPH_STATEMENT_TIMEOUT
+                )
+            )
+            db.execute(
+                text("SELECT pg_advisory_xact_lock(:uid)").bindparams(uid=user_id)
+            )
     with _timed_side_effect(
         "ghost_graph_upsert",
         session_id=session_id,
@@ -697,6 +754,68 @@ def _run_session_move_evidence_side_effects(
         move_count=move_count,
     ):
         db.commit()
+
+
+def _run_session_move_evidence_side_effects(
+    db: Session,
+    *,
+    session_id: uuid.UUID,
+    user_id: int,
+    player_color: str,
+    evidence_moves: list,
+    move_count: int,
+    dialect_name: str,
+) -> None:
+    """Run the evidence side effects after the session_moves upsert, each timed.
+
+    The graph-dependent stages (advisory lock + ghost-graph upsert + opportunity
+    events + commit) run inside :func:`_run_graph_evidence_txn`. On a recoverable
+    Postgres timeout (SQLSTATE 55P03 / 57014) we rollback and RETRY ONCE: the
+    SessionMove rows are already committed and ``_compute_blunder_opportunity_events``
+    rebuilds events from ALL session moves, so the retry is a clean full recompute,
+    not a partial patch. If the retry also times out we rollback and accept the gap
+    with an explicit WARNING — opportunity events do NOT self-heal (SRS counters read
+    the persisted rows with no lazy recompute), so the dropped accounting regenerates
+    only on the next successful same-session upload.
+
+    The analysis-cache write (own txn) and background-recompute enqueue (cheap,
+    coalesced, opening-score self-heal) run REGARDLESS — they sit outside the
+    graph-dependent failure boundary, and the session is clean after rollback.
+
+    Shared by the SQLite/Postgres and generic-dialect paths so both emit the same
+    per-stage timing and stay in sync. Non-postgres dialects skip the advisory lock
+    + SET LOCALs and never raise the timeout SQLSTATEs, so the degrade path is a
+    Postgres-only concern.
+    """
+    graph_txn_kwargs = dict(
+        session_id=session_id,
+        user_id=user_id,
+        player_color=player_color,
+        evidence_moves=evidence_moves,
+        move_count=move_count,
+        dialect_name=dialect_name,
+    )
+    try:
+        _run_graph_evidence_txn(db, **graph_txn_kwargs)
+    except OperationalError as err:
+        if _graph_timeout_sqlstate(err) is None:
+            # Connection failures / non-timeout OperationalErrors (and any other
+            # error type) propagate unchanged — the narrow catch only owns timeouts.
+            raise
+        db.rollback()
+        try:
+            _run_graph_evidence_txn(db, **graph_txn_kwargs)
+        except OperationalError as retry_err:
+            if _graph_timeout_sqlstate(retry_err) is None:
+                raise
+            db.rollback()
+            logger.warning(
+                "upsert_session_moves graph evidence timed out twice; opportunity "
+                "events skipped for session_id=%s user_id=%s; not self-healing — "
+                "regenerates on the next successful same-session upload",
+                session_id,
+                user_id,
+            )
     with _timed_side_effect(
         "analysis_cache_write",
         session_id=session_id,
@@ -822,6 +941,7 @@ def upsert_session_moves(
                 player_color=game_session.player_color,
                 evidence_moves=evidence_moves,
                 move_count=len(values),
+                dialect_name=dialect_name,
             )
         # Emitted only after the upload is durable (post-commit) so a failed
         # insert/commit never produces a successful-looking analytics event.
@@ -882,6 +1002,7 @@ def upsert_session_moves(
             player_color=game_session.player_color,
             evidence_moves=evidence_moves,
             move_count=len(values),
+            dialect_name=dialect_name,
         )
 
     # Emitted only after the upload is durable (post-commit) so a failed
