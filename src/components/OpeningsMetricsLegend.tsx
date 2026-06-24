@@ -74,12 +74,14 @@ function OpeningsMetricsLegend() {
           role="tooltip"
         >
           <dl className="openings-metrics-legend__list">
-            {METRICS.map(({ term, desc }) => (
-              <div key={term}>
-                <dt>{term}</dt>
-                <dd>{desc}</dd>
-              </div>
-            ))}
+                            <dt>Opening Score</dt>
+                            <dd>Measures how well you know the opening. Based on your play in games and drills. Graded from A-F</dd>
+                            <dt>Coverage</dt>
+                            <dd>How much of the opening's variations you've explored </dd>
+                            <dt>Confidence</dt>
+                            <dd>How confident we are in your opening score based on how many games you've played and how much coverage</dd>
+
+
           </dl>
         </div>
       )}
