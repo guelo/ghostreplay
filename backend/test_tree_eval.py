@@ -299,24 +299,108 @@ def test_move_eval_mate_outranks_cp_among_trusted(session):
     assert out[(POS_A, "f1c4")] == MoveEval(cp=None, mate=2)
 
 
-def test_move_eval_trust_filter_exact_path(session):
-    # An untrusted browser row on the EXACT key must not drive the eval; with no
-    # trusted alternative the result is None.
+def test_untrusted_exact_row_surfaces_as_fallback(session):
+    # An untrusted browser row on the EXACT key is not trusted, but with no trusted
+    # alternative its played_eval is surfaced as the tier-3 fallback so the off-book
+    # card shows a number instead of "—".
     _seed(session, fen=POS_A, uci="f1c4", played_eval=77, trusted=False,
           analysis_profile_id=BROWSER_PROFILE_ID,
           evidence_contract_id="resolver-complete-v1")
     out = lookup_move_evals(session, [(POS_A, "f1c4")])
-    assert out[(POS_A, "f1c4")] is None
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=77, mate=None)
 
 
 def test_move_eval_trust_filter_lets_trusted_transposition_win(session):
-    # Untrusted exact row is rejected, but a trusted transposition still resolves.
+    # Untrusted exact row is rejected in favor of a trusted transposition: tier 2
+    # (trusted normalized) beats tier 3 (untrusted exact).
     _seed(session, fen=POS_A, uci="f1c4", played_eval=77, trusted=False,
           analysis_profile_id=BROWSER_PROFILE_ID,
           evidence_contract_id="resolver-complete-v1")
     _seed(session, fen=POS_B, uci="f1c4", played_eval=18)
     out = lookup_move_evals(session, [(POS_A, "f1c4")])
     assert out[(POS_A, "f1c4")] == MoveEval(cp=18, mate=None)
+
+
+# --- untrusted played-eval fallback (tiers 3-4) -------------------------------
+#
+# These pin the g-a0ix change: when no trusted eval exists, an untrusted played eval
+# (browser-game or ANY non-authoritative source) is surfaced so off-book cards show a
+# number. Cache-row -> eval RESOLUTION lives here; eval -> tie-break sort ordering is
+# owned by test_tree_api.py (which patches lookup_move_evals), so no sort test is
+# added here for this change.
+
+def test_untrusted_normalized_fallback_surfaces(session):
+    # Tier 4: only an untrusted browser row exists, stored under a clock variant, so
+    # the request resolves via the untrusted normalized fallback.
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=33, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=33, mate=None)
+
+
+def test_trusted_exact_beats_untrusted_normalized_fallback(session):
+    # Tier 1 > tier 4. The trusted row goes on the exact key; the untrusted row on a
+    # clock variant (same normalized) — analysis_cache's UniqueConstraint(fen_before,
+    # move_uci) forbids two rows on the exact key, so the exact-key collision itself
+    # is covered by the writer/upsert tests, not a dual-seed here.
+    _seed(session, fen=POS_A, uci="f1c4", played_eval=18)
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=77, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=18, mate=None)
+
+
+def test_untrusted_fallback_ranks_precomputed_over_game(session):
+    # Among untrusted survivors, _move_sort_key still applies: a precomputed-but-
+    # untrusted row outranks a game-untrusted row (source_rank precomputed < game).
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=10, source="game",
+          trusted=False, analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    _seed(session, fen="r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 6 7",
+          uci="f1c4", played_eval=20, source="precomputed",
+          trusted=False, analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=20, mate=None)
+
+
+def test_untrusted_fallback_prefers_mate_over_cp(session):
+    # Mate data wins among untrusted survivors at the same normalized position+move.
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=10, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    _seed(session, fen="r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 6 7",
+          uci="f1c4", played_eval=20, played_eval_mate=2, trusted=False,
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=None, mate=2)
+
+
+def test_non_browser_untrusted_source_surfaces(session):
+    # Tiers 3-4 are source-agnostic, NOT browser-specific: a bare untrusted row with
+    # no profile/contract identity (source=None) still surfaces its played_eval.
+    _seed(session, fen=POS_A, uci="f1c4", played_eval=44, source=None, trusted=False)
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=44, mate=None)
+
+
+def test_mixed_batch_trusted_untrusted_and_miss(session):
+    # One node trusted (tier 1), one untrusted-only (tier 3), one genuine miss.
+    _seed(session, fen=POS_A, uci="f1c4", played_eval=42)               # trusted exact
+    _seed(session, fen=POS_A, uci="f1b5", played_eval=7, trusted=False,  # untrusted exact
+          analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(
+        session, [(POS_A, "f1c4"), (POS_A, "f1b5"), (POS_A, "g1f3")]
+    )
+    assert out == {
+        (POS_A, "f1c4"): MoveEval(cp=42, mate=None),
+        (POS_A, "f1b5"): MoveEval(cp=7, mate=None),
+        (POS_A, "g1f3"): None,
+    }
 
 
 # --- perspective conversion ----------------------------------------------------
@@ -363,9 +447,10 @@ def test_writer_populates_normalized_fen_before(session):
     )
     row = session.query(AnalysisCache).one()
     assert row.normalized_fen_before == normalize_fen(POS_A)
-    # The row is a non-authoritative browser row, so the Phase-4 move-trust gate keeps
-    # it out of the eval lookup even though its normalized column would resolve the
-    # clock variant. (Trusted transposition resolution is covered by the fallback
-    # tests above, which seed identity-bearing rows.)
+    # The row is a non-authoritative browser row. No trusted eval exists for this
+    # position+move, so it resolves the clock-variant request via the untrusted
+    # normalized fallback (tier 4) — surfacing the browser played_eval rather than
+    # dropping it. (Trusted transposition resolution is covered by the fallback tests
+    # above, which seed identity-bearing rows.)
     out = lookup_move_evals(session, [(POS_B, "f1c4")])
-    assert out[(POS_B, "f1c4")] is None
+    assert out[(POS_B, "f1c4")] == MoveEval(cp=25, mate=None)

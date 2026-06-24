@@ -64,8 +64,11 @@ def _move_trusted(row: AnalysisCache) -> bool:
 
 
 def _move_sort_key(row: AnalysisCache) -> tuple:
-    # Ranks an already move-trusted candidate list (trust filtering precedes this).
-    # Prefer rows with mate data, then precomputed > game > other, then lowest id.
+    # Ranks a candidate list deterministically: prefer rows with mate data, then
+    # precomputed > game > other, then lowest id. Used for BOTH the trusted
+    # normalized survivors (tier 2) and the untrusted fallback survivors (tier 4) —
+    # trust filtering no longer strictly precedes this, so an untrusted row may be
+    # ranked here when no trusted eval exists.
     return (
         0 if row.played_eval_mate is not None else 1,
         source_rank(row.source),
@@ -80,12 +83,22 @@ def lookup_move_evals(
     """Resolve a white-relative eval per ``(parent_fen, move_uci)`` request.
 
     Batched into at most two indexed queries regardless of node count: never scans
-    ``analysis_cache`` and never queries once per child. Exact full-FEN+UCI match
-    wins; otherwise the indexed normalized-FEN transposition fallback is used. Both
-    paths apply the move-grain trust gate FIRST — an untrusted browser/legacy row can
-    never drive a played eval — then select deterministically among the trusted
-    survivors (mate data, then precomputed > game > other, then id). An entry is
-    ``None`` only when no usable trusted eval exists.
+    ``analysis_cache`` and never queries once per child.
+
+    A trusted eval is always preferred. An untrusted played eval (browser-game or any
+    other non-authoritative row) is used only as a last-resort fallback when no
+    trusted eval exists for the position+move, so previously-blank off-book cards now
+    show whatever cached eval we do have. Tier precedence, first hit wins:
+
+      1. exact ``(fen_before, uci)``, move-trusted
+      2. normalized ``(normalized_fen_before, uci)``, move-trusted (best by sort key)
+      3. exact ``(fen_before, uci)``, untrusted
+      4. normalized ``(normalized_fen_before, uci)``, untrusted (best by sort key)
+
+    Tiers 3-4 are source-agnostic: ANY untrusted row carrying a usable played eval
+    qualifies, ranked by :func:`_move_sort_key` (mate data, then precomputed > game >
+    other, then id) — not just ``browser-game-v1``. An entry is ``None`` only when no
+    usable eval (trusted or untrusted) exists.
     """
     # Dedupe while preserving caller order; every request gets an entry.
     reqs = list(dict.fromkeys((f, u) for f, u in requests))
@@ -108,9 +121,10 @@ def lookup_move_evals(
         if row is not None and _move_trusted(row):
             ev = _played_eval(row)
             if ev is not None:
-                result[(fen, uci)] = ev
+                result[(fen, uci)] = ev  # tier 1
                 continue
         # Exact miss, untrusted exact row, or no usable eval -> normalized fallback.
+        # The untrusted exact row (if any) stays in ``exact_map`` for tier 3.
         try:
             norm_of[(fen, uci)] = normalize_fen(fen)
         except Exception:
@@ -131,19 +145,32 @@ def lookup_move_evals(
         )
         .all()
     )
-    by_norm_move: dict[tuple[str, str], list[AnalysisCache]] = {}
+    # Split survivors with a usable played eval by trust: trusted ones feed tier 2,
+    # untrusted ones feed tier 4. Untrusted rows are RETAINED (not dropped) so they
+    # can fill gaps where no trusted eval exists.
+    trusted_by_norm: dict[tuple[str, str], list[AnalysisCache]] = {}
+    untrusted_by_norm: dict[tuple[str, str], list[AnalysisCache]] = {}
     for r in fallback_rows:
-        # Drop untrusted rows BEFORE ranking so an untrusted eval can never win.
-        if not _move_trusted(r):
-            continue
         if _played_eval(r) is None:
             continue
-        by_norm_move.setdefault((r.normalized_fen_before, r.move_uci), []).append(r)
+        bucket = trusted_by_norm if _move_trusted(r) else untrusted_by_norm
+        bucket.setdefault((r.normalized_fen_before, r.move_uci), []).append(r)
 
     for fen, uci in unresolved:
-        candidates = by_norm_move.get((norm_of[(fen, uci)], uci))
-        if candidates:
-            result[(fen, uci)] = _played_eval(min(candidates, key=_move_sort_key))
+        key = (norm_of[(fen, uci)], uci)
+        trusted = trusted_by_norm.get(key)
+        if trusted:  # tier 2
+            result[(fen, uci)] = _played_eval(min(trusted, key=_move_sort_key))
+            continue
+        exact = exact_map.get((fen, uci))  # tier 3: untrusted exact row
+        if exact is not None:
+            ev = _played_eval(exact)
+            if ev is not None:
+                result[(fen, uci)] = ev
+                continue
+        untrusted = untrusted_by_norm.get(key)
+        if untrusted:  # tier 4
+            result[(fen, uci)] = _played_eval(min(untrusted, key=_move_sort_key))
 
     return result
 

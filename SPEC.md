@@ -436,10 +436,18 @@ node has key `(parent_fen, move_uci)`, but the tree replays the UCI line from th
 initial board so `parent_fen` is a full 6-field FEN whose clocks may differ from a
 stored `fen_before` (transpositions). `lookup_move_evals` resolves each node in at
 most two indexed, batched queries (never a scan, never one query per child):
-1. **Exact `(fen_before, move_uci)` wins** when its row has a usable played eval.
+1. **Exact `(fen_before, move_uci)` wins** when its row has a usable, *move-trusted*
+   played eval.
 2. Otherwise an **indexed normalized fallback** over `(normalized_fen_before, move_uci)`
-   selects deterministically: prefer rows with mate data, then `source=precomputed` >
-   `game` > other, then lowest `id`.
+   among *move-trusted* rows selects deterministically: prefer rows with mate data, then
+   `source=precomputed` > `game` > other, then lowest `id`.
+3. Otherwise — only when **no trusted eval exists** — an **untrusted played-eval
+   fallback** surfaces whatever cached eval we have so off-book cards show a number
+   instead of an em dash: the untrusted exact row (tier 3), else the best untrusted
+   normalized row by the same deterministic key (tier 4). This tier is source-agnostic
+   (any non-authoritative row with a usable played eval — browser-game, bare-source, or
+   other — qualifies), so the **move-card eval is NOT strictly trust-gated**. The
+   column-0 **root** eval (`lookup_root_eval`) has no such fallback and stays trusted-only.
 The returned value prefers `played_eval_mate` over `played_eval` (mate over cp). The
 column-0 root uses `lookup_root_eval`, returning the position's `best_eval`/`best_eval_mate`
 (the eval under the engine's best move — a property of the position); any row at the
@@ -2577,11 +2585,14 @@ preference.
 **Wire shape & consumers.** `POST /api/analysis/lookup` (renamed from the old
 `GET /api/analysis-cache`) returns both grains independently rather than one flattened
 row, including position-only hits (trusted position, no exact move row — `move_san`
-null). Trust-gated consumers — `tree_eval.py` root/move eval, the session drill-review
+null). Trust-gated consumers — `tree_eval.py` **root** eval, the session drill-review
 export (below), the **opening-score quality fallback** (below), and the split frontend
 guards — read position facts from
 `position_analysis` (legacy-v2 fallback during migration), never from raw `analysis_cache`
-position columns. For drill grading, strictness-0 compares the played move to the trusted
+position columns. **Exception:** `tree_eval.py`'s **move-card** eval (`lookup_move_evals`)
+carries an untrusted display fallback (§14, tiers 3-4) — when no trusted eval exists it
+surfaces an untrusted `played_eval` so off-book cards still render a number. The root eval
+and all position-fact reads remain strictly trust-gated. For drill grading, strictness-0 compares the played move to the trusted
 `best_move_uci` alone (no move-eval needed); thresholds use `position_eval_loss_cp` or
 fall back to the worker (see §6.4.6).
 

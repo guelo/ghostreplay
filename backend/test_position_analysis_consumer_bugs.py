@@ -112,14 +112,17 @@ def test_lookup_move_evals_untrusted_normalized_fallback(session):
     # ONLY an untrusted browser row supplies a played_eval, stored under a
     # clock-variant FEN so the request resolves via the normalized fallback. No
     # trusted canonical eval exists for this position+move.
+    #
+    # g-a0ix: the move-card eval is no longer strictly trust-gated. When no trusted
+    # eval exists the untrusted browser played_eval is surfaced as the last-resort
+    # fallback (tier 4), so previously-blank off-book cards show a number. (The ROOT
+    # eval stays trusted-only — see test_root_eval_gul4p_untrusted_sibling_does_not_
+    # surface below, which is deliberately NOT flipped.)
     _seed(session, fen=POS_B, uci="f1c4", played_eval=BROWSER_CP, **_untrusted_browser_values())
 
     result = lookup_move_evals(session, [(POS_A, "f1c4")])[(POS_A, "f1c4")]
 
-    # (a) the untrusted browser eval must NOT drive the result, AND
-    # (b) with no trusted eval available, the correct outcome is "unavailable".
-    assert result != MoveEval(cp=BROWSER_CP, mate=None)
-    assert result is None
+    assert result == MoveEval(cp=BROWSER_CP, mate=None)
 
 
 def test_lookup_move_evals_trusted_canonical_still_resolves(session):
