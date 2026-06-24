@@ -10848,6 +10848,73 @@ button.tree-node-card--compact {
     gap: 0.4rem;
 }
 
+/* Off-book marker: a violet pill (deliberately off the grade hue — greens /
+   yellows / reds — and the blue connectors, so it reads as "your line" rather
+   than a grade or a book edge) flagging moves that branch off the eco.json
+   book. Clickable: toggles the info popover below. Mirrors the grade tag's
+   sizing for a consistent chip rhythm. */
+.tree-node-card__off-book-wrap {
+    flex: 0 0 auto;
+    display: inline-flex;
+}
+
+.tree-node-card__off-book {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-violet-500) 55%, transparent);
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--color-violet-500) 16%, var(--card-bg));
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--color-violet-500) 72%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.tree-node-card__off-book:hover {
+    background: color-mix(in srgb, var(--color-violet-500) 28%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--color-violet-500) 75%, transparent);
+}
+
+.tree-node-card__off-book:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-violet-500) 60%, transparent);
+    outline-offset: 1px;
+}
+
+/* Fixed (viewport-anchored) so it escapes the tree columns' overflow scrollers.
+   Positioned in JS from the trigger's rect. */
+.tree-node-card__off-book-popup {
+    position: fixed;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    width: 232px;
+    padding: 0.6rem 0.7rem;
+    background: var(--surface-elevated, var(--bg-secondary, #2a2a2a));
+    border: 1px solid color-mix(in srgb, var(--color-violet-500) 38%, transparent);
+    border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    font-size: 0.72rem;
+    font-weight: 400;
+    line-height: 1.45;
+    letter-spacing: normal;
+    text-transform: none;
+    text-align: left;
+    color: var(--text-secondary);
+    cursor: default;
+}
+
+.tree-node-card__off-book-popup strong {
+    font-size: 0.74rem;
+    color: var(--text-primary);
+}
+
 .tree-node-card__name {
     flex: 1;
     min-width: 0;
@@ -10918,6 +10985,13 @@ button.tree-node-card--compact {
     font-size: 0.95rem;
     font-weight: 700;
     color: var(--text-primary);
+}
+
+.tree-node-card__name-line {
+    display: flex;
+    align-items: baseline;
+    gap: 0.35rem;
+    min-width: 0;
 }
 
 .tree-node-card--expanded .tree-node-card__name {

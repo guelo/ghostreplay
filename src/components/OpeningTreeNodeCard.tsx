@@ -1,3 +1,4 @@
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   formatGames,
   formatMoveLabel,
@@ -27,6 +28,10 @@ export interface OpeningTreeNodeView {
   san: string | null;
   openingName: string | null;
   eco: string | null;
+  /** True when this move's edge exists in the eco.json opening book. False =>
+   *  an off-book branch from the player's games; the name is inherited from the
+   *  last book leaf, so an "Off book" chip flags it. Always true for the root. */
+  inBook: boolean;
   /** 0–100 opening score; null = no evidence. */
   score: number | null;
   /** White-relative centipawns (+white / −black); null when no best-move row. */
@@ -75,9 +80,124 @@ function GradeTag({ score }: { score: number | null }) {
   );
 }
 
+/**
+ * Marks a move whose edge is NOT in the eco.json book — an off-book branch from
+ * the player's own games. Its opening name is inherited from the last book leaf,
+ * so this chip flags that the name is approximate and the line is the player's.
+ *
+ * The chip is a clickable trigger that toggles an info popover. It renders as a
+ * `role="button"` span (not a `<button>`) because the compact card is itself a
+ * selection `<button>` and a real nested button is invalid; the click is
+ * stopped from propagating so tapping the chip never selects the card. The
+ * popover is `position: fixed` and anchored to the trigger rect so it escapes
+ * the tree columns' `overflow` scrollers (which would otherwise clip it).
+ */
+function OffBookChip() {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; visibility: "hidden" | "visible" }>({
+    top: 0,
+    left: 0,
+    visibility: "hidden",
+  });
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLSpanElement>(null);
+  const popupRef = useRef<HTMLSpanElement>(null);
+
+  const toggle = (e: { stopPropagation: () => void; preventDefault: () => void }) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setOpen((v) => !v);
+  };
+
+  // Anchor the fixed popover to the trigger after it mounts (so we can measure
+  // its size and flip/clamp it into the viewport). Rendered hidden for one frame
+  // to avoid a flash at the unpositioned origin.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const trigger = triggerRef.current;
+    const popup = popupRef.current;
+    if (!trigger || !popup) return;
+    const t = trigger.getBoundingClientRect();
+    const p = popup.getBoundingClientRect();
+    const margin = 8;
+    let left = t.left;
+    if (left + p.width > window.innerWidth - margin) {
+      left = window.innerWidth - p.width - margin;
+    }
+    if (left < margin) left = margin;
+    let top = t.bottom + 6;
+    if (top + p.height > window.innerHeight - margin) {
+      top = t.top - 6 - p.height; // flip above when there is no room below
+    }
+    if (top < margin) top = margin;
+    setPos({ top, left, visibility: "visible" });
+  }, [open]);
+
+  // Dismiss on outside click, Escape, or any scroll/resize (the fixed popover
+  // would otherwise detach from the chip as the tree scrolls).
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (wrapRef.current?.contains(target) || popupRef.current?.contains(target)) {
+        return;
+      }
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    const dismiss = () => setOpen(false);
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [open]);
+
+  return (
+    <span className="tree-node-card__off-book-wrap" ref={wrapRef}>
+      <span
+        ref={triggerRef}
+        role="button"
+        tabIndex={0}
+        className="tree-node-card__off-book"
+        aria-label="Off book — what does this mean?"
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") toggle(e);
+        }}
+      >
+        Off book
+      </span>
+      {open && (
+        <span
+          ref={popupRef}
+          className="tree-node-card__off-book-popup"
+          role="tooltip"
+          style={pos}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <strong>Off book</strong>
+          <span>
+            This move isn't in the official opening book — it is an opening move you played in a game.
+          </span>
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Compact body: two lines (SAN + score/grade, then opening name + eval). */
 function CompactBody({ node }: { node: OpeningTreeNodeView }) {
   const isRoot = node.san === null;
+  const isOffBook = !isRoot && !node.inBook;
   const name = formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
 
@@ -91,6 +211,7 @@ function CompactBody({ node }: { node: OpeningTreeNodeView }) {
         </span>
       </span>
       <span className="tree-node-card__line tree-node-card__line--secondary">
+        {isOffBook && <OffBookChip />}
         {!isRoot && (
           <span className="tree-node-card__name" title={name}>
             {name}
@@ -111,6 +232,7 @@ function ExpandedBody({
   onStartDrill?: () => void;
 }) {
   const isRoot = node.san === null;
+  const isOffBook = !isRoot && !node.inBook;
   const name = formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
   // Every expanded move card is drillable; the page decides drillability by
@@ -126,8 +248,11 @@ function ExpandedBody({
           {formatMoveLabel(node.ply, node.san)}
         </span>
         {!isRoot && (
-          <span className="tree-node-card__name" title={name}>
-            {name}
+          <span className="tree-node-card__name-line">
+            <span className="tree-node-card__name" title={name}>
+              {name}
+            </span>
+            {isOffBook && <OffBookChip />}
           </span>
         )}
       </div>

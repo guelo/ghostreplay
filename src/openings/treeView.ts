@@ -115,6 +115,7 @@ export function nodeToView(node: TreeNode): OpeningTreeNodeView {
     san: node.san,
     openingName: node.opening_name,
     eco: node.eco,
+    inBook: node.in_book,
     score: node.opening_score,
     evalCp: node.eval_cp,
     evalMate: node.eval_mate,
@@ -145,6 +146,9 @@ export function synthesizeRootView(
     san: null,
     openingName: null,
     eco: null,
+    // The start position is conceptually always "in book"; also gated by the
+    // null SAN, so the chip never shows on the root regardless.
+    inBook: true,
     score: response.root_opening_score ?? null,
     evalCp: response.root_eval_cp,
     evalMate: response.root_eval_mate,

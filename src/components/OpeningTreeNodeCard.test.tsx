@@ -11,6 +11,7 @@ const childView: OpeningTreeNodeView = {
   san: "Nf3",
   openingName: "Ruy Lopez",
   eco: "C60",
+  inBook: true,
   score: 72,
   evalCp: 120,
   evalMate: null,
@@ -28,6 +29,7 @@ const rootView: OpeningTreeNodeView = {
   san: null,
   openingName: null,
   eco: null,
+  inBook: true,
   score: null,
   evalCp: 40,
   evalMate: null,
@@ -164,6 +166,63 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(screen.getByText("Nf3")).toBeInTheDocument();
   });
 
+  it("shows an 'Off book' chip for off-book moves and hides it for book moves", () => {
+    const { rerender } = render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: false }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Off book")).toBeInTheDocument();
+
+    rerender(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: true }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Off book")).toBeNull();
+  });
+
+  it("opens the 'Off book' info popover on click without selecting the card", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: false }}
+        onSelect={onSelect}
+      />,
+    );
+
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: /off book — what does this mean/i }),
+    );
+
+    // The popover appears, and the chip click did NOT bubble to card selection.
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    expect(screen.getByText(/branches off from your own games/i)).toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // Escape dismisses it.
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("never shows the 'Off book' chip on the root", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...rootView, inBook: false }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Off book")).toBeNull();
+  });
+
   it("renders the root as 'Start' with eval but no name slot", () => {
     render(
       <OpeningTreeNodeCard
@@ -252,6 +311,16 @@ describe("OpeningTreeNodeCard — expanded", () => {
       />,
     );
     expect(screen.getByText("Checkmate")).toBeInTheDocument();
+  });
+
+  it("shows the 'Off book' chip next to the name for off-book expanded moves", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="expanded"
+        node={{ ...childView, inBook: false }}
+      />,
+    );
+    expect(screen.getByText("Off book")).toBeInTheDocument();
   });
 
   it("renders the root with a 'Starting position' header, no name line, dashed metrics, and eval", () => {
