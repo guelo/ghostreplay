@@ -13,6 +13,7 @@ import {
 } from "../openings/route";
 import {
   connectorStyle,
+  moveLabelAt,
   resolveDrop,
   type DisplayColumn,
 } from "../openings/treeView";
@@ -210,6 +211,11 @@ function OpeningsPage() {
   const columns = view?.columns ?? null;
   const selectionLine = view?.selectionLine ?? [];
   const columnCount = columns?.length ?? 0;
+  // The loading placeholder registers as the column after the last real one, so
+  // the connector loop draws the unconnected (dangling-arrow) stub from the
+  // selected card out toward the column being fetched while it loads.
+  const connectorColumnCount =
+    columnCount + (appendStatus === "loading" ? 1 : 0);
   // Full line (not a depth count): a same-depth sibling switch changes which
   // node is selected without changing columnCount and must re-aim the lines.
   const selectionKey = `${playerColor}\u0000${selectionLine.join("\u0000")}`;
@@ -222,7 +228,7 @@ function OpeningsPage() {
     scrollRef,
     columnElsRef,
     selectedNodeElsRef,
-    columnCount,
+    columnCount: connectorColumnCount,
     selectionKey,
   });
 
@@ -621,14 +627,48 @@ function OpeningsPage() {
                       />
                     ))}
 
-                    {appendStatus === "loading" && (
-                      <div
-                        className="openings-tree-column openings-tree-append openings-tree-append--loading"
-                        aria-live="polite"
-                      >
-                        <p className="openings-tree-append__label">Loading…</p>
-                      </div>
-                    )}
+                    {appendStatus === "loading" &&
+                      (() => {
+                        // The loading column will render the move at its ply in
+                        // the requested line — head it now with that move's
+                        // label (a real move on forward/deep nav, "—" when the
+                        // click only extends one ply past what's loaded).
+                        const appendLabel = moveLabelAt(
+                          moves,
+                          view.selectionLine.length,
+                        );
+                        return (
+                          <div
+                            className="openings-tree-column openings-tree-append openings-tree-append--loading"
+                            aria-live="polite"
+                          >
+                            <span
+                              className={`openings-tree-column__header${
+                                appendLabel
+                                  ? " openings-tree-column__header--active"
+                                  : ""
+                              }`}
+                              aria-hidden="true"
+                            >
+                              {appendLabel ?? "—"}
+                            </span>
+                            <div
+                              className="openings-tree-append__body"
+                              ref={(el) =>
+                                registerColumn(view.columns.length, el)
+                              }
+                            >
+                              <span
+                                className="openings-tree-append__spinner"
+                                aria-hidden="true"
+                              />
+                              <p className="openings-tree-append__label">
+                                Loading…
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                     {appendStatus === "error" && (
                       <div

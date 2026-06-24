@@ -1,6 +1,7 @@
 import { Chess } from "chess.js";
 import type { OpeningTreeNodeView } from "../components/OpeningTreeNodeCard";
 import type { TreeNode, TreeResponse } from "../utils/api";
+import { formatMoveLabel } from "./format";
 
 /**
  * Pure (no-React) transform layer for the `/openings` move tree. Turns a
@@ -194,6 +195,30 @@ export function replayLine(line: string[]): BoardState {
     lastMove = played;
   }
   return { fen: chess.fen(), lastMove };
+}
+
+/**
+ * Header label ("1. e4" / "2… Nf6") for the move at `index` in a UCI line, or
+ * null when the index is out of range or a move is illegal. Used to head the
+ * loading placeholder column with the move it is about to render — the move the
+ * settled column will be selected on — by replaying the line for that move's
+ * SAN (the column model isn't built yet while the fetch is in flight).
+ */
+export function moveLabelAt(line: string[], index: number): string | null {
+  if (index < 0 || index >= line.length) {
+    return null;
+  }
+  const chess = new Chess();
+  let san: string | null = null;
+  for (let i = 0; i <= index; i++) {
+    const played = applyUci(chess, line[i]);
+    if (!played) {
+      return null;
+    }
+    san = chess.history().at(-1) ?? null;
+  }
+  // ply is 1-based: line index 0 is ply 1 (White's first move).
+  return formatMoveLabel(index + 1, san);
 }
 
 /**
