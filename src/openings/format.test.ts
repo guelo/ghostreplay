@@ -12,42 +12,43 @@ import {
   getPriorityTone,
 } from './format'
 
-// Grade/tone boundaries are the retained A≥85…F<45 scale. The first populated v2
-// calibration (g-m36y) showed a low-skewed distribution but was ~95% one user —
-// too thin to re-centre — so the original boundaries stand. These tests pin them
-// so any future shift is a deliberate, reviewed change.
+// Grade/tone boundaries re-centred onto the observed v2 distribution (g-g5sg,
+// 2026-06-24 calibration: pooled p50≈33, p95≈55, six included pairs all median
+// 31–34). The original A≥85…F<45 scale graded ~95% of cards F/alert; the bands
+// now track pooled percentiles. These tests pin the new boundaries so any future
+// shift is a deliberate, reviewed change.
 describe('getPriorityLabel', () => {
-  it('grades at the retained boundaries (F<45, D 45–55, C 55–70, B 70–85, A≥85)', () => {
+  it('grades at the re-centred boundaries (F<22, D 22–28, C 28–38, B 38–50, A≥50)', () => {
     expect(getPriorityLabel(null)).toBe('No Data')
 
     expect(getPriorityLabel(0)).toBe('F')
-    expect(getPriorityLabel(44.9)).toBe('F')
+    expect(getPriorityLabel(21.9)).toBe('F')
 
-    expect(getPriorityLabel(45)).toBe('D')
-    expect(getPriorityLabel(54.9)).toBe('D')
+    expect(getPriorityLabel(22)).toBe('D')
+    expect(getPriorityLabel(27.9)).toBe('D')
 
-    expect(getPriorityLabel(55)).toBe('C')
-    expect(getPriorityLabel(69.9)).toBe('C')
+    expect(getPriorityLabel(28)).toBe('C')
+    expect(getPriorityLabel(37.9)).toBe('C')
 
-    expect(getPriorityLabel(70)).toBe('B')
-    expect(getPriorityLabel(84.9)).toBe('B')
+    expect(getPriorityLabel(38)).toBe('B')
+    expect(getPriorityLabel(49.9)).toBe('B')
 
-    expect(getPriorityLabel(85)).toBe('A')
+    expect(getPriorityLabel(50)).toBe('A')
     expect(getPriorityLabel(100)).toBe('A')
   })
 })
 
 describe('getPriorityTone', () => {
-  it('maps tones to the retained boundaries (alert<45, watch 45–65, steady≥65)', () => {
+  it('maps tones to the re-centred boundaries (alert<25, watch 25–38, steady≥38)', () => {
     expect(getPriorityTone(null)).toBe('muted')
 
     expect(getPriorityTone(0)).toBe('alert')
-    expect(getPriorityTone(44.9)).toBe('alert')
+    expect(getPriorityTone(24.9)).toBe('alert')
 
-    expect(getPriorityTone(45)).toBe('watch')
-    expect(getPriorityTone(64.9)).toBe('watch')
+    expect(getPriorityTone(25)).toBe('watch')
+    expect(getPriorityTone(37.9)).toBe('watch')
 
-    expect(getPriorityTone(65)).toBe('steady')
+    expect(getPriorityTone(38)).toBe('steady')
     expect(getPriorityTone(100)).toBe('steady')
   })
 })
@@ -76,19 +77,19 @@ describe('numeric formatters', () => {
 describe('tree-card helpers', () => {
   it('getGradeToken tracks the getPriorityLabel boundaries', () => {
     expect(getGradeToken(null)).toBe('none')
-    expect(getGradeToken(44.9)).toBe('f')
-    expect(getGradeToken(45)).toBe('d')
-    expect(getGradeToken(55)).toBe('c')
-    expect(getGradeToken(70)).toBe('b')
-    expect(getGradeToken(85)).toBe('a')
+    expect(getGradeToken(21.9)).toBe('f')
+    expect(getGradeToken(22)).toBe('d')
+    expect(getGradeToken(28)).toBe('c')
+    expect(getGradeToken(38)).toBe('b')
+    expect(getGradeToken(50)).toBe('a')
   })
 
   it('getGradeText spells out each grade and uses sentence-case "No data" for null', () => {
     expect(getGradeText(90)).toBe('Grade A')
-    expect(getGradeText(72)).toBe('Grade B')
-    expect(getGradeText(60)).toBe('Grade C')
-    expect(getGradeText(48)).toBe('Grade D')
-    expect(getGradeText(20)).toBe('Grade F')
+    expect(getGradeText(42)).toBe('Grade B')
+    expect(getGradeText(32)).toBe('Grade C')
+    expect(getGradeText(24)).toBe('Grade D')
+    expect(getGradeText(10)).toBe('Grade F')
 
     // Deliberate casing split: the accessible grade name is sentence case while
     // the visible label stays title case. Pinned together so neither drifts.

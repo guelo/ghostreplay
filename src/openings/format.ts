@@ -33,21 +33,25 @@ export function formatGames(value: number | null | undefined): string {
   return value.toLocaleString();
 }
 
-// Grade/tone boundaries retained at the original A≥85…F<45 scale. The first
-// populated v2 calibration (g-m36y) showed a low-skewed distribution that would
-// argue for re-centring, but the cohort was ~95% one user — too thin to move a
-// product-facing scale. Revisit when more populated pairs exist. See
-// docs/openingscore_final.md "Calibration Outcome (v2)".
+// Grade/tone boundaries re-centred onto the observed v2 score distribution
+// (g-g5sg, 2026-06-24 calibration: pooled p50≈33, p95≈55, and six included
+// pairs all median 31–34). The original A≥85…F<45 scale graded ~95% of cards
+// F/alert and conveyed no signal, so the bands now track pooled percentiles:
+// A≥50 (~p95) · B≥38 (~p82) · C≥28 (~p40) · D≥22 (~p12) · F<22; tone alert<25
+// · watch<38. The raw score is still displayed unchanged (formatScore), so a
+// strong card reads e.g. "A · 50" — grade is the relative signal, the number
+// is the absolute quality. See docs/openingscore_final.md "Calibration Outcome
+// (v2)".
 export function getPriorityTone(score: number | null): OpeningTone {
   if (score === null) {
     return "muted";
   }
 
-  if (score < 45) {
+  if (score < 25) {
     return "alert";
   }
 
-  if (score < 65) {
+  if (score < 38) {
     return "watch";
   }
 
@@ -59,19 +63,19 @@ export function getPriorityLabel(score: number | null): string {
     return "No Data";
   }
 
-  if (score >= 85) {
+  if (score >= 50) {
     return "A";
   }
 
-  if (score >= 70) {
+  if (score >= 38) {
     return "B";
   }
 
-  if (score >= 55) {
+  if (score >= 28) {
     return "C";
   }
 
-  if (score >= 45) {
+  if (score >= 22) {
     return "D";
   }
 

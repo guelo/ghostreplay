@@ -83,8 +83,8 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(screen.getByText("Nf3")).toBeInTheDocument();
     expect(screen.getByText("72")).toBeInTheDocument();
 
-    const grade = screen.getByLabelText("Grade B");
-    expect(grade).toHaveTextContent("B");
+    const grade = screen.getByLabelText("Grade A");
+    expect(grade).toHaveTextContent("A");
 
     const name = screen.getByText("Ruy Lopez");
     expect(name).toHaveAttribute("title", "Ruy Lopez");
@@ -248,7 +248,7 @@ describe("OpeningTreeNodeCard — expanded", () => {
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.getByText("2. Nf3")).toBeInTheDocument();
     expect(screen.getByText("72")).toBeInTheDocument();
-    expect(screen.getByLabelText("Grade B")).toHaveTextContent("B");
+    expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
     expect(screen.getByText("+1.2")).toBeInTheDocument();
 
     expect(screen.getByText("Coverage")).toBeInTheDocument();
@@ -335,9 +335,9 @@ describe("OpeningTreeNodeCard — expanded", () => {
 
   it.each<[number | null, string]>([
     [90, "Grade A"],
-    [78, "Grade B"],
-    [60, "Grade C"],
-    [48, "Grade D"],
+    [42, "Grade B"],
+    [32, "Grade C"],
+    [24, "Grade D"],
     [10, "Grade F"],
     [null, "No data"],
   ])("exposes the grade accessible name for score %s", (score, label) => {

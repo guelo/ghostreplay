@@ -670,27 +670,38 @@ discontinuity across the old 49↔50cp pass/fail boundary (asserted by
 `test_no_49_50_discontinuity` / `test_context_sensitivity` in
 `backend/test_opening_quality.py`). No change.
 
-### Grade thresholds — **retained** (insufficient evidence to re-centre)
+### Grade thresholds — **re-centred** (g-g5sg, 2026-06-24)
 
-`A ≥ 85`, `B ≥ 70`, `C ≥ 55`, `D ≥ 45`, `F < 45`; tones `alert < 45`,
-`watch < 65` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
+`A ≥ 50`, `B ≥ 38`, `C ≥ 28`, `D ≥ 22`, `F < 22`; tones `alert < 25`,
+`watch < 38` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
 
-The populated calibration run *did* show a low-skewed distribution that would
-argue for re-centring — pooled named-score mean **32.1**, p5 **19.7** / p25
-**27.3** / p50 **33.3** / p75 **34.1** / p95 **47.2** (n=278), per-user medians
-**30.8–33.3** (median-of-medians **32.4**), synthetic-hero p50 **33.9**. Under the
-current scale ~90% of those positions grade F and none reach B/A. **However, the
-cohort is too thin to act on:** ≈95% of the 278 samples come from a single user
-(`user 14`: 266 of 278), and only 2 of the 4 included pairs carry large
-observation counts. Moving a product-facing scale on one user's distribution is
-not justified, so the boundaries are **retained**.
+The original `A ≥ 85 … F < 45` scale was retained through the first calibration
+because that cohort was ~95% one user. The **2026-06-24** run (prod Railway DB,
+13 candidate pairs / 6 included at `min_observations = 20`) confirmed the
+low-skewed distribution is **real across users, not a single-user artifact**: all
+six included pairs' medians fall in **30.6–34.1**, while pooled named-score stats
+were mean **32.8**, p5 **18.9** / p25 **25.0** / p50 **33.3** / p75 **36.3** / p95
+**54.7** (n=450), synthetic-hero mean **33.6**. Under the old scale **>75% of
+cards graded F**, ~95% were D-or-F, and **none reached C/A**, so the grade carried
+no differentiating signal.
 
-> **Re-centring stays data-gated.** Re-run once more pairs sit at/above
-> `--min-observations` with a spread of distinct users. If the pooled and
-> per-user-median distributions still argue for a shift, edit `getPriorityLabel`
-> / `getPriorityTone` and update `src/openings/format.test.ts` to assert the new
-> boundaries. Grade/tone are display of an unchanged stored score, so a re-centre
-> is display-only and does **not** bump `QUALITY_VERSION`.
+The boundaries are therefore re-centred onto the pooled percentiles so grades
+differentiate: `A ≥ 50` (~p95), `B ≥ 38` (~p82), `C ≥ 28` (~p40, the median
+lands mid-C), `D ≥ 22` (~p12), `F < 22`; tones `alert < 25` (~p25, genuinely
+weak) / `watch < 38`. The resulting pooled mix is ≈ A 7% / B 11% / C 42% /
+D 28% / F 12% (median = C).
+
+> **The raw score is still displayed unchanged** (`formatScore`). Grade and
+> number can read e.g. "**A · 50**" — the grade is the *relative* position on the
+> observed distribution, the number is the *absolute* win-chance quality. This was
+> a deliberate product decision (keep the honest absolute number rather than hide
+> or rescale it).
+>
+> Grade/tone are display of an unchanged stored score, so this re-centre is
+> **display-only** and does **not** bump `QUALITY_VERSION`. The cohort is still
+> volume-dominated by one user (`user 14` ≈ 95% of pooled rows), so the central
+> tendency is well-supported but the fine 5-band *shape* is one-user-driven;
+> revisit the band placement when more high-observation users exist.
 
 ### Source mix & horizon
 
@@ -701,16 +712,17 @@ distribution; raw-middlegame vs unscored root counts kept distinct).
 ### Numeric gates (release bar)
 
 - One-pass in-memory scoring per pair (full ~11k-root registry): **< 5 s**.
-  Observed on the populated run: median **3.4 s/pair**, max **3.6 s** (total 23.6 s
-  across 4 pairs / 11,274 named roots) → **PASS**.
+  Observed on the 2026-06-24 run: median **3.2 s/pair**, max **3.7 s** (total
+  38.1 s across the candidate pairs / 11,274 named roots) → **PASS**.
 - Cache read (`list_cached_opening_scores` after one isolated recompute, under
   `--write-bench`): **< 50 ms**. Observed **38.96 ms** over 216 cached rows on an
-  isolated `ghostreplay_calibrate` Postgres copy → **PASS**.
+  isolated `ghostreplay_calibrate` Postgres copy (earlier write-bench run; the
+  2026-06-24 run was read-only, so cache read was `n/a`) → **PASS**.
 
-**Source mix (populated run):** 100% `session_eval` / 0.0% `analysis_cache`
-(8,850 samples; 26 sessions excluded for broken continuity). **Horizon:**
-opening-interval length mean 19.7 plies; 689 of 900 samples reached middlegame.
-**Cohort:** 4 of 8 candidate pairs included (`min_observations = 20`).
+**Source mix (2026-06-24 run):** 99.6% `session_eval` / 0.4% `analysis_cache`
+(17,693 observations; 128 sessions excluded for broken continuity). **Horizon:**
+opening-interval length mean 15.3 plies; 1,253 of 2,345 samples reached
+middlegame. **Cohort:** 6 of 13 candidate pairs included (`min_observations = 20`).
 
 ## Why This Is The Final Recommendation
 
