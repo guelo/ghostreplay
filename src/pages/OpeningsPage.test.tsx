@@ -16,6 +16,7 @@ import {
 import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
 
 const getOpeningTreeMock = vi.fn();
+const getOpeningTreeStatusMock = vi.fn();
 const captureEventMock = vi.fn();
 
 vi.mock("../analytics/posthog", () => ({
@@ -40,6 +41,9 @@ vi.mock("../utils/api", async () => {
     ...actual,
     getOpeningTree: (...args: Parameters<typeof actual.getOpeningTree>) =>
       getOpeningTreeMock(...args),
+    getOpeningTreeStatus: (
+      ...args: Parameters<typeof actual.getOpeningTreeStatus>
+    ) => getOpeningTreeStatusMock(...args),
   };
 });
 
@@ -362,6 +366,13 @@ function clickMove(san: string) {
 
 beforeEach(() => {
   getOpeningTreeMock.mockReset();
+  // Default: cache is warm so the page loads the tree directly (no setup poll).
+  // The cold-cache initializing flow is covered by its own tests below.
+  getOpeningTreeStatusMock.mockReset();
+  getOpeningTreeStatusMock.mockResolvedValue({
+    player_color: "white",
+    state: "warm",
+  });
   captureEventMock.mockReset();
   boardOptions = {};
 });
@@ -966,5 +977,42 @@ describe("OpeningsPage tree", () => {
     );
     expect(observed).toBeTruthy();
     expect(observed!.getAttribute("stroke-dasharray")).toBeNull();
+  });
+});
+
+describe("OpeningsPage cold-cache setup (g-k4z2)", () => {
+  it("shows the one-time setup screen while building, then loads the tree once warm", async () => {
+    vi.useFakeTimers();
+    try {
+      // Cold (user, color): the first probe is still bootstrapping, the next is warm.
+      getOpeningTreeStatusMock.mockReset();
+      getOpeningTreeStatusMock
+        .mockResolvedValueOnce({ player_color: "white", state: "building" })
+        .mockResolvedValueOnce({ player_color: "white", state: "warm" });
+      getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
+
+      renderAt("/openings?color=white");
+
+      // Explicit one-time setup state — NOT a silent spinner — and no /tree fetch
+      // is issued while the bootstrap runs server-side.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(
+        screen.getByText(/Setting up your white opening tree/i),
+      ).toBeInTheDocument();
+      expect(getOpeningTreeMock).not.toHaveBeenCalled();
+
+      // The next poll is warm → the tree loads automatically.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      expect(
+        screen.getByText("e4", { selector: ".tree-node-card__move" }),
+      ).toBeInTheDocument();
+      expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useOpeningsTree } from "./useOpeningsTree";
 import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
 
@@ -13,9 +13,11 @@ import type { TreeColumn, TreeNode, TreeResponse } from "../utils/api";
  */
 
 const getOpeningTreeMock = vi.fn();
+const getOpeningTreeStatusMock = vi.fn();
 
 vi.mock("../utils/api", () => ({
   getOpeningTree: (...args: unknown[]) => getOpeningTreeMock(...args),
+  getOpeningTreeStatus: (...args: unknown[]) => getOpeningTreeStatusMock(...args),
 }));
 
 function tn(overrides: Partial<TreeNode> & { uci: string }): TreeNode {
@@ -83,6 +85,12 @@ const baseRoute = { playerColor: "white" as const, opening: null };
 describe("useOpeningsTree — user-selected cache scope (g-obh5)", () => {
   beforeEach(() => {
     getOpeningTreeMock.mockReset();
+    // Default: cache is warm, so the fetch path is unchanged for these tests.
+    getOpeningTreeStatusMock.mockReset();
+    getOpeningTreeStatusMock.mockResolvedValue({
+      player_color: "white",
+      state: "warm",
+    });
   });
 
   it("refetches the exact prefix when the displayed response carries a user-selected node", async () => {
@@ -164,5 +172,149 @@ describe("useOpeningsTree — user-selected cache scope (g-obh5)", () => {
       expect(result.current.canonicalLine).toEqual(["e2e4"]),
     );
     expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useOpeningsTree — cold-cache bootstrap gate (g-k4z2)", () => {
+  // Poll cadence mirrors STATUS_POLL_INTERVAL_MS in useOpeningsTree.ts.
+  const POLL_MS = 2000;
+
+  beforeEach(() => {
+    getOpeningTreeMock.mockReset();
+    getOpeningTreeStatusMock.mockReset();
+  });
+
+  it("shows the initializing state while building, then loads the tree once warm", async () => {
+    vi.useFakeTimers();
+    try {
+      // First probe is still building (the one-time bootstrap), second is warm.
+      getOpeningTreeStatusMock
+        .mockResolvedValueOnce({ player_color: "white", state: "building" })
+        .mockResolvedValueOnce({ player_color: "white", state: "warm" });
+      getOpeningTreeMock.mockResolvedValue(tr({ canonical_line: [] }));
+
+      const { result } = renderHook(() =>
+        useOpeningsTree({ ...baseRoute, moves: [] }),
+      );
+
+      // First /tree/status probe resolves "building" → explicit initializing
+      // state, and crucially NO /tree fetch is issued (no silent server block).
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(result.current.pageStatus).toBe("initializing");
+      expect(getOpeningTreeMock).not.toHaveBeenCalled();
+
+      // After one poll interval the next probe is warm → the tree loads.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_MS);
+      });
+      expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
+      expect(result.current.pageStatus).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("probes status at most once per color (warm stays warm for the session)", async () => {
+    getOpeningTreeStatusMock.mockResolvedValue({
+      player_color: "white",
+      state: "warm",
+    });
+    getOpeningTreeMock.mockResolvedValue(
+      tr({
+        canonical_line: ["e2e4"],
+        columns: [tc(0, [tn({ uci: "e2e4", san: "e4", ply: 1 })], "e2e4")],
+      }),
+    );
+
+    const { result, rerender } = renderHook(
+      (props: { playerColor: "white"; opening: null; moves: string[] }) =>
+        useOpeningsTree(props),
+      { initialProps: { ...baseRoute, moves: [] as string[] } },
+    );
+    await waitFor(() => expect(result.current.isSettled).toBe(true));
+    expect(getOpeningTreeStatusMock).toHaveBeenCalledTimes(1);
+
+    // A divergent line for the same (now known-warm) color forces a fresh fetch
+    // but skips the status probe — warm is remembered per color.
+    rerender({ ...baseRoute, moves: ["d2d4"] });
+    await waitFor(() => expect(getOpeningTreeMock).toHaveBeenCalledTimes(2));
+    expect(getOpeningTreeStatusMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a retry-able PAGE error (not a pinned setup screen) when the poll times out after a tree was shown", async () => {
+    vi.useFakeTimers();
+    try {
+      // White loads warm (so a previous tree is displayed + displayedRef is set).
+      getOpeningTreeStatusMock.mockResolvedValue({
+        player_color: "white",
+        state: "warm",
+      });
+      getOpeningTreeMock.mockResolvedValue(tr({ canonical_line: [] }));
+
+      const { result, rerender } = renderHook(
+        (props: {
+          playerColor: "white" | "black";
+          opening: null;
+          moves: string[];
+        }) => useOpeningsTree(props),
+        {
+          initialProps: {
+            playerColor: "white" as "white" | "black",
+            opening: null,
+            moves: [] as string[],
+          },
+        },
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.isSettled).toBe(true);
+
+      // Switch to a cold color whose one-time bootstrap never finishes.
+      getOpeningTreeStatusMock.mockReset();
+      getOpeningTreeStatusMock.mockResolvedValue({
+        player_color: "black",
+        state: "building",
+      });
+      rerender({ playerColor: "black", opening: null, moves: [] });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(result.current.pageStatus).toBe("initializing");
+
+      // Exhaust the ~25×2s poll cap. Despite a previous (white) tree still in
+      // displayedRef, this must become a retry-able PAGE error — not an append
+      // error that would leave the setup screen pinned with no Retry.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(result.current.pageStatus).toBe("error");
+      expect(result.current.view).toBeNull();
+      expect(result.current.error).toMatch(/still being set up/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a /tree bootstrap_timeout as a retry-able setup state, not ready", async () => {
+    // Warm status gate passes, but the /tree fetch races onto a degraded,
+    // still-building book-only tree (the batch was pruned/invalidated): it must
+    // NOT render as ready.
+    getOpeningTreeStatusMock.mockResolvedValue({
+      player_color: "white",
+      state: "warm",
+    });
+    getOpeningTreeMock.mockResolvedValue(
+      tr({ canonical_line: [], cache_state: "bootstrap_timeout" }),
+    );
+
+    const { result } = renderHook(() =>
+      useOpeningsTree({ ...baseRoute, moves: [] }),
+    );
+    await waitFor(() => expect(result.current.pageStatus).toBe("error"));
+    expect(result.current.isSettled).toBe(false);
+    expect(result.current.error).toMatch(/finishing setup/i);
   });
 });

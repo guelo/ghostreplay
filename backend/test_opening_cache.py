@@ -1419,7 +1419,9 @@ def test_ensure_tree_cache_legacy_edgeless_batch_blocks_and_bootstraps(db_sessio
 
 
 def test_ensure_tree_cache_no_evidence_returns_book_only(db_session):
-    """Cold user with no evidence: refresh_now writes no batch ⇒ (None, None, book_only)."""
+    """Cold user with no evidence: short-circuit to (None, None, book_only) WITHOUT
+    blocking on refresh_now — a book-only tree is correct and complete, and the
+    blocking flush would needlessly queue behind the single scheduler worker (g-k4z2)."""
     graph = _make_graph()
     roots = _make_roots()
     with patch(
@@ -1429,17 +1431,21 @@ def test_ensure_tree_cache_no_evidence_returns_book_only(db_session):
     ) as request_recompute:
         result = ensure_tree_cache(db_session, 999, "white", graph, roots)
 
-    refresh_now.assert_called_once()
+    # No blocking bootstrap and no background trigger for a no-evidence user.
+    refresh_now.assert_not_called()
     request_recompute.assert_not_called()
     assert result == (None, None, "book_only")
 
 
 def test_ensure_tree_cache_bootstrap_timeout_no_batch_logs_warning(db_session, caplog):
     """A bootstrap that times out (refresh_now False) with no batch logs a WARNING and
-    reports the degraded state distinctly (not a clean book-only)."""
+    reports the degraded state distinctly (not a clean book-only). The user HAS
+    evidence (else the no-evidence short-circuit returns book_only before refresh_now)."""
     graph = _make_graph()
     roots = _make_roots()
     with patch(
+        "app.opening_cache.has_opening_evidence", return_value=True
+    ), patch(
         "app.opening_score_scheduler.refresh_now", return_value=False
     ), patch("app.opening_score_scheduler.request_recompute"):
         with caplog.at_level("WARNING"):

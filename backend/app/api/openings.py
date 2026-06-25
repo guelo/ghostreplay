@@ -29,6 +29,7 @@ from app.opening_cache import (
     lookup_observed_edges_for_parents,
     lookup_position_scores_for_batch,
     observed_edge_parent_chunk_count,
+    resolve_tree_cache_state,
 )
 from app.opening_evidence import EdgeEvidence, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
@@ -609,6 +610,24 @@ class TreeResponse(BaseModel):
     columns: list[TreeColumn]
     batch_computed_at: datetime | None
     model_version: str
+    # Diagnostic cache signal from ensure_tree_cache (warm_fresh / bootstrapped /
+    # book_only / bootstrap_timeout), set by the route after build. Lets a DIRECT
+    # /tree caller (one that did not gate on /tree/status) detect a degraded
+    # book-only/timeout tree and retry. The default covers builder-only construction
+    # in tests; the route always overwrites it.
+    cache_state: str = "warm_fresh"
+
+
+class TreeStatusResponse(BaseModel):
+    """Cheap, non-blocking cache-state probe for the ``/tree`` poll (g-k4z2).
+
+    ``state`` is ``"warm"`` (load ``/tree`` now — it serves the cached batch),
+    ``"building"`` (a one-time bootstrap is running — show the setup UI and keep
+    polling), or ``"cold"`` (this poll just kicked the bootstrap off).
+    """
+
+    player_color: str
+    state: str
 
 
 @dataclass(frozen=True)
@@ -1341,6 +1360,27 @@ class _OpeningTreeBuilder:
         )
 
 
+@router.get("/tree/status", response_model=TreeStatusResponse)
+def get_opening_tree_status(
+    player_color: Literal["white", "black"] = Query(...),
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> TreeStatusResponse:
+    """Cheap cache-state probe so the UI can show an explicit one-time
+    "Setting up your opening tree…" state instead of a silent ~22s spinner.
+
+    Does ONE indexed batch lookup (+ a ``limit=1`` evidence check only when there
+    is no batch) — it never builds the overlay and never blocks on the bootstrap.
+    On a cold/registry-stale (user, color) with evidence it fires the BACKGROUND
+    recompute (non-blocking) and returns ``building``/``cold``; the UI polls until
+    ``warm`` and then loads ``/tree`` (now fast). See ``resolve_tree_cache_state``.
+    """
+    graph = get_opening_graph()
+    roots = get_opening_roots()
+    state = resolve_tree_cache_state(db, user.user_id, player_color, graph, roots)
+    return TreeStatusResponse(player_color=player_color, state=state)
+
+
 @router.get("/tree", response_model=TreeResponse)
 def get_opening_tree(
     player_color: Literal["white", "black"] = Query(...),
@@ -1392,6 +1432,7 @@ def get_opening_tree(
         db, graph, roots, batch_id, batch_computed_at, player_color, user.user_id
     )
     response = builder.build(move, opening, timings=timings)
+    response.cache_state = cache_state
     timings["observed_edge_query_count"] = builder._observed_edge_query_count
     timings["observed_edge_row_count"] = builder._observed_edge_row_count
     timings["observed_straggler_count"] = builder._observed_straggler_count

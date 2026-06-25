@@ -1392,6 +1392,22 @@ export interface TreeResponse {
   columns: TreeColumn[]
   batch_computed_at: string | null
   model_version: string
+  /** Diagnostic cache signal (warm_fresh / bootstrapped / book_only /
+   *  bootstrap_timeout) for a DIRECT caller that did not gate on /tree/status —
+   *  lets it detect a degraded book-only/timeout tree. Optional for backward
+   *  compatibility with older responses (g-k4z2). */
+  cache_state?: string
+}
+
+/** Cheap cache-state of the opening tree for one (color): `warm` => load /tree
+ *  now; `building` => a one-time bootstrap is running; `cold` => this poll just
+ *  kicked it off. `building`/`cold` both mean "show the setup UI and keep
+ *  polling". (g-k4z2) */
+export type TreeCacheState = "warm" | "building" | "cold"
+
+export interface TreeStatusResponse {
+  player_color: OpeningPlayerColor
+  state: TreeCacheState
 }
 
 /**
@@ -1419,6 +1435,24 @@ export const getOpeningTree = async (
 
   return requestJson<TreeResponse>(
     `${API_BASE_URL}/api/openings/tree?${search}`,
+    { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
+    { fallbackMessage: 'Failed to load openings' },
+  )
+}
+
+/**
+ * Cheap, non-blocking cache-state probe for one (color). The page polls this
+ * before/while loading the tree so a cold (user, color) — whose tree needs a
+ * one-time ~22s bootstrap — shows an explicit "Setting up…" state instead of a
+ * silent long spinner. Warm reads return immediately. (g-k4z2)
+ */
+export const getOpeningTreeStatus = async (
+  playerColor: OpeningPlayerColor,
+  options?: { signal?: AbortSignal },
+): Promise<TreeStatusResponse> => {
+  const search = new URLSearchParams({ player_color: playerColor })
+  return requestJson<TreeStatusResponse>(
+    `${API_BASE_URL}/api/openings/tree/status?${search}`,
     { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
     { fallbackMessage: 'Failed to load openings' },
   )

@@ -110,6 +110,37 @@ def test_immediate_deadline_is_sticky_under_normal_enqueues():
     assert recompute.calls == [(7, "white")]
 
 
+def test_is_scheduled_tracks_pending_inflight_and_is_key_scoped():
+    # The read-side /tree/status probe uses is_scheduled to tell a freshly-fired
+    # bootstrap ("cold") from one already running ("building") without enqueuing.
+    clock = _FakeClock()
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    # Idle: nothing scheduled.
+    assert sched.is_scheduled(123, "white") is False
+
+    # A queued recompute is "scheduled" — auto_start is off so the key stays in
+    # _pending and the worker never runs it here.
+    sched.request_recompute(123, "white")
+    assert sched.is_scheduled(123, "white") is True
+    # Key-scoped: an unrelated (user, color) is not reported scheduled.
+    assert sched.is_scheduled(999, "black") is False
+
+    # The in-flight set is observed too (a recompute mid-run, before it pops).
+    with sched._lock:
+        sched._inflight.add((5, "white"))
+    assert sched.is_scheduled(5, "white") is True
+    with sched._lock:
+        sched._inflight.discard((5, "white"))
+    assert sched.is_scheduled(5, "white") is False
+
+    # After the queued run completes the key is neither pending nor in-flight.
+    clock.advance(2.0)
+    sched.run_due()
+    assert sched.is_scheduled(123, "white") is False
+
+
 def test_distinct_keys_each_recompute_once_with_own_session():
     clock = _FakeClock()
     recompute = _RecordingRecompute()

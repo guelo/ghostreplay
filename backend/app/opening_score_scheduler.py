@@ -177,6 +177,18 @@ class OpeningScoreScheduler:
                     return False
                 self._cond.wait(timeout=min(remaining, 0.1))
 
+    def is_scheduled(self, user_id: int, player_color: str) -> bool:
+        """Non-mutating: is a recompute for this key pending or in-flight?
+
+        The cheap read-side probe behind ``/api/openings/tree/status`` uses this to
+        tell a freshly-fired bootstrap ("cold") from one already running
+        ("building") WITHOUT enqueuing anything. Guarded by the same lock the worker
+        mutates ``_pending``/``_inflight`` under, so it observes a consistent set.
+        """
+        key: Key = (user_id, player_color)
+        with self._lock:
+            return key in self._pending or key in self._inflight
+
     # ------------------------------------------------------------------
     # Synchronous test surface
     # ------------------------------------------------------------------
@@ -375,6 +387,22 @@ def refresh_now(user_id: int, player_color: str, timeout: float = 5.0) -> bool:
     except Exception:
         logger.exception(
             "opening score refresh_now failed",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
+        return False
+
+
+def is_recompute_scheduled(user_id: int, player_color: str) -> bool:
+    """Non-mutating probe: is a recompute for this key pending or in-flight?
+
+    Best-effort (any scheduler error is logged and reported as "not scheduled")
+    so the read-side ``/tree/status`` probe can never 500 on a scheduler fault.
+    """
+    try:
+        return _scheduler.is_scheduled(user_id, player_color)
+    except Exception:
+        logger.exception(
+            "opening score is_scheduled probe failed",
             extra={"user_id": user_id, "player_color": player_color},
         )
         return False

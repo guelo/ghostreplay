@@ -1219,3 +1219,193 @@ def test_tree_builder_holds_scalars_not_orm_batch(client, auth_headers):
     # No ORM batch / overlay retained on the builder.
     assert not hasattr(builder, "overlay")
     assert not hasattr(builder, "batch")
+
+
+# --- GET /tree/status: non-blocking cold-cache probe (g-k4z2) -----------------
+#
+# The status route reports warm | building | cold from a CHEAP check
+# (get_latest_opening_score_batch + registry-fingerprint compare, and a limit=1
+# evidence check only when there is no batch). It must never build the overlay and
+# never call the blocking refresh_now; on a cold/registry-stale (user, color) with
+# evidence it fires only the BACKGROUND request_recompute and reports progress.
+
+STATUS_URL = "/api/openings/tree/status"
+
+
+@contextlib.contextmanager
+def _status_patches(
+    *, batch, has_evidence=True, scheduled=False, graph=None, roots=None
+):
+    """Patch the cheap collaborators behind resolve_tree_cache_state.
+
+    ``overlay_evidence`` and ``refresh_now`` are spied so each test can assert the
+    probe never builds the overlay and never blocks on the bootstrap. The scheduler
+    facades are patched on their source module (resolve_tree_cache_state imports
+    them lazily at call time)."""
+    overlay_spy = MagicMock()
+    request_recompute = MagicMock()
+    refresh_now = MagicMock()
+    with (
+        patch("app.api.openings.get_opening_graph",
+              return_value=graph or _make_graph()),
+        patch("app.api.openings.get_opening_roots",
+              return_value=roots or _make_roots()),
+        patch("app.opening_cache.get_latest_opening_score_batch",
+              return_value=batch),
+        patch("app.opening_cache.has_opening_evidence", return_value=has_evidence),
+        patch("app.opening_cache.overlay_evidence", overlay_spy),
+        patch("app.opening_score_scheduler.is_recompute_scheduled",
+              return_value=scheduled),
+        patch("app.opening_score_scheduler.request_recompute", request_recompute),
+        patch("app.opening_score_scheduler.refresh_now", refresh_now),
+    ):
+        yield overlay_spy, request_recompute, refresh_now
+
+
+def _current_batch():
+    """A batch whose registry fingerprint matches the synthetic graph/roots."""
+    batch = _batch(datetime(2026, 6, 12, tzinfo=timezone.utc))
+    batch.registry_fingerprint = opening_score_inputs_fingerprint(
+        _make_graph(), _make_roots()
+    )
+    return batch
+
+
+def test_tree_status_no_auth_returns_401(client):
+    resp = client.get(STATUS_URL, params={"player_color": "white"})
+    assert resp.status_code == 401
+
+
+def test_tree_status_invalid_color_returns_422(client, auth_headers):
+    resp = client.get(STATUS_URL, params={"player_color": "sideways"},
+                      headers=auth_headers())
+    assert resp.status_code == 422
+
+
+def test_tree_status_warm_with_current_registry_batch(client, auth_headers):
+    """A current-registry batch ⇒ warm. The probe schedules nothing and builds no
+    overlay (the /tree GET owns the background revalidate)."""
+    with _status_patches(batch=_current_batch()) as (overlay, recompute, refresh):
+        resp = client.get(STATUS_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json() == {"player_color": "white", "state": "warm"}
+    overlay.assert_not_called()
+    recompute.assert_not_called()
+    refresh.assert_not_called()
+
+
+def test_tree_status_warm_when_no_batch_and_no_evidence(client, auth_headers):
+    """No batch + no opening evidence ⇒ warm: the tree is correctly book-only and
+    /tree is fast (a recompute would write no batch, so polling could never flip)."""
+    with _status_patches(batch=None, has_evidence=False) as (overlay, recompute,
+                                                             refresh):
+        resp = client.get(STATUS_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "warm"
+    overlay.assert_not_called()
+    recompute.assert_not_called()
+    refresh.assert_not_called()
+
+
+def test_tree_status_cold_fires_background_recompute(client, auth_headers):
+    """No batch + evidence + nothing scheduled ⇒ cold: fire the BACKGROUND
+    request_recompute once, never refresh_now, never build the overlay."""
+    with _status_patches(batch=None, has_evidence=True, scheduled=False) as (
+        overlay, recompute, refresh
+    ):
+        resp = client.get(STATUS_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "cold"
+    recompute.assert_called_once_with(123, "white")
+    refresh.assert_not_called()
+    overlay.assert_not_called()
+
+
+def test_tree_status_building_when_recompute_already_scheduled(client, auth_headers):
+    """No batch + evidence + work already pending/in-flight ⇒ building, WITHOUT a
+    redundant re-enqueue."""
+    with _status_patches(batch=None, has_evidence=True, scheduled=True) as (
+        overlay, recompute, refresh
+    ):
+        resp = client.get(STATUS_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "building"
+    recompute.assert_not_called()
+    refresh.assert_not_called()
+    overlay.assert_not_called()
+
+
+def test_tree_status_registry_stale_batch_is_building_not_warm(client, auth_headers):
+    """A registry/schema-stale batch (predates this read model) is NOT warm even with
+    no current evidence: recompute_opening_scores_if_needed always rebuilds it, so the
+    probe reports progress (here cold, kicking off the background rebuild) and never
+    consults has_opening_evidence (the batch-present branch short-circuits)."""
+    stale = _batch(datetime(2026, 6, 1, tzinfo=timezone.utc))
+    stale.registry_fingerprint = "stale-registry-fingerprint"
+    with _status_patches(batch=stale, has_evidence=False, scheduled=False) as (
+        overlay, recompute, refresh
+    ):
+        resp = client.get(STATUS_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "cold"
+    recompute.assert_called_once_with(123, "white")
+    refresh.assert_not_called()
+    overlay.assert_not_called()
+
+
+def test_tree_status_end_to_end_warm_against_seeded_batch(
+    client, auth_headers, db_session
+):
+    """End-to-end with the REAL resolve_tree_cache_state + get_latest_opening_score_batch
+    against a seeded current-registry batch (only graph/roots + scheduler stubbed):
+    warm, and no overlay rebuild on the probe path."""
+    graph = _make_graph()
+    roots = _make_roots()
+    db_session.add(OpeningScoreBatch(
+        user_id=123, player_color="white", generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
+        computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+    ))
+    db_session.commit()
+
+    with (
+        patch("app.api.openings.get_opening_graph", return_value=graph),
+        patch("app.api.openings.get_opening_roots", return_value=roots),
+        patch("app.opening_cache.overlay_evidence") as overlay_spy,
+        patch("app.opening_score_scheduler.request_recompute") as recompute,
+        patch("app.opening_score_scheduler.refresh_now") as refresh,
+    ):
+        resp = client.get(STATUS_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+
+    assert resp.status_code == 200
+    assert resp.json()["state"] == "warm"
+    overlay_spy.assert_not_called()
+    recompute.assert_not_called()
+    refresh.assert_not_called()
+
+
+def test_tree_response_carries_cache_state(client, auth_headers):
+    """Part A: the /tree response surfaces ensure_tree_cache's cache_state so a DIRECT
+    caller can detect a degraded book_only / bootstrap_timeout tree."""
+    with (
+        patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
+        patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
+        patch("app.api.openings.ensure_tree_cache",
+              return_value=(None, None, "bootstrap_timeout")),
+        patch("app.api.openings.lookup_observed_edges_for_parents",
+              return_value={}),
+        patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
+        patch("app.api.openings.lookup_move_evals",
+              side_effect=lambda db, reqs: {r: None for r in reqs}),
+        patch("app.api.openings.lookup_root_eval", return_value=None),
+    ):
+        resp = client.get(TREE_URL, params={"player_color": "white"},
+                          headers=auth_headers())
+    assert resp.status_code == 200
+    assert resp.json()["cache_state"] == "bootstrap_timeout"

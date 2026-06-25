@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getOpeningTree,
+  getOpeningTreeStatus,
   type OpeningPlayerColor,
   type TreeResponse,
 } from "../utils/api";
@@ -19,8 +20,14 @@ import { buildTreeView, type TreeView } from "../openings/treeView";
  * lets backtracking to a prefix of a canonical line hit the cache.
  */
 
-export type PageStatus = "loading" | "ready" | "error";
+export type PageStatus = "loading" | "initializing" | "ready" | "error";
 export type AppendStatus = "idle" | "loading" | "error";
+
+/** Cold-cache poll cadence + ceiling. The one-time tree bootstrap is ~22-25s, so
+ *  ~25 polls at 2s (~50s) is a comfortable upper bound before surfacing a
+ *  retry-able error (g-k4z2). */
+const STATUS_POLL_INTERVAL_MS = 2000;
+const STATUS_POLL_MAX_ATTEMPTS = 25;
 
 export interface OpeningsTreeRoute {
   playerColor: OpeningPlayerColor;
@@ -123,6 +130,44 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+/** Abortable sleep — rejects AbortError (silenced by isAbortError) when the
+ *  route changes mid-wait, so a cold-cache poll can never outlive its effect. */
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** The explicit one-time "Setting up your opening tree…" render. `response` is
+ *  null so the page shows the setup screen (not stale columns of another color)
+ *  while the cold-cache bootstrap runs. */
+function initializingRender(routeKey: string, line: string[]): RenderState {
+  return {
+    routeKey,
+    response: null,
+    selectionLine: line,
+    loadedThroughPly: 0,
+    isExactResponseLine: false,
+    pageStatus: "initializing",
+    appendStatus: "idle",
+    error: null,
+    canonicalLine: null,
+    isSettled: false,
+  };
+}
+
 function settledRender(
   routeKey: string,
   response: TreeResponse,
@@ -152,6 +197,11 @@ export function useOpeningsTree(
   const cacheRef = useRef<Map<string, TreeResponse>>(new Map());
   const displayedRef = useRef<Displayed | null>(null);
   const versionRef = useRef(0);
+  // Colors whose cache we've confirmed warm this session. Warm stays warm until a
+  // deploy/page reload (a new game only triggers a background revalidate, not a
+  // registry change), so the status probe runs at most once per color and warm
+  // reads are otherwise unchanged (g-k4z2).
+  const warmColorsRef = useRef<Set<OpeningPlayerColor>>(new Set());
   const [retryNonce, setRetryNonce] = useState(0);
 
   const currentRouteKey = makeRouteKey(playerColor, movesKey, opening);
@@ -260,57 +310,153 @@ export function useOpeningsTree(
       });
     }
 
-    getOpeningTree({ playerColor, moves, opening }, { signal: controller.signal })
-      .then((response) => {
-        if (versionRef.current !== version) {
-          return; // superseded by a newer route
-        }
-        // Step 4 — resolve: store under both keys and render settled. Using
-        // canonical_line as the selection line renders a backend truncation of a
-        // stale/invalid input line as the canonical line.
-        cacheRef.current.set(
-          makeCanonicalKey(playerColor, response.canonical_line),
-          response,
-        );
-        cacheRef.current.set(requestKey, response);
-        displayedRef.current = {
-          response,
-          line: response.canonical_line,
-        };
-        setRender(
-          settledRender(routeKey, response, response.canonical_line, true),
-        );
-      })
-      .catch((error: unknown) => {
-        if (isAbortError(error) || versionRef.current !== version) {
-          return;
-        }
-        // Step 5 — reject. No displayed columns → page error (full retry); else
-        // the frontier placeholder becomes an inline error and the existing
-        // columns are left untouched.
-        const message =
-          error instanceof Error ? error.message : "Failed to load openings";
-        if (!displayedRef.current) {
-          setRender({
-            routeKey,
-            response: null,
-            selectionLine: requestedLine,
-            loadedThroughPly: 0,
-            isExactResponseLine: false,
-            pageStatus: "error",
-            appendStatus: "idle",
-            error: message,
-            canonicalLine: null,
-            isSettled: false,
-          });
-        } else {
-          setRender((prev) => ({
-            ...prev,
-            appendStatus: "error",
-            error: message,
-          }));
-        }
+    // A retry-able full-page error for the cold-cache setup flow. Unlike onReject,
+    // it never keeps stale columns: the setup screen is a full-screen takeover
+    // (response is null), so a failure there must clear to a page error with a
+    // Retry — not an inline append error gated on a (now wrong-color) displayed
+    // response (g-k4z2).
+    const setSetupError = (message: string) => {
+      setRender({
+        routeKey,
+        response: null,
+        selectionLine: requestedLine,
+        loadedThroughPly: 0,
+        isExactResponseLine: false,
+        pageStatus: "error",
+        appendStatus: "idle",
+        error: message,
+        canonicalLine: null,
+        isSettled: false,
       });
+    };
+
+    const onSetupError = (error: unknown) => {
+      if (isAbortError(error) || versionRef.current !== version) {
+        return;
+      }
+      setSetupError(
+        error instanceof Error ? error.message : "Failed to load openings",
+      );
+    };
+
+    const onResolve = (response: TreeResponse) => {
+      if (versionRef.current !== version) {
+        return; // superseded by a newer route
+      }
+      if (response.cache_state === "bootstrap_timeout") {
+        // Raced past the status gate onto a degraded, still-building book-only
+        // tree (the warm batch was pruned/invalidated between the status probe
+        // and this fetch). Don't cache/render it as ready: drop the warm memo so
+        // a retry re-runs the status poll, and surface a retry-able setup state.
+        warmColorsRef.current.delete(playerColor);
+        setSetupError(
+          "Your opening tree is still finishing setup. Retry in a moment.",
+        );
+        return;
+      }
+      // Step 4 — resolve: store under both keys and render settled. Using
+      // canonical_line as the selection line renders a backend truncation of a
+      // stale/invalid input line as the canonical line.
+      cacheRef.current.set(
+        makeCanonicalKey(playerColor, response.canonical_line),
+        response,
+      );
+      cacheRef.current.set(requestKey, response);
+      displayedRef.current = {
+        response,
+        line: response.canonical_line,
+      };
+      setRender(
+        settledRender(routeKey, response, response.canonical_line, true),
+      );
+    };
+
+    const onReject = (error: unknown) => {
+      if (isAbortError(error) || versionRef.current !== version) {
+        return;
+      }
+      // Step 5 — reject. No displayed columns → page error (full retry); else
+      // the frontier placeholder becomes an inline error and the existing
+      // columns are left untouched. A cold-cache poll timeout has no displayed
+      // columns, so it surfaces as a retry-able page error.
+      const message =
+        error instanceof Error ? error.message : "Failed to load openings";
+      if (!displayedRef.current) {
+        setRender({
+          routeKey,
+          response: null,
+          selectionLine: requestedLine,
+          loadedThroughPly: 0,
+          isExactResponseLine: false,
+          pageStatus: "error",
+          appendStatus: "idle",
+          error: message,
+          canonicalLine: null,
+          isSettled: false,
+        });
+      } else {
+        setRender((prev) => ({
+          ...prev,
+          appendStatus: "error",
+          error: message,
+        }));
+      }
+    };
+
+    const runFetch = () =>
+      getOpeningTree(
+        { playerColor, moves, opening },
+        { signal: controller.signal },
+      )
+        .then(onResolve)
+        .catch(onReject);
+
+    // Cold-cache gate (g-k4z2): the cold (user, color) bootstrap is a one-time
+    // ~22s wait, so probe the cheap /tree/status first and, while it is building,
+    // show an explicit "Setting up…" state and poll instead of firing /tree (which
+    // would block server-side for the whole bootstrap behind a silent spinner).
+    // Warm stays warm for the session, so we probe at most once per color.
+    const ensureWarm = async (): Promise<boolean> => {
+      for (let attempt = 0; attempt < STATUS_POLL_MAX_ATTEMPTS; attempt += 1) {
+        const status = await getOpeningTreeStatus(playerColor, {
+          signal: controller.signal,
+        });
+        if (versionRef.current !== version) {
+          return false; // superseded by a newer route
+        }
+        if (status.state === "warm") {
+          return true;
+        }
+        // building / cold: surface the one-time setup screen and wait a beat. The
+        // first warm probe never renders this, so a warm color shows no flash.
+        setRender(initializingRender(routeKey, requestedLine));
+        await delay(STATUS_POLL_INTERVAL_MS, controller.signal);
+        if (versionRef.current !== version) {
+          return false;
+        }
+      }
+      throw new Error(
+        "Your opening tree is still being set up. Retry in a moment.",
+      );
+    };
+
+    if (warmColorsRef.current.has(playerColor)) {
+      void runFetch();
+    } else {
+      ensureWarm()
+        .then((warm) => {
+          if (versionRef.current !== version || !warm) {
+            return;
+          }
+          warmColorsRef.current.add(playerColor);
+          return runFetch();
+        })
+        // A status-poll failure / timeout is a setup-flow failure (full-screen
+        // takeover), so it surfaces as a retry-able page error — never the
+        // append-error path, which would otherwise pin a permanent setup screen
+        // with no Retry once a previous tree had been displayed (g-k4z2).
+        .catch(onSetupError);
+    }
 
     return () => {
       controller.abort();

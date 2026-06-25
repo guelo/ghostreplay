@@ -464,6 +464,38 @@ function OpeningsPage() {
                 Retry
               </button>
             </section>
+          ) : pageStatus === "initializing" ? (
+            <section
+              className="openings-state openings-state--loading openings-state--initializing"
+              aria-live="polite"
+              aria-label="Setting up your opening tree"
+            >
+              <p className="openings-state__title">
+                Setting up your {colorLabel.toLowerCase()} opening tree…
+              </p>
+              <p className="openings-state__body">
+                This one-time setup analyzes your games to build the tree. It
+                usually takes around half a minute — it will load automatically
+                when it's ready.
+              </p>
+              <div className="openings-tree-workspace openings-tree-workspace--loading">
+                <div
+                  className="openings-tree-board openings-tree-board--skeleton"
+                  aria-hidden="true"
+                />
+                <div className="openings-tree-scroll">
+                  <div className="openings-tree-canvas">
+                    {Array.from({ length: 3 }).map((_, index) => (
+                      <div
+                        key={index}
+                        className="openings-tree-column openings-tree-column--skeleton"
+                        aria-hidden="true"
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>
           ) : !view ? (
             <section
               className="openings-state openings-state--loading"

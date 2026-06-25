@@ -494,6 +494,16 @@ def ensure_tree_cache(
     if warm_fresh:
         request_recompute(user_id, player_color)
         cache_state = "warm_fresh"
+    elif batch is None and not has_opening_evidence(db, user_id, player_color):
+        # A user with no opening evidence has no observed moves to hide, so a
+        # book-only tree is the correct AND complete result — there is nothing to
+        # bootstrap. Short-circuit to "book_only" WITHOUT refresh_now: a blocking
+        # refresh_now here would enqueue an immediate recompute and AWAIT the single
+        # serialized scheduler worker, so even though the no-evidence recompute is
+        # itself a no-op, this read could still sit up to TREE_BOOTSTRAP_TIMEOUT
+        # behind another user's in-flight recompute. This mirrors
+        # resolve_tree_cache_state's no-evidence "warm" and keeps that path fast.
+        cache_state = "book_only"
     else:
         refreshed = refresh_now(user_id, player_color, timeout=TREE_BOOTSTRAP_TIMEOUT)
         if not refreshed:
@@ -520,6 +530,55 @@ def ensure_tree_cache(
     if batch is None:
         return None, None, cache_state
     return batch.id, batch.computed_at, cache_state
+
+
+def resolve_tree_cache_state(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+) -> str:
+    """Cheap, non-blocking cache-state probe for the ``/api/openings/tree/status``
+    poll — the read-side signal that lets the UI show an explicit one-time
+    "Setting up your opening tree…" state instead of a silent ~22s spinner.
+
+    Returns ``"warm"`` | ``"building"`` | ``"cold"`` from ONE indexed batch lookup
+    (and, only when there is no batch, one ``limit=1`` evidence existence check). It
+    NEVER builds the evidence overlay and NEVER calls ``refresh_now``, so it cannot
+    trigger the blocking bootstrap that ``ensure_tree_cache`` performs on the read
+    path:
+
+      - ``"warm"`` — a current-registry batch already exists (``/tree`` serves it
+        and only background-revalidates), OR there is no batch and the user has no
+        opening evidence at all. The latter's tree is correctly book-only and
+        ``/tree`` is fast for them (``recompute_opening_scores_if_needed`` writes no
+        batch for a no-evidence user, so a poll would otherwise never flip to warm);
+        reporting warm lets the UI load ``/tree`` directly.
+      - ``"cold"`` / ``"building"`` — no current-registry batch yet but a recompute
+        WILL produce one (cold-with-evidence, or a registry/schema-stale batch that
+        ``recompute_opening_scores_if_needed`` always rebuilds). Fire the BACKGROUND
+        scheduler trigger (``request_recompute``, never ``refresh_now``) so the
+        bootstrap runs off the request thread, and report ``"cold"`` when this poll
+        just kicked it off or ``"building"`` when work was already scheduled. Firing
+        only when nothing is scheduled avoids redundant coalesced re-enqueues, and a
+        failed/lost recompute is simply re-fired by the next poll.
+    """
+    _validate_player_color(player_color)
+    # Lazy import mirrors ensure_tree_cache: opening_score_scheduler imports this
+    # module at load, so a module-level import would create a cycle.
+    from app.opening_score_scheduler import is_recompute_scheduled, request_recompute
+
+    current_registry = opening_score_inputs_fingerprint(graph, roots)
+    batch = get_latest_opening_score_batch(db, user_id, player_color)
+    if batch is not None and batch.registry_fingerprint == current_registry:
+        return "warm"
+    if batch is None and not has_opening_evidence(db, user_id, player_color):
+        return "warm"
+    already_scheduled = is_recompute_scheduled(user_id, player_color)
+    if not already_scheduled:
+        request_recompute(user_id, player_color)
+    return "building" if already_scheduled else "cold"
 
 
 def lookup_position_scores_for_batch(
