@@ -6551,6 +6551,61 @@
     margin: 0.25rem 0;
 }
 
+/* Feedback nav action — accent color + a periodically wiggling chat icon so it
+   stands out from the muted route links and invites users to leave feedback. */
+.nav-feedback {
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--brand-primary);
+}
+
+.nav-bar__link.nav-feedback {
+    display: inline-flex;
+    font-weight: 600;
+}
+
+.nav-drawer__link.nav-feedback {
+    display: flex;
+}
+
+.nav-bar__link.nav-feedback:hover,
+.nav-drawer__link.nav-feedback:hover {
+    color: var(--brand-secondary);
+}
+
+.nav-feedback__icon {
+    flex: none;
+    transform-origin: center 70%;
+    animation: feedback-attention 3.2s ease-in-out infinite;
+}
+
+/* Mostly at rest, then a quick friendly wiggle to catch the eye. */
+@keyframes feedback-attention {
+    0%,
+    62%,
+    100% {
+        transform: scale(1) rotate(0deg);
+    }
+    68% {
+        transform: scale(1.16) rotate(-10deg);
+    }
+    76% {
+        transform: scale(1.16) rotate(10deg);
+    }
+    84% {
+        transform: scale(1.16) rotate(-6deg);
+    }
+    92% {
+        transform: scale(1.08) rotate(0deg);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .nav-feedback__icon {
+        animation: none;
+    }
+}
+
 /* Auth Form Page */
 .auth-page {
     flex: 1;
@@ -6993,6 +7048,13 @@
 .openings-state--error {
     border: 1px solid var(--error-light);
     background: var(--error-bg);
+}
+
+/* One-time cold-cache setup (g-k4z2): restore header padding the --loading
+ * modifier zeroes, keeping the skeleton workspace below flush. */
+.openings-state--initializing {
+    gap: 0.55rem;
+    padding: 1rem 1.05rem 0;
 }
 
 /* ---------------------------------------------------------------------------

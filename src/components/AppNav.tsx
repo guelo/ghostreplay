@@ -1,10 +1,33 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "../contexts/useAuth";
+import { openFeedbackWidget } from "../analytics/featurebase";
 
 type AppNavProps = {
   showLogo?: boolean;
 };
+
+// Speech-bubble icon for the Feedback action. Translucent bubble + solid dots,
+// both `currentColor`, so it reads on any nav background and inherits the
+// accent color set on `.nav-feedback`. Decorative — hidden from the a11y tree.
+const FeedbackIcon = () => (
+  <svg
+    className="nav-feedback__icon"
+    width="15"
+    height="15"
+    viewBox="0 0 24 24"
+    aria-hidden="true"
+  >
+    <path
+      fill="currentColor"
+      opacity="0.25"
+      d="M5 3C3.3 3 2 4.3 2 6v8c0 1.7 1.3 3 3 3h2v3.5c0 .45.52.7.86.41L12.5 17H19c1.7 0 3-1.3 3-3V6c0-1.7-1.3-3-3-3H5Z"
+    />
+    <circle cx="8" cy="10" r="1.4" fill="currentColor" />
+    <circle cx="12" cy="10" r="1.4" fill="currentColor" />
+    <circle cx="16" cy="10" r="1.4" fill="currentColor" />
+  </svg>
+);
 
 const routeActions = [
   { to: "/", label: "Home" },
@@ -102,6 +125,19 @@ function AppNav({ showLogo = false }: AppNavProps) {
             {action.label}
           </Link>
         ))}
+        <button
+          type="button"
+          className={`${buttonClassName} nav-feedback`}
+          onClick={() => {
+            // Dismiss the mobile drawer before opening the feedback portal in a
+            // new tab, matching how the route links close it on navigate.
+            if (variant === "mobile") closeMenu();
+            openFeedbackWidget();
+          }}
+        >
+          <FeedbackIcon />
+          Feedback
+        </button>
         {user?.isAnonymous ? (
           <>
             <Link

@@ -4,6 +4,11 @@ import { within } from "@testing-library/react";
 import type { AuthContextValue } from "../contexts/authContextShared";
 import { fireEvent, render, screen } from "../test/utils";
 import AppNav from "./AppNav";
+import { openFeedbackWidget } from "../analytics/featurebase";
+
+vi.mock("../analytics/featurebase", () => ({
+  openFeedbackWidget: vi.fn(),
+}));
 
 const authState = vi.hoisted(() => ({
   current: {
@@ -30,6 +35,7 @@ const renderNav = () =>
 
 describe("AppNav", () => {
   beforeEach(() => {
+    vi.mocked(openFeedbackWidget).mockClear();
     authState.current = {
       user: { id: 1, username: "guest", isAnonymous: true },
       token: "token",
@@ -136,5 +142,28 @@ describe("AppNav", () => {
 
     fireEvent.keyDown(document, { key: "Tab" });
     expect(closeButton).toHaveFocus();
+  });
+
+  it("opens the feedback widget from the desktop nav", () => {
+    renderNav();
+
+    fireEvent.click(screen.getByRole("button", { name: /feedback/i }));
+
+    expect(vi.mocked(openFeedbackWidget)).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens the feedback widget from the mobile drawer and closes it", () => {
+    renderNav();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /open navigation menu/i }),
+    );
+    const drawer = screen.getByRole("dialog", { name: /navigation menu/i });
+    fireEvent.click(within(drawer).getByRole("button", { name: /feedback/i }));
+
+    expect(vi.mocked(openFeedbackWidget)).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByRole("dialog", { name: /navigation menu/i }),
+    ).toBeNull();
   });
 });

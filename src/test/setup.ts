@@ -11,6 +11,11 @@ expect.extend(matchers)
 // exercise the enabled path override it locally with `vi.stubEnv`.
 import.meta.env.VITE_PUBLIC_POSTHOG_DISABLED = 'true'
 
+// Likewise force the Featurebase feedback widget OFF suite-wide so its SDK never
+// boots even if a local `.env` sets an App ID (vitest reads local Vite env).
+// Enabled-path tests override this explicitly with `vi.stubEnv`.
+import.meta.env.VITE_PUBLIC_FEATUREBASE_DISABLED = 'true'
+
 afterEach(() => {
   cleanup()
   // Restore console, remove window listeners, cancel timers, reset buffer +
