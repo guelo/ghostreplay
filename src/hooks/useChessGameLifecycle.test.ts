@@ -1,6 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { Chess } from "chess.js";
-import type { MutableRefObject } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import { useChessGameLifecycle } from "./useChessGameLifecycle";
@@ -111,7 +110,6 @@ const setup = ({
   for (const [requestId, review] of pendingSrsEntries) {
     coordinator.decisionOwner.registerSrsReview(requestId, review);
   }
-  const openingHistoryRef: MutableRefObject<Array<null>> = { current: [] };
 
   const clearMoveHighlights = vi.fn();
   const resetMode = vi.fn();
@@ -121,7 +119,6 @@ const setup = ({
   const setIsStartingGame = vi.fn();
   const setStartError = vi.fn();
   const setShowStartOverlay = vi.fn();
-  const setLiveOpening = vi.fn();
   const setBlunderAlert = vi.fn();
   const setShowFlash = vi.fn();
   const setBlunderReviewId = vi.fn();
@@ -145,7 +142,6 @@ const setup = ({
     useChessGameLifecycle({
       chess,
       coordinator,
-      openingHistoryRef,
       clearMoveHighlights,
       resetMode,
       resetEngine,
@@ -154,7 +150,6 @@ const setup = ({
       setIsStartingGame,
       setStartError,
       setShowStartOverlay,
-      setLiveOpening,
       setBlunderAlert,
       setShowFlash,
       setBlunderReviewId,

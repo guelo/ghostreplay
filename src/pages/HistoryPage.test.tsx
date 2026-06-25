@@ -251,7 +251,10 @@ describe('HistoryPage', () => {
       expect(screen.getByText('Ruy Lopez')).toBeInTheDocument();
     });
 
-    expect(mockFetchSessionOpenings).toHaveBeenCalledWith('abc-123');
+    expect(mockFetchSessionOpenings).toHaveBeenCalledWith(
+      'abc-123',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(screen.getByRole('region', { name: 'Openings played' })).toBeInTheDocument();
   });
 

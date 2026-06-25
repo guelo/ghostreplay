@@ -1214,7 +1214,15 @@ def get_session_openings(
 ) -> SessionOpeningsResponse:
     game_session = _get_session_or_404(db, session_id)
     _ensure_session_owned_by_user(game_session, user)
-    if not is_visible_game_session(game_session):
+    # Serve the owner's own session — including an in-progress (not-yet-converted)
+    # drill — so the live opening lineage shows during drill play (g-8nke). The
+    # visibility gate only hides drills from history lists; access is already
+    # enforced by ownership above. The guard stays defensive against any future
+    # mode that is neither normal nor a drill.
+    if (
+        not is_visible_game_session(game_session)
+        and game_session.session_mode != DRILL_SESSION_MODE
+    ):
         raise HTTPException(status_code=404, detail="Game session not found")
 
     player_color = game_session.player_color

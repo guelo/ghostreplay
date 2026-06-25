@@ -1150,10 +1150,11 @@ export interface SessionOpeningsResponse {
  */
 export const fetchSessionOpenings = async (
   sessionId: string,
+  options?: { signal?: AbortSignal },
 ): Promise<SessionOpeningsResponse> => {
   return requestJson<SessionOpeningsResponse>(
     `${API_BASE_URL}/api/session/${sessionId}/openings`,
-    { method: 'GET', headers: getAuthHeaders() },
+    { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
     { fallbackMessage: 'Failed to load session openings' },
   )
 }

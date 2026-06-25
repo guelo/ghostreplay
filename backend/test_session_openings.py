@@ -173,7 +173,10 @@ def test_openings_wrong_user_forbidden(client, auth_headers, create_game_session
     assert resp.status_code == 403
 
 
-def test_openings_non_visible_drill_returns_404(client, auth_headers, create_game_session, db_session):
+def test_openings_active_drill_returns_lineage(client, auth_headers, create_game_session, db_session):
+    """An in-progress (not-yet-converted) drill is not "visible" in history, but
+    the owner is actively playing it and must see its live opening lineage
+    (g-8nke). The endpoint serves drill sessions for their owner."""
     session_id = create_game_session(user_id=123, player_color="white")
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     session.session_mode = "drill"
@@ -181,11 +184,17 @@ def test_openings_non_visible_drill_returns_404(client, auth_headers, create_gam
     session.is_rated = False
     session.rated_start_ply = None
     db_session.commit()
-    resp = client.get(
-        f"/api/session/{session_id}/openings",
-        headers=auth_headers(user_id=123),
-    )
-    assert resp.status_code == 404
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        resp = client.get(
+            f"/api/session/{session_id}/openings",
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    keys = [item["opening_key"] for item in resp.json()["lineage"]]
+    assert keys == [KP_KEY, RUY_KEY, MORPHY_KEY]
 
 
 # ---------------------------------------------------------------------------

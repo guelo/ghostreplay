@@ -1,11 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
-import type {
-  Dispatch,
-  MutableRefObject,
-  SetStateAction,
-} from "react";
+import type { Dispatch, SetStateAction } from "react";
 import { Chess } from "chess.js";
-import type { OpeningLookupResult } from "../openings/openingBook";
 import type {
   DrillSessionContract,
   DrillStrictness,
@@ -47,7 +42,6 @@ const applyRatingScores = (scores: RatingScores | null | undefined) => {
 type UseChessGameLifecycleArgs = {
   chess: Chess;
   coordinator: GameAnalysisCoordinator;
-  openingHistoryRef: MutableRefObject<(OpeningLookupResult | null)[]>;
   clearMoveHighlights: () => void;
   resetMode: () => void;
   resetEngine: () => void;
@@ -56,7 +50,6 @@ type UseChessGameLifecycleArgs = {
   setIsStartingGame: Dispatch<SetStateAction<boolean>>;
   setStartError: Dispatch<SetStateAction<string | null>>;
   setShowStartOverlay: Dispatch<SetStateAction<boolean>>;
-  setLiveOpening: Dispatch<SetStateAction<OpeningLookupResult | null>>;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
   setBlunderReviewId: Dispatch<SetStateAction<number | null>>;
@@ -85,7 +78,6 @@ type UseChessGameLifecycleArgs = {
 export const useChessGameLifecycle = ({
   chess,
   coordinator,
-  openingHistoryRef,
   clearMoveHighlights,
   resetMode,
   resetEngine,
@@ -94,7 +86,6 @@ export const useChessGameLifecycle = ({
   setIsStartingGame,
   setStartError,
   setShowStartOverlay,
-  setLiveOpening,
   setBlunderAlert,
   setShowFlash,
   setBlunderReviewId,
@@ -522,8 +513,6 @@ export const useChessGameLifecycle = ({
         s2.setScoreChanges(null);
         s2.setMoveHistory([]);
         s2.setViewIndex(null);
-        setLiveOpening(null);
-        openingHistoryRef.current = [];
         resetEngine();
         coordinator.startSession(response.session_id);
         clearBlunderBoardOverride?.();
@@ -566,7 +555,6 @@ export const useChessGameLifecycle = ({
       chess,
       coordinator,
       clearMoveHighlights,
-      openingHistoryRef,
       resetEngine,
       resetMode,
       setBlunderAlert,
@@ -579,7 +567,6 @@ export const useChessGameLifecycle = ({
       clearReviewedDrillReturn,
       setEngineMessage,
       setIsStartingGame,
-      setLiveOpening,
       setReviewFailModal,
       setShowFlash,
       setShowPassToast,
@@ -686,8 +673,6 @@ export const useChessGameLifecycle = ({
         setShowRevertWarning(false);
         setShowResignWarning(false);
         clearMoveHighlights();
-        setLiveOpening(null);
-        openingHistoryRef.current = [];
         // DecisionOwner decision state is cleared by its fullReset, driven by
         // coordinator.clearSession/startSession → emitReset above.
         resetMode();
@@ -728,7 +713,6 @@ export const useChessGameLifecycle = ({
       chess,
       coordinator,
       clearMoveHighlights,
-      openingHistoryRef,
       resetEngine,
       resetMode,
       setBlunderAlert,
@@ -741,7 +725,6 @@ export const useChessGameLifecycle = ({
       clearReviewedDrillReturn,
       setEngineMessage,
       setIsStartingGame,
-      setLiveOpening,
       setReviewFailModal,
       setShowFlash,
       setShowPassToast,
@@ -888,8 +871,6 @@ export const useChessGameLifecycle = ({
     store.setGameResult(null);
     store.setMoveHistory([]);
     store.setViewIndex(null);
-    setLiveOpening(null);
-    openingHistoryRef.current = [];
     resetEngine();
     if (store.drillOpeningKey && store.drillState !== "converted") {
       coordinator.stopSessionUploads();
@@ -929,7 +910,6 @@ export const useChessGameLifecycle = ({
     chess,
     coordinator,
     clearMoveHighlights,
-    openingHistoryRef,
     resetEngine,
     resetMode,
     setBlunderAlert,
@@ -941,7 +921,6 @@ export const useChessGameLifecycle = ({
     clearBlunderBoardOverride,
     clearReviewedDrillReturn,
     setEngineMessage,
-    setLiveOpening,
     setReviewFailModal,
     setShowFlash,
       setShowPassToast,

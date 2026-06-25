@@ -164,4 +164,53 @@ describe("GameOpeningLineage", () => {
     expect(group.className).toContain("game-opening-chip--muted");
     expect(within(group).getByText("—")).toBeInTheDocument();
   });
+
+  it("hides Start Drill in the expanded card when onStartDrill is omitted", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <GameOpeningLineage
+          playerColor="white"
+          lineage={[makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })]}
+          onSelectRoot={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Select Ruy Lopez/ }));
+
+    // The card expanded (link present) but the Start Drill button is absent.
+    expect(
+      screen.getByRole("link", { name: /View in Openings/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Start Drill/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("is expand-only when onSelectRoot is omitted (live panel)", async () => {
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <GameOpeningLineage
+          playerColor="white"
+          lineage={[makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })]}
+        />
+      </MemoryRouter>,
+    );
+
+    // Wording reflects expand-only (no "Select"); there is no select callback to fire.
+    const toggle = screen.getByRole("button", { name: "Show Ruy Lopez details" });
+    expect(
+      screen.queryByRole("button", { name: /Select Ruy Lopez/ }),
+    ).not.toBeInTheDocument();
+
+    await user.click(toggle);
+
+    // Tapping still expands the card in place.
+    expect(screen.getByTestId("lineage-board")).toHaveAttribute(
+      "data-position",
+      "k1",
+    );
+  });
 });

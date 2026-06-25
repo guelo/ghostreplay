@@ -10,6 +10,7 @@ import { useChessGameController } from "../hooks/useChessGameController";
 import type { PlayerMoveApplyResult } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
@@ -21,9 +22,6 @@ import {
 } from "../stores/createAnalysisStore";
 import { useGameAnalysisCoordinator } from "../contexts/useGameAnalysisCoordinator";
 import type { DrillGrade } from "../services/GameAnalysisCoordinator";
-import type { OpeningLookupResult } from "../openings/openingBook";
-import { lookupOpeningByFen, prewarmOpeningBook } from "../openings/openingBook";
-import { scheduleIdle } from "../utils/scheduleIdle";
 import { captureEvent } from "../analytics/posthog";
 import type { TargetBlunderSrs } from "../utils/api";
 import { getStatsAchievements } from "../utils/api";
@@ -35,7 +33,6 @@ import {
   type DrillFailInfo,
   type ReviewFailInfo,
 } from "./chess-game/domain/movePresentation";
-import { deriveDisplayedOpening } from "./chess-game/domain/opening";
 import {
   derivePerfectStreak,
   type PreviousPerfectStreakState,
@@ -55,6 +52,7 @@ import { eloStakes } from "./chess-game/elo";
 import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
+import GameOpeningLineage from "./GameOpeningLineage";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import DrillStopActions from "./chess-game/ui/DrillStopActions";
 import {
@@ -195,9 +193,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [engineMessage, setEngineMessage] = useState<string | null>(null);
   const sessionId = useGameStore((s) => s.sessionId);
   const isGameActive = useGameStore((s) => s.isGameActive);
-  const [liveOpening, setLiveOpening] = useState<OpeningLookupResult | null>(
-    null,
-  );
   const gameResult = useGameStore((s) => s.gameResult);
   const [isStartingGame, setIsStartingGame] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -329,9 +324,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Recording/SRS decision state (blunderRecorded, contextMap, pendingSrsMap,
   // frontier, committedDecisionIndex) now lives on the coordinator-owned
   // DecisionOwner (g-2m0p), not on React refs.
-  const openingLookupRequestIdRef = useRef(0);
-  // Index 0 = starting position (before any move), index N = after move N
-  const openingHistoryRef = useRef<(OpeningLookupResult | null)[]>([]);
   const moveMessagesRef = useRef<Map<number, MoveMessage[]>>(new Map());
   const [moveMessagesVersion, setMoveMessagesVersion] = useState(0);
   const previousOpponentModeRef = useRef<"ghost" | "engine" | null>(null);
@@ -382,10 +374,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     return deriveBlunderArrows(reviewFailModal, blunderAlert, drillFailInfo);
   }, [reviewFailModal, blunderAlert, drillFailInfo]);
 
-  // Opening label that tracks with move navigation
-  const displayedOpening = useMemo(() => {
-    return deriveDisplayedOpening(openingHistoryRef.current, viewIndex);
-  }, [viewIndex, liveOpening]); // liveOpening dependency triggers recalc when history updates
+  // Live opening-lineage hierarchy (broadest -> deepest), driven from the active
+  // session. Refetches as moves accumulate and polls while the game is active to
+  // converge the analysis+upload lag. Expand-only: no board-jump, no Start Drill.
+  const { lineage: openingLineage, playerColor: openingLineagePlayerColor } =
+    useSessionOpenings(sessionId, {
+      refetchKey: moveHistory.length,
+      pollIntervalMs: 2000,
+      active: isGameActive,
+    });
 
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
@@ -698,7 +695,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   } = useChessGameLifecycle({
     chess,
     coordinator,
-    openingHistoryRef,
     clearMoveHighlights,
     resetMode,
     resetEngine,
@@ -707,7 +703,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setIsStartingGame,
     setStartError,
     setShowStartOverlay,
-    setLiveOpening,
     setBlunderAlert,
     setShowFlash,
     setBlunderReviewId,
@@ -1329,63 +1324,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     ],
   );
 
-  // Prewarm the opening book so the first live lookup does not block on the
-  // network round trip during play.
-  useEffect(() => {
-    if (isGameActive) {
-      prewarmOpeningBook();
-    }
-  }, [isGameActive]);
-
-  useEffect(() => {
-    if (!isGameActive) {
-      openingLookupRequestIdRef.current += 1;
-      setLiveOpening(null);
-      return;
-    }
-
-    // Index 0 = starting position, index N = after move N
-    const historyIdx = moveHistory.length;
-    const requestId = openingLookupRequestIdRef.current + 1;
-    openingLookupRequestIdRef.current = requestId;
-
-    // Defer the lookup off the live interaction path. `fen` is the canonical
-    // chess.js board state, so skip the main-thread re-parse during normalize.
-    const cancel = scheduleIdle(() => {
-      if (openingLookupRequestIdRef.current !== requestId) {
-        return;
-      }
-      void lookupOpeningByFen(fen, { canonical: true })
-        .then((opening) => {
-          if (openingLookupRequestIdRef.current !== requestId) {
-            return;
-          }
-          const history = openingHistoryRef.current;
-          if (opening) {
-            history[historyIdx] = opening;
-          } else {
-            // Carry forward last known opening
-            let lastKnown: OpeningLookupResult | null = null;
-            for (let i = historyIdx - 1; i >= 0; i--) {
-              if (history[i]) {
-                lastKnown = history[i];
-                break;
-              }
-            }
-            history[historyIdx] = lastKnown;
-          }
-          setLiveOpening(history[historyIdx] ?? null);
-        })
-        .catch(() => {
-          if (openingLookupRequestIdRef.current !== requestId) {
-            return;
-          }
-        });
-    });
-
-    return cancel;
-  }, [fen, isGameActive, moveHistory.length]);
-
   useEffect(() => {
     if (!isGameActive) {
       // New/ended game resets the opening guard so the next game can fire.
@@ -1910,7 +1848,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             blunderTargetFen={blunderTargetFen}
             boardOrientation={boardOrientation}
             blunderReviewSrs={blunderReviewSrs}
-            displayedOpening={displayedOpening}
+            openingLineageSlot={
+              (isGameActive || gameResult !== null) &&
+              openingLineage.length > 0 ? (
+                <div className="chess-panel__openings">
+                  <GameOpeningLineage
+                    playerColor={openingLineagePlayerColor}
+                    lineage={openingLineage}
+                  />
+                </div>
+              ) : null
+            }
             isReviewMomentActive={isReviewMomentActive}
             resolvedReview={resolvedReview}
             isViewingLive={isViewingLive}

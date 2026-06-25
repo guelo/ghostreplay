@@ -23,6 +23,7 @@ const recordManualBlunderMock = vi.fn();
 const reviewSrsBlunderMock = vi.fn();
 const fetchCurrentRatingMock = vi.fn();
 const getStatsAchievementsMock = vi.fn();
+const fetchSessionOpeningsMock = vi.fn();
 const audioPlayMock = vi.fn();
 const audioCtorSpy = vi.fn();
 const captureEventMock = vi.fn();
@@ -53,6 +54,10 @@ vi.mock("../utils/api", async (importOriginal) => {
     recordBlunder: (...args: unknown[]) => recordBlunderMock(...args),
     recordManualBlunder: (...args: unknown[]) => recordManualBlunderMock(...args),
     reviewSrsBlunder: (...args: unknown[]) => reviewSrsBlunderMock(...args),
+    // The live opening-lineage hook (useSessionOpenings) calls this; without an
+    // override it would fall through to the real network helper in every test.
+    fetchSessionOpenings: (...args: unknown[]) =>
+      fetchSessionOpeningsMock(...args),
   };
 });
 
@@ -303,6 +308,11 @@ beforeEach(() => {
   }
   vi.stubGlobal("Audio", MockAudio);
   fetchCurrentRatingMock.mockReset();
+  fetchSessionOpeningsMock.mockReset();
+  fetchSessionOpeningsMock.mockResolvedValue({
+    player_color: "white",
+    lineage: [],
+  });
   captureEventMock.mockReset();
   getStatsAchievementsMock.mockReset();
   getStatsAchievementsMock.mockResolvedValue({
@@ -3188,14 +3198,13 @@ describe("ChessGame move analysis", () => {
   });
 });
 
-describe("ChessGame opening display", () => {
+describe("ChessGame opening lineage", () => {
   beforeEach(() => {
     window.HTMLElement.prototype.scrollIntoView = vi.fn();
     startGameMock.mockReset();
     uploadSessionMovesMock.mockReset();
     getNextOpponentMoveMock.mockReset();
     evaluatePositionMock.mockReset();
-    lookupOpeningByFenMock.mockReset();
     gameAnalysisStore.getState().clearAll();
     capturedPieceDrop = null;
 
@@ -3205,48 +3214,122 @@ describe("ChessGame opening display", () => {
       target_blunder_id: null,
       decision_source: "backend_engine",
     });
-    lookupOpeningByFenMock.mockResolvedValue({
-      eco: "C20",
-      name: "King's Pawn Game",
-      source: "eco",
-    });
     uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
   });
 
-  it("shows opening only during an active game", async () => {
+  it("renders the live opening lineage while a game is active", async () => {
     startGameMock.mockResolvedValueOnce({
-      session_id: "session-opening",
+      session_id: "session-lineage",
       engine_elo: 1500,
       player_color: "white",
+    });
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          score: 60,
+          confidence: 0.5,
+          coverage: 0.5,
+          sample_size: 5,
+          game_count: 2,
+          path: [],
+        },
+      ],
     });
 
     render(<ChessGame />);
 
+    // No lineage before a game starts; the legacy "Opening:" line is gone.
+    expect(
+      screen.queryByRole("region", { name: "Openings played" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/^Opening:/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("Opening:")).toBeInTheDocument();
-      expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
+      expect(
+        screen.getByRole("region", { name: "Openings played" }),
+      ).toBeInTheDocument();
     });
+    const region = screen.getByRole("region", { name: "Openings played" });
+    expect(region).toHaveTextContent("King's Pawn Game");
 
+    // Resetting (game no longer active) hides the lineage.
     fireEvent.click(screen.getByRole("button", { name: /reset/i }));
-    expect(screen.queryByText(/^Opening:/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Openings played" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("keeps opening tied to live position while navigating history", async () => {
+  it("keeps the lineage visible after the game ends", async () => {
     startGameMock.mockResolvedValueOnce({
-      session_id: "session-live-opening",
+      session_id: "session-postgame-lineage",
       engine_elo: 1500,
       player_color: "white",
     });
-    lookupOpeningByFenMock.mockResolvedValue({
-      eco: "C50",
-      name: "Italian Game",
-      source: "eco",
+    endGameMock.mockResolvedValue({});
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          score: 60,
+          confidence: 0.5,
+          coverage: 0.5,
+          sample_size: 5,
+          game_count: 2,
+          path: [],
+        },
+      ],
     });
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("region", { name: "Openings played" }),
+      ).toBeInTheDocument();
+    });
+
+    // Resign to end the game (gameResult set, isGameActive false) without reset.
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /view analysis/i }),
+      ).toBeInTheDocument();
+    });
+
+    // The lineage persists post-game (gated on gameResult, not just active).
+    expect(
+      screen.getByRole("region", { name: "Openings played" }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no lineage when the session has no openings yet", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-empty-lineage",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    // Global beforeEach already defaults fetchSessionOpenings to an empty lineage.
 
     render(<ChessGame />);
 
@@ -3254,65 +3337,11 @@ describe("ChessGame opening display", () => {
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
 
     await waitFor(() => {
-      expect(lookupOpeningByFenMock).toHaveBeenCalled();
+      expect(fetchSessionOpeningsMock).toHaveBeenCalled();
     });
-
-    const initialLookupCount = lookupOpeningByFenMock.mock.calls.length;
-
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
-    });
-
-    await waitFor(() => {
-      expect(lookupOpeningByFenMock.mock.calls.length).toBeGreaterThan(
-        initialLookupCount,
-      );
-      expect(screen.getByText("C50 Italian Game")).toBeInTheDocument();
-    });
-
-    const afterMoveLookupCount = lookupOpeningByFenMock.mock.calls.length;
-    fireEvent.click(screen.getByTitle(/previous move/i));
-
-    expect(screen.getByText("C50 Italian Game")).toBeInTheDocument();
-    expect(lookupOpeningByFenMock.mock.calls.length).toBe(afterMoveLookupCount);
-  });
-
-  it("keeps last known opening after leaving the opening book", async () => {
-    startGameMock.mockResolvedValueOnce({
-      session_id: "session-sticky-opening",
-      engine_elo: 1500,
-      player_color: "white",
-    });
-    lookupOpeningByFenMock
-      .mockResolvedValueOnce({
-        eco: "C20",
-        name: "King's Pawn Game",
-        source: "eco",
-      })
-      .mockResolvedValue(null);
-
-    render(<ChessGame />);
-
-    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
-    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
-
-    await waitFor(() => {
-      expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
-    });
-
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
-    });
-
-    await waitFor(() => {
-      expect(lookupOpeningByFenMock.mock.calls.length).toBeGreaterThanOrEqual(
-        2,
-      );
-    });
-
-    // Should retain the last known opening, not show "Unknown"
-    expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
-    expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("region", { name: "Openings played" }),
+    ).not.toBeInTheDocument();
   });
 });
 

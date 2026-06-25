@@ -1,7 +1,6 @@
-import { memo, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import StaticMiniBoard from "./StaticMiniBoard";
 import SettingsGearIcon from "./SettingsGearIcon";
-import type { OpeningLookupResult } from "../../../openings/openingBook";
 import type { RatingScoreKey, RatingScores, TargetBlunderSrs } from "../../../utils/api";
 import { getRatingDisplayLabel, resolveDisplayScore, useGameStore } from "../../../stores/useGameStore";
 import type { ResolvedReview } from "../types";
@@ -40,7 +39,10 @@ type GameInfoPanelProps = {
   blunderTargetFen: string | null;
   boardOrientation: BoardOrientation;
   blunderReviewSrs: TargetBlunderSrs | null;
-  displayedOpening: OpeningLookupResult | null;
+  /** Live opening-lineage hierarchy (broadest -> deepest), rendered in place of
+   *  the old single-line "Opening: …". Owned by ChessGame; null/undefined when
+   *  there is nothing to show (e.g. before the first boundary, or inactive). */
+  openingLineageSlot?: ReactNode;
   isReviewMomentActive: boolean;
   resolvedReview: ResolvedReview | null;
   isViewingLive: boolean;
@@ -247,7 +249,7 @@ const GameInfoPanel = ({
   blunderTargetFen,
   boardOrientation,
   blunderReviewSrs,
-  displayedOpening,
+  openingLineageSlot,
   isReviewMomentActive,
   resolvedReview,
   isViewingLive,
@@ -527,16 +529,7 @@ const GameInfoPanel = ({
         showRehookToast={showRehookToast}
         onDismissRehookToast={onDismissRehookToast}
       />
-      {isGameActive && (
-        <p className="chess-meta chess-panel__opening">
-          Opening:{" "}
-          <span className="chess-meta-strong">
-            {displayedOpening
-              ? `${displayedOpening.eco} ${displayedOpening.name}`
-              : "Unknown"}
-          </span>
-        </p>
-      )}
+      {openingLineageSlot}
       {materialFen && materialPerspective && (
         <div className="chess-panel__material">
           <MaterialDisplay fen={materialFen} perspective={materialPerspective} />

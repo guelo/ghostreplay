@@ -32,7 +32,9 @@ const makeProps = () => {
     blunderTargetFen: null,
     boardOrientation: "white" as const,
     blunderReviewSrs: null as TargetBlunderSrs | null,
-    displayedOpening: { eco: "C20", name: "King's Pawn Game", source: "eco" },
+    openingLineageSlot: (
+      <div className="chess-panel__openings">Opening lineage</div>
+    ),
     isReviewMomentActive: false,
     resolvedReview: null,
     isViewingLive: true,
@@ -48,13 +50,22 @@ describe("GameInfoPanel", () => {
     const { container } = render(<GameInfoPanel {...props} />);
 
     expect(screen.getByText("Ghost Master 2000")).toBeInTheDocument();
-    expect(screen.getByText("C20 King's Pawn Game")).toBeInTheDocument();
 
     const avatar = container.querySelector(
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
     expect(avatar).not.toBeNull();
     expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(2000));
+  });
+
+  it("renders the opening-lineage slot in place of the old opening line", () => {
+    const { container } = render(<GameInfoPanel {...makeProps()} />);
+
+    expect(container.querySelector(".chess-panel__openings")).toHaveTextContent(
+      "Opening lineage",
+    );
+    // The old single-line opening element is gone.
+    expect(container.querySelector(".chess-panel__opening")).toBeNull();
   });
 
   it("shows the drilling label instead of the status text in an active drill", () => {
@@ -133,9 +144,6 @@ describe("GameInfoPanel", () => {
     expect(matchup).toHaveTextContent("Ghost Master 2000");
     expect(matchup?.querySelector(".chess-panel__mobile-versus")).toHaveTextContent(
       "vs",
-    );
-    expect(container.querySelector(".chess-panel__opening")).toHaveTextContent(
-      "C20 King's Pawn Game",
     );
   });
 

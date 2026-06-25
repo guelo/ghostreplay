@@ -8527,7 +8527,8 @@ button.openings-shell__crumb:hover {
     }
 
     .game-page .chess-panel__desktop-label,
-    .game-page .chess-panel__opening {
+    .game-page .chess-panel__opening,
+    .game-page .chess-panel__openings {
         display: none;
     }
 
@@ -9322,6 +9323,46 @@ button.openings-shell__crumb:hover {
 .opening-family-card__analysis-link:hover,
 .opening-family-card__analysis-link:focus-visible {
     text-decoration: underline;
+}
+
+/* ---- Live game chess-panel: opening lineage compact fit ----
+   The lineage shares /history's components but lives in the ~240px
+   (--game-panel-width) game panel, so the expanded analysis card needs a
+   smaller board and tamed score/grade typography to stay inside the column.
+   Scoped to .chess-panel__openings so /history (wider) is untouched. */
+.chess-panel__openings {
+    min-width: 0;
+}
+
+/* Shrink the board column so board + score panel fit ~208px of inner width. */
+.chess-panel__openings .opening-family-card--analysis .opening-family-card__overview {
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 0.45rem;
+}
+
+.chess-panel__openings .opening-family-card--analysis .opening-family-card__board {
+    width: 84px;
+    height: 84px;
+}
+
+/* Cap the large score number / grade so they don't overflow the narrow panel. */
+.chess-panel__openings .opening-family-card__score-metric dd {
+    font-size: 1.4rem;
+}
+
+.chess-panel__openings .opening-family-card__grade {
+    font-size: 1.25rem;
+}
+
+/* Two-up so coverage / games / confidence wrap inside 240px. */
+.chess-panel__openings .opening-family-card__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+/* Smaller depth step so deep chips don't run off the right edge of the panel. */
+.chess-panel__openings .game-opening-lineage__item {
+    padding-left: calc(var(--lineage-depth, 0) * 0.4rem);
 }
 
 /* ---- SRS repeat-mistake spotlight (full-screen, board stays lit) ---- */
