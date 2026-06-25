@@ -1,29 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 
-/**
- * Page-level legend for the three opening metrics. An info (ⓘ) button beside
- * the Openings Tree title toggles a popover defining Score, Coverage, and
- * Confidence once, so the per-node cards stay uncluttered. Copy is sourced from
- * docs/openingscore_final.md (the single source of truth for these meanings).
- *
- * Reuses the GameReviewStats info-button/popup interaction (click / Escape /
- * click-outside dismiss) via the shared `.info-help-*` classes.
- */
-const METRICS: Array<{ term: string; desc: string }> = [
-  {
-    term: "Score",
-    desc: "How reliably you navigate this opening's important lines (0–100, graded A–F). Higher means you stay on track through the opponent replies you've actually trained.",
-  },
-  {
-    term: "Coverage",
-    desc: "How much of the important opponent-response tree you've actually faced. Low coverage means parts of the opening haven't been tested yet.",
-  },
-  {
-    term: "Confidence",
-    desc: "How much evidence backs the score — how many times you've played and reviewed these lines, and how recently.",
-  },
-];
-
 function OpeningsMetricsLegend() {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLSpanElement>(null);
@@ -51,7 +27,7 @@ function OpeningsMetricsLegend() {
       <button
         type="button"
         className="info-help-btn openings-metrics-legend__btn"
-        aria-label="What do Score, Coverage, and Confidence mean?"
+        aria-label="What do the opening metrics and move types mean?"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
@@ -83,6 +59,39 @@ function OpeningsMetricsLegend() {
 
 
           </dl>
+          <p className="openings-metrics-legend__section-title">Move types</p>
+          <ul className="openings-metrics-legend__types">
+            <li>
+              <span
+                className="openings-metrics-legend__swatch openings-metrics-legend__swatch--book"
+                aria-hidden="true"
+              />
+              <span>
+                <strong>Book move</strong> — part of the opening book.
+              </span>
+            </li>
+            <li>
+              <span
+                className="openings-metrics-legend__swatch openings-metrics-legend__swatch--off-book"
+                aria-hidden="true"
+              />
+              <span>
+                <strong>Off book</strong> — a move from your own games, not in
+                the book. Flagged by a violet tag on the card (its connector
+                stays the standard book/observed colour).
+              </span>
+            </li>
+            <li>
+              <span
+                className="openings-metrics-legend__swatch openings-metrics-legend__swatch--selected"
+                aria-hidden="true"
+              />
+              <span>
+                <strong>Board move</strong> — a move you explored on the board,
+                shown while it's part of the current line.
+              </span>
+            </li>
+          </ul>
         </div>
       )}
     </span>

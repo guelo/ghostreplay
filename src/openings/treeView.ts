@@ -46,12 +46,17 @@ export interface DisplayNode {
   isSelected: boolean;
   /** The single deepest selected node → renders the expanded card. */
   isExpanded: boolean;
-  /** Drops only land on navigable nodes; the root is never a drop target. */
+  /** Mirrors the backend `is_navigable` (in the structural set OR this column's
+   *  user-selected move, g-obh5). A board drop onto a navigable frontier node
+   *  re-selects it; the root is never a drop target. Board drops are NOT limited
+   *  to navigable nodes — any legal move extends the line as a user-selected
+   *  node. */
   isNavigable: boolean;
   /** Whether clicking the card selects it. The synthesized root is always
-   *  selectable; an API node is selectable only when `is_navigable` — the
-   *  backend includes display-only boundary moves you cannot navigate into,
-   *  and selecting one would push a URL the backend immediately truncates. */
+   *  selectable; an API node is selectable only when `is_navigable`. The backend
+   *  still emits display-only boundary moves that are not click-navigable — you
+   *  reach an off-book/boundary move by playing it on the board (it returns as a
+   *  user-selected node), not by clicking its card. */
   isSelectable: boolean;
   /** The new selection line produced by selecting this node. */
   selectLine: string[];
@@ -60,6 +65,9 @@ export interface DisplayNode {
   inBook: boolean;
   /** Edge traversed in the user's real sessions → solid connector. */
   isObserved: boolean;
+  /** A legal move chosen on the board, not in book/observed — the third move
+   *  type. Line-scoped (only valid as the selected move of its column). */
+  isUserSelected: boolean;
   /** Times the user reached this edge → connector thickness. */
   encounterCount: number;
 }
@@ -67,6 +75,10 @@ export interface DisplayNode {
 export interface ConnectorStyle {
   /** Stroke width; clamps log2(encounters) into [2, 6]. */
   width: number;
+  /** Colour axis for the connector aimed at the selected child. Only the third
+   *  type (board exploration) gets a distinct hue; book vs observed is already
+   *  conveyed by width (encounter count), so they share the `default` colour. */
+  variant: "default" | "selected";
 }
 
 /**
@@ -79,10 +91,15 @@ export interface ConnectorStyle {
  */
 export function connectorStyle(node: DisplayNode | null): ConnectorStyle {
   if (!node) {
-    return { width: 2 };
+    return { width: 2, variant: "default" };
   }
   const width = Math.max(2, Math.min(6, 2 + Math.log2(node.encounterCount + 1)));
-  return { width };
+  // Only the third type (board exploration) is recoloured; book/observed share
+  // the default colour and are distinguished by width.
+  const variant: ConnectorStyle["variant"] = node.isUserSelected
+    ? "selected"
+    : "default";
+  return { width, variant };
 }
 
 export interface DisplayColumn {
@@ -117,6 +134,7 @@ export function nodeToView(node: TreeNode): OpeningTreeNodeView {
     openingName: node.opening_name,
     eco: node.eco,
     inBook: node.in_book,
+    isUserSelected: node.is_user_selected,
     score: node.opening_score,
     evalCp: node.eval_cp,
     evalMate: node.eval_mate,
@@ -150,6 +168,7 @@ export function synthesizeRootView(
     // The start position is conceptually always "in book"; also gated by the
     // null SAN, so the chip never shows on the root regardless.
     inBook: true,
+    isUserSelected: false,
     score: response.root_opening_score ?? null,
     evalCp: response.root_eval_cp,
     evalMate: response.root_eval_mate,
@@ -275,6 +294,7 @@ export function buildTreeView(
         // The root is only ever a connector *parent*, never a styled child.
         inBook: false,
         isObserved: false,
+        isUserSelected: false,
         encounterCount: 0,
       },
     ],
@@ -287,24 +307,31 @@ export function buildTreeView(
     }
     const lineIndex = column.ply;
     const selectedUci = selectionLine[lineIndex] ?? null;
-    const nodes: DisplayNode[] = column.nodes.map((node) => {
-      const isSelected = node.uci === selectedUci;
-      return {
-        key: node.uci,
-        view: nodeToView(node),
-        uci: node.uci,
-        childFen: node.child_fen,
-        isSelected,
-        // Only the deepest selected node (in column k-1) expands.
-        isExpanded: isSelected && lineIndex === k - 1,
-        isNavigable: node.is_navigable,
-        isSelectable: node.is_navigable,
-        selectLine: selectionLine.slice(0, lineIndex).concat(node.uci),
-        inBook: node.in_book,
-        isObserved: node.is_observed,
-        encounterCount: node.encounter_count,
-      };
-    });
+    const nodes: DisplayNode[] = column.nodes
+      // Line-scope invariant: a user-selected (third type) node is only a node
+      // while it IS the selected move of its column. A cached/provisional render
+      // of a deeper response for a shorter prefix can still carry one as a stale
+      // sibling — omit it (g-obh5 step 4b.2).
+      .filter((node) => !(node.is_user_selected && node.uci !== selectedUci))
+      .map((node) => {
+        const isSelected = node.uci === selectedUci;
+        return {
+          key: node.uci,
+          view: nodeToView(node),
+          uci: node.uci,
+          childFen: node.child_fen,
+          isSelected,
+          // Only the deepest selected node (in column k-1) expands.
+          isExpanded: isSelected && lineIndex === k - 1,
+          isNavigable: node.is_navigable,
+          isSelectable: node.is_navigable,
+          selectLine: selectionLine.slice(0, lineIndex).concat(node.uci),
+          inBook: node.in_book,
+          isObserved: node.is_observed,
+          isUserSelected: node.is_user_selected,
+          encounterCount: node.encounter_count,
+        };
+      });
     apiColumns.push({ kind: "moves", lineIndex, nodes });
   }
   // Backend returns columns in ply order; sort defensively so lineIndex math

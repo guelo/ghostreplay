@@ -386,14 +386,24 @@ def test_tree_deepest_opening_name_inherited(client, auth_headers):
 
 # --- canonical URLs -----------------------------------------------------------
 
-def test_tree_stale_move_truncates_to_canonical(client, auth_headers):
-    # 1.e4 then a legal-but-unknown black reply (1...d5) truncates the line.
+def test_tree_off_tree_move_becomes_user_selected_node(client, auth_headers):
+    # 1.e4 then a legal-but-unknown black reply (1...d5) is now KEPT as a
+    # user-selected (third type) move instead of being truncated (g-obh5).
     resp = _call(client, auth_headers,
                  params={"player_color": "white", "move": ["e2e4", "d7d5"]})
     data = resp.json()
-    assert data["canonical_line"] == ["e2e4"]
-    assert data["selected_fen"] == E4
-    assert data["selected_ply"] == 1
+    assert data["canonical_line"] == ["e2e4", "d7d5"]
+    assert data["selected_fen"] == normalize_fen(_full_fen(["e2e4", "d7d5"]))
+    assert data["selected_ply"] == 2
+    d5 = _by_uci(data["columns"][1], "d7d5")
+    assert d5["is_user_selected"] is True
+    assert d5["is_navigable"] is True
+    assert d5["in_book"] is False
+    assert d5["is_observed"] is False
+    # A brand-new position has no score row and (here) no eval — null metrics.
+    assert d5["opening_score"] is None
+    assert d5["eval_cp"] is None
+    assert d5["eval_mate"] is None
 
 
 def test_tree_cycle_truncates():
@@ -465,14 +475,59 @@ def test_tree_middlegame_book_child_is_terminal_boundary(client, auth_headers):
     assert navigable["terminal_reason"] is None
 
 
-def test_tree_stale_url_into_boundary_truncates(client, auth_headers):
-    # Selecting the non-navigable middlegame boundary move truncates the line.
+def test_tree_selected_boundary_move_becomes_navigable(client, auth_headers):
+    # Selecting the middlegame boundary move b8c6 now keeps it in the line and
+    # forces it navigable for THIS line — a crossed boundary is the third move
+    # type (g-obh5), distinct from the same move as an unselected sibling (which
+    # stays non-navigable, see test_tree_middlegame_book_child_is_terminal_boundary).
     resp = _call(client, auth_headers, mid_fens={NC6},
                  params={"player_color": "white",
                          "move": ["e2e4", "e7e5", "g1f3", "b8c6"]})
     data = resp.json()
-    assert data["canonical_line"] == ["e2e4", "e7e5", "g1f3"]
+    assert data["canonical_line"] == ["e2e4", "e7e5", "g1f3", "b8c6"]
+    assert data["selected_fen"] == NC6
+    boundary = _by_uci(data["columns"][3], "b8c6")
+    assert boundary["is_navigable"] is True
+    assert boundary["is_user_selected"] is True
+    # It IS a book move (just a middlegame boundary), so in_book stays true.
+    assert boundary["in_book"] is True
+
+
+def test_tree_chain_of_off_tree_moves_all_render(client, auth_headers):
+    # Two consecutive off-tree moves (1.e4 d5 2.exd5): the SECOND must still
+    # render a node even though its parent (the first off-tree position) has no
+    # column children — the build loop injects the selected move (g-obh5).
+    resp = _call(client, auth_headers,
+                 params={"player_color": "white",
+                         "move": ["e2e4", "d7d5", "e4d5"]})
+    data = resp.json()
+    assert data["canonical_line"] == ["e2e4", "d7d5", "e4d5"]
+    d5 = _by_uci(data["columns"][1], "d7d5")
+    assert d5["is_user_selected"] is True
+    exd5 = _by_uci(data["columns"][2], "e4d5")
+    assert exd5["is_user_selected"] is True
+    assert exd5["is_navigable"] is True
+
+
+def test_tree_off_tree_transposition_reexpands_book(client, auth_headers):
+    # 1.Nf3 e5 2.e4 transposes into 1.e4 e5 2.Nf3 (NF3). The off-tree line is
+    # kept, and reaching a known book FEN re-expands that position's book
+    # children (g-obh5).
+    resp = _call(client, auth_headers,
+                 params={"player_color": "white",
+                         "move": ["g1f3", "e7e5", "e2e4"]})
+    data = resp.json()
+    assert data["canonical_line"] == ["g1f3", "e7e5", "e2e4"]
     assert data["selected_fen"] == NF3
+    g1f3 = _by_uci(data["columns"][0], "g1f3")
+    assert g1f3["is_user_selected"] is True
+    # The START reveal column still offers the book move e2e4 alongside it.
+    assert _by_uci(data["columns"][0], "e2e4")["is_user_selected"] is False
+    # The transposed-into NF3 position re-expands its book children.
+    reveal = data["columns"][3]
+    assert set(_ucis(reveal)) == {"b8c6", "g8f6"}
+    assert _by_uci(reveal, "b8c6")["is_navigable"] is True
+    assert _by_uci(reveal, "g8f6")["is_navigable"] is True
 
 
 def test_tree_selected_terminal_reason_direct(client, auth_headers):

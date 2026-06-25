@@ -75,6 +75,7 @@ function tn(overrides: Partial<TreeNode> & { uci: string }): TreeNode {
     in_book: true,
     is_navigable: true,
     is_observed: false,
+    is_user_selected: false,
     is_prepared: false,
     user_choice_count: 0,
     encounter_count: 0,
@@ -159,6 +160,30 @@ const WHITE_E4 = tr({
       tn({ uci: "c7c5", san: "c5", ply: 2, opening_score: 50 }),
       tn({ uci: "e7e5", san: "e5", ply: 2, opening_score: 52 }),
     ]),
+  ],
+});
+
+// Resolved response for a legal off-tree first move (1.a3): a3 is a
+// user-selected (third type) node alongside the book moves at the root column.
+const WHITE_A3 = tr({
+  canonical_line: ["a2a3"],
+  columns: [
+    tc(
+      0,
+      [
+        tn({ uci: "e2e4", san: "e4", ply: 1, opening_score: 61 }),
+        tn({ uci: "d2d4", san: "d4", ply: 1, opening_score: 55 }),
+        tn({
+          uci: "a2a3",
+          san: "a3",
+          ply: 1,
+          is_user_selected: true,
+          in_book: false,
+          opening_score: null,
+        }),
+      ],
+      "a2a3",
+    ),
   ],
 });
 
@@ -459,12 +484,13 @@ describe("OpeningsPage tree", () => {
     await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
   });
 
-  it("syncs a navigable board drop to the tree and rejects off-tree drops", async () => {
+  it("syncs a navigable board drop to the tree and rejects illegal drops", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
     await screen.findByText("e4", { selector: ".tree-node-card__move" });
 
-    // Off-tree but legal (a2a3 is not a node in the frontier column) → rejected.
+    // Illegal drop (e2→e5 is not a legal pawn move) → resolveDrop returns null →
+    // rejected, board snaps back, no exploration captured.
     let rejected: boolean | undefined;
     act(() => {
       rejected = (
@@ -472,14 +498,14 @@ describe("OpeningsPage tree", () => {
           sourceSquare: string;
           targetSquare: string;
         }) => boolean
-      )({ sourceSquare: "a2", targetSquare: "a3" });
+      )({ sourceSquare: "e2", targetSquare: "e5" });
     });
     expect(rejected).toBe(false);
     expect(location()).toBe("/openings?color=white");
     // A rejected drop never reaches selectLine, so no exploration is captured.
     expect(captureEventMock).not.toHaveBeenCalled();
 
-    // Navigable drop e2→e4 extends the line; board position follows immediately.
+    // Navigable drop e2→e4 selects the existing node; board follows immediately.
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
     let accepted: boolean | undefined;
     act(() => {
@@ -504,6 +530,92 @@ describe("OpeningsPage tree", () => {
     // Let the post-drop refetch settle so its state update doesn't trail the
     // test as an act() warning.
     await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+  });
+
+  it("extends the line for a legal off-tree board drop (third move type)", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // a2a3 is legal but not a node in the frontier column. Previously this was
+    // rejected (board snapped back); now it extends the line as a user-selected
+    // (third type) move the backend resolves and renders (g-obh5).
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_A3);
+    let accepted: boolean | undefined;
+    act(() => {
+      accepted = (
+        boardOptions.onPieceDrop as (a: {
+          sourceSquare: string;
+          targetSquare: string;
+        }) => boolean
+      )({ sourceSquare: "a2", targetSquare: "a3" });
+    });
+    expect(accepted).toBe(true);
+    expect(location()).toBe("/openings?color=white&move=a2a3");
+    // The off-tree drop flows through selectLine, so it captures directly.
+    expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      from_key: "",
+      to_key: "a2a3",
+      depth: 1,
+      player_color: "white",
+    });
+    // The refetch settles into a3 as the deepest selected (expanded) node; let
+    // it land so the state update doesn't trail as an act() warning.
+    await screen.findByText("1. a3", {
+      selector: ".tree-node-card__move-label",
+    });
+    // "Your move" chip flags the third move type on the expanded card.
+    expect(screen.getByText("Your move")).toBeInTheDocument();
+    expect(lineIndexes()).toEqual([-1, 0]);
+  });
+
+  it("off-tree board drop: loading spinner renders inside the frontier column, not a new column", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Keep the off-tree (a2a3) refetch pending so the loading state is visible.
+    const pending = deferred<TreeResponse>();
+    getOpeningTreeMock.mockReturnValueOnce(pending.promise);
+    act(() => {
+      (
+        boardOptions.onPieceDrop as (a: {
+          sourceSquare: string;
+          targetSquare: string;
+        }) => boolean
+      )({ sourceSquare: "a2", targetSquare: "a3" });
+    });
+
+    // The spinner sits in a footer INSIDE the frontier column (below the book
+    // cards), and NO standalone append loading column is spawned (g-42md).
+    await waitFor(() =>
+      expect(screen.getByText("Loading…")).toBeInTheDocument(),
+    );
+    const frontier = screen
+      .getAllByTestId("tree-column")
+      .find((el) => el.getAttribute("data-line-index") === "0");
+    expect(
+      frontier?.querySelector(".openings-tree-column__loading-footer"),
+    ).not.toBeNull();
+    expect(
+      document.querySelector(".openings-tree-append--loading"),
+    ).toBeNull();
+    // Still just root + the one frontier column; the book siblings remain.
+    expect(lineIndexes()).toEqual([-1, 0]);
+    expect(
+      screen.getByText("e4", { selector: ".tree-node-card__move" }),
+    ).toBeInTheDocument();
+
+    // Resolving settles a3 into that same column as the expanded "Your move"
+    // card and clears the footer.
+    act(() => pending.resolve(WHITE_A3));
+    await screen.findByText("1. a3", {
+      selector: ".tree-node-card__move-label",
+    });
+    expect(screen.getByText("Your move")).toBeInTheDocument();
+    expect(
+      document.querySelector(".openings-tree-column__loading-footer"),
+    ).toBeNull();
   });
 
   it("switches perspective: flips orientation, preserves the line, refetches at root", async () => {

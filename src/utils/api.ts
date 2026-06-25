@@ -1394,9 +1394,14 @@ export interface TreeNode {
   opening_name: string | null
   eco: string | null
   in_book: boolean
-  /** uci is in the structural child set of parent → gates clicks/drops. */
+  /** uci is in parent's structural child set OR is this column's user-selected
+   *  move (g-obh5) → gates node clicks. Board drops are NOT gated: any legal
+   *  move can be played, becoming a user-selected node. */
   is_navigable: boolean
   is_observed: boolean
+  /** A legal move chosen on the board that is not in book/observed — the third
+   *  move type. Line-scoped: only emitted as the selected move of its column. */
+  is_user_selected: boolean
   is_prepared: boolean
   user_choice_count: number
   encounter_count: number

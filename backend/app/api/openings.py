@@ -792,8 +792,9 @@ class TreeNode(BaseModel):
     opening_name: str | None
     eco: str | None
     in_book: bool
-    is_navigable: bool         # uci in _structural_children(parent); gates clicks/drops
+    is_navigable: bool         # uci in _structural_children(parent) OR this column's user-selected move; gates node clicks only — board drops accept any legal move (g-obh5)
     is_observed: bool
+    is_user_selected: bool     # legal move chosen on the board, not in book/observed (g-obh5)
     is_prepared: bool
     user_choice_count: int
     encounter_count: int
@@ -865,6 +866,7 @@ class _RawNode:
     in_book: bool
     is_navigable: bool
     is_observed: bool
+    is_user_selected: bool
     is_prepared: bool
     user_choice_count: int
     encounter_count: int
@@ -1030,13 +1032,6 @@ class _OpeningTreeBuilder:
         self._column_cache[norm_fen] = result
         return result
 
-    def _is_leaf(self, board: chess.Board, norm_fen: str) -> bool:
-        return (
-            board.is_checkmate()
-            or board.is_stalemate()
-            or not self._column_children(norm_fen)
-        )
-
     def _terminal_reason_for_position(
         self, board: chess.Board, norm_fen: str
     ) -> str | None:
@@ -1072,12 +1067,15 @@ class _OpeningTreeBuilder:
     # -- canonical line resolution -----------------------------------------
 
     def _resolve_moves(self, moves: list[str]) -> list[str]:
-        """Validate + truncate a UCI move line to its canonical navigable prefix.
+        """Validate + truncate a UCI move line to its canonical legal prefix.
 
-        Malformed UCI is a client error (422); a well-formed-but-non-navigable,
-        illegal, cyclic, or over-deep move truncates the line (canonical-URL
-        behavior). The legality guard runs BEFORE ``push`` so a corrupt/synthetic
-        observed edge that passed the structural check can never corrupt replay
+        Malformed UCI is a client error (422); a true game-over, illegal, cyclic,
+        or over-deep move truncates the line (canonical-URL behavior). Any legal
+        move is kept — a legal move past the book/observed frontier becomes a
+        user-selected (third type) node (g-obh5) rather than being dropped, so the
+        board can explore lines that are not yet in the tree. Cycles, illegality,
+        and max ply (``MAX_TREE_PLY``) still bound abuse. The legality guard runs
+        BEFORE ``push`` so a corrupt/synthetic edge can never corrupt replay
         (finding #4).
         """
         board = chess.Board()
@@ -1090,18 +1088,15 @@ class _OpeningTreeBuilder:
                 raise HTTPException(status_code=422, detail="Malformed move in line")
             if len(line) >= MAX_TREE_PLY:
                 break
-            parent_norm = normalize_fen(board.fen())
-            if self._is_leaf(board, parent_norm):
-                break
-            if token not in self._structural_children(parent_norm):
-                break
+            if board.is_checkmate() or board.is_stalemate():
+                break  # no legal continuations exist
             if move not in board.legal_moves:
-                break
+                break  # keep illegal-move truncation
             board.push(move)
             child_norm = normalize_fen(board.fen())
             if child_norm in visited:
                 board.pop()
-                break
+                break  # keep cycle/repetition guard
             visited.add(child_norm)
             line.append(token)
         return line
@@ -1208,12 +1203,32 @@ class _OpeningTreeBuilder:
         for i in range(k + 1):
             board_i = boards[i]
             norm_i = pos_norm[i]
-            if self._is_leaf(board_i, norm_i):
-                continue  # no reveal column (only reachable at i == k)
+            if board_i.is_checkmate() or board_i.is_stalemate():
+                continue  # genuinely no children
             structural = self._structural_children(norm_i)
+            # Local copy (NOT the cache): the selected off-tree move is injected
+            # per-line and must never leak into _column_cache.
+            column = dict(self._column_children(norm_i))
             selected_uci = line[i] if i < k else None
+            if selected_uci is not None and selected_uci not in column:
+                # A legal move past the book/observed frontier (g-obh5): the
+                # resolver kept it in the line, so inject it as a navigable
+                # user-selected node. Pre-validated legal by _resolve_moves.
+                move = chess.Move.from_uci(selected_uci)
+                board_i.push(move)
+                child_full = board_i.fen()
+                board_i.pop()
+                column[selected_uci] = _ChildEdge(
+                    uci=selected_uci,
+                    child_fen=normalize_fen(child_full),
+                    in_book=False,
+                    is_observed=False,
+                    edge=None,
+                )
+            if not column:
+                continue  # leaf with nothing selected (only at i == k) — no reveal column
             raw_nodes: list[_RawNode] = []
-            for uci, child in self._column_children(norm_i).items():
+            for uci, child in column.items():
                 try:
                     move = chess.Move.from_uci(uci)
                 except ValueError:
@@ -1228,7 +1243,11 @@ class _OpeningTreeBuilder:
                 child_is_mate = board_i.is_checkmate()
                 child_is_stale = board_i.is_stalemate()
                 board_i.pop()
-                is_navigable = uci in structural
+                # A move selected on the board that is not in the structural set is
+                # the third move type: forced navigable for THIS line only (the
+                # same move as an unselected sibling stays non-navigable).
+                is_user_selected = uci == selected_uci and uci not in structural
+                is_navigable = uci in structural or is_user_selected
                 node_obj = self.graph.get_node(child.child_fen)
                 edge = child.edge
                 drill_root = self.roots.get_root(child.child_fen)
@@ -1242,6 +1261,7 @@ class _OpeningTreeBuilder:
                         in_book=child.in_book,
                         is_navigable=is_navigable,
                         is_observed=child.is_observed,
+                        is_user_selected=is_user_selected,
                         is_prepared=bool(
                             edge is not None
                             and (edge.live_attempts >= 2 or edge.live_passes >= 1)
@@ -1378,6 +1398,7 @@ class _OpeningTreeBuilder:
             in_book=rn.in_book,
             is_navigable=rn.is_navigable,
             is_observed=rn.is_observed,
+            is_user_selected=rn.is_user_selected,
             is_prepared=rn.is_prepared,
             user_choice_count=rn.user_choice_count,
             encounter_count=rn.encounter_count,

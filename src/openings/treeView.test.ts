@@ -23,6 +23,7 @@ function makeNode(overrides: Partial<TreeNode> & { uci: string }): TreeNode {
     in_book: true,
     is_navigable: true,
     is_observed: false,
+    is_user_selected: false,
     is_prepared: false,
     user_choice_count: 0,
     encounter_count: 0,
@@ -129,6 +130,14 @@ describe("nodeToView", () => {
     const view = nodeToView(node);
     expect(view.isTerminal).toBe(true);
     expect(view.terminalReason).toBe("checkmate");
+  });
+
+  it("maps is_user_selected (the third move type) onto the view", () => {
+    expect(nodeToView(makeNode({ uci: "d7d5" })).isUserSelected).toBe(false);
+    expect(
+      nodeToView(makeNode({ uci: "d7d5", is_user_selected: true }))
+        .isUserSelected,
+    ).toBe(true);
   });
 });
 
@@ -348,6 +357,69 @@ describe("buildTreeView", () => {
     expect(d2d4.childFen).toBe("fen-after-d4");
   });
 
+  it("maps is_user_selected onto api nodes and defaults the root to false", () => {
+    const view = buildTreeView(
+      makeResponse({
+        canonical_line: ["e2e4", "a7a6"],
+        columns: [
+          makeColumn(0, [makeNode({ uci: "e2e4", ply: 1 })], "e2e4"),
+          makeColumn(
+            1,
+            [
+              makeNode({
+                uci: "a7a6",
+                ply: 2,
+                is_user_selected: true,
+                is_navigable: true,
+              }),
+            ],
+            "a7a6",
+          ),
+        ],
+      }),
+      {
+        selectionLine: ["e2e4", "a7a6"],
+        loadedThroughPly: 2,
+        isExactResponseLine: true,
+      },
+    );
+    // The third-type node IS the selected move of its column → kept + flagged.
+    const a7a6 = view.columns[2].nodes.find((n) => n.uci === "a7a6")!;
+    expect(a7a6.isUserSelected).toBe(true);
+    expect(a7a6.isSelected).toBe(true);
+    // The synthesized root is never user-selected.
+    expect(view.columns[0].nodes[0].isUserSelected).toBe(false);
+  });
+
+  it("omits a user-selected node that is not the column's selected move (line-scope)", () => {
+    // A deeper cached/provisional response can carry a third-type sibling that
+    // has left the line; it must not render as a navigable child of a shorter
+    // prefix (g-obh5 line-scope invariant).
+    const view = buildTreeView(
+      makeResponse({
+        canonical_line: ["e2e4"],
+        columns: [
+          makeColumn(
+            0,
+            [
+              makeNode({ uci: "e2e4", ply: 1 }),
+              makeNode({
+                uci: "a2a3",
+                ply: 1,
+                is_user_selected: true,
+                is_navigable: true,
+              }),
+            ],
+            "e2e4",
+          ),
+        ],
+      }),
+      { selectionLine: ["e2e4"], loadedThroughPly: 1, isExactResponseLine: true },
+    );
+    // a2a3 is stale here (selectedUci is e2e4) → dropped; e2e4 stays.
+    expect(view.columns[1].nodes.map((n) => n.uci)).toEqual(["e2e4"]);
+  });
+
   it("derives the board from the effective line, not selected_fen", () => {
     const view = buildTreeView(
       makeResponse({
@@ -370,13 +442,17 @@ describe("buildTreeView", () => {
 });
 
 describe("connectorStyle", () => {
-  // connectorStyle reads only encounterCount; dashing is a render-time, measured
-  // concern (an endpoint scrolled off-screen), not a model property.
-  const edge = (encounterCount: number): DisplayNode =>
-    ({ encounterCount }) as unknown as DisplayNode;
+  // connectorStyle reads encounterCount (width) and the move-type flags
+  // (variant); dashing is a render-time, measured concern (an endpoint scrolled
+  // off-screen), not a model property.
+  const edge = (
+    encounterCount: number,
+    flags: Partial<DisplayNode> = {},
+  ): DisplayNode =>
+    ({ encounterCount, ...flags }) as unknown as DisplayNode;
 
-  it("returns a base-width pointer for a null (frontier) child", () => {
-    expect(connectorStyle(null)).toEqual({ width: 2 });
+  it("returns a base-width default pointer for a null (frontier) child", () => {
+    expect(connectorStyle(null)).toEqual({ width: 2, variant: "default" });
   });
 
   it("grows width with encounter count", () => {
@@ -387,6 +463,17 @@ describe("connectorStyle", () => {
   it("clamps width into [2, 6] across encounter counts", () => {
     expect(connectorStyle(edge(0)).width).toBe(2);
     expect(connectorStyle(edge(100_000)).width).toBe(6);
+  });
+
+  it("recolours only the third (selected) type; book/observed share default", () => {
+    expect(connectorStyle(edge(0)).variant).toBe("default");
+    // Observed is conveyed by width, not colour — it stays the default variant.
+    expect(connectorStyle(edge(0, { isObserved: true })).variant).toBe(
+      "default",
+    );
+    expect(connectorStyle(edge(0, { isUserSelected: true })).variant).toBe(
+      "selected",
+    );
   });
 });
 

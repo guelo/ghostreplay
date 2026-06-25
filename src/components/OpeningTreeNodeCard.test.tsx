@@ -12,6 +12,7 @@ const childView: OpeningTreeNodeView = {
   openingName: "Ruy Lopez",
   eco: "C60",
   inBook: true,
+  isUserSelected: false,
   score: 72,
   evalCp: 120,
   evalMate: null,
@@ -30,6 +31,7 @@ const rootView: OpeningTreeNodeView = {
   openingName: null,
   eco: null,
   inBook: true,
+  isUserSelected: false,
   score: null,
   evalCp: 40,
   evalMate: null,
@@ -204,12 +206,54 @@ describe("OpeningTreeNodeCard — compact", () => {
 
     // The popover appears, and the chip click did NOT bubble to card selection.
     expect(screen.getByRole("tooltip")).toBeInTheDocument();
-    expect(screen.getByText(/branches off from your own games/i)).toBeInTheDocument();
     expect(onSelect).not.toHaveBeenCalled();
 
     // Escape dismisses it.
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("shows a 'Your move' chip for user-selected moves instead of 'Off book'", () => {
+    const { rerender } = render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: false, isUserSelected: true }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Your move")).toBeInTheDocument();
+    // The third type wins over off-book — no "Off book" chip on the same card.
+    expect(screen.queryByText("Off book")).toBeNull();
+
+    // A user-selected move that crossed a book boundary (inBook=true) still gets
+    // the "Your move" chip (and a book move would show no chip).
+    rerender(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: true, isUserSelected: true }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Your move")).toBeInTheDocument();
+  });
+
+  it("opens the 'Your move' info popover on click without selecting the card", async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, isUserSelected: true }}
+        onSelect={onSelect}
+      />,
+    );
+
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    await user.click(
+      screen.getByRole("button", { name: /your move — what does this mean/i }),
+    );
+    expect(screen.getByRole("tooltip")).toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it("never shows the 'Off book' chip on the root", () => {
@@ -321,6 +365,17 @@ describe("OpeningTreeNodeCard — expanded", () => {
       />,
     );
     expect(screen.getByText("Off book")).toBeInTheDocument();
+  });
+
+  it("shows the 'Your move' chip next to the name for user-selected expanded moves", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="expanded"
+        node={{ ...childView, inBook: false, isUserSelected: true }}
+      />,
+    );
+    expect(screen.getByText("Your move")).toBeInTheDocument();
+    expect(screen.queryByText("Off book")).toBeNull();
   });
 
   it("renders the root with a 'Starting position' header, no name line, dashed metrics, and eval", () => {

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   formatGames,
   formatMoveLabel,
@@ -32,6 +32,9 @@ export interface OpeningTreeNodeView {
    *  an off-book branch from the player's games; the name is inherited from the
    *  last book leaf, so an "Off book" chip flags it. Always true for the root. */
   inBook: boolean;
+  /** A legal move chosen on the board, not from the book or the player's games —
+   *  the third move type. Flagged with a "Your move" chip (wins over off-book). */
+  isUserSelected: boolean;
   /** 0–100 opening score; null = no evidence. */
   score: number | null;
   /** White-relative centipawns (+white / −black); null when no best-move row. */
@@ -81,18 +84,28 @@ function GradeTag({ score }: { score: number | null }) {
 }
 
 /**
- * Marks a move whose edge is NOT in the eco.json book — an off-book branch from
- * the player's own games. Its opening name is inherited from the last book leaf,
- * so this chip flags that the name is approximate and the line is the player's.
+ * A small chip that is itself a clickable trigger toggling an info popover —
+ * shared plumbing for the move-type chips (Off book / Your move).
  *
- * The chip is a clickable trigger that toggles an info popover. It renders as a
- * `role="button"` span (not a `<button>`) because the compact card is itself a
- * selection `<button>` and a real nested button is invalid; the click is
- * stopped from propagating so tapping the chip never selects the card. The
- * popover is `position: fixed` and anchored to the trigger rect so it escapes
- * the tree columns' `overflow` scrollers (which would otherwise clip it).
+ * It renders as a `role="button"` span (not a `<button>`) because the compact
+ * card is itself a selection `<button>` and a real nested button is invalid; the
+ * click is stopped from propagating so tapping the chip never selects the card.
+ * The popover is `position: fixed` and anchored to the trigger rect so it
+ * escapes the tree columns' `overflow` scrollers (which would otherwise clip it).
  */
-function OffBookChip() {
+function PopoverChip({
+  label,
+  ariaLabel,
+  triggerClassName,
+  title,
+  children,
+}: {
+  label: string;
+  ariaLabel: string;
+  triggerClassName: string;
+  title: string;
+  children: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number; visibility: "hidden" | "visible" }>({
     top: 0,
@@ -166,15 +179,15 @@ function OffBookChip() {
         ref={triggerRef}
         role="button"
         tabIndex={0}
-        className="tree-node-card__off-book"
-        aria-label="Off book — what does this mean?"
+        className={triggerClassName}
+        aria-label={ariaLabel}
         aria-expanded={open}
         onClick={toggle}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") toggle(e);
         }}
       >
-        Off book
+        {label}
       </span>
       {open && (
         <span
@@ -184,20 +197,56 @@ function OffBookChip() {
           style={pos}
           onClick={(e) => e.stopPropagation()}
         >
-          <strong>Off book</strong>
-          <span>
-            This move isn't in the official opening book — it is an opening move you played in a game.
-          </span>
+          <strong>{title}</strong>
+          <span>{children}</span>
         </span>
       )}
     </span>
   );
 }
 
+/**
+ * Marks a move whose edge is NOT in the eco.json book — an off-book branch from
+ * the player's own games. Its opening name is inherited from the last book leaf,
+ * so this chip flags that the name is approximate and the line is the player's.
+ */
+function OffBookChip() {
+  return (
+    <PopoverChip
+      label="Off book"
+      ariaLabel="Off book — what does this mean?"
+      triggerClassName="tree-node-card__off-book"
+      title="Off book"
+    >
+      This move isn't in the official opening book — it is an opening move you played in a game.
+    </PopoverChip>
+  );
+}
+
+/**
+ * Marks the third move type: a legal move chosen on the board to explore.
+ * Line-scoped — it exists only while it is the selected move of its column — and
+ * may be on or off book (a crossed book boundary still gets this chip), so the
+ * copy avoids claiming it is not in the book.
+ */
+function SelectedMoveChip() {
+  return (
+    <PopoverChip
+      label="Your move"
+      ariaLabel="Your move — what does this mean?"
+      triggerClassName="tree-node-card__selected-move"
+      title="Your move"
+    >
+      A move you explored on the board; shown while it's part of the current line.
+    </PopoverChip>
+  );
+}
+
 /** Compact body: two lines (SAN + score/grade, then opening name + eval). */
 function CompactBody({ node }: { node: OpeningTreeNodeView }) {
   const isRoot = node.san === null;
-  const isOffBook = !isRoot && !node.inBook;
+  const isUserSelected = !isRoot && node.isUserSelected;
+  const isOffBook = !isRoot && !node.inBook && !node.isUserSelected;
   const name = formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
 
@@ -211,6 +260,7 @@ function CompactBody({ node }: { node: OpeningTreeNodeView }) {
         </span>
       </span>
       <span className="tree-node-card__line tree-node-card__line--secondary">
+        {isUserSelected && <SelectedMoveChip />}
         {isOffBook && <OffBookChip />}
         {!isRoot && (
           <span className="tree-node-card__name" title={name}>
@@ -232,7 +282,8 @@ function ExpandedBody({
   onStartDrill?: () => void;
 }) {
   const isRoot = node.san === null;
-  const isOffBook = !isRoot && !node.inBook;
+  const isUserSelected = !isRoot && node.isUserSelected;
+  const isOffBook = !isRoot && !node.inBook && !node.isUserSelected;
   const name = formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
   // Every expanded move card is drillable; the page decides drillability by
@@ -252,6 +303,7 @@ function ExpandedBody({
             <span className="tree-node-card__name" title={name}>
               {name}
             </span>
+            {isUserSelected && <SelectedMoveChip />}
             {isOffBook && <OffBookChip />}
           </span>
         )}

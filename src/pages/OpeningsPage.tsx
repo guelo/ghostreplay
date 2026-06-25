@@ -44,6 +44,7 @@ function TreeColumnView({
   column,
   columnIndex,
   isNextAfterActive,
+  showLoadingFooter,
   registerColumn,
   registerSelectedNode,
   onSelect,
@@ -54,6 +55,10 @@ function TreeColumnView({
   // The column immediately right of the active one; widened (like the active
   // column) so its collapsed opening names are easier to read.
   isNextAfterActive: boolean;
+  // An off-tree board move is loading: its card will settle INTO this (the
+  // deepest/frontier) column, so the spinner lives here, below the cards —
+  // never as a standalone appended column (g-42md).
+  showLoadingFooter: boolean;
   registerColumn: (idx: number, el: HTMLElement | null) => void;
   registerSelectedNode: (idx: number, el: HTMLElement | null) => void;
   onSelect: (line: string[]) => void;
@@ -160,6 +165,21 @@ function TreeColumnView({
           // NB: every node renders inside a 1:1 wrapper div so the column's flex
           // children are uniform; only the selected one carries a measure ref.
         })}
+        {/* Off-tree move loading: the new card will appear in THIS column once the
+            refetch settles, so the spinner sits below the existing cards rather
+            than spawning a standalone column (g-42md). */}
+        {showLoadingFooter && (
+          <div
+            className="openings-tree-column__loading-footer"
+            aria-live="polite"
+          >
+            <span
+              className="openings-tree-append__spinner"
+              aria-hidden="true"
+            />
+            <p className="openings-tree-append__label">Loading…</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -211,11 +231,26 @@ function OpeningsPage() {
   const columns = view?.columns ?? null;
   const selectionLine = view?.selectionLine ?? [];
   const columnCount = columns?.length ?? 0;
-  // The loading placeholder registers as the column after the last real one, so
+  // An off-tree board move is loading when the deepest rendered column has a
+  // move selected at its ply (it's in the line) that is NOT among its nodes —
+  // i.e. the move isn't in the displayed (stale) response. Its card will settle
+  // into THIS column, so the spinner goes inside it (below the cards) rather
+  // than as a standalone appended column (g-42md). In-tree forward selection
+  // (deepest column already shows the selected card) and color switch / empty
+  // frontier (no move selected at the deepest ply) keep the append column.
+  const lastColumn = columns?.[columns.length - 1] ?? null;
+  const offTreeLoading =
+    appendStatus === "loading" &&
+    lastColumn?.kind === "moves" &&
+    selectionLine[lastColumn.lineIndex] !== undefined &&
+    !lastColumn.nodes.some((node) => node.isSelected);
+  // The append placeholder registers as the column after the last real one, so
   // the connector loop draws the unconnected (dangling-arrow) stub from the
-  // selected card out toward the column being fetched while it loads.
-  const connectorColumnCount =
-    columnCount + (appendStatus === "loading" ? 1 : 0);
+  // selected card out toward the column being fetched while it loads. The
+  // off-tree case has no append column (the spinner lives inside the frontier
+  // column), so it contributes no extra connector column.
+  const showAppendColumn = appendStatus === "loading" && !offTreeLoading;
+  const connectorColumnCount = columnCount + (showAppendColumn ? 1 : 0);
   // Full line (not a depth count): a same-depth sibling switch changes which
   // node is selected without changing columnCount and must re-aim the lines.
   const selectionKey = `${playerColor}\u0000${selectionLine.join("\u0000")}`;
@@ -332,10 +367,11 @@ function OpeningsPage() {
     navigate("/play", { state: { drillSetup: { ...p, playerColor } } });
   };
 
-  // Board → tree: accept a drag only when the children column of the deepest
-  // position is actually rendered (settled) and the move lands on a navigable
-  // node there. Otherwise reject (board snaps back) so board and tree can never
-  // diverge.
+  // Board → tree: accept any LEGAL drag on the deepest (settled) position. An
+  // in-tree frontier move selects its existing node; any other legal move
+  // extends the line as a user-selected (third type) move the backend then
+  // resolves and renders (g-obh5). Only an illegal drag (resolveDrop → null)
+  // snaps back, so board and tree can never diverge on a legal move.
   const handlePieceDrop = ({
     sourceSquare,
     targetSquare,
@@ -345,7 +381,7 @@ function OpeningsPage() {
     }
     const uci = resolveDrop(view.board.fen, sourceSquare, targetSquare);
     if (!uci) {
-      return false;
+      return false; // illegal → snap back
     }
     const frontier = view.columns.find(
       (column) =>
@@ -355,10 +391,10 @@ function OpeningsPage() {
     const target = frontier?.nodes.find(
       (node) => node.uci === uci && node.isNavigable,
     );
-    if (!target) {
-      return false;
-    }
-    selectLine(target.selectLine);
+    // In-tree frontier move selects its node; otherwise extend the line. The
+    // optimistic board state (piece stays because we return true) reconciles
+    // with the refetched view.board.fen once the new line settles.
+    selectLine(target ? target.selectLine : view.selectionLine.concat(uci));
     return true;
   };
 
@@ -504,9 +540,40 @@ function OpeningsPage() {
                         >
                           <path d="M0,0 L9,5 L0,10 Z" fill="currentColor" />
                         </marker>
+                        {/* Selected (third type) arrowhead: its own color via a
+                            class so currentColor inside the marker resolves to
+                            the selected hue (the group-color trick can't reach
+                            into a marker). */}
+                        <marker
+                          id="openings-tree-arrowhead--selected"
+                          className="openings-tree-arrowhead-selected"
+                          markerUnits="userSpaceOnUse"
+                          markerWidth="10"
+                          markerHeight="10"
+                          refX="0"
+                          refY="5"
+                          orient="auto"
+                        >
+                          <path d="M0,0 L9,5 L0,10 Z" fill="currentColor" />
+                        </marker>
                       </defs>
                       {connectors.map((c, i) => {
-                        const style = connectorStyles[i] ?? { width: 2 };
+                        const style = connectorStyles[i] ?? {
+                          width: 2,
+                          variant: "default" as const,
+                        };
+                        // The third move type (board exploration) recolors its
+                        // connector: a distinct <g> color (stroke + clamp tips
+                        // inherit it) plus a dedicated arrowhead marker, since a
+                        // marker's currentColor resolves against the marker, not
+                        // the referencing path's group.
+                        const isSelectedVariant = style.variant === "selected";
+                        const groupClass = isSelectedVariant
+                          ? "openings-tree-connector-group--selected"
+                          : undefined;
+                        const arrowMarker = isSelectedVariant
+                          ? "url(#openings-tree-arrowhead--selected)"
+                          : "url(#openings-tree-arrowhead)";
                         // When an endpoint's cell is scrolled out of its column,
                         // mark the clamped edge with a small triangle pointing
                         // toward the selection, and dash the line (matching
@@ -541,7 +608,7 @@ function OpeningsPage() {
                           const ty = c.y1;
                           const stub = clampTip(c.x1, c.y1, c.off);
                           return (
-                            <g key={i}>
+                            <g key={i} className={groupClass}>
                               <path
                                 className="openings-tree-connector"
                                 d={`M ${c.x1} ${c.y1} L ${tx} ${ty}`}
@@ -549,11 +616,7 @@ function OpeningsPage() {
                                 stroke="currentColor"
                                 strokeWidth={style.width}
                                 strokeDasharray={c.off ? "5 4" : undefined}
-                                markerEnd={
-                                  c.off
-                                    ? undefined
-                                    : "url(#openings-tree-arrowhead)"
-                                }
+                                markerEnd={c.off ? undefined : arrowMarker}
                                 opacity={c.off ? 0.5 : 0.9}
                               />
                               {stub && (
@@ -580,7 +643,7 @@ function OpeningsPage() {
                         const tip2 = clampTip(x2 - 7, c.y2, c.off2);
                         const clamped = c.off || c.off2;
                         return (
-                          <g key={i}>
+                          <g key={i} className={groupClass}>
                             <path
                               className="openings-tree-connector"
                               d={d}
@@ -588,7 +651,7 @@ function OpeningsPage() {
                               stroke="currentColor"
                               strokeWidth={style.width}
                               strokeDasharray={clamped ? "5 4" : undefined}
-                              markerEnd="url(#openings-tree-arrowhead)"
+                              markerEnd={arrowMarker}
                               opacity={clamped ? 0.5 : 0.9}
                             />
                             {tip && (
@@ -620,6 +683,9 @@ function OpeningsPage() {
                           ) ??
                             false)
                         }
+                        showLoadingFooter={
+                          offTreeLoading && index === cols.length - 1
+                        }
                         registerColumn={registerColumn}
                         registerSelectedNode={registerSelectedNode}
                         onSelect={selectLine}
@@ -627,7 +693,7 @@ function OpeningsPage() {
                       />
                     ))}
 
-                    {appendStatus === "loading" &&
+                    {showAppendColumn &&
                       (() => {
                         // The loading column will render the move at its ply in
                         // the requested line — head it now with that move's

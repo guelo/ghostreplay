@@ -92,6 +92,24 @@ function makeRouteKey(
   return `${color}\n${movesKey}\n${opening ?? ""}`;
 }
 
+/** Whether a response carries any user-selected (third type) node, memoized per
+ *  response object. Such a node is line-scoped — the backend only emits it as the
+ *  selected move of its column — so a deeper response must not be reused (via the
+ *  prefix no-fetch path) for a shorter prefix, or the selected sibling would leak
+ *  as a navigable child of a position that no longer selects it (g-obh5). */
+const selectedNodeCache = new WeakMap<TreeResponse, boolean>();
+function responseHasSelectedNode(response: TreeResponse): boolean {
+  const cached = selectedNodeCache.get(response);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const has = response.columns.some((column) =>
+    column.nodes.some((node) => node.is_user_selected),
+  );
+  selectedNodeCache.set(response, has);
+  return has;
+}
+
 /** Length of the shared leading prefix of two UCI lines. */
 function commonPrefix(left: string[], right: string[]): number {
   let i = 0;
@@ -175,16 +193,20 @@ export function useOpeningsTree(
     const displayed = displayedRef.current;
     const requestedLine = moves;
 
-    // Step 2 — prefix no-fetch path. All three guards are required:
+    // Step 2 — prefix no-fetch path. All four guards are required:
     //   - opening == null: a legacy opening=<fen> (moves=[], a prefix of any
     //     line) must still fetch so the backend resolves the FEN→line.
     //   - same color: a color switch must re-hydrate color-specific metrics.
     //   - prefix: the displayed response is a superset of the requested line.
+    //   - no user-selected node: a displayed response carrying a line-scoped
+    //     third-type node must refetch the exact prefix, or the selected sibling
+    //     would leak as a navigable child of a shorter prefix (g-obh5).
     if (
       opening == null &&
       displayed != null &&
       displayed.response.player_color === playerColor &&
-      commonPrefix(displayed.line, requestedLine) === requestedLine.length
+      commonPrefix(displayed.line, requestedLine) === requestedLine.length &&
+      !responseHasSelectedNode(displayed.response)
     ) {
       setRender({
         routeKey,

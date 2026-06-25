@@ -7236,6 +7236,50 @@ button.openings-shell__crumb:hover {
     margin: 0.1rem 0 0;
 }
 
+/* "Move types" sub-section (g-obh5): explains the three connector/chip types. */
+.openings-metrics-legend__section-title {
+    margin: 0.75rem 0 0.35rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.openings-metrics-legend__types {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.openings-metrics-legend__types li {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.4rem;
+}
+
+.openings-metrics-legend__swatch {
+    flex: 0 0 auto;
+    width: 0.8rem;
+    height: 0.8rem;
+    margin-top: 0.15rem;
+    border-radius: 0.2rem;
+    border: 1px solid color-mix(in srgb, var(--swatch-color) 60%, transparent);
+    background: color-mix(in srgb, var(--swatch-color) 30%, transparent);
+}
+
+.openings-metrics-legend__swatch--book {
+    --swatch-color: var(--brand-primary);
+}
+
+.openings-metrics-legend__swatch--off-book {
+    --swatch-color: var(--color-violet-500);
+}
+
+.openings-metrics-legend__swatch--selected {
+    --swatch-color: var(--color-sky-500);
+}
+
 .openings-tree__color-label {
     font-size: 0.85rem;
     font-weight: 700;
@@ -7358,6 +7402,16 @@ button.openings-shell__crumb:hover {
     z-index: 5;
     /* currentColor for strokes/markers → theme-aware connectors. */
     color: var(--brand-primary);
+}
+
+/* Third move type (g-obh5): a move explored on the board. Recolor the whole
+   connector group so its stroke + clamp tips inherit, and color the dedicated
+   arrowhead marker the same way (a marker's currentColor resolves against the
+   marker, not the referencing group). Sky distinguishes it from the
+   brand-primary book/observed connectors and the violet off-book chip. */
+.openings-tree-connector-group--selected,
+.openings-tree-arrowhead-selected {
+    color: var(--color-sky-500);
 }
 
 .openings-tree-column {
@@ -7483,6 +7537,28 @@ button.openings-shell__crumb:hover {
 
 .openings-tree-append--error {
     color: var(--error-text, var(--text-primary));
+}
+
+/* Off-tree move loading footer (g-42md): the new card will settle into this
+   frontier column, so the spinner sits below the existing cards instead of as a
+   standalone column. A hairline + padding sets it off from the sibling cards. */
+.openings-tree-column__loading-footer {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 0.3rem;
+    padding-top: 0.6rem;
+    border-top: 1px dashed var(--border-color);
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+
+.openings-tree-column__loading-footer .openings-tree-append__spinner {
+    width: 1.1rem;
+    height: 1.1rem;
+    border-width: 2px;
 }
 
 /* Narrow: board stacks above the tree and un-sticks (the whole page scrolls
@@ -10923,6 +10999,36 @@ button.tree-node-card--compact {
 
 .tree-node-card__off-book:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--color-violet-500) 60%, transparent);
+    outline-offset: 1px;
+}
+
+/* "Your move" chip — the third move type (a board exploration). Mirrors the
+   off-book chip's plumbing but in sky to match its connector color (g-obh5). */
+.tree-node-card__selected-move {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-sky-500) 55%, transparent);
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--color-sky-500) 16%, var(--card-bg));
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--color-sky-500) 72%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.tree-node-card__selected-move:hover {
+    background: color-mix(in srgb, var(--color-sky-500) 28%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--color-sky-500) 75%, transparent);
+}
+
+.tree-node-card__selected-move:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-sky-500) 60%, transparent);
     outline-offset: 1px;
 }
 
