@@ -112,8 +112,8 @@ describe('normalizeApiPath', () => {
 
   it('strips the origin/base URL down to the pathname', () => {
     expect(
-      normalizeApiPath('https://api.example.com/api/openings/children?player_color=white'),
-    ).toBe('/api/openings/children')
+      normalizeApiPath('https://api.example.com/api/openings/tree?player_color=white'),
+    ).toBe('/api/openings/tree')
   })
 
   it('leaves a template-free relative path unchanged', () => {

@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.models import OpeningPositionScore, UserOpeningScore
-from app.opening_roots import OpeningRoots
 
 
 @dataclass(frozen=True)
@@ -79,21 +78,6 @@ class CachedOpeningScoreRow:
     underexposed_branch_value: float | None
 
 
-@dataclass(frozen=True)
-class DirectBranchView:
-    """Direct-row view of a branch.
-
-    ``direct_row`` is the branch root's own cached score (None when unscored).
-    ``scored_root_count`` is navigation metadata only — the number of scored
-    named rows in the subtree (root + descendants) — and never feeds a score.
-    ``weakest_root`` is the weakest scored root in the subtree.
-    """
-
-    direct_row: CachedOpeningScoreRow | None
-    scored_root_count: int
-    weakest_root: CachedOpeningScoreRow | None
-
-
 def _weakest_root(rows: list[CachedOpeningScoreRow]) -> CachedOpeningScoreRow:
     """Pick the weakest root, tie-breaking on ``opening_key`` only.
 
@@ -103,43 +87,6 @@ def _weakest_root(rows: list[CachedOpeningScoreRow]) -> CachedOpeningScoreRow:
     mastery (score).
     """
     return min(rows, key=lambda r: (r.opening_score, r.opening_key))
-
-
-def _collect_branch_rows(
-    rows_by_key: dict[str, CachedOpeningScoreRow],
-    branch_key: str,
-    roots_registry: OpeningRoots,
-) -> list[CachedOpeningScoreRow]:
-    return [
-        row
-        for row in (
-            rows_by_key.get(branch_key),
-            *(
-                rows_by_key.get(descendant.opening_key)
-                for descendant in roots_registry.get_descendants(branch_key)
-            ),
-        )
-        if row is not None
-    ]
-
-
-def direct_branch_view(
-    rows_by_key: dict[str, CachedOpeningScoreRow],
-    branch_key: str,
-    roots_registry: OpeningRoots,
-) -> DirectBranchView:
-    """Direct-row semantics for a branch (section 9).
-
-    Score/sample/last-practiced come from the branch root's **own** cached row,
-    not a descendant rollup. ``scored_root_count`` and ``weakest_root`` are
-    navigation metadata computed over the scored subtree rows.
-    """
-    subtree_rows = _collect_branch_rows(rows_by_key, branch_key, roots_registry)
-    return DirectBranchView(
-        direct_row=rows_by_key.get(branch_key),
-        scored_root_count=len(subtree_rows),
-        weakest_root=_weakest_root(subtree_rows) if subtree_rows else None,
-    )
 
 
 def _batch_has_stale_branch_keys(

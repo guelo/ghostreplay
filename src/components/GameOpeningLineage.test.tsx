@@ -95,7 +95,7 @@ describe("GameOpeningLineage", () => {
     const link = screen.getByRole("link", { name: /View in Openings/ });
     expect(link).toHaveAttribute(
       "href",
-      "/openings?color=white&opening=deep-key&path=k1&path=k2",
+      "/openings?color=white&opening=deep-key",
     );
   });
 

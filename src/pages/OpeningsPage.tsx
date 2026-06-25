@@ -72,9 +72,9 @@ function TreeColumnView({
   // The column hosting the expanded (deepest selected) card is the active one.
   const isActive = column.nodes.some((node) => node.isExpanded);
 
-  // Header (copied from TreePrototype): the move chosen in this column, shown
-  // with its move number. "Start" at the root, the selected move label for a
-  // chosen column, "—" for the frontier column that has no selection yet.
+  // Header: the move chosen in this column, shown with its move number. "Start"
+  // at the root, the selected move label for a chosen column, "—" for the
+  // frontier column that has no selection yet.
   const selectedNode = column.nodes.find((node) => node.isSelected) ?? null;
   const headerLabel =
     column.kind === "root"
@@ -95,9 +95,8 @@ function TreeColumnView({
       data-testid="tree-column"
       data-line-index={column.lineIndex}
     >
-      {/* Header sits OUTSIDE the scroller (like TreePrototype) so the per-column
-          scrollbar spans only the cards — the header's underline stays full
-          column width. */}
+      {/* Header sits OUTSIDE the scroller so the per-column scrollbar spans only
+          the cards — the header's underline stays full column width. */}
       <button
         type="button"
         className={`openings-tree-column__header${
@@ -576,9 +575,9 @@ function OpeningsPage() {
                           : "url(#openings-tree-arrowhead)";
                         // When an endpoint's cell is scrolled out of its column,
                         // mark the clamped edge with a small triangle pointing
-                        // toward the selection, and dash the line (matching
-                        // TreePrototype) so an off-screen endpoint reads as
-                        // "continues past the visible band."
+                        // toward the selection, and dash the line so an
+                        // off-screen endpoint reads as "continues past the
+                        // visible band."
                         const clampTip = (
                           cx: number,
                           cy: number,

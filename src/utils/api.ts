@@ -436,6 +436,7 @@ export interface DrillSessionContract {
   normal_started_at: string | null
   converted_at: string | null
   terminal_reason?: 'off_route' | 'accuracy' | 'natural_end' | null
+  opening_score_changes?: OpeningScoreDeltaItem[] | null
 }
 
 export type DrillRouteStatus = 'on_route' | 'root_reached' | 'failed'
@@ -460,6 +461,7 @@ export interface DrillRouteCheckResponse {
   target_fen: string
   suggestions: DrillRouteSuggestion[]
   failure: DrillRouteFailure | null
+  opening_score_changes?: OpeningScoreDeltaItem[] | null
 }
 
 export interface DrillRouteMetadata {
@@ -518,6 +520,25 @@ export type RatingScores = {
   lichess: RatingScore | null
 }
 
+/**
+ * One played opening's score change over a just-ended game or drill (g-xanz).
+ * `before`/`after` are raw opening scores (same units the /openings cards show);
+ * `delta` is `after - before` when both are known. `is_new` is true when the
+ * opening was crossed for the first time this session (no baseline entry) — then
+ * `before`/`delta` are null and only the after-score is shown.
+ */
+export interface OpeningScoreDeltaItem {
+  opening_key: string
+  opening_name: string
+  opening_family: string
+  eco: string | null
+  depth: number
+  before: number | null
+  after: number | null
+  delta: number | null
+  is_new: boolean
+}
+
 interface EndGameResponse {
   session_id: string
   result: string
@@ -526,6 +547,7 @@ interface EndGameResponse {
   scores?: RatingScores | null
   score_changes?: RatingScores | null
   scores_after?: RatingScores | null
+  opening_score_changes?: OpeningScoreDeltaItem[] | null
 }
 
 export interface CurrentRatingResponse {
@@ -1287,54 +1309,6 @@ export interface FamilyScoresResponse {
   computed_at: string | null
 }
 
-export interface OpeningChildItem {
-  opening_key: string
-  opening_name: string
-  opening_family: string
-  eco: string | null
-  depth: number
-  child_count: number
-  subtree_score: number | null
-  subtree_confidence: number | null
-  subtree_coverage: number | null
-  subtree_sample_size: number
-  subtree_game_count: number
-  subtree_root_count: number
-  last_practiced_at: string | null
-  weakest_root_key: string | null
-  weakest_root_name: string | null
-  weakest_root_family: string | null
-  weakest_root_score: number | null
-}
-
-export interface OpeningBreadcrumbItem {
-  opening_key: string
-  opening_name: string
-  is_current: boolean
-}
-
-export interface CurrentBranchStats {
-  score: number | null
-  confidence: number | null
-  coverage: number | null
-  sample_size: number | null
-  game_count: number | null
-  root_count: number
-}
-
-export interface ChildrenResponse {
-  player_color: OpeningPlayerColor
-  parent_key: string | null
-  parent_name: string | null
-  canonical_opening_key: string | null
-  canonical_path: string[]
-  breadcrumbs: OpeningBreadcrumbItem[]
-  current_branch_stats: CurrentBranchStats
-  children: OpeningChildItem[]
-  total_children: number
-  computed_at: string | null
-}
-
 /**
  * Fetch opening family scores for one player color.
  */
@@ -1349,34 +1323,6 @@ export const getOpeningFamilyScores = async (
     `${API_BASE_URL}/api/openings/families/scores?${params}`,
     { method: 'GET', headers: getAuthHeaders() },
     { fallbackMessage: 'Failed to load opening families' },
-  )
-}
-
-/**
- * Fetch structural opening children for one player color and optional parent root.
- */
-export const getOpeningChildren = async (
-  options: {
-    playerColor: OpeningPlayerColor
-    parentKey?: string
-    path?: string[]
-  },
-): Promise<ChildrenResponse> => {
-  const { playerColor, parentKey, path = [] } = options
-  const params = new URLSearchParams({
-    player_color: playerColor,
-  })
-  if (parentKey) {
-    params.set('parent_key', parentKey)
-  }
-  for (const pathKey of path) {
-    params.append('path', pathKey)
-  }
-
-  return requestJson<ChildrenResponse>(
-    `${API_BASE_URL}/api/openings/children?${params}`,
-    { method: 'GET', headers: getAuthHeaders() },
-    { fallbackMessage: 'Failed to load openings' },
   )
 }
 

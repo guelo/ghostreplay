@@ -449,7 +449,7 @@ def ensure_tree_cache(
     """Resolve the batch the ``/api/openings/tree`` read path will serve from, and
     fire the single stale-while-revalidate trigger for that request.
 
-    Unlike the card-grid readers, the tree CANNOT tolerate serving a registry-stale
+    Unlike the non-tree score readers, the tree CANNOT tolerate serving a registry-stale
     batch: a batch built before ``edges-v1`` carries zero ``opening_position_edges``
     rows, so plain background revalidation would render a book-only tree and silently
     hide the user's observed moves until a later recompute lands. Because the

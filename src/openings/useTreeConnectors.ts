@@ -1,9 +1,9 @@
 import { useLayoutEffect, useState, type RefObject } from "react";
 
 /**
- * Measured connector geometry for the `/openings` move tree. Ported from the
- * `TreePrototypePage` measurement loop, restricted to the **selected path** and
- * made reusable so `OpeningsPage` stays readable.
+ * Measured connector geometry for the `/openings` move tree. Runs a DOM
+ * measurement loop restricted to the **selected path** and kept reusable so
+ * `OpeningsPage` stays readable.
  *
  * This hook is the ONLY DOM-measuring code in the tree page. It returns **pure
  * geometry** — never style. Style (dashed/width) is applied at render time from

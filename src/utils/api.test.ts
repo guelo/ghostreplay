@@ -13,7 +13,6 @@ import {
   getNextOpponentMove,
   reviewSrsBlunder,
   getOpeningFamilyScores,
-  getOpeningChildren,
   getStatsSummary,
   getStatsAchievements,
 } from './api'
@@ -1117,85 +1116,6 @@ describe('getOpeningFamilyScores', () => {
 
     await expect(getOpeningFamilyScores('white')).rejects.toThrow(
       'Failed to load opening families: Bad Request',
-    )
-  })
-})
-
-describe('getOpeningChildren', () => {
-  beforeEach(() => {
-    fetchMock.mockReset()
-    mockStore = {}
-  })
-
-  it('requests the children endpoint with player color query', async () => {
-    mockResponse({
-      player_color: 'white',
-      parent_key: null,
-      parent_name: null,
-      canonical_opening_key: null,
-      canonical_path: [],
-      breadcrumbs: [],
-      current_branch_stats: {
-        score: null,
-        confidence: null,
-        coverage: null,
-        sample_size: null,
-        root_count: 0,
-      },
-      children: [],
-      total_children: 0,
-      computed_at: null,
-    })
-
-    await getOpeningChildren({ playerColor: 'white' })
-
-    const [url, options] = fetchMock.mock.calls[0]
-    expect(options.method).toBe('GET')
-    expect(url).toContain('/api/openings/children')
-    expect(url).toContain('player_color=white')
-    expect(url).not.toContain('parent_key=')
-    expect(url).not.toContain('path=')
-  })
-
-  it('includes encoded parent_key and repeated path queries when provided', async () => {
-    mockResponse({
-      player_color: 'white',
-      parent_key: 'fen value',
-      parent_name: 'Polish Opening',
-      canonical_opening_key: 'fen value',
-      canonical_path: ['ancestor one', 'ancestor two'],
-      breadcrumbs: [],
-      current_branch_stats: {
-        score: 58,
-        confidence: 0.63,
-        coverage: 0.41,
-        sample_size: 17,
-        root_count: 2,
-      },
-      children: [],
-      total_children: 0,
-      computed_at: null,
-    })
-
-    await getOpeningChildren({
-      playerColor: 'white',
-      parentKey: 'fen value',
-      path: ['ancestor one', 'ancestor two'],
-    })
-
-    const [url] = fetchMock.mock.calls[0]
-    expect(url).toContain('/api/openings/children')
-    expect(url).toContain('player_color=white')
-    expect(url).toContain('parent_key=fen+value')
-    expect(url).toContain('path=ancestor+one')
-    expect(url).toContain('path=ancestor+two')
-  })
-
-  it('surfaces the fallback error message for non-ok responses', async () => {
-    mockResponse({}, false, 'Bad Request', 400)
-
-    await expect(getOpeningChildren({ playerColor: 'white' })).rejects.toThrow(
-      'Failed to load openings: Bad Request',
     )
   })
 })

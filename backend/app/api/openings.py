@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import os
 import time
 from collections import defaultdict, deque
@@ -21,7 +20,6 @@ from app.opening_aggregate import (
     CachedOpeningScoreRow,
     CachedPositionScoreRow,
     _weakest_root,
-    direct_branch_view,
 )
 from app.opening_cache import (
     SCORE_MODEL_VERSION,
@@ -36,7 +34,6 @@ from app.opening_evidence import EdgeEvidence, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import mate_to_cp
 from app.opening_rootcalc import (
-    SYNTHETIC_INITIAL_FEN,
     SYNTHETIC_ROOT_FAMILY,
     RootScore,
     compute_root_score,
@@ -228,78 +225,9 @@ class DrillDownResponse(BaseModel):
     computed_at: datetime | None
 
 
-class OpeningChildItem(BaseModel):
-    opening_key: str
-    opening_name: str
-    opening_family: str
-    eco: str | None
-    depth: int
-    child_count: int
-    subtree_score: float | None
-    subtree_confidence: float | None
-    subtree_coverage: float | None
-    subtree_sample_size: int
-    subtree_game_count: int
-    subtree_root_count: int
-    last_practiced_at: datetime | None
-    weakest_root_key: str | None
-    weakest_root_name: str | None
-    weakest_root_family: str | None
-    weakest_root_score: float | None
-
-
-class OpeningBreadcrumbItem(BaseModel):
-    opening_key: str
-    opening_name: str
-    is_current: bool
-
-
-class CurrentBranchStats(BaseModel):
-    score: float | None
-    confidence: float | None
-    coverage: float | None
-    sample_size: int | None
-    game_count: int | None
-    root_count: int
-
-
-class ChildrenResponse(BaseModel):
-    player_color: str
-    parent_key: str | None
-    parent_name: str | None
-    canonical_opening_key: str | None
-    canonical_path: list[str]
-    breadcrumbs: list[OpeningBreadcrumbItem]
-    current_branch_stats: CurrentBranchStats
-    children: list[OpeningChildItem]
-    total_children: int
-    computed_at: datetime | None
-
-
 # ---------------------------------------------------------------------------
 # Aggregation helpers
 # ---------------------------------------------------------------------------
-
-def _direct_branch_stats(row: CachedOpeningScoreRow | None) -> CurrentBranchStats:
-    """Direct-row current-branch stats. ``root_count`` is direct-row presence."""
-    if row is None:
-        return CurrentBranchStats(
-            score=None,
-            confidence=None,
-            coverage=None,
-            sample_size=None,
-            game_count=None,
-            root_count=0,
-        )
-    return CurrentBranchStats(
-        score=row.opening_score,
-        confidence=row.confidence,
-        coverage=row.coverage,
-        sample_size=row.sample_size,
-        game_count=row.game_count,
-        root_count=1,
-    )
-
 
 def build_family_scores(rows: list[CachedOpeningScoreRow]) -> list[FamilyScoreItem]:
     """Aggregate per-root cached scores into per-family items.
@@ -466,109 +394,6 @@ def build_drill_down_roots(
     return items, scored_count
 
 
-def build_opening_children(
-    rows_by_key: dict[str, CachedOpeningScoreRow],
-    parent_key: str | None,
-    roots_registry: OpeningRoots,
-) -> list[OpeningChildItem]:
-    items: list[OpeningChildItem] = []
-
-    for child in roots_registry.get_children(parent_key):
-        view = direct_branch_view(rows_by_key, child.opening_key, roots_registry)
-        direct = view.direct_row
-        weakest = view.weakest_root
-
-        items.append(
-            OpeningChildItem(
-                opening_key=child.opening_key,
-                opening_name=child.opening_name,
-                opening_family=child.opening_family,
-                eco=child.eco,
-                depth=child.depth,
-                child_count=len(roots_registry.get_children(child.opening_key)),
-                # Card score/sample/last-practiced are the child's DIRECT row.
-                subtree_score=direct.opening_score if direct is not None else None,
-                subtree_confidence=direct.confidence if direct is not None else None,
-                subtree_coverage=direct.coverage if direct is not None else None,
-                subtree_sample_size=direct.sample_size if direct is not None else 0,
-                subtree_game_count=direct.game_count if direct is not None else 0,
-                # Navigation metadata only — count of scored named rows in subtree.
-                subtree_root_count=view.scored_root_count,
-                last_practiced_at=direct.last_practiced_at if direct is not None else None,
-                weakest_root_key=weakest.opening_key if weakest is not None else None,
-                weakest_root_name=weakest.opening_name if weakest is not None else None,
-                weakest_root_family=weakest.opening_family if weakest is not None else None,
-                weakest_root_score=weakest.opening_score if weakest is not None else None,
-            )
-        )
-
-    items.sort(
-        key=lambda item: (
-            item.subtree_score is None,
-            -item.subtree_score if item.subtree_score is not None else math.inf,
-            -item.weakest_root_score if item.weakest_root_score is not None else math.inf,
-            item.opening_name,
-            item.opening_key,
-        )
-    )
-    return items
-
-
-def canonicalize_children_route(
-    parent_key: str | None,
-    path_keys: list[str],
-    roots_registry: OpeningRoots,
-) -> tuple[str | None, list[str], list[OpeningRoot]]:
-    """Return the deepest valid route prefix for the requested DAG path.
-
-    The requested route is interpreted as [*path_keys, parent_key] where the
-    final item is the currently selected opening and path entries are its
-    explicit ancestors from top-level down to the immediate parent.
-    """
-    if parent_key is None:
-        return None, [], []
-
-    route_keys = [*path_keys, parent_key]
-    validated_roots: list[OpeningRoot] = []
-
-    for index, opening_key in enumerate(route_keys):
-        root = roots_registry.get_root(opening_key)
-        if root is None:
-            break
-
-        if index == 0:
-            if root.parent_keys:
-                break
-        else:
-            previous_key = validated_roots[-1].opening_key
-            if previous_key not in root.parent_keys:
-                break
-
-        validated_roots.append(root)
-
-    if not validated_roots:
-        return None, [], []
-
-    canonical_opening_key = validated_roots[-1].opening_key
-    canonical_path = [root.opening_key for root in validated_roots[:-1]]
-    return canonical_opening_key, canonical_path, validated_roots
-
-
-def build_opening_breadcrumbs(route_roots: list[OpeningRoot]) -> list[OpeningBreadcrumbItem]:
-    if not route_roots:
-        return []
-
-    current_key = route_roots[-1].opening_key
-    return [
-        OpeningBreadcrumbItem(
-            opening_key=root.opening_key,
-            opening_name=root.opening_name,
-            is_current=root.opening_key == current_key,
-        )
-        for root in route_roots
-    ]
-
-
 # ---------------------------------------------------------------------------
 # Dataclass → Pydantic conversion
 # ---------------------------------------------------------------------------
@@ -717,58 +542,6 @@ def get_family_drill_down(
         roots=root_items,
         total_roots=len(root_items),
         scored_roots=scored_count,
-        computed_at=computed_at,
-    )
-
-
-@router.get("/children", response_model=ChildrenResponse)
-def get_opening_children(
-    player_color: Literal["white", "black"] = Query(...),
-    parent_key: str | None = Query(None),
-    path: list[str] = Query([]),
-    db: Session = Depends(get_db),
-    user: TokenPayload = Depends(get_current_user),
-) -> ChildrenResponse:
-    roots_registry = get_opening_roots()
-    if parent_key is not None and roots_registry.get_root(parent_key) is None:
-        raise HTTPException(status_code=404, detail="Unknown opening root")
-
-    batch, row_views = load_cached_rows(db, user.user_id, player_color)
-    computed_at = batch.computed_at if batch is not None else None
-
-    rows_by_key = {row.opening_key: row for row in row_views}
-    canonical_parent_key, canonical_path, route_roots = canonicalize_children_route(
-        parent_key,
-        path,
-        roots_registry,
-    )
-    parent_root = (
-        roots_registry.get_root(canonical_parent_key)
-        if canonical_parent_key is not None
-        else None
-    )
-    children = build_opening_children(
-        rows_by_key,
-        canonical_parent_key,
-        roots_registry,
-    )
-    # Top level: synthetic whole-repertoire row. Drilled in: the selected root's
-    # own direct row. No descendant aggregation.
-    current_branch_row = rows_by_key.get(
-        SYNTHETIC_INITIAL_FEN
-        if canonical_parent_key is None
-        else canonical_parent_key
-    )
-    return ChildrenResponse(
-        player_color=player_color,
-        parent_key=canonical_parent_key,
-        parent_name=parent_root.opening_name if parent_root is not None else None,
-        canonical_opening_key=canonical_parent_key,
-        canonical_path=canonical_path,
-        breadcrumbs=build_opening_breadcrumbs(route_roots),
-        current_branch_stats=_direct_branch_stats(current_branch_row),
-        children=children,
-        total_children=len(children),
         computed_at=computed_at,
     )
 

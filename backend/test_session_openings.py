@@ -8,8 +8,6 @@ from unittest.mock import patch
 import chess
 import pytest
 
-from app.api.openings import build_opening_children
-from app.opening_aggregate import _snapshot_cached_rows
 from app.opening_cache import opening_score_inputs_fingerprint
 from app.opening_graph import OpeningGraph, OpeningGraphNode, _fen_from_board
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -223,25 +221,6 @@ def test_openings_ordered_lineage(client, auth_headers, create_game_session, db_
     assert data["lineage"][2]["path"] == [KP_KEY, RUY_KEY]
 
 
-def test_openings_lineage_canonicalizes_to_itself(client, auth_headers, create_game_session, db_session):
-    """The played chain is a valid DAG route: each item links to its own node."""
-    from app.api.openings import canonicalize_children_route
-
-    session_id = create_game_session(user_id=123, player_color="white")
-    _insert_moves(db_session, session_id, RUY_SANS)
-    roots = _ruy_roots()
-
-    with patch(PATCH_ROOTS, return_value=roots):
-        resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
-
-    for item in resp.json()["lineage"]:
-        canonical_key, canonical_path, _ = canonicalize_children_route(
-            item["opening_key"], item["path"], roots
-        )
-        assert canonical_key == item["opening_key"]
-        assert canonical_path == item["path"]
-
-
 def test_openings_transposition_played_chain_only(client, auth_headers, create_game_session, db_session):
     """A multi-parent root surfaces only the parent actually played."""
     # Build a synthetic line where the deep root has two possible parents but
@@ -337,42 +316,6 @@ def test_openings_ancestor_without_own_row_is_unscored(client, auth_headers, cre
     assert lineage[MORPHY_KEY]["sample_size"] == 8
     assert lineage[RUY_KEY]["score"] is None
     assert lineage[KP_KEY]["score"] is None
-
-
-def test_openings_score_parity_with_build_opening_children(client, auth_headers, create_game_session, db_session):
-    """Each item's score equals what build_opening_children reports for that node."""
-    session_id = create_game_session(user_id=123, player_color="white")
-    _insert_moves(db_session, session_id, RUY_SANS)
-    roots = _ruy_roots()
-
-    batch_id = _make_batch(db_session, roots)
-    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY,
-                   opening_name="Ruy Lopez", opening_family="Ruy Lopez",
-                   opening_score=40.0, confidence=0.5, coverage=0.5, sample_size=4)
-    _add_score_row(db_session, batch_id=batch_id, opening_key=MORPHY_KEY,
-                   opening_name="Ruy Lopez: Morphy Defense", opening_family="Ruy Lopez",
-                   opening_score=80.0, confidence=0.7, coverage=0.6, sample_size=6)
-    db_session.commit()
-
-    with patch(PATCH_ROOTS, return_value=roots):
-        resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
-    lineage = {item["opening_key"]: item for item in resp.json()["lineage"]}
-
-    # Reconstruct rows_by_key the way both endpoints do and compare to the
-    # /openings children builder (the card the user lands on).
-    rows = (
-        db_session.query(UserOpeningScore)
-        .filter(UserOpeningScore.batch_id == batch_id)
-        .all()
-    )
-    rows_by_key = {row.opening_key: row for row in _snapshot_cached_rows(rows)}
-
-    # build_opening_children for parent KP_KEY yields the RUY child subtree score.
-    kp_children = {c.opening_key: c for c in build_opening_children(rows_by_key, KP_KEY, roots)}
-    assert lineage[RUY_KEY]["score"] == pytest.approx(kp_children[RUY_KEY].subtree_score)
-
-    ruy_children = {c.opening_key: c for c in build_opening_children(rows_by_key, RUY_KEY, roots)}
-    assert lineage[MORPHY_KEY]["score"] == pytest.approx(ruy_children[MORPHY_KEY].subtree_score)
 
 
 def test_openings_lineage_warm_serves_cached_and_schedules_background(client, auth_headers, create_game_session, db_session):

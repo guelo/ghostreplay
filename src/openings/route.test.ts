@@ -29,49 +29,23 @@ describe("buildOpeningsSearchParams", () => {
     expect(params.getAll("move")).toEqual(["e2e4", "c7c5", "g1f3"]);
   });
 
-  it("gives moves precedence — legacy opening/path are ignored when moves is set", () => {
+  it("gives moves precedence — opening is ignored when moves is set", () => {
     const params = buildOpeningsSearchParams({
       playerColor: "white",
       moves: ["e2e4"],
       opening: FEN,
-      openingKey: "deep-key",
-      path: ["k1", "k2"],
     });
     expect(params.toString()).toBe("color=white&move=e2e4");
     expect(params.get("opening")).toBeNull();
-    expect(params.getAll("path")).toEqual([]);
   });
 
-  it("emits color + opening= for a legacy FEN deep-link entry (new field)", () => {
+  it("emits color + opening= for a legacy FEN deep-link entry", () => {
     const params = buildOpeningsSearchParams({
       playerColor: "black",
       opening: FEN,
     });
     expect(params.get("opening")).toBe(FEN);
     expect(params.getAll("move")).toEqual([]);
-    expect(params.getAll("path")).toEqual([]);
-  });
-
-  it("emits the legacy named-grid form byte-identically (openingKey + repeated path)", () => {
-    const params = buildOpeningsSearchParams({
-      playerColor: "white",
-      openingKey: "deep-key",
-      path: ["k1", "k2"],
-    });
-    // Pin the exact pre-migration string GameOpeningLineage.test.tsx asserts.
-    expect(params.toString()).toBe(
-      "color=white&opening=deep-key&path=k1&path=k2",
-    );
-  });
-
-  it("lets opening win over openingKey AND never emits path (review finding 1)", () => {
-    const params = buildOpeningsSearchParams({
-      playerColor: "white",
-      opening: FEN,
-      openingKey: "k",
-      path: ["a", "b"],
-    });
-    expect(params.get("opening")).toBe(FEN);
     expect(params.getAll("path")).toEqual([]);
   });
 

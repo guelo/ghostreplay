@@ -8,10 +8,7 @@ import {
   getPriorityLabel,
 } from "../openings/format";
 
-export type OpeningFamilyCardVariant = "full" | "analysis";
-
 export interface OpeningFamilyCardProps {
-  variant?: OpeningFamilyCardVariant;
   openingName: string;
   openingKey: string;
   playerColor: OpeningPlayerColor;
@@ -20,35 +17,23 @@ export interface OpeningFamilyCardProps {
   gameCount: number | null;
   confidence: number | null;
   isUnscored: boolean;
-  /** Full variant only: the move line for this opening. */
-  moveLine?: string | null;
-  /** Full variant only: footer note (e.g. child count). */
-  footerNote?: string;
-  /** Full variant only: drill-down affordance label. */
-  drillDownLabel?: string;
-  /** Full variant only: navigates into this opening's children (stretched link). */
-  onDrillDown?: () => void;
-  /** Handler for the "Start Drill" button (full + analysis variants). */
+  /** Handler for the "Start Drill" button. */
   onStartDrill?: () => void;
-  /** Analysis variant only: href to this opening's /openings page. */
+  /** href to this opening's /openings page. */
   openingsHref?: string;
-  /** Analysis variant only: collapses the card when its surface is clicked. */
+  /** Collapses the card when its surface is clicked. */
   onCollapse?: () => void;
 }
 
 /**
- * Shared inner body for an opening family card. Rendered inside a tone-classed
- * wrapper (`opening-family-card opening-family-card--{tone}`) by the caller.
- *
- * - `variant="full"` (default): the /openings scoreboard card with move line,
- *   metrics, and drill footer.
- * - `variant="analysis"`: a compact card for the /history analysis lineage —
- *   smaller board with the score/grade beside it, no move line, and a footer
- *   linking to /openings and a Start Drill button. When `onCollapse` is set, the
- *   card surface (everything but the footer controls) collapses the card.
+ * Compact opening card for the /history analysis lineage and the live game
+ * chess-panel. Rendered inside a tone-classed wrapper (`opening-family-card
+ * opening-family-card--{tone}`) by the caller: a small board with the
+ * score/grade beside it, a metrics row, and a footer linking to /openings with a
+ * Start Drill button. When `onCollapse` is set, the card surface (everything but
+ * the footer controls) collapses the card.
  */
 function OpeningFamilyCard({
-  variant = "full",
   openingName,
   openingKey,
   playerColor,
@@ -57,17 +42,11 @@ function OpeningFamilyCard({
   gameCount,
   confidence,
   isUnscored,
-  moveLine,
-  footerNote,
-  drillDownLabel,
-  onDrillDown,
   onStartDrill,
   openingsHref,
   onCollapse,
 }: OpeningFamilyCardProps) {
   const statusLabel = getPriorityLabel(score);
-  const isFull = variant === "full";
-  const isAnalysis = variant === "analysis";
 
   return (
     <>
@@ -79,21 +58,8 @@ function OpeningFamilyCard({
           onClick={onCollapse}
         />
       )}
-      {onDrillDown && (
-        <button
-          type="button"
-          className="opening-family-card__drill-nav"
-          aria-label={`Open ${openingName}`}
-          onClick={onDrillDown}
-        />
-      )}
       <div className="opening-family-card__headline">
         <h2 className="opening-family-card__title">{openingName}</h2>
-        {isFull && (
-          <p className="opening-family-card__hint">
-            Moves: <strong>{moveLine ?? "Line unavailable."}</strong>
-          </p>
-        )}
         {isUnscored && (
           <p className="opening-family-card__subhint">
             No scored roots in this subtree yet.
@@ -145,55 +111,25 @@ function OpeningFamilyCard({
         </div>
       </dl>
 
-      {isFull && (
-        <div className="opening-family-card__footer">
-          <span className="opening-family-card__footer-note">{footerNote}</span>
-          <div className="opening-family-card__footer-actions">
-            {drillDownLabel && (
-              <span className="opening-family-card__drilldown">
-                {drillDownLabel}
-              </span>
-            )}
-            {onStartDrill && (
-              <button
-                type="button"
-                className="opening-family-card__drill-button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onStartDrill();
-                }}
-              >
-                Start Drill
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
-      {isAnalysis && (
-        <div className="opening-family-card__analysis-footer">
-          {openingsHref && (
-            <Link
-              className="opening-family-card__analysis-link"
-              to={openingsHref}
-            >
-              View in Openings
-            </Link>
-          )}
-          {onStartDrill && (
-            <button
-              type="button"
-              className="opening-family-card__drill-button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onStartDrill();
-              }}
-            >
-              Start Drill
-            </button>
-          )}
-        </div>
-      )}
+      <div className="opening-family-card__analysis-footer">
+        {openingsHref && (
+          <Link className="opening-family-card__analysis-link" to={openingsHref}>
+            View in Openings
+          </Link>
+        )}
+        {onStartDrill && (
+          <button
+            type="button"
+            className="opening-family-card__drill-button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onStartDrill();
+            }}
+          >
+            Start Drill
+          </button>
+        )}
+      </div>
     </>
   );
 }

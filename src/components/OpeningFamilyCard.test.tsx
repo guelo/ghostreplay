@@ -26,30 +26,21 @@ const baseProps = {
 };
 
 describe("OpeningFamilyCard", () => {
-  it("renders the full variant with move line and drill button", () => {
+  it("renders the opening name, score, and Start Drill button", () => {
     const onStartDrill = vi.fn();
     renderCard(
-      <OpeningFamilyCard
-        {...baseProps}
-        variant="full"
-        moveLine="1.e4 e5 2.Nf3 Nc6 3.Bb5"
-        footerNote="2 children"
-        drillDownLabel="Drill down"
-        onStartDrill={onStartDrill}
-      />,
+      <OpeningFamilyCard {...baseProps} onStartDrill={onStartDrill} />,
     );
 
     expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
-    expect(screen.getByText("1.e4 e5 2.Nf3 Nc6 3.Bb5")).toBeInTheDocument();
-    expect(screen.getByText("2 children")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Start Drill" }),
     ).toBeInTheDocument();
     expect(screen.getByText("72")).toBeInTheDocument();
   });
 
-  it("renders the analysis variant without the full move line", () => {
-    renderCard(<OpeningFamilyCard {...baseProps} variant="analysis" />);
+  it("renders the board and metrics without a move line", () => {
+    renderCard(<OpeningFamilyCard {...baseProps} />);
 
     expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
     expect(screen.queryByText(/Moves:/)).not.toBeInTheDocument();
@@ -61,13 +52,12 @@ describe("OpeningFamilyCard", () => {
     expect(screen.getByText("Coverage")).toBeInTheDocument();
   });
 
-  it("renders the analysis footer link + Start Drill button", async () => {
+  it("renders the footer link + Start Drill button", async () => {
     const user = userEvent.setup();
     const onStartDrill = vi.fn();
     renderCard(
       <OpeningFamilyCard
         {...baseProps}
-        variant="analysis"
         openingsHref="/openings?color=white&opening=ruy-key"
         onStartDrill={onStartDrill}
       />,
@@ -85,11 +75,7 @@ describe("OpeningFamilyCard", () => {
     const user = userEvent.setup();
     const onCollapse = vi.fn();
     renderCard(
-      <OpeningFamilyCard
-        {...baseProps}
-        variant="analysis"
-        onCollapse={onCollapse}
-      />,
+      <OpeningFamilyCard {...baseProps} onCollapse={onCollapse} />,
     );
 
     await user.click(
@@ -100,12 +86,7 @@ describe("OpeningFamilyCard", () => {
 
   it("shows an em-dash grade and unscored note for a null score", () => {
     renderCard(
-      <OpeningFamilyCard
-        {...baseProps}
-        variant="analysis"
-        score={null}
-        isUnscored
-      />,
+      <OpeningFamilyCard {...baseProps} score={null} isUnscored />,
     );
 
     expect(screen.getByText("—")).toBeInTheDocument();

@@ -5544,6 +5544,115 @@
     }
 }
 
+/* Post-game / post-drill opening-score deltas (g-xanz). One row per played
+   opening: "Italian Game  41 → 44  (+3) B". Shared by the post-game banner and
+   the stopped-drill actions. */
+.opening-score-delta {
+    margin: 0.45rem 0 0;
+    animation: rating-delta-in 0.4s ease-out;
+    text-align: left;
+}
+
+.opening-score-delta__label {
+    margin: 0 0 0.25rem;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+}
+
+.opening-score-delta__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.opening-score-delta__row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+}
+
+.opening-score-delta__name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+}
+
+.opening-score-delta__scores {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    font-variant-numeric: tabular-nums;
+}
+
+.opening-score-delta__before,
+.opening-score-delta__arrow {
+    color: var(--text-tertiary);
+}
+
+.opening-score-delta__after {
+    font-weight: 700;
+}
+
+.opening-score-delta__change {
+    font-weight: 700;
+    font-size: 0.8rem;
+}
+
+.opening-score-delta__row--up .opening-score-delta__change {
+    color: #4caf50;
+}
+
+.opening-score-delta__row--down .opening-score-delta__change {
+    color: #ef5350;
+}
+
+.opening-score-delta__new {
+    font-weight: 700;
+    color: var(--color-green-500);
+}
+
+.opening-score-delta__grade {
+    flex: 0 0 auto;
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: var(--grade-accent, var(--text-tertiary));
+}
+
+.opening-score-delta__grade--a {
+    --grade-accent: var(--color-green-600);
+}
+
+.opening-score-delta__grade--b {
+    --grade-accent: var(--color-green-500);
+}
+
+.opening-score-delta__grade--c {
+    --grade-accent: var(--color-yellow-600);
+}
+
+.opening-score-delta__grade--d {
+    --grade-accent: var(--color-orange-500);
+}
+
+.opening-score-delta__grade--f {
+    --grade-accent: var(--color-red-500);
+}
+
+.opening-score-delta__grade--none {
+    --grade-accent: var(--text-tertiary);
+}
+
 /* Moves Column (material + move list) */
 .moves-column {
     grid-area: moves;
@@ -6827,244 +6936,6 @@
 }
 
 /* Openings page */
-.openings-shell {
-    display: flex;
-    flex-direction: column;
-    gap: 1.25rem;
-}
-
-.openings-shell__hero {
-    position: relative;
-    overflow: hidden;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: stretch;
-    gap: 1rem;
-    padding: clamp(1.1rem, 3vw, 1.6rem);
-    border: 1px solid var(--border-color-strong);
-    border-radius: 1.5rem;
-    background:
-        radial-gradient(
-            circle at top right,
-            color-mix(in srgb, var(--brand-primary) 18%, transparent),
-            transparent 48%
-        ),
-        linear-gradient(
-            145deg,
-            color-mix(in srgb, var(--color-white) 68%, var(--bg-primary)),
-            color-mix(in srgb, var(--bg-secondary) 78%, var(--card-bg))
-        );
-    box-shadow: var(--shadow-lg);
-}
-
-.openings-shell__hero::after {
-    content: "";
-    position: absolute;
-    inset: auto -3rem -4rem auto;
-    width: 12rem;
-    height: 12rem;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--warning) 18%, transparent);
-    filter: blur(28px);
-    opacity: 0.7;
-}
-
-.openings-shell__copy {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 480px;
-    min-width: 0;
-    gap: 0.55rem;
-}
-
-.openings-shell__eyebrow {
-    margin: 0;
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: var(--brand-secondary);
-}
-
-.openings-shell__title-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.75rem;
-}
-
-.openings-shell__title {
-    margin: 0;
-    font-size: clamp(1.7rem, 4vw, 2.35rem);
-    line-height: 1.05;
-    color: var(--text-primary);
-}
-
-.openings-shell__badge {
-    display: inline-flex;
-    align-items: center;
-    padding: 0.35rem 0.8rem;
-    border-radius: 999px;
-    border: 1px solid color-mix(in srgb, var(--brand-secondary) 24%, var(--border-color));
-    background: color-mix(in srgb, var(--color-white) 68%, var(--card-bg));
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    font-weight: 700;
-}
-
-.openings-shell__hint {
-    margin: 0;
-    max-width: 62ch;
-    color: var(--text-secondary);
-    font-size: 0.98rem;
-}
-
-.openings-shell__hero-rail {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    flex: 0 1 320px;
-    min-width: min(100%, 280px);
-    flex-direction: column;
-    gap: 1rem;
-}
-
-.openings-shell__stats-card {
-    --opening-card-accent: var(--text-tertiary);
-    position: relative;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    gap: 0.85rem;
-    padding: 0.95rem;
-    border: 1px solid color-mix(in srgb, var(--opening-card-accent) 18%, var(--border-color));
-    border-radius: 1.2rem;
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--opening-card-accent) 8%, var(--card-bg)),
-            color-mix(in srgb, var(--color-white) 78%, var(--bg-primary))
-        );
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-white) 72%, transparent);
-}
-
-.openings-shell__stats-card::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: 4px;
-    background: var(--opening-card-accent);
-}
-
-.openings-shell__stats-copy {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-}
-
-.openings-shell__stats-label {
-    margin: 0;
-    color: var(--text-tertiary);
-    font-size: 0.76rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-}
-
-.openings-shell__stats-caption {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 0.88rem;
-}
-
-.openings-shell__stats-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.75rem;
-    margin: 0;
-}
-
-.openings-shell__stats-metric {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    padding: 0.75rem 0.8rem;
-    border: 1px solid color-mix(in srgb, var(--brand-primary) 14%, var(--border-color));
-    border-radius: 1rem;
-    background: color-mix(in srgb, var(--color-white) 84%, var(--card-bg));
-}
-
-.openings-shell__stats-metric dt {
-    color: var(--text-tertiary);
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-}
-
-.openings-shell__stats-metric dd {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: 1.35rem;
-    font-weight: 700;
-    line-height: 1;
-}
-
-.openings-shell__context {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: 1.02rem;
-    font-weight: 700;
-}
-
-.openings-shell__breadcrumbs {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.55rem;
-}
-
-.openings-shell__crumb {
-    border: 1px solid color-mix(in srgb, var(--brand-secondary) 20%, var(--border-color));
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--color-white) 74%, var(--card-bg));
-    color: var(--text-secondary);
-    padding: 0.45rem 0.8rem;
-    font-size: 0.88rem;
-    font-weight: 700;
-    line-height: 1.2;
-}
-
-button.openings-shell__crumb {
-    cursor: pointer;
-    transition:
-        transform 180ms ease,
-        border-color 180ms ease,
-        color 180ms ease,
-        box-shadow 180ms ease;
-}
-
-button.openings-shell__crumb:hover {
-    transform: translateY(-1px);
-    border-color: color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
-    color: var(--text-primary);
-    box-shadow: var(--shadow-sm);
-}
-
-.openings-shell__crumb--current {
-    background: var(--gradient-brand);
-    border-color: transparent;
-    color: var(--text-on-gradient);
-}
-
-.openings-shell__toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.9rem;
-}
 
 /* "Playing as" picker: the label sits outside a segmented king toggle that
    reuses the .mode-toggle-row / .segmented-toggle styling from the game setup. */
@@ -7092,42 +6963,6 @@ button.openings-shell__crumb:hover {
     width: 1.25rem;
     height: 1.25rem;
     flex-shrink: 0;
-}
-
-.openings-shell__toolbar-note {
-    margin: 0;
-    color: var(--text-tertiary);
-    font-size: 0.9rem;
-}
-
-.openings-shell__backbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.9rem 1rem;
-    border: 1px solid var(--border-color);
-    border-radius: 1rem;
-    background: color-mix(in srgb, var(--color-white) 74%, var(--bg-secondary));
-    box-shadow: var(--shadow-sm);
-}
-
-.openings-shell__backbutton {
-    border: 1px solid var(--border-color);
-    border-radius: 999px;
-    background: var(--card-bg);
-    color: var(--text-primary);
-    padding: 0.45rem 0.85rem;
-    font-size: 0.86rem;
-    font-weight: 700;
-    cursor: pointer;
-}
-
-.openings-shell__path {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 0.92rem;
-    overflow-wrap: anywhere;
 }
 
 .openings-state {
@@ -7158,11 +6993,6 @@ button.openings-shell__crumb:hover {
 .openings-state--error {
     border: 1px solid var(--error-light);
     background: var(--error-bg);
-}
-
-.openings-state--empty {
-    border: 1px solid color-mix(in srgb, var(--brand-primary) 28%, var(--border-color));
-    background: color-mix(in srgb, var(--brand-primary) 8%, var(--card-bg));
 }
 
 /* ---------------------------------------------------------------------------
@@ -7600,12 +7430,6 @@ button.openings-shell__crumb:hover {
     }
 }
 
-.openings-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
-    gap: 1rem;
-}
-
 .opening-family-card {
     --opening-card-accent: var(--brand-primary);
     position: relative;
@@ -7628,49 +7452,6 @@ button.openings-shell__crumb:hover {
     box-shadow: var(--shadow-md);
 }
 
-.opening-family-card--interactive {
-    width: 100%;
-    text-align: left;
-    transition:
-        transform 180ms ease,
-        box-shadow 180ms ease,
-        border-color 180ms ease;
-}
-
-.opening-family-card--interactive:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-lg);
-    border-color: color-mix(in srgb, var(--opening-card-accent) 30%, var(--border-color));
-}
-
-/* Stretched-link button: fills the card so the whole surface drills down, while
-   keeping the Start Drill button as a separate sibling control (no nested
-   buttons). */
-.opening-family-card__drill-nav {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    border: none;
-    background: none;
-    cursor: pointer;
-    z-index: 0;
-}
-
-.opening-family-card__drill-nav:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--opening-card-accent) 60%, transparent);
-    outline-offset: 2px;
-}
-
-/* Keep the action footer above the stretched drill-nav so its controls stay
-   clickable. */
-.opening-family-card__footer {
-    position: relative;
-    z-index: 1;
-}
-
 .opening-family-card::before {
     content: "";
     position: absolute;
@@ -7679,8 +7460,7 @@ button.openings-shell__crumb:hover {
     background: var(--opening-card-accent);
 }
 
-.opening-family-card--alert,
-.openings-shell__stats-card--alert {
+.opening-family-card--alert {
     --opening-card-accent: var(--error);
     background:
         linear-gradient(
@@ -7690,8 +7470,7 @@ button.openings-shell__crumb:hover {
         );
 }
 
-.opening-family-card--watch,
-.openings-shell__stats-card--watch {
+.opening-family-card--watch {
     --opening-card-accent: var(--warning-dark);
     background:
         linear-gradient(
@@ -7701,8 +7480,7 @@ button.openings-shell__crumb:hover {
         );
 }
 
-.opening-family-card--steady,
-.openings-shell__stats-card--steady {
+.opening-family-card--steady {
     --opening-card-accent: var(--success-dark);
     background:
         linear-gradient(
@@ -7712,8 +7490,7 @@ button.openings-shell__crumb:hover {
         );
 }
 
-.opening-family-card--muted,
-.openings-shell__stats-card--muted {
+.opening-family-card--muted {
     --opening-card-accent: var(--text-tertiary);
     background:
         linear-gradient(
@@ -7735,17 +7512,6 @@ button.openings-shell__crumb:hover {
     line-height: 1.15;
     color: var(--text-primary);
     overflow-wrap: anywhere;
-}
-
-.opening-family-card__hint {
-    margin: 0;
-    color: var(--text-secondary);
-    font-size: 0.93rem;
-    overflow-wrap: anywhere;
-}
-
-.opening-family-card__hint strong {
-    color: var(--text-primary);
 }
 
 .opening-family-card__subhint {
@@ -7870,87 +7636,6 @@ button.openings-shell__crumb:hover {
     line-height: 1.1;
     font-weight: 700;
     overflow-wrap: anywhere;
-}
-
-.opening-family-card__footer {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.6rem;
-}
-
-.opening-family-card__footer-note {
-    color: var(--text-tertiary);
-    font-size: 0.85rem;
-    font-weight: 600;
-}
-
-.opening-family-card__drilldown {
-    color: color-mix(in srgb, var(--opening-card-accent) 74%, var(--text-primary));
-    font-size: 0.88rem;
-    font-weight: 700;
-}
-
-.opening-family-card--skeleton {
-    min-height: 230px;
-}
-
-.opening-family-card__skeleton-bar,
-.opening-family-card__metric--skeleton {
-    position: relative;
-    overflow: hidden;
-    border-radius: 999px;
-    background: color-mix(in srgb, var(--bg-secondary) 84%, var(--color-white));
-}
-
-.opening-family-card__skeleton-bar::after,
-.opening-family-card__metric--skeleton::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    transform: translateX(-100%);
-    background: linear-gradient(
-        90deg,
-        transparent,
-        color-mix(in srgb, var(--color-white) 70%, transparent),
-        transparent
-    );
-    animation: openings-shimmer 1.35s ease-in-out infinite;
-}
-
-.opening-family-card__skeleton-bar--short {
-    width: 34%;
-    height: 0.7rem;
-}
-
-.opening-family-card__skeleton-bar--title {
-    width: 68%;
-    height: 1.15rem;
-}
-
-.opening-family-card__skeleton-bar--long {
-    width: 92%;
-    height: 0.85rem;
-}
-
-.opening-family-card__metrics--skeleton {
-    align-self: end;
-}
-
-.opening-family-card__metric--skeleton {
-    min-height: 74px;
-    border-radius: 0.95rem;
-}
-
-@keyframes openings-shimmer {
-    from {
-        transform: translateX(-100%);
-    }
-
-    to {
-        transform: translateX(100%);
-    }
 }
 
 /* Stats page */
@@ -8335,14 +8020,6 @@ button.openings-shell__crumb:hover {
     .stats-list-card__item {
         grid-template-columns: 1fr;
         gap: 0.15rem;
-    }
-
-    .openings-shell__toolbar {
-        align-items: flex-start;
-    }
-
-    .openings-shell__toolbar-note {
-        width: 100%;
     }
 }
 
@@ -8770,19 +8447,6 @@ button.openings-shell__crumb:hover {
         line-height: 1;
     }
 
-    .openings-shell__hero {
-        display: block;
-    }
-
-    .openings-shell__hero-rail {
-        width: 100%;
-        margin-top: 1rem;
-    }
-
-    .openings-grid {
-        grid-template-columns: 1fr;
-    }
-
     .opening-family-card__overview {
         grid-template-columns: 1fr;
     }
@@ -9101,13 +8765,6 @@ button.openings-shell__crumb:hover {
     text-align: center;
 }
 
-/* OpeningsPage card drill button */
-.opening-family-card__footer-actions {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-}
-
 .opening-family-card__drill-button {
     border: 1px solid var(--border-color-strong);
     background: var(--button-secondary-bg);
@@ -9134,10 +8791,6 @@ button.openings-shell__crumb:hover {
     /* Beat the generic .chess-start-panel 22rem cap for drill mode. */
     .game-page .chess-start-panel--drill {
         width: min(calc(100vw - 1.5rem), 30rem);
-    }
-
-    .opening-family-card__footer-actions {
-        gap: 0.25rem;
     }
 
     .opening-family-card__drill-button {

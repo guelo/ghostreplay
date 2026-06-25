@@ -52,8 +52,7 @@ function GameOpeningLineage({
           const cardId = `opening-card-${index}`;
           const openingsHref = `/openings?${buildOpeningsSearchParams({
             playerColor,
-            openingKey: item.opening_key,
-            path: item.path,
+            opening: item.opening_key,
           })}`;
 
           return (
@@ -70,7 +69,6 @@ function GameOpeningLineage({
                   className={`opening-family-card opening-family-card--analysis opening-family-card--${tone}`}
                 >
                   <OpeningFamilyCard
-                    variant="analysis"
                     openingName={item.opening_name}
                     openingKey={item.opening_key}
                     playerColor={playerColor}
