@@ -478,8 +478,8 @@ def ensure_tree_cache(
     request degrades to a book-only tree while the background recompute finishes).
 
     A pathologically heavy user whose bootstrap ``refresh_now`` times out is served
-    the registry-stale batch for that one request (``lookup_observed_edges_for_batch``
-    returns an empty map ⇒ book-only); the background recompute finishes and the next read
+    the registry-stale batch for that one request (the observed-edge prefetch finds no
+    matching rows ⇒ book-only); the background recompute finishes and the next read
     is correct and fast. That rare, logged degradation is preferred over serving a
     wrong tree on every warm read.
     """
@@ -593,33 +593,67 @@ def lookup_observed_edges_for_parent(
     return [_edge_evidence_from_row(row) for row in rows]
 
 
-def lookup_observed_edges_for_batch(
+# Max parents per ``parent_fen IN (...)`` chunk. The visible node set is small by
+# construction (~tens), so a wave is normally a single chunk; this only splits the
+# rare pathological wave to stay under SQLite's ~999-bound-parameter cap (tests run on
+# SQLite; Postgres is unaffected). Exported so the tree builder can count the actual
+# number of chunked SELECTs a wave issues (each chunk is one DB round-trip).
+OBSERVED_EDGE_PARENT_CHUNK_SIZE = 900
+
+
+def _chunked(items: list[str], size: int) -> Iterable[list[str]]:
+    """Yield ``items`` in lists of at most ``size`` (defensive SQLite param cap)."""
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def observed_edge_parent_chunk_count(n_parents: int) -> int:
+    """Number of chunked SELECTs ``lookup_observed_edges_for_parents`` issues for
+    ``n_parents`` distinct parents (one DB round-trip per chunk). Zero for an empty
+    set; the tree builder uses this to count actual queries, not waves."""
+    if n_parents <= 0:
+        return 0
+    return -(-n_parents // OBSERVED_EDGE_PARENT_CHUNK_SIZE)
+
+
+def lookup_observed_edges_for_parents(
     db: Session,
     batch_id: int,
+    parent_fens: Iterable[str],
 ) -> dict[str, list[EdgeEvidence]]:
-    """All observed edges for one batch, indexed by normalized parent FEN.
+    """Observed edges for a SPECIFIC set of parents in one batch, indexed by
+    normalized parent FEN.
 
-    A single ``SELECT … WHERE batch_id=?`` that the tree builder loads ONCE up front,
-    replacing the previous per-parent point queries (an N+1 that scaled the endpoint's
-    latency as visible-parents × DB round-trip). Total edge rows per batch are tiny
-    (tens), so eager-loading is cheap and collapses the structural pass to a single
-    round-trip — including the terminal-probe frontier, which the per-parent design
-    could miss.
+    Bounded by the visible node set (line ∪ frontier) the tree builder will actually
+    visit, so it fetches ~tens of rows instead of the whole batch (g-0qe6 Option B,
+    superseding the whole-batch eager load that pulled a high-history user's ENTIRE
+    edge history across the remote-DB RTT). Reads via the
+    ``idx_opening_position_edges_batch_parent`` index using ``parent_fen IN (...)``.
 
     Keys are the persisted ``parent_fen`` (normalized 4-field, matching the builder's
-    ``norm_fen``). A parent with no observed edges is simply absent from the map, so
-    callers should use ``.get(norm_fen, [])``.
+    ``norm_fen``). A requested parent with no observed edges is simply absent from the
+    map, so callers should use ``.get(norm_fen, [])``.
     """
-    rows = (
-        db.query(OpeningPositionEdge)
-        .filter(OpeningPositionEdge.batch_id == batch_id)
-        .all()
-    )
+    fens = {f for f in parent_fens}
+    if not fens:
+        return {}
     edges_by_parent: dict[str, list[EdgeEvidence]] = {}
-    for row in rows:
-        edges_by_parent.setdefault(row.parent_fen, []).append(
-            _edge_evidence_from_row(row)
+    # The set is small by construction (visible nodes), so this is usually a single
+    # chunk; chunk defensively for SQLite's ~999-bound-parameter cap (see
+    # OBSERVED_EDGE_PARENT_CHUNK_SIZE; tests run on SQLite, Postgres is unaffected).
+    for chunk in _chunked(sorted(fens), OBSERVED_EDGE_PARENT_CHUNK_SIZE):
+        rows = (
+            db.query(OpeningPositionEdge)
+            .filter(
+                OpeningPositionEdge.batch_id == batch_id,
+                OpeningPositionEdge.parent_fen.in_(chunk),
+            )
+            .all()
         )
+        for row in rows:
+            edges_by_parent.setdefault(row.parent_fen, []).append(
+                _edge_evidence_from_row(row)
+            )
     return edges_by_parent
 
 

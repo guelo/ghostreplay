@@ -29,10 +29,12 @@ from app.opening_cache import (
     get_latest_opening_score_batch,
     list_cached_opening_scores,
     list_position_scores,
+    OBSERVED_EDGE_PARENT_CHUNK_SIZE,
     load_cached_rows,
-    lookup_observed_edges_for_batch,
     lookup_observed_edges_for_parent,
+    lookup_observed_edges_for_parents,
     lookup_position_scores,
+    observed_edge_parent_chunk_count,
     lookup_position_scores_for_batch,
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
@@ -1688,22 +1690,19 @@ def test_lookup_observed_edges_for_parent_reconstructs_edge_evidence(db_session)
     assert lookup_observed_edges_for_parent(db_session, batch.id, TWO_KNIGHTS_FEN) == []
 
 
-def test_lookup_observed_edges_for_batch_indexes_all_parents_in_one_query(db_session):
-    """The batch read loads every observed edge for a batch in ONE SELECT, indexed by
-    normalized parent FEN — the tree builder's single-round-trip replacement for the
-    per-parent N+1 (g-a6k2)."""
+def test_lookup_observed_edges_for_parents_returns_only_requested(db_session):
+    """The bounded read loads observed edges for ONLY the requested parents (the tree's
+    visible node set), indexed by normalized parent FEN — Option B's replacement for the
+    whole-batch eager load (g-0qe6). Parents with no edges are absent; quality is
+    zeroed."""
     _seed_black_opening_session(db_session)
     batch = recompute_opening_scores(db_session, 123, "black")
 
-    by_parent = lookup_observed_edges_for_batch(db_session, batch.id)
-    assert isinstance(by_parent, dict)
-    # Every persisted edge row for the batch is represented.
-    total_edges = (
-        db_session.query(OpeningPositionEdge)
-        .filter(OpeningPositionEdge.batch_id == batch.id)
-        .count()
+    # Request only the 1.e4 position (which has the e7e5 edge) — NOT the whole batch.
+    by_parent = lookup_observed_edges_for_parents(
+        db_session, batch.id, [KINGS_PAWN_FEN, TWO_KNIGHTS_FEN]
     )
-    assert sum(len(edges) for edges in by_parent.values()) == total_edges
+    assert isinstance(by_parent, dict)
     # The 1.e4 e5 edge is grouped under its parent FEN, matching the per-parent read.
     assert KINGS_PAWN_FEN in by_parent
     edge = next(e for e in by_parent[KINGS_PAWN_FEN] if e.uci == "e7e5")
@@ -1712,10 +1711,68 @@ def test_lookup_observed_edges_for_batch_indexes_all_parents_in_one_query(db_ses
     # Quality columns are not persisted; the tree never reads them.
     assert edge.quality_sum == 0.0
     assert edge.quality_count == 0
-    # A parent with no observed edges is simply absent (callers use .get(fen, [])).
+    # A requested parent with no observed edges is simply absent (callers use .get).
     assert TWO_KNIGHTS_FEN not in by_parent
-    # An unknown / empty batch yields an empty map (book-only, zero edges).
-    assert lookup_observed_edges_for_batch(db_session, batch.id + 9999) == {}
+    # A parent NOT requested is never loaded, even though it has edges in the batch —
+    # the whole point of the bounded read.
+    other_parents = {
+        r.parent_fen
+        for r in db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch.id)
+        .all()
+    } - {KINGS_PAWN_FEN}
+    assert other_parents, "fixture should have parents beyond 1.e4"
+    assert other_parents.isdisjoint(by_parent.keys())
+
+
+def test_lookup_observed_edges_for_parents_empty_input_skips_query(db_session):
+    """Empty parent set short-circuits to an empty map (no SELECT)."""
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores(db_session, 123, "black")
+    assert lookup_observed_edges_for_parents(db_session, batch.id, []) == {}
+
+
+def test_lookup_observed_edges_for_parents_chunks_large_in_list(db_session):
+    """A parent set larger than the chunk cap is split across multiple IN-queries and
+    merged back into one map (SQLite ~999-param defence) — the real parent's edge still
+    resolves alongside 1000+ unrelated FENs."""
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores(db_session, 123, "black")
+
+    padding = [f"synthetic-fen-{i} w - -" for i in range(1500)]
+    by_parent = lookup_observed_edges_for_parents(
+        db_session, batch.id, [KINGS_PAWN_FEN, *padding]
+    )
+    # Despite >900 requested FENs (forcing >1 chunk), the real edge resolves and the
+    # synthetic FENs (no rows) are absent.
+    assert KINGS_PAWN_FEN in by_parent
+    assert any(e.uci == "e7e5" for e in by_parent[KINGS_PAWN_FEN])
+    assert all(not key.startswith("synthetic-fen-") for key in by_parent)
+
+
+def test_lookup_observed_edges_for_parents_unknown_batch_is_empty(db_session):
+    """An unknown batch yields an empty map (book-only, zero edges)."""
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores(db_session, 123, "black")
+    assert (
+        lookup_observed_edges_for_parents(
+            db_session, batch.id + 9999, [KINGS_PAWN_FEN]
+        )
+        == {}
+    )
+
+
+def test_observed_edge_parent_chunk_count_matches_chunking():
+    """The chunk-count helper (used by the tree builder to count actual SELECTs, not
+    waves) reports one round-trip per IN-chunk: 0 for empty, 1 within the cap, and
+    ceil(n / cap) when a wave splits."""
+    cap = OBSERVED_EDGE_PARENT_CHUNK_SIZE
+    assert observed_edge_parent_chunk_count(0) == 0
+    assert observed_edge_parent_chunk_count(1) == 1
+    assert observed_edge_parent_chunk_count(cap) == 1
+    assert observed_edge_parent_chunk_count(cap + 1) == 2
+    assert observed_edge_parent_chunk_count(2 * cap) == 2
+    assert observed_edge_parent_chunk_count(2 * cap + 1) == 3
 
 
 def test_lookup_position_scores_for_batch_resolves_by_batch(db_session):
