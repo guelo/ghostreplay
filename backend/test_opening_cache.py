@@ -30,6 +30,7 @@ from app.opening_cache import (
     list_cached_opening_scores,
     list_position_scores,
     load_cached_rows,
+    lookup_observed_edges_for_batch,
     lookup_observed_edges_for_parent,
     lookup_position_scores,
     lookup_position_scores_for_batch,
@@ -1685,6 +1686,36 @@ def test_lookup_observed_edges_for_parent_reconstructs_edge_evidence(db_session)
     assert edge.quality_count == 0
     # A parent with no observed edges resolves to an empty list (book-only).
     assert lookup_observed_edges_for_parent(db_session, batch.id, TWO_KNIGHTS_FEN) == []
+
+
+def test_lookup_observed_edges_for_batch_indexes_all_parents_in_one_query(db_session):
+    """The batch read loads every observed edge for a batch in ONE SELECT, indexed by
+    normalized parent FEN — the tree builder's single-round-trip replacement for the
+    per-parent N+1 (g-a6k2)."""
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores(db_session, 123, "black")
+
+    by_parent = lookup_observed_edges_for_batch(db_session, batch.id)
+    assert isinstance(by_parent, dict)
+    # Every persisted edge row for the batch is represented.
+    total_edges = (
+        db_session.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch.id)
+        .count()
+    )
+    assert sum(len(edges) for edges in by_parent.values()) == total_edges
+    # The 1.e4 e5 edge is grouped under its parent FEN, matching the per-parent read.
+    assert KINGS_PAWN_FEN in by_parent
+    edge = next(e for e in by_parent[KINGS_PAWN_FEN] if e.uci == "e7e5")
+    assert edge.child_fen == OPEN_GAME_FEN
+    assert edge.traversal_count >= 1
+    # Quality columns are not persisted; the tree never reads them.
+    assert edge.quality_sum == 0.0
+    assert edge.quality_count == 0
+    # A parent with no observed edges is simply absent (callers use .get(fen, [])).
+    assert TWO_KNIGHTS_FEN not in by_parent
+    # An unknown / empty batch yields an empty map (book-only, zero edges).
+    assert lookup_observed_edges_for_batch(db_session, batch.id + 9999) == {}
 
 
 def test_lookup_position_scores_for_batch_resolves_by_batch(db_session):

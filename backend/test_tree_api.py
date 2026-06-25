@@ -144,7 +144,8 @@ def _observed_by_parent(overlay: EvidenceOverlay) -> dict[str, list[EdgeEvidence
 
     The persisted ``opening_position_edges`` read model is keyed by
     ``(batch_id, parent_fen)``; this reproduces that grouping in memory so the
-    patched ``lookup_observed_edges_for_parent`` can serve each parent's edges.
+    patched ``lookup_observed_edges_for_batch`` can serve the whole batch map (the
+    exact shape that function returns).
     """
     by_parent: dict[str, list[EdgeEvidence]] = defaultdict(list)
     for (parent_fen, _child_fen), edge in overlay.edges.items():
@@ -190,7 +191,7 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
 
     The persisted tree read models are simulated in memory: ``ensure_tree_cache``
     resolves a ``(batch_id, computed_at, cache_state)`` triple, observed edges are
-    served from the ``overlay`` fixture via the patched per-parent lookup, and
+    served from the ``overlay`` fixture via the patched whole-batch lookup, and
     position rows from ``position_rows`` via the patched batch lookup. ``batch_id`` is
     non-None whenever the fixture carries any cache content (a batch, observed edges,
     or position rows); the cold/no-evidence book-only path is modelled by leaving all
@@ -211,8 +212,8 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
     def _ensure(db, uid, color, g, r):
         return batch_id, batch_computed_at, cache_state
 
-    def _loep(db, b_id, parent_fen):
-        return list(observed_by_parent.get(parent_fen, []))
+    def _loeb(db, b_id):
+        return {parent: list(edges) for parent, edges in observed_by_parent.items()}
 
     def _lpsfb(db, b_id, fens):
         return {fen: row for fen, row in position_rows.items() if fen in fens}
@@ -228,7 +229,7 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
         patch("app.api.openings.get_opening_graph", return_value=graph),
         patch("app.api.openings.get_opening_roots", return_value=roots),
         patch("app.api.openings.ensure_tree_cache", side_effect=_ensure),
-        patch("app.api.openings.lookup_observed_edges_for_parent", side_effect=_loep),
+        patch("app.api.openings.lookup_observed_edges_for_batch", side_effect=_loeb),
         patch("app.api.openings.lookup_position_scores_for_batch", side_effect=_lpsfb),
         patch("app.api.openings.lookup_move_evals", side_effect=_lme),
         patch("app.api.openings.lookup_root_eval", side_effect=_lre),
@@ -246,23 +247,27 @@ def _make_builder(graph, roots, overlay, player_color="white", *, batch_id=1,
                   batch_computed_at=None, user_id=123):
     """Construct an _OpeningTreeBuilder whose observed edges resolve from ``overlay``.
 
-    Returns ``(builder, patch_cm)``: enter ``patch_cm`` around any call that reaches
-    ``_observed_children`` so the per-parent lookup is served from the in-memory
-    overlay instead of the real ``opening_position_edges`` table.
+    ``build()`` loads the observed-edge batch via ``_load_observed_edges`` (timed as
+    ``observed_edges_ms``); tests that call structural methods directly (without
+    ``build()``) need the cache pre-populated, so this eagerly runs that load under a
+    patched whole-batch lookup served from the in-memory overlay (not the real
+    ``opening_position_edges`` table). Returns ``(builder, patch_cm)`` where
+    ``patch_cm`` is a no-op context manager kept for caller compatibility — the edge
+    map is already loaded, so no patch needs to stay active for method calls.
     """
     from app.api.openings import _OpeningTreeBuilder
 
     by_parent = _observed_by_parent(overlay)
 
-    def _loep(db, b_id, parent_fen):
-        return list(by_parent.get(parent_fen, []))
+    def _loeb(db, b_id):
+        return {parent: list(edges) for parent, edges in by_parent.items()}
 
     builder = _OpeningTreeBuilder(
         None, graph, roots, batch_id, batch_computed_at, player_color, user_id
     )
-    return builder, patch(
-        "app.api.openings.lookup_observed_edges_for_parent", side_effect=_loep
-    )
+    with patch("app.api.openings.lookup_observed_edges_for_batch", side_effect=_loeb):
+        builder._load_observed_edges()
+    return builder, contextlib.nullcontext()
 
 
 def _ucis(column: dict) -> list[str]:
@@ -330,6 +335,7 @@ def test_tree_timing_log_can_be_forced(client, auth_headers, monkeypatch, caplog
     timing = next(message for message in messages if message.startswith("opening_tree timing"))
     assert "ensure_cache_ms=" in timing
     assert "cache_state=" in timing
+    assert "observed_edges_ms=" in timing
     assert "observed_edge_queries=" in timing
     assert "position_rows_ms=" in timing
     assert "move_evals_ms=" in timing
@@ -922,7 +928,7 @@ def test_structural_children_parity_with_scorer(client, auth_headers):
 # --- end-to-end: real position-row + eval lookups against a seeded DB ---------
 
 def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
-    """Exercise the real ensure_tree_cache + lookup_observed_edges_for_parent +
+    """Exercise the real ensure_tree_cache + lookup_observed_edges_for_batch +
     lookup_position_scores_for_batch + analysis_cache eval lookups against a seeded
     batch (only the graph/roots and the scheduler are stubbed). The request path must
     NOT rebuild overlay_evidence."""
@@ -947,7 +953,7 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
         computed_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
     ))
     # A persisted observed edge for the in-book 1...e5 reply, read by the real
-    # lookup_observed_edges_for_parent (no overlay rebuild).
+    # lookup_observed_edges_for_batch (no overlay rebuild).
     db_session.add(OpeningPositionEdge(
         batch_id=batch.id, user_id=123, player_color="white",
         parent_fen=E4, child_fen=E4E5, uci="e7e5",
@@ -998,22 +1004,25 @@ def test_tree_end_to_end_real_lookups(client, auth_headers, db_session):
     assert e5["user_choice_count"] == 2
 
 
-# --- warm read: no overlay rebuild, bounded per-parent edge lookups -----------
+# --- warm read: no overlay rebuild, single batch edge lookup ------------------
 
-def test_tree_warm_read_no_overlay_rebuild_and_bounded_edge_queries(client, auth_headers):
-    """A warm read serves observed edges from the cache via bounded per-parent point
-    queries and never rebuilds overlay_evidence on the request thread."""
+def test_tree_warm_read_no_overlay_rebuild_and_single_edge_query(client, auth_headers):
+    """A warm read serves observed edges from the cache via a SINGLE whole-batch query
+    (g-a6k2: collapse the per-parent N+1) and never rebuilds overlay_evidence on the
+    request thread."""
     edge_key, edge = _obs_edge(["e2e4", "e7e5", "d2d4"], traversal_count=2,
                                live_attempts=1)
     overlay = _overlay("white", edges={edge_key: edge})
     by_parent = _observed_by_parent(overlay)
-    loep = MagicMock(side_effect=lambda db, b_id, parent_fen: list(by_parent.get(parent_fen, [])))
+    loeb = MagicMock(side_effect=lambda db, b_id: {
+        parent: list(edges) for parent, edges in by_parent.items()
+    })
 
     with (
         patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
         patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
         patch("app.api.openings.ensure_tree_cache", return_value=(1, None, "warm_fresh")),
-        patch("app.api.openings.lookup_observed_edges_for_parent", loep),
+        patch("app.api.openings.lookup_observed_edges_for_batch", loeb),
         patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
         patch("app.api.openings.lookup_move_evals",
               side_effect=lambda db, reqs: {r: None for r in reqs}),
@@ -1028,12 +1037,37 @@ def test_tree_warm_read_no_overlay_rebuild_and_bounded_edge_queries(client, auth
     overlay_spy.assert_not_called()
     # The observed off-book move is served from the cache.
     assert "d2d4" in _ucis(resp.json()["columns"][2])
-    # Bounded by visited parents (line positions ∪ rendered frontier), not the total
-    # observed-edge count — a handful of memoized per-parent point queries.
-    assert 0 < loep.call_count <= 20
-    # Each lookup is a per-parent point query: (db, batch_id, parent_fen).
-    for call in loep.call_args_list:
-        assert len(call.args) == 3
+    # Exactly ONE observed-edge query per request, regardless of node/column count.
+    assert loeb.call_count == 1
+    # It is a whole-batch read: (db, batch_id) — no parent_fen.
+    assert len(loeb.call_args.args) == 2
+
+
+def test_tree_cold_no_evidence_issues_zero_edge_queries(client, auth_headers):
+    """A cold / no-evidence user (batch_id is None) yields a book-only tree and never
+    touches the observed-edge read model (g-a6k2 acceptance)."""
+    loeb = MagicMock(side_effect=lambda db, b_id: {})
+
+    with (
+        patch("app.api.openings.get_opening_graph", return_value=_make_graph()),
+        patch("app.api.openings.get_opening_roots", return_value=_make_roots()),
+        patch("app.api.openings.ensure_tree_cache",
+              return_value=(None, None, "book_only")),
+        patch("app.api.openings.lookup_observed_edges_for_batch", loeb),
+        patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
+        patch("app.api.openings.lookup_move_evals",
+              side_effect=lambda db, reqs: {r: None for r in reqs}),
+        patch("app.api.openings.lookup_root_eval", return_value=None),
+    ):
+        resp = client.get(TREE_URL,
+                          params={"player_color": "white", "move": ["e2e4"]},
+                          headers=auth_headers())
+
+    assert resp.status_code == 200
+    # Book-only tree: the E4 column still lists the book replies.
+    assert set(_ucis(resp.json()["columns"][1])) == {"e7e5", "c7c5"}
+    # No batch ⇒ zero observed-edge queries.
+    assert loeb.call_count == 0
 
 
 def test_tree_builder_holds_scalars_not_orm_batch(client, auth_headers):

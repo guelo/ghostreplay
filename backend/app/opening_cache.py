@@ -478,8 +478,8 @@ def ensure_tree_cache(
     request degrades to a book-only tree while the background recompute finishes).
 
     A pathologically heavy user whose bootstrap ``refresh_now`` times out is served
-    the registry-stale batch for that one request (``lookup_observed_edges_for_parent``
-    returns ``[]`` ⇒ book-only); the background recompute finishes and the next read
+    the registry-stale batch for that one request (``lookup_observed_edges_for_batch``
+    returns an empty map ⇒ book-only); the background recompute finishes and the next read
     is correct and fast. That rare, logged degradation is preferred over serving a
     wrong tree on every warm read.
     """
@@ -551,6 +551,26 @@ def lookup_position_scores_for_batch(
     return {snapshot.normalized_fen: snapshot for snapshot in snapshots}
 
 
+def _edge_evidence_from_row(row: OpeningPositionEdge) -> EdgeEvidence:
+    """Reconstruct an ``EdgeEvidence`` from one persisted edge row.
+
+    The tree never reads quality, so the reconstructed ``EdgeEvidence`` carries
+    ``quality_sum=0.0, quality_count=0`` (the columns are not persisted; see
+    ``OpeningPositionEdge``).
+    """
+    return EdgeEvidence(
+        parent_fen=row.parent_fen,
+        child_fen=row.child_fen,
+        uci=row.uci,
+        traversal_count=row.traversal_count,
+        live_attempts=row.live_attempts,
+        live_passes=row.live_passes,
+        live_fails=row.live_fails,
+        quality_sum=0.0,
+        quality_count=0,
+    )
+
+
 def lookup_observed_edges_for_parent(
     db: Session,
     batch_id: int,
@@ -558,15 +578,9 @@ def lookup_observed_edges_for_parent(
 ) -> list[EdgeEvidence]:
     """Observed edges out of ``parent_fen`` for one batch, as ``EdgeEvidence``.
 
-    Powers the tree builder's bounded per-parent read via the
-    ``idx_opening_position_edges_batch_parent`` index: the builder discovers exactly
-    the parents it needs (visible line positions ∪ rendered frontier children) and
-    loads each lazily. ``parent_fen`` is the normalized 4-field key the edges were
-    stored under, matching the builder's ``norm_fen``, so no renormalization.
-
-    The tree never reads quality, so the reconstructed ``EdgeEvidence`` carries
-    ``quality_sum=0.0, quality_count=0`` (the columns are not persisted; see
-    ``OpeningPositionEdge``).
+    Reads via the ``idx_opening_position_edges_batch_parent`` index: ``parent_fen``
+    is the normalized 4-field key the edges were stored under, matching the builder's
+    ``norm_fen``, so no renormalization.
     """
     rows = (
         db.query(OpeningPositionEdge)
@@ -576,20 +590,37 @@ def lookup_observed_edges_for_parent(
         )
         .all()
     )
-    return [
-        EdgeEvidence(
-            parent_fen=row.parent_fen,
-            child_fen=row.child_fen,
-            uci=row.uci,
-            traversal_count=row.traversal_count,
-            live_attempts=row.live_attempts,
-            live_passes=row.live_passes,
-            live_fails=row.live_fails,
-            quality_sum=0.0,
-            quality_count=0,
+    return [_edge_evidence_from_row(row) for row in rows]
+
+
+def lookup_observed_edges_for_batch(
+    db: Session,
+    batch_id: int,
+) -> dict[str, list[EdgeEvidence]]:
+    """All observed edges for one batch, indexed by normalized parent FEN.
+
+    A single ``SELECT … WHERE batch_id=?`` that the tree builder loads ONCE up front,
+    replacing the previous per-parent point queries (an N+1 that scaled the endpoint's
+    latency as visible-parents × DB round-trip). Total edge rows per batch are tiny
+    (tens), so eager-loading is cheap and collapses the structural pass to a single
+    round-trip — including the terminal-probe frontier, which the per-parent design
+    could miss.
+
+    Keys are the persisted ``parent_fen`` (normalized 4-field, matching the builder's
+    ``norm_fen``). A parent with no observed edges is simply absent from the map, so
+    callers should use ``.get(norm_fen, [])``.
+    """
+    rows = (
+        db.query(OpeningPositionEdge)
+        .filter(OpeningPositionEdge.batch_id == batch_id)
+        .all()
+    )
+    edges_by_parent: dict[str, list[EdgeEvidence]] = {}
+    for row in rows:
+        edges_by_parent.setdefault(row.parent_fen, []).append(
+            _edge_evidence_from_row(row)
         )
-        for row in rows
-    ]
+    return edges_by_parent
 
 
 def list_opening_score_candidate_pairs(

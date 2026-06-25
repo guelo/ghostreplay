@@ -27,7 +27,7 @@ from app.opening_cache import (
     SCORE_MODEL_VERSION,
     ensure_tree_cache,
     load_cached_rows,
-    lookup_observed_edges_for_parent,
+    lookup_observed_edges_for_batch,
     lookup_position_scores_for_batch,
 )
 from app.opening_evidence import EdgeEvidence, overlay_evidence
@@ -777,9 +777,8 @@ def get_opening_children(
 # Returns one hydrated column per position along a canonical move line so a deep
 # link / refresh renders in a single request. Does ZERO per-request scoring and
 # NO per-request overlay rebuild: structural shape comes from the opening graph +
-# the persisted observed-edge read model (opening_position_edges, read by bounded
-# per-parent lookups), direct metrics from the persisted batch, evals from the
-# analysis_cache.
+# the persisted observed-edge read model (opening_position_edges, read in one batch
+# load), direct metrics from the persisted batch, evals from the analysis_cache.
 # ---------------------------------------------------------------------------
 
 
@@ -882,18 +881,21 @@ class _OpeningTreeBuilder:
 
     Structural shape (which moves exist, which are navigable, which are terminal)
     is a pure function of the opening graph + observed tree edges; this class derives
-    it, then performs exactly the batched DB lookups the epic mandates — bounded
-    per-parent observed-edge lookups, one position-row load, one move-eval batch, one
+    it, then performs exactly the batched DB lookups the epic mandates — one
+    observed-edge batch load, one position-row load, one move-eval batch, one
     root-eval — to hydrate metrics and evals. It never scores on the request path
     (the cold bootstrap inside ``ensure_tree_cache`` is the only exception, and it is
     bounded).
 
     Observed edges come from the persisted ``opening_position_edges`` read model via
-    lazy, memoized per-parent point queries keyed by ``batch_id``: the builder holds
-    only the scalar ``batch_id`` / ``batch_computed_at`` the route resolved BEFORE its
-    ``db.rollback()``, never an ORM batch row, so no surprise refresh SELECT can fire
-    after the rollback. ``batch_id is None`` (cold / no-evidence user) yields a
-    book-only structural tree.
+    a SINGLE batch read (``lookup_observed_edges_for_batch``) issued inside ``build``
+    as the timed ``observed_edges_ms`` stage, indexed by parent FEN in memory: the
+    builder holds only the scalar ``batch_id`` / ``batch_computed_at`` the route
+    resolved BEFORE its ``db.rollback()``, never an ORM batch row, so no surprise
+    refresh SELECT can fire after the rollback. One batch read — instead of one point
+    query per visited parent — collapses the structural pass from N+1 round-trips to
+    one, and covers the terminal-probe frontier for free. ``batch_id is None`` (cold /
+    no-evidence user) yields a book-only structural tree with zero edge queries.
     """
 
     def __init__(
@@ -921,34 +923,45 @@ class _OpeningTreeBuilder:
         self._struct_cache: dict[str, dict[str, _ChildEdge]] = {}
         self._column_cache: dict[str, dict[str, _ChildEdge]] = {}
 
-        # Lazy, memoized per-parent observed-edge cache. Loaded only for the parents
-        # the builder actually visits (visible line ∪ rendered frontier), so a warm
-        # read is bounded by visible nodes, not total session history.
+        # Observed-edge read model, indexed by normalized parent FEN. Populated by
+        # _load_observed_edges() during build() (timed as observed_edges_ms) rather
+        # than here, so the DB round-trip is never an unaccounted gap in the route
+        # timing log. Empty until then; an absent batch (cold/no-evidence user) leaves
+        # it empty ⇒ book-only tree.
+        # Instrumentation for the route timing log: query count is 1 when a batch was
+        # loaded, 0 otherwise, regardless of node/column count.
         self._observed_cache: dict[str, list[EdgeEvidence]] = {}
-        # Instrumentation for the route timing log (Finding: prove the read is
-        # bounded by line+frontier, not by total observed edges).
         self._observed_edge_query_count = 0
         self._observed_edge_row_count = 0
 
     # -- structural shape ---------------------------------------------------
 
+    def _load_observed_edges(self) -> None:
+        """Eager-load the batch's observed edges once, indexed by parent FEN.
+
+        A single ``SELECT`` (vs the former per-parent N+1); ``_observed_children``
+        then reads it from memory. ``batch_id is None`` (cold / no-evidence user) is
+        a no-op ⇒ empty map ⇒ book-only tree. Called from ``build`` inside the timed
+        ``observed_edges_ms`` stage so the DB round-trip is always accounted for in
+        the route timing log (never an unattributed gap in ``total_ms``).
+        """
+        if self.batch_id is None:
+            return
+        self._observed_cache = lookup_observed_edges_for_batch(self.db, self.batch_id)
+        self._observed_edge_query_count = 1
+        self._observed_edge_row_count = sum(
+            len(edges) for edges in self._observed_cache.values()
+        )
+
     def _observed_children(self, norm_fen: str) -> list[EdgeEvidence]:
-        """Observed edges out of ``norm_fen``, loaded lazily from the cache batch.
+        """Observed edges out of ``norm_fen``, read from the loaded batch map.
 
         Stored edge keys are already normalized 4-field FENs (``_record_edge`` keys
         on ``norm_before`` / ``norm_after``), matching ``norm_fen``, so no
-        renormalization. ``batch_id is None`` ⇒ no cache ⇒ book-only tree.
+        renormalization. A parent with no observed edges (or ``batch_id is None``) is
+        simply absent from the map ⇒ book-only continuation.
         """
-        hit = self._observed_cache.get(norm_fen)
-        if hit is None:
-            if self.batch_id is None:
-                hit = []
-            else:
-                hit = lookup_observed_edges_for_parent(self.db, self.batch_id, norm_fen)
-                self._observed_edge_query_count += 1
-                self._observed_edge_row_count += len(hit)
-            self._observed_cache[norm_fen] = hit
-        return hit
+        return self._observed_cache.get(norm_fen, [])
 
     def _is_middlegame(self, norm_fen: str) -> bool:
         cached = self._mid_cache.get(norm_fen)
@@ -1194,6 +1207,13 @@ class _OpeningTreeBuilder:
             line_name[i] = cur_name
             line_eco[i] = cur_eco
         _record_timing(timings, "line_names_ms", stage_started)
+
+        # Load the batch's observed edges in one SELECT before the structural pass
+        # reads them from memory. Timed separately so this DB round-trip is never an
+        # unaccounted gap between rollback and the (now in-memory) structural stage.
+        stage_started = time.perf_counter()
+        self._load_observed_edges()
+        _record_timing(timings, "observed_edges_ms", stage_started)
 
         # Pass 1: structural column build (board-derived fields) + lookup keys.
         stage_started = time.perf_counter()
@@ -1520,8 +1540,9 @@ def get_opening_tree(
     # path. Warm-fresh batches serve immediately (background revalidate); a cold or
     # registry/schema-stale batch (e.g. predating edges-v1, so it has no observed
     # edge rows) blocks for a one-time bootstrap so observed moves are never hidden.
-    # The observed edges themselves are then read lazily by the builder from the
-    # persisted opening_position_edges read model — no overlay rebuild on this path.
+    # The observed edges themselves are then read by the builder in one batch load
+    # from the persisted opening_position_edges read model — no overlay rebuild on
+    # this path.
     stage_started = time.perf_counter()
     batch_id, batch_computed_at, cache_state = ensure_tree_cache(
         db, user.user_id, player_color, graph, roots
@@ -1551,7 +1572,8 @@ def get_opening_tree(
             "move_count=%d has_opening_param=%s canonical_ply=%d graph_ms=%.3f "
             "roots_ms=%.3f ensure_cache_ms=%.3f cache_state=%s rollback_ms=%.3f "
             "resolve_line_ms=%.3f "
-            "replay_line_ms=%.3f line_names_ms=%.3f structural_columns_ms=%.3f "
+            "replay_line_ms=%.3f line_names_ms=%.3f observed_edges_ms=%.3f "
+            "structural_columns_ms=%.3f "
             "position_rows_ms=%.3f move_evals_ms=%.3f root_eval_ms=%.3f "
             "hydrate_sort_ms=%.3f selected_terminal_ms=%.3f builder_total_ms=%.3f "
             "observed_edge_queries=%d observed_edge_rows=%d raw_columns=%d "
@@ -1572,6 +1594,7 @@ def get_opening_tree(
             _timing_ms(timings, "resolve_line_ms"),
             _timing_ms(timings, "replay_line_ms"),
             _timing_ms(timings, "line_names_ms"),
+            _timing_ms(timings, "observed_edges_ms"),
             _timing_ms(timings, "structural_columns_ms"),
             _timing_ms(timings, "position_rows_ms"),
             _timing_ms(timings, "move_evals_ms"),
