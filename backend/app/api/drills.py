@@ -22,6 +22,11 @@ from app.fen import normalize_fen
 from app.models import GameSession, decode_uci_line, encode_uci_line
 from app.opening_graph import get_opening_graph
 from app.opening_roots import derive_family, get_opening_roots
+from app.opening_score_delta import (
+    OpeningScoreDeltaItem,
+    compute_opening_score_delta,
+    snapshot_opening_baseline,
+)
 from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
@@ -110,6 +115,10 @@ class DrillSessionContract(BaseModel):
     normal_started_at: datetime | None
     converted_at: datetime | None
     terminal_reason: str | None = None
+    # Played-opening score deltas (before -> after) vs the drill baseline, set
+    # only by the terminal drill endpoints (natural-end, accuracy fail). None for
+    # start/get/continue/abandon, which don't recompute.
+    opening_score_changes: list[OpeningScoreDeltaItem] | None = None
 
 
 def _get_drill_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -133,7 +142,10 @@ def _suggestion(move: DrillRouteMove) -> DrillRouteSuggestion:
     )
 
 
-def _contract(session: GameSession) -> DrillSessionContract:
+def _contract(
+    session: GameSession,
+    opening_score_changes: list[OpeningScoreDeltaItem] | None = None,
+) -> DrillSessionContract:
     if session.session_mode != DRILL_SESSION_MODE or not session.drill_opening_key:
         raise HTTPException(status_code=400, detail="Session is not a drill")
 
@@ -190,6 +202,7 @@ def _contract(session: GameSession) -> DrillSessionContract:
         normal_started_at=session.normal_started_at,
         converted_at=session.converted_at,
         terminal_reason=session.drill_terminal_reason,
+        opening_score_changes=opening_score_changes,
     )
 
 
@@ -250,6 +263,12 @@ def start_drill(
         drill_opening_key = normalized_target
         drill_line = encode_uci_line(request.line)
 
+    # Snapshot opening scores before any drill move uploads (best-effort), so the
+    # end-of-drill delta has a stable "before" — mirrors the game-start path.
+    opening_score_baseline = snapshot_opening_baseline(
+        db, user.user_id, request.player_color.value
+    )
+
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -265,6 +284,7 @@ def start_drill(
         drill_line=drill_line,
         drill_strictness=request.strictness.value,
         drill_strictness_cp=request.strictness_cp,
+        opening_score_baseline=opening_score_baseline,
     )
     db.add(session)
     db.commit()
@@ -316,7 +336,9 @@ def fail_drill(
     db.commit()
     db.refresh(session)
     capture(str(user.user_id), "drill_failed", {"reason": session.drill_terminal_reason})
-    return _contract(session)
+    # The opening root was reached before the accuracy slip, so the played chain
+    # carries a meaningful delta to surface in the stopped-drill banner.
+    return _contract(session, opening_score_changes=compute_opening_score_delta(db, session) or None)
 
 
 @router.post("/{session_id}/continue", response_model=DrillSessionContract)
@@ -429,6 +451,15 @@ def check_drill_route(
     capture(str(user.user_id), "drill_failed", {"reason": "off_route"})
     # reason="off_route" even if the move also exceeds the centipawn threshold —
     # leaving the route is the primary signal; staying on route is the first correction.
+    #
+    # No opening-score delta here: route-check is a speculative per-move endpoint
+    # (the "is this terminal?" answer only arrives in this response), so the
+    # frontend cannot apply the full-history upload barrier the other terminal
+    # paths use before the backend reads session_moves — the just-played off-route
+    # move may not be persisted yet, yielding a stale/short chain. Off-route also
+    # means the drill failed BEFORE reaching the target opening, so the delta is
+    # the least meaningful here. The accuracy-fail and natural-end paths (clean
+    # terminal calls the frontend barriers) carry the delta instead.
     return DrillRouteCheckResponse(
         status="failed",
         current_fen=current_fen,
@@ -473,7 +504,7 @@ def natural_end_drill(
     db.commit()
     db.refresh(session)
     capture(str(user.user_id), "drill_natural_end", {"result": request.result})
-    return _contract(session)
+    return _contract(session, opening_score_changes=compute_opening_score_delta(db, session) or None)
 
 
 @router.post("/{session_id}/abandon", response_model=DrillSessionContract)

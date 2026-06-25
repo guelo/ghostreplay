@@ -1,6 +1,6 @@
 import type { SetStateAction } from "react";
 import { create } from "zustand";
-import type { DrillSessionState, DrillStrictness, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
+import type { DrillSessionState, DrillStrictness, OpeningScoreDeltaItem, RatingChange, RatingScoreKey, RatingScores } from "../utils/api";
 import type { MoveRecord } from "../components/chess-game/domain/movePresentation";
 import type { GameResult } from "../components/chess-game/domain/status";
 import {
@@ -74,6 +74,8 @@ export type GameState = {
   ratingDisplayType: RatingScoreKey;
   ratingChange: RatingChange | null;
   scoreChanges: RatingScores | null;
+  // Per-played-opening score deltas for the just-ended game/drill (g-xanz).
+  openingScoreChanges: OpeningScoreDeltaItem[] | null;
   soundMuted: boolean;
   soundVolume: number;
 };
@@ -110,6 +112,9 @@ export type GameActions = {
   setRatingDisplayType: (update: SetStateAction<RatingScoreKey>) => void;
   setRatingChange: (update: SetStateAction<RatingChange | null>) => void;
   setScoreChanges: (update: SetStateAction<RatingScores | null>) => void;
+  setOpeningScoreChanges: (
+    update: SetStateAction<OpeningScoreDeltaItem[] | null>,
+  ) => void;
   setSoundMuted: (update: SetStateAction<boolean>) => void;
   setSoundVolume: (update: SetStateAction<number>) => void;
 };
@@ -148,6 +153,7 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   ratingDisplayType: readRatingDisplayType(),
   ratingChange: null,
   scoreChanges: null,
+  openingScoreChanges: null,
   soundMuted: getSoundMuted(),
   soundVolume: getSoundVolume(),
 
@@ -204,6 +210,8 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ ratingChange: resolve(u, s.ratingChange) })),
   setScoreChanges: (u) =>
     set((s) => ({ scoreChanges: resolve(u, s.scoreChanges) })),
+  setOpeningScoreChanges: (u) =>
+    set((s) => ({ openingScoreChanges: resolve(u, s.openingScoreChanges) })),
   setSoundMuted: (u) =>
     set((s) => ({ soundMuted: persistSoundMuted(resolve(u, s.soundMuted)) })),
   setSoundVolume: (u) =>

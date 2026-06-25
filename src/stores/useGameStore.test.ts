@@ -46,3 +46,32 @@ describe("useGameStore sound settings", () => {
     expect(useGameStore.getState().soundMuted).toBe(true);
   });
 });
+
+describe("useGameStore openingScoreChanges", () => {
+  afterEach(() => {
+    useGameStore.getState().setOpeningScoreChanges(null);
+  });
+
+  it("defaults to null and sets/clears the played-opening deltas", () => {
+    expect(useGameStore.getState().openingScoreChanges).toBeNull();
+
+    const changes = [
+      {
+        opening_key: "k1",
+        opening_name: "Italian Game",
+        opening_family: "Italian Game",
+        eco: "C50",
+        depth: 3,
+        before: 41,
+        after: 44,
+        delta: 3,
+        is_new: false,
+      },
+    ];
+    useGameStore.getState().setOpeningScoreChanges(changes);
+    expect(useGameStore.getState().openingScoreChanges).toEqual(changes);
+
+    useGameStore.getState().setOpeningScoreChanges(null);
+    expect(useGameStore.getState().openingScoreChanges).toBeNull();
+  });
+});

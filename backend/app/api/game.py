@@ -20,6 +20,11 @@ from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory, decode_uci_line
 from app.opening_graph import get_opening_graph
+from app.opening_score_delta import (
+    OpeningScoreDeltaItem,
+    compute_opening_score_delta,
+    snapshot_opening_baseline,
+)
 from app.posthog_client import capture
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
@@ -531,6 +536,11 @@ class GameEndResponse(BaseModel):
     scores: RatingScores | None = None
     score_changes: RatingScores | None = None
     scores_after: RatingScores | None = None
+    # Per-played-opening score deltas (before -> after) vs the session baseline,
+    # broadest -> deepest. Independent of rating gating, so present for unrated /
+    # practice-continuation games too. None when no opening was crossed or the
+    # delta could not be computed.
+    opening_score_changes: list[OpeningScoreDeltaItem] | None = None
 
 
 class MoveDetails(BaseModel):
@@ -618,6 +628,13 @@ def start_game(
 
     Returns the session_id to be used for subsequent game operations.
     """
+    # Snapshot the user's current opening scores BEFORE any of this game's moves
+    # upload, so end-of-game deltas have a stable "before" to diff against
+    # (best-effort; NULL leaves the delta omitted rather than blocking start).
+    opening_score_baseline = snapshot_opening_baseline(
+        db, user.user_id, request.player_color.value
+    )
+
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -627,6 +644,7 @@ def start_game(
         blunder_recorded=False,
         player_color=request.player_color.value,
         session_mode="normal",
+        opening_score_baseline=opening_score_baseline,
     )
 
     db.add(session)
@@ -765,6 +783,17 @@ def end_game(
     db.commit()
     db.refresh(session)
 
+    # Recompute opening scores and diff the played chain against the session
+    # baseline. Best-effort and supplementary to the rating change — never raises.
+    # Skipped for ABANDON: those end calls fire during "new game/drill" cleanup
+    # and the response is discarded, so computing the delta would only add the
+    # synchronous refresh_now latency for a banner that never renders.
+    opening_score_changes = (
+        None
+        if request.result == GameResult.ABANDON
+        else compute_opening_score_delta(db, session) or None
+    )
+
     capture(
         str(user.user_id),
         "game_ended",
@@ -790,6 +819,7 @@ def end_game(
         scores=scores_after,
         score_changes=score_changes,
         scores_after=scores_after,
+        opening_score_changes=opening_score_changes,
     )
 
 

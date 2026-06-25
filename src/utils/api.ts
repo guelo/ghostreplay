@@ -461,7 +461,6 @@ export interface DrillRouteCheckResponse {
   target_fen: string
   suggestions: DrillRouteSuggestion[]
   failure: DrillRouteFailure | null
-  opening_score_changes?: OpeningScoreDeltaItem[] | null
 }
 
 export interface DrillRouteMetadata {

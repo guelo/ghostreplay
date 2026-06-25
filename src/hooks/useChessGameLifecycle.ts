@@ -31,6 +31,11 @@ import { buildSessionMoveUploads } from "../components/chess-game/domain/session
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
 
+// Upper bound on the final pre-terminal move upload (g-xanz). Keeps a hung or
+// lock-bound /moves from blocking game/drill end; the opening-score delta is
+// supplementary, so on timeout we proceed and let it degrade.
+const FINAL_UPLOAD_TIMEOUT_MS = 4000;
+
 const applyRatingScores = (scores: RatingScores | null | undefined) => {
   if (!scores) return;
   const s = useGameStore.getState();
@@ -199,6 +204,42 @@ export const useChessGameLifecycle = ({
       .catch(() => {});
   }, []);
 
+  // Durably upload the FULL move history before a terminal recompute. The
+  // end-of-session opening-score delta diffs the played chain from session_moves
+  // and recomputes after-scores from graph evidence, so both depend on this
+  // game's moves being persisted first. The incremental uploader is fire-and-
+  // forget and resolved-analysis-only, so it can race the recompute and yield a
+  // short/stale chain. This awaits a complete upload (every move carries its
+  // fen_after even when analysis is unresolved; the /moves endpoint upserts), so
+  // the delta is correct.
+  //
+  // BOUNDED + non-fatal: the delta is supplementary, so the upload must never
+  // hold the primary terminal action (rating/result/drill-state) hostage. A
+  // hung or lock-bound /moves is cut off by an AbortSignal timeout; on
+  // abort/reject we log and proceed, leaving the delta to degrade.
+  const uploadFullMoveHistoryBeforeEnd = useCallback(
+    async (sessionId: string) => {
+      try {
+        const uploads = buildSessionMoveUploads(
+          useGameStore.getState().moveHistory,
+          new Map(coordinator.store.getState().analysisMap),
+          STARTING_FEN,
+        );
+        if (uploads.length > 0) {
+          await uploadSessionMoves(sessionId, uploads, {
+            signal: AbortSignal.timeout(FINAL_UPLOAD_TIMEOUT_MS),
+          });
+        }
+      } catch (err) {
+        console.error(
+          "[SessionMoves] Final move-history upload failed/timed out:",
+          err,
+        );
+      }
+    },
+    [coordinator],
+  );
+
   const handleGameEnd = useCallback(async () => {
     const store = useGameStore.getState();
     if (!store.sessionId || !store.isGameActive) return;
@@ -240,6 +281,10 @@ export const useChessGameLifecycle = ({
           result.type === "draw")
       ) {
         try {
+          // Persist the full drill move history before the backend recomputes,
+          // so the opening-score delta reflects this drill (g-xanz). Done before
+          // stopSessionUploads below discards the unresolved tail.
+          await uploadFullMoveHistoryBeforeEnd(store.sessionId);
           const contract = await naturalEndDrill(
             store.sessionId,
             result.type,
@@ -251,6 +296,7 @@ export const useChessGameLifecycle = ({
           const s = useGameStore.getState();
           s.setDrillState(contract.drill_state);
           s.setDrillTerminalReason(contract.terminal_reason ?? null);
+          s.setOpeningScoreChanges(contract.opening_score_changes ?? null);
           s.setIsRated(false);
           // Natural-ended drills remain hidden and unrated unless converted.
           // Persisted evidence is best-effort, so discard any resolved upload
@@ -270,10 +316,10 @@ export const useChessGameLifecycle = ({
       }
 
       try {
-        // Best-effort flush of already-resolved analyses — does not block
-        coordinator.flushPendingUploads().catch((err) =>
-          console.error("[SessionMoves] Flush failed:", err),
-        );
+        // Await a complete move upload so the opening-score delta sees the full
+        // played chain and fresh after-scores (replaces the prior fire-and-forget
+        // resolved-only flush, which could race the recompute).
+        await uploadFullMoveHistoryBeforeEnd(store.sessionId);
 
         const endResponse = await endGame(
           store.sessionId,
@@ -290,6 +336,11 @@ export const useChessGameLifecycle = ({
           s.setScoreChanges(endResponse.score_changes ?? null);
           applyRatingScores(endResponse.scores_after ?? endResponse.scores);
         }
+        // Opening deltas are independent of rating gating (unrated/practice games
+        // still earn them), so set them outside the rating block.
+        useGameStore
+          .getState()
+          .setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
         finishLocalGame(result, {
           preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
           finalizingSessionId,
@@ -304,6 +355,7 @@ export const useChessGameLifecycle = ({
     chess,
     coordinator,
     finishLocalGame,
+    uploadFullMoveHistoryBeforeEnd,
     setBlunderReviewId,
     setBlunderReviewSrs,
     setBlunderTargetFen,
@@ -398,6 +450,7 @@ export const useChessGameLifecycle = ({
           applyRatingScores(endResponse.scores_after ?? endResponse.scores);
         }
         const s = useGameStore.getState();
+        s.setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
         s.setIsRated(false);
         s.setIsPracticeContinuation(true);
         s.setDrillState(null);
@@ -511,6 +564,7 @@ export const useChessGameLifecycle = ({
         s2.setGameResult(null);
         s2.setRatingChange(null);
         s2.setScoreChanges(null);
+        s2.setOpeningScoreChanges(null);
         s2.setMoveHistory([]);
         s2.setViewIndex(null);
         resetEngine();
@@ -652,6 +706,7 @@ export const useChessGameLifecycle = ({
         s.setGameResult(null);
         s.setRatingChange(null);
         s.setScoreChanges(null);
+        s.setOpeningScoreChanges(null);
 
         resetEngine();
         coordinator.clearSession();
@@ -808,9 +863,9 @@ export const useChessGameLifecycle = ({
         return;
       }
 
-      coordinator.flushPendingUploads().catch((err) =>
-        console.error("[SessionMoves] Flush failed:", err),
-      );
+      // Await a complete move upload so the resigned game's opening-score delta
+      // reflects the full played chain (matches handleGameEnd).
+      await uploadFullMoveHistoryBeforeEnd(store.sessionId);
 
       const endResponse = await endGame(
         store.sessionId,
@@ -827,6 +882,11 @@ export const useChessGameLifecycle = ({
         s.setScoreChanges(endResponse.score_changes ?? null);
         applyRatingScores(endResponse.scores_after ?? endResponse.scores);
       }
+      // Opening deltas are rating-independent, so set them outside the rating
+      // block (P2: a resigned game must still surface them).
+      useGameStore
+        .getState()
+        .setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
       finishLocalGame(
         { type: "resign", message: "You resigned." },
         { finalizingSessionId },
@@ -840,6 +900,7 @@ export const useChessGameLifecycle = ({
     chess,
     coordinator,
     finishLocalGame,
+    uploadFullMoveHistoryBeforeEnd,
     setEngineMessage,
   ]);
 
@@ -1000,6 +1061,9 @@ export const useChessGameLifecycle = ({
     handleViewHistory,
     handleContinueDrill,
     abandonStoppedDrill,
+    // Exposed so the drill accuracy-fail path (in ChessGame) can apply the same
+    // bounded full-history upload barrier before requesting its terminal delta.
+    uploadFullMoveHistoryBeforeEnd,
     showRevertWarning,
   };
 };

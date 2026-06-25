@@ -1,7 +1,9 @@
 import { memo } from "react";
 import SettingsGearIcon from "./SettingsGearIcon";
+import OpeningScoreDelta from "./OpeningScoreDelta";
 import type {
   DrillSessionState,
+  OpeningScoreDeltaItem,
   RatingChange,
   RatingScoreKey,
   RatingScores,
@@ -29,6 +31,7 @@ type PostGameBannerProps = {
   drillActionsDisabled?: boolean;
   ratingChange: RatingChange | null;
   scoreChanges?: RatingScores | null;
+  openingScoreChanges?: OpeningScoreDeltaItem[] | null;
   ratingDisplayType?: RatingScoreKey;
   onViewAnalysis: () => void;
   onShowStartOverlay: () => void;
@@ -48,6 +51,7 @@ const PostGameBanner = ({
   drillActionsDisabled,
   ratingChange,
   scoreChanges,
+  openingScoreChanges,
   ratingDisplayType = "elo",
   onViewAnalysis,
   onShowStartOverlay,
@@ -76,6 +80,9 @@ const PostGameBanner = ({
         aria-label="Post-game options"
       >
         <p className="game-end-banner-message">{gameResult.message}</p>
+        {/* Drill banner has no rating delta, so the opening-score change is the
+            primary post-drill signal. */}
+        <OpeningScoreDelta changes={openingScoreChanges} />
         <div className="chess-post-game-actions">
           {onNewDrill && (
             <span className="drill-again-group">
@@ -127,6 +134,8 @@ const PostGameBanner = ({
             </span>
           </p>
         )}
+        {/* Opening-score deltas sit under the rating delta for a game. */}
+        <OpeningScoreDelta changes={openingScoreChanges} />
         <div className="chess-post-game-actions">
           <button
             className="chess-button primary"

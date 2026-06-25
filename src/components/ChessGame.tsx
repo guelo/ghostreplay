@@ -267,6 +267,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const ratingScores = useGameStore((s) => s.ratingScores);
   const ratingDisplayType = useGameStore((s) => s.ratingDisplayType);
   const scoreChanges = useGameStore((s) => s.scoreChanges);
+  const openingScoreChanges = useGameStore((s) => s.openingScoreChanges);
   const ratingChange = useGameStore((s) => s.ratingChange);
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
@@ -639,6 +640,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           const reason = route.failure?.reason ?? null;
           useGameStore.getState().setDrillState("failed");
           useGameStore.getState().setDrillTerminalReason(reason);
+          // No opening-score delta on an off-route fail: route-check is a
+          // speculative per-move call, so we can't run the full-history upload
+          // barrier before the backend reads session_moves, and going off-route
+          // means the target opening was never reached. Clear any prior value so
+          // DrillStopActions shows no (stale) delta.
+          useGameStore.getState().setOpeningScoreChanges(null);
           drillFailedMoveIndexRef.current = result.moveIndex;
           setDrillFailInfo({
             playedMoveUci: route.failure?.played_move_uci ?? result.moveUci,
@@ -692,6 +699,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleViewAnalysis,
     handleViewHistory,
     abandonStoppedDrill,
+    uploadFullMoveHistoryBeforeEnd,
   } = useChessGameLifecycle({
     chess,
     coordinator,
@@ -1101,13 +1109,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       result: Extract<PlayerMoveApplyResult, { applied: true }>,
       bestMove: string | null,
     ) => {
-      await failDrill(sessionId, "accuracy");
+      // Durably upload the full move history before failDrill computes the
+      // opening-score delta, so the recompute sees this drill's complete chain
+      // (mirrors the natural-end barrier). Bounded; degrades on timeout.
+      await uploadFullMoveHistoryBeforeEnd(sessionId);
+      const contract = await failDrill(sessionId, "accuracy");
       if (!isPostRootMoveStillCurrent(sessionId, result)) {
         return;
       }
       const store = useGameStore.getState();
       store.setDrillState("failed");
       store.setDrillTerminalReason("accuracy");
+      store.setOpeningScoreChanges(contract.opening_score_changes ?? null);
       drillFailedMoveIndexRef.current = result.moveIndex;
       setDrillFailInfo({
         playedMoveUci: result.moveUci,
@@ -1121,7 +1134,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setViewIndex(result.moveIndex - 1);
       setDrillRecovery(null);
     },
-    [isPostRootMoveStillCurrent, setEngineMessage, setViewIndex],
+    [
+      isPostRootMoveStillCurrent,
+      uploadFullMoveHistoryBeforeEnd,
+      setEngineMessage,
+      setViewIndex,
+    ],
   );
 
   const continueAfterPlayerMove = useCallback(
@@ -1954,6 +1972,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 drillActionsDisabled={isStartingGame}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
+                openingScoreChanges={openingScoreChanges}
                 ratingDisplayType={ratingDisplayType}
                 onViewAnalysis={handleViewAnalysis}
                 onShowStartOverlay={handleShowStartOverlay}
@@ -1969,6 +1988,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               isReviewedDrillReturn) && (
               <DrillStopActions
                 terminalReason={drillTerminalReason}
+                openingScoreChanges={openingScoreChanges}
                 onAnotherDrill={handleAgainDrill}
                 onAnotherDrillSettings={handleAgainSettings}
                 // Live stop rebuilds + opens the review; reviewed return just

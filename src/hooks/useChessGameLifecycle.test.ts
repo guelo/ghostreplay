@@ -13,6 +13,7 @@ const uploadSessionMovesMock = vi.fn();
 const startDrillMock = vi.fn();
 const continueDrillMock = vi.fn();
 const abandonDrillMock = vi.fn();
+const naturalEndDrillMock = vi.fn();
 const getOpeningRootsMock = vi.fn();
 const audioCtorMock = vi.fn();
 const audioPlayMock = vi.fn();
@@ -25,6 +26,7 @@ vi.mock("../utils/api", () => ({
   startDrill: (...args: unknown[]) => startDrillMock(...args),
   continueDrill: (...args: unknown[]) => continueDrillMock(...args),
   abandonDrill: (...args: unknown[]) => abandonDrillMock(...args),
+  naturalEndDrill: (...args: unknown[]) => naturalEndDrillMock(...args),
   getOpeningRoots: (...args: unknown[]) => getOpeningRootsMock(...args),
 }));
 
@@ -197,6 +199,7 @@ beforeEach(() => {
   startDrillMock.mockReset();
   continueDrillMock.mockReset();
   abandonDrillMock.mockReset();
+  naturalEndDrillMock.mockReset();
   getOpeningRootsMock.mockReset();
   getOpeningBookMock.mockReset();
   uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
@@ -1545,5 +1548,167 @@ describe("useChessGameLifecycle", () => {
       }),
     );
     expect(coordinator.startSession).not.toHaveBeenCalled();
+  });
+
+  // --- opening-score delta wiring (g-xanz) --------------------------------
+
+  const OPENING_CHANGES = [
+    {
+      opening_key: "k1",
+      opening_name: "Italian Game",
+      opening_family: "Italian Game",
+      eco: "C50",
+      depth: 3,
+      before: 41,
+      after: 44,
+      delta: 3,
+      is_new: false,
+    },
+  ];
+
+  it("populates openingScoreChanges from the game-end response and uploads the full history first", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "checkmate_win",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // P1: the full move history is uploaded BEFORE endGame's recompute. Assert
+    // order (the bug was ordering-specific), not just that both were called.
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      endGameMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("populates openingScoreChanges from the resign response (P2)", async () => {
+    const chess = new Chess();
+    chess.move("e4");
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: "e4", fen: chess.fen(), uci: "e2e4" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    act(() => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      endGameMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("populates openingScoreChanges from the natural-end drill contract", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+    useGameStore.setState({
+      sessionId: "drill-session-xanz",
+      drillOpeningKey: "target-fen",
+      drillState: "active",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    naturalEndDrillMock.mockResolvedValueOnce({
+      session_id: "drill-session-xanz",
+      drill_state: "failed",
+      terminal_reason: "natural_end",
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(naturalEndDrillMock).toHaveBeenCalled();
+    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // P1: the drill's moves are uploaded BEFORE naturalEndDrill recomputes (and
+    // before stopSessionUploads discards the tail). Assert order, not just calls.
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      naturalEndDrillMock.mock.invocationCallOrder[0],
+    );
+    expect(coordinator.stopSessionUploads).toHaveBeenCalled();
+  });
+
+  it("still records the terminal endpoint when the final upload fails/times out", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    // The bounded upload hangs/aborts — must not block endGame.
+    uploadSessionMovesMock.mockRejectedValueOnce(new Error("upload timed out"));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "checkmate_win",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    // The primary terminal action still ran despite the upload failure.
+    expect(endGameMock).toHaveBeenCalled();
+    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
   });
 });

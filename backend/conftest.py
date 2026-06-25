@@ -72,6 +72,7 @@ def _create_test_schema(conn) -> None:
             rated_start_ply INTEGER,
             recorded_blunder_id INTEGER,
             blunder_idempotency_key VARCHAR(64),
+            opening_score_baseline TEXT,
             CHECK (session_mode IN ('normal','drill')),
             CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),

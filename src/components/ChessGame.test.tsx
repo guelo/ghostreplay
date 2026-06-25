@@ -666,6 +666,13 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
       expect(useGameStore.getState().viewIndex).toBe(-1);
     });
+    // The full move history is durably uploaded BEFORE failDrill computes the
+    // opening-score delta (g-xanz barrier). The bug was ordering-specific, so
+    // assert the upload ran first — not merely that both were called.
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
+      failDrillMock.mock.invocationCallOrder[0],
+    );
   });
 
   it("passes a post-root drill move whose loss exactly equals strictness (boundary passes)", async () => {
@@ -3183,8 +3190,10 @@ describe("ChessGame move analysis", () => {
     });
     fireEvent.click(screen.getByText("Resign"));
 
+    // Resign now awaits a full move-history upload before endGame so the
+    // opening-score delta sees the complete chain (g-xanz).
     await waitFor(() => {
-      expect(mockCoordinator.flushPendingUploads).toHaveBeenCalled();
+      expect(uploadSessionMovesMock).toHaveBeenCalled();
     });
 
     await waitFor(() => {
@@ -3451,7 +3460,7 @@ describe("ChessGame remount persistence", () => {
       expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
     });
 
-    // Resign — coordinator should flush pending uploads
+    // Resign — coordinator should durably upload the full move history first
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
     await waitFor(() => {
       expect(screen.getByText("Are you sure?")).toBeInTheDocument();
@@ -3459,7 +3468,7 @@ describe("ChessGame remount persistence", () => {
     fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
-      expect(mockCoordinator.flushPendingUploads).toHaveBeenCalled();
+      expect(uploadSessionMovesMock).toHaveBeenCalled();
     });
 
     await waitFor(() => {
