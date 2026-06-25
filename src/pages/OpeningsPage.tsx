@@ -348,6 +348,34 @@ function OpeningsPage() {
     setSearchParams(buildOpeningsSearchParams({ playerColor, moves: newLine }));
   };
 
+  // Left arrow walks up the tree one ply (drop the deepest move), which steps
+  // the board back one move since the FEN is replayed from the selection line.
+  // No-op at the root, while typing in a field, or with a modifier held (so
+  // Cmd/Alt+Left still triggers browser Back).
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft") return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (selectionLine.length === 0) return;
+      event.preventDefault();
+      selectLine(selectionLine.slice(0, -1));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // selectLine is re-created each render but closes over the live route, so it
+    // only needs re-binding when the selection line itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionLine]);
+
   // Perspective switch keeps the shared line; the hook refetches (color in key)
   // and the board orientation flips immediately, before the refetch resolves.
   const switchColor = (color: OpeningPlayerColor) => {
