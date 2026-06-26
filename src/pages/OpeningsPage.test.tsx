@@ -364,6 +364,20 @@ function clickMove(san: string) {
   fireEvent.click(moveSpan.closest("button") as HTMLButtonElement);
 }
 
+/** Fire the board's onSquareClick for a square (the click-to-move entry). */
+function clickSquare(square: string) {
+  act(() => {
+    (boardOptions.onSquareClick as (a: { square: string }) => void)({ square });
+  });
+}
+
+/** The latest squareStyles passed to the board (last-move + legal-move hints). */
+function squareStyles(): Record<string, React.CSSProperties> {
+  return (
+    (boardOptions.squareStyles as Record<string, React.CSSProperties>) ?? {}
+  );
+}
+
 beforeEach(() => {
   getOpeningTreeMock.mockReset();
   // Default: cache is warm so the page loads the tree directly (no setup poll).
@@ -977,6 +991,168 @@ describe("OpeningsPage tree", () => {
     );
     expect(observed).toBeTruthy();
     expect(observed!.getAttribute("stroke-dasharray")).toBeNull();
+  });
+});
+
+describe("OpeningsPage click-to-move (g-0b6q)", () => {
+  it("selects a piece on click, paints legal-move hints, then moves on the second click", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // First click selects the e2 pawn: legal dots (e3, e4) + a source highlight
+    // are painted, and nothing navigates yet.
+    clickSquare("e2");
+    const hints = squareStyles();
+    expect(hints.e2).toBeDefined();
+    expect(hints.e3).toBeDefined();
+    expect(hints.e4).toBeDefined();
+    expect(location()).toBe("/openings?color=white");
+    expect(captureEventMock).not.toHaveBeenCalled();
+
+    // Second click on a legal destination makes the move; the in-tree frontier
+    // node (e4) is selected just like the equivalent drag.
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
+    clickSquare("e4");
+    expect(location()).toBe("/openings?color=white&move=e2e4");
+    expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      from_key: "",
+      to_key: "e2e4",
+      depth: 1,
+      player_color: "white",
+    });
+    // Hints clear once the move lands.
+    expect(squareStyles().e3).toBeUndefined();
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+  });
+
+  it("extends the line for a legal off-tree square click (third move type)", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // a2→a3 is legal but not a frontier node → extend the line (g-obh5),
+    // routed through the same path as the drag.
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_A3);
+    clickSquare("a2");
+    clickSquare("a3");
+    expect(location()).toBe("/openings?color=white&move=a2a3");
+    expect(captureEventMock).toHaveBeenCalledWith("opening_explored", {
+      from_key: "",
+      to_key: "a2a3",
+      depth: 1,
+      player_color: "white",
+    });
+    await screen.findByText("1. a3", {
+      selector: ".tree-node-card__move-label",
+    });
+  });
+
+  it("does not select an opponent piece or an empty square", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Black pawn (not the side to move) → no hints.
+    clickSquare("e7");
+    expect(squareStyles().e7).toBeUndefined();
+    expect(squareStyles().e5).toBeUndefined();
+
+    // Empty square → no hints.
+    clickSquare("e4");
+    expect(squareStyles().e4).toBeUndefined();
+    expect(location()).toBe("/openings?color=white");
+    expect(captureEventMock).not.toHaveBeenCalled();
+  });
+
+  it("clears hints (no navigation) when the second click is an illegal destination", async () => {
+    getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    clickSquare("e2");
+    expect(squareStyles().e4).toBeDefined();
+
+    // e2→e5 is illegal for a pawn: applyBoardMove refuses, and since e5 is empty
+    // there's nothing to (re)select, so the hints clear and no move is made.
+    clickSquare("e5");
+    expect(squareStyles().e4).toBeUndefined();
+    expect(squareStyles().e2).toBeUndefined();
+    expect(location()).toBe("/openings?color=white");
+    expect(captureEventMock).not.toHaveBeenCalled();
+  });
+
+  it("locks the board with a loading overlay while a move-triggered refetch is in flight", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Settled → no board overlay.
+    expect(
+      document.querySelector(".openings-tree-board__loading"),
+    ).toBeNull();
+
+    // Keep the e2e4 refetch pending: the board is locked, so the overlay (with
+    // its accessible status role) appears on top of it.
+    const pending = deferred<TreeResponse>();
+    getOpeningTreeMock.mockReturnValueOnce(pending.promise);
+    clickMove("e4");
+
+    await waitFor(() =>
+      expect(
+        document.querySelector(".openings-tree-board__loading"),
+      ).not.toBeNull(),
+    );
+    expect(
+      screen.getByRole("status", { name: "Loading next moves" }),
+    ).toBeInTheDocument();
+
+    // Resolving settles the view and removes the overlay.
+    await act(async () => {
+      pending.resolve(WHITE_E4);
+    });
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+    expect(
+      document.querySelector(".openings-tree-board__loading"),
+    ).toBeNull();
+  });
+
+  it("clears stale hints when the perspective is switched at the same root FEN", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Select e2 at the root (hints painted).
+    clickSquare("e2");
+    expect(squareStyles().e4).toBeDefined();
+
+    // Switching to Black flips the board but keeps the starting FEN, so the
+    // stale White hints must clear even though board.fen is unchanged.
+    getOpeningTreeMock.mockResolvedValueOnce(BLACK_ROOT);
+    fireEvent.click(screen.getByRole("button", { name: "Black" }));
+    expect(squareStyles().e2).toBeUndefined();
+    expect(squareStyles().e4).toBeUndefined();
+    expect(squareStyles().e3).toBeUndefined();
+
+    // Let the perspective refetch settle so its state update doesn't trail as an
+    // act() warning.
+    await screen.findByText("40", { selector: ".tree-node-card__score" });
+  });
+
+  it("clears stale hints when the board position changes via a tree click", async () => {
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
+    renderAt("/openings?color=white");
+    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+
+    // Select e2 (hints shown), then navigate via a tree node instead of the
+    // board: the position changes, so the e2 hints must not linger.
+    clickSquare("e2");
+    expect(squareStyles().e4).toBeDefined();
+
+    getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
+    clickMove("e4");
+    await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1]));
+    expect(squareStyles().e3).toBeUndefined();
   });
 });
 

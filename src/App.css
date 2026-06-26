@@ -7255,6 +7255,21 @@
     background: var(--bg-secondary);
 }
 
+/* While a move-triggered refetch is in flight the board is locked (you can't
+   move until the new tree column settles), so a veil + centered spinner sit on
+   top to signal the wait. Anchored to the sticky/relative board box; intercepts
+   pointer events so an attempted drag/click reads as blocked, not ignored. */
+.openings-tree-board__loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 0.6rem;
+    background: rgba(255, 255, 255, 0.45);
+    z-index: 3;
+}
+
 /* Horizontal tree scroller — the ONLY horizontally-scrolling axis. overflow-y
    is hidden so the whole tree never scrolls vertically (each column does). */
 .openings-tree-scroll {
@@ -7470,7 +7485,9 @@
 
     .openings-tree-board {
         width: min(100%, 360px);
-        position: static;
+        /* relative (not static) un-sticks the board the same way while keeping
+           it a positioning context for the loading overlay. */
+        position: relative;
     }
 
     /* Stacked layout. Two axis flips bite here:

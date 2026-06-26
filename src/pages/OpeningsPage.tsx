@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Chess } from "chess.js";
+import type { Square } from "chess.js";
 import { Chessboard, defaultPieces } from "react-chessboard";
-import type { PieceDropHandlerArgs } from "react-chessboard";
+import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import AppNav from "../components/AppNav";
 import OpeningTreeNodeCard from "../components/OpeningTreeNodeCard";
 import OpeningsMetricsLegend from "../components/OpeningsMetricsLegend";
@@ -38,6 +40,9 @@ const COLOR_OPTIONS: Array<{
 const LAST_MOVE_HIGHLIGHT: React.CSSProperties = {
   background: "rgba(56, 189, 248, 0.35)",
 };
+
+/** Narrow a raw board coordinate to a chess.js Square (`a1`–`h8`). */
+const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
 
 /** One vertical column of tree node cards; the deepest selected node expands. */
 function TreeColumnView({
@@ -227,6 +232,19 @@ function OpeningsPage() {
     else selectedNodeElsRef.current.delete(idx);
   };
 
+  // --- Click-to-move state -------------------------------------------------
+  // A clicked-and-selected source square plus the legal-move hint styles it
+  // paints (matching the other boards). Drag-to-move never touches these; they
+  // only drive the click path and the dots overlay.
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [optionSquares, setOptionSquares] = useState<
+    Record<string, React.CSSProperties>
+  >({});
+  const clearMoveHints = useCallback(() => {
+    setSelectedSquare(null);
+    setOptionSquares({});
+  }, []);
+
   const columns = view?.columns ?? null;
   const selectionLine = view?.selectionLine ?? [];
   const columnCount = columns?.length ?? 0;
@@ -394,21 +412,19 @@ function OpeningsPage() {
     navigate("/play", { state: { drillSetup: { ...p, playerColor } } });
   };
 
-  // Board → tree: accept any LEGAL drag on the deepest (settled) position. An
+  // Board → tree: accept any LEGAL move on the deepest (settled) position. An
   // in-tree frontier move selects its existing node; any other legal move
   // extends the line as a user-selected (third type) move the backend then
-  // resolves and renders (g-obh5). Only an illegal drag (resolveDrop → null)
-  // snaps back, so board and tree can never diverge on a legal move.
-  const handlePieceDrop = ({
-    sourceSquare,
-    targetSquare,
-  }: PieceDropHandlerArgs): boolean => {
-    if (!view || !isSettled || !targetSquare) {
+  // resolves and renders (g-obh5). Only an illegal move (resolveDrop → null)
+  // is refused, so board and tree can never diverge on a legal move. Shared by
+  // both entry points: drag-drop and click-to-move.
+  const applyBoardMove = (from: string, to: string): boolean => {
+    if (!view || !isSettled) {
       return false;
     }
-    const uci = resolveDrop(view.board.fen, sourceSquare, targetSquare);
+    const uci = resolveDrop(view.board.fen, from, to);
     if (!uci) {
-      return false; // illegal → snap back
+      return false; // illegal
     }
     const frontier = view.columns.find(
       (column) =>
@@ -425,14 +441,117 @@ function OpeningsPage() {
     return true;
   };
 
+  // Drag-drop entry point: an illegal drag (applyBoardMove → false) snaps back.
+  const handlePieceDrop = ({
+    sourceSquare,
+    targetSquare,
+  }: PieceDropHandlerArgs): boolean => {
+    if (!targetSquare) {
+      return false;
+    }
+    const moved = applyBoardMove(sourceSquare, targetSquare);
+    if (moved) {
+      clearMoveHints();
+    }
+    return moved;
+  };
+
+  // Paint legal-move hints for a clicked piece on the deepest position: a dot
+  // for a quiet move, a red ring for a capture, plus a yellow tint on the
+  // source. Mirrors AnalysisBoard.getMoveOptions / ChessGame. Returns whether
+  // the square has any legal move (i.e. is worth selecting).
+  const getMoveOptions = (square: string): boolean => {
+    if (!view || !isSquare(square)) {
+      return false;
+    }
+    let chess;
+    let moves;
+    try {
+      chess = new Chess(view.board.fen);
+      moves = chess.moves({ square, verbose: true });
+    } catch {
+      return false;
+    }
+    if (moves.length === 0) {
+      return false;
+    }
+    const sourcePiece = chess.get(square);
+    const newSquares: Record<string, React.CSSProperties> = {};
+    for (const move of moves) {
+      const target = chess.get(move.to);
+      const isCapture =
+        sourcePiece != null &&
+        target != null &&
+        target.color !== sourcePiece.color;
+      newSquares[move.to] = {
+        background: isCapture
+          ? "rgba(255, 0, 0, 0.4)"
+          : "radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)",
+        borderRadius: "50%",
+      };
+    }
+    newSquares[square] = { background: "rgba(255, 255, 0, 0.4)" };
+    setOptionSquares(newSquares);
+    return true;
+  };
+
+  // Click-to-select / click-to-move on the openings board. With a square
+  // already selected, click a destination to move (illegal → fall through to
+  // re-selection); otherwise click an own-color piece with legal moves to
+  // select it and show the hints.
+  const handleSquareClick = ({ square }: SquareHandlerArgs) => {
+    if (!view || !isSettled) {
+      return;
+    }
+    if (selectedSquare) {
+      const moved = applyBoardMove(selectedSquare, square);
+      if (moved) {
+        clearMoveHints();
+        return;
+      }
+      // Illegal — fall through to (re)selection.
+    }
+    if (!isSquare(square)) {
+      clearMoveHints();
+      return;
+    }
+    let chess;
+    try {
+      chess = new Chess(view.board.fen);
+    } catch {
+      clearMoveHints();
+      return;
+    }
+    const piece = chess.get(square);
+    if (piece && piece.color === chess.turn() && getMoveOptions(square)) {
+      setSelectedSquare(square);
+      return;
+    }
+    clearMoveHints();
+  };
+
+  // Board context changed — position (tree click, left-arrow nav,
+  // canonicalization, completed move) OR perspective (a color switch flips
+  // orientation at the SAME root FEN) → drop any in-progress click selection so
+  // stale dots never linger on the new/flipped board. playerColor is a dep
+  // precisely because a White→Black switch at the root leaves board.fen
+  // unchanged, so fen alone would miss it.
+  const boardFen = view?.board.fen ?? null;
+  useEffect(() => {
+    clearMoveHints();
+  }, [boardFen, playerColor, clearMoveHints]);
+
   const colorLabel = playerColor === "white" ? "White" : "Black";
   const lastMove = view?.board.lastMove ?? null;
-  const squareStyles = lastMove
+  const lastMoveStyles: Record<string, React.CSSProperties> = lastMove
     ? {
         [lastMove.from]: LAST_MOVE_HIGHLIGHT,
         [lastMove.to]: LAST_MOVE_HIGHLIGHT,
       }
     : {};
+  // Click-to-move hints (selected square + legal dots) layer over the last-move
+  // highlight; an option square wins on overlap.
+  const squareStyles = { ...lastMoveStyles, ...optionSquares };
 
   return (
     <main className="app-shell openings-page">
@@ -571,10 +690,27 @@ function OpeningsPage() {
                       boardOrientation: playerColor,
                       allowDragging: true,
                       onPieceDrop: handlePieceDrop,
+                      onSquareClick: handleSquareClick,
                       animationDurationInMs: 150,
                       squareStyles,
                     }}
                   />
+                  {/* A move-triggered refetch is in flight, so the board is
+                      locked (applyBoardMove no-ops until isSettled) until the
+                      new column settles. Veil + spinner signal the wait and
+                      swallow drags/clicks so they don't read as ignored. */}
+                  {appendStatus === "loading" && (
+                    <div
+                      className="openings-tree-board__loading"
+                      role="status"
+                      aria-label="Loading next moves"
+                    >
+                      <span
+                        className="openings-tree-append__spinner"
+                        aria-hidden="true"
+                      />
+                    </div>
+                  )}
                 </div>
 
                 <div className="openings-tree-scroll" ref={scrollRef}>
