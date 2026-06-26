@@ -3,7 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import GameOpeningLineage from "./GameOpeningLineage";
-import type { OpeningLineageItem } from "../utils/api";
+import type { OpeningLineageItem, OpeningScoreDeltaItem } from "../utils/api";
 
 vi.mock("react-chessboard", () => ({
   Chessboard: ({ options }: { options: Record<string, unknown> }) => (
@@ -28,11 +28,29 @@ function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
   };
 }
 
+function makeChange(
+  overrides: Partial<OpeningScoreDeltaItem>,
+): OpeningScoreDeltaItem {
+  return {
+    opening_key: "key",
+    opening_name: "Opening",
+    opening_family: "Family",
+    eco: null,
+    depth: 0,
+    before: 41,
+    after: 44,
+    delta: 3,
+    is_new: false,
+    ...overrides,
+  };
+}
+
 function renderLineage(
   lineage: OpeningLineageItem[],
   handlers: {
     onSelectRoot?: (item: OpeningLineageItem) => void;
     onStartDrill?: (item: OpeningLineageItem) => void;
+    scoreChanges?: OpeningScoreDeltaItem[] | null;
   } = {},
 ) {
   const onSelectRoot = handlers.onSelectRoot ?? vi.fn();
@@ -42,6 +60,7 @@ function renderLineage(
       <GameOpeningLineage
         playerColor="white"
         lineage={lineage}
+        scoreChanges={handlers.scoreChanges}
         onSelectRoot={onSelectRoot}
         onStartDrill={onStartDrill}
       />
@@ -212,5 +231,121 @@ describe("GameOpeningLineage", () => {
       "data-position",
       "k1",
     );
+  });
+
+  describe("score-diff badge (g-3gmc)", () => {
+    it("renders a positive diff in green to the right of the chip", () => {
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "Italian Game" })],
+        {
+          scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
+        },
+      );
+
+      const badge = screen.getByText("+3 → 44");
+      expect(badge).toHaveClass("game-opening-lineage__delta--up");
+    });
+
+    it("renders a negative diff in red", () => {
+      renderLineage([makeItem({ opening_key: "k1" })], {
+        scoreChanges: [
+          makeChange({ opening_key: "k1", before: 64, after: 62, delta: -2 }),
+        ],
+      });
+
+      const badge = screen.getByText("-2 → 62");
+      expect(badge).toHaveClass("game-opening-lineage__delta--down");
+    });
+
+    it("hides the badge when the rounded scores don't change (sub-1.0 wobble)", () => {
+      // raw delta +0.5, but round(42.1)=42 === round(41.6)=42 -> no visible change.
+      renderLineage([makeItem({ opening_key: "k1" })], {
+        scoreChanges: [
+          makeChange({ opening_key: "k1", before: 41.6, after: 42.1, delta: 0.5 }),
+        ],
+      });
+
+      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+    });
+
+    it("follows the rounded scores across a boundary cross", () => {
+      // round(41.6)=42, round(41.4)=41 -> displayed +1 -> 42.
+      renderLineage([makeItem({ opening_key: "k1" })], {
+        scoreChanges: [
+          makeChange({ opening_key: "k1", before: 41.4, after: 41.6, delta: 0.2 }),
+        ],
+      });
+
+      const badge = screen.getByText("+1 → 42");
+      expect(badge).toHaveClass("game-opening-lineage__delta--up");
+    });
+
+    it("renders no badge when no change matches the opening key", () => {
+      renderLineage([makeItem({ opening_key: "k1" })], {
+        scoreChanges: [
+          makeChange({ opening_key: "other", before: 41, after: 44 }),
+        ],
+      });
+
+      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+    });
+
+    it("renders no badge for a brand-new opening, with or without an after-score", () => {
+      const { unmount } = renderLineage([makeItem({ opening_key: "k1" })], {
+        scoreChanges: [
+          makeChange({
+            opening_key: "k1",
+            is_new: true,
+            before: null,
+            delta: null,
+            after: 30,
+          }),
+        ],
+      });
+      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+      unmount();
+
+      renderLineage([makeItem({ opening_key: "k1" })], {
+        scoreChanges: [
+          makeChange({
+            opening_key: "k1",
+            is_new: true,
+            before: null,
+            delta: null,
+            after: null,
+          }),
+        ],
+      });
+      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+    });
+
+    it("shows the badge in both collapsed and expanded states, as a sibling of the card", async () => {
+      const user = userEvent.setup();
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })],
+        {
+          scoreChanges: [
+            makeChange({
+              opening_key: "k1",
+              opening_name: "Ruy Lopez",
+              before: 41,
+              after: 44,
+            }),
+          ],
+        },
+      );
+
+      // Collapsed: badge present next to the chip.
+      expect(screen.getByText("+3 → 44")).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: /Select Ruy Lopez/ }));
+
+      // Still present once expanded, and NOT inside the card/board body — it is a
+      // direct child of the <li>, a sibling of the expanded card.
+      const badge = screen.getByText("+3 → 44");
+      expect(badge).toBeInTheDocument();
+      expect(screen.getByTestId("lineage-board")).not.toContainElement(badge);
+      expect(badge.parentElement?.tagName).toBe("LI");
+    });
   });
 });

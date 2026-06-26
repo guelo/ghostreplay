@@ -5544,115 +5544,6 @@
     }
 }
 
-/* Post-game / post-drill opening-score deltas (g-xanz). One row per played
-   opening: "Italian Game  41 → 44  (+3) B". Shared by the post-game banner and
-   the stopped-drill actions. */
-.opening-score-delta {
-    margin: 0.45rem 0 0;
-    animation: rating-delta-in 0.4s ease-out;
-    text-align: left;
-}
-
-.opening-score-delta__label {
-    margin: 0 0 0.25rem;
-    font-size: 0.68rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-tertiary);
-}
-
-.opening-score-delta__list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-}
-
-.opening-score-delta__row {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 0.5rem;
-    font-size: 0.85rem;
-}
-
-.opening-score-delta__name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text-secondary);
-}
-
-.opening-score-delta__scores {
-    flex: 0 0 auto;
-    display: inline-flex;
-    align-items: baseline;
-    gap: 0.3rem;
-    font-variant-numeric: tabular-nums;
-}
-
-.opening-score-delta__before,
-.opening-score-delta__arrow {
-    color: var(--text-tertiary);
-}
-
-.opening-score-delta__after {
-    font-weight: 700;
-}
-
-.opening-score-delta__change {
-    font-weight: 700;
-    font-size: 0.8rem;
-}
-
-.opening-score-delta__row--up .opening-score-delta__change {
-    color: #4caf50;
-}
-
-.opening-score-delta__row--down .opening-score-delta__change {
-    color: #ef5350;
-}
-
-.opening-score-delta__new {
-    font-weight: 700;
-    color: var(--color-green-500);
-}
-
-.opening-score-delta__grade {
-    flex: 0 0 auto;
-    font-size: 0.66rem;
-    font-weight: 700;
-    color: var(--grade-accent, var(--text-tertiary));
-}
-
-.opening-score-delta__grade--a {
-    --grade-accent: var(--color-green-600);
-}
-
-.opening-score-delta__grade--b {
-    --grade-accent: var(--color-green-500);
-}
-
-.opening-score-delta__grade--c {
-    --grade-accent: var(--color-yellow-600);
-}
-
-.opening-score-delta__grade--d {
-    --grade-accent: var(--color-orange-500);
-}
-
-.opening-score-delta__grade--f {
-    --grade-accent: var(--color-red-500);
-}
-
-.opening-score-delta__grade--none {
-    --grade-accent: var(--text-tertiary);
-}
-
 /* Moves Column (material + move list) */
 .moves-column {
     grid-area: moves;
@@ -8905,7 +8796,35 @@
 }
 
 .game-opening-lineage__item {
+    /* Flex row: the chip-or-card block flexes to fill, the score-diff badge
+       (g-3gmc) pins to the right and the card shrinks to make room. */
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
     padding-left: calc(var(--lineage-depth, 0) * 0.65rem);
+}
+
+.game-opening-lineage__item > .game-opening-chip,
+.game-opening-lineage__item > .opening-family-card {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* Inline post-game score-diff badge: "+3 → 44" green / "-2 → 62" red (g-3gmc). */
+.game-opening-lineage__delta {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.game-opening-lineage__delta--up {
+    color: var(--success);
+}
+
+.game-opening-lineage__delta--down {
+    color: var(--error);
 }
 
 .game-opening-chip {
@@ -9066,15 +8985,17 @@
     min-width: 0;
 }
 
-/* Shrink the board column so board + score panel fit ~208px of inner width. */
+/* Shrink the board column so board + score panel fit ~208px of inner width.
+   Trimmed to 76px (from 84px) so the right-side score-diff badge (g-3gmc) fits
+   beside an expanded analysis card without overflowing the 240px panel. */
 .chess-panel__openings .opening-family-card--analysis .opening-family-card__overview {
-    grid-template-columns: 84px minmax(0, 1fr);
+    grid-template-columns: 76px minmax(0, 1fr);
     gap: 0.45rem;
 }
 
 .chess-panel__openings .opening-family-card--analysis .opening-family-card__board {
-    width: 84px;
-    height: 84px;
+    width: 76px;
+    height: 76px;
 }
 
 /* Cap the large score number / grade so they don't overflow the narrow panel. */
@@ -9092,8 +9013,12 @@
     gap: 0.5rem;
 }
 
-/* Smaller depth step so deep chips don't run off the right edge of the panel. */
+/* Smaller depth step so deep chips don't run off the right edge of the panel.
+   The badge pins to the card's top-right (flex-start) in the narrow panel so an
+   expanded analysis card keeps the diff visible without widening the 240px
+   column (g-3gmc). */
 .chess-panel__openings .game-opening-lineage__item {
+    align-items: flex-start;
     padding-left: calc(var(--lineage-depth, 0) * 0.4rem);
 }
 

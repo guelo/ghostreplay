@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import OpeningFamilyCard from "./OpeningFamilyCard";
 import { buildOpeningsSearchParams } from "../openings/route";
 import {
@@ -6,11 +6,19 @@ import {
   getPriorityLabel,
   getPriorityTone,
 } from "../openings/format";
-import type { OpeningLineageItem, OpeningPlayerColor } from "../utils/api";
+import type {
+  OpeningLineageItem,
+  OpeningPlayerColor,
+  OpeningScoreDeltaItem,
+} from "../utils/api";
 
 interface GameOpeningLineageProps {
   playerColor: OpeningPlayerColor;
   lineage: OpeningLineageItem[];
+  /** Post-game/drill opening-score changes (g-xanz), keyed by opening_key. When
+   *  provided, a changed opening shows an inline diff badge to the right of its
+   *  card (g-3gmc). Null during live play -> no badges. */
+  scoreChanges?: OpeningScoreDeltaItem[] | null;
   /** When provided, tapping a chip selects that opening's root on the
    *  board/MoveList/graph (history parity). Omit for the live game panel, where
    *  cards are expand-only and must NOT move the live board. */
@@ -18,6 +26,23 @@ interface GameOpeningLineageProps {
   /** When provided, the expanded card shows a Start Drill button. Omit to hide
    *  it (live game panel). */
   onStartDrill?: (item: OpeningLineageItem) => void;
+}
+
+type LineageBadge = { diff: number; after: number; dir: "up" | "down" };
+
+/**
+ * Derive the inline score-diff badge for one opening, or null to render nothing.
+ * The badge is computed from the ROUNDED before/after (the cards display rounded
+ * scores), so a sub-1.0 float wobble never renders a misleading `+0`/`+1`.
+ * Brand-new openings (is_new) show nothing per user choice (g-3gmc).
+ */
+function badgeFor(change: OpeningScoreDeltaItem | undefined): LineageBadge | null {
+  if (!change || change.is_new) return null;
+  if (change.before == null || change.after == null) return null;
+  const after = Math.round(change.after);
+  const diff = after - Math.round(change.before);
+  if (diff === 0) return null;
+  return { diff, after, dir: diff > 0 ? "up" : "down" };
 }
 
 /**
@@ -31,10 +56,16 @@ interface GameOpeningLineageProps {
 function GameOpeningLineage({
   playerColor,
   lineage,
+  scoreChanges,
   onSelectRoot,
   onStartDrill,
 }: GameOpeningLineageProps) {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+
+  const changeByKey = useMemo(
+    () => new Map((scoreChanges ?? []).map((c) => [c.opening_key, c])),
+    [scoreChanges],
+  );
 
   if (lineage.length === 0) {
     return null;
@@ -54,6 +85,8 @@ function GameOpeningLineage({
             playerColor,
             opening: item.opening_key,
           })}`;
+          const badge = badgeFor(changeByKey.get(item.opening_key));
+          const badgeSign = badge && badge.diff > 0 ? "+" : "";
 
           return (
             <li
@@ -133,6 +166,17 @@ function GameOpeningLineage({
                     </span>
                   </button>
                 </div>
+              )}
+              {/* Inline score-diff badge (g-3gmc): sibling of the card, to its
+                  right, shown in both collapsed-chip and expanded-card states. */}
+              {badge && (
+                <span
+                  className={`game-opening-lineage__delta game-opening-lineage__delta--${badge.dir}`}
+                  aria-label={`${item.opening_name} score ${badgeSign}${badge.diff}, now ${badge.after}`}
+                >
+                  {badgeSign}
+                  {badge.diff} → {badge.after}
+                </span>
               )}
             </li>
           );

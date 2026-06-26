@@ -1,12 +1,8 @@
 import { memo } from "react";
 import SettingsGearIcon from "./SettingsGearIcon";
-import OpeningScoreDelta from "./OpeningScoreDelta";
-import type { OpeningScoreDeltaItem } from "../../../utils/api";
 
 type DrillStopActionsProps = {
   terminalReason: "off_route" | "accuracy" | "natural_end" | null;
-  /** Opening-score deltas for the just-stopped drill (g-xanz). */
-  openingScoreChanges?: OpeningScoreDeltaItem[] | null;
   onAnotherDrill: () => void;
   /** Open the setup overlay to change drill settings (gear button). */
   onAnotherDrillSettings: () => void;
@@ -38,7 +34,6 @@ const subtitleFor = (reason: DrillStopActionsProps["terminalReason"]): string =>
 
 const DrillStopActions = ({
   terminalReason,
-  openingScoreChanges,
   onAnotherDrill,
   onAnotherDrillSettings,
   onAnalyze,
@@ -56,7 +51,6 @@ const DrillStopActions = ({
           {errorMessage}
         </p>
       )}
-      <OpeningScoreDelta changes={openingScoreChanges} />
       <div className="chess-post-game-actions">
         <span className="drill-again-group">
           <button

@@ -1,23 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "../../../test/utils";
-import type { OpeningScoreDeltaItem, RatingChange } from "../../../utils/api";
+import type { RatingChange } from "../../../utils/api";
 import type { GameResult } from "../domain/status";
 import PostGameBanner from "./PostGameBanner";
-
-const openingChange = (
-  over: Partial<OpeningScoreDeltaItem> = {},
-): OpeningScoreDeltaItem => ({
-  opening_key: "k1",
-  opening_name: "Italian Game",
-  opening_family: "Italian Game",
-  eco: "C50",
-  depth: 3,
-  before: 41,
-  after: 44,
-  delta: 3,
-  is_new: false,
-  ...over,
-});
 
 const makeProps = () => {
   const onViewAnalysis = vi.fn();
@@ -203,37 +188,6 @@ describe("PostGameBanner", () => {
     // must not render its generic inactive "New game" prompt here.
     expect(container).toBeEmptyDOMElement();
     expect(screen.queryByRole("button", { name: /new game/i })).toBeNull();
-  });
-
-  it("renders opening-score deltas under the rating delta for a game", () => {
-    const props = makeProps();
-    render(
-      <PostGameBanner
-        {...props}
-        openingScoreChanges={[openingChange()]}
-      />,
-    );
-
-    expect(screen.getByText("+16")).toBeInTheDocument(); // rating delta still there
-    expect(screen.getByText("Italian Game")).toBeInTheDocument();
-    expect(screen.getByText("(+3)")).toBeInTheDocument();
-  });
-
-  it("renders opening-score deltas in the stopped-drill banner (no rating delta)", () => {
-    const props = makeProps();
-    render(
-      <PostGameBanner
-        {...props}
-        drillOpeningKey="some-opening"
-        drillState="failed"
-        onNewDrill={vi.fn()}
-        openingScoreChanges={[openingChange({ is_new: true, before: null, delta: null, after: 30 })]}
-      />,
-    );
-
-    expect(screen.queryByText("+16")).not.toBeInTheDocument();
-    expect(screen.getByText("Italian Game")).toBeInTheDocument();
-    expect(screen.getByText(/new/)).toBeInTheDocument();
   });
 
   it("disables the drill restart actions when drillActionsDisabled is set", () => {

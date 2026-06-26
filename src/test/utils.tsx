@@ -6,6 +6,7 @@ import {
   fireEvent,
   screen,
   waitFor,
+  within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
@@ -46,4 +47,4 @@ function customRender(
 
 // Override render method
 export { customRender as render }
-export { act, fireEvent, screen, userEvent, waitFor }
+export { act, fireEvent, screen, userEvent, waitFor, within }

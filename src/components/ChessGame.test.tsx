@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Chess } from "chess.js";
-import { render, screen, fireEvent, waitFor, act } from "../test/utils";
+import { render, screen, fireEvent, waitFor, act, within } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
 import { STARTING_FEN, MAIA_ELO_BINS } from "./chess-game/config";
@@ -673,6 +673,101 @@ describe("ChessGame characterization safeguards", () => {
     expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
       failDrillMock.mock.invocationCallOrder[0],
     );
+  });
+
+  it("shows the opening-score badge in the lineage (not DrillStopActions) when a drill fails on accuracy (g-3gmc)", async () => {
+    // The played opening lineage (separate from the drill target) hosts the badge.
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          score: 44,
+          confidence: 0.5,
+          coverage: 0.5,
+          sample_size: 5,
+          game_count: 2,
+          path: [],
+        },
+      ],
+    });
+    // The accuracy stop carries the opening-score delta on the failDrill contract.
+    failDrillMock.mockResolvedValueOnce({
+      session_id: "session-characterization",
+      drill_state: "failed",
+      terminal_reason: "accuracy",
+      opening_score_changes: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          before: 41,
+          after: 44,
+          delta: 3,
+          is_new: false,
+        },
+      ],
+    });
+
+    useGameStore.setState({
+      sessionId: "session-characterization",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      drillStrictnessCp: 25,
+      liveFen: STARTING_FEN,
+    });
+
+    render(<ChessGame />);
+    useGameStore.setState({
+      drillOpeningKey: "target-fen",
+      drillState: "root_reached",
+      drillStrictnessCp: 25,
+    });
+
+    mockCoordinator.waitForAnalysis.mockReset();
+    mockCoordinator.waitForAnalysis.mockResolvedValue({
+      id: "analysis-e4",
+      move: "e2e4",
+      bestMove: "d2d4",
+      bestEval: 40,
+      playedEval: 10,
+      currentPositionEval: 10,
+      playedEvalMate: null,
+      currentPositionEvalMate: null,
+      moveIndex: 0,
+      delta: 30,
+      classification: "mistake",
+      blunder: false,
+      recordable: false,
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    await waitFor(() => {
+      expect(useGameStore.getState().drillState).toBe("failed");
+    });
+
+    // The badge renders next to the played-opening chip in the lineage...
+    const region = await screen.findByRole("region", {
+      name: "Openings played",
+    });
+    const badge = within(region).getByText("+3 → 44");
+    expect(badge).toHaveClass("game-opening-lineage__delta--up");
+
+    // ...and NOT inside the (now delta-less) drill-stopped actions.
+    const drillRegion = screen.getByRole("region", {
+      name: /Drill stopped/i,
+    });
+    expect(within(drillRegion).queryByText("+3 → 44")).not.toBeInTheDocument();
   });
 
   it("passes a post-root drill move whose loss exactly equals strictness (boundary passes)", async () => {
@@ -3368,6 +3463,84 @@ describe("ChessGame opening lineage", () => {
     expect(
       screen.getByRole("region", { name: "Openings played" }),
     ).toBeInTheDocument();
+  });
+
+  it("refetches the lineage at terminal and shows the inline score-diff badge after resign (g-3gmc)", async () => {
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-postgame-delta",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    // The opening-score delta lands at the terminal endGame call (g-xanz)...
+    endGameMock.mockResolvedValue({
+      opening_score_changes: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          before: 41,
+          after: 44,
+          delta: 3,
+          is_new: false,
+        },
+      ],
+    });
+    // ...but the lineage is EMPTY during play (a resign adds no move and polling
+    // is already off), so the card the badge attaches to only exists after the
+    // forced terminal refetch — exactly the "deltas arrive before lineage" gap.
+    // Global beforeEach defaults fetchSessionOpenings to an empty lineage.
+
+    render(<ChessGame />);
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(fetchSessionOpeningsMock).toHaveBeenCalled();
+    });
+    // Empty lineage during play -> no region, no badge yet.
+    expect(
+      screen.queryByRole("region", { name: "Openings played" }),
+    ).not.toBeInTheDocument();
+
+    const callsBeforeResign = fetchSessionOpeningsMock.mock.calls.length;
+    // The terminal refetch returns the played opening so the badge has a card.
+    fetchSessionOpeningsMock.mockResolvedValue({
+      player_color: "white",
+      lineage: [
+        {
+          opening_key: "k1",
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          score: 44,
+          confidence: 0.5,
+          coverage: 0.5,
+          sample_size: 5,
+          game_count: 2,
+          path: [],
+        },
+      ],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
+
+    // The terminal openingScoreChanges bumps refetchKey -> one more fetch, which
+    // loads the card; the inline badge then renders next to the chip.
+    const region = await screen.findByRole("region", {
+      name: "Openings played",
+    });
+    expect(fetchSessionOpeningsMock.mock.calls.length).toBeGreaterThan(
+      callsBeforeResign,
+    );
+    const badge = within(region).getByText("+3 → 44");
+    expect(badge).toHaveClass("game-opening-lineage__delta--up");
   });
 
   it("renders no lineage when the session has no openings yet", async () => {
