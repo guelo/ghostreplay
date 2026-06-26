@@ -7,14 +7,23 @@ natural-end, drill accuracy-fail, and the off-route route-check failure path.
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import chess
 import pytest
 
 from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
-from app.opening_graph import OpeningGraph, OpeningGraphNode, _fen_from_board
-from app.opening_roots import OpeningRoot, OpeningRoots
+from app.opening_cache import (
+    opening_score_inputs_fingerprint,
+    opening_score_raw_inputs_fingerprint,
+)
+from app.opening_graph import (
+    OpeningGraph,
+    OpeningGraphNode,
+    _fen_from_board,
+    get_opening_graph,
+)
+from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_score_delta import (
     compute_opening_score_delta,
     snapshot_opening_baseline,
@@ -27,10 +36,10 @@ PATCH_ROOTS = "app.opening_score_delta.get_opening_roots"
 
 @pytest.fixture(autouse=True)
 def _stub_scheduler():
-    """Serve seeded rows directly: stub the scheduler so no worker thread spawns
-    and seeded batches are never recomputed away. refresh_now returns True
-    (recompute confirmed fresh) so the baseline snapshot treats the seeded batch
-    as current; tests that need a failed refresh override it locally."""
+    """Stub the scheduler so no worker thread spawns and seeded batches are never
+    recomputed away. The start-path snapshot (g-fix-start-latency) never touches
+    the scheduler, but the end-of-session compute_opening_score_delta still calls
+    refresh_now — stub it True so those tests serve the seeded batch as-is."""
     with (
         patch("app.opening_score_scheduler.request_recompute", return_value=None),
         patch("app.opening_score_scheduler.refresh_now", return_value=True),
@@ -110,10 +119,27 @@ def _ruy_roots() -> OpeningRoots:
     })
 
 
-def _make_batch(db_session, *, user_id=123, player_color="white", generation=1) -> int:
+def _make_batch(db_session, *, user_id=123, player_color="white", generation=1,
+                fresh=True) -> int:
+    """Seed a batch. ``fresh=True`` stamps the registry + raw-input fingerprints
+    the start-path freshness gate (proven_fresh_opening_scores) checks, so the
+    snapshot treats it as provably current (test users carry no evidence -> a
+    deterministic empty raw digest). ``fresh=False`` leaves inputs_fingerprint NULL
+    (legacy/stale) so the gate skips it (source=skipped_stale)."""
+    if fresh:
+        registry_fp = opening_score_inputs_fingerprint(
+            get_opening_graph(), get_opening_roots()
+        )
+        inputs_fp = opening_score_raw_inputs_fingerprint(
+            db_session, user_id, player_color
+        )
+    else:
+        registry_fp = "fp"
+        inputs_fp = None
     batch = OpeningScoreBatch(
         user_id=user_id, player_color=player_color, generation=generation,
-        registry_fingerprint="fp",
+        registry_fingerprint=registry_fp,
+        inputs_fingerprint=inputs_fp,
         computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
     )
     db_session.add(batch)
@@ -147,6 +173,26 @@ def _make_session(db_session, *, user_id=123, player_color="white",
     return db_session.query(GameSession).filter(GameSession.id == sid).one()
 
 
+def _seed_evidence(db_session, *, user_id=123, player_color="white") -> None:
+    """Create a normal-mode session move with fen_before so has_opening_evidence
+    sees the user as having opening evidence (a candidate pair) even with no batch
+    — the cold-cache-with-evidence case the start path must skip, not empty-baseline."""
+    sid = uuid.uuid4()
+    db_session.add(GameSession(
+        id=sid, user_id=user_id,
+        started_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        status="ended", result="checkmate_win", engine_elo=1500,
+        player_color=player_color, session_mode="normal",
+    ))
+    db_session.add(SessionMove(
+        session_id=sid, move_number=1, color="white", move_san="e4",
+        fen_before="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        fen_after="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        segment="normal",
+    ))
+    db_session.commit()
+
+
 # ---------------------------------------------------------------------------
 # snapshot_opening_baseline
 # ---------------------------------------------------------------------------
@@ -162,59 +208,88 @@ def test_snapshot_returns_json_score_map(db_session):
     assert json.loads(snap) == {RUY_KEY: 41.0, MORPHY_KEY: 75.0}
 
 
-def test_snapshot_empty_map_when_no_batch(db_session):
-    # No batch + stubbed refresh_now -> a valid empty baseline ("{}"), NOT None,
-    # so the session's first openings later read as new rather than unknown.
+def test_snapshot_empty_map_when_no_batch_no_evidence(db_session):
+    # No batch AND no evidence -> a brand-new user -> a valid empty baseline ("{}"),
+    # NOT None, so the session's first openings later read as new rather than unknown.
     assert snapshot_opening_baseline(db_session, 123, "white") == "{}"
 
 
-def test_snapshot_none_on_failure(db_session):
-    with patch("app.opening_score_delta.load_cached_rows", side_effect=RuntimeError("boom")):
-        assert snapshot_opening_baseline(db_session, 123, "white") is None
+def test_snapshot_skips_cold_cache_with_evidence(db_session):
+    # No batch yet but the user DOES have evidence (cold cache, e.g. post-restart
+    # first read): can't prove a baseline. Returning "{}" would falsely mark every
+    # existing opening "new" at session end, so skip (NULL) instead.
+    _seed_evidence(db_session, user_id=123, player_color="white")
+    assert snapshot_opening_baseline(db_session, 123, "white") is None
 
 
-def test_snapshot_forces_refresh_before_reading(db_session):
-    # The baseline must reflect ALL evidence as of session start, so a bounded
-    # refresh_now runs before the (otherwise warm-stale) read.
+def test_snapshot_skips_when_batch_stale(db_session):
+    # A batch exists but its fingerprints don't match current inputs (legacy/stale,
+    # NO scheduler activity needed to detect it). Snapshotting it would persist a
+    # stale "before" -> end-of-session misattribution. Skip (NULL baseline).
+    batch_id = _make_batch(db_session, fresh=False)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
+    db_session.commit()
+
+    assert snapshot_opening_baseline(db_session, 123, "white") is None
+
+
+def test_snapshot_does_not_call_refresh_now(db_session):
+    # The start hot path must never touch the scheduler. A fresh batch yields the
+    # score map WITHOUT a single refresh_now call (no 5s timeout exposure).
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
     db_session.commit()
 
-    with patch(
-        "app.opening_score_scheduler.refresh_now", return_value=True
-    ) as mock_refresh:
+    with patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh:
         snap = snapshot_opening_baseline(db_session, 123, "white")
 
-    mock_refresh.assert_called_once_with(123, "white")
     import json
     assert json.loads(snap) == {RUY_KEY: 41.0}
+    mock_refresh.assert_not_called()
+
+
+def test_snapshot_logs_source_signal(db_session, caplog):
+    # Observability lands WITH the fix: source + snapshot_ms are in the message
+    # string (root formatter prints %(message)s only), so the latency win is provable.
+    import logging
+
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
+    db_session.commit()
+    with caplog.at_level(logging.INFO, logger="app.opening_score_delta"):
+        snapshot_opening_baseline(db_session, 123, "white")
+    assert "source=cached_fresh" in caplog.text
+    assert "snapshot_ms=" in caplog.text
+
+    caplog.clear()
+    _make_batch(db_session, user_id=999, player_color="white", fresh=False)
+    db_session.commit()
+    with caplog.at_level(logging.INFO, logger="app.opening_score_delta"):
+        snapshot_opening_baseline(db_session, 999, "white")
+    assert "source=skipped_stale" in caplog.text
+
+
+def test_snapshot_none_on_failure(db_session):
+    with patch(
+        "app.opening_score_delta.proven_fresh_opening_scores",
+        side_effect=RuntimeError("boom"),
+    ):
+        assert snapshot_opening_baseline(db_session, 123, "white") is None
 
 
 def test_snapshot_rolls_back_on_failure(db_session):
     # A failed read can abort the transaction (Postgres); snapshot must roll back
     # so the caller's session-create commit is not poisoned.
     with (
-        patch("app.opening_score_delta.load_cached_rows", side_effect=RuntimeError("boom")),
+        patch(
+            "app.opening_score_delta.proven_fresh_opening_scores",
+            side_effect=RuntimeError("boom"),
+        ),
         patch.object(db_session, "rollback") as mock_rollback,
     ):
         result = snapshot_opening_baseline(db_session, 123, "white")
     assert result is None
     mock_rollback.assert_called_once()
-
-
-def test_snapshot_skips_when_refresh_fails(db_session):
-    # Warm cache holds a (possibly stale) batch, but refresh_now reports it could
-    # NOT confirm freshness (timeout/failure/shutdown). Snapshotting the warm rows
-    # anyway would persist a stale "before" -> end-of-session misattribution. The
-    # snapshot must be skipped (NULL baseline) instead.
-    batch_id = _make_batch(db_session)
-    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
-    db_session.commit()
-
-    with patch("app.opening_score_scheduler.refresh_now", return_value=False):
-        result = snapshot_opening_baseline(db_session, 123, "white")
-
-    assert result is None
 
 
 def test_delta_serves_cached_when_final_refresh_fails(db_session):
@@ -242,7 +317,8 @@ def test_game_start_succeeds_when_baseline_snapshot_fails(client, auth_headers, 
     # Endpoint contract: a snapshot failure degrades the baseline to NULL but the
     # game must still start.
     with patch(
-        "app.opening_score_delta.load_cached_rows", side_effect=RuntimeError("db boom")
+        "app.opening_score_delta.proven_fresh_opening_scores",
+        side_effect=RuntimeError("db boom"),
     ):
         resp = client.post(
             "/api/game/start",
@@ -254,6 +330,46 @@ def test_game_start_succeeds_when_baseline_snapshot_fails(client, auth_headers, 
         GameSession.id == uuid.UUID(resp.json()["session_id"])
     ).one()
     assert session.opening_score_baseline is None
+
+
+def test_game_start_does_not_block_on_scheduler(client, auth_headers, db_session):
+    # Endpoint-level regression: a fresh cache populates the baseline AND the start
+    # path never calls refresh_now (no 5s scheduler wait before the game begins).
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
+    db_session.commit()
+
+    with patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh:
+        resp = client.post(
+            "/api/game/start",
+            json={"engine_elo": 1500, "player_color": "white"},
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 201
+    session = db_session.query(GameSession).filter(
+        GameSession.id == uuid.UUID(resp.json()["session_id"])
+    ).one()
+    import json
+    assert json.loads(session.opening_score_baseline) == {RUY_KEY: 41.0}
+    mock_refresh.assert_not_called()
+
+
+def test_drill_start_does_not_block_on_scheduler(client, auth_headers, db_session):
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=KP_KEY, opening_score=33.0)
+    db_session.commit()
+
+    with patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh:
+        start = _start_drill(client, auth_headers)
+
+    assert start.status_code == 201
+    session = db_session.query(GameSession).filter(
+        GameSession.id == uuid.UUID(start.json()["session_id"])
+    ).one()
+    import json
+    assert json.loads(session.opening_score_baseline) == {KP_KEY: 33.0}
+    mock_refresh.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

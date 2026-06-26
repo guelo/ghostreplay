@@ -19,13 +19,18 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from pydantic import BaseModel
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app.models import GameSession, SessionMove
-from app.opening_cache import load_cached_rows
+from app.opening_cache import (
+    has_opening_evidence,
+    load_cached_rows,
+    proven_fresh_opening_scores,
+)
 from app.opening_roots import get_opening_roots, played_opening_chain
 
 logger = logging.getLogger(__name__)
@@ -59,55 +64,70 @@ def snapshot_opening_baseline(
     """Capture the user's current opening scores as a JSON ``{key: score}`` map.
 
     Returns the JSON string to persist into ``GameSession.opening_score_baseline``
-    (``"{}"`` when the user has no scored openings yet — a valid empty baseline,
-    so the session's first openings later read as new), or None when the snapshot
-    could not be taken (delta then omitted at session end). Best-effort: any
+    (``"{}"`` when the user has no opening evidence yet — a valid empty baseline,
+    so the session's first openings later read as new), or None when no confident
+    baseline can be captured (delta then omitted at session end). Best-effort: any
     failure leaves the baseline NULL rather than blocking session creation.
 
-    Forces a bounded ``refresh_now`` BEFORE reading. A warm ``load_cached_rows``
-    only enqueues a background recompute and returns the *existing* batch, so a
-    queued recompute from earlier evidence may not have landed yet — while the
-    end-of-session ``refresh_now`` folds in both that earlier evidence and this
-    session. Diffing a stale "before" against that fresh "after" would attribute
-    prior games/drills to the just-ended one. Refreshing first makes the baseline
-    reflect all evidence as of session start; it is cheap when the cache is
-    already fresh (the recompute gate is a no-op).
+    NON-BLOCKING (g-fix-start-latency): this runs on the game/drill start hot path
+    and must NEVER wait on the opening-score scheduler. It reads the latest cached
+    batch directly via ``proven_fresh_opening_scores`` (no ``refresh_now``, no
+    enqueue, no scheduler probe) and only returns a confident baseline when that
+    batch is PROVABLY current — registry + raw-input fingerprints match and no
+    stale branch keys. A stale or cold-with-evidence cache yields NULL instead:
+    diffing a stale "before" against the end-of-session fresh "after" would
+    over-attribute prior sessions' gains to the just-ended one, so degrading to
+    "no delta" is preferred over a misattributed one. Only a user with genuinely
+    no evidence gets the empty ``"{}"`` baseline.
     """
+    t0 = time.perf_counter()
+    source = "failed"
     try:
-        # Lazy import mirrors load_cached_rows (scheduler imports opening_cache).
-        from app.opening_score_scheduler import refresh_now
-
-        # refresh_now returns False (not raises) on timeout/failure/shutdown; it
-        # returns True even for a no-evidence user (the recompute is a successful
-        # no-op). A False here means the warm batch may be stale, so reading it
-        # would persist a "before" the end-of-session refresh later outpaces —
-        # reintroducing the misattribution. Skip the snapshot (baseline NULL ->
-        # delta omitted) rather than persist a possibly-stale baseline.
-        if not refresh_now(user_id, player_color):
-            logger.warning(
-                "opening baseline refresh did not confirm freshness; skipping "
-                "snapshot user_id=%s color=%s",
-                user_id,
-                player_color,
-            )
+        batch, rows, is_fresh = proven_fresh_opening_scores(db, user_id, player_color)
+        if batch is None:
+            # No batch yet. Distinguish a brand-new user (no evidence -> valid
+            # empty baseline) from a cold cache that still has evidence (cannot
+            # prove a baseline -> skip, else session-end falsely marks every
+            # existing opening "new").
+            if has_opening_evidence(db, user_id, player_color):
+                source = "skipped_cold"
+                return None
+            source = "empty_no_evidence"
+            return "{}"
+        if not is_fresh:
+            # Cache exists but is provably stale (evidence/registry drift or legacy
+            # branch keys). Persisting it would reintroduce the misattribution.
+            source = "skipped_stale"
             return None
-        _, rows = load_cached_rows(db, user_id, player_color)
+        source = "cached_fresh"
         return json.dumps({row.opening_key: row.opening_score for row in rows})
     except Exception:  # noqa: BLE001 — best-effort snapshot must never block start
         # A failed read can abort the transaction (esp. Postgres); roll back so
         # the caller's session-create insert/commit is not poisoned. Guard the
         # rollback itself so a degenerate session state still degrades to None.
+        source = "failed"
         try:
             db.rollback()
         except Exception:  # noqa: BLE001
             pass
         logger.warning(
-            "opening baseline snapshot failed user_id=%s color=%s",
+            "opening_baseline_snapshot source=failed user_id=%s color=%s",
             user_id,
             player_color,
             exc_info=True,
         )
         return None
+    finally:
+        # Fields go IN THE MESSAGE: the root formatter prints %(message)s only, so
+        # extra= kwargs would be dropped. snapshot_ms proves the snapshot is fast;
+        # the route's duration_ms (HTTPLoggingMiddleware) proves start latency.
+        logger.info(
+            "opening_baseline_snapshot user_id=%s color=%s source=%s snapshot_ms=%.2f",
+            user_id,
+            player_color,
+            source,
+            (time.perf_counter() - t0) * 1000.0,
+        )
 
 
 def _session_played_fens(db: Session, session_id) -> list[str]:

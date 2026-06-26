@@ -39,6 +39,7 @@ from app.opening_cache import (
     list_opening_score_candidate_pairs,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
+    proven_fresh_opening_scores,
     prune_old_opening_score_batches,
     recompute_opening_scores,
     recompute_opening_scores_if_needed,
@@ -816,6 +817,105 @@ def test_if_needed_recomputes_when_batch_stale_for_decay(db_session):
     if computed_at.tzinfo is None:
         computed_at = computed_at.replace(tzinfo=timezone.utc)
     assert computed_at > stale_at + OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
+
+
+# ---------------------------------------------------------------------------
+# proven_fresh_opening_scores — non-blocking freshness verdict (g-fix-start-latency)
+# ---------------------------------------------------------------------------
+
+def test_proven_fresh_true_for_freshly_recomputed_batch(db_session):
+    # A batch just written by the gate must be reported provably fresh.
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    batch, rows, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+
+    assert batch is not None
+    assert rows
+    assert is_fresh is True
+
+
+def test_proven_fresh_false_when_evidence_mutated(db_session):
+    # In-place evidence change (raw digest flips) -> the cached batch is stale even
+    # with NO scheduler work pending; the verdict must catch it.
+    session = _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    move = (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session.id, SessionMove.color == "black")
+        .first()
+    )
+    move.eval_delta = 500
+    db_session.commit()
+
+    _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+    assert is_fresh is False
+
+
+def test_proven_fresh_false_on_registry_drift(db_session):
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    batch = get_latest_opening_score_batch(db_session, 123, "black")
+    batch.registry_fingerprint = "stale-registry"
+    db_session.commit()
+
+    _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+    assert is_fresh is False
+
+
+def test_proven_fresh_false_for_legacy_null_inputs_fingerprint(db_session):
+    # Batches written before raw-input fingerprinting have inputs_fingerprint=None;
+    # they can never be proven fresh and must read as stale.
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    batch = get_latest_opening_score_batch(db_session, 123, "black")
+    batch.inputs_fingerprint = None
+    db_session.commit()
+
+    _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+    assert is_fresh is False
+
+
+def test_proven_fresh_false_for_stale_branch_keys(db_session):
+    # Legacy rows carrying a branch NAME but no branch KEY are stale even when both
+    # fingerprints match — mirrors the gate's _batch_has_stale_branch_keys guard.
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    _, rows = list_cached_opening_scores(db_session, 123, "black")
+    rows[0].strongest_branch_name = "Some Branch"
+    rows[0].strongest_branch_key = None
+    db_session.commit()
+
+    _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+    assert is_fresh is False
+
+
+def test_proven_fresh_none_when_no_batch(db_session):
+    batch, rows, is_fresh = proven_fresh_opening_scores(db_session, 999, "white")
+    assert batch is None
+    assert rows == []
+    assert is_fresh is False
+
+
+def test_proven_fresh_never_touches_scheduler(db_session):
+    # The verdict must be readable on the request hot path with zero scheduler
+    # interaction (no refresh_now / no request_recompute, blocking or otherwise).
+    _seed_black_opening_session(db_session)
+    recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    with (
+        patch("app.opening_score_scheduler.refresh_now") as mock_refresh,
+        patch("app.opening_score_scheduler.request_recompute") as mock_request,
+    ):
+        _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+
+    assert is_fresh is True
+    mock_refresh.assert_not_called()
+    mock_request.assert_not_called()
 
 
 @pytest.mark.parametrize(
