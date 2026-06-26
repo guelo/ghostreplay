@@ -195,8 +195,8 @@ export const useChessGameLifecycle = ({
         );
         // Only resample engine ELO when truly idle (no active game AND no drill
         // context loaded). A reviewed-drill return mounts inactive but with the
-        // abandoned drill still in the store; resampling here would clobber the
-        // retained engine ELO before "Again" replays it (g-65ve).
+        // abandoned drill still in the store; skip resampling so the post-drill
+        // UI shows the Elo you just played. Again/gear resample on action.
         if (!s.isGameActive && s.drillState === null) {
           s.setEngineElo(sampleEloBin(data.current_rating));
         }

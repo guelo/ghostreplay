@@ -48,7 +48,7 @@ import {
   MAIA_ELO_BINS,
   STARTING_FEN,
 } from "./chess-game/config";
-import { eloStakes } from "./chess-game/elo";
+import { eloStakes, sampleEloBin } from "./chess-game/elo";
 import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
@@ -120,9 +120,10 @@ const isReviewedDrillReturnValid = (
   if (store.drillState !== "abandoned") return false;
   if (!store.drillOpeningKey) return false;
   if (store.moveHistory.length === 0) return false;
-  // Exact replay requires the full restart settings (handleAgainDrill inputs).
+  // Restart replays opening/side/strictness exactly (difficulty is resampled),
+  // so require those handleAgainDrill inputs — but not engineElo, which is no
+  // longer a restart input.
   if (store.playerColor !== "white" && store.playerColor !== "black") return false;
-  if (typeof store.engineElo !== "number") return false;
   if (store.drillStrictness == null) return false;
   if (store.drillStrictnessCp == null) return false;
   return true;
@@ -380,7 +381,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // converge the analysis+upload lag. Expand-only: no board-jump, no Start Drill.
   const { lineage: openingLineage, playerColor: openingLineagePlayerColor } =
     useSessionOpenings(sessionId, {
-      refetchKey: moveHistory.length,
+      // Force one extra refetch at a terminal event (g-3gmc): a resign/fast-stop
+      // sets openingScoreChanges WITHOUT adding a move and with polling already
+      // off, so the lineage can still be empty when the deltas land. During play
+      // openingScoreChanges is null (flag 0); at terminal it flips non-null
+      // (flag +1) while moveHistory is frozen, so the key strictly increases ->
+      // exactly one refetch that loads the cards the badges attach to.
+      refetchKey: moveHistory.length + (openingScoreChanges ? 1 : 0),
       pollIntervalMs: 2000,
       active: isGameActive,
     });
@@ -1640,7 +1647,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // prefill effect so it doesn't clobber these values.
       skipStickyPrefillRef.current = true;
       setDrillStrictnessCp(s.drillStrictnessCp ?? drillStrictnessCp);
-      setEngineElo(s.engineElo);
+      // Re-randomize opponent difficulty (g-ncvm), mirroring the New Game
+      // popup; the user can still adjust the slider before Start.
+      setEngineElo(sampleEloBin(s.playerRating));
       setDrillPlayerColor(s.playerColor === "black" ? "black" : "white");
       if (s.drillLine != null) {
         // Ad-hoc drill: restore the synthetic selection + line from the durable
@@ -1671,25 +1680,37 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drillStrictnessCp]);
 
-  // Instantly restart the drill with the previous drill's exact settings.
+  // Instantly restart the drill: opening/side/strictness replay exactly, but
+  // opponent difficulty is re-randomized with the New Game algorithm (g-ncvm).
   const handleAgainDrill = useCallback(async () => {
     if (isStartingGame) return;
     const s = useGameStore.getState();
-    captureEvent("drill_again_clicked", {
-      opening_key: s.drillOpeningKey ?? null,
-      player_color: s.playerColor,
-      engine_elo: s.engineElo,
-    });
-    // Exact replay is impossible without the exact cp — open the overlay instead.
+    // Exact replay is impossible without the exact cp — open the overlay
+    // instead (it samples its own Elo). Sample AFTER this guard so the value
+    // logged in telemetry is exactly the value actually used.
     if (!s.drillOpeningKey || s.drillStrictness == null || s.drillStrictnessCp == null) {
+      captureEvent("drill_again_clicked", {
+        opening_key: s.drillOpeningKey ?? null,
+        player_color: s.playerColor,
+        engine_elo: null, // no Elo committed here; the overlay will sample
+      });
       handleAgainSettings();
       return;
     }
 
+    // Re-randomize opponent difficulty (g-ncvm) with the New Game algorithm,
+    // sampled around the player's rating; opening/side/strictness stay fixed.
+    const nextEngineElo = sampleEloBin(s.playerRating);
+    captureEvent("drill_again_clicked", {
+      opening_key: s.drillOpeningKey,
+      player_color: s.playerColor,
+      engine_elo: nextEngineElo, // logged value == value actually used
+    });
+
     const result = await handleNewDrill({
       openingKey: s.drillOpeningKey,
       playerColor: s.playerColor,
-      engineElo: s.engineElo,
+      engineElo: nextEngineElo,
       strictness: s.drillStrictness,
       strictnessCp: s.drillStrictnessCp,
       // Replaying an ad-hoc drill needs its line: the store key is a target FEN,
@@ -1873,6 +1894,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   <GameOpeningLineage
                     playerColor={openingLineagePlayerColor}
                     lineage={openingLineage}
+                    scoreChanges={openingScoreChanges}
                   />
                 </div>
               ) : null
@@ -1972,7 +1994,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 drillActionsDisabled={isStartingGame}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
-                openingScoreChanges={openingScoreChanges}
                 ratingDisplayType={ratingDisplayType}
                 onViewAnalysis={handleViewAnalysis}
                 onShowStartOverlay={handleShowStartOverlay}
@@ -1988,7 +2009,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               isReviewedDrillReturn) && (
               <DrillStopActions
                 terminalReason={drillTerminalReason}
-                openingScoreChanges={openingScoreChanges}
                 onAnotherDrill={handleAgainDrill}
                 onAnotherDrillSettings={handleAgainSettings}
                 // Live stop rebuilds + opens the review; reviewed return just

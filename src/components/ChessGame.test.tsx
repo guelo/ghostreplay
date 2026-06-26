@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import { render, screen, fireEvent, waitFor, act } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
-import { STARTING_FEN } from "./chess-game/config";
+import { STARTING_FEN, MAIA_ELO_BINS } from "./chess-game/config";
 import { setMatchMedia } from "../test/setup";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import type { AnalysisResult } from "../hooks/useMoveAnalysis";
@@ -1410,7 +1410,7 @@ describe("ChessGame characterization safeguards", () => {
     ...overrides,
   });
 
-  it("instant Again restarts the drill with exact stored settings and no overlay", async () => {
+  it("instant Again restarts the drill with exact opening/side/strictness (difficulty resampled) and no overlay", async () => {
     await driveOffRouteFail();
     useGameStore.setState({
       playerColor: "white",
@@ -1430,6 +1430,7 @@ describe("ChessGame characterization safeguards", () => {
       expect(startDrillMock).toHaveBeenCalledWith({
         opening_key: "target-fen",
         player_color: "white",
+        // Difficulty is re-randomized (g-ncvm), so any sampled bin is valid.
         engine_elo: expect.any(Number),
         strictness: "lenient",
         // Exact cp preserved — a 20cp drill restarts at 20cp, not a rounded 25.
@@ -1443,13 +1444,44 @@ describe("ChessGame characterization safeguards", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("instant Again re-randomizes opponent difficulty (g-ncvm)", async () => {
+    await driveOffRouteFail();
+    useGameStore.setState({
+      playerColor: "white",
+      drillStrictness: "lenient",
+      drillStrictnessCp: 20,
+      engineElo: 1500,
+      playerRating: 1500,
+    });
+    // Math.random() === 0 makes sampleEloBin return MAIA_ELO_BINS[0] regardless
+    // of rating, so the resampled bin is deterministic and ≠ the stored 1500.
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    startDrillMock.mockResolvedValueOnce(makeDrillResponse());
+
+    const again = await screen.findByRole("button", { name: /^again$/i });
+    await act(async () => {
+      fireEvent.click(again);
+    });
+
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith(
+        expect.objectContaining({ engine_elo: MAIA_ELO_BINS[0] }),
+      );
+    });
+    // The resampled value drives the avatar/label refresh via the store.
+    expect(useGameStore.getState().engineElo).toBe(MAIA_ELO_BINS[0]);
+  });
+
   it("captures drill_again_clicked when Again is pressed", async () => {
     await driveOffRouteFail();
     useGameStore.setState({
       playerColor: "white",
       drillStrictness: "lenient",
       drillStrictnessCp: 20,
+      playerRating: 1500,
     });
+    // Mocked Math.random pins the resampled bin so we can assert the exact value.
+    vi.spyOn(Math, "random").mockReturnValue(0);
     startDrillMock.mockResolvedValueOnce(makeDrillResponse());
 
     const again = await screen.findByRole("button", { name: /^again$/i });
@@ -1460,7 +1492,7 @@ describe("ChessGame characterization safeguards", () => {
     expect(captureEventMock).toHaveBeenCalledWith("drill_again_clicked", {
       opening_key: "target-fen",
       player_color: "white",
-      engine_elo: expect.any(Number),
+      engine_elo: MAIA_ELO_BINS[0],
     });
   });
 
@@ -1665,9 +1697,12 @@ describe("ChessGame characterization safeguards", () => {
     useGameStore.setState({
       playerColor: "white",
       engineElo: 1500,
+      playerRating: 1500,
       drillStrictness: "lenient",
       drillStrictnessCp: 20,
     });
+    // Opening difficulty is resampled (g-ncvm), not seeded from store/localStorage.
+    vi.spyOn(Math, "random").mockReturnValue(0);
 
     const gear = await screen.findByRole("button", {
       name: /change drill settings/i,
@@ -1679,8 +1714,10 @@ describe("ChessGame characterization safeguards", () => {
     expect(
       await screen.findByRole("button", { name: /start drill/i }),
     ).toBeInTheDocument();
-    // Store values win over localStorage: engine 1500 (not 800), white (not black).
-    expect(useGameStore.getState().engineElo).toBe(1500);
+    // Difficulty is re-randomized to MAIA_ELO_BINS[0] (mocked) — neither the
+    // store's 1500 nor localStorage's 800. Side/strictness/opening still show
+    // store-wins-over-localStorage below.
+    expect(useGameStore.getState().engineElo).toBe(MAIA_ELO_BINS[0]);
     // Drill side is now local state, decoupled from the store playerColorChoice;
     // the White side king button should be active (from the store's player_color).
     expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass(
@@ -1835,7 +1872,7 @@ describe("ChessGame characterization safeguards", () => {
     expect(useGameStore.getState().gameResult).not.toBeNull();
   };
 
-  it("natural-end Another drill restarts instantly with exact stored settings", async () => {
+  it("natural-end Another drill restarts instantly with exact opening/side/strictness (difficulty resampled)", async () => {
     await reachNaturalEndDrillBanner();
     startDrillMock.mockResolvedValueOnce(makeDrillResponse());
 
@@ -1847,6 +1884,7 @@ describe("ChessGame characterization safeguards", () => {
       expect(startDrillMock).toHaveBeenCalledWith({
         opening_key: "target-fen",
         player_color: "white",
+        // Difficulty is re-randomized (g-ncvm), so any sampled bin is valid.
         engine_elo: expect.any(Number),
         strictness: "lenient",
         strictness_cp: 20,
@@ -4181,10 +4219,12 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     expect(screen.getByRole("button", { name: /^again$/i })).toBeInTheDocument();
   });
 
-  it("Again restarts with the preserved exact settings and no stale-session traffic", async () => {
+  it("Again restarts with the preserved opening/side/strictness (difficulty resampled) and no stale-session traffic", async () => {
     seedAbandonedDrillStore();
     useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
     setReturnMarker("drill-1");
+    // Difficulty is re-randomized (g-ncvm); mock pins it to MAIA_ELO_BINS[0].
+    vi.spyOn(Math, "random").mockReturnValue(0);
 
     render(<ChessGame />);
 
@@ -4194,7 +4234,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
       expect(startDrillMock).toHaveBeenCalledWith({
         opening_key: "ruy-lopez",
         player_color: "white",
-        engine_elo: 1500,
+        engine_elo: MAIA_ELO_BINS[0],
         strictness: "standard",
         strictness_cp: 25,
       });
@@ -4225,6 +4265,8 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     });
     useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
     setReturnMarker("drill-1");
+    // Difficulty is re-randomized (g-ncvm); mock pins it to MAIA_ELO_BINS[0].
+    vi.spyOn(Math, "random").mockReturnValue(0);
 
     render(<ChessGame />);
 
@@ -4234,7 +4276,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
       expect(startDrillMock).toHaveBeenCalledWith({
         opening_key: "target-fen",
         player_color: "white",
-        engine_elo: 1500,
+        engine_elo: MAIA_ELO_BINS[0],
         strictness: "standard",
         strictness_cp: 25,
         line: ["e2e4", "c7c5"],
@@ -4258,12 +4300,15 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     expect(useDrillAnalysisStore.getState().snapshot).toBe(snapshot);
   });
 
-  it("preserves the retained engine Elo against the on-mount rating resample", async () => {
+  it("retains the engine Elo on the mount resample but resamples it on Again", async () => {
+    // Two behaviors in one test: the on-mount rating resample is SKIPPED for a
+    // drill-in-store (so the post-drill UI keeps showing 1500), while clicking
+    // Again deliberately re-randomizes the difficulty (g-ncvm).
     seedAbandonedDrillStore();
     useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
     setReturnMarker("drill-1");
-    // A rating that maps to a different Maia bin — if the resample fired it would
-    // clobber the retained 1500 before "Again" reads it.
+    // A rating that maps to a different Maia bin — if the mount resample fired it
+    // would clobber the retained 1500 before "Again" reads it.
     fetchCurrentRatingMock.mockResolvedValue({
       current_rating: 900,
       is_provisional: false,
@@ -4278,12 +4323,15 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
       await Promise.resolve();
     });
 
+    // Mount resample skipped: the just-played Elo is retained.
     expect(useGameStore.getState().engineElo).toBe(1500);
 
+    // Again resamples; mock pins the fresh bin to MAIA_ELO_BINS[0].
+    vi.spyOn(Math, "random").mockReturnValue(0);
     fireEvent.click(screen.getByRole("button", { name: /^again$/i }));
     await waitFor(() => {
       expect(startDrillMock).toHaveBeenCalledWith(
-        expect.objectContaining({ engine_elo: 1500 }),
+        expect.objectContaining({ engine_elo: MAIA_ELO_BINS[0] }),
       );
     });
   });
