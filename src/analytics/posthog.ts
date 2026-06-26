@@ -11,7 +11,14 @@ import posthog from 'posthog-js'
  * uninitialized SDK (notably `reset()` before `init()`).
  */
 
-const DEFAULT_HOST = 'https://us.i.posthog.com'
+// Same-origin reverse proxy (see vercel.json rewrites / vite.config.ts proxy).
+// PostHog's endpoints don't satisfy COEP `require-corp` (the app is cross-origin
+// isolated for the Stockfish WASM SharedArrayBuffer), so cross-origin requests
+// to us.i.posthog.com get dropped with "CORS Failed". Routing through `/ingest`
+// makes them same-origin, which is exempt from both CORS and the COEP
+// resource-policy check. An absolute VITE_PUBLIC_POSTHOG_HOST (e.g. self-hosted
+// or EU) still overrides this and bypasses the proxy.
+const DEFAULT_HOST = '/ingest'
 
 let enabled = false
 
@@ -29,8 +36,14 @@ export function initAnalytics(): void {
   if (enabled) return
   const token = import.meta.env.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
   if (!token || isDisabled()) return
+  const apiHost = import.meta.env.VITE_PUBLIC_POSTHOG_HOST || DEFAULT_HOST
   posthog.init(token, {
-    api_host: import.meta.env.VITE_PUBLIC_POSTHOG_HOST || DEFAULT_HOST,
+    api_host: apiHost,
+    // When proxying via a same-origin path, the SDK can't derive the UI host
+    // (it replaces `.i.posthog.com` -> `.posthog.com`, which is garbage for
+    // `/ingest`), so pin it. For an absolute api_host the SDK derives its own
+    // UI host correctly, so leave ui_host unset to respect EU/self-hosted.
+    ...(apiHost.startsWith('/') ? { ui_host: 'https://us.posthog.com' } : {}),
     // A recent `defaults` date opts into current PostHog defaults, which makes
     // `capture_pageview: 'history_change'` (SPA route views) the default; we
     // also set it explicitly so the behavior is pinned regardless of the date.

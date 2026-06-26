@@ -5,6 +5,31 @@ import react from '@vitejs/plugin-react'
 const resolveShim = (relative: string) =>
   path.resolve(__dirname, 'src', 'shims', 'node', relative)
 
+// Same-origin reverse proxy for PostHog (mirrors the vercel.json rewrites).
+// The default `api_host` is `/ingest`, so dev AND preview must forward it to
+// PostHog or analytics 404s / breaks under the COEP `require-corp` headers both
+// servers emit. Order matters — Vite proxy is first-match-wins (object key
+// order, preserved by spread), so the two `us-assets` rules MUST precede the
+// broad `/ingest` rule. `changeOrigin` so SNI/Host matches upstream; rewrite
+// strips the `/ingest` prefix the SDK adds in CUSTOM-region mode.
+const posthogProxy = {
+  '/ingest/static': {
+    target: 'https://us-assets.i.posthog.com',
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/ingest/, ''),
+  },
+  '/ingest/array': {
+    target: 'https://us-assets.i.posthog.com',
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/ingest/, ''),
+  },
+  '/ingest': {
+    target: 'https://us.i.posthog.com',
+    changeOrigin: true,
+    rewrite: (p: string) => p.replace(/^\/ingest/, ''),
+  },
+}
+
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
@@ -29,6 +54,7 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      ...posthogProxy,
     },
   },
   preview: {
@@ -36,5 +62,6 @@ export default defineConfig({
       'Cross-Origin-Opener-Policy': 'same-origin',
       'Cross-Origin-Embedder-Policy': 'require-corp',
     },
+    proxy: { ...posthogProxy },
   },
 })

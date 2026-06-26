@@ -80,9 +80,12 @@ describe('analytics/posthog', () => {
         autocapture: true,
       }),
     )
+    // An absolute host lets the SDK derive its own UI host — we must NOT pin
+    // ui_host to the US proxy value (that would hijack EU/self-hosted).
+    expect(initMock.mock.calls[0][1].ui_host).toBeUndefined()
   })
 
-  it('defaults the host when VITE_PUBLIC_POSTHOG_HOST is unset', async () => {
+  it('defaults to the same-origin proxy when VITE_PUBLIC_POSTHOG_HOST is unset', async () => {
     vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
     vi.stubEnv('VITE_PUBLIC_POSTHOG_HOST', '')
     vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
@@ -90,7 +93,11 @@ describe('analytics/posthog', () => {
     mod.initAnalytics()
     expect(initMock).toHaveBeenCalledWith(
       'phc_test',
-      expect.objectContaining({ api_host: 'https://us.i.posthog.com' }),
+      expect.objectContaining({
+        api_host: '/ingest',
+        // The SDK can't derive a UI host from a same-origin path, so pin it.
+        ui_host: 'https://us.posthog.com',
+      }),
     )
   })
 
