@@ -26,6 +26,7 @@ import { playEndGameAudio } from "../components/chess-game/endGameAudio";
 import { sampleEloBin } from "../components/chess-game/elo";
 import type { BoardOrientation, OpenHistoryOptions, ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
+import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
 import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
 import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
@@ -297,6 +298,9 @@ export const useChessGameLifecycle = ({
           s.setDrillState(contract.drill_state);
           s.setDrillTerminalReason(contract.terminal_reason ?? null);
           s.setOpeningScoreChanges(contract.opening_score_changes ?? null);
+          // The immediate delta is the warm/possibly-stale cache; reconcile to the
+          // provably-fresh value once the background recompute lands (g-fix-end-latency).
+          void pollFreshOpeningDelta(finalizingSessionId);
           s.setIsRated(false);
           // Natural-ended drills remain hidden and unrated unless converted.
           // Persisted evidence is best-effort, so discard any resolved upload
@@ -341,6 +345,9 @@ export const useChessGameLifecycle = ({
         useGameStore
           .getState()
           .setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
+        // Reconcile the warm delta to the provably-fresh value once the background
+        // recompute lands (g-fix-end-latency).
+        void pollFreshOpeningDelta(finalizingSessionId);
         finishLocalGame(result, {
           preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
           finalizingSessionId,
@@ -451,6 +458,9 @@ export const useChessGameLifecycle = ({
         }
         const s = useGameStore.getState();
         s.setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
+        // Reconcile the warm delta to the provably-fresh value once the background
+        // recompute lands (g-fix-end-latency). store.sessionId is the id resigned above.
+        void pollFreshOpeningDelta(store.sessionId!);
         s.setIsRated(false);
         s.setIsPracticeContinuation(true);
         s.setDrillState(null);
@@ -887,6 +897,9 @@ export const useChessGameLifecycle = ({
       useGameStore
         .getState()
         .setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
+      // Reconcile the warm delta to the provably-fresh value once the background
+      // recompute lands (g-fix-end-latency).
+      void pollFreshOpeningDelta(finalizingSessionId);
       finishLocalGame(
         { type: "resign", message: "You resigned." },
         { finalizingSessionId },

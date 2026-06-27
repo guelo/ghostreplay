@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass, fields as dc_fields
 from datetime import datetime
@@ -16,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.fen import active_color, normalize_fen
 from app.game_phase import is_middlegame_position
+from app.models import GameSession
 from app.opening_aggregate import (
     CachedOpeningScoreRow,
     CachedPositionScoreRow,
@@ -40,6 +42,7 @@ from app.opening_rootcalc import (
     compute_root_score,
 )
 from app.opening_roots import OpeningRoots, get_opening_roots
+from app.opening_score_delta import OpeningScoreDeltaItem, read_opening_score_delta
 from app.security import TokenPayload, get_current_user
 from app.tree_eval import lookup_move_evals, lookup_root_eval
 
@@ -1379,6 +1382,46 @@ def get_opening_tree_status(
     roots = get_opening_roots()
     state = resolve_tree_cache_state(db, user.user_id, player_color, graph, roots)
     return TreeStatusResponse(player_color=player_color, state=state)
+
+
+class OpeningScoreDeltaPollResponse(BaseModel):
+    """Non-blocking poll payload for the end-of-session opening-score banner.
+
+    ``is_fresh`` is the poll-stop signal: True once the cached delta is provably
+    current (or no opening was crossed), False while a cold/stale cache is still
+    converging in the background. ``opening_score_changes`` is None when the played
+    chain crossed no opening (or the cache cannot be read yet).
+    """
+
+    opening_score_changes: list[OpeningScoreDeltaItem] | None = None
+    is_fresh: bool
+
+
+@router.get("/score-delta/{session_id}", response_model=OpeningScoreDeltaPollResponse)
+def get_opening_score_delta(
+    session_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> OpeningScoreDeltaPollResponse:
+    """Reconcile-poll for the end-of-session opening-score delta (g-fix-end-latency).
+
+    The terminal endpoints (game end, drill fail/natural-end) now serve a warm,
+    possibly-stale delta immediately and enqueue a background recompute instead of
+    blocking up to ~10s on the scheduler. The frontend polls this GET until
+    ``is_fresh`` and overwrites the banner in place with the provably-fresh value.
+    One endpoint serves both game and drill sessions (both are ``GameSession`` with
+    the same ``player_color`` / ``opening_score_baseline``). Non-blocking: never
+    touches the scheduler (see ``read_opening_score_delta``).
+    """
+    session = db.query(GameSession).filter(GameSession.id == session_id).first()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.user_id != user.user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    items, is_fresh = read_opening_score_delta(db, session)
+    return OpeningScoreDeltaPollResponse(
+        opening_score_changes=items or None, is_fresh=is_fresh
+    )
 
 
 @router.get("/tree", response_model=TreeResponse)

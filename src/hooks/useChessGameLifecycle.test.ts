@@ -36,6 +36,16 @@ vi.mock("../openings/openingBook", () => ({
   getOpeningBook: (...args: unknown[]) => getOpeningBookMock(...args),
 }));
 
+// The terminal handlers fire the reconcile-poll (g-fix-end-latency). Stub it as a
+// spy so no real timers/network run, and assert it's invoked with the finalizing
+// session id at each terminal site. (The full ../utils/api mock above omits
+// getOpeningScoreDelta, so the real helper would call an undefined fn.)
+const pollFreshOpeningDeltaMock = vi.fn();
+vi.mock("../utils/openingDeltaPoll", () => ({
+  pollFreshOpeningDelta: (...args: unknown[]) =>
+    pollFreshOpeningDeltaMock(...args),
+}));
+
 const initialStoreState = useGameStore.getInitialState();
 
 const createMockCoordinator = (): GameAnalysisCoordinator =>
@@ -202,6 +212,7 @@ beforeEach(() => {
   naturalEndDrillMock.mockReset();
   getOpeningRootsMock.mockReset();
   getOpeningBookMock.mockReset();
+  pollFreshOpeningDeltaMock.mockReset();
   uploadSessionMovesMock.mockResolvedValue({ moves_inserted: 0 });
   audioCtorMock.mockReset();
   audioPlayMock.mockReset();
@@ -306,6 +317,8 @@ describe("useChessGameLifecycle", () => {
     expect(setIsRevertPending).toHaveBeenNthCalledWith(1, true);
     expect(setIsRevertPending).toHaveBeenLastCalledWith(false);
     expect(setShowRevertWarning).toHaveBeenLastCalledWith(false);
+    // Reconcile-poll fires for the resigned session (g-fix-end-latency).
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
   });
 
   it("prunes only pending SRS reviews removed by a local rewind", async () => {
@@ -1595,6 +1608,8 @@ describe("useChessGameLifecycle", () => {
 
     await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
     expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
     // P1: the full move history is uploaded BEFORE endGame's recompute. Assert
     // order (the bug was ordering-specific), not just that both were called.
     expect(uploadSessionMovesMock).toHaveBeenCalled();
@@ -1629,6 +1644,8 @@ describe("useChessGameLifecycle", () => {
 
     await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
     expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
     expect(uploadSessionMovesMock).toHaveBeenCalled();
     expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
       endGameMock.mock.invocationCallOrder[0],
@@ -1668,6 +1685,8 @@ describe("useChessGameLifecycle", () => {
 
     expect(naturalEndDrillMock).toHaveBeenCalled();
     expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The reconcile-poll fires for the finalizing drill session (g-fix-end-latency).
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("drill-session-xanz");
     // P1: the drill's moves are uploaded BEFORE naturalEndDrill recomputes (and
     // before stopSessionUploads discards the tail). Assert order, not just calls.
     expect(uploadSessionMovesMock).toHaveBeenCalled();

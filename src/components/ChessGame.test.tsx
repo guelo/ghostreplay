@@ -24,6 +24,7 @@ const reviewSrsBlunderMock = vi.fn();
 const fetchCurrentRatingMock = vi.fn();
 const getStatsAchievementsMock = vi.fn();
 const fetchSessionOpeningsMock = vi.fn();
+const pollFreshOpeningDeltaMock = vi.fn();
 const audioPlayMock = vi.fn();
 const audioCtorSpy = vi.fn();
 const captureEventMock = vi.fn();
@@ -60,6 +61,14 @@ vi.mock("../utils/api", async (importOriginal) => {
       fetchSessionOpeningsMock(...args),
   };
 });
+
+// The drill accuracy-fail handler fires the reconcile-poll (g-fix-end-latency).
+// The api mock above spreads importOriginal, so the real helper would hit the
+// network — stub it as a spy and assert it fires with the failing session id.
+vi.mock("../utils/openingDeltaPoll", () => ({
+  pollFreshOpeningDelta: (...args: unknown[]) =>
+    pollFreshOpeningDeltaMock(...args),
+}));
 
 const evaluatePositionMock = vi.fn();
 const lookupOpeningByFenMock = vi.fn();
@@ -344,6 +353,7 @@ describe("ChessGame start flow", () => {
     });
     startDrillMock.mockReset();
     getOpeningRootsMock.mockReset();
+    pollFreshOpeningDeltaMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
     lookupOpeningByFenMock.mockReset();
@@ -666,6 +676,8 @@ describe("ChessGame characterization safeguards", () => {
       expect(useGameStore.getState().drillTerminalReason).toBe("accuracy");
       expect(useGameStore.getState().viewIndex).toBe(-1);
     });
+    // The reconcile-poll fires for the failed drill session (g-fix-end-latency).
+    expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-characterization");
     // The full move history is durably uploaded BEFORE failDrill computes the
     // opening-score delta (g-xanz barrier). The bug was ordering-specific, so
     // assert the upload ran first — not merely that both were called.

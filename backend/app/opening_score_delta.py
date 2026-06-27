@@ -28,7 +28,6 @@ from sqlalchemy.orm import Session
 from app.models import GameSession, SessionMove
 from app.opening_cache import (
     has_opening_evidence,
-    load_cached_rows,
     proven_fresh_opening_scores,
 )
 from app.opening_roots import get_opening_roots, played_opening_chain
@@ -142,86 +141,150 @@ def _session_played_fens(db: Session, session_id) -> list[str]:
     return [move.fen_after for move in moves]
 
 
+def _delta_items_from_cache(
+    db: Session, session: GameSession
+) -> tuple[list[OpeningScoreDeltaItem], bool, str]:
+    """Build the played-chain delta from the latest cached batch — NON-BLOCKING.
+
+    Never touches the opening-score scheduler (no ``refresh_now``, no enqueue, no
+    wait). Returns ``(items, is_fresh, source)`` where ``is_fresh`` is the
+    poll-stop signal, NOT a gate on the items:
+
+    - empty played chain -> ``([], True, "no_chain")`` — nothing will ever appear,
+      so the frontend poll stops after one read.
+    - cold cache (no batch yet) -> ``([], False, "skipped_cold")`` — the poll keeps
+      going until a batch builds; meanwhile no all-``None`` banner is shown.
+    - a warm batch -> items built from its rows for ANY freshness, with ``is_fresh``
+      carrying the ``proven_fresh_opening_scores`` verdict (``"cached_fresh"`` /
+      ``"cached_stale"``). A stale warm "after" is best-effort: ``opening_score`` is
+      a 0-100 mastery score the just-played plies can move either way, so a slightly
+      stale "after" may transiently over- or under-state the eventual fresh delta —
+      corrected once the poll's ``is_fresh`` read lands.
+    """
+    chain = played_opening_chain(
+        _session_played_fens(db, session.id), get_opening_roots()
+    )
+    if not chain:
+        return [], True, "no_chain"
+
+    batch, rows, is_fresh = proven_fresh_opening_scores(
+        db, session.user_id, session.player_color
+    )
+    if batch is None:
+        return [], False, "skipped_cold"
+
+    rows_by_key = {row.opening_key: row for row in rows}
+
+    baseline: dict[str, float] | None = None
+    if session.opening_score_baseline:
+        try:
+            parsed = json.loads(session.opening_score_baseline)
+            if isinstance(parsed, dict):
+                baseline = parsed
+        except (ValueError, TypeError):
+            baseline = None
+
+    items: list[OpeningScoreDeltaItem] = []
+    for root in chain:
+        row = rows_by_key.get(root.opening_key)
+        after = row.opening_score if row is not None else None
+        if baseline is None:
+            before: float | None = None
+            is_new = False
+        else:
+            before = baseline.get(root.opening_key)
+            is_new = before is None
+        delta = (
+            after - before
+            if after is not None and before is not None
+            else None
+        )
+        items.append(
+            OpeningScoreDeltaItem(
+                opening_key=root.opening_key,
+                opening_name=root.opening_name,
+                opening_family=root.opening_family,
+                eco=root.eco,
+                depth=root.depth,
+                before=before,
+                after=after,
+                delta=delta,
+                is_new=is_new,
+            )
+        )
+    return items, is_fresh, "cached_fresh" if is_fresh else "cached_stale"
+
+
 def compute_opening_score_delta(
     db: Session, session: GameSession
 ) -> list[OpeningScoreDeltaItem]:
-    """Recompute and diff the played-opening chain for an ended session.
+    """Diff the played-opening chain for an ended session — NON-BLOCKING.
 
-    Forces a bounded synchronous recompute so the after-scores reflect this
-    session, walks the played chain (same as ``get_session_openings``), and diffs
-    each crossed opening's fresh score against the session baseline. Returns the
-    chain broadest -> deepest; empty when no opening was crossed. Never raises —
-    on any failure the list is empty and the caller simply shows nothing.
+    Serves the latest WARM cached batch immediately (no scheduler wait) and
+    enqueues a BACKGROUND recompute so the cache converges; the frontend then polls
+    ``read_opening_score_delta`` (GET /api/openings/score-delta/{session_id}) for
+    the provably-fresh delta and overwrites the banner in place. Walks the played
+    chain (same as ``get_session_openings``) and diffs each crossed opening's cached
+    score against the session baseline, broadest -> deepest; empty when no opening
+    was crossed. Never raises — on any failure the list is empty and the caller
+    simply shows nothing.
+
+    NON-BLOCKING (g-fix-end-latency): the prior implementation forced a synchronous
+    ``refresh_now`` (up to 5s) and a cold ``load_cached_rows`` (another 5s) before
+    returning, holding the whole terminal action hostage to freshen a supplementary
+    banner. The warm "after" served here is best-effort and is corrected by the poll
+    (see ``_delta_items_from_cache``).
     """
+    t0 = time.perf_counter()
+    source = "failed"
     try:
-        # Lazy import mirrors load_cached_rows: opening_score_scheduler imports
+        items, _is_fresh, source = _delta_items_from_cache(db, session)
+        # Enqueue a BACKGROUND recompute so the cache converges (cold builds its
+        # first batch; stale refreshes) for the poll to read. Lazy import mirrors
+        # the historical load_cached_rows pattern: opening_score_scheduler imports
         # opening_cache at module load, so a top-level import risks a cycle.
-        from app.opening_score_scheduler import refresh_now
+        from app.opening_score_scheduler import request_recompute
 
-        player_color = session.player_color
-
-        # Best-effort: block briefly so the after-scores include this session's
-        # evidence. On timeout/False the cached after-scores are served as-is
-        # (delta may lag by one recompute) — acceptable; don't block the banner.
-        try:
-            refresh_now(session.user_id, player_color)
-        except Exception:  # noqa: BLE001 — recompute is advisory here
-            logger.warning(
-                "opening delta refresh_now failed session_id=%s", session.id,
-                exc_info=True,
-            )
-
-        chain = played_opening_chain(
-            _session_played_fens(db, session.id), get_opening_roots()
-        )
-        if not chain:
-            return []
-
-        _, cached_rows = load_cached_rows(db, session.user_id, player_color)
-        rows_by_key = {row.opening_key: row for row in cached_rows}
-
-        baseline: dict[str, float] | None = None
-        if session.opening_score_baseline:
-            try:
-                parsed = json.loads(session.opening_score_baseline)
-                if isinstance(parsed, dict):
-                    baseline = parsed
-            except (ValueError, TypeError):
-                baseline = None
-
-        items: list[OpeningScoreDeltaItem] = []
-        for root in chain:
-            row = rows_by_key.get(root.opening_key)
-            after = row.opening_score if row is not None else None
-            if baseline is None:
-                before: float | None = None
-                is_new = False
-            else:
-                before = baseline.get(root.opening_key)
-                is_new = before is None
-            delta = (
-                after - before
-                if after is not None and before is not None
-                else None
-            )
-            items.append(
-                OpeningScoreDeltaItem(
-                    opening_key=root.opening_key,
-                    opening_name=root.opening_name,
-                    opening_family=root.opening_family,
-                    eco=root.eco,
-                    depth=root.depth,
-                    before=before,
-                    after=after,
-                    delta=delta,
-                    is_new=is_new,
-                )
-            )
+        request_recompute(session.user_id, session.player_color)
         return items
     except Exception:  # noqa: BLE001 — delta is supplementary; never 500 the end
+        source = "failed"
         logger.warning(
             "opening delta computation failed session_id=%s",
             getattr(session, "id", None),
             exc_info=True,
         )
         return []
+    finally:
+        # Fields go IN THE MESSAGE: the root formatter prints %(message)s only, so
+        # extra= kwargs would be dropped. source proves which path served; compute_ms
+        # proves the end path no longer blocks (same pattern as snapshot above).
+        logger.info(
+            "opening_score_delta source=%s compute_ms=%.2f",
+            source,
+            (time.perf_counter() - t0) * 1000.0,
+        )
+
+
+def read_opening_score_delta(
+    db: Session, session: GameSession
+) -> tuple[list[OpeningScoreDeltaItem], bool]:
+    """Non-blocking poll reader for GET /api/openings/score-delta/{session_id}.
+
+    Returns ``(items, is_fresh)`` from the latest cached batch WITHOUT touching the
+    scheduler — no ``refresh_now`` and (unlike the immediate compute) no
+    ``request_recompute``: re-enqueuing on every poll would push the scheduler's
+    ``quiet_window`` debounce forward and *delay* convergence. ``is_fresh`` tells the
+    frontend when to stop polling (no chain / already-fresh) vs keep going (cold,
+    batch still building). Best-effort: any failure degrades to ``([], False)``.
+    """
+    try:
+        items, is_fresh, _source = _delta_items_from_cache(db, session)
+        return items, is_fresh
+    except Exception:  # noqa: BLE001 — supplementary poll must never raise
+        logger.warning(
+            "opening delta poll failed session_id=%s",
+            getattr(session, "id", None),
+            exc_info=True,
+        )
+        return [], False

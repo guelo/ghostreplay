@@ -95,6 +95,18 @@ describe('normalizeApiPath', () => {
     )
   })
 
+  it('maps the opening score-delta poll route to the backend template', () => {
+    expect(normalizeApiPath(`/api/openings/score-delta/${uuid}`)).toBe(
+      '/api/openings/score-delta/{session_id}',
+    )
+  })
+
+  it('does not mislabel a static openings sibling like /api/openings/tree', () => {
+    expect(normalizeApiPath('/api/openings/tree/status')).toBe(
+      '/api/openings/tree/status',
+    )
+  })
+
   it('does not mislabel a static sibling like /api/drills/start', () => {
     expect(normalizeApiPath('/api/drills/start')).toBe('/api/drills/start')
   })

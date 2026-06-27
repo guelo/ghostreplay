@@ -82,6 +82,7 @@ const API_ROUTE_TEMPLATES: ReadonlyArray<readonly [RegExp, string]> = [
   [new RegExp(`^/api/session/${UUID_SOURCE}/moves$`, 'i'), '/api/session/{session_id}/moves'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/analysis$`, 'i'), '/api/session/{session_id}/analysis'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/openings$`, 'i'), '/api/session/{session_id}/openings'],
+  [new RegExp(`^/api/openings/score-delta/${UUID_SOURCE}$`, 'i'), '/api/openings/score-delta/{session_id}'],
 ]
 
 /**
@@ -1455,6 +1456,29 @@ export const getOpeningTreeStatus = async (
     `${API_BASE_URL}/api/openings/tree/status?${search}`,
     { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
     { fallbackMessage: 'Failed to load openings' },
+  )
+}
+
+export interface OpeningScoreDeltaPollResponse {
+  opening_score_changes: OpeningScoreDeltaItem[] | null
+  is_fresh: boolean
+}
+
+/**
+ * Reconcile-poll for the end-of-session opening-score delta (g-fix-end-latency).
+ * The terminal endpoints now return a warm (possibly stale) delta immediately and
+ * recompute in the background; this GET is polled until `is_fresh` so the banner
+ * self-corrects in place. Shared by game and drill sessions. `options.signal`
+ * threads a per-request timeout so a hung GET can't stall the poll loop.
+ */
+export const getOpeningScoreDelta = async (
+  sessionId: string,
+  options?: { signal?: AbortSignal },
+): Promise<OpeningScoreDeltaPollResponse> => {
+  return requestJson<OpeningScoreDeltaPollResponse>(
+    `${API_BASE_URL}/api/openings/score-delta/${sessionId}`,
+    { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
+    { fallbackMessage: 'Failed to load opening score delta' },
   )
 }
 

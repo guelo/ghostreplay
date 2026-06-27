@@ -26,6 +26,7 @@ from app.opening_graph import (
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_score_delta import (
     compute_opening_score_delta,
+    read_opening_score_delta,
     snapshot_opening_baseline,
 )
 
@@ -37,9 +38,10 @@ PATCH_ROOTS = "app.opening_score_delta.get_opening_roots"
 @pytest.fixture(autouse=True)
 def _stub_scheduler():
     """Stub the scheduler so no worker thread spawns and seeded batches are never
-    recomputed away. The start-path snapshot (g-fix-start-latency) never touches
-    the scheduler, but the end-of-session compute_opening_score_delta still calls
-    refresh_now — stub it True so those tests serve the seeded batch as-is."""
+    recomputed away. Neither the start-path snapshot (g-fix-start-latency) nor the
+    end-path delta (g-fix-end-latency) calls refresh_now anymore, but the end-path
+    compute now enqueues a BACKGROUND request_recompute — stub it to a no-op so no
+    real worker fires (and so tests can assert it WAS enqueued)."""
     with (
         patch("app.opening_score_scheduler.request_recompute", return_value=None),
         patch("app.opening_score_scheduler.refresh_now", return_value=True),
@@ -292,9 +294,10 @@ def test_snapshot_rolls_back_on_failure(db_session):
     mock_rollback.assert_called_once()
 
 
-def test_delta_serves_cached_when_final_refresh_fails(db_session):
-    # The END-of-session recompute is best-effort: if refresh_now fails there, the
-    # delta still serves the cached after-scores (compute ignores the bool).
+def test_delta_does_not_call_refresh_now(db_session):
+    # g-fix-end-latency: the end path must NEVER block on the scheduler. A warm
+    # batch yields the delta WITHOUT a single refresh_now call (no 5s timeout
+    # exposure on the terminal action).
     import json
     session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
@@ -303,7 +306,7 @@ def test_delta_serves_cached_when_final_refresh_fails(db_session):
     db_session.commit()
 
     with (
-        patch("app.opening_score_scheduler.refresh_now", return_value=False),
+        patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh,
         patch(PATCH_ROOTS, return_value=_ruy_roots()),
     ):
         items = compute_opening_score_delta(db_session, session)
@@ -311,6 +314,60 @@ def test_delta_serves_cached_when_final_refresh_fails(db_session):
     by_key = {item.opening_key: item for item in items}
     assert by_key[RUY_KEY].after == pytest.approx(44.0)
     assert by_key[RUY_KEY].delta == pytest.approx(3.0)
+    mock_refresh.assert_not_called()
+
+
+def test_delta_enqueues_background_recompute(db_session):
+    # The immediate compute serves the warm delta and enqueues a BACKGROUND
+    # recompute so the cache converges for the reconcile-poll to read.
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with (
+        patch(
+            "app.opening_score_scheduler.request_recompute", new=Mock()
+        ) as mock_enqueue,
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        compute_opening_score_delta(db_session, session)
+
+    mock_enqueue.assert_called_once_with(123, "white")
+
+
+def test_delta_empty_when_cold_no_batch(db_session):
+    # Cold cache (an opening was crossed but no batch exists yet): the compute
+    # returns NO items rather than an all-None banner — the poll fills it in once
+    # the background recompute builds the first batch.
+    session = _make_session(db_session, baseline="{}")
+    _insert_moves(db_session, session.id, RUY_SANS)
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        assert compute_opening_score_delta(db_session, session) == []
+
+
+def test_delta_logs_source_and_compute_ms(db_session, caplog):
+    # Observability: source + compute_ms are in the message string (root formatter
+    # prints %(message)s only), so production api_request duration can verify the fix.
+    import json
+    import logging
+
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with (
+        caplog.at_level(logging.INFO, logger="app.opening_score_delta"),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        compute_opening_score_delta(db_session, session)
+    assert "source=cached_fresh" in caplog.text
+    assert "compute_ms=" in caplog.text
 
 
 def test_game_start_succeeds_when_baseline_snapshot_fails(client, auth_headers, db_session):
@@ -477,6 +534,90 @@ def test_delta_never_raises_on_internal_failure(db_session):
     _insert_moves(db_session, session.id, RUY_SANS)
     with patch(PATCH_ROOTS, side_effect=RuntimeError("boom")):
         assert compute_opening_score_delta(db_session, session) == []
+
+
+# ---------------------------------------------------------------------------
+# read_opening_score_delta (GET reconcile-poll reader — non-blocking)
+# ---------------------------------------------------------------------------
+
+def test_read_delta_fresh_returns_items_and_true(db_session):
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)  # fresh fingerprints
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    assert is_fresh is True
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[RUY_KEY].after == pytest.approx(44.0)
+    assert by_key[RUY_KEY].delta == pytest.approx(3.0)
+
+
+def test_read_delta_stale_returns_items_and_false(db_session):
+    # Items are served for ANY warm batch; is_fresh only drives the poll-stop signal.
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session, fresh=False)  # stale fingerprints
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    assert is_fresh is False
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[RUY_KEY].after == pytest.approx(44.0)
+
+
+def test_read_delta_cold_returns_empty_and_false(db_session):
+    # No batch yet but an opening crossed -> keep polling (False), no all-None banner.
+    session = _make_session(db_session, baseline="{}")
+    _insert_moves(db_session, session.id, RUY_SANS)
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        items, is_fresh = read_opening_score_delta(db_session, session)
+    assert items == []
+    assert is_fresh is False
+
+
+def test_read_delta_no_chain_returns_empty_and_true(db_session):
+    # No opening crossed -> nothing will ever appear, so stop the poll (True).
+    session = _make_session(db_session, baseline="{}")
+    _insert_moves(db_session, session.id, RUY_SANS)
+    other = _make_roots({
+        "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -": {
+            "name": "Queen's Pawn", "family": "Queen's Pawn", "depth": 1, "parents": []
+        }
+    })
+    with patch(PATCH_ROOTS, return_value=other):
+        items, is_fresh = read_opening_score_delta(db_session, session)
+    assert items == []
+    assert is_fresh is True
+
+
+def test_read_delta_never_touches_scheduler(db_session):
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with (
+        patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh,
+        patch(
+            "app.opening_score_scheduler.request_recompute", new=Mock()
+        ) as mock_enqueue,
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        read_opening_score_delta(db_session, session)
+
+    mock_refresh.assert_not_called()
+    mock_enqueue.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -765,3 +906,175 @@ def test_game_end_abandon_skips_opening_score_changes(client, auth_headers, db_s
     assert resp.status_code == 200
     assert resp.json()["opening_score_changes"] is None
     mock_compute.assert_not_called()
+
+
+# --- terminal endpoints never block on the scheduler (g-fix-end-latency) ----
+#
+# refresh_now is patched with an AssertionError side-effect AND asserted
+# not-called: compute swallows exceptions, so the side-effect alone wouldn't
+# surface a regression — the assert_not_called() is the load-bearing check.
+
+
+def test_game_end_does_not_block_on_scheduler(client, auth_headers, db_session):
+    import json
+    start = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "white"},
+        headers=auth_headers(user_id=123),
+    )
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.opening_score_baseline = json.dumps({RUY_KEY: 41.0})
+    db_session.commit()
+    _insert_moves(db_session, session_id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    mock_refresh = Mock(side_effect=AssertionError("refresh_now must not run"))
+    with (
+        patch("app.opening_score_scheduler.refresh_now", new=mock_refresh),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        resp = client.post(
+            "/api/game/end",
+            json={"session_id": session_id, "result": "checkmate_win", "pgn": "1. e4", "is_rated": False},
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    mock_refresh.assert_not_called()
+    # The warm delta is still served (non-blocking, not degraded).
+    changes = {c["opening_key"]: c for c in resp.json()["opening_score_changes"]}
+    assert changes[RUY_KEY]["delta"] == pytest.approx(3.0)
+
+
+def test_drill_natural_end_does_not_block_on_scheduler(client, auth_headers, db_session):
+    import json
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+    db_session.commit()
+    _insert_moves(db_session, session_id, RUY_SANS)
+    _seed_drill_after_scores(db_session)
+
+    mock_refresh = Mock(side_effect=AssertionError("refresh_now must not run"))
+    with (
+        patch("app.opening_score_scheduler.refresh_now", new=mock_refresh),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        resp = client.post(
+            f"/api/drills/{session_id}/natural-end",
+            json={"result": "checkmate_win", "pgn": "1. e4"},
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    mock_refresh.assert_not_called()
+    changes = {c["opening_key"]: c for c in resp.json()["opening_score_changes"]}
+    assert changes[KP_KEY]["delta"] == pytest.approx(20.0)
+
+
+def test_drill_accuracy_fail_does_not_block_on_scheduler(client, auth_headers, db_session):
+    import json
+    start = _start_drill(client, auth_headers)
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    session.opening_score_baseline = json.dumps({KP_KEY: 40.0})
+    db_session.commit()
+    _insert_moves(db_session, session_id, RUY_SANS)
+    _seed_drill_after_scores(db_session)
+
+    mock_refresh = Mock(side_effect=AssertionError("refresh_now must not run"))
+    with (
+        patch("app.opening_score_scheduler.refresh_now", new=mock_refresh),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        resp = client.post(
+            f"/api/drills/{session_id}/fail",
+            json={"terminal_reason": "accuracy"},
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    mock_refresh.assert_not_called()
+    changes = {c["opening_key"]: c for c in resp.json()["opening_score_changes"]}
+    assert changes[KP_KEY]["delta"] == pytest.approx(20.0)
+
+
+# --- GET /api/openings/score-delta/{session_id} reconcile-poll --------------
+
+def test_get_score_delta_returns_fresh_changes(client, auth_headers, db_session):
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        resp = client.get(
+            f"/api/openings/score-delta/{session.id}",
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_fresh"] is True
+    changes = {c["opening_key"]: c for c in body["opening_score_changes"]}
+    assert changes[RUY_KEY]["delta"] == pytest.approx(3.0)
+
+
+def test_get_score_delta_cold_is_not_fresh_with_no_changes(client, auth_headers, db_session):
+    # Cold cache, opening crossed: is_fresh False (keep polling), no banner yet.
+    session = _make_session(db_session, baseline="{}")
+    _insert_moves(db_session, session.id, RUY_SANS)
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        resp = client.get(
+            f"/api/openings/score-delta/{session.id}",
+            headers=auth_headers(user_id=123),
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["is_fresh"] is False
+    assert body["opening_score_changes"] is None
+
+
+def test_get_score_delta_unknown_session_404(client, auth_headers):
+    resp = client.get(
+        f"/api/openings/score-delta/{uuid.uuid4()}",
+        headers=auth_headers(user_id=123),
+    )
+    assert resp.status_code == 404
+
+
+def test_get_score_delta_wrong_owner_403(client, auth_headers, db_session):
+    session = _make_session(db_session, user_id=123, baseline="{}")
+    resp = client.get(
+        f"/api/openings/score-delta/{session.id}",
+        headers=auth_headers(user_id=999),
+    )
+    assert resp.status_code == 403
+
+
+def test_get_score_delta_never_blocks_on_scheduler(client, auth_headers, db_session):
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    with (
+        patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh,
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        resp = client.get(
+            f"/api/openings/score-delta/{session.id}",
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    mock_refresh.assert_not_called()

@@ -13,6 +13,7 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
+import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningRootItem } from "../utils/api";
 import { checkDrillRoute, failDrill, getOpeningRoots } from "../utils/api";
@@ -1128,6 +1129,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       store.setDrillState("failed");
       store.setDrillTerminalReason("accuracy");
       store.setOpeningScoreChanges(contract.opening_score_changes ?? null);
+      // Reconcile the warm delta to the provably-fresh value once the background
+      // recompute lands (g-fix-end-latency).
+      void pollFreshOpeningDelta(sessionId);
       drillFailedMoveIndexRef.current = result.moveIndex;
       setDrillFailInfo({
         playedMoveUci: result.moveUci,
