@@ -141,6 +141,35 @@ def test_is_scheduled_tracks_pending_inflight_and_is_key_scoped():
     assert sched.is_scheduled(123, "white") is False
 
 
+def test_is_inflight_tracks_only_running_runs_and_is_key_scoped():
+    # The one-shot baseline snapshot (g-1iul) gates the O(evidence) digest on
+    # is_inflight: narrower than is_scheduled, it reports True ONLY for a RUNNING
+    # recompute, never a merely-pending/debounced one.
+    clock = _FakeClock()
+    recompute = _RecordingRecompute()
+    sched, _ = _make_scheduler(clock, recompute)
+
+    # Idle: nothing in-flight.
+    assert sched.is_inflight(123, "white") is False
+
+    # A queued (pending) recompute is NOT in-flight — this is the whole point of
+    # the narrower probe vs is_scheduled (which would report True here).
+    sched.request_recompute(123, "white")
+    assert sched.is_scheduled(123, "white") is True
+    assert sched.is_inflight(123, "white") is False
+
+    # A running recompute (mid-run, before it pops) IS in-flight.
+    with sched._lock:
+        sched._inflight.add((5, "white"))
+    assert sched.is_inflight(5, "white") is True
+    # Key-scoped: an unrelated (user, color) is not reported in-flight.
+    assert sched.is_inflight(999, "black") is False
+    # Removing the key clears it.
+    with sched._lock:
+        sched._inflight.discard((5, "white"))
+    assert sched.is_inflight(5, "white") is False
+
+
 def test_distinct_keys_each_recompute_once_with_own_session():
     clock = _FakeClock()
     recompute = _RecordingRecompute()

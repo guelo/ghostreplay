@@ -46,11 +46,15 @@ def _stub_scheduler():
     ``is_recompute_scheduled`` is the cheap NOT-fresh gate the poll consults
     (g-xmhv); default it to False (quiescent) so freshness tests reach
     ``_is_batch_fresh`` deterministically regardless of cross-test scheduler state.
-    Tests exercising the scheduled branch override it locally."""
+    ``is_recompute_inflight`` is the narrower IN-FLIGHT-ONLY gate the one-shot
+    baseline snapshot consults (g-1iul); default it to False so the existing
+    quiescent snapshot tests still reach ``_is_batch_fresh``. Tests exercising the
+    scheduled/in-flight branches override these locally."""
     with (
         patch("app.opening_score_scheduler.request_recompute", return_value=None),
         patch("app.opening_score_scheduler.refresh_now", return_value=True),
         patch("app.opening_score_scheduler.is_recompute_scheduled", return_value=False),
+        patch("app.opening_score_scheduler.is_recompute_inflight", return_value=False),
     ):
         yield
 
@@ -130,7 +134,7 @@ def _ruy_roots() -> OpeningRoots:
 def _make_batch(db_session, *, user_id=123, player_color="white", generation=1,
                 fresh=True) -> int:
     """Seed a batch. ``fresh=True`` stamps the registry + raw-input fingerprints
-    the start-path freshness gate (proven_fresh_opening_scores) checks, so the
+    the start-path freshness gate (_is_batch_fresh) checks, so the
     snapshot treats it as provably current (test users carry no evidence -> a
     deterministic empty raw digest). ``fresh=False`` leaves inputs_fingerprint NULL
     (legacy/stale) so the gate skips it (source=skipped_stale)."""
@@ -278,8 +282,11 @@ def test_snapshot_logs_source_signal(db_session, caplog):
 
 
 def test_snapshot_none_on_failure(db_session):
+    # list_cached_opening_scores is the FIRST DB call in the snapshot try block and
+    # always runs (in-flight or quiescent), so injecting there reliably reaches the
+    # except handler regardless of the gate branch.
     with patch(
-        "app.opening_score_delta.proven_fresh_opening_scores",
+        "app.opening_score_delta.list_cached_opening_scores",
         side_effect=RuntimeError("boom"),
     ):
         assert snapshot_opening_baseline(db_session, 123, "white") is None
@@ -290,7 +297,7 @@ def test_snapshot_rolls_back_on_failure(db_session):
     # so the caller's session-create commit is not poisoned.
     with (
         patch(
-            "app.opening_score_delta.proven_fresh_opening_scores",
+            "app.opening_score_delta.list_cached_opening_scores",
             side_effect=RuntimeError("boom"),
         ),
         patch.object(db_session, "rollback") as mock_rollback,
@@ -298,6 +305,101 @@ def test_snapshot_rolls_back_on_failure(db_session):
         result = snapshot_opening_baseline(db_session, 123, "white")
     assert result is None
     mock_rollback.assert_called_once()
+
+
+# --- g-1iul: in-flight-only cheap gate for the one-shot baseline snapshot -----
+
+
+def test_snapshot_inflight_with_batch_skips_digest_and_evidence(db_session, caplog):
+    # The 9.6s regression: while a recompute is IN-FLIGHT and a batch exists, the
+    # snapshot must NOT pay the O(evidence) freshness digest (it would serialize
+    # GIL-bound against the running worker) NOR probe has_opening_evidence. It
+    # degrades to NULL with source=skipped_recompute_inflight. Spying on both is
+    # the load-bearing check.
+    import logging
+
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
+    db_session.commit()
+
+    spy_fresh = Mock(
+        side_effect=AssertionError("digest must not run while recompute in-flight")
+    )
+    spy_evidence = Mock(
+        side_effect=AssertionError("evidence probe must not run when batch present")
+    )
+    with (
+        caplog.at_level(logging.INFO, logger="app.opening_score_delta"),
+        patch("app.opening_score_scheduler.is_recompute_inflight", return_value=True),
+        patch("app.opening_score_delta._is_batch_fresh", new=spy_fresh),
+        patch("app.opening_score_delta.has_opening_evidence", new=spy_evidence),
+    ):
+        result = snapshot_opening_baseline(db_session, 123, "white")
+
+    assert result is None
+    spy_fresh.assert_not_called()
+    spy_evidence.assert_not_called()
+    assert "source=skipped_recompute_inflight" in caplog.text
+
+
+def test_snapshot_inflight_no_batch_with_evidence_skips(db_session, caplog):
+    # In-flight, no batch, but the user HAS evidence (cold-with-evidence during a
+    # recompute): can't prove a baseline -> NULL, source=skipped_recompute_inflight.
+    # The digest still never runs.
+    import logging
+
+    _seed_evidence(db_session, user_id=123, player_color="white")
+
+    spy_fresh = Mock(side_effect=AssertionError("digest must not run in-flight"))
+    with (
+        caplog.at_level(logging.INFO, logger="app.opening_score_delta"),
+        patch("app.opening_score_scheduler.is_recompute_inflight", return_value=True),
+        patch("app.opening_score_delta._is_batch_fresh", new=spy_fresh),
+    ):
+        result = snapshot_opening_baseline(db_session, 123, "white")
+
+    assert result is None
+    spy_fresh.assert_not_called()
+    assert "source=skipped_recompute_inflight" in caplog.text
+
+
+def test_snapshot_inflight_no_batch_no_evidence_empty(db_session, caplog):
+    # In-flight, no batch, no evidence (brand-new user): still a valid empty
+    # baseline so the session's first openings read as new, NOT skipped.
+    import json
+    import logging
+
+    spy_fresh = Mock(side_effect=AssertionError("digest must not run in-flight"))
+    with (
+        caplog.at_level(logging.INFO, logger="app.opening_score_delta"),
+        patch("app.opening_score_scheduler.is_recompute_inflight", return_value=True),
+        patch("app.opening_score_delta._is_batch_fresh", new=spy_fresh),
+    ):
+        result = snapshot_opening_baseline(db_session, 123, "white")
+
+    assert json.loads(result) == {}
+    spy_fresh.assert_not_called()
+    assert "source=empty_no_evidence" in caplog.text
+
+
+def test_snapshot_quiescent_with_batch_still_proves_freshness(db_session):
+    # The in-flight gate is IN-FLIGHT-ONLY: a quiescent scheduler (default stub
+    # False) must STILL reach the digest and capture the confident baseline. A
+    # pending-but-not-running recompute is deliberately not gated here.
+    import json
+
+    from app import opening_score_delta as osd
+
+    batch_id = _make_batch(db_session)  # fresh fingerprints
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
+    db_session.commit()
+
+    spy_fresh = Mock(wraps=osd._is_batch_fresh)
+    with patch.object(osd, "_is_batch_fresh", new=spy_fresh):
+        snap = snapshot_opening_baseline(db_session, 123, "white")
+
+    spy_fresh.assert_called_once()
+    assert json.loads(snap) == {RUY_KEY: 41.0}
 
 
 def test_delta_does_not_call_refresh_now(db_session):
@@ -410,7 +512,7 @@ def test_game_start_succeeds_when_baseline_snapshot_fails(client, auth_headers, 
     # Endpoint contract: a snapshot failure degrades the baseline to NULL but the
     # game must still start.
     with patch(
-        "app.opening_score_delta.proven_fresh_opening_scores",
+        "app.opening_score_delta.list_cached_opening_scores",
         side_effect=RuntimeError("db boom"),
     ):
         resp = client.post(

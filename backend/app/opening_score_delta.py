@@ -30,7 +30,6 @@ from app.opening_cache import (
     _is_batch_fresh,
     has_opening_evidence,
     list_cached_opening_scores,
-    proven_fresh_opening_scores,
 )
 from app.opening_roots import get_opening_roots, played_opening_chain
 
@@ -72,19 +71,56 @@ def snapshot_opening_baseline(
 
     NON-BLOCKING (g-fix-start-latency): this runs on the game/drill start hot path
     and must NEVER wait on the opening-score scheduler. It reads the latest cached
-    batch directly via ``proven_fresh_opening_scores`` (no ``refresh_now``, no
-    enqueue, no scheduler probe) and only returns a confident baseline when that
-    batch is PROVABLY current — registry + raw-input fingerprints match and no
-    stale branch keys. A stale or cold-with-evidence cache yields NULL instead:
-    diffing a stale "before" against the end-of-session fresh "after" would
-    over-attribute prior sessions' gains to the just-ended one, so degrading to
-    "no delta" is preferred over a misattributed one. Only a user with genuinely
-    no evidence gets the empty ``"{}"`` baseline.
+    batch directly via ``list_cached_opening_scores`` (no ``refresh_now``, no
+    enqueue, no blocking) and only returns a confident baseline when that batch is
+    PROVABLY current — registry + raw-input fingerprints match and no stale branch
+    keys (``_is_batch_fresh``). A stale or cold-with-evidence cache yields NULL
+    instead: diffing a stale "before" against the end-of-session fresh "after"
+    would over-attribute prior sessions' gains to the just-ended one, so degrading
+    to "no delta" is preferred over a misattributed one. Only a user with
+    genuinely no evidence gets the empty ``"{}"`` baseline.
+
+    CHEAP-GATE (g-1iul): the freshness proof (``_is_batch_fresh`` ->
+    ``raw_evidence_inputs_digest``) is O(evidence) and python-chess-heavy, so it
+    ballooned to ~9.6s when it serialized (GIL-bound) against a RUNNING background
+    recompute. This snapshot is ONE-SHOT (no later poll re-checks it), so it gates
+    that digest behind an IN-FLIGHT-ONLY probe (``is_recompute_inflight``), NOT the
+    broader pending-or-in-flight ``is_recompute_scheduled`` the poll uses: a
+    merely-pending entry is idle (no GIL contention, only the residual ~1.3s digest
+    tracked by g-mxeo), and gating on it would PERMANENTLY drop the baseline for
+    any session that starts during the common debounce window. So only a RUNNING
+    recompute makes the snapshot skip the digest and degrade to no-baseline.
     """
     t0 = time.perf_counter()
     source = "failed"
     try:
-        batch, rows, is_fresh = proven_fresh_opening_scores(db, user_id, player_color)
+        # Cheap indexed batch+rows read first (no fingerprint/digest).
+        batch, rows = list_cached_opening_scores(db, user_id, player_color)
+
+        # IN-FLIGHT-ONLY gate (lazy import: the scheduler imports opening_cache at
+        # module load, so a top-level import risks a cycle). A RUNNING recompute is
+        # the only thing that makes the O(evidence) digest serialize against the
+        # worker (the 9.6s pathology); skip it. A pending/debounced entry is
+        # deliberately NOT gated here (see docstring) so its fresh baseline is still
+        # captured.
+        from app.opening_score_scheduler import is_recompute_inflight
+
+        if is_recompute_inflight(user_id, player_color):
+            if batch is not None:
+                # The running worker is rebuilding the batch and we cannot prove the
+                # current one fresh without paying the digest it would serialize
+                # against. Degrade to no-baseline (NO evidence probe, NO digest).
+                source = "skipped_recompute_inflight"
+                return None
+            # No batch: only now pay the evidence probe to keep a brand-new user's
+            # valid empty baseline. Confined to the batch-is-None case.
+            if has_opening_evidence(db, user_id, player_color):
+                source = "skipped_recompute_inflight"
+                return None
+            source = "empty_no_evidence"
+            return "{}"
+
+        # Quiescent: prove freshness (the O(evidence) digest; residual g-mxeo).
         if batch is None:
             # No batch yet. Distinguish a brand-new user (no evidence -> valid
             # empty baseline) from a cold cache that still has evidence (cannot
@@ -95,7 +131,7 @@ def snapshot_opening_baseline(
                 return None
             source = "empty_no_evidence"
             return "{}"
-        if not is_fresh:
+        if not _is_batch_fresh(db, batch, rows):
             # Cache exists but is provably stale (evidence/registry drift or legacy
             # branch keys). Persisting it would reintroduce the misattribution.
             source = "skipped_stale"
@@ -250,8 +286,8 @@ def compute_opening_score_delta(
     (see ``_delta_items_from_cache``).
 
     CACHE-ONLY (g-xmhv): this path NEVER proves freshness. The O(evidence) digest
-    (``raw_evidence_inputs_digest``) that ``proven_fresh_opening_scores`` paid was
-    the real ~9s cost at game-end — building the warm items from
+    (``raw_evidence_inputs_digest``) that the freshness proof paid was the real ~9s
+    cost at game-end — building the warm items from
     ``list_cached_opening_scores`` is cheap; PROVING them fresh is not. So we serve
     the warm items UNVERIFIED, log ``source=cached_unverified``, and let the poll
     reconcile. Fixes the residual 9.95s ``/api/game/end``.

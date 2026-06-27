@@ -189,6 +189,20 @@ class OpeningScoreScheduler:
         with self._lock:
             return key in self._pending or key in self._inflight
 
+    def is_inflight(self, user_id: int, player_color: str) -> bool:
+        """Non-mutating: is a recompute for this key RUNNING right now?
+
+        Narrower than ``is_scheduled`` (which also counts a pending/debounced
+        entry). The one-shot baseline snapshot gates on this: only a RUNNING
+        recompute makes the O(evidence) digest serialize against the worker (the
+        9.6s GIL-contention case); a merely-pending entry is idle. Guarded by the
+        same lock the worker mutates ``_inflight`` under, so it observes a
+        consistent set.
+        """
+        key: Key = (user_id, player_color)
+        with self._lock:
+            return key in self._inflight
+
     # ------------------------------------------------------------------
     # Synchronous test surface
     # ------------------------------------------------------------------
@@ -403,6 +417,25 @@ def is_recompute_scheduled(user_id: int, player_color: str) -> bool:
     except Exception:
         logger.exception(
             "opening score is_scheduled probe failed",
+            extra={"user_id": user_id, "player_color": player_color},
+        )
+        return False
+
+
+def is_recompute_inflight(user_id: int, player_color: str) -> bool:
+    """Non-mutating probe: is a recompute for this key RUNNING right now?
+
+    Narrower than ``is_recompute_scheduled`` (pending OR in-flight). The one-shot
+    baseline snapshot gates the O(evidence) digest on this: only a RUNNING
+    recompute causes the GIL-contention pathology. Best-effort (any scheduler
+    error is logged and reported as "not in-flight") so the start hot path can
+    never 500 on a scheduler fault.
+    """
+    try:
+        return _scheduler.is_inflight(user_id, player_color)
+    except Exception:
+        logger.exception(
+            "opening score is_inflight probe failed",
             extra={"user_id": user_id, "player_color": player_color},
         )
         return False
