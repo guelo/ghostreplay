@@ -41,10 +41,16 @@ def _stub_scheduler():
     recomputed away. Neither the start-path snapshot (g-fix-start-latency) nor the
     end-path delta (g-fix-end-latency) calls refresh_now anymore, but the end-path
     compute now enqueues a BACKGROUND request_recompute — stub it to a no-op so no
-    real worker fires (and so tests can assert it WAS enqueued)."""
+    real worker fires (and so tests can assert it WAS enqueued).
+
+    ``is_recompute_scheduled`` is the cheap NOT-fresh gate the poll consults
+    (g-xmhv); default it to False (quiescent) so freshness tests reach
+    ``_is_batch_fresh`` deterministically regardless of cross-test scheduler state.
+    Tests exercising the scheduled branch override it locally."""
     with (
         patch("app.opening_score_scheduler.request_recompute", return_value=None),
         patch("app.opening_score_scheduler.refresh_now", return_value=True),
+        patch("app.opening_score_scheduler.is_recompute_scheduled", return_value=False),
     ):
         yield
 
@@ -338,6 +344,34 @@ def test_delta_enqueues_background_recompute(db_session):
     mock_enqueue.assert_called_once_with(123, "white")
 
 
+def test_delta_terminal_post_never_proves_freshness(db_session):
+    # g-xmhv: the terminal POST must serve the warm banner WITHOUT the O(evidence)
+    # freshness proof (raw_evidence_inputs_digest), which was the residual ~9s cost.
+    # Patch the raw-input fingerprint to fail-if-called; the warm delta is still
+    # built from list_cached_opening_scores (digest is OFF the terminal path).
+    # compute swallows exceptions, so assert_not_called() is the load-bearing check.
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)  # seeds fingerprints BEFORE the patch
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    mock_fp = Mock(
+        side_effect=AssertionError("freshness proof must not run on terminal POST")
+    )
+    with (
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", new=mock_fp),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        items = compute_opening_score_delta(db_session, session)
+
+    mock_fp.assert_not_called()
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[RUY_KEY].after == pytest.approx(44.0)
+    assert by_key[RUY_KEY].delta == pytest.approx(3.0)
+
+
 def test_delta_empty_when_cold_no_batch(db_session):
     # Cold cache (an opening was crossed but no batch exists yet): the compute
     # returns NO items rather than an all-None banner — the poll fills it in once
@@ -366,7 +400,9 @@ def test_delta_logs_source_and_compute_ms(db_session, caplog):
         patch(PATCH_ROOTS, return_value=_ruy_roots()),
     ):
         compute_opening_score_delta(db_session, session)
-    assert "source=cached_fresh" in caplog.text
+    # g-xmhv: the terminal POST serves the warm banner UNVERIFIED (no freshness
+    # proof), so it logs source=cached_unverified, not cached_fresh.
+    assert "source=cached_unverified" in caplog.text
     assert "compute_ms=" in caplog.text
 
 
@@ -618,6 +654,64 @@ def test_read_delta_never_touches_scheduler(db_session):
 
     mock_refresh.assert_not_called()
     mock_enqueue.assert_not_called()
+
+
+def test_read_delta_skips_digest_while_recompute_scheduled(db_session):
+    # g-xmhv: while a recompute is pending/in-flight, the batch is by definition not
+    # yet known-fresh, so the poll returns is_fresh=False CHEAPLY — the O(evidence)
+    # digest must NOT run (this is what killed the 9-17s poll GETs). The warm items
+    # are still served. read swallows exceptions, so assert_not_called() is the
+    # load-bearing check (a stray digest call would degrade items to []).
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    mock_fp = Mock(
+        side_effect=AssertionError("digest must not run while recompute scheduled")
+    )
+    with (
+        patch(
+            "app.opening_score_scheduler.is_recompute_scheduled", return_value=True
+        ),
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", new=mock_fp),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    assert is_fresh is False
+    mock_fp.assert_not_called()
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[RUY_KEY].after == pytest.approx(44.0)
+
+
+def test_read_delta_proves_freshness_once_when_quiescent(db_session):
+    # g-xmhv: a quiescent scheduler is the ONLY path that proves freshness, and it
+    # runs the O(evidence) digest exactly ONCE, returning is_fresh per the verdict.
+    import json
+    session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
+    _insert_moves(db_session, session.id, RUY_SANS)
+    batch_id = _make_batch(db_session)  # fresh fingerprints
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    real_fp = opening_score_raw_inputs_fingerprint(db_session, 123, "white")
+    spy = Mock(return_value=real_fp)
+    with (
+        patch(
+            "app.opening_score_scheduler.is_recompute_scheduled", return_value=False
+        ),
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", new=spy),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        items, is_fresh = read_opening_score_delta(db_session, session)
+
+    spy.assert_called_once()
+    assert is_fresh is True
+    by_key = {item.opening_key: item for item in items}
+    assert by_key[RUY_KEY].delta == pytest.approx(3.0)
 
 
 # ---------------------------------------------------------------------------
@@ -945,6 +1039,48 @@ def test_game_end_does_not_block_on_scheduler(client, auth_headers, db_session):
     assert resp.status_code == 200
     mock_refresh.assert_not_called()
     # The warm delta is still served (non-blocking, not degraded).
+    changes = {c["opening_key"]: c for c in resp.json()["opening_score_changes"]}
+    assert changes[RUY_KEY]["delta"] == pytest.approx(3.0)
+
+
+def test_game_end_never_proves_freshness(client, auth_headers, db_session):
+    # g-xmhv headline regression: /api/game/end returns 200 with the warm banner
+    # while BOTH refresh_now AND the O(evidence) digest are fail-if-called — proving
+    # the residual 9.95s freshness proof is OFF the terminal POST path. compute
+    # swallows exceptions, so the assert_not_called() pair is the load-bearing check.
+    import json
+    start = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "white"},
+        headers=auth_headers(user_id=123),
+    )
+    session_id = start.json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.opening_score_baseline = json.dumps({RUY_KEY: 41.0})
+    db_session.commit()
+    _insert_moves(db_session, session_id, RUY_SANS)
+    batch_id = _make_batch(db_session)  # seeds fingerprints BEFORE the patch
+    _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
+    db_session.commit()
+
+    mock_refresh = Mock(side_effect=AssertionError("refresh_now must not run"))
+    mock_fp = Mock(
+        side_effect=AssertionError("freshness digest must not run on terminal POST")
+    )
+    with (
+        patch("app.opening_score_scheduler.refresh_now", new=mock_refresh),
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", new=mock_fp),
+        patch(PATCH_ROOTS, return_value=_ruy_roots()),
+    ):
+        resp = client.post(
+            "/api/game/end",
+            json={"session_id": session_id, "result": "checkmate_win", "pgn": "1. e4", "is_rated": False},
+            headers=auth_headers(user_id=123),
+        )
+
+    assert resp.status_code == 200
+    mock_refresh.assert_not_called()
+    mock_fp.assert_not_called()
     changes = {c["opening_key"]: c for c in resp.json()["opening_score_changes"]}
     assert changes[RUY_KEY]["delta"] == pytest.approx(3.0)
 

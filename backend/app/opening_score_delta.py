@@ -25,9 +25,11 @@ from pydantic import BaseModel
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
-from app.models import GameSession, SessionMove
+from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
 from app.opening_cache import (
+    _is_batch_fresh,
     has_opening_evidence,
+    list_cached_opening_scores,
     proven_fresh_opening_scores,
 )
 from app.opening_roots import get_opening_roots, played_opening_chain
@@ -143,35 +145,47 @@ def _session_played_fens(db: Session, session_id) -> list[str]:
 
 def _delta_items_from_cache(
     db: Session, session: GameSession
-) -> tuple[list[OpeningScoreDeltaItem], bool, str]:
-    """Build the played-chain delta from the latest cached batch — NON-BLOCKING.
+) -> tuple[
+    list[OpeningScoreDeltaItem],
+    OpeningScoreBatch | None,
+    list[UserOpeningScore],
+    str,
+]:
+    """Build the played-chain delta from the latest cached batch — CHEAP.
 
-    Never touches the opening-score scheduler (no ``refresh_now``, no enqueue, no
-    wait). Returns ``(items, is_fresh, source)`` where ``is_fresh`` is the
-    poll-stop signal, NOT a gate on the items:
+    Reads the latest batch + rows via ``list_cached_opening_scores`` (indexed
+    batch+rows lookup, NO fingerprint) and never touches the scheduler. The
+    expensive O(evidence) freshness proof (``_is_batch_fresh`` ->
+    ``raw_evidence_inputs_digest``) is deliberately NOT done here (g-xmhv): the
+    terminal POST never needs it, and the poll runs it at most once, gated behind a
+    cheaper signal (see ``read_opening_score_delta``).
 
-    - empty played chain -> ``([], True, "no_chain")`` — nothing will ever appear,
-      so the frontend poll stops after one read.
-    - cold cache (no batch yet) -> ``([], False, "skipped_cold")`` — the poll keeps
-      going until a batch builds; meanwhile no all-``None`` banner is shown.
-    - a warm batch -> items built from its rows for ANY freshness, with ``is_fresh``
-      carrying the ``proven_fresh_opening_scores`` verdict (``"cached_fresh"`` /
-      ``"cached_stale"``). A stale warm "after" is best-effort: ``opening_score`` is
-      a 0-100 mastery score the just-played plies can move either way, so a slightly
-      stale "after" may transiently over- or under-state the eventual fresh delta —
-      corrected once the poll's ``is_fresh`` read lands.
+    Returns ``(items, batch, rows, status)`` where ``status`` is one of:
+
+    - ``"no_chain"``: empty played chain -> ``items == []``; nothing will ever
+      appear, so the poll stops after one read.
+    - ``"skipped_cold"``: no batch yet -> ``items == []``; the poll keeps going
+      until a batch builds (no all-``None`` banner is shown meanwhile).
+    - ``"warm"``: ``items`` built from the batch rows for ANY freshness. A warm
+      "after" is best-effort: ``opening_score`` is a 0-100 mastery score the
+      just-played plies can move either way, so a slightly stale "after" may
+      transiently over- or under-state the eventual fresh delta — corrected once
+      the poll's freshness read lands.
+
+    ``batch`` / ``rows`` are returned so the poll caller can run ``_is_batch_fresh``
+    on them without a second query (both empty for the non-``"warm"`` cases).
     """
     chain = played_opening_chain(
         _session_played_fens(db, session.id), get_opening_roots()
     )
     if not chain:
-        return [], True, "no_chain"
+        return [], None, [], "no_chain"
 
-    batch, rows, is_fresh = proven_fresh_opening_scores(
+    batch, rows = list_cached_opening_scores(
         db, session.user_id, session.player_color
     )
     if batch is None:
-        return [], False, "skipped_cold"
+        return [], None, [], "skipped_cold"
 
     rows_by_key = {row.opening_key: row for row in rows}
 
@@ -212,7 +226,7 @@ def _delta_items_from_cache(
                 is_new=is_new,
             )
         )
-    return items, is_fresh, "cached_fresh" if is_fresh else "cached_stale"
+    return items, batch, rows, "warm"
 
 
 def compute_opening_score_delta(
@@ -234,11 +248,21 @@ def compute_opening_score_delta(
     returning, holding the whole terminal action hostage to freshen a supplementary
     banner. The warm "after" served here is best-effort and is corrected by the poll
     (see ``_delta_items_from_cache``).
+
+    CACHE-ONLY (g-xmhv): this path NEVER proves freshness. The O(evidence) digest
+    (``raw_evidence_inputs_digest``) that ``proven_fresh_opening_scores`` paid was
+    the real ~9s cost at game-end — building the warm items from
+    ``list_cached_opening_scores`` is cheap; PROVING them fresh is not. So we serve
+    the warm items UNVERIFIED, log ``source=cached_unverified``, and let the poll
+    reconcile. Fixes the residual 9.95s ``/api/game/end``.
     """
     t0 = time.perf_counter()
     source = "failed"
     try:
-        items, _is_fresh, source = _delta_items_from_cache(db, session)
+        items, _batch, _rows, status = _delta_items_from_cache(db, session)
+        # The terminal POST never proves freshness: warm items are UNVERIFIED and
+        # reconciled by the poll. ``no_chain`` / ``skipped_cold`` log as-is.
+        source = "cached_unverified" if status == "warm" else status
         # Enqueue a BACKGROUND recompute so the cache converges (cold builds its
         # first batch; stale refreshes) for the poll to read. Lazy import mirrors
         # the historical load_cached_rows pattern: opening_score_scheduler imports
@@ -271,16 +295,36 @@ def read_opening_score_delta(
 ) -> tuple[list[OpeningScoreDeltaItem], bool]:
     """Non-blocking poll reader for GET /api/openings/score-delta/{session_id}.
 
-    Returns ``(items, is_fresh)`` from the latest cached batch WITHOUT touching the
+    Returns ``(items, is_fresh)`` from the latest cached batch WITHOUT blocking the
     scheduler — no ``refresh_now`` and (unlike the immediate compute) no
     ``request_recompute``: re-enqueuing on every poll would push the scheduler's
     ``quiet_window`` debounce forward and *delay* convergence. ``is_fresh`` tells the
     frontend when to stop polling (no chain / already-fresh) vs keep going (cold,
-    batch still building). Best-effort: any failure degrades to ``([], False)``.
+    batch still building / recompute pending). Best-effort: any failure degrades to
+    ``([], False)``.
+
+    Freshness costs an O(evidence) digest, so it is proven at most ONCE per poll
+    (g-xmhv): only a quiescent scheduler reaches ``_is_batch_fresh``. While a
+    recompute is pending/in-flight (``is_recompute_scheduled``) the batch is, by
+    definition, not yet known-fresh — return ``False`` CHEAPLY and let the next poll
+    re-check once the worker settles. This is what kills the 9-17s poll GETs.
     """
     try:
-        items, is_fresh, _source = _delta_items_from_cache(db, session)
-        return items, is_fresh
+        items, batch, rows, status = _delta_items_from_cache(db, session)
+        if status == "no_chain":
+            return items, True  # nothing will ever appear -> stop polling
+        if status == "skipped_cold":
+            return items, False  # batch still building -> keep polling
+        # status == "warm": items are served for any freshness; decide the poll-stop
+        # signal. Cheap NOT-fresh gate first (lazy import: the scheduler imports
+        # opening_cache at module load, so a top-level import risks a cycle).
+        from app.opening_score_scheduler import is_recompute_scheduled
+
+        if is_recompute_scheduled(session.user_id, session.player_color):
+            return items, False  # pending/in-flight recompute -> not yet fresh
+        # Quiescent: the O(evidence) fingerprint is the ONLY thing that may assert
+        # is_fresh=True, and it runs at most once here.
+        return items, _is_batch_fresh(db, batch, rows)
     except Exception:  # noqa: BLE001 — supplementary poll must never raise
         logger.warning(
             "opening delta poll failed session_id=%s",

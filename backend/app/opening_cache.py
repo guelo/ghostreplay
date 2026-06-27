@@ -377,6 +377,45 @@ def load_cached_rows(
     return batch, _snapshot_cached_rows(rows)
 
 
+def _is_batch_fresh(
+    db: Session,
+    batch: OpeningScoreBatch,
+    rows: list[UserOpeningScore],
+) -> bool:
+    """Freshness predicate for an ALREADY-FETCHED batch + its rows.
+
+    Single source of truth for "would ``recompute_opening_scores_if_needed`` serve
+    this batch UNCHANGED": the registry fingerprint matches, the raw-input
+    fingerprint matches, and there are no stale branch-key rows. (Time-decay
+    staleness is intentionally ignored — it perturbs scores by a small wall-clock
+    amount, not by un-folded evidence, so gating on it would gut baseline coverage
+    for no correctness benefit.)
+
+    EXPENSIVE: ``opening_score_raw_inputs_fingerprint`` -> ``raw_evidence_inputs_digest``
+    is O(evidence volume) (it full-scans + hashes every session_moves +
+    analysis_cache row for the user). Hot paths that only need the items must NOT
+    call this; the end-of-session delta poll gates it behind the cheap
+    ``is_recompute_scheduled`` probe so it runs at most once per poll session, and
+    only when the scheduler is quiescent (g-xmhv).
+
+    ``batch`` carries its own ``user_id`` / ``player_color``, so callers need not
+    re-thread them. Mirrors the fast-path conditions in
+    ``recompute_opening_scores_if_needed``; if that gate's freshness predicate
+    changes, update this helper to match.
+    """
+    registry_fingerprint = opening_score_inputs_fingerprint(
+        get_opening_graph(), get_opening_roots()
+    )
+    raw_fingerprint = opening_score_raw_inputs_fingerprint(
+        db, batch.user_id, batch.player_color
+    )
+    return (
+        batch.registry_fingerprint == registry_fingerprint
+        and batch.inputs_fingerprint == raw_fingerprint
+        and not _batch_has_stale_branch_keys(rows)
+    )
+
+
 def proven_fresh_opening_scores(
     db: Session,
     user_id: int,
@@ -386,33 +425,17 @@ def proven_fresh_opening_scores(
     the scheduler (no ``refresh_now``, no ``request_recompute``, no enqueue, no wait).
 
     Returns ``(batch, rows, is_fresh)``. ``is_fresh`` is True only when a batch
-    exists AND ``recompute_opening_scores_if_needed`` would serve it UNCHANGED:
-    the registry fingerprint matches, the raw-input fingerprint matches, and there
-    are no stale branch-key rows. (Time-decay staleness is intentionally ignored —
-    it perturbs scores by a small wall-clock amount, not by un-folded evidence, so
-    gating on it would gut baseline coverage for no correctness benefit.)
+    exists AND ``_is_batch_fresh`` holds (see it for the predicate).
 
     Cost: one batch+rows read plus the cheap raw-input digest (``cheap SQL, no
     overlay`` — the ~2.6s python-chess overlay is never built). Built for the
     session-start hot path, which must capture a confident baseline only when the
     cache is PROVABLY current and otherwise degrade to NULL without blocking.
-
-    Mirrors the fast-path conditions in ``recompute_opening_scores_if_needed``; if
-    that gate's freshness predicate changes, update this helper to match.
     """
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
     if batch is None:
         return None, [], False
-    registry_fingerprint = opening_score_inputs_fingerprint(
-        get_opening_graph(), get_opening_roots()
-    )
-    raw_fingerprint = opening_score_raw_inputs_fingerprint(db, user_id, player_color)
-    is_fresh = (
-        batch.registry_fingerprint == registry_fingerprint
-        and batch.inputs_fingerprint == raw_fingerprint
-        and not _batch_has_stale_branch_keys(rows)
-    )
-    return batch, rows, is_fresh
+    return batch, rows, _is_batch_fresh(db, batch, rows)
 
 
 def list_position_scores(
