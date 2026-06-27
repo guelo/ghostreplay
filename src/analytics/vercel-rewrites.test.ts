@@ -7,6 +7,12 @@ import vercelConfig from '../../vercel.json'
 // rule, and all three must precede the SPA catch-all — otherwise remote config
 // mis-routes to the ingestion host or `/ingest/*` is swallowed by index.html.
 //
+// The broad rule MUST use the raw-regex `/ingest/(.*)` + `$1`, NOT the
+// path-segment `:path*` form: Vercel's `:path*` does not match a trailing
+// slash, so the SDK's trailing-slash ingestion endpoints (`/e/`, `/i/v0/e/`,
+// `/decide/`, `/flags/`, `/batch/`) fall through to the SPA catch-all and a
+// POST to static index.html returns 405 (g-ml4u). `(.*)` matches slashes.
+//
 // Vite resolves this JSON import relative to the test file at transform time, so
 // it's robust regardless of cwd or the jsdom test environment.
 describe('vercel.json PostHog rewrites', () => {
@@ -27,15 +33,16 @@ describe('vercel.json PostHog rewrites', () => {
     )
   })
 
-  it('routes the broad ingestion path to the ingestion host', () => {
-    expect(dest('/ingest/:path*')).toBe('https://us.i.posthog.com/:path*')
+  it('routes the broad ingestion path to the ingestion host via slash-agnostic regex', () => {
+    // `(.*)` (not `:path*`) so trailing-slash endpoints match — see file header.
+    expect(dest('/ingest/(.*)')).toBe('https://us.i.posthog.com/$1')
   })
 
   it('orders the assets rules before the broad ingestion rule', () => {
     expect(idx('/ingest/static/:path*')).toBeGreaterThanOrEqual(0)
     expect(idx('/ingest/array/:path*')).toBeGreaterThanOrEqual(0)
-    expect(idx('/ingest/static/:path*')).toBeLessThan(idx('/ingest/:path*'))
-    expect(idx('/ingest/array/:path*')).toBeLessThan(idx('/ingest/:path*'))
+    expect(idx('/ingest/static/:path*')).toBeLessThan(idx('/ingest/(.*)'))
+    expect(idx('/ingest/array/:path*')).toBeLessThan(idx('/ingest/(.*)'))
   })
 
   it('orders all PostHog rules before the SPA catch-all', () => {
@@ -43,6 +50,6 @@ describe('vercel.json PostHog rewrites', () => {
     expect(catchAll).toBeGreaterThanOrEqual(0)
     expect(idx('/ingest/static/:path*')).toBeLessThan(catchAll)
     expect(idx('/ingest/array/:path*')).toBeLessThan(catchAll)
-    expect(idx('/ingest/:path*')).toBeLessThan(catchAll)
+    expect(idx('/ingest/(.*)')).toBeLessThan(catchAll)
   })
 })
