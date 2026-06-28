@@ -330,38 +330,35 @@ def _forward_reachable_position_ids(
     return reachable
 
 
-def _upsert_opportunity_event(
-    db: Session,
-    *,
-    session_id: uuid.UUID,
-    blunder_id: int,
-    occurred_at,
-    opportunity: bool,
-    reached: bool,
-) -> None:
-    values = {
-        "session_id": session_id,
-        "blunder_id": blunder_id,
-        "occurred_at": occurred_at,
-        "opportunity": opportunity,
-        "reached": reached,
-    }
+def _bulk_upsert_opportunity_events(db: Session, rows: list[dict]) -> None:
+    """Upsert many opportunity-event rows in a single statement.
+
+    ``rows`` is a list of dicts with keys ``session_id``, ``blunder_id``,
+    ``occurred_at``, ``opportunity``, ``reached``. On sqlite/postgresql this emits
+    one multi-row ``INSERT ... ON CONFLICT ... VALUES`` (the dialect ``.values()``
+    accepts a list of dicts), collapsing the former one-round-trip-per-blunder loop
+    (g-b809). The generic-dialect fallback keeps the per-row query-then-merge path.
+    """
+    if not rows:
+        return
+
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":
-        stmt = sqlite_insert(BlunderOpportunityEvent).values(values)
+        stmt = sqlite_insert(BlunderOpportunityEvent).values(rows)
     elif dialect_name == "postgresql":
-        stmt = postgresql_insert(BlunderOpportunityEvent).values(values)
+        stmt = postgresql_insert(BlunderOpportunityEvent).values(rows)
     else:
-        existing = db.query(BlunderOpportunityEvent).filter(
-            BlunderOpportunityEvent.session_id == session_id,
-            BlunderOpportunityEvent.blunder_id == blunder_id,
-        ).first()
-        if existing:
-            existing.occurred_at = occurred_at
-            existing.opportunity = opportunity
-            existing.reached = reached
-        else:
-            db.add(BlunderOpportunityEvent(**values))
+        for values in rows:
+            existing = db.query(BlunderOpportunityEvent).filter(
+                BlunderOpportunityEvent.session_id == values["session_id"],
+                BlunderOpportunityEvent.blunder_id == values["blunder_id"],
+            ).first()
+            if existing:
+                existing.occurred_at = values["occurred_at"]
+                existing.opportunity = values["opportunity"]
+                existing.reached = values["reached"]
+            else:
+                db.add(BlunderOpportunityEvent(**values))
         return
 
     stmt = stmt.on_conflict_do_update(
@@ -373,6 +370,29 @@ def _upsert_opportunity_event(
         },
     )
     db.execute(stmt)
+
+
+def _upsert_opportunity_event(
+    db: Session,
+    *,
+    session_id: uuid.UUID,
+    blunder_id: int,
+    occurred_at,
+    opportunity: bool,
+    reached: bool,
+) -> None:
+    _bulk_upsert_opportunity_events(
+        db,
+        [
+            {
+                "session_id": session_id,
+                "blunder_id": blunder_id,
+                "occurred_at": occurred_at,
+                "opportunity": opportunity,
+                "reached": reached,
+            }
+        ],
+    )
 
 
 @dataclass
@@ -545,27 +565,39 @@ def _compute_blunder_opportunity_events(
         .filter(BlunderOpportunityEvent.session_id == session_id, Blunder.user_id == user_id)
         .all()
     )
-    for event in existing_events:
-        if event.blunder_id not in matched:
-            db.delete(event)
+    # One DELETE for all stale rows, keyed by primary id. Deriving stale_ids from
+    # the already-loaded, Blunder.user_id-scoped existing_events preserves that
+    # scoping and bounds the IN-list by stale-row count (g-b809).
+    stale_ids = [e.id for e in existing_events if e.blunder_id not in matched]
+    if stale_ids:
+        db.query(BlunderOpportunityEvent).filter(
+            BlunderOpportunityEvent.id.in_(stale_ids)
+        ).delete(synchronize_session=False)
 
     occurred_at = normal_play_started_at(game_session)
-    for blunder_id, (opportunity, reached) in matched.items():
-        _upsert_opportunity_event(
-            db,
-            session_id=session_id,
-            blunder_id=blunder_id,
-            occurred_at=occurred_at,
-            opportunity=opportunity,
-            reached=reached,
-        )
+    # One INSERT ... ON CONFLICT over all matched blunders (g-b809). Matched and
+    # stale id sets are disjoint by construction, so DELETE-then-INSERT is
+    # behavior-preserving.
+    _bulk_upsert_opportunity_events(
+        db,
+        [
+            {
+                "session_id": session_id,
+                "blunder_id": blunder_id,
+                "occurred_at": occurred_at,
+                "opportunity": opportunity,
+                "reached": reached,
+            }
+            for blunder_id, (opportunity, reached) in matched.items()
+        ],
+    )
     # NB: no commit here. The caller owns the commit so the deferred ghost-graph
     # edges (staged by _upsert_session_position_graph with autoflush off) are
     # flushed under a distinct ``evidence_commit`` timing stage rather than being
-    # misattributed to this compute stage. The event INSERT/UPDATEs above already
-    # executed within this stage (sqlite/postgres issue them immediately via
-    # _upsert_opportunity_event); only their durability and any pending ORM deletes
-    # finalize at the caller's commit. Direct callers (tests/scripts) must commit.
+    # misattributed to this compute stage. Both the bulk DELETE and the bulk INSERT
+    # above already emit SQL within this stage (autoflush is off; ``.delete()`` and
+    # ``db.execute()`` issue immediately); only their durability finalizes at the
+    # caller's commit. Direct callers (tests/scripts) must commit.
 
 
 def _upsert_analysis_cache(
@@ -741,12 +773,14 @@ def _run_graph_evidence_txn(
             player_color=player_color,
         )
     # Single commit that flushes the deferred ghost-graph edges staged above
-    # (db.add with autoflush off) plus any pending ORM event deletes, and finalizes
-    # durability. NB: for sqlite/postgres the opportunity-event INSERT/UPDATEs
-    # already executed inside the opportunity_events stage (they issue immediately),
-    # so this stage owns the graph-edge flush + commit cost — and IntegrityErrors
-    # surfacing only at flush/commit — not the per-event write round-trips. Timed
-    # separately so deferred-flush/commit cost is not misattributed to compute.
+    # (db.add with autoflush off) and finalizes durability. NB: for sqlite/postgres
+    # both the opportunity-event INSERT/UPDATEs and the bulk stale-event DELETE
+    # already executed inside the opportunity_events stage (they issue immediately;
+    # the DELETE uses synchronize_session=False so it emits SQL there, not at
+    # commit), so this stage owns the graph-edge flush + commit cost — and
+    # IntegrityErrors surfacing only at flush/commit — not the per-event write
+    # round-trips. Timed separately so deferred-flush/commit cost is not
+    # misattributed to compute.
     with _timed_side_effect(
         "evidence_commit",
         session_id=session_id,

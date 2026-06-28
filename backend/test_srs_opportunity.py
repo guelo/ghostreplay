@@ -669,6 +669,43 @@ def _count_moves_queries(db_session):
         event.remove(engine, "before_cursor_execute", counter)
 
 
+class _OpportunityEventWriteCounter:
+    r"""Count INSERT vs DELETE statements that touch ``blunder_opportunity_events``.
+
+    The g-b809 perf guard asserts the per-blunder upsert loop collapsed to one
+    INSERT and the per-event ``db.delete()`` loop collapsed to one DELETE. We
+    classify by the statement's leading verb so the ``existing_events`` SELECT (a
+    JOIN that also names the table) is ignored — only writes are tallied.
+    """
+
+    _TABLE = "blunder_opportunity_events"
+
+    def __init__(self) -> None:
+        self.insert = 0
+        self.delete = 0
+
+    def __call__(self, conn, cursor, statement, parameters, context, executemany):
+        lowered = statement.lower()
+        if self._TABLE not in lowered:
+            return
+        verb = lowered.lstrip()
+        if verb.startswith("insert"):
+            self.insert += 1
+        elif verb.startswith("delete"):
+            self.delete += 1
+
+
+@contextlib.contextmanager
+def _count_opportunity_event_writes(db_session):
+    counter = _OpportunityEventWriteCounter()
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", counter)
+    try:
+        yield counter
+    finally:
+        event.remove(engine, "before_cursor_execute", counter)
+
+
 def test_forward_reachable_multi_ply_and_radius_cutoff(db_session):
     user_id = 123
     fens = _distinct_king_fens(5)
@@ -834,6 +871,120 @@ def test_opportunity_traversal_cost_is_bounded_and_independent_of_blunder_count(
     assert few_queries <= OPPORTUNITY_ANCESTOR_RADIUS_PLY
     # And it does not scale with blunder count: 16× more blunders, same query count.
     assert many_queries == few_queries
+
+
+def _build_reached_session_with_stale_events(
+    db_session, *, user_id: int, reached_count: int, stale_count: int
+):
+    """A session with ``reached_count`` reached blunders and ``stale_count``
+    pre-existing opportunity events that the recompute must delete.
+
+    Each reached blunder sits on a position the session actually reaches via a
+    ``SessionMove.fen_after`` (so ``opportunity``/``reached`` are both true) — these
+    drive the bulk INSERT. Each stale event points at a blunder on an unrelated
+    position with no in-edges, so it is neither reached nor forward-reachable and
+    the recompute drops it via the bulk DELETE. All blunders belong to ``user_id``
+    so the user-scoped ``existing_events`` query sees the stale rows.
+
+    Distinct king-only FENs satisfy ``uq_blunders_user_position`` (one blunder per
+    position).
+    """
+    fens = _distinct_king_fens(reached_count + stale_count)
+    game_session = _session(db_session, user_id=user_id)
+
+    reached_blunders = []
+    for i, fen in enumerate(fens[:reached_count]):
+        pos = _position(db_session, user_id=user_id, fen=fen, active_color="white")
+        reached_blunders.append(_blunder(db_session, user_id=user_id, position=pos))
+        db_session.add(
+            SessionMove(
+                session_id=game_session.id,
+                move_number=i + 1,
+                color="black",
+                move_san=f"m{i}",
+                fen_after=fen,
+            )
+        )
+
+    stale_blunders = []
+    for fen in fens[reached_count:]:
+        pos = _position(db_session, user_id=user_id, fen=fen, active_color="white")
+        blunder = _blunder(db_session, user_id=user_id, position=pos)
+        stale_blunders.append(blunder)
+        db_session.add(
+            BlunderOpportunityEvent(
+                blunder_id=blunder.id,
+                session_id=game_session.id,
+                occurred_at=datetime.now(timezone.utc),
+                opportunity=True,
+                reached=True,
+            )
+        )
+
+    db_session.commit()
+    return game_session, reached_blunders, stale_blunders
+
+
+@pytest.mark.parametrize("reached_count,stale_count", [(5, 3), (40, 12)])
+def test_opportunity_event_writes_are_batched(db_session, reached_count, stale_count):
+    """g-b809 perf guard: the per-blunder upsert loop and the per-event delete loop
+    each collapse to a single statement, independent of blunder/event count.
+
+    Stale rows are essential: without them a leftover per-row ``db.delete()`` loop
+    would emit 0 deletes and pass silently, so the fixture seeds rows that must be
+    removed and asserts both that exactly one DELETE ran and that they are gone.
+    """
+    user_id = 300 + reached_count
+    game_session, reached_blunders, stale_blunders = _build_reached_session_with_stale_events(
+        db_session, user_id=user_id, reached_count=reached_count, stale_count=stale_count
+    )
+
+    # Count only the recompute: the listener is registered after fixture setup, so
+    # fixture INSERTs are excluded without needing a counter reset.
+    with _count_opportunity_event_writes(db_session) as counter:
+        _compute_blunder_opportunity_events(
+            db_session, session_id=game_session.id, user_id=user_id, player_color="white"
+        )
+        # Snapshot before commit: both writes must emit inside the compute stage,
+        # not be deferred to the caller's commit. (synchronize_session=False is what
+        # moves the DELETE here; a leftover per-row ORM delete loop would instead
+        # flush at commit and break the before/after split below.)
+        insert_in_compute = counter.insert
+        delete_in_compute = counter.delete
+        db_session.commit()
+
+    # One INSERT over all matched blunders (independent of reached_count) and one
+    # DELETE over all stale rows (independent of stale_count) — no per-row trips —
+    # and both landed in the compute stage with the commit adding nothing.
+    assert insert_in_compute == 1
+    assert delete_in_compute == 1
+    assert counter.insert == 1
+    assert counter.delete == 1
+
+    # The stale events are actually gone (proves the bulk DELETE ran, not a no-op).
+    stale_ids = [b.id for b in stale_blunders]
+    assert (
+        db_session.query(BlunderOpportunityEvent)
+        .filter(
+            BlunderOpportunityEvent.session_id == game_session.id,
+            BlunderOpportunityEvent.blunder_id.in_(stale_ids),
+        )
+        .count()
+        == 0
+    )
+
+    # Every reached blunder got its opportunity event written by the single INSERT.
+    reached_ids = [b.id for b in reached_blunders]
+    written = (
+        db_session.query(BlunderOpportunityEvent)
+        .filter(
+            BlunderOpportunityEvent.session_id == game_session.id,
+            BlunderOpportunityEvent.blunder_id.in_(reached_ids),
+        )
+        .all()
+    )
+    assert len(written) == reached_count
+    assert all(e.opportunity and e.reached for e in written)
 
 
 def test_find_ghost_move_prefers_immediate_review_over_deeper_route(db_session):
