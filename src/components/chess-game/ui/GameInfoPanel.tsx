@@ -172,7 +172,7 @@ export const GameWarningStack = memo(({
           <span className="review-warning-toast__label">Review Position</span>
         </div>
         <p className="review-warning-toast__detail">
-          This position has come back to haunt you. You've messed this up before.
+          This position has come back to haunt you. You've blundered here before.
         </p>
         {resolvedReview.result !== "pending" && (
           <div className="review-warning-toast__overlay">
@@ -189,7 +189,7 @@ export const GameWarningStack = memo(({
           <span className="review-warning-toast__label">Review Position</span>
         </div>
         <p className="review-warning-toast__detail">
-          This position has come back to haunt you. You've messed this up before.
+          This position has come back to haunt you. You've blundered here before.
         </p>
       </div>
     ) : null;
