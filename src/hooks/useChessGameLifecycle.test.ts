@@ -307,6 +307,9 @@ describe("useChessGameLifecycle", () => {
           move_san: "e5",
         }),
       ]),
+      // Terminal resign-before-revert: the final upload drives the single
+      // opportunity recompute (g-y90g).
+      expect.objectContaining({ recomputeOpportunity: true }),
     );
     expect(endGameMock).toHaveBeenCalledWith(
       "session-123",
@@ -1729,5 +1732,128 @@ describe("useChessGameLifecycle", () => {
     // The primary terminal action still ran despite the upload failure.
     expect(endGameMock).toHaveBeenCalled();
     expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+  });
+
+  // g-y90g: the final full upload stops the incremental uploader FIRST (folded
+  // into uploadFullMoveHistoryBeforeEnd, so every terminal path inherits it) and
+  // carries recomputeOpportunity:true so opportunity is recomputed exactly once.
+  it("game-end: stops uploads before the final upload and flags the opportunity recompute", async () => {
+    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+    const move = chess.move({ from: "g6", to: "g7" });
+    if (!move || !chess.isCheckmate()) {
+      throw new Error("Unable to construct terminal test move");
+    }
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "checkmate_win",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(coordinator.stopSessionUploads).toHaveBeenCalled();
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    // stop precedes the final upload (the folded-in invariant).
+    expect(
+      vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
+    ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
+    // The final upload drives the single opportunity recompute.
+    expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+      expect.objectContaining({ recomputeOpportunity: true }),
+    );
+  });
+
+  it("resign: stops uploads before the final upload and flags the opportunity recompute", async () => {
+    const chess = new Chess();
+    chess.move("e4");
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory: [{ san: "e4", fen: chess.fen(), uci: "e2e4" }],
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      result.current.executeResign();
+    });
+
+    await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
+    expect(coordinator.stopSessionUploads).toHaveBeenCalled();
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    expect(
+      vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
+    ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
+    expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+      expect.objectContaining({ recomputeOpportunity: true }),
+    );
+  });
+
+  it("revert: stops uploads before the snapshot upload and flags the opportunity recompute", async () => {
+    const chess = new Chess();
+    const moveOne = chess.move("e4");
+    const fenAfterMoveOne = chess.fen();
+    const moveTwo = chess.move("e5");
+    const fenAfterMoveTwo = chess.fen();
+    if (!moveOne || !moveTwo) {
+      throw new Error("Unable to construct test position");
+    }
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory: [
+        { san: moveOne.san, fen: fenAfterMoveOne, uci: "e2e4" },
+        { san: moveTwo.san, fen: fenAfterMoveTwo, uci: "e7e5" },
+      ],
+      isGameActive: true,
+      isRated: true,
+      isPracticeContinuation: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "resign",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      await result.current.executeRevert();
+    });
+
+    expect(coordinator.stopSessionUploads).toHaveBeenCalled();
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    // executeRevert uploads the pre-revert snapshot directly (not via
+    // uploadFullMoveHistoryBeforeEnd), so it owns its own stop-before-upload.
+    expect(
+      vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
+    ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
+    expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+      expect.objectContaining({ recomputeOpportunity: true }),
+    );
   });
 });

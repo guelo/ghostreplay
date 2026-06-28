@@ -543,6 +543,96 @@ def test_session_moves_defers_opportunity_events_off_request_path(
     )
 
 
+def test_session_moves_recompute_opportunity_false_skips_event(
+    client, auth_headers, create_game_session, db_session, _no_op_recompute_scheduler
+):
+    """g-y90g: ``recompute_opportunity=false`` skips ONLY the opportunity recompute.
+
+    With a reachable blunder seeded, a default/true upload writes a
+    BlunderOpportunityEvent (the existing tests cover that). A ``false`` upload
+    must write NO opportunity event, yet still run the non-gated stages — proved
+    here by the opening-score ``request_recompute`` (stubbed) still firing. A
+    follow-up ``true`` upload then produces the event, confirming the seed is
+    genuinely opportunity-producing and the skip was the flag, not the setup.
+    """
+    session_stub, _srs_stub = _no_op_recompute_scheduler
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    session_uuid = uuid.UUID(session_id)
+    fen_start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    target_position = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_after_e4),
+        fen_raw=fen_after_e4,
+        active_color="black",
+    )
+    db_session.add(target_position)
+    db_session.flush()
+    db_session.add(
+        Blunder(
+            user_id=user_id,
+            position_id=target_position.id,
+            bad_move_san="bad",
+            best_move_san="good",
+            eval_loss_cp=200,
+            created_at=datetime.now(timezone.utc) - timedelta(hours=5),
+        )
+    )
+    db_session.commit()
+
+    move_payload = {
+        "move_number": 1,
+        "color": "white",
+        "move_san": "e4",
+        "fen_before": fen_start,
+        "fen_after": fen_after_e4,
+        "eval_cp": 20,
+        "best_move_san": "e4",
+        "best_move_eval_cp": 20,
+        "eval_delta": 0,
+        "classification": "best",
+    }
+
+    # (1) recompute_opportunity=false — moves persist, opening recompute still
+    # fires (non-gated stage), but NO opportunity event is written.
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": [move_payload], "recompute_opportunity": False},
+        headers=auth_headers(user_id=user_id),
+    )
+    assert response.status_code == 200
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .count()
+        == 1
+    )
+    assert session_stub.called  # opening-score recompute is NOT gated
+    assert (
+        db_session.query(BlunderOpportunityEvent)
+        .filter(BlunderOpportunityEvent.session_id == session_uuid)
+        .count()
+        == 0
+    )
+
+    # (2) recompute_opportunity=true — the same seed now produces the event.
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": [move_payload], "recompute_opportunity": True},
+        headers=auth_headers(user_id=user_id),
+    )
+    assert response.status_code == 200
+    db_session.expire_all()
+    assert (
+        db_session.query(BlunderOpportunityEvent)
+        .filter(BlunderOpportunityEvent.session_id == session_uuid)
+        .count()
+        == 1
+    )
+
+
 def test_session_analysis_success(client, auth_headers, create_game_session):
     session_id = create_game_session(user_id=123, player_color="white")
 

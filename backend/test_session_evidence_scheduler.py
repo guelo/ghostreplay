@@ -166,6 +166,98 @@ def test_dedup_last_write_wins_per_slot():
     assert by_slot[(5, "white")].eval_cp == 20
 
 
+def test_run_opportunity_default_true_forwarded():
+    # A single enqueue with no flag defaults to True and forwards it into the run.
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(sid, 7, "white", [_move(1, "white")])
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert len(run.calls) == 1
+    assert run.calls[0]["run_opportunity"] is True
+
+
+def test_run_opportunity_or_folds_false_then_true():
+    # The burst-collapse case: mid-game incremental (False) followed by the final
+    # full upload (True) coalesces into ONE run that DOES recompute opportunity.
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(sid, 7, "white", [_move(1, "white")], run_opportunity=False)
+    clock.advance(0.1)
+    sched.enqueue(sid, 7, "white", [_move(2, "white")], run_opportunity=True)
+
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert len(run.calls) == 1
+    assert run.calls[0]["run_opportunity"] is True
+
+
+def test_run_opportunity_or_folds_true_then_false():
+    # OR-fold is order-independent: once any enqueue requested it, a later False
+    # cannot clear it (a stray in-flight incremental landing after the final one).
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(sid, 7, "white", [_move(1, "white")], run_opportunity=True)
+    clock.advance(0.1)
+    sched.enqueue(sid, 7, "white", [_move(2, "white")], run_opportunity=False)
+
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert len(run.calls) == 1
+    assert run.calls[0]["run_opportunity"] is True
+
+
+def test_run_opportunity_all_false_burst_stays_false():
+    # A pure mid-game burst (no final upload yet) never recomputes opportunity.
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(sid, 7, "white", [_move(1, "white")], run_opportunity=False)
+    clock.advance(0.1)
+    sched.enqueue(sid, 7, "white", [_move(2, "white")], run_opportunity=False)
+
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert len(run.calls) == 1
+    assert run.calls[0]["run_opportunity"] is False
+
+
+def test_facade_forwards_recompute_opportunity_false(monkeypatch):
+    # enqueue_session_evidence maps recompute_opportunity onto the scheduler's
+    # run_opportunity kwarg.
+    captured: dict = {}
+
+    def fake_enqueue(session_id, user_id, player_color, moves, run_opportunity=True):
+        captured["run_opportunity"] = run_opportunity
+
+    monkeypatch.setattr(evidence_mod._scheduler, "enqueue", fake_enqueue)
+    enqueue_session_evidence(
+        object(),
+        session_id=uuid.uuid4(),
+        user_id=1,
+        player_color="white",
+        evidence_moves=[_move(1, "white")],
+        move_count=1,
+        recompute_opportunity=False,
+    )
+    assert captured["run_opportunity"] is False
+
+
 def test_payload_cleared_after_run():
     clock = _FakeClock()
     run = _RecordingSideEffects()

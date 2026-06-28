@@ -1714,10 +1714,17 @@ export class GameAnalysisCoordinator {
       : null
     state.abortController = controller
 
+    // Mid-game incremental uploads skip the expensive blunder-opportunity
+    // recompute (g-y90g): the current session's own mid-game opportunity events
+    // are never consumed during its own play, so only the final/complete upload
+    // (uploadFullMoveHistoryBeforeEnd) needs to compute them. Graph upsert +
+    // analysis-cache + opening-score recompute still run on every upload.
     uploadSessionMoves(
       state.sessionId,
       payload,
-      controller ? { signal: controller.signal } : undefined,
+      controller
+        ? { signal: controller.signal, recomputeOpportunity: false }
+        : { recomputeOpportunity: false },
     )
       .then(() => {
         if (state.abortController === controller) {

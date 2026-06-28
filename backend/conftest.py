@@ -475,7 +475,16 @@ def _sync_session_evidence():
     again locally, which overrides this autouse shim for that test only.
     """
 
-    def _run_sync(db, *, session_id, user_id, player_color, evidence_moves, move_count):
+    def _run_sync(
+        db,
+        *,
+        session_id,
+        user_id,
+        player_color,
+        evidence_moves,
+        move_count,
+        recompute_opportunity: bool = True,
+    ):
         session_api._run_session_move_evidence_side_effects(
             db,
             session_id=session_id,
@@ -484,6 +493,7 @@ def _sync_session_evidence():
             evidence_moves=evidence_moves,
             move_count=move_count,
             dialect_name=db.bind.dialect.name,
+            run_opportunity=recompute_opportunity,
         )
 
     with patch("app.api.session.enqueue_session_evidence", _run_sync):

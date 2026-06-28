@@ -380,6 +380,34 @@ describe('uploadSessionMoves', () => {
       'Failed to upload session moves: Unprocessable Entity',
     )
   })
+
+  it('omits recompute_opportunity from the body when not specified', async () => {
+    mockResponse({ moves_inserted: 0 })
+
+    await uploadSessionMoves('sess-1', [])
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body).toEqual({ moves: [] })
+    expect('recompute_opportunity' in body).toBe(false)
+  })
+
+  it('includes recompute_opportunity: false when opted out (incremental upload)', async () => {
+    mockResponse({ moves_inserted: 0 })
+
+    await uploadSessionMoves('sess-1', [], { recomputeOpportunity: false })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.recompute_opportunity).toBe(false)
+  })
+
+  it('includes recompute_opportunity: true when flagged (final upload)', async () => {
+    mockResponse({ moves_inserted: 0 })
+
+    await uploadSessionMoves('sess-1', [], { recomputeOpportunity: true })
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(body.recompute_opportunity).toBe(true)
+  })
 })
 
 describe('recordBlunder', () => {

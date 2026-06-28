@@ -604,6 +604,14 @@ export interface SessionMoveUpload {
 
 interface SessionMovesRequest {
   moves: SessionMoveUpload[]
+  /**
+   * When false, the backend SKIPS the expensive blunder-opportunity recompute
+   * for this upload (g-y90g). Mid-game incremental uploads send false; only the
+   * final, complete upload sends true (or omits it — backend defaults to true).
+   * Omitted from the body when undefined so callers that don't care get the
+   * backend default.
+   */
+  recompute_opportunity?: boolean
 }
 
 interface SessionMovesResponse {
@@ -866,14 +874,21 @@ export const fetchRatingHistory = async (
 export const uploadSessionMoves = async (
   sessionId: string,
   moves: SessionMoveUpload[],
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; recomputeOpportunity?: boolean },
 ): Promise<SessionMovesResponse> => {
+  // Only include recompute_opportunity in the body when the caller specifies it,
+  // so omitting it falls through to the backend default (true). Mid-game
+  // incremental uploads pass false to skip the opportunity recompute (g-y90g).
+  const body: SessionMovesRequest =
+    options?.recomputeOpportunity === undefined
+      ? { moves }
+      : { moves, recompute_opportunity: options.recomputeOpportunity }
   return requestJson<SessionMovesResponse>(
     `${API_BASE_URL}/api/session/${sessionId}/moves`,
     {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ moves } satisfies SessionMovesRequest),
+      body: JSON.stringify(body satisfies SessionMovesRequest),
       signal: options?.signal,
     },
     { fallbackMessage: 'Failed to upload session moves' },

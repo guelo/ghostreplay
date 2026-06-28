@@ -220,6 +220,16 @@ export const useChessGameLifecycle = ({
   // abort/reject we log and proceed, leaving the delta to degrade.
   const uploadFullMoveHistoryBeforeEnd = useCallback(
     async (sessionId: string) => {
+      // Stop the incremental uploader FIRST so this is the last /moves this
+      // client emits for the session (g-y90g). Folding the stop in here — rather
+      // than at each terminal call site — makes "the final full upload is the
+      // last /moves" STRUCTURAL: no terminal path (game end, drill natural-end,
+      // resign, accuracy-fail) can forget it. stopSessionUploads only touches
+      // the coordinator's upload bookkeeping (disables the timer, clears dirty,
+      // aborts the in-flight fetch); the full-history upload below reads
+      // moveHistory + analysisMap directly, so it is unaffected. All callers are
+      // terminal, so the permanent disable until the next startSession is correct.
+      coordinator.stopSessionUploads();
       try {
         const uploads = buildSessionMoveUploads(
           useGameStore.getState().moveHistory,
@@ -227,8 +237,15 @@ export const useChessGameLifecycle = ({
           STARTING_FEN,
         );
         if (uploads.length > 0) {
+          // The final, complete upload carries recomputeOpportunity: true so the
+          // backend computes blunder opportunity exactly once at finalize (the
+          // mid-game incremental uploads skipped it). Any already-dispatched
+          // in-flight incremental that races to the server is harmless: the
+          // evidence enqueue coalesces by session_id and only this true-flagged
+          // entry drives the single recompute.
           await uploadSessionMoves(sessionId, uploads, {
             signal: AbortSignal.timeout(FINAL_UPLOAD_TIMEOUT_MS),
+            recomputeOpportunity: true,
           });
         }
       } catch (err) {
@@ -283,8 +300,9 @@ export const useChessGameLifecycle = ({
       ) {
         try {
           // Persist the full drill move history before the backend recomputes,
-          // so the opening-score delta reflects this drill (g-xanz). Done before
-          // stopSessionUploads below discards the unresolved tail.
+          // so the opening-score delta reflects this drill (g-xanz). This also
+          // stops the incremental uploader (folded into the helper, g-y90g),
+          // discarding the unresolved tail and flagging the opportunity recompute.
           await uploadFullMoveHistoryBeforeEnd(store.sessionId);
           const contract = await naturalEndDrill(
             store.sessionId,
@@ -303,9 +321,8 @@ export const useChessGameLifecycle = ({
           void pollFreshOpeningDelta(finalizingSessionId);
           s.setIsRated(false);
           // Natural-ended drills remain hidden and unrated unless converted.
-          // Persisted evidence is best-effort, so discard any resolved upload
-          // tail that had not already reached the server.
-          coordinator.stopSessionUploads();
+          // (The upload tail was already discarded by stopSessionUploads, folded
+          // into uploadFullMoveHistoryBeforeEnd above — g-y90g.)
           finishLocalGame(result, {
             preserveResolvedReviewMoveIndex: store.moveHistory.length - 1,
             playEndGameAudio: true,
@@ -437,7 +454,15 @@ export const useChessGameLifecycle = ({
           STARTING_FEN,
         );
 
-        await uploadSessionMoves(store.sessionId!, snapshotUploads);
+        // This path uploads the PRE-revert snapshot directly (not the live
+        // moveHistory), so it does NOT go through uploadFullMoveHistoryBeforeEnd.
+        // Stop the incremental uploader first so this terminal resign-before-
+        // revert upload is the last /moves emitted, and flag it for the single
+        // opportunity recompute (g-y90g).
+        coordinator.stopSessionUploads();
+        await uploadSessionMoves(store.sessionId!, snapshotUploads, {
+          recomputeOpportunity: true,
+        });
         if (!isCurrentRevertExecution(executionId)) {
           return;
         }
@@ -465,7 +490,7 @@ export const useChessGameLifecycle = ({
         s.setIsPracticeContinuation(true);
         s.setDrillState(null);
         s.setDrillStrictnessCp(null);
-        coordinator.stopSessionUploads();
+        // (Uploads were already stopped before the snapshot upload above — g-y90g.)
       }
 
       if (!isCurrentRevertExecution(executionId)) {

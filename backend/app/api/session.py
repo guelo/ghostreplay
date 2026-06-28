@@ -125,6 +125,13 @@ class SessionMoveInput(BaseModel):
 
 class SessionMovesRequest(BaseModel):
     moves: list[SessionMoveInput] = Field(default_factory=list)
+    # When False, this upload SKIPS the expensive blunder-opportunity recompute
+    # (forward BFS + load-all-blunders + bulk DELETE/UPSERT). The frontend's
+    # mid-game incremental uploader opts out so only the final, complete upload
+    # pays for it. Default True keeps any other caller's behavior unchanged
+    # (compute — safe, just slower). The graph upsert + analysis-cache write +
+    # opening-score recompute enqueue still run on EVERY upload regardless.
+    recompute_opportunity: bool = True
 
 
 class SessionMovesResponse(BaseModel):
@@ -767,9 +774,18 @@ def _run_graph_evidence_txn(
     evidence_moves: list,
     move_count: int,
     dialect_name: str,
+    run_opportunity: bool = True,
 ) -> None:
     """Acquire the per-user advisory lock, upsert the graph + opportunity events,
     and commit — the graph-dependent failure boundary (g-q0aw).
+
+    ``run_opportunity`` gates ONLY the blunder-opportunity recompute (g-y90g):
+    mid-game incremental uploads pass False to skip it (the current session's own
+    mid-game opportunity events are never consumed during its own play), while the
+    final, complete upload passes True so opportunity is computed exactly once at
+    finalize. The advisory lock + ghost-graph upsert + commit run regardless; the
+    opportunity recompute, when enabled, stays in THIS txn AFTER the graph upsert
+    so its forward BFS sees this upload's fresh edges.
 
     This is the FIRST statement of a fresh autobegun txn (the prior
     ``session_moves_upsert`` stage committed). On Postgres it takes
@@ -814,18 +830,19 @@ def _run_graph_evidence_txn(
         move_count=move_count,
     ):
         _upsert_session_position_graph(db, user_id=user_id, moves=evidence_moves)
-    with _timed_side_effect(
-        "opportunity_events",
-        session_id=session_id,
-        user_id=user_id,
-        move_count=move_count,
-    ):
-        _compute_blunder_opportunity_events(
-            db,
+    if run_opportunity:
+        with _timed_side_effect(
+            "opportunity_events",
             session_id=session_id,
             user_id=user_id,
-            player_color=player_color,
-        )
+            move_count=move_count,
+        ):
+            _compute_blunder_opportunity_events(
+                db,
+                session_id=session_id,
+                user_id=user_id,
+                player_color=player_color,
+            )
     # Single commit that finalizes durability. NB: the ghost-graph edges were
     # already flushed inside the ghost_graph_upsert stage (Phase 6 of
     # _upsert_session_position_graph), so duplicate-edge IntegrityErrors now
@@ -853,6 +870,7 @@ def _run_session_move_evidence_side_effects(
     evidence_moves: list,
     move_count: int,
     dialect_name: str,
+    run_opportunity: bool = True,
 ) -> None:
     """Run the evidence side effects after the session_moves upsert, each timed.
 
@@ -864,7 +882,11 @@ def _run_session_move_evidence_side_effects(
     not a partial patch. If the retry also times out we rollback and accept the gap
     with an explicit WARNING — opportunity events do NOT self-heal (SRS counters read
     the persisted rows with no lazy recompute), so the dropped accounting regenerates
-    only on the next successful same-session upload.
+    only on the next OPPORTUNITY-ENABLED upload (``run_opportunity=True``) or the
+    offline ``scripts/recompute_srs_opportunities.py`` recompute. After g-y90g
+    mid-game incremental uploads skip opportunity, and the final enabled upload may
+    be the last one for the session, so regeneration is not guaranteed without the
+    offline script.
 
     The analysis-cache write (own txn) and background-recompute enqueue (cheap,
     coalesced, opening-score self-heal) run REGARDLESS — they sit outside the
@@ -882,6 +904,7 @@ def _run_session_move_evidence_side_effects(
         evidence_moves=evidence_moves,
         move_count=move_count,
         dialect_name=dialect_name,
+        run_opportunity=run_opportunity,
     )
     try:
         _run_graph_evidence_txn(db, **graph_txn_kwargs)
@@ -900,7 +923,9 @@ def _run_session_move_evidence_side_effects(
             logger.warning(
                 "upsert_session_moves graph evidence timed out twice; opportunity "
                 "events skipped for session_id=%s user_id=%s; not self-healing — "
-                "regenerates on the next successful same-session upload",
+                "regenerates only on the next opportunity-enabled upload "
+                "(run_opportunity=True, not guaranteed post g-y90g) or the offline "
+                "recompute_srs_opportunities.py script",
                 session_id,
                 user_id,
             )
@@ -1033,6 +1058,7 @@ def upsert_session_moves(
                 player_color=game_session.player_color,
                 evidence_moves=evidence_moves,
                 move_count=len(values),
+                recompute_opportunity=request.recompute_opportunity,
             )
         # Emitted only after the upload is durable (post-commit) so a failed
         # insert/commit never produces a successful-looking analytics event.
@@ -1097,6 +1123,7 @@ def upsert_session_moves(
             player_color=game_session.player_color,
             evidence_moves=evidence_moves,
             move_count=len(values),
+            recompute_opportunity=request.recompute_opportunity,
         )
 
     # Emitted only after the upload is durable (post-commit) so a failed

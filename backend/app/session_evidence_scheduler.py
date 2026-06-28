@@ -21,8 +21,11 @@ IMPORTANT — single-process assumption (same as the opening-score scheduler):
 Accepted durability risk:
     A hard kill (SIGKILL/OOM/deploy-kill) between enqueue and worker completion
     drops that session's deferred accounting. Backstops: (1) blunder-opportunity
-    events self-heal on the next successful same-session upload (a full recompute
-    from all committed ``session_moves``); (2) the offline
+    events regenerate (a full recompute from all committed ``session_moves``) on
+    the next OPPORTUNITY-ENABLED upload — i.e. one with ``run_opportunity=True``;
+    after g-y90g mid-game incremental uploads explicitly skip opportunity, and the
+    final ``run_opportunity=True`` upload may be the LAST one for the session, so
+    this is not guaranteed to fire — falling back to (2) the offline
     ``scripts/recompute_srs_opportunities.py`` recompute; (3) ``drain=True`` on
     graceful shutdown. This is a narrow, explicitly-accepted regression vs the old
     synchronous commit, traded for the latency win.
@@ -63,6 +66,11 @@ class _Entry:
     moves: dict[tuple[int, str], object]
     first_seen: float
     deadline: float
+    # OR-folded across coalesced enqueues (g-y90g): once ANY upload for this
+    # session requests the opportunity recompute (the final, complete upload),
+    # the single coalesced worker run computes it. A burst of mid-game
+    # incremental uploads (all False) folds to False → zero recomputes.
+    run_opportunity: bool = True
     enqueue_count: int = 0
 
 
@@ -92,13 +100,22 @@ class SessionEvidenceScheduler:
     # Enqueue
     # ------------------------------------------------------------------
     def _enqueue_locked(
-        self, session_id: Key, user_id: int, player_color: str, moves: list
+        self,
+        session_id: Key,
+        user_id: int,
+        player_color: str,
+        moves: list,
+        run_opportunity: bool,
     ) -> None:
         """Coalesce an enqueue for ``session_id``. Caller must hold ``_cond``.
 
         New key: create a pending entry with the move payload. Existing key: fold
         the moves in last-write-wins per ``(move_number, color)`` slot and refresh
         the debounce deadline (capped by ``max_wait`` from first_seen).
+
+        ``run_opportunity`` OR-folds into the entry (g-y90g): an existing entry
+        becomes True if ANY enqueue (this one or a prior) requested it, so the
+        incremental(False) + final(True) burst collapses to exactly one recompute.
         """
         now = self.clock()
         entry = self._pending.get(session_id)
@@ -109,6 +126,7 @@ class SessionEvidenceScheduler:
                 moves={(m.move_number, m.color): m for m in moves},
                 first_seen=now,
                 deadline=min(now + self.quiet_window, now + self.max_wait),
+                run_opportunity=run_opportunity,
             )
             self._pending[session_id] = entry
         else:
@@ -117,11 +135,17 @@ class SessionEvidenceScheduler:
             entry.deadline = min(
                 now + self.quiet_window, entry.first_seen + self.max_wait
             )
+            entry.run_opportunity = entry.run_opportunity or run_opportunity
         entry.enqueue_count += 1
         self._cond.notify_all()
 
     def enqueue(
-        self, session_id: Key, user_id: int, player_color: str, moves: list
+        self,
+        session_id: Key,
+        user_id: int,
+        player_color: str,
+        moves: list,
+        run_opportunity: bool = True,
     ) -> None:
         """Coalesce an evidence run for ``session_id``.
 
@@ -131,7 +155,9 @@ class SessionEvidenceScheduler:
         with self._cond:
             if self._shutdown:
                 return
-            self._enqueue_locked(session_id, user_id, player_color, moves)
+            self._enqueue_locked(
+                session_id, user_id, player_color, moves, run_opportunity
+            )
         if self.auto_start:
             try:
                 self.start()
@@ -271,6 +297,7 @@ class SessionEvidenceScheduler:
                 evidence_moves=moves,
                 move_count=len(moves),
                 dialect_name=db.bind.dialect.name,
+                run_opportunity=entry.run_opportunity,
             )
         except Exception:
             logger.exception(
@@ -323,6 +350,7 @@ def enqueue_session_evidence(
     player_color: str,
     evidence_moves: list,
     move_count: int,
+    recompute_opportunity: bool = True,
 ) -> None:
     """Schedule the deferred /moves evidence side effects (best-effort).
 
@@ -334,10 +362,18 @@ def enqueue_session_evidence(
     session); it exists so the synchronous test shim can run the side effects on
     the request's session for both the SQLite and Postgres-override test paths.
     ``move_count`` is accepted for logging parity (``len(evidence_moves)`` also
-    works).
+    works). ``recompute_opportunity`` (g-y90g) OR-folds into the coalesced entry:
+    False from mid-game incremental uploads, True from the final/complete upload,
+    so the burst collapses to exactly one opportunity recompute.
     """
     try:
-        _scheduler.enqueue(session_id, user_id, player_color, evidence_moves)
+        _scheduler.enqueue(
+            session_id,
+            user_id,
+            player_color,
+            evidence_moves,
+            run_opportunity=recompute_opportunity,
+        )
     except Exception:
         logger.exception(
             "session evidence enqueue failed",

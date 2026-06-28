@@ -685,6 +685,17 @@ describe("ChessGame characterization safeguards", () => {
     expect(uploadSessionMovesMock.mock.invocationCallOrder[0]).toBeLessThan(
       failDrillMock.mock.invocationCallOrder[0],
     );
+    // g-y90g: the accuracy-fail path goes through uploadFullMoveHistoryBeforeEnd,
+    // which stops the incremental uploader BEFORE this final upload (so no stray
+    // mid-game upload races it) and flags it for the single opportunity recompute.
+    // This is the structural guard for the review's P1 miss (no ChessGame change).
+    expect(mockCoordinator.stopSessionUploads).toHaveBeenCalled();
+    expect(
+      vi.mocked(mockCoordinator.stopSessionUploads).mock.invocationCallOrder[0],
+    ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
+    expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
+      expect.objectContaining({ recomputeOpportunity: true }),
+    );
   });
 
   it("shows the opening-score badge in the lineage (not DrillStopActions) when a drill fails on accuracy (g-3gmc)", async () => {
@@ -1170,6 +1181,8 @@ describe("ChessGame characterization safeguards", () => {
     expect(uploadSessionMovesMock).toHaveBeenCalledWith(
       "session-characterization",
       expect.any(Array),
+      // Terminal resign-before-revert flags the single opportunity recompute (g-y90g).
+      expect.objectContaining({ recomputeOpportunity: true }),
     );
     expect(endGameMock).toHaveBeenCalledWith(
       "session-characterization",
@@ -2621,14 +2634,8 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
-      const rehookToasts = Array.from(
-        document.querySelectorAll(".chess-warning-stack .rehook-toast"),
-      );
-      expect(
-        rehookToasts.some((toast) =>
-          toast.textContent?.includes("The haunting resumes"),
-        ),
-      ).toBe(true);
+      const notice = document.querySelector(".board-notice--rehook");
+      expect(notice?.textContent).toContain("The haunting resumes");
     });
 
     expect(
@@ -2691,7 +2698,7 @@ describe("ChessGame blunder recording", () => {
       );
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -2760,7 +2767,7 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -2826,7 +2833,7 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -2912,7 +2919,7 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
     await act(async () => {
       capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
@@ -2980,7 +2987,7 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -2988,9 +2995,9 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
-      const toast = document.querySelector(".review-warning-toast--pass");
-      expect(toast).toBeInTheDocument();
-      expect(toast?.querySelector(".review-warning-toast__overlay-icon")?.textContent).toBe("✓");
+      const notice = document.querySelector(".board-notice--pass");
+      expect(notice).toBeInTheDocument();
+      expect(notice?.querySelector(".board-notice__result-icon")?.textContent).toBe("✓");
     });
   });
 
@@ -3039,7 +3046,7 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -3047,13 +3054,13 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
-      const toast = document.querySelector(".review-warning-toast--fail");
-      expect(toast).toBeInTheDocument();
-      expect(toast?.querySelector(".review-warning-toast__overlay-icon")?.textContent).toBe("✗");
+      const notice = document.querySelector(".board-notice--fail");
+      expect(notice).toBeInTheDocument();
+      expect(notice?.querySelector(".board-notice__result-icon")?.textContent).toBe("✗");
     });
   });
 
-  it("clears resolved review overlay on next move", async () => {
+  it("auto-dismisses the resolved review result after its short window", async () => {
     getNextOpponentMoveMock
       .mockResolvedValueOnce({
         mode: "ghost",
@@ -3098,7 +3105,7 @@ describe("ChessGame blunder recording", () => {
       capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
     });
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--review-warning")).toBeInTheDocument();
     });
 
     await act(async () => {
@@ -3106,82 +3113,19 @@ describe("ChessGame blunder recording", () => {
     });
 
     await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast--pass")).toBeInTheDocument();
+      expect(document.querySelector(".board-notice--pass")).toBeInTheDocument();
     });
 
-    // Make another move — overlay should clear
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "d2", targetSquare: "d4" });
-    });
-
-    await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast--pass")).not.toBeInTheDocument();
-    });
-  });
-
-  it("clears resolved review overlay on revert", async () => {
-    getNextOpponentMoveMock
-      .mockResolvedValueOnce({
-        mode: "ghost",
-        move: { uci: "e7e5", san: "e5" },
-        target_blunder_id: 42,
-        target_fen: "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
-        decision_source: "ghost_path",
-      })
-      .mockResolvedValue({
-        mode: "engine",
-        move: { uci: "b8c6", san: "Nc6" },
-        target_blunder_id: null,
-        decision_source: "backend_engine",
-      });
-
-    mockAnalyzeMove.mockImplementation(
-      (_fen: string, move: string, _color: string, moveIndex: number) => {
-        if (moveIndex === 2) {
-          gameAnalysisStore.getState().resolveAnalysis(moveIndex, {
-            id: "review-pass-revert",
-            move,
-            bestMove: "g1f3",
-            bestEval: 40,
-            playedEval: 20,
-            currentPositionEval: 20,
-            playedEvalMate: null,
-            currentPositionEvalMate: null,
-            moveIndex: 2,
-            delta: 20,
-            classification: "good" as const,
-            blunder: false,
-            recordable: false,
-          });
-          return "review-pass-revert";
-        }
+    // The result box gets out of the way on its own short (2s) timer — no
+    // further move is required.
+    await waitFor(
+      () => {
+        expect(
+          document.querySelector(".board-notice--pass"),
+        ).not.toBeInTheDocument();
       },
+      { timeout: 3000 },
     );
-
-    await startGameAsWhite();
-
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
-    });
-    await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast")).toBeInTheDocument();
-    });
-
-    await act(async () => {
-      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
-    });
-
-    await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast--pass")).toBeInTheDocument();
-    });
-
-    // Trigger revert (unrated, so no warning dialog)
-    useGameStore.getState().setIsRated(false);
-    fireEvent.click(screen.getByTitle("Revert last move"));
-
-    await waitFor(() => {
-      expect(document.querySelector(".review-warning-toast--pass")).not.toBeInTheDocument();
-    });
   });
 });
 

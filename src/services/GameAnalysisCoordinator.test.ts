@@ -208,6 +208,41 @@ describe('GameAnalysisCoordinator', () => {
       expect(retryCalls.length).toBe(2) // original + retry
       expect(retryCalls[1][1]).toEqual(firstPayload) // same frozen payload
     })
+
+    it('opts out of the opportunity recompute on incremental uploads (g-y90g)', async () => {
+      coordinator.startSession('session-inc')
+      useGameStore.setState({ moveHistory: makeMoveHistory(2) })
+
+      let resolveLookup!: (v: Map<string, unknown>) => void
+      lookupAnalysisCacheMock.mockReturnValueOnce(
+        new Promise((resolve) => { resolveLookup = resolve }),
+      )
+
+      coordinator.analyzeMove('fen-0', 'uci-0', 'white', 0, 20)
+      vi.advanceTimersByTime(200) // flush cache debounce
+      resolveLookup(new Map([
+        ['fen-0::uci-0', {
+          move_san: 'm0', best_move_uci: 'uci-0', best_move_san: 'm0',
+          best_line_uci: ['uci-0', 'reply-0'],
+          played_eval: 10, best_eval: 10, eval_delta: 0, classification: 'best',
+          position_trusted: true,
+          move_trusted: true,
+        }],
+      ]))
+      await vi.advanceTimersByTimeAsync(0) // resolve cache promise
+
+      uploadSessionMovesMock.mockResolvedValueOnce({ moves_inserted: 1 })
+
+      // Fire the 3-second incremental upload timer
+      vi.advanceTimersByTime(3000)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
+      const options = uploadSessionMovesMock.mock.calls[0][2]
+      expect(options).toEqual(
+        expect.objectContaining({ recomputeOpportunity: false }),
+      )
+    })
   })
 
   describe('drill upload response handling', () => {
