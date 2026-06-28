@@ -126,7 +126,7 @@ const SrsFailSpotlight = ({ trigger, targetRef, onDone }: SrsFailSpotlightProps)
           className={`srs-fail-content__inner${shrinking ? " srs-fail-content__inner--shrink" : ""}`}
         >
           <div className="srs-fail-content__glyph" aria-hidden="true">!</div>
-          <h2 className="srs-fail-content__headline">You made this mistake again!</h2>
+          <h2 className="srs-fail-content__headline">You made this blunder again!</h2>
         </div>
       </div>
     </>,

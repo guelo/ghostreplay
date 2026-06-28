@@ -121,7 +121,7 @@ describe("MoveRow — pop animation classes", () => {
           {
             key: "fail-0",
             variant: "srs-fail",
-            text: "You made this mistake again!",
+            text: "You made this blunder again!",
             srsFailDetail: {
               userMoveSan: "e4",
               bestMoveSan: "d4",

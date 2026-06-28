@@ -70,7 +70,7 @@
     </div>
     <div class="moves">
       Move list
-      <div class="bubble">! You made this mistake again!<br><small>played Nf3?? · best was Bxe5</small></div>
+      <div class="bubble">! You made this blunder again!<br><small>played Nf3?? · best was Bxe5</small></div>
     </div>
   </div>
 
@@ -103,7 +103,7 @@ function open(){
   if(active) return; active=true;
   spot=document.createElement('div'); spot.className='spot';
   ovc=document.createElement('div'); ovc.className='ovc';
-  ovc.innerHTML=`<div class="glyph">!</div><h2>You made this mistake again!</h2>`;
+  ovc.innerHTML=`<div class="glyph">!</div><h2>You made this blunder again!</h2>`;
   document.body.append(spot, ovc);
   requestAnimationFrame(()=>{ position(); spot.classList.add('show'); });
   spot.addEventListener('click', startShrink);

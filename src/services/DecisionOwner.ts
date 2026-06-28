@@ -696,7 +696,7 @@ export class DecisionOwner {
       }
       ui.appendMoveMessage(outcome.moveIndex, {
         key: `srs-${requestId}`,
-        text: 'You made this mistake again!',
+        text: 'You made this blunder again!',
         variant: 'srs-fail',
         srsFailDetail,
         srsStats: srs
