@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -425,6 +425,119 @@ def test_session_moves_succeeds_when_opening_cache_refresh_fails(
     assert (
         db_session.query(SessionMove)
         .filter(SessionMove.session_id == session_uuid, SessionMove.move_number == 1, SessionMove.color == "white")
+        .count()
+        == 1
+    )
+
+
+def test_session_moves_defers_opportunity_events_off_request_path(
+    client, auth_headers, create_game_session, db_session
+):
+    """Acceptance (dialect-independent): the opportunity-event stage is NOT on the
+    /moves request-latency path.
+
+    Seed a reachable blunder so a *successful* evidence run WOULD write a
+    BlunderOpportunityEvent. Patch ``enqueue_session_evidence`` with a MagicMock
+    (this nested patch overrides the autouse synchronous shim for this test only)
+    so the deferred pipeline never runs inline. The response must still be 200 with
+    the session_moves committed, the enqueue must be called exactly once carrying
+    the evidence payload, and NO opportunity event may exist immediately after the
+    response — proving the work is deferred. Re-POSTing without the mock (the
+    autouse sync shim) then runs the deferred work and produces the event,
+    confirming the seed is genuinely opportunity-producing.
+    """
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    session_uuid = uuid.UUID(session_id)
+    fen_start = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    # A reachable blunder at the player position the upload lands on: a successful
+    # evidence run would record an opportunity event (reached=True).
+    target_position = Position(
+        user_id=user_id,
+        fen_hash=fen_hash(fen_after_e4),
+        fen_raw=fen_after_e4,
+        active_color="black",
+    )
+    db_session.add(target_position)
+    db_session.flush()
+    blunder = Blunder(
+        user_id=user_id,
+        position_id=target_position.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        created_at=datetime.now(timezone.utc) - timedelta(hours=5),
+    )
+    db_session.add(blunder)
+    db_session.commit()
+
+    payload = {
+        "moves": [
+            {
+                "move_number": 1,
+                "color": "white",
+                "move_san": "e4",
+                "fen_before": fen_start,
+                "fen_after": fen_after_e4,
+                "eval_cp": 20,
+                "best_move_san": "e4",
+                "best_move_eval_cp": 20,
+                "eval_delta": 0,
+                "classification": "best",
+            }
+        ]
+    }
+
+    enqueue_mock = MagicMock()
+    with patch("app.api.session.enqueue_session_evidence", enqueue_mock):
+        response = client.post(
+            f"/api/session/{session_id}/moves",
+            json=payload,
+            headers=auth_headers(user_id=user_id),
+        )
+
+    # (1) 200 + session_moves committed durably.
+    assert response.status_code == 200
+    assert response.json()["moves_inserted"] == 1
+    assert (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .count()
+        == 1
+    )
+
+    # (2) The deferred work was enqueued exactly once with the expected identity
+    # and the full evidence payload — not run inline.
+    enqueue_mock.assert_called_once()
+    kwargs = enqueue_mock.call_args.kwargs
+    assert kwargs["session_id"] == session_uuid
+    assert kwargs["user_id"] == user_id
+    assert kwargs["player_color"] == "white"
+    assert len(kwargs["evidence_moves"]) == 1
+
+    # (3) The opportunity-event stage did NOT run in the request path.
+    assert (
+        db_session.query(BlunderOpportunityEvent)
+        .filter(BlunderOpportunityEvent.session_id == session_uuid)
+        .count()
+        == 0
+    )
+
+    # Control: re-POST without the mock (autouse sync shim runs the deferred work)
+    # — the same seed now produces the opportunity event, so the count==0 above is
+    # a genuine deferral, not a setup that could never have produced an event.
+    response = client.post(
+        f"/api/session/{session_id}/moves",
+        json=payload,
+        headers=auth_headers(user_id=user_id),
+    )
+    assert response.status_code == 200
+    db_session.expire_all()
+    assert (
+        db_session.query(BlunderOpportunityEvent)
+        .filter(BlunderOpportunityEvent.session_id == session_uuid)
         .count()
         == 1
     )

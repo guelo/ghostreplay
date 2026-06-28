@@ -15,6 +15,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import time
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -155,7 +156,16 @@ def test_moves_concurrent_same_opening_serialize(
     """N concurrent same-user /moves replays of the same opening line serialize on
     the per-user advisory lock: all return 200 (no duplicate-key 500s) and the graph
     converges to exactly the deduped edge set — one Move per (from_position_id,
-    move_san), three positions for the e4 e5 line."""
+    move_san), three positions for the e4 e5 line.
+
+    NOTE (g-yjtn): with evidence side effects now deferred off the request path,
+    this validates the SYNCHRONOUS-SHIM / cross-process-contention path — the
+    autouse ``_sync_session_evidence`` fixture runs the side effects on each
+    request's own PG backend, so the concurrent requests still contend on the
+    real ``pg_advisory_xact_lock``. In production the single evidence worker
+    thread serializes runs instead, so the advisory lock is effectively
+    uncontended there; this test still defends the lock's correctness against any
+    cross-process writer."""
     user_id = 123
     session_ids = [
         _start_game(pg_client, auth_headers, user_id) for _ in range(5)
@@ -180,11 +190,19 @@ def test_moves_concurrent_same_opening_serialize(
 def test_moves_graph_lock_timeout_degrades(
     pg_client, pg_engine, pg_session_factory, auth_headers, caplog
 ):
-    """When the per-user advisory lock is held elsewhere for the whole request, the
-    graph txn times out, retries once, times out again, and degrades: the request
-    still returns 200, a WARNING names the skipped opportunity accounting, the graph
-    write is rolled back, yet the analysis-cache write and recompute enqueue (outside
-    the graph failure boundary) still run."""
+    """Validates the evidence side-effect SHIM/DEGRADE semantics: when the per-user
+    advisory lock is held elsewhere for the whole run, the graph txn times out,
+    retries once, times out again, and degrades — a WARNING names the skipped
+    opportunity accounting, the graph write is rolled back, yet the analysis-cache
+    write and recompute enqueue (outside the graph failure boundary) still run. The
+    request still returns 200.
+
+    NOTE (g-yjtn): evidence side effects are now deferred off the /moves request
+    path; this exercises them via the autouse synchronous shim on the request's PG
+    backend, so the timing below measures the SHIM's synchronous lock wait, NOT
+    production /moves latency (prod no longer blocks on the lock at all). The
+    "/moves does not block on the held lock" guarantee is defended separately by
+    ``test_moves_does_not_block_on_held_lock_production_shape`` below."""
     user_id = 321
     session_id = _start_game(pg_client, auth_headers, user_id)
     # A reachable blunder so a successful upload WOULD write an opportunity event;
@@ -216,6 +234,9 @@ def test_moves_graph_lock_timeout_degrades(
     assert response.json()["moves_inserted"] == len(_OPENING_MOVES)
     # Two lock waits (initial + retry), each bounded by lock_timeout=300ms; allow
     # generous headroom but assert it didn't hang near the 5s production default.
+    # NB (g-yjtn): through the sync shim this measures the SHIM's synchronous lock
+    # wait, not prod /moves latency. The production-shape latency guarantee lives in
+    # test_moves_does_not_block_on_held_lock_production_shape.
     assert elapsed < 3.0
 
     # The degrade WARNING names the skipped, non-self-healing opportunity accounting.
@@ -242,6 +263,64 @@ def test_moves_graph_lock_timeout_degrades(
         verify.close()
     assert cache_rows == len(_OPENING_MOVES)
     recompute_mock.assert_called_once_with(user_id, "white")
+
+
+@pg_required
+def test_moves_does_not_block_on_held_lock_production_shape(
+    pg_client, pg_engine, pg_session_factory, auth_headers
+):
+    """Production-shape latency guarantee (g-yjtn): the REAL /moves route does not
+    block on the per-user advisory lock.
+
+    Unlike the degrade test (which runs the side effects through the autouse sync
+    shim), this overrides the shim with a MagicMock so the route behaves as it does
+    in production — commit + enqueue only, with the expensive evidence pipeline
+    deferred to the worker. With the advisory lock held on a dedicated connection
+    at the DEFAULT 5s lock_timeout, the response must come back in a small fraction
+    of that time and leave no graph/opportunity rows: proof that the lock wait is no
+    longer on the request path."""
+    user_id = 987
+    session_id = _start_game(pg_client, auth_headers, user_id)
+    # A reachable blunder: a successful evidence run WOULD write an opportunity
+    # event (and the seed leaves exactly one pre-existing Position). We assert both
+    # stay absent/unchanged right after the response.
+    _seed_reachable_blunder(pg_session_factory, user_id)
+
+    # Hold the per-user advisory lock on a dedicated raw connection for the whole
+    # request. If /moves still acquired pg_advisory_xact_lock(user_id) it would
+    # block until the default 5s lock_timeout; instead it must return immediately.
+    holder = pg_engine.connect()
+    enqueue_mock = MagicMock()
+    try:
+        holder.execute(text("SELECT pg_advisory_lock(:k)"), {"k": user_id})
+
+        start = time.perf_counter()
+        with patch.object(session_api, "enqueue_session_evidence", enqueue_mock):
+            response = _post_opening(pg_client, auth_headers, session_id, user_id)
+        elapsed = time.perf_counter() - start
+    finally:
+        holder.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": user_id})
+        holder.close()
+
+    # (1) 200 with the rows committed.
+    assert response.status_code == 200
+    assert response.json()["moves_inserted"] == len(_OPENING_MOVES)
+    # (2) Well under the 5s lock_timeout the request would incur if it waited on
+    # the held lock — i.e. /moves did NOT block on it.
+    assert elapsed < 1.0, elapsed
+    # (3) The deferred work was enqueued exactly once with the right identity.
+    enqueue_mock.assert_called_once()
+    kwargs = enqueue_mock.call_args.kwargs
+    assert kwargs["session_id"] == uuid.UUID(session_id)
+    assert kwargs["user_id"] == user_id
+    assert kwargs["player_color"] == "white"
+    assert len(kwargs["evidence_moves"]) == len(_OPENING_MOVES)
+    # (4) The expensive evidence work is genuinely deferred: no graph edges and no
+    # opportunity event right after the response (only the seeded Position exists).
+    position_count, move_count = _graph_counts(pg_session_factory, user_id)
+    assert position_count == 1
+    assert move_count == 0
+    assert _opportunity_event_count(pg_session_factory, session_id) == 0
 
 
 @pg_required

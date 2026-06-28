@@ -22,6 +22,7 @@ from app.api.session import router as session_router
 from app.api.srs import router as srs_router
 from app.db import engine
 from app.opening_score_scheduler import get_scheduler
+from app.session_evidence_scheduler import get_evidence_scheduler
 from app.posthog_client import shutdown as posthog_shutdown
 from app.security import AuthMiddleware
 from app.http_logging import HTTPLoggingMiddleware
@@ -44,11 +45,31 @@ async def lifespan(app: FastAPI):
     except Exception:
         logging.getLogger(__name__).exception("opening score scheduler failed to start")
 
+    # Start the in-process /moves evidence scheduler (deferred graph/opportunity/
+    # analysis-cache/recompute side effects). Start failure must not block boot —
+    # enqueues then degrade to best-effort no-ops. Start order is irrelevant.
+    try:
+        get_evidence_scheduler().start()
+    except Exception:
+        logging.getLogger(__name__).exception("session evidence scheduler failed to start")
+
     try:
         yield
     finally:
-        # Teardown must not be wedged by a hung recompute: swallow drain errors
-        # so engine.dispose() always runs.
+        # Teardown must not be wedged by a hung run: each drain is wrapped so a
+        # hang/failure can't wedge teardown and engine.dispose() always runs.
+        #
+        # SHUTDOWN ORDER IS LOAD-BEARING. Drain the evidence scheduler FIRST:
+        # its drain runs _run_session_move_evidence_side_effects, whose last step
+        # calls request_recompute(...) on the OPENING scheduler. That enqueue
+        # early-returns (silently drops) once the opening scheduler's _shutdown is
+        # set, so the opening scheduler must still be live while the evidence
+        # scheduler drains. The opening recompute (best-effort, self-healing)
+        # then drains in the next step.
+        try:
+            get_evidence_scheduler().shutdown(drain=True)
+        except Exception:
+            logging.getLogger(__name__).exception("session evidence scheduler shutdown failed")
         try:
             get_scheduler().shutdown(drain=True)
         except Exception:

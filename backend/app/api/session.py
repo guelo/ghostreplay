@@ -32,6 +32,7 @@ from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain
 from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
+from app.session_evidence_scheduler import enqueue_session_evidence
 from app.models import (
     Blunder,
     BlunderOpportunityEvent,
@@ -968,14 +969,17 @@ def upsert_session_moves(
 
             db.commit()
         if evidence_moves:
-            _run_session_move_evidence_side_effects(
+            # Deferred off the request path: the expensive graph/opportunity/
+            # analysis-cache/recompute pipeline runs on the evidence scheduler's
+            # worker thread (best-effort; an enqueue failure never regresses
+            # /moves to 500). See app/session_evidence_scheduler.py.
+            enqueue_session_evidence(
                 db,
                 session_id=session_id,
                 user_id=user.user_id,
                 player_color=game_session.player_color,
                 evidence_moves=evidence_moves,
                 move_count=len(values),
-                dialect_name=dialect_name,
             )
         # Emitted only after the upload is durable (post-commit) so a failed
         # insert/commit never produces a successful-looking analytics event.
@@ -1029,14 +1033,17 @@ def upsert_session_moves(
         db.commit()
 
     if evidence_moves:
-        _run_session_move_evidence_side_effects(
+        # Deferred off the request path: the expensive graph/opportunity/
+        # analysis-cache/recompute pipeline runs on the evidence scheduler's
+        # worker thread (best-effort; an enqueue failure never regresses /moves
+        # to 500). See app/session_evidence_scheduler.py.
+        enqueue_session_evidence(
             db,
             session_id=session_id,
             user_id=user.user_id,
             player_color=game_session.player_color,
             evidence_moves=evidence_moves,
             move_count=len(values),
-            dialect_name=dialect_name,
         )
 
     # Emitted only after the upload is durable (post-commit) so a failed

@@ -20,6 +20,7 @@ os.environ.setdefault("JWT_SECRET", "test-secret-32-bytes-minimum-length")
 os.environ["POSTHOG_DISABLED"] = "true"
 os.environ.pop("POSTHOG_PROJECT_TOKEN", None)
 
+from app.api import session as session_api
 from app.database_url import _normalize_postgres_scheme
 from app.db import get_db
 from app.main import app
@@ -458,9 +459,45 @@ def _no_op_recompute_scheduler():
         yield session_stub, srs_stub
 
 
+@pytest.fixture(autouse=True)
+def _sync_session_evidence():
+    """Run /moves evidence side effects synchronously on the request's session.
+
+    In production ``enqueue_session_evidence`` defers the graph/opportunity/
+    analysis-cache/recompute pipeline to a background worker thread bound to the
+    real ``SessionLocal``. Tests assert on those side effects immediately after
+    the response, so patch the bound alias in the API module with a synchronous
+    shim that runs the real ``_run_session_move_evidence_side_effects`` on the
+    REQUEST's ``db`` — correct for the SQLite default AND the Postgres
+    ``_override_pg_db`` path. ``_no_op_recompute_scheduler`` still stubs the
+    opening ``request_recompute`` invoked inside the side effects. Tests that need
+    the deferred (production-shape) behaviour patch ``enqueue_session_evidence``
+    again locally, which overrides this autouse shim for that test only.
+    """
+
+    def _run_sync(db, *, session_id, user_id, player_color, evidence_moves, move_count):
+        session_api._run_session_move_evidence_side_effects(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            player_color=player_color,
+            evidence_moves=evidence_moves,
+            move_count=move_count,
+            dialect_name=db.bind.dialect.name,
+        )
+
+    with patch("app.api.session.enqueue_session_evidence", _run_sync):
+        yield
+
+
 @pytest.fixture
 def client(_db_override):
-    with patch("app.main.engine", engine), patch("app.main.get_scheduler") as get_scheduler:
+    # Patch get_evidence_scheduler (and get_scheduler) so the FastAPI lifespan
+    # never starts a real daemon thread bound to the production SessionLocal
+    # during tests; the _sync_session_evidence shim handles endpoint behaviour.
+    with patch("app.main.engine", engine), patch(
+        "app.main.get_scheduler"
+    ) as get_scheduler, patch("app.main.get_evidence_scheduler"):
         with TestClient(app) as client:
             yield client
 
@@ -572,7 +609,9 @@ def pg_client(pg_engine, pg_session_factory):
             db.close()
 
     app.dependency_overrides[get_db] = _override_pg_db
-    with patch("app.main.engine", pg_engine), patch("app.main.get_scheduler"):
+    with patch("app.main.engine", pg_engine), patch(
+        "app.main.get_scheduler"
+    ), patch("app.main.get_evidence_scheduler"):
         with TestClient(app) as pg_test_client:
             yield pg_test_client
     app.dependency_overrides.pop(get_db, None)
