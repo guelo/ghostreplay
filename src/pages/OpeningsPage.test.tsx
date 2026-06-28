@@ -445,7 +445,7 @@ describe("OpeningsPage tree", () => {
     expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("labels each column header with the selected move (Start / move / —)", async () => {
+  it('labels each column header with the selected move (Start / move / "Choose one")', async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_SICILIAN);
     renderAt("/openings?color=white&move=e2e4&move=c7c5");
     await waitFor(() => expect(lineIndexes()).toEqual([-1, 0, 1, 2]));
@@ -454,8 +454,8 @@ describe("OpeningsPage tree", () => {
       .getAllByTestId("tree-column-header")
       .map((el) => el.textContent);
     // Root → "Start"; the two chosen columns → their move-number labels; the
-    // frontier column (no selection yet) → "—".
-    expect(headers).toEqual(["Start", "1. e4", `1${"…"} c5`, "—"]);
+    // frontier column (no selection yet) → "Choose one".
+    expect(headers).toEqual(["Start", "1. e4", `1${"…"} c5`, "Choose one"]);
   });
 
   it("truncates the line when a column header is clicked", async () => {

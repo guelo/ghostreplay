@@ -78,15 +78,15 @@ function TreeColumnView({
   const isActive = column.nodes.some((node) => node.isExpanded);
 
   // Header: the move chosen in this column, shown with its move number. "Start"
-  // at the root, the selected move label for a chosen column, "—" for the
-  // frontier column that has no selection yet.
+  // at the root, the selected move label for a chosen column, "Choose one" for
+  // the frontier column that has no selection yet (a prompt to pick a move).
   const selectedNode = column.nodes.find((node) => node.isSelected) ?? null;
   const headerLabel =
     column.kind === "root"
       ? "Start"
       : selectedNode
         ? formatMoveLabel(selectedNode.view.ply, selectedNode.view.san)
-        : "—";
+        : "Choose one";
   // Where clicking the header navigates: the root jumps to the start; a chosen
   // column truncates the line to its selection; the frontier header is inert.
   const headerLine: string[] | null =

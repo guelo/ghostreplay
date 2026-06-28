@@ -7270,8 +7270,8 @@
     cursor: pointer;
 }
 
-/* A column on the selected path gets the brand accent; the frontier "—" header
-   keeps the muted default and is disabled (non-navigable). */
+/* A column on the selected path gets the brand accent; the frontier
+   "Choose one" header keeps the muted default and is disabled (non-navigable). */
 .openings-tree-column__header--active {
     color: var(--brand-primary);
     border-bottom-color: var(--brand-primary);
