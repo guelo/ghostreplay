@@ -128,9 +128,9 @@ def backfill_ghost_graph(
         totals.edges_created += stats.edges_created
         totals.edges_existing += stats.edges_existing
 
-        # Session autoflush is off; flush so the next session's dedup query sees
-        # edges this batch already added (avoids duplicate-key inserts on commit).
-        db.flush()
+        # No explicit flush needed: _upsert_session_position_graph flushes its own
+        # positions and edges (Phase 6, g-wlzj), so the next session's dedup
+        # SELECTs already see this batch's rows (avoids duplicate-key inserts).
 
         if not dry_run and batch_size > 0 and index % batch_size == 0:
             db.commit()

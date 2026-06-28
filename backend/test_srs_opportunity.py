@@ -12,7 +12,9 @@ from sqlalchemy import event
 from app.api.session import (
     _compute_blunder_opportunity_events,
     _forward_reachable_position_ids,
+    _upsert_session_position_graph,
 )
+from scripts.backfill_ghost_graph import _MoveRow
 from app.fen import fen_hash
 from app.models import (
     Blunder,
@@ -732,6 +734,62 @@ def test_forward_reachable_multi_ply_and_radius_cutoff(db_session):
         db_session, user_id=user_id, start_ids={nodes[0].id}, radius_ply=2
     )
     assert capped == {nodes[1].id, nodes[2].id}
+
+
+def test_fresh_upload_edge_visible_to_opportunity_bfs(db_session):
+    """A fresh opponent->player edge taught THIS upload reaches a downstream blunder.
+
+    Pins the g-wlzj Phase 6 flush: the upsert flushes its own edges so the
+    immediately-following forward BFS (same txn, autoflush off) sees them. Here O
+    and P pre-exist, so the OLD per-position incidental flush never fired for the
+    fresh O->P edge — without Phase 6 the BFS could not reach B and no opportunity
+    event would be created. Guards against silently reverting to defer-all.
+    """
+    user_id = 123
+    opp_fen = "7k/8/8/8/8/8/8/K7 b - - 0 1"        # black to move (opponent)
+    player_fen = "6k1/8/8/8/8/8/8/K7 w - - 1 2"    # white to move (player), after ...Kg8
+    blunder_fen = "6k1/8/8/8/8/8/8/1K6 b - - 2 2"  # downstream of player_fen, after Kb1
+
+    opp = _position(db_session, user_id=user_id, fen=opp_fen, active_color="black")
+    player = _position(db_session, user_id=user_id, fen=player_fen, active_color="white")
+    blunder_pos = _position(db_session, user_id=user_id, fen=blunder_fen, active_color="black")
+    # Pre-existing player->blunder edge; the opponent->player edge is taught below.
+    db_session.add(Move(from_position_id=player.id, move_san="Kb1", to_position_id=blunder_pos.id))
+    blunder = _blunder(db_session, user_id=user_id, position=blunder_pos)
+    game_session = _session(db_session, user_id=user_id, player_color="white")
+    db_session.add(
+        SessionMove(
+            session_id=game_session.id,
+            move_number=1,
+            color="black",
+            move_san="Kg8",
+            fen_before=opp_fen,
+            fen_after=player_fen,
+        )
+    )
+    db_session.commit()
+
+    # Same transaction, no commit between: the upsert stages + flushes the fresh
+    # O->P edge (Phase 6), then the BFS inside compute reads it.
+    stats = _upsert_session_position_graph(
+        db_session,
+        user_id=user_id,
+        moves=[_MoveRow(fen_before=opp_fen, move_san="Kg8", fen_after=player_fen)],
+    )
+    assert stats.edges_created == 1
+    _compute_blunder_opportunity_events(
+        db_session,
+        session_id=game_session.id,
+        user_id=user_id,
+        player_color="white",
+    )
+    db_session.commit()
+
+    event_row = (
+        db_session.query(BlunderOpportunityEvent).filter_by(blunder_id=blunder.id).one()
+    )
+    assert event_row.opportunity is True
+    assert event_row.reached is False
 
 
 def test_forward_reachable_handles_cycles_and_transpositions(db_session):

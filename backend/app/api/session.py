@@ -413,13 +413,15 @@ def _upsert_session_position_graph(
     user_id: int,
     moves: list[SessionMoveInput],
 ) -> GhostGraphUpsertStats:
-    """Teach the ghost graph from ordinary uploaded game moves."""
+    """Teach the ghost graph from ordinary uploaded game moves.
+
+    Bulk-query design (g-wlzj): resolve every position and edge with a fixed
+    number of round-trips — one positions SELECT, one positions flush, one moves
+    SELECT, one final edge flush — instead of the former per-move Position lookup
+    + per-move Move lookup (~3 round-trips/move). The six phases below replace the
+    old per-row loop while preserving its counters and dedup semantics exactly.
+    """
     stats = GhostGraphUpsertStats()
-    hash_to_position_id: dict[str, int] = {}
-    # Edges added in this call but not yet flushed: the dedup query below cannot
-    # see them (session autoflush is off), so track them in-memory to avoid
-    # duplicate-key inserts when a game transposes back to the same edge.
-    pending_edges: set[tuple[int, str]] = set()
 
     def move_matches_fens(move: SessionMoveInput) -> bool:
         if not move.fen_before or not move.fen_after:
@@ -433,72 +435,123 @@ def _upsert_session_position_graph(
         except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError):
             return False
 
-    def ensure_position(fen: str) -> int | None:
+    # ``hash_meta`` maps fen_hash -> (first-seen raw FEN, active color) in
+    # insertion order. It is the single source of truth for the lookup IN-set
+    # and the creation order of new positions; first-seen wins (transposed FENs
+    # share a hash but differ in raw FEN / move clocks). ``valid_specs`` holds
+    # (h_before, h_after, san) for every move whose BOTH endpoint FENs hashed.
+    hash_meta: dict[str, tuple[str, str]] = {}
+    valid_specs: list[tuple[str, str, str]] = []
+
+    def record_hash(fen: str) -> str | None:
         try:
             hash_val = fen_hash(fen)
             color = active_color(fen)
         except (IndexError, ValueError):
             return None
+        if hash_val not in hash_meta:
+            hash_meta[hash_val] = (fen, color)
+        return hash_val
 
-        existing_id = hash_to_position_id.get(hash_val)
-        if existing_id is not None:
-            return existing_id
-
-        existing = (
-            db.query(Position)
-            .filter(Position.user_id == user_id, Position.fen_hash == hash_val)
-            .first()
-        )
-        if existing:
-            hash_to_position_id[hash_val] = existing.id
-            return existing.id
-
-        position = Position(
-            user_id=user_id,
-            fen_hash=hash_val,
-            fen_raw=fen,
-            active_color=color,
-        )
-        db.add(position)
-        db.flush()
-        hash_to_position_id[hash_val] = position.id
-        stats.positions_created += 1
-        return position.id
-
+    # Phase 1 — validate + hash (CPU only, no DB). Record before then after,
+    # independently — mirrors the old unconditional ensure_position(before) then
+    # ensure_position(after): each position is created/counted even when the
+    # other FEN fails to hash and the edge is dropped.
     for move in moves:
         if not move_matches_fens(move):
             stats.invalid_moves += 1
             continue
         stats.valid_moves += 1
 
-        from_id = ensure_position(move.fen_before)
-        to_id = ensure_position(move.fen_after)
+        h_before = record_hash(move.fen_before)
+        h_after = record_hash(move.fen_after)
+        if h_before is not None and h_after is not None:
+            valid_specs.append((h_before, h_after, move.move_san))
+
+    hash_to_position_id: dict[str, int] = {}
+
+    # Phase 2 — bulk-fetch existing positions (1 SELECT).
+    if hash_meta:
+        for pid, fh in (
+            db.query(Position.id, Position.fen_hash)
+            .filter(Position.user_id == user_id, Position.fen_hash.in_(hash_meta.keys()))
+            .all()
+        ):
+            hash_to_position_id[fh] = pid
+
+    # Phase 3 — bulk-create new positions (1 flush). Iterate hash_meta in
+    # insertion order so ids are assigned in first-seen order; one flush assigns
+    # all ids (SQLAlchemy 2.x insertmanyvalues -> batched RETURNING on Postgres).
+    new_positions: list[tuple[str, Position]] = []
+    for hash_val, (fen_raw, color) in hash_meta.items():
+        if hash_val in hash_to_position_id:
+            continue
+        position = Position(
+            user_id=user_id,
+            fen_hash=hash_val,
+            fen_raw=fen_raw,
+            active_color=color,
+        )
+        db.add(position)
+        new_positions.append((hash_val, position))
+    if new_positions:
+        db.flush()
+        for hash_val, position in new_positions:
+            hash_to_position_id[hash_val] = position.id
+        stats.positions_created += len(new_positions)
+
+    # Phase 4 — bulk-fetch existing moves (1 SELECT). Resolve endpoints, then
+    # fetch every (from_id, san) edge for the candidate from-ids in one query.
+    # Filtering by from_position_id only over-fetches sibling SANs at a from-id;
+    # newly-created from-ids return nothing (their edges aren't flushed yet).
+    resolved_specs: list[tuple[int, int, str]] = []
+    candidate_from_ids: set[int] = set()
+    for h_before, h_after, san in valid_specs:
+        from_id = hash_to_position_id.get(h_before)
+        to_id = hash_to_position_id.get(h_after)
         if from_id is None or to_id is None:
             continue
+        resolved_specs.append((from_id, to_id, san))
+        candidate_from_ids.add(from_id)
 
-        edge_key = (from_id, move.move_san)
+    existing_edges: set[tuple[int, str]] = set()
+    if candidate_from_ids:
+        existing_edges = {
+            (fid, san)
+            for fid, san in db.query(Move.from_position_id, Move.move_san)
+            .filter(Move.from_position_id.in_(candidate_from_ids))
+            .all()
+        }
+
+    # Phase 5 — resolve + stage edges in-memory (no round-trips). pending_edges
+    # dedups within this batch (a game can transpose back to the same edge); the
+    # check order matches the old loop exactly.
+    pending_edges: set[tuple[int, str]] = set()
+    for from_id, to_id, san in resolved_specs:
+        edge_key = (from_id, san)
         if edge_key in pending_edges:
             stats.edges_existing += 1
             continue
-
-        existing_move = (
-            db.query(Move)
-            .filter(Move.from_position_id == from_id, Move.move_san == move.move_san)
-            .first()
-        )
-        if existing_move:
+        if edge_key in existing_edges:
             stats.edges_existing += 1
             continue
-
         db.add(
             Move(
                 from_position_id=from_id,
-                move_san=move.move_san,
+                move_san=san,
                 to_position_id=to_id,
             )
         )
         pending_edges.add(edge_key)
         stats.edges_created += 1
+
+    # Phase 6 — flush all staged edges (g-wlzj). The immediately-following
+    # opportunity BFS (_forward_reachable_position_ids) runs in this same txn with
+    # autoflush off, so it only sees flushed edges; flushing here exposes this
+    # upload's fresh edges to it. Strict superset of the old behavior, where the
+    # incidental per-position flush already leaked most — but not the tail — of
+    # these edges. No-op when no edges were staged.
+    db.flush()
 
     return stats
 
@@ -592,13 +645,13 @@ def _compute_blunder_opportunity_events(
             for blunder_id, (opportunity, reached) in matched.items()
         ],
     )
-    # NB: no commit here. The caller owns the commit so the deferred ghost-graph
-    # edges (staged by _upsert_session_position_graph with autoflush off) are
-    # flushed under a distinct ``evidence_commit`` timing stage rather than being
-    # misattributed to this compute stage. Both the bulk DELETE and the bulk INSERT
-    # above already emit SQL within this stage (autoflush is off; ``.delete()`` and
-    # ``db.execute()`` issue immediately); only their durability finalizes at the
-    # caller's commit. Direct callers (tests/scripts) must commit.
+    # NB: no commit here. The caller owns the commit. The ghost-graph edges are
+    # already flushed (by _upsert_session_position_graph's own Phase 6 flush, so
+    # the forward-reachable BFS above could see this upload's fresh edges); the
+    # bulk DELETE and bulk INSERT here also emit SQL within this stage (autoflush
+    # is off; ``.delete()`` and ``db.execute()`` issue immediately). Only their
+    # durability finalizes at the caller's commit. Direct callers (tests/scripts)
+    # must commit.
 
 
 def _upsert_analysis_cache(
@@ -773,14 +826,14 @@ def _run_graph_evidence_txn(
             user_id=user_id,
             player_color=player_color,
         )
-    # Single commit that flushes the deferred ghost-graph edges staged above
-    # (db.add with autoflush off) and finalizes durability. NB: for sqlite/postgres
-    # both the opportunity-event INSERT/UPDATEs and the bulk stale-event DELETE
-    # already executed inside the opportunity_events stage (they issue immediately;
-    # the DELETE uses synchronize_session=False so it emits SQL there, not at
-    # commit), so this stage owns the graph-edge flush + commit cost — and
-    # IntegrityErrors surfacing only at flush/commit — not the per-event write
-    # round-trips. Timed separately so deferred-flush/commit cost is not
+    # Single commit that finalizes durability. NB: the ghost-graph edges were
+    # already flushed inside the ghost_graph_upsert stage (Phase 6 of
+    # _upsert_session_position_graph), so duplicate-edge IntegrityErrors now
+    # surface there, not here. For sqlite/postgres the opportunity-event
+    # INSERT/UPDATEs and the bulk stale-event DELETE also already executed inside
+    # the opportunity_events stage (they issue immediately; the DELETE uses
+    # synchronize_session=False so it emits SQL there, not at commit). This stage
+    # owns the COMMIT (durability) only. Timed separately so commit cost is not
     # misattributed to compute.
     with _timed_side_effect(
         "evidence_commit",
