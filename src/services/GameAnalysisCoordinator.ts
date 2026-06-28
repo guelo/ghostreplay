@@ -52,14 +52,24 @@ const CACHE_BATCH_MAX_AGE_MS = 400
  */
 const ANALYSIS_RESOLUTION_TIMEOUT_MS = 2500
 /**
- * Hard total-analysis deadline started at analyzeMove. Guarantees no-hang: if an
- * indexed request never resolves (worker never emits, cache missed, etc.) the
- * request is terminated as failed so analysis-dependent gameplay cannot deadlock.
- * Depth-17 move analysis can run root + post-played + post-best searches, and
- * one root phase alone can exceed 8s on real positions, so this guard must be
- * loose enough for slow-but-finite analyses to publish.
+ * Per-request inactivity watchdog window. Replaces the old fixed total-elapsed
+ * deadline: a request fails only after producing NO observable activity (worker
+ * `analysis-progress`/started/streaming/result/error) for this window; any
+ * activity for it resets the timer. Comfortably above Stockfish's intra-search
+ * info cadence plus the per-request reset round-trip, while cutting silent-worker
+ * failure from 30s → 8s so drill `waitForAnalysis` recovery does not stall. The
+ * watchdog is a POST-ready concept; engine boot is bounded separately by
+ * ANALYSIS_BOOT_TIMEOUT_MS.
  */
-const ANALYSIS_TOTAL_DEADLINE_MS = 30_000
+const ANALYSIS_INACTIVITY_TIMEOUT_MS = 8_000
+/**
+ * Boot backstop, distinct from the inactivity window. Bounds a silent/hung
+ * engine boot: started on worker creation, cleared on `ready`, and on fire it
+ * tears the worker down as a fatal start failure (so drill recovery settles
+ * instead of hanging). Generous — comfortably above real WASM cold-boot, below
+ * the old 30s deadline that used to double as the boot guard.
+ */
+const ANALYSIS_BOOT_TIMEOUT_MS = 20_000
 const INCREMENTAL_UPLOAD_INTERVAL_MS = 3000
 const INCREMENTAL_UPLOAD_BATCH_THRESHOLD = 4
 const IDLE_SHUTDOWN_MS = 5 * 60 * 1000 // 5 minutes
@@ -130,8 +140,12 @@ type ResolutionEntry = {
   workerFailed?: boolean
   /** Captured scoped-error text, used when rejecting waiters. */
   workerError?: string
-  /** Total-analysis hard deadline (started at analyzeMove). */
-  deadlineTimer?: ReturnType<typeof setTimeout>
+  /** Per-request inactivity watchdog (armed post-ready; reset by activity). */
+  watchdogTimer?: ReturnType<typeof setTimeout>
+  /** True once this request has produced its OWN activity. A started request is
+   *  reset only by its own activity (worker's serial focus); a not-yet-started
+   *  (queued) request is reset by any live worker liveness. */
+  started?: boolean
   /** Cache-response window (started at dispatch in flushCacheLookups). */
   cacheTimer?: ReturnType<typeof setTimeout>
 }
@@ -279,6 +293,14 @@ export class GameAnalysisCoordinator {
   private resolvedIndices = new Set<number>()
   private lastStreamingUpdateMs = 0
   private currentAnalyzingRequestId: string | null = null
+  /** True only between the worker's `ready` and its teardown. The inactivity
+   *  watchdog is a post-ready concept, so analyzeMove arms it only when this is
+   *  true; pre-ready requests are armed when `ready` arrives. NOT the store
+   *  status (which a scoped recovery can move independently). */
+  private engineReady = false
+  /** Backstop for a silent/hung engine boot (ANALYSIS_BOOT_TIMEOUT_MS). Started
+   *  on worker creation, cleared on `ready`; fatal on fire. */
+  private bootWatchdogTimer: ReturnType<typeof setTimeout> | null = null
 
   // Cache lookup batching
   private pendingCacheLookups: PendingCacheLookup[] = []
@@ -440,7 +462,7 @@ export class GameAnalysisCoordinator {
     for (const idx of indices) {
       const entry = this.resolutionState.get(idx)
       if (entry) {
-        if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+        if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
         this.resolutionState.delete(idx)
       }
@@ -514,6 +536,49 @@ export class GameAnalysisCoordinator {
       }
     }
     this.analysisWaiters.clear()
+  }
+
+  // --- Inactivity watchdog ---
+
+  /** (Re)arm the per-request inactivity timer for an entry. On fire the request
+   *  is failed as `inactivity`. */
+  private armWatchdog(moveIndex: number, entry: ResolutionEntry) {
+    if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
+    entry.watchdogTimer = setTimeout(() => {
+      this.failRequest(moveIndex, entry.requestId, 'inactivity')
+    }, ANALYSIS_INACTIVITY_TIMEOUT_MS)
+  }
+
+  /** Serial-worker liveness: re-arm the watchdog of every still-pending entry
+   *  that has NOT started yet (queued behind the active request). The worker is a
+   *  single serial engine, so a live active request's progress proves it is alive
+   *  and draining toward those queued requests. Also called directly by `ready`
+   *  (no id) to (re)arm everything once the engine is live. */
+  private bumpQueuedWatchdogs() {
+    for (const [idx, entry] of this.resolutionState) {
+      if (entry.started) continue
+      if (this.resolvedIndices.has(idx)) continue
+      this.armWatchdog(idx, entry)
+    }
+  }
+
+  /** Reset the watchdog from observed activity for `requestId`. SELF-GUARDING: it
+   *  does NOTHING unless `requestId` is the LIVE, CURRENT owner of its index — so
+   *  a superseded id (entry now owned by the replacement), a failed id (entry
+   *  deleted), a resolved id, or a discarded id is inert and can neither revive
+   *  nor fail a newer request, nor keep queued work alive (review finding 1). For
+   *  a live request: mark it `started` and re-arm ITS watchdog (own activity),
+   *  then bump the queued (not-started) entries (serial-worker liveness). */
+  private noteActivity(requestId: string) {
+    const idx = this.requestIdToMoveIndex.get(requestId)
+    if (idx === undefined) return
+    const entry = this.resolutionState.get(idx)
+    if (!entry || entry.requestId !== requestId) return
+    if (this.latestRequestIds.get(idx) !== requestId) return
+    if (this.resolvedIndices.has(idx)) return
+    entry.started = true
+    this.armWatchdog(idx, entry)
+    this.bumpQueuedWatchdogs()
   }
 
   // --- Drill-truth side channel (Phase 6) ---
@@ -697,6 +762,14 @@ export class GameAnalysisCoordinator {
     this.worker.addEventListener('message', this.handleWorkerMessage)
     this.worker.addEventListener('error', this.handleWorkerError)
     this.store.getState().resetTransient()
+    // A fresh worker is not yet ready: the inactivity watchdog stays disarmed
+    // until `ready` arrives, bounded meanwhile by the boot backstop.
+    this.engineReady = false
+    if (this.bootWatchdogTimer) clearTimeout(this.bootWatchdogTimer)
+    this.bootWatchdogTimer = setTimeout(() => {
+      this.bootWatchdogTimer = null
+      this.handleFatalError('Analysis engine failed to start')
+    }, ANALYSIS_BOOT_TIMEOUT_MS)
     this.resetIdleTimer()
   }
 
@@ -705,6 +778,11 @@ export class GameAnalysisCoordinator {
       clearTimeout(this.idleTimer)
       this.idleTimer = null
     }
+    if (this.bootWatchdogTimer) {
+      clearTimeout(this.bootWatchdogTimer)
+      this.bootWatchdogTimer = null
+    }
+    this.engineReady = false
     if (!this.worker) return
     this.worker.removeEventListener('message', this.handleWorkerMessage)
     this.worker.removeEventListener('error', this.handleWorkerError)
@@ -859,7 +937,7 @@ export class GameAnalysisCoordinator {
       // caller awaiting the old request does not hang (Finding F2).
       const prevEntry = this.resolutionState.get(moveIndex)
       if (prevEntry) {
-        if (prevEntry.deadlineTimer) clearTimeout(prevEntry.deadlineTimer)
+        if (prevEntry.watchdogTimer) clearTimeout(prevEntry.watchdogTimer)
         if (prevEntry.cacheTimer) clearTimeout(prevEntry.cacheTimer)
         this.rejectWaitersForRequest(moveIndex, prevEntry.requestId, new Error('Analysis superseded'))
       }
@@ -876,10 +954,13 @@ export class GameAnalysisCoordinator {
       this.requestIdToMoveIndex.set(id, moveIndex)
       this.resolvedIndices.delete(moveIndex)
 
-      const deadlineTimer = setTimeout(() => {
-        this.failRequest(moveIndex, id, 'deadline')
-      }, ANALYSIS_TOTAL_DEADLINE_MS)
-      this.resolutionState.set(moveIndex, { requestId: id, cacheStatus: 'pending', deadlineTimer })
+      const entry: ResolutionEntry = { requestId: id, cacheStatus: 'pending' }
+      this.resolutionState.set(moveIndex, entry)
+      // Arm the inactivity watchdog only once the engine is ready; a request
+      // scheduled while still booting is armed later by `ready` →
+      // bumpQueuedWatchdogs() (engine-boot strategy — the 8s window must not
+      // false-fail the first request during a slow cold WASM boot).
+      if (this.engineReady) this.armWatchdog(moveIndex, entry)
 
       // Outcome: supersession/retry lineage (L3). previousRequestId comes from
       // the dedicated lineage map, NOT latestRequestIds (cleared by same-gen
@@ -929,7 +1010,7 @@ export class GameAnalysisCoordinator {
     this.terminateWorker()
     // Terminating the worker orphans every in-flight request — buffered,
     // pending, and worker-failed alike — so reject all their waiters rather
-    // than leaving them to hang until the total deadline (Finding R4).
+    // than leaving them to hang until the inactivity watchdog fires (Finding R4).
     this.clearAllResolutionState()
     this.rejectAnalysisWaiters(new Error('Analysis worker restarted'))
     this.rejectDrillTruthWaiters(new Error('Analysis worker restarted'))
@@ -948,7 +1029,7 @@ export class GameAnalysisCoordinator {
    *  tombstone map and the cache-batch age clock. Used by all lifecycle paths. */
   private clearAllResolutionState() {
     for (const entry of this.resolutionState.values()) {
-      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
       if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
     }
     this.resolutionState.clear()
@@ -994,7 +1075,7 @@ export class GameAnalysisCoordinator {
     // Reject any unresolved waiters — clearing orphans every in-flight request
     // (Finding R4).
     for (const entry of this.resolutionState.values()) {
-      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
       if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
     }
     this.resolutionState.clear()
@@ -1029,7 +1110,19 @@ export class GameAnalysisCoordinator {
 
     switch (message.type) {
       case 'ready':
+        // A stray late `ready` (e.g. after the boot-timeout fatal path) must not
+        // flip 'error' back to 'ready', re-arm watchdogs, or clear the boot guard
+        // on a dead worker. terminateWorker's listener removal isolates a replaced
+        // worker, so no separate generation check is needed.
+        if (s.status === 'error') break
+        this.engineReady = true
+        if (this.bootWatchdogTimer) {
+          clearTimeout(this.bootWatchdogTimer)
+          this.bootWatchdogTimer = null
+        }
         s.setStatus('ready')
+        // Arm the inactivity watchdog for every request scheduled while booting.
+        this.bumpQueuedWatchdogs()
         break
       case 'analysis-started': {
         // Drop late worker messages after a fatal error (Finding F1).
@@ -1038,14 +1131,23 @@ export class GameAnalysisCoordinator {
         // lookup so they never re-show the spinner.
         if (this.discardedRequestIds.has(message.id)) break
         // Gate by request state so a late start after a cache hit cancels does
-        // not re-show the spinner (Finding R5).
+        // not re-show the spinner (Finding R5), AND require a LIVE resolution
+        // entry so a late start after a watchdog/worker failRequest (entry gone,
+        // but the id still in latestRequestIds) cannot revive the spinner for a
+        // request that already failed.
         const startIdx = this.requestIdToMoveIndex.get(message.id)
-        if (
-          startIdx !== undefined &&
-          (this.latestRequestIds.get(startIdx) !== message.id || this.resolvedIndices.has(startIdx))
-        ) {
-          break
+        if (startIdx !== undefined) {
+          const entry = this.resolutionState.get(startIdx)
+          if (
+            !entry ||
+            entry.requestId !== message.id ||
+            this.latestRequestIds.get(startIdx) !== message.id ||
+            this.resolvedIndices.has(startIdx)
+          ) {
+            break
+          }
         }
+        this.noteActivity(message.id)
         this.currentAnalyzingRequestId = message.id
         s.setIsAnalyzing(true)
         s.setAnalyzingMove(message.move)
@@ -1054,6 +1156,7 @@ export class GameAnalysisCoordinator {
       case 'analysis-streaming': {
         if (s.status === 'error') break
         if (this.discardedRequestIds.has(message.id)) break
+        this.noteActivity(message.id)
         const streamIdx = this.pendingMoveIndices.get(message.id)
         if (
           streamIdx !== undefined &&
@@ -1068,6 +1171,15 @@ export class GameAnalysisCoordinator {
         }
         break
       }
+      case 'analysis-progress': {
+        // Liveness-only ping (root/post-played/post-best). Drop after a fatal
+        // error or for a pruned/reverted request; otherwise reset the watchdog.
+        // noteActivity self-guards against stale/superseded/resolved ids.
+        if (s.status === 'error') break
+        if (this.discardedRequestIds.has(message.id)) break
+        this.noteActivity(message.id)
+        break
+      }
       case 'analysis': {
         // Drop late worker results after a fatal error (Finding F1).
         if (s.status === 'error') {
@@ -1080,6 +1192,9 @@ export class GameAnalysisCoordinator {
           this.clearActiveAnalysisStateIfCurrent(message.id)
           break
         }
+        // Activity: reset the watchdog (self-guarded). Matters when the result is
+        // buffered behind a still-pending cache so the wait is not killed.
+        this.noteActivity(message.id)
 
         const moveIndex = this.requestIdToMoveIndex.get(message.id)
         if (moveIndex !== undefined) {
@@ -1138,6 +1253,9 @@ export class GameAnalysisCoordinator {
           const entry = this.resolutionState.get(idx)
           if (!entry || entry.requestId !== message.id) break
           if (this.resolvedIndices.has(idx)) break
+          // Activity: reset the watchdog (self-guarded). Matters when the error is
+          // held behind a still-pending cache (workerFailed) awaiting recovery.
+          this.noteActivity(message.id)
           this.clearActiveAnalysisStateIfCurrent(message.id)
           if (entry.cacheStatus === 'pending') {
             // A trusted cache hit can still resolve this move; wait for the
@@ -1147,7 +1265,7 @@ export class GameAnalysisCoordinator {
           } else {
             // Cache already released the fallback (reverse order) and no worker
             // result is coming \u2014 fail immediately rather than waiting for the
-            // total deadline (Finding 1/2).
+            // inactivity watchdog to expire (Finding 1/2).
             this.failRequest(idx, message.id, 'worker-error', message.error)
           }
           break
@@ -1270,8 +1388,8 @@ export class GameAnalysisCoordinator {
   /**
    * Release the buffered worker fallback once the cache has settled non-trusted
    * (miss / untrusted / error / timeout). Idempotent and id-guarded. Does NOT
-   * clear the total-analysis deadline — that still guards a never-arriving
-   * worker.
+   * clear the inactivity watchdog — a released request still awaiting a silent
+   * worker stays protected, failing only after the watchdog window of silence.
    */
   private releaseFallback(moveIndex: number, requestId: string, reason: ReleaseReason) {
     const entry = this.resolutionState.get(moveIndex)
@@ -1297,8 +1415,8 @@ export class GameAnalysisCoordinator {
       // Worker already errored and no result will ever come.
       this.failRequest(moveIndex, requestId, 'worker-error', entry.workerError)
     }
-    // else: leave released; the worker result resolves on arrival, or the total
-    // deadline terminates the request.
+    // else: leave released; the worker result resolves on arrival, or the
+    // inactivity watchdog terminates the request after a window of silence.
   }
 
   /**
@@ -1309,14 +1427,14 @@ export class GameAnalysisCoordinator {
   private failRequest(
     moveIndex: number,
     requestId: string,
-    reason: 'deadline' | 'worker-error',
+    reason: 'inactivity' | 'worker-error',
     errorText?: string,
   ) {
     const entry = this.resolutionState.get(moveIndex)
     if (!entry || entry.requestId !== requestId) return
     if (this.resolvedIndices.has(moveIndex)) return
 
-    if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+    if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
     if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
     this.resolutionState.delete(moveIndex)
     this.pendingMoveIndices.delete(requestId)
@@ -1325,7 +1443,7 @@ export class GameAnalysisCoordinator {
     this.rejectWaitersForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
     // A hard terminal failure rejects any drill-truth waiter for this request and
     // drops its record so a drill grade awaiting truth fails to recovery rather
-    // than hanging to the deadline.
+    // than hanging to the inactivity watchdog.
     this.rejectDrillTruthForRequest(moveIndex, requestId, new Error(errorText ?? 'analysis timed out'))
     this.cancelWorkerAnalysis(requestId)
     this.clearActiveAnalysisStateIfCurrent(requestId)
@@ -1356,7 +1474,7 @@ export class GameAnalysisCoordinator {
     // Terminal: clear per-request state + both timers + pending metadata.
     const entry = this.resolutionState.get(moveIndex)
     if (entry) {
-      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
       if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       this.resolutionState.delete(moveIndex)
     }
@@ -1681,6 +1799,10 @@ export class GameAnalysisCoordinator {
     }
     if (this.idleTimer) {
       clearTimeout(this.idleTimer)
+    }
+    if (this.bootWatchdogTimer) {
+      clearTimeout(this.bootWatchdogTimer)
+      this.bootWatchdogTimer = null
     }
     this.clearAllResolutionState()
     this.rejectAnalysisWaiters(new Error('Analysis coordinator destroyed'))

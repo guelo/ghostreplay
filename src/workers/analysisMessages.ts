@@ -19,6 +19,15 @@ export type AnalysisWorkerResponse =
   | { type: 'ready' }
   | { type: 'analysis-started'; id: string; move: string }
   | { type: 'analysis-streaming'; id: string; cp: number; depth: number }
+  /**
+   * Per-search liveness ping for the inactivity watchdog. Emitted from ANY of an
+   * analysis's searches (root / post-played / post-best) — the engine-line level,
+   * not `onInfo` — so the previously-silent root and post-best phases surface
+   * activity too. Worker-throttled. Distinct from `analysis-streaming`, which is
+   * display-only and post-played; this carries NO eval/depth and is consumed
+   * solely to reset the per-request inactivity watchdog.
+   */
+  | { type: 'analysis-progress'; id: string }
   | {
       type: 'analysis'
       id: string

@@ -389,13 +389,238 @@ describe('useMoveAnalysis', () => {
     })
     const id = postMessageMock.mock.calls[0][0].id
 
-    // Fire the per-variation no-hang deadline (ANALYSIS_TOTAL_DEADLINE_MS).
+    // A silent variation fails after the per-variation inactivity watchdog window
+    // (ANALYSIS_INACTIVITY_TIMEOUT_MS).
     act(() => {
-      vi.advanceTimersByTime(30_000)
+      vi.advanceTimersByTime(8_000)
     })
 
     expect(onVariationError).toHaveBeenCalledTimes(1)
     expect(onVariationError).toHaveBeenCalledWith(id)
+  })
+
+  it('keeps a progressing variation alive past the inactivity window', () => {
+    vi.useFakeTimers()
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+    const fen = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove(fen, 'e7e5', 'white', undefined, undefined, 2, fen)
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    // Progress every < window, total elapsed well past 2× the window — each ping
+    // resets the variation watchdog, so a slow-but-progressing variation survives.
+    act(() => {
+      for (let i = 0; i < 8; i++) {
+        simulateMessage({ type: 'analysis-progress', id })
+        vi.advanceTimersByTime(6_000)
+      }
+    })
+    expect(onVariationError).not.toHaveBeenCalled()
+
+    // It still fails once it finally goes silent for a full window.
+    act(() => { vi.advanceTimersByTime(8_000) })
+    expect(onVariationError).toHaveBeenCalledTimes(1)
+    expect(onVariationError).toHaveBeenCalledWith(id)
+  })
+
+  it('fails a started-but-silent variation even while an indexed request progresses', () => {
+    vi.useFakeTimers()
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove('fen-0', 'e2e4', 'white', 0)
+      result.current.analyzeMove('fen-v', 'e7e5', 'white', undefined, undefined, 2, 'fen-v')
+    })
+    const analyzeCalls = postMessageMock.mock.calls.filter(([m]) => m.type === 'analyze-move')
+    const indexedId = analyzeCalls.find((c) => c[0].moveIndex === 0)![0].id
+    const varId = analyzeCalls.find((c) => c[0].moveIndex === undefined)![0].id
+
+    act(() => {
+      simulateMessage({ type: 'analysis-started', id: indexedId, move: 'e2e4' })
+      simulateMessage({ type: 'analysis-started', id: varId, move: 'e7e5' })
+    })
+
+    // The indexed request progresses; the STARTED variation stays silent. A
+    // started request is reset only by its own activity, so unrelated indexed
+    // progress does NOT keep the variation alive — it fails after its window.
+    act(() => {
+      for (let i = 0; i < 8; i++) {
+        simulateMessage({ type: 'analysis-progress', id: indexedId })
+        vi.advanceTimersByTime(6_000)
+      }
+    })
+    expect(onVariationError).toHaveBeenCalledWith(varId)
+  })
+
+  it('keeps a queued (not-started) variation alive behind a progressing indexed request', () => {
+    vi.useFakeTimers()
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove('fen-0', 'e2e4', 'white', 0)
+      result.current.analyzeMove('fen-v', 'e7e5', 'white', undefined, undefined, 2, 'fen-v')
+    })
+    const analyzeCalls = postMessageMock.mock.calls.filter(([m]) => m.type === 'analyze-move')
+    const indexedId = analyzeCalls.find((c) => c[0].moveIndex === 0)![0].id
+    const varId = analyzeCalls.find((c) => c[0].moveIndex === undefined)![0].id
+
+    act(() => { simulateMessage({ type: 'analysis-started', id: indexedId, move: 'e2e4' }) })
+
+    // The indexed request progresses while the variation stays silent and
+    // not-started; serial-worker liveness keeps the queued variation alive.
+    act(() => {
+      for (let i = 0; i < 8; i++) {
+        simulateMessage({ type: 'analysis-progress', id: indexedId })
+        vi.advanceTimersByTime(6_000)
+      }
+    })
+    expect(onVariationError).not.toHaveBeenCalled()
+
+    // The variation finally starts and resolves — still no error.
+    act(() => {
+      simulateMessage({ type: 'analysis-started', id: varId, move: 'e7e5' })
+      simulateMessage({
+        type: 'analysis', id: varId, move: 'e7e5', bestMove: 'e7e5',
+        bestEval: 0, playedEval: 0, delta: 0, classification: 'best',
+      })
+    })
+    expect(onVariationError).not.toHaveBeenCalled()
+  })
+
+  it('stale variation progress does NOT extend a queued indexed request (self-guard)', () => {
+    vi.useFakeTimers()
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      // Queued indexed request B (no activity → stays not-started).
+      result.current.analyzeMove('fen-0', 'e2e4', 'white', 0)
+      // A variation we then terminate so its id becomes stale/deleted.
+      result.current.analyzeMove('fen-v', 'e7e5', 'white', undefined, undefined, 2, 'fen-v')
+    })
+    const analyzeCalls = postMessageMock.mock.calls.filter(([m]) => m.type === 'analyze-move')
+    const indexedId = analyzeCalls.find((c) => c[0].moveIndex === 0)![0].id
+    const varId = analyzeCalls.find((c) => c[0].moveIndex === undefined)![0].id
+
+    // Terminate the variation → its id leaves pendingVariationPlies.
+    act(() => {
+      simulateMessage({
+        type: 'analysis', id: varId, move: 'e7e5', bestMove: 'e7e5',
+        bestEval: 0, playedEval: 0, delta: 0, classification: 'best',
+      })
+    })
+
+    // Just before B's window (armed at t=0 since ready): a stale variation ping
+    // must be inert and must NOT re-arm B via serial liveness.
+    act(() => { vi.advanceTimersByTime(7_000) })
+    act(() => { simulateMessage({ type: 'analysis-progress', id: varId }) })
+
+    // Past B's original window with no LIVE activity → B fails at its window,
+    // canceling its worker request.
+    act(() => { vi.advanceTimersByTime(2_000) })
+    const canceledB = postMessageMock.mock.calls.some(
+      ([m]) => m.type === 'cancel-analysis' && m.id === indexedId,
+    )
+    expect(canceledB).toBe(true)
+  })
+
+  it('resets an indexed request watchdog on analysis-progress', () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+
+    // Progress every < window keeps the indexed request alive well past the
+    // window — the spinner stays up and nothing is failed.
+    act(() => {
+      for (let i = 0; i < 8; i++) {
+        simulateMessage({ type: 'analysis-progress', id })
+        vi.advanceTimersByTime(6_000)
+      }
+    })
+    expect(store.getState().isAnalyzing).toBe(true)
+    expect(store.getState().analysisMap.has(0)).toBe(false)
+
+    // A final worker result still resolves it.
+    act(() => {
+      simulateMessage({
+        type: 'analysis', id, move: 'e2e4', bestMove: 'e2e4',
+        bestEval: 10, playedEval: 10, delta: 0, classification: 'best',
+      })
+    })
+    expect(store.getState().analysisMap.get(0)?.id).toBe(id)
+  })
+
+  it('a late analysis-started after an indexed watchdog failure does not revive the spinner (P2)', () => {
+    vi.useFakeTimers()
+    const { result } = renderHook(() => useMoveAnalysis(store))
+
+    act(() => { simulateMessage({ type: 'ready' }) })
+    act(() => { result.current.analyzeMove('fen-0', 'e2e4', 'white', 0) })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    // Cache miss → released; the started request then goes silent → watchdog fails
+    // it (entry removed, id still in latestRequestIds).
+    act(() => { vi.advanceTimersByTime(200) })
+    act(() => { vi.advanceTimersByTime(8_000) })
+    expect(store.getState().isAnalyzing).toBe(false)
+
+    // A racey late analysis-started for the failed request must NOT revive it —
+    // the start gate now requires a live resolution entry (P2).
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e2e4' }) })
+    expect(store.getState().isAnalyzing).toBe(false)
+  })
+
+  it('drops a late result/start for a timed-out variation (P1/P2)', () => {
+    vi.useFakeTimers()
+    const onVariationError = vi.fn()
+    const { result } = renderHook(() => useMoveAnalysis(store, onVariationError))
+
+    act(() => {
+      simulateMessage({ type: 'ready' })
+      result.current.analyzeMove('fen-v', 'e7e5', 'white', undefined, undefined, 2, 'fen-v')
+    })
+    const id = postMessageMock.mock.calls[0][0].id
+
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e7e5' }) })
+    expect(store.getState().isAnalyzing).toBe(true)
+
+    // The started variation goes silent → its watchdog fails it, clearing the
+    // spinner and tombstoning the id.
+    act(() => { vi.advanceTimersByTime(8_000) })
+    expect(onVariationError).toHaveBeenCalledWith(id)
+    expect(store.getState().isAnalyzing).toBe(false)
+    expect(store.getState().lastAnalysis).toBeNull()
+
+    // A racey late analysis-started for the canceled variation must NOT revive the
+    // spinner (P2).
+    act(() => { simulateMessage({ type: 'analysis-started', id, move: 'e7e5' }) })
+    expect(store.getState().isAnalyzing).toBe(false)
+
+    // A racey late analysis for the canceled variation must NOT fall through to the
+    // ad-hoc branch and clobber lastAnalysis (P1).
+    act(() => {
+      simulateMessage({
+        type: 'analysis', id, move: 'e7e5', bestMove: 'e7e5',
+        bestEval: 0, playedEval: 0, delta: 0, classification: 'best',
+      })
+    })
+    expect(store.getState().lastAnalysis).toBeNull()
   })
 
   it('does not post to worker when status is error', () => {

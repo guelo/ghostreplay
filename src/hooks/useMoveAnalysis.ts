@@ -24,9 +24,16 @@ const createRequestId = () => {
 const CACHE_LOOKUP_DEBOUNCE_MS = 150
 const CACHE_BATCH_MAX_AGE_MS = 400
 const ANALYSIS_RESOLUTION_TIMEOUT_MS = 2500
-// Matches GameAnalysisCoordinator: depth-17 analysis can legitimately exceed
-// the old 8s guard before all required searches finish.
-const ANALYSIS_TOTAL_DEADLINE_MS = 30_000
+// Matches GameAnalysisCoordinator: a per-request inactivity window replaces the
+// old fixed total deadline. A request (indexed OR variation) fails only after
+// producing no observable activity for this window; any activity resets it, so a
+// slow-but-progressing depth-17 analysis survives while a silent/hung worker
+// still fails promptly. Armed only post-`ready` (see ANALYSIS_BOOT_TIMEOUT_MS).
+const ANALYSIS_INACTIVITY_TIMEOUT_MS = 8_000
+// Boot backstop, distinct from the inactivity window: bounds a silent/hung engine
+// boot (cleared on `ready`, fatal on fire) so the tight 8s window never has to
+// tolerate a slow cold WASM start.
+const ANALYSIS_BOOT_TIMEOUT_MS = 20_000
 
 type PendingCacheLookup = {
   requestId: string
@@ -45,7 +52,11 @@ type ResolutionEntry = {
   releaseReason?: ReleaseReason
   bufferedWorker?: AnalysisResult
   workerFailed?: boolean
-  deadlineTimer?: ReturnType<typeof setTimeout>
+  /** Per-request inactivity watchdog (armed post-ready; reset by activity). */
+  watchdogTimer?: ReturnType<typeof setTimeout>
+  /** True once this request produced its OWN activity — then reset only by its
+   *  own activity; a queued (not-started) entry is reset by any worker liveness. */
+  started?: boolean
   cacheTimer?: ReturnType<typeof setTimeout>
 }
 
@@ -137,10 +148,22 @@ export const useMoveAnalysis = (
   const pendingMeta = useRef<Map<string, { moveIndex: number; legalMoveCount: number | undefined }>>(new Map())
   // Maps request IDs to the absolute ply + FEN of an in-flight what-if analysis
   const pendingVariationPlies = useRef<Map<string, { ply: number; fen: string }>>(new Map())
-  // Per-variation no-hang deadline timers (variation requests are not tracked in
-  // resolutionState, so they need their own deadline that also cancels the
+  // Per-variation inactivity watchdog timers (variation requests are not tracked
+  // in resolutionState, so they need their own watchdog that also cancels the
   // worker request — otherwise a missing readyok stalls the worker queue).
-  const variationDeadlineTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const variationWatchdogTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  // Variation request ids that have produced their OWN activity. A started
+  // variation is reset only by its own activity (so a silent started variation
+  // still fails after its window); a not-started one is reset by worker liveness.
+  const variationStarted = useRef<Set<string>>(new Set())
+  // Tombstones for variation ids torn down by FAILURE while the worker stays
+  // alive (timeout/cancel via failVariation, scoped variation error, clearAnalysis).
+  // Variation ids are never in requestIdToMoveIndex, so a late worker `analysis`
+  // for one would otherwise fall through to the non-indexed branch and clobber
+  // lastAnalysis (and a late `analysis-started` would revive the spinner). Handlers
+  // drop tombstoned ids. Cleared on worker teardown (fatal / unmount), where the
+  // 'error' status guard + worker termination already cover late messages.
+  const discardedVariationIds = useRef<Set<string>>(new Set())
   // Throttle streaming eval updates to avoid excessive rerenders
   const lastStreamingUpdateMs = useRef(0)
   // Which request currently owns the global analyzing/streaming transient state,
@@ -169,6 +192,13 @@ export const useMoveAnalysis = (
   // Incremented on unmount; async cache callbacks captured at schedule time
   // no-op if it changed, preventing post-unmount store mutation (Finding 5).
   const mountToken = useRef(0)
+  // True only between the worker's `ready` and its teardown. The inactivity
+  // watchdog is post-ready, so analyzeMove arms it only when this is true;
+  // pre-ready requests are armed when `ready` arrives (engine-boot strategy).
+  const engineReadyRef = useRef(false)
+  // Boot backstop for a silent/hung engine boot. Started in the worker effect,
+  // cleared on `ready`/fatal-error/cleanup; on fire it runs the fatal teardown.
+  const bootWatchdogTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Debounced cache lookup batch
   const pendingCacheLookups = useRef<PendingCacheLookup[]>([])
@@ -197,7 +227,7 @@ export const useMoveAnalysis = (
 
       const entry = resolutionState.current.get(moveIndex)
       if (entry) {
-        if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+        if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
         resolutionState.current.delete(moveIndex)
       }
@@ -236,7 +266,7 @@ export const useMoveAnalysis = (
       const entry = resolutionState.current.get(moveIndex)
       if (!entry || entry.requestId !== requestId) return
       if (resolvedIndices.current.has(moveIndex)) return
-      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
       if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       resolutionState.current.delete(moveIndex)
       exactBestTruth.current.delete(moveIndex)
@@ -249,16 +279,18 @@ export const useMoveAnalysis = (
   )
 
   const clearVariationTimer = useCallback((requestId: string) => {
-    const timer = variationDeadlineTimers.current.get(requestId)
+    const timer = variationWatchdogTimers.current.get(requestId)
     if (timer) clearTimeout(timer)
-    variationDeadlineTimers.current.delete(requestId)
+    variationWatchdogTimers.current.delete(requestId)
+    variationStarted.current.delete(requestId)
   }, [])
 
   const clearAllVariationTimers = useCallback(() => {
-    for (const timer of variationDeadlineTimers.current.values()) {
+    for (const timer of variationWatchdogTimers.current.values()) {
       clearTimeout(timer)
     }
-    variationDeadlineTimers.current.clear()
+    variationWatchdogTimers.current.clear()
+    variationStarted.current.clear()
   }, [])
 
   // No-hang terminator for what-if (variation) requests: cancel the worker
@@ -268,6 +300,9 @@ export const useMoveAnalysis = (
       clearVariationTimer(requestId)
       if (!pendingVariationPlies.current.has(requestId)) return
       pendingVariationPlies.current.delete(requestId)
+      // Tombstone so a late worker result/start for this canceled variation is
+      // dropped, not mistaken for a fresh ad-hoc analysis (clobbering lastAnalysis).
+      discardedVariationIds.current.add(requestId)
       cancelWorkerRequest(requestId)
       store.getState().setVariationStreamingEval(null)
       clearActiveAnalysisStateIfCurrent(requestId)
@@ -277,6 +312,91 @@ export const useMoveAnalysis = (
       onVariationErrorRef.current?.(requestId)
     },
     [store, clearVariationTimer, cancelWorkerRequest, clearActiveAnalysisStateIfCurrent],
+  )
+
+  // --- Inactivity watchdog (mirrors GameAnalysisCoordinator) ---
+
+  // (Re)arm an indexed request's inactivity timer. On fire the request is failed
+  // (no-hang). Looks the entry up by index and verifies the requestId still owns
+  // it, so a stale call is inert.
+  const armWatchdog = useCallback(
+    (moveIndex: number, requestId: string) => {
+      const entry = resolutionState.current.get(moveIndex)
+      if (!entry || entry.requestId !== requestId) return
+      if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
+      const token = mountToken.current
+      entry.watchdogTimer = setTimeout(() => {
+        if (mountToken.current !== token) return
+        failRequest(moveIndex, requestId)
+      }, ANALYSIS_INACTIVITY_TIMEOUT_MS)
+    },
+    [failRequest],
+  )
+
+  // (Re)arm a variation request's inactivity timer. Callers ensure the variation
+  // is still pending; on fire it fails the variation (cancels the worker request).
+  const armVariationWatchdog = useCallback(
+    (requestId: string) => {
+      const existing = variationWatchdogTimers.current.get(requestId)
+      if (existing) clearTimeout(existing)
+      const token = mountToken.current
+      const timer = setTimeout(() => {
+        if (mountToken.current !== token) return
+        failVariation(requestId)
+      }, ANALYSIS_INACTIVITY_TIMEOUT_MS)
+      variationWatchdogTimers.current.set(requestId, timer)
+    },
+    [failVariation],
+  )
+
+  // Serial-worker liveness: the single engine is alive and draining, so re-arm
+  // every NOT-started indexed entry and NOT-started variation (those queued
+  // behind the active request). A STARTED request is reset only by its own
+  // activity, so it is skipped here. Also called by `ready` to arm everything.
+  const noteWorkerLiveness = useCallback(() => {
+    for (const [idx, entry] of resolutionState.current) {
+      if (entry.started) continue
+      if (resolvedIndices.current.has(idx)) continue
+      armWatchdog(idx, entry.requestId)
+    }
+    for (const requestId of pendingVariationPlies.current.keys()) {
+      if (variationStarted.current.has(requestId)) continue
+      armVariationWatchdog(requestId)
+    }
+  }, [armWatchdog, armVariationWatchdog])
+
+  // Reset the watchdog from observed activity for `requestId`. SELF-GUARDED: it
+  // returns early — doing NOTHING, NOT calling noteWorkerLiveness — unless the id
+  // is either (a) a live current indexed request or (b) a still-pending variation.
+  // So a late progress for a superseded/resolved indexed id or a deleted/terminal
+  // variation id is inert and cannot re-arm unrelated queued work (the variation
+  // ids are deleted on every terminal/timeout path, so this guard is essential).
+  const noteActivity = useCallback(
+    (requestId: string) => {
+      const idx = requestIdToMoveIndex.current.get(requestId)
+      if (idx !== undefined) {
+        // Indexed id (possibly a stale tombstone). Only a live current owner
+        // re-arms; otherwise return without touching liveness.
+        const entry = resolutionState.current.get(idx)
+        if (
+          entry &&
+          entry.requestId === requestId &&
+          latestRequestIds.current.get(idx) === requestId &&
+          !resolvedIndices.current.has(idx)
+        ) {
+          entry.started = true
+          armWatchdog(idx, requestId)
+          noteWorkerLiveness()
+        }
+        return
+      }
+      if (pendingVariationPlies.current.has(requestId)) {
+        variationStarted.current.add(requestId)
+        armVariationWatchdog(requestId)
+        noteWorkerLiveness()
+      }
+    },
+    [armWatchdog, armVariationWatchdog, noteWorkerLiveness],
   )
 
   // Release the buffered worker fallback once the cache settles non-trusted.
@@ -408,7 +528,7 @@ export const useMoveAnalysis = (
   // teardown terminates the worker, so it can drop the tombstones too.
   const clearResolutionState = useCallback((keepTombstones = false) => {
     for (const entry of resolutionState.current.values()) {
-      if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+      if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
       if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
     }
     resolutionState.current.clear()
@@ -454,6 +574,53 @@ export const useMoveAnalysis = (
     )
     workerRef.current = worker
 
+    // Shared fatal teardown for an unscoped worker error, a worker ErrorEvent, or
+    // a silent/hung boot (boot watchdog): error status, drop transient/streaming
+    // state, free pending variations, clear resolution + variation state, and
+    // invalidate the worker so a late `ready` cannot revive it (Finding 3).
+    const runFatalTeardown = (errorText: string) => {
+      const s = store.getState()
+      s.setStatus('error')
+      s.setError(errorText)
+      s.setIsAnalyzing(false)
+      s.setAnalyzingMove(null)
+      s.setStreamingEval(null)
+      s.setVariationStreamingEval(null)
+      lastStreamingUpdateMs.current = 0
+      currentAnalyzingRequestId.current = null
+      engineReadyRef.current = false
+      if (bootWatchdogTimer.current) {
+        clearTimeout(bootWatchdogTimer.current)
+        bootWatchdogTimer.current = null
+      }
+      for (const requestId of pendingVariationPlies.current.keys()) {
+        onVariationErrorRef.current?.(requestId)
+      }
+      pendingVariationPlies.current.clear()
+      clearAllVariationTimers()
+      clearResolutionState()
+      // The worker is terminated below and the 'error' status guard now drops any
+      // late message, so the variation tombstones are moot — clear them to bound
+      // the set's growth across a session.
+      discardedVariationIds.current.clear()
+      if (workerRef.current) {
+        workerRef.current.terminate()
+        workerRef.current = null
+      }
+      mountToken.current++
+    }
+
+    // A fresh worker is not yet ready: keep the inactivity watchdog disarmed until
+    // `ready`, bounded meanwhile by the boot backstop (engine-boot strategy). A
+    // silent/hung boot runs the fatal teardown so recovery settles, not hangs.
+    engineReadyRef.current = false
+    if (bootWatchdogTimer.current) clearTimeout(bootWatchdogTimer.current)
+    const bootToken = mountToken.current
+    bootWatchdogTimer.current = setTimeout(() => {
+      if (mountToken.current !== bootToken) return
+      runFatalTeardown('Analysis engine failed to start')
+    }, ANALYSIS_BOOT_TIMEOUT_MS)
+
     const handleMessage = (event: MessageEvent<AnalysisWorkerResponse>) => {
       const message = event.data
       const s = store.getState()
@@ -461,22 +628,45 @@ export const useMoveAnalysis = (
       switch (message.type) {
         case 'ready':
           // A stray late `ready` must not flip a fatal error back to ready and
-          // reopen the ad-hoc path (Finding 3). A genuine remount resets status
-          // to 'booting' (resetTransient), so legitimate recovery still works.
+          // reopen the ad-hoc path (Finding 3), nor re-arm watchdogs / clear the
+          // boot guard on a dead worker. A genuine remount resets status to
+          // 'booting' (resetTransient), so legitimate recovery still works.
           if (s.status === 'error') break
+          engineReadyRef.current = true
+          if (bootWatchdogTimer.current) {
+            clearTimeout(bootWatchdogTimer.current)
+            bootWatchdogTimer.current = null
+          }
           s.setStatus('ready')
+          // Arm the inactivity watchdog for every request scheduled while booting.
+          noteWorkerLiveness()
           break
         case 'analysis-started': {
           // Drop late worker messages after a fatal error (Finding F1).
           if (s.status === 'error') break
+          // Drop a late start for a failed/canceled variation so it cannot revive
+          // the spinner after its watchdog already fired (P2).
+          if (discardedVariationIds.current.has(message.id)) break
           // Gate indexed requests by request state (Finding R5), but accept
-          // variation requests which are tracked separately (Finding G4).
+          // variation requests which are tracked separately (Finding G4). Require a
+          // LIVE resolution entry so a late start after a watchdog/worker
+          // failRequest (entry gone, id still in latestRequestIds) cannot revive
+          // the spinner for a request that already failed (P2).
           const startIdx = requestIdToMoveIndex.current.get(message.id)
           if (startIdx !== undefined) {
-            if (latestRequestIds.current.get(startIdx) !== message.id || resolvedIndices.current.has(startIdx)) {
+            const entry = resolutionState.current.get(startIdx)
+            if (
+              !entry ||
+              entry.requestId !== message.id ||
+              latestRequestIds.current.get(startIdx) !== message.id ||
+              resolvedIndices.current.has(startIdx)
+            ) {
               break
             }
           }
+          // Activity: reset the watchdog (self-guarded; routes to the indexed or
+          // variation own-re-arm + serial-worker liveness).
+          noteActivity(message.id)
           currentAnalyzingRequestId.current = message.id
           s.setIsAnalyzing(true)
           s.setAnalyzingMove(message.move)
@@ -484,6 +674,9 @@ export const useMoveAnalysis = (
         }
         case 'analysis-streaming': {
           if (s.status === 'error') break
+          // Activity: reset the watchdog (self-guarded; routes to indexed re-arm
+          // or variation own-re-arm).
+          noteActivity(message.id)
           const streamIdx = pendingMoveIndices.current.get(message.id)
           // Guard by latestRequestIds so a superseded request's stream cannot
           // update the replacement index (Finding 2).
@@ -517,9 +710,24 @@ export const useMoveAnalysis = (
           }
           break
         }
+        case 'analysis-progress': {
+          // Liveness-only ping (root/post-played/post-best phases). Reset the
+          // watchdog; noteActivity self-guards against stale/superseded/resolved
+          // indexed ids and deleted/terminal variation ids.
+          if (s.status === 'error') break
+          noteActivity(message.id)
+          break
+        }
         case 'analysis': {
           // Drop late worker results after a fatal error (Finding F1).
           if (s.status === 'error') break
+          // Drop a late result for a failed/canceled variation: its id is no longer
+          // in pendingVariationPlies, so without this it would fall through to the
+          // non-indexed branch and clobber lastAnalysis with a stale result (P1).
+          if (discardedVariationIds.current.has(message.id)) {
+            clearActiveAnalysisStateIfCurrent(message.id)
+            break
+          }
 
           // Clear any in-flight variation streaming for this request; the
           // resolved result now lives in the variation analysis cache.
@@ -544,6 +752,9 @@ export const useMoveAnalysis = (
             ) {
               break
             }
+            // Activity: reset the watchdog (self-guarded). Matters when the result
+            // is buffered behind a still-pending cache so the wait is not killed.
+            noteActivity(message.id)
 
             const meta = pendingMeta.current.get(message.id)
             const forced = meta?.legalMoveCount !== undefined && meta.legalMoveCount <= 2
@@ -619,6 +830,9 @@ export const useMoveAnalysis = (
             if (pendingVariationPlies.current.has(message.id)) {
               clearVariationTimer(message.id)
               pendingVariationPlies.current.delete(message.id)
+              // Tombstone so a racey late result/start for this errored variation
+              // cannot clobber lastAnalysis or revive the spinner (P1/P2).
+              discardedVariationIds.current.add(message.id)
               s.setVariationStreamingEval(null)
               clearActiveAnalysisStateIfCurrent(message.id)
               // Free the variation tree's pending entry so this FEN can be
@@ -632,6 +846,9 @@ export const useMoveAnalysis = (
             const entry = resolutionState.current.get(idx)
             if (!entry || entry.requestId !== message.id) break
             if (resolvedIndices.current.has(idx)) break
+            // Activity: reset the watchdog (self-guarded). Matters when the error
+            // is held behind a still-pending cache (workerFailed) awaiting recovery.
+            noteActivity(message.id)
             // The worker has stopped for this request either way, so clear the
             // spinner if it still owns it (failRequest also does this).
             clearActiveAnalysisStateIfCurrent(message.id)
@@ -642,32 +859,9 @@ export const useMoveAnalysis = (
             }
             break
           }
-          // Unscoped / fatal error.
-          s.setStatus('error')
-          s.setError(message.error)
-          s.setIsAnalyzing(false)
-          s.setAnalyzingMove(null)
-          // Drop any in-flight streaming state so no stale dot/segment lingers.
-          s.setStreamingEval(null)
-          s.setVariationStreamingEval(null)
-          lastStreamingUpdateMs.current = 0
-          currentAnalyzingRequestId.current = null
-          // Free every still-pending variation entry before clearing so their
-          // FENs can be re-requested after recovery (Finding F3).
-          for (const requestId of pendingVariationPlies.current.keys()) {
-            onVariationErrorRef.current?.(requestId)
-          }
-          pendingVariationPlies.current.clear()
-          clearAllVariationTimers()
-          clearResolutionState()
-          // Invalidate the worker so a late `ready` cannot flip status back and
-          // let queued stale results enter the ad-hoc path (Finding 3). Recovery
-          // is a remount (the effect creates a fresh worker).
-          if (workerRef.current) {
-            workerRef.current.terminate()
-            workerRef.current = null
-          }
-          mountToken.current++
+          // Unscoped / fatal error — shared teardown (also clears the boot timer
+          // and invalidates the worker so a late `ready` cannot revive it).
+          runFatalTeardown(message.error)
           break
         }
         case 'log':
@@ -679,29 +873,7 @@ export const useMoveAnalysis = (
     }
 
     const handleError = (event: ErrorEvent) => {
-      const s = store.getState()
-      s.setStatus('error')
-      s.setError(event.message)
-      s.setIsAnalyzing(false)
-      s.setAnalyzingMove(null)
-      // Drop any in-flight streaming state so no stale dot/segment lingers.
-      s.setStreamingEval(null)
-      s.setVariationStreamingEval(null)
-      lastStreamingUpdateMs.current = 0
-      currentAnalyzingRequestId.current = null
-      // Free every still-pending variation entry before clearing (Finding F3).
-      for (const requestId of pendingVariationPlies.current.keys()) {
-        onVariationErrorRef.current?.(requestId)
-      }
-      pendingVariationPlies.current.clear()
-      clearAllVariationTimers()
-      clearResolutionState()
-      // Invalidate the worker (see the unscoped-error branch, Finding 3).
-      if (workerRef.current) {
-        workerRef.current.terminate()
-        workerRef.current = null
-      }
-      mountToken.current++
+      runFatalTeardown(event.message)
     }
 
     worker.addEventListener('message', handleMessage)
@@ -712,6 +884,11 @@ export const useMoveAnalysis = (
       worker.removeEventListener('error', handleError)
       worker.terminate()
       workerRef.current = null
+      engineReadyRef.current = false
+      if (bootWatchdogTimer.current) {
+        clearTimeout(bootWatchdogTimer.current)
+        bootWatchdogTimer.current = null
+      }
       // Invalidate any in-flight async cache callbacks so they cannot mutate
       // the store after unmount (Finding 5), and clear timers.
       mountToken.current++
@@ -722,15 +899,17 @@ export const useMoveAnalysis = (
       }
       pendingVariationPlies.current.clear()
       for (const entry of resolutionState.current.values()) {
-        if (entry.deadlineTimer) clearTimeout(entry.deadlineTimer)
+        if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       }
       resolutionState.current.clear()
       exactBestTruth.current.clear()
-      for (const timer of variationDeadlineTimers.current.values()) {
+      for (const timer of variationWatchdogTimers.current.values()) {
         clearTimeout(timer)
       }
-      variationDeadlineTimers.current.clear()
+      variationWatchdogTimers.current.clear()
+      variationStarted.current.clear()
+      discardedVariationIds.current.clear()
       if (cacheFlushTimer.current !== null) {
         clearTimeout(cacheFlushTimer.current)
         cacheFlushTimer.current = null
@@ -754,11 +933,11 @@ export const useMoveAnalysis = (
         // Supersede any prior resolution state for this index (Findings 2 & F2).
         const prevEntry = resolutionState.current.get(moveIndex)
         if (prevEntry) {
-          if (prevEntry.deadlineTimer) clearTimeout(prevEntry.deadlineTimer)
+          if (prevEntry.watchdogTimer) clearTimeout(prevEntry.watchdogTimer)
           if (prevEntry.cacheTimer) clearTimeout(prevEntry.cacheTimer)
-          // Cancel the superseded worker request: dropping its deadline here
+          // Cancel the superseded worker request: dropping its watchdog here
           // would otherwise leave a reset-stalled old request blocking the
-          // worker queue, with only the replacement's deadline firing later.
+          // worker queue, with only the replacement's watchdog firing later.
           cancelWorkerRequest(prevEntry.requestId)
         }
         pendingMoveIndices.current.set(id, moveIndex)
@@ -770,23 +949,18 @@ export const useMoveAnalysis = (
         // request's record can't promote this new request (g-49e2).
         exactBestTruth.current.delete(moveIndex)
 
-        const token = mountToken.current
-        const deadlineTimer = setTimeout(() => {
-          if (mountToken.current !== token) return
-          failRequest(moveIndex, id)
-        }, ANALYSIS_TOTAL_DEADLINE_MS)
-        resolutionState.current.set(moveIndex, { requestId: id, cacheStatus: 'pending', deadlineTimer })
+        resolutionState.current.set(moveIndex, { requestId: id, cacheStatus: 'pending' })
+        // Arm the inactivity watchdog only once the engine is ready; a request
+        // scheduled while booting is armed when `ready` arrives (engine-boot
+        // strategy — the 8s window must not false-fail during a slow cold boot).
+        if (engineReadyRef.current) armWatchdog(moveIndex, id)
       } else if (variationPly !== undefined && variationFen !== undefined) {
         pendingVariationPlies.current.set(id, { ply: variationPly, fen: variationFen })
         // Variation requests are not in resolutionState, so give them their own
-        // no-hang deadline that cancels the worker request (a missing readyok
-        // would otherwise block the worker queue indefinitely).
-        const token = mountToken.current
-        const variationTimer = setTimeout(() => {
-          if (mountToken.current !== token) return
-          failVariation(id)
-        }, ANALYSIS_TOTAL_DEADLINE_MS)
-        variationDeadlineTimers.current.set(id, variationTimer)
+        // inactivity watchdog that cancels the worker request (a missing readyok
+        // would otherwise block the worker queue indefinitely). Armed post-ready
+        // like indexed requests; a pre-ready variation is armed by `ready`.
+        if (engineReadyRef.current) armVariationWatchdog(id)
       }
 
       // Fire the worker (existing path)
@@ -808,7 +982,7 @@ export const useMoveAnalysis = (
 
       return id
     },
-    [store, scheduleCacheLookup, failRequest, failVariation, cancelWorkerRequest],
+    [store, scheduleCacheLookup, armWatchdog, armVariationWatchdog, cancelWorkerRequest],
   )
 
   const clearAnalysis = useCallback(() => {
@@ -823,6 +997,9 @@ export const useMoveAnalysis = (
     }
     for (const requestId of pendingVariationPlies.current.keys()) {
       cancelWorkerRequest(requestId)
+      // Tombstone: clearAnalysis does not terminate the worker, so a late result
+      // for this canceled variation must be dropped, not treated as ad-hoc (P1).
+      discardedVariationIds.current.add(requestId)
       // Free the variation tree's pending entry so the FEN can be re-requested
       // after the clear (Finding F3).
       onVariationErrorRef.current?.(requestId)

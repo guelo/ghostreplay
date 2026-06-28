@@ -39,6 +39,31 @@ let activeSearch: {
 let activeAnalysisId: string | null = null;
 const canceledAnalyses = new Set<string>();
 
+// Inactivity-watchdog liveness (analysis-progress). The coordinator/hook arm a
+// per-request inactivity timer; any progress ping resets it. Throttle the
+// info-line pings so a chatty Stockfish iteration does not flood the channel.
+const PROGRESS_THROTTLE_MS = 250;
+let lastProgressPostMs = Number.NEGATIVE_INFINITY;
+
+/**
+ * Unthrottled phase-boundary liveness ping, keyed by the active analysis id.
+ * Info lines only cover the INSIDE of a search; the per-request reset and the
+ * gaps BETWEEN the root/post-played/post-best searches emit no info, so a
+ * `bestmove` arriving just before the watchdog window followed by a slow next
+ * phase could false-kill a live request. Emitted at the per-request reset and at
+ * each search's bestmove (1 + ≤3 per request — low volume), skipped when the
+ * request is canceled. Separate from the throttled info-line ping; does NOT
+ * touch `lastProgressPostMs`.
+ */
+const postPhaseProgress = () => {
+  if (activeAnalysisId && !canceledAnalyses.has(activeAnalysisId)) {
+    ctx.postMessage({
+      type: "analysis-progress",
+      id: activeAnalysisId,
+    } satisfies AnalysisWorkerResponse);
+  }
+};
+
 // Per-request readiness waiters, distinct from the init engineReady handshake.
 // Each `ucinewgame`+`isready` reset pushes one waiter; Stockfish answers every
 // `isready` with exactly one `readyok`, so acknowledgments are matched in FIFO
@@ -259,6 +284,10 @@ const handleEngineLine = (line: string) => {
       const waiter = resetAckQueue.shift()!;
       if (!waiter.done) {
         waiter.done = true;
+        // A completed LIVE per-request reset, just before the root search begins:
+        // emit a phase-boundary liveness ping so the watchdog covers the silent
+        // reset→root gap (the init-handshake readyok below is NOT per-request).
+        postPhaseProgress();
         waiter.resolve();
       }
       return;
@@ -284,11 +313,29 @@ const handleEngineLine = (line: string) => {
       score: current.lastScore,
       pv: current.lastPv,
     });
+    // Search-phase completion (root / post-played / post-best): emit a
+    // phase-boundary liveness ping so the watchdog covers the gap between this
+    // bestmove and the next phase's first info line.
+    postPhaseProgress();
     return;
   }
 
   const info = parseUciInfoLine(line);
   if (info && activeSearch) {
+    // Throttled per-search liveness ping (any non-null info line: depth/score/pv),
+    // BEFORE the score/pv handling so even a score/pv-only line surfaces activity.
+    // Fires for ALL THREE searches including the previously-silent root, so the
+    // inactivity watchdog sees continuous progress even within a long iteration.
+    if (activeAnalysisId) {
+      const now = Date.now();
+      if (now - lastProgressPostMs >= PROGRESS_THROTTLE_MS) {
+        lastProgressPostMs = now;
+        ctx.postMessage({
+          type: "analysis-progress",
+          id: activeAnalysisId,
+        } satisfies AnalysisWorkerResponse);
+      }
+    }
     if (info.score) {
       activeSearch.lastScore = info.score;
       if (activeSearch.onInfo) {
@@ -390,6 +437,11 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     id: request.id,
     move: request.move,
   } satisfies AnalysisWorkerResponse);
+
+  // Reset the progress throttle so the FIRST info line of this new request emits
+  // a progress ping promptly. NEGATIVE_INFINITY (not 0) — under fake timers
+  // Date.now() starts at 0, so 0 would suppress the very first ping.
+  lastProgressPostMs = Number.NEGATIVE_INFINITY;
 
   const sideToMove = getSideToMove(request.fen);
 
@@ -568,6 +620,7 @@ ctx.addEventListener(
         canceledAnalyses.clear();
         analysisInFlight = false;
         pendingAnalyses.length = 0;
+        lastProgressPostMs = Number.NEGATIVE_INFINITY;
         break;
       }
       default:

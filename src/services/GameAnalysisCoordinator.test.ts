@@ -1256,6 +1256,18 @@ describe('GameAnalysisCoordinator', () => {
       })
     }
 
+    // The inactivity watchdog arms only once the engine is ready, so watchdog
+    // tests post a `ready` after startSession (it also clears the boot backstop).
+    const postReady = () => {
+      ;(coordinator as any).handleWorkerMessage({ data: { type: 'ready' } })
+    }
+    const postStarted = (id: string, move = 'e2e4') => {
+      ;(coordinator as any).handleWorkerMessage({ data: { type: 'analysis-started', id, move } })
+    }
+    const postProgress = (id: string) => {
+      ;(coordinator as any).handleWorkerMessage({ data: { type: 'analysis-progress', id } })
+    }
+
     it('publishes only the trusted cache result when the worker finishes first (AC1)', async () => {
       coordinator.startSession('s')
       let resolveLookup!: (v: Map<string, unknown>) => void
@@ -1429,37 +1441,165 @@ describe('GameAnalysisCoordinator', () => {
       expect(workerWon?.delta).toBe(cacheWon?.delta)
     })
 
-    it('total-analysis deadline rejects a stalled worker without hanging (AC7, 10b)', async () => {
+    it('inactivity watchdog rejects a silent worker (post-ready)', async () => {
       coordinator.startSession('s')
+      postReady()
       coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
       const pending = coordinator.waitForAnalysis(0)
       const rejection = expect(pending).rejects.toThrow(/timed out/i)
 
-      // Cache misses (releases, no buffered worker), worker never emits.
+      // Cache miss → released (no buffered worker), then silence for the window.
       await vi.advanceTimersByTimeAsync(200)
-      await vi.advanceTimersByTimeAsync(30_000)
+      await vi.advanceTimersByTimeAsync(8_000)
       await rejection
       expect((coordinator as any).resolutionState.size).toBe(0)
     })
 
-    it('keeps a slow-but-finite worker analysis alive past the old 8s deadline', async () => {
+    it('a progressing search survives past the window; only silence kills it', async () => {
       coordinator.startSession('s')
+      postReady()
       const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
       const pending = coordinator.waitForAnalysis(0)
 
-      await vi.advanceTimersByTimeAsync(200)
-      await vi.advanceTimersByTimeAsync(8200)
+      await vi.advanceTimersByTimeAsync(200) // cache miss → released
 
-      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
-      expect((coordinator as any).resolutionState.has(0)).toBe(true)
+      // Progress every < window, total elapsed well past 2× the window: each
+      // ping resets the watchdog, so a slow-but-progressing search never dies.
+      for (let i = 0; i < 8; i++) {
+        postProgress(id)
+        await vi.advanceTimersByTimeAsync(6_000)
+        expect((coordinator as any).resolutionState.has(0)).toBe(true)
+        expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+      }
 
       postWorker(id)
+      await expect(pending).resolves.toMatchObject({ id, bestMove: 'worker-best' })
+    })
 
-      await expect(pending).resolves.toMatchObject({
-        id,
-        bestMove: 'worker-best',
-      })
-      expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(id)
+    it('a queued request is not failed while the worker progresses another (serial liveness)', async () => {
+      coordinator.startSession('s')
+      postReady()
+      const id0 = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const id1 = coordinator.analyzeMove('fen-1', 'd2d4', 'white', 1, 20)!
+      const pending1 = coordinator.waitForAnalysis(1)
+
+      await vi.advanceTimersByTimeAsync(200) // both cache miss → released
+
+      // idx0 is the worker's serial focus; idx1 waits behind it. idx0's progress
+      // proves the single engine is alive and draining toward idx1.
+      postStarted(id0)
+      for (let i = 0; i < 8; i++) {
+        postProgress(id0)
+        await vi.advanceTimersByTimeAsync(6_000)
+        expect((coordinator as any).resolutionState.has(1)).toBe(true)
+      }
+
+      postWorker(id0) // resolves idx0
+      expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(id0)
+
+      // idx1 now becomes the focus and resolves on its own activity.
+      postStarted(id1, 'd2d4')
+      postProgress(id1)
+      postWorker(id1, { move: 'd2d4' })
+      await expect(pending1).resolves.toMatchObject({ id: id1 })
+    })
+
+    it('a started request that goes silent fails after one window', async () => {
+      coordinator.startSession('s')
+      postReady()
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+      const rejection = expect(pending).rejects.toThrow(/timed out/i)
+
+      await vi.advanceTimersByTimeAsync(200) // cache miss → released
+      postStarted(id)
+      // The started request is the worker's focus; its own silence is a hang.
+      await vi.advanceTimersByTimeAsync(8_000)
+      await rejection
+      expect((coordinator as any).resolutionState.has(0)).toBe(false)
+    })
+
+    it('stale progress does NOT extend a queued watchdog (self-guard)', async () => {
+      coordinator.startSession('s')
+      postReady()
+      const idA = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      coordinator.analyzeMove('fen-1', 'd2d4', 'white', 1, 20)
+      const pendingB = coordinator.waitForAnalysis(1)
+      const rejectionB = expect(pendingB).rejects.toThrow(/timed out/i)
+
+      await vi.advanceTimersByTimeAsync(200) // both cache miss → released
+
+      // Supersede idx0 so idA is stale (its index is now owned by the replacement).
+      const idA2 = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      expect(idA2).not.toBe(idA)
+
+      // Just before B's ORIGINAL window: a stale ping for the superseded idA must
+      // be inert (self-guard) and must NOT re-arm B via serial liveness.
+      await vi.advanceTimersByTimeAsync(7_000)
+      postProgress(idA)
+
+      // Past B's original window with no LIVE activity → B fails at its window.
+      await vi.advanceTimersByTimeAsync(1_500)
+      await rejectionB
+      expect((coordinator as any).resolutionState.has(1)).toBe(false)
+    })
+
+    it('a request scheduled before `ready` is not failed during a slow boot', async () => {
+      coordinator.startSession('s') // booting; engine not ready
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+
+      // No inactivity watchdog armed yet (pre-ready). Past the inactivity window
+      // but within the boot window → still pending, not error.
+      await vi.advanceTimersByTimeAsync(200) // cache miss → released
+      await vi.advanceTimersByTimeAsync(10_000) // > 8s inactivity, < 20s boot
+      expect((coordinator as any).resolutionState.has(0)).toBe(true)
+      expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+      expect(coordinator.store.getState().status).not.toBe('error')
+
+      // `ready` arms it; progress + result resolves.
+      postReady()
+      postStarted(id)
+      postProgress(id)
+      postWorker(id)
+      await expect(pending).resolves.toMatchObject({ id })
+    })
+
+    it('a silent boot fails via the boot watchdog (no `ready`)', async () => {
+      coordinator.startSession('s')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const pending = coordinator.waitForAnalysis(0)
+      const rejection = expect(pending).rejects.toThrow()
+
+      // No `ready` ever arrives → the boot backstop fires, failing rather than
+      // hanging so drill waitForAnalysis recovery still settles.
+      await vi.advanceTimersByTimeAsync(200)
+      await vi.advanceTimersByTimeAsync(20_000)
+      await rejection
+      expect(coordinator.store.getState().status).toBe('error')
+    })
+
+    it('a late analysis-started after watchdog failure does not revive the spinner (P2)', async () => {
+      coordinator.startSession('s')
+      postReady()
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+      const rejection = expect(pending).rejects.toThrow(/timed out/i)
+
+      await vi.advanceTimersByTimeAsync(200) // cache miss → released
+      postStarted(id)
+      expect(coordinator.store.getState().isAnalyzing).toBe(true)
+
+      // The started request goes silent → the watchdog fails it (entry removed,
+      // but the id is still in latestRequestIds).
+      await vi.advanceTimersByTimeAsync(8_000)
+      await rejection
+      expect(coordinator.store.getState().isAnalyzing).toBe(false)
+
+      // A racey late analysis-started for the now-failed request must NOT pass the
+      // start gate and revive the spinner — it requires a LIVE resolution entry.
+      postStarted(id)
+      expect(coordinator.store.getState().isAnalyzing).toBe(false)
     })
 
     it('timeout releases the worker; a late trusted hit is ignored (AC2, R3)', async () => {

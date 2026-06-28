@@ -775,4 +775,117 @@ describe('analysisWorker', () => {
       expect.objectContaining({ type: 'analysis', id: 'req-a' }),
     )
   })
+
+  it('emits analysis-progress during the root search (root-phase liveness)', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+
+    const id = 'analysis-root'
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id,
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    // The per-request reset (ucinewgame+isready→readyok) auto-resolves; wait for
+    // the root search to begin.
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+
+    postMessageMock.mockClear()
+    // A root-search info line — BEFORE any bestmove. The root phase emitted no
+    // observable activity before this change; now it surfaces a liveness ping.
+    engineMessageHandler?.('info depth 5 score cp 20 pv e2e4')
+
+    expect(postMessageMock).toHaveBeenCalledWith(
+      { type: 'analysis-progress', id } satisfies AnalysisWorkerResponse,
+    )
+  })
+
+  it('emits analysis-progress on bestmove (phase-boundary liveness)', async () => {
+    await import('./analysisWorker')
+
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+
+    const id = 'analysis-bestmove'
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id,
+          fen: '4k3/8/8/8/8/8/8/4K2R w - - 0 1',
+          move: 'e1e2',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+
+    postMessageMock.mockClear()
+    // The root search completes with a bestmove and NO surrounding info line; the
+    // phase-boundary ping still surfaces liveness for the silent between-phase gap.
+    engineMessageHandler?.('bestmove e1e2')
+
+    expect(postMessageMock).toHaveBeenCalledWith(
+      { type: 'analysis-progress', id } satisfies AnalysisWorkerResponse,
+    )
+  })
+
+  it('throttles analysis-progress pings to one per window of rapid info lines', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(0)
+      await import('./analysisWorker')
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+
+      const id = 'analysis-throttle'
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id,
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            move: 'e2e4',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      // Flush the per-request reset → root search start under fake timers.
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+
+      postMessageMock.mockClear()
+      const progressCount = () =>
+        postMessageMock.mock.calls.filter(([m]) => m.type === 'analysis-progress').length
+
+      // Two rapid info lines within the 250ms throttle window → one ping.
+      engineMessageHandler?.('info depth 5 score cp 20 pv e2e4')
+      engineMessageHandler?.('info depth 6 score cp 22 pv e2e4')
+      expect(progressCount()).toBe(1)
+
+      // Past the window → the next info line emits a second ping.
+      await vi.advanceTimersByTimeAsync(300)
+      engineMessageHandler?.('info depth 7 score cp 25 pv e2e4')
+      expect(progressCount()).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
