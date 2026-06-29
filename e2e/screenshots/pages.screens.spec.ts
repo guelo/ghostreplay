@@ -582,9 +582,8 @@ test.describe("play", () => {
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "review-warning-toast",
-      // Mobile + desktop warning stacks both render a toast; only the one for
-      // the active breakpoint is visible, so match on visibility.
-      waitFor: (p) => p.locator(".review-warning-toast:visible"),
+      // The review warning renders as a single on-board notice (top-left).
+      waitFor: (p) => p.locator(".board-notice--review-warning:visible"),
     });
   });
 
@@ -599,11 +598,10 @@ test.describe("play", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await playMove(page, "e2", "e4");
     await waitForMoveCountAtLeast(page, 2);
-    // The rehook toast auto-dismisses after 3s (ChessGame.tsx) but the frozen
-    // clock blocks that timer — advance it so the board is toast-free.
+    // The rehook board notice auto-dismisses after 3s (useBoardNotice) but the
+    // frozen clock blocks that timer — advance it so the board is notice-free.
     await page.clock.runFor(3500);
-    await expect(page.locator(".rehook-toast:visible")).toHaveCount(0);
-    await expect(page.locator(".review-warning-toast:visible")).toHaveCount(0);
+    await expect(page.locator(".board-notice:visible")).toHaveCount(0);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "mid-game",
@@ -772,7 +770,9 @@ test.describe("play", () => {
     await waitForMoveCountAtLeast(page, 4);
     await playMove(page, "f1", "c4");
     await waitForMoveCountAtLeast(page, 6);
-    await expect(page.locator(".review-warning-toast:visible")).toBeVisible({
+    await expect(
+      page.locator(".board-notice--review-warning:visible"),
+    ).toBeVisible({
       timeout: 30_000,
     });
 
@@ -783,11 +783,11 @@ test.describe("play", () => {
     ).toBeVisible({ timeout: 15_000 });
 
     // The first ghost reply (engine->ghost) raised the "The haunting resumes"
-    // rehook toast, which auto-dismisses after 3s — but the frozen clock blocks
-    // that timer, so it would linger beneath the spotlight. Advance the clock to
-    // dismiss it (and confirm) before pausing for the capture.
+    // rehook notice; reaching the review position then preempted it with the
+    // review warning (single board-notice slot). Advance the frozen clock to
+    // clear any lingering rehook timer and confirm no rehook is in the capture.
     await page.clock.runFor(3500);
-    await expect(page.locator(".rehook-toast:visible")).toHaveCount(0);
+    await expect(page.locator(".board-notice--rehook:visible")).toHaveCount(0);
 
     // Play the recorded fail move (king move) to trigger the spotlight. The
     // clock MUST stay running across this move: the coordinator dispatches the

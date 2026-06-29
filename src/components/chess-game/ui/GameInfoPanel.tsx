@@ -3,7 +3,6 @@ import StaticMiniBoard from "./StaticMiniBoard";
 import SettingsGearIcon from "./SettingsGearIcon";
 import type { RatingScoreKey, RatingScores, TargetBlunderSrs } from "../../../utils/api";
 import { getRatingDisplayLabel, resolveDisplayScore, useGameStore } from "../../../stores/useGameStore";
-import type { ResolvedReview } from "../types";
 import { deriveOpponentAvatarMood, type GameResult } from "../domain/status";
 import OpponentAvatar from "./OpponentAvatar";
 import MaterialDisplay from "../../MaterialDisplay";
@@ -43,11 +42,6 @@ type GameInfoPanelProps = {
    *  the old single-line "Opening: …". Owned by ChessGame; null/undefined when
    *  there is nothing to show (e.g. before the first boundary, or inactive). */
   openingLineageSlot?: ReactNode;
-  isReviewMomentActive: boolean;
-  resolvedReview: ResolvedReview | null;
-  isViewingLive: boolean;
-  showRehookToast: boolean;
-  onDismissRehookToast: () => void;
   perfectStreak: {
     current: number;
     personalBest: number;
@@ -57,30 +51,6 @@ type GameInfoPanelProps = {
   materialFen?: string;
   materialPerspective?: BoardOrientation;
 };
-
-type GameWarningStackProps = {
-  className?: string;
-  isGameActive: boolean;
-  opponentMode: OpponentMode;
-  isReviewMomentActive: boolean;
-  resolvedReview: ResolvedReview | null;
-  isViewingLive: boolean;
-  showRehookToast: boolean;
-  onDismissRehookToast: () => void;
-};
-
-const WarningTriangleIcon = () => (
-  <svg
-    className="review-warning-toast__icon"
-    width="48"
-    height="48"
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M1 21h22L12 2 1 21Zm12-3h-2v-2h2v2Zm0-4h-2v-4h2v4Z" />
-  </svg>
-);
 
 const formatLastSeen = (isoDate: string): string => {
   const ms = Date.now() - new Date(isoDate).getTime();
@@ -152,75 +122,6 @@ const PerfectStreakBadge = ({
   );
 };
 
-export const GameWarningStack = memo(({
-  className = "",
-  isGameActive,
-  opponentMode,
-  isReviewMomentActive,
-  resolvedReview,
-  isViewingLive,
-  showRehookToast,
-  onDismissRehookToast,
-}: GameWarningStackProps) => {
-  const reviewWarning =
-    resolvedReview && isViewingLive ? (
-      <div
-        className={`review-warning-toast review-warning-toast--${resolvedReview.result}`}
-      >
-        <div className="review-warning-toast__header">
-          <WarningTriangleIcon />
-          <span className="review-warning-toast__label">Review Position</span>
-        </div>
-        <p className="review-warning-toast__detail">
-          This position has come back to haunt you. You've blundered here before.
-        </p>
-        {resolvedReview.result !== "pending" && (
-          <div className="review-warning-toast__overlay">
-            <span className="review-warning-toast__overlay-icon">
-              {resolvedReview.result === "pass" ? "✓" : "✗"}
-            </span>
-          </div>
-        )}
-      </div>
-    ) : isReviewMomentActive ? (
-      <div className="review-warning-toast" role="alert">
-        <div className="review-warning-toast__header">
-          <WarningTriangleIcon />
-          <span className="review-warning-toast__label">Review Position</span>
-        </div>
-        <p className="review-warning-toast__detail">
-          This position has come back to haunt you. You've blundered here before.
-        </p>
-      </div>
-    ) : null;
-
-  const showWarningStack =
-    reviewWarning !== null ||
-    (isGameActive && opponentMode === "ghost" && showRehookToast);
-
-  if (!showWarningStack) {
-    return null;
-  }
-
-  return (
-    <div className={`chess-warning-stack ${className}`.trim()}>
-      {isGameActive && opponentMode === "ghost" && showRehookToast && (
-        <button
-          className="rehook-toast"
-          onClick={onDismissRehookToast}
-          type="button"
-        >
-          <span className="rehook-toast__label">The haunting resumes</span>
-          <span className="rehook-toast__detail">
-            Steering to past mistake
-          </span>
-        </button>
-      )}
-      {reviewWarning}
-    </div>
-  );
-});
-
 const GameInfoPanel = ({
   statusText,
   gameStatusBadge,
@@ -250,11 +151,6 @@ const GameInfoPanel = ({
   boardOrientation,
   blunderReviewSrs,
   openingLineageSlot,
-  isReviewMomentActive,
-  resolvedReview,
-  isViewingLive,
-  showRehookToast,
-  onDismissRehookToast,
   perfectStreak,
   materialFen,
   materialPerspective,
@@ -519,16 +415,6 @@ const GameInfoPanel = ({
           isGameActive={isGameActive}
         />
       </div>
-      <GameWarningStack
-        className="chess-warning-stack--panel"
-        isGameActive={isGameActive}
-        opponentMode={opponentMode}
-        isReviewMomentActive={isReviewMomentActive}
-        resolvedReview={resolvedReview}
-        isViewingLive={isViewingLive}
-        showRehookToast={showRehookToast}
-        onDismissRehookToast={onDismissRehookToast}
-      />
       {openingLineageSlot}
       {materialFen && materialPerspective && (
         <div className="chess-panel__material">

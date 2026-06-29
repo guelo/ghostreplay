@@ -9,7 +9,6 @@ import { useGameStore } from "../../../stores/useGameStore";
 const makeProps = () => {
   const onToggleGhostInfo = vi.fn();
   const onCloseGhostInfo = vi.fn();
-  const onDismissRehookToast = vi.fn();
   return {
     statusText: "White to move",
     gameStatusBadge: { label: "Active", className: "active" },
@@ -35,11 +34,6 @@ const makeProps = () => {
     openingLineageSlot: (
       <div className="chess-panel__openings">Opening lineage</div>
     ),
-    isReviewMomentActive: false,
-    resolvedReview: null,
-    isViewingLive: true,
-    showRehookToast: false,
-    onDismissRehookToast,
     perfectStreak: { current: 0, personalBest: 0 },
   };
 };
@@ -207,42 +201,6 @@ describe("GameInfoPanel", () => {
       "img.opponent-avatar",
     ) as HTMLImageElement | null;
     expect(avatar?.getAttribute("src")).toBe(getOpponentAvatarSrc(1200));
-  });
-
-  it("shows rehook toast below opponent label and calls dismiss on click", () => {
-    const props = makeProps();
-    render(
-      <GameInfoPanel
-        {...props}
-        opponentMode="ghost"
-        opponentName=""
-        showRehookToast
-      />,
-    );
-
-    expect(screen.getByText("The haunting resumes")).toBeInTheDocument();
-    expect(screen.getByText("Steering to past mistake")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByText("The haunting resumes"));
-    expect(props.onDismissRehookToast).toHaveBeenCalledTimes(1);
-  });
-
-  it("stacks ghost warnings in a shared warning container", () => {
-    const props = makeProps();
-    const { container } = render(
-      <GameInfoPanel
-        {...props}
-        opponentMode="ghost"
-        opponentName=""
-        showRehookToast
-        isReviewMomentActive
-      />,
-    );
-
-    const stack = container.querySelector(".chess-warning-stack");
-    expect(stack).not.toBeNull();
-    expect(stack?.querySelector(".rehook-toast")).not.toBeNull();
-    expect(stack?.querySelector(".review-warning-toast")).not.toBeNull();
   });
 
   it("renders ghost target info and forwards ghost-info callbacks", () => {

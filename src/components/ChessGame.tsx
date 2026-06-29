@@ -10,6 +10,7 @@ import { useChessGameController } from "../hooks/useChessGameController";
 import type { PlayerMoveApplyResult } from "../hooks/useChessGameController";
 import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { useBoardNotice } from "../hooks/useBoardNotice";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
@@ -52,7 +53,7 @@ import {
 import { eloStakes, sampleEloBin } from "./chess-game/elo";
 import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
-import GameInfoPanel, { GameWarningStack } from "./chess-game/ui/GameInfoPanel";
+import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import GameOpeningLineage from "./GameOpeningLineage";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
 import DrillStopActions from "./chess-game/ui/DrillStopActions";
@@ -614,6 +615,17 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       }
       setEngineMessage("Drill steering is unavailable. Try again or abandon the drill.");
     },
+  });
+
+  // The rehook signal is pre-gated here so useBoardNotice only sees a rising
+  // edge it should surface (mirrors the old warning-stack guard).
+  const showRehookNotice =
+    isGameActive && opponentMode === "ghost" && showRehookToast;
+  const boardNotice = useBoardNotice({
+    isReviewMomentActive,
+    resolvedReview,
+    showRehookNotice,
+    isViewingLive,
   });
 
   const checkPostPlayerDrillRoute = useCallback(
@@ -1776,10 +1788,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     () => setShowGhostInfo(false),
     [],
   );
-  const handleDismissRehookToast = useCallback(
-    () => setShowRehookToast(false),
-    [],
-  );
   const canRetryDrillSteering =
     Boolean(engineMessage) &&
     drillOpeningKey !== null &&
@@ -1903,11 +1911,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 </div>
               ) : null
             }
-            isReviewMomentActive={isReviewMomentActive}
-            resolvedReview={resolvedReview}
-            isViewingLive={isViewingLive}
-            showRehookToast={showRehookToast}
-            onDismissRehookToast={handleDismissRehookToast}
             perfectStreak={perfectStreak}
             materialFen={panelMaterialFen}
             materialPerspective={opponentColor}
@@ -1956,6 +1959,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onPromotionPick={handlePromotionPick}
                 onPromotionCancel={handlePromotionCancel}
                 streakToast={blocksStreakToast ? null : streakToast}
+                boardNotice={boardNotice}
                 isDrillMode={isDrillMode}
                 onSwitchToPlayMode={handleSwitchToPlayMode}
                 onSwitchToDrillMode={handleSwitchToDrillMode}
@@ -1973,16 +1977,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
               />
             </div>
           </div>
-          <GameWarningStack
-            className="chess-warning-stack--mobile"
-            isGameActive={isGameActive}
-            opponentMode={opponentMode}
-            isReviewMomentActive={isReviewMomentActive}
-            resolvedReview={resolvedReview}
-            isViewingLive={isViewingLive}
-            showRehookToast={showRehookToast}
-            onDismissRehookToast={handleDismissRehookToast}
-          />
           {hasBelowBoardContent && (
             <div className="chess-graph-area">
               <PostGameBanner

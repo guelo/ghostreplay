@@ -6,6 +6,7 @@ import { PromotionPicker } from "./PromotionPicker";
 import OpponentAvatar from "./OpponentAvatar";
 import DrillSetupPanel from "./DrillSetupPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
+import type { BoardNotice } from "../types";
 
 type BoardOrientation = "white" | "black";
 
@@ -54,6 +55,8 @@ type BoardStageProps = {
   onPromotionPick: (piece: 'q' | 'r' | 'b' | 'n') => void;
   onPromotionCancel: () => void;
   streakToast: { type: "milestone" | "record"; streak: number } | null;
+  // Single board-anchored notice (review warning / result / rehook), top-left.
+  boardNotice: BoardNotice | null;
   // Drill mode props
   isDrillMode?: boolean;
   onSwitchToPlayMode?: () => void;
@@ -74,7 +77,7 @@ type BoardStageProps = {
 
 const WarningTriangleIcon = () => (
   <svg
-    className="review-warning-toast__icon"
+    className="warning-triangle-icon"
     width="48"
     height="48"
     viewBox="0 0 24 24"
@@ -132,6 +135,7 @@ const BoardStage = ({
   onPromotionPick,
   onPromotionCancel,
   streakToast,
+  boardNotice,
   isDrillMode = false,
   onSwitchToPlayMode,
   onSwitchToDrillMode,
@@ -162,6 +166,54 @@ const BoardStage = ({
                   : `${streakToast.streak} best moves`}
               </span>
               <span className="streak-toast__detail">⭐ Perfect streak</span>
+            </div>
+          )}
+          {boardNotice && (
+            <div
+              key={boardNotice.nonce}
+              className={
+                boardNotice.kind === "review-result"
+                  ? `board-notice board-notice--review-result board-notice--${boardNotice.result}`
+                  : `board-notice board-notice--${boardNotice.kind}`
+              }
+              role={boardNotice.kind === "review-warning" ? "alert" : "status"}
+              aria-live={
+                boardNotice.kind === "review-warning" ? "assertive" : "polite"
+              }
+            >
+              {boardNotice.kind === "review-warning" && (
+                <>
+                  <div className="board-notice__header">
+                    <WarningTriangleIcon />
+                    <span className="board-notice__label">Review Position</span>
+                  </div>
+                  <p className="board-notice__detail">
+                    You've blundered here before.
+                  </p>
+                </>
+              )}
+              {boardNotice.kind === "review-result" && (
+                <div className="board-notice__result">
+                  <span className="board-notice__result-icon" aria-hidden="true">
+                    {boardNotice.result === "pass" ? "✓" : "✗"}
+                  </span>
+                  <span className="board-notice__result-label">
+                    {boardNotice.result === "pass"
+                      ? "Blunder Avoided!"
+                      : "Blundered again"}
+                  </span>
+                </div>
+              )}
+              {boardNotice.kind === "rehook" && (
+                <>
+                  <span className="board-notice__label">
+                    The haunting resumes
+                  </span>
+                  <span className="board-notice__detail">
+                    Ghost is replaying moves to your old blunder.
+                  </span>
+                </>
+              )}
             </div>
           )}
           {showStartOverlay && (!isGameActive || isStoppedDrill) && (

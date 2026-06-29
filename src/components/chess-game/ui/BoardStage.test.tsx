@@ -117,6 +117,7 @@ const makeProps = () => {
     onPromotionPick: vi.fn(),
     onPromotionCancel: vi.fn(),
     streakToast: null,
+    boardNotice: null,
   };
 };
 
@@ -264,6 +265,66 @@ describe("BoardStage", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent("New record: 8");
     expect(screen.getByText("⭐ Perfect streak")).toBeInTheDocument();
+  });
+
+  it("renders a review-warning board notice with an alert role", () => {
+    const props = makeProps();
+    const { container } = render(
+      <BoardStage
+        {...props}
+        boardNotice={{ kind: "review-warning", nonce: 1 }}
+      />,
+    );
+
+    const notice = container.querySelector(".board-notice--review-warning");
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveAttribute("role", "alert");
+    expect(notice).toHaveTextContent("Review Position");
+    expect(notice?.querySelector(".warning-triangle-icon")).not.toBeNull();
+  });
+
+  it("renders a pass review-result board notice with a check", () => {
+    const props = makeProps();
+    const { container } = render(
+      <BoardStage
+        {...props}
+        boardNotice={{ kind: "review-result", result: "pass", nonce: 2 }}
+      />,
+    );
+
+    const notice = container.querySelector(".board-notice--pass");
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice?.querySelector(".board-notice__result-icon")?.textContent).toBe(
+      "✓",
+    );
+  });
+
+  it("renders a fail review-result board notice with a cross", () => {
+    const props = makeProps();
+    const { container } = render(
+      <BoardStage
+        {...props}
+        boardNotice={{ kind: "review-result", result: "fail", nonce: 3 }}
+      />,
+    );
+
+    const notice = container.querySelector(".board-notice--fail");
+    expect(notice).not.toBeNull();
+    expect(notice?.querySelector(".board-notice__result-icon")?.textContent).toBe(
+      "✗",
+    );
+  });
+
+  it("renders a rehook board notice", () => {
+    const props = makeProps();
+    const { container } = render(
+      <BoardStage {...props} boardNotice={{ kind: "rehook", nonce: 4 }} />,
+    );
+
+    const notice = container.querySelector(".board-notice--rehook");
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveTextContent("The haunting resumes");
   });
 
   it("calls onPromotionPick when a promotion piece is clicked", () => {

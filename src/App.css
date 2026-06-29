@@ -2599,7 +2599,7 @@
     }
 }
 
-/* Shared toast entrance animation (used by .streak-toast, .rehook-toast, etc.) */
+/* Shared toast entrance animation (used by .streak-toast, .board-notice, etc.) */
 @keyframes blunder-toast-in {
     0% {
         opacity: 0;
@@ -2649,44 +2649,117 @@
     font-size: 0.8rem;
 }
 
-/* Ghost re-hook toast (anchored below Opponent label in side panel) */
-.chess-warning-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    width: 100%;
-    max-width: 420px;
+/* Shared warning-triangle icon (board notice + revert/resign dialogs) */
+.warning-triangle-icon {
+    flex: 0 0 auto;
+    color: var(--warning-dark);
 }
 
-.chess-warning-stack--mobile {
-    display: none;
-}
-
-.rehook-toast {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    padding: 0.5rem 0.75rem;
-    border-radius: 0.6rem;
-    border: 1px solid color-mix(in srgb, var(--status-ghost) 45%, transparent 55%);
-    background: color-mix(in srgb, var(--status-ghost) 10%, transparent 90%);
+/*
+ * Single board-anchored notice, top-left of the board area. Exactly one shows
+ * at a time (see useBoardNotice); each kind auto-dismisses on its own timer.
+ * Top-left so it never collides with the bottom-right streak toast.
+ */
+.board-notice {
+    position: absolute;
+    top: 0.75rem;
+    left: 0.75rem;
+    z-index: 8;
+    max-width: min(70%, 22rem);
+    padding: 0.6rem 0.8rem;
+    border-radius: 0.75rem;
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
     color: var(--text-primary);
-    font-size: 0.8rem;
-    cursor: pointer;
-    animation: blunder-toast-in 250ms ease-out;
-    text-align: left;
-    width: 100%;
-}
-
-.rehook-toast__label {
-    font-weight: 700;
     font-size: 0.85rem;
-    color: var(--status-ghost);
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    pointer-events: none;
+    animation: blunder-toast-in 250ms ease-out;
 }
 
-.rehook-toast__detail {
-    color: var(--text-tertiary);
-    font-size: 0.75rem;
+.board-notice__header {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.board-notice .warning-triangle-icon {
+    width: 1.25rem;
+    height: 1.25rem;
+}
+
+.board-notice__label {
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.board-notice__detail {
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.board-notice--review-warning {
+    border: 2px solid var(--warning);
+    border-left: 4px solid var(--warning-dark);
+    /* Opaque tint: this notice sits over the board, so --warning-bg's 50%
+       transparency would let pieces bleed through and hurt legibility. */
+    background: color-mix(in srgb, var(--warning) 24%, var(--card-bg));
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--warning) 25%, transparent);
+}
+
+.board-notice__result {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.board-notice__result-icon {
+    font-size: 1.75rem;
+    font-weight: 900;
+    line-height: 1;
+    animation: review-overlay-in 300ms ease-out;
+}
+
+.board-notice__result-label {
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.board-notice--pass {
+    border: 2px solid var(--success);
+    background: color-mix(in srgb, var(--success) 12%, var(--overlay-bg));
+}
+
+.board-notice--pass .board-notice__result-icon,
+.board-notice--pass .board-notice__result-label {
+    color: var(--success);
+}
+
+.board-notice--fail {
+    border: 2px solid var(--eval-blunder);
+    background: color-mix(in srgb, var(--eval-blunder) 12%, var(--overlay-bg));
+}
+
+.board-notice--fail .board-notice__result-icon,
+.board-notice--fail .board-notice__result-label {
+    color: var(--eval-blunder);
+}
+
+.board-notice--rehook {
+    border: 1px solid color-mix(in srgb, var(--status-ghost) 45%, transparent 55%);
+    background: color-mix(in srgb, var(--status-ghost) 12%, var(--overlay-bg));
+}
+
+.board-notice--rehook .board-notice__label {
+    color: var(--status-ghost);
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 0.85rem;
 }
 
 /* Review fail panel (side panel) */
@@ -2735,111 +2808,6 @@
     align-self: flex-start;
     font-size: 0.8rem;
     padding: 0.4rem 1rem;
-}
-
-/* Review warning toast */
-.review-warning-toast {
-    padding: 0.7rem 0.9rem;
-    border-radius: 0.75rem;
-    border: 2px solid var(--warning);
-    background: var(--warning-bg);
-    box-shadow: 0 4px 12px color-mix(in srgb, var(--warning) 25%, transparent);
-    color: var(--text-primary);
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    width: 100%;
-    max-width: 420px;
-    animation: blunder-toast-in 250ms ease-out;
-    border-left: 4px solid var(--warning-dark);
-}
-
-.review-warning-toast__label {
-    font-size: 0.78rem;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--text-primary);
-}
-
-.review-warning-toast__header {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-}
-
-.review-warning-toast__icon {
-    flex: 0 0 auto;
-    color: var(--warning-dark);
-}
-
-.review-warning-toast__detail {
-    margin: 0;
-    font-size: 0.8rem;
-    color: var(--text-primary);
-}
-
-.review-warning-toast__srs {
-    display: flex;
-    gap: 0.75rem;
-    font-size: 0.72rem;
-    color: var(--text-secondary);
-    margin-top: 0.15rem;
-}
-
-.review-warning-toast--pending,
-.review-warning-toast--pass,
-.review-warning-toast--fail {
-    position: relative;
-    overflow: hidden;
-}
-
-.review-warning-toast--pending {
-    opacity: 0.7;
-}
-
-.review-warning-toast--pass {
-    border-color: var(--success);
-    border-left-color: var(--success);
-    background: color-mix(in srgb, var(--success) 8%, var(--warning-bg));
-}
-
-.review-warning-toast--fail {
-    border-color: var(--eval-blunder);
-    border-left-color: var(--eval-blunder);
-    background: color-mix(in srgb, var(--eval-blunder) 8%, var(--warning-bg));
-}
-
-.review-warning-toast__overlay {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: inherit;
-    animation: review-overlay-in 300ms ease-out;
-}
-
-.review-warning-toast--pass .review-warning-toast__overlay {
-    background: color-mix(in srgb, var(--success) 20%, transparent);
-}
-
-.review-warning-toast--fail .review-warning-toast__overlay {
-    background: color-mix(in srgb, var(--eval-blunder) 20%, transparent);
-}
-
-.review-warning-toast__overlay-icon {
-    font-size: 2.5rem;
-    font-weight: 900;
-    line-height: 1;
-}
-
-.review-warning-toast--pass .review-warning-toast__overlay-icon {
-    color: var(--success);
-}
-
-.review-warning-toast--fail .review-warning-toast__overlay-icon {
-    color: var(--eval-blunder);
 }
 
 @keyframes review-overlay-in {
@@ -8043,14 +8011,6 @@
     }
 
     /*
-     * Vertical space beside the graph is tight, so surface the review warning
-     * above the rest of the panel content.
-     */
-    .chess-warning-stack--panel {
-        order: -1;
-    }
-
-    /*
      * Panel now hugs the right edge, so the ghost-info popup must open to the
      * left instead of the right to stay on screen.
      */
@@ -8255,48 +8215,6 @@
         letter-spacing: 0;
     }
 
-    .game-page .chess-warning-stack {
-        width: 100%;
-        max-width: none;
-    }
-
-    .game-page .review-warning-toast,
-    .game-page .rehook-toast {
-        box-sizing: border-box;
-        max-width: none;
-        pointer-events: auto;
-        box-shadow: var(--shadow-xl);
-    }
-
-    .game-page .chess-warning-stack--panel {
-        display: none;
-    }
-
-    .game-page .chess-warning-stack--mobile {
-        display: flex;
-        grid-area: notices;
-        box-sizing: border-box;
-        padding: 0 0.5rem;
-        z-index: 2;
-    }
-
-    .game-page .review-warning-toast {
-        background: color-mix(in srgb, var(--warning) 18%, var(--card-bg));
-        pointer-events: none;
-    }
-
-    .game-page .review-warning-toast--pending {
-        opacity: 1;
-    }
-
-    .game-page .rehook-toast {
-        background: color-mix(in srgb, var(--status-ghost) 12%, var(--card-bg));
-    }
-
-    .game-page .rehook-toast__detail {
-        color: var(--text-secondary);
-    }
-
     .game-page .ghost-info-box {
         position: fixed;
         top: calc(3.25rem + env(safe-area-inset-top));
@@ -8454,23 +8372,6 @@
         grid-template-areas:
             "panel"
             "board"
-            "moves"
-            "graph";
-    }
-
-    .chess-layout:has(> .chess-warning-stack--mobile) {
-        grid-template-areas:
-            "panel"
-            "board"
-            "notices"
-            "moves";
-    }
-
-    .chess-layout.has-graph:has(> .chess-warning-stack--mobile) {
-        grid-template-areas:
-            "panel"
-            "board"
-            "notices"
             "moves"
             "graph";
     }

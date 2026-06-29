@@ -55,19 +55,12 @@ const playToSeededReviewPosition = async (page: Page): Promise<void> => {
   await waitForMoveCountAtLeast(page, 4);
   await playMove(page, "f1", "c4");
   await waitForMoveCountAtLeast(page, 6);
+  // The review warning now renders on the board itself (top-left), not in a
+  // below-board stack. It auto-dismisses after a few seconds, so assert it
+  // promptly within its window.
   await expect(
-    page.locator(".chess-warning-stack--mobile .review-warning-toast"),
+    page.locator(".chessboard-board-area .board-notice--review-warning"),
   ).toBeVisible();
-};
-
-const expectNoticesBelowBoard = async (page: Page): Promise<void> => {
-  const boardBox = await page.locator(".chessboard-board-area").boundingBox();
-  const warningBox = await page
-    .locator(".chess-warning-stack--mobile")
-    .boundingBox();
-  expect(boardBox).not.toBeNull();
-  expect(warningBox).not.toBeNull();
-  expect(warningBox!.y).toBeGreaterThanOrEqual(boardBox!.y + boardBox!.height);
 };
 
 test("narrow game layout keeps controls usable and overlays in viewport", async ({
@@ -104,16 +97,8 @@ test("narrow game layout keeps controls usable and overlays in viewport", async 
   // Controls row sits above the move strip in the horizontal list.
   expect(controlsBox!.y).toBeLessThan(stripBox!.y);
 
-  const mobileWarnings = page.locator(".chess-warning-stack--mobile");
-  await expect(mobileWarnings.locator(".review-warning-toast")).toBeVisible();
-  await expect(mobileWarnings.locator(".rehook-toast")).toBeVisible();
-  await expectNoticesBelowBoard(page);
-
-  // Above the 659px portrait breakpoint the mobile notice stack is hidden and
-  // notices move into the panel, so the below-board assertion no longer
-  // applies. Resize only to exercise the ghost-info popover at a wider width.
+  // Resize to a wider width to exercise the ghost-info popover positioning.
   await page.setViewportSize({ width: 767, height: 430 });
-  await expect(page.locator(".chess-warning-stack--mobile")).toBeHidden();
 
   await page.getByRole("button", { name: "Toggle ghost info" }).click();
   const ghostInfo = page.locator(".ghost-info-box");
