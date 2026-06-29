@@ -18,12 +18,35 @@ DATABASE_URL = resolve_database_url()
 DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "10"))
 DB_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "10"))
 
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=DB_POOL_SIZE,
-    max_overflow=DB_MAX_OVERFLOW,
-)
+# Discard pooled connections older than this at checkout — generic max-lifetime
+# hygiene against a socket that went stale while idle in the pool. NOT calibrated
+# to any proxy idle timeout: prod reaches Postgres over Railway private networking
+# (DATABASE_PRIVATE_URL), which bypasses the public TCP proxy entirely, so 1800 is
+# just a conservative default. pool_pre_ping already rejects a stale-at-checkout
+# connection, so this is a proactive backstop — and note it does NOT save a
+# connection that dies mid-request (only the TCP keepalives below do). See g-q6w5.
+DB_POOL_RECYCLE = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+
+_engine_kwargs = {
+    "pool_pre_ping": True,
+    "pool_size": DB_POOL_SIZE,
+    "max_overflow": DB_MAX_OVERFLOW,
+    "pool_recycle": DB_POOL_RECYCLE,
+}
+
+if DATABASE_URL.startswith("postgresql"):
+    # libpq TCP keepalives: detect a dead peer quickly and stop an intermediate
+    # proxy from reaping an idle gap *within* a long request. These are
+    # psycopg/Postgres-specific connect args — SQLite (tests) rejects them, so
+    # only attach them for a Postgres URL.
+    _engine_kwargs["connect_args"] = {
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    }
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 
 if engine.dialect.name == "sqlite":
