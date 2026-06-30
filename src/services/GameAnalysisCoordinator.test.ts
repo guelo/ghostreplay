@@ -1511,6 +1511,40 @@ describe('GameAnalysisCoordinator', () => {
       await expect(pending).resolves.toMatchObject({ id, bestMove: 'worker-best' })
     })
 
+    it('a single long iteration survives: one info ping then heartbeat pings carry it well past the window (g-f2mg)', async () => {
+      coordinator.startSession('s')
+      postReady()
+      const id = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)!
+      const pending = coordinator.waitForAnalysis(0)
+
+      await vi.advanceTimersByTimeAsync(200) // cache miss → released
+
+      postStarted(id)
+      // The g-f2mg failure: depth 13 completes (one info-derived ping), then
+      // Stockfish spends a long time inside a single iteration emitting no info
+      // line. The worker's wall-clock heartbeat keeps posting analysis-progress on
+      // its ~1s cadence, so the watchdog never sees 8s of silence — the request is
+      // NOT failed as inactivity even though no info line arrives.
+      //
+      // Run for 30s — past the 8s inactivity window AND past any engine-silence
+      // ceiling a (wrong) gated heartbeat might impose (~20s) plus the watchdog
+      // window. The heartbeat is unconditional while a search is active, so the
+      // request stays alive the whole time.
+      postProgress(id) // the lone depth-13 info ping
+      for (let i = 0; i < 30; i++) {
+        await vi.advanceTimersByTimeAsync(1_000) // heartbeat cadence (< 8s window)
+        postProgress(id)
+        expect((coordinator as any).resolutionState.has(0)).toBe(true)
+        expect(coordinator.store.getState().analysisMap.has(0)).toBe(false)
+      }
+      // 30s+ elapsed and still alive on heartbeat alone.
+      expect((coordinator as any).resolutionState.has(0)).toBe(true)
+
+      // The iteration finally completes and the worker resolves it.
+      postWorker(id)
+      await expect(pending).resolves.toMatchObject({ id, bestMove: 'worker-best' })
+    })
+
     it('a queued request is not failed while the worker progresses another (serial liveness)', async () => {
       coordinator.startSession('s')
       postReady()

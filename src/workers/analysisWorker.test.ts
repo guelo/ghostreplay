@@ -888,4 +888,205 @@ describe('analysisWorker', () => {
       vi.useRealTimers()
     }
   })
+
+  it('keeps posting heartbeat pings through a long silent iteration (past the inactivity window) and still resolves on a late bestmove', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(0)
+      await import('./analysisWorker')
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+
+      const id = 'analysis-heartbeat'
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id,
+            // The real g-f2mg position: a sharp depth-14 iteration ran ~8.7s with
+            // no info line, false-killing the live search before this fix.
+            fen: 'r4rk1/pp3ppp/4p3/3p4/b1pP1B2/2q1P3/2P1BPPP/1K1R3R w - - 2 17',
+            move: 'd1c1',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+
+      postMessageMock.mockClear()
+      const progressCount = () =>
+        postMessageMock.mock.calls.filter(
+          ([m]) => m.type === 'analysis-progress' && m.id === id,
+        ).length
+
+      // A single long iteration: NO engine line for 30s — well past the 8s
+      // coordinator inactivity window AND past any plausible engine-silence
+      // ceiling. The wall-clock heartbeat must keep pinging on its ~1s cadence the
+      // WHOLE time (g-f2mg AC: posts UNCONDITIONALLY while a search is active), so
+      // the coordinator never sees inactivity and never false-kills a live search.
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(progressCount()).toBeGreaterThanOrEqual(28)
+
+      // The iteration finally completes; the root search resolves and the worker
+      // advances to the post-played search (moves d1c1) — proving the long-silent
+      // search was never abandoned (a would-be ceiling+inactivity window of ~28s
+      // came and went with the search still live).
+      engineMessageHandler?.('info depth 14 score cp 950 nodes 5537499 pv c3a3')
+      engineMessageHandler?.('bestmove c3a3')
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+          expect.stringContaining('moves d1c1'),
+        )
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the heartbeat once the analysis completes, leaking no timer into idle time', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(0)
+      await import('./analysisWorker')
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+
+      const id = 'analysis-heartbeat-complete'
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id,
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            move: 'e2e4',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      // Root search → bestmove (best === played, so only post-played follows).
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+      engineMessageHandler?.('info depth 17 score cp 30 pv e2e4 e7e5')
+      engineMessageHandler?.('bestmove e2e4')
+
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+          expect.stringContaining('moves e2e4'),
+        )
+      })
+      engineMessageHandler?.('info depth 17 score cp -25 pv e7e5')
+      engineMessageHandler?.('bestmove e7e5')
+
+      await vi.waitFor(() => {
+        expect(postMessageMock).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'analysis', id }),
+        )
+      })
+
+      // The request is fully resolved; no search is active. Advancing the clock
+      // must emit no further heartbeat pings (timer cleared on bestmove and at
+      // the per-request finally — no leak into the next request).
+      postMessageMock.mockClear()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(
+        postMessageMock.mock.calls.filter(([m]) => m.type === 'analysis-progress'),
+      ).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the heartbeat on cancel so a canceled search stops pinging', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(0)
+      await import('./analysisWorker')
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+
+      const id = 'analysis-heartbeat-cancel'
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id,
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            move: 'e2e4',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: { type: 'cancel-analysis', id } satisfies AnalysisWorkerRequest,
+        }),
+      )
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('stop')
+
+      // Heartbeat stopped eagerly on cancel — even though no bestmove arrived to
+      // null activeSearch, advancing the clock emits no pings.
+      postMessageMock.mockClear()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(
+        postMessageMock.mock.calls.filter(([m]) => m.type === 'analysis-progress'),
+      ).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears the heartbeat on terminate so no timer leaks after teardown', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.setSystemTime(0)
+      await import('./analysisWorker')
+
+      engineMessageHandler?.('uciok')
+      engineMessageHandler?.('readyok')
+
+      const id = 'analysis-heartbeat-terminate'
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: {
+            type: 'analyze-move',
+            id,
+            fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+            move: 'e2e4',
+            playerColor: 'white',
+          } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      await vi.waitFor(() => {
+        expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+      })
+
+      messageHandler?.(
+        new MessageEvent('message', {
+          data: { type: 'terminate' } satisfies AnalysisWorkerRequest,
+        }),
+      )
+
+      postMessageMock.mockClear()
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(
+        postMessageMock.mock.calls.filter(([m]) => m.type === 'analysis-progress'),
+      ).toHaveLength(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -45,6 +45,29 @@ const canceledAnalyses = new Set<string>();
 const PROGRESS_THROTTLE_MS = 250;
 let lastProgressPostMs = Number.NEGATIVE_INFINITY;
 
+// Wall-clock liveness heartbeat. Stockfish `info` output is event-driven (per
+// completed depth), NOT time-periodic, so a single long iteration can exceed the
+// coordinator's inactivity window with zero info lines (g-f2mg: an 8.7s depth-14
+// iteration false-killed a live search whose only fault was that one iteration
+// crossed no info-reporting boundary). The heartbeat posts analysis-progress on a
+// fixed clock for as long as a search is active — UNCONDITIONALLY, not gated on
+// engine output — so the coordinator watchdog tracks worker liveness instead of
+// Stockfish's reporting cadence. Period must sit comfortably under
+// ANALYSIS_INACTIVITY_TIMEOUT_MS (8s); ~1s gives wide margin.
+//
+// Deliberately NOT gated on a max engine-silence window. Any such ceiling would
+// re-create the exact false-kill class g-f2mg fixes: a live search inside one
+// >ceiling iteration emits no lines, the gated heartbeat would fall silent, and
+// the watchdog would fail a live search around ~ceiling+8s. Liveness here means
+// "the orchestrator worker is alive and a search is active"; a dead orchestrator
+// stops the interval, so the genuinely-hung path still fails (the "dead worker
+// emits zero pings" guard). Detecting a wedged ENGINE sub-worker (live
+// orchestrator, dead engine) is a DIFFERENT problem that needs an explicit
+// terminate-and-recreate backstop, NOT a silent liveness gate — tracked in
+// g-5fng so this heartbeat is not "fixed" back into a false-kill.
+const HEARTBEAT_INTERVAL_MS = 1000;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
 /**
  * Unthrottled phase-boundary liveness ping, keyed by the active analysis id.
  * Info lines only cover the INSIDE of a search; the per-request reset and the
@@ -62,6 +85,39 @@ const postPhaseProgress = () => {
       id: activeAnalysisId,
     } satisfies AnalysisWorkerResponse);
   }
+};
+
+const stopHeartbeat = () => {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+};
+
+/**
+ * Start the wall-clock liveness heartbeat for the active search. Called from
+ * runSearch once `activeSearch` is set. The interval body is self-guarding — it
+ * only pings while a search is live and its analysis is neither cleared nor
+ * canceled — so a stray tick after the search ends is inert. It is NOT gated on
+ * engine output (see the heartbeat note above): vouching unconditionally while a
+ * search is active is the whole point. Heartbeats are still cleared eagerly at
+ * every search/request exit to avoid leaking a timer across requests. Clears any
+ * prior timer first, so it is safe to re-call.
+ */
+const startHeartbeat = () => {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (
+      activeSearch &&
+      activeAnalysisId &&
+      !canceledAnalyses.has(activeAnalysisId)
+    ) {
+      ctx.postMessage({
+        type: "analysis-progress",
+        id: activeAnalysisId,
+      } satisfies AnalysisWorkerResponse);
+    }
+  }, HEARTBEAT_INTERVAL_MS);
 };
 
 // Per-request readiness waiters, distinct from the init engineReady handshake.
@@ -194,6 +250,9 @@ const runSearch = async (
   return new Promise<SearchResult>(
     (resolve, reject) => {
       activeSearch = { resolve, reject, lastScore: null, lastPv: null, onInfo };
+      // Arm the wall-clock heartbeat for THIS search so a single long iteration
+      // (which emits no info line) still proves worker liveness to the watchdog.
+      startHeartbeat();
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
       sendEngineCommand("go depth 17");
@@ -254,7 +313,10 @@ const buildBestLine = (
 const handleEngineError = (event: ErrorEvent) => {
   const message = event.message || "Failed to initialize Stockfish";
   // The engine is broken: settle all in-flight resets so analysisInFlight cannot
-  // stick and no placeholder waits for an ack that will never come.
+  // stick and no placeholder waits for an ack that will never come. Stop the
+  // heartbeat too, so a dead engine cannot keep emitting liveness pings for a
+  // search that will never produce a bestmove.
+  stopHeartbeat();
   failAllRequestReady(new Error(message));
   ctx.postMessage({
     type: "error",
@@ -301,6 +363,9 @@ const handleEngineLine = (line: string) => {
   if (line.startsWith("bestmove")) {
     const current = activeSearch;
     activeSearch = null;
+    // This search is over: stop its heartbeat. The next phase's runSearch arms a
+    // fresh one; the bestmove→next-phase gap is covered by postPhaseProgress.
+    stopHeartbeat();
 
     if (!current) {
       return;
@@ -362,6 +427,10 @@ const cancelAnalysis = (analysisId: string) => {
     if (activeSearch) {
       sendEngineCommand("stop");
     }
+    // Stop the heartbeat eagerly so a canceled request stops pinging immediately
+    // (the interval body already self-guards on the cancel tombstone, but clear
+    // the timer to avoid leaking it past the request).
+    stopHeartbeat();
     // Cancel may land while awaiting the per-request reset (before any search
     // starts): reject the waiter so analyzeMove unwinds via AnalysisCanceledError
     // instead of hanging until a readyok that we no longer act on.
@@ -424,6 +493,12 @@ const drainQueue = () => {
       if (activeAnalysisId === request.id) {
         activeAnalysisId = null;
       }
+      // Per-request safety net: every request lifecycle ends here (success,
+      // cancel, or error). The last search's bestmove normally stops the
+      // heartbeat already, but a mid-search reject (e.g. AnalysisCanceledError)
+      // can abandon activeSearch — clear the timer so it never leaks into the
+      // next request.
+      stopHeartbeat();
       analysisInFlight = false;
       drainQueue();
     });
@@ -614,6 +689,7 @@ ctx.addEventListener(
         engine?.terminate();
         engine = null;
         engineReady = false;
+        stopHeartbeat();
         failAllRequestReady(new Error("Analysis worker terminated"));
         activeSearch = null;
         activeAnalysisId = null;
