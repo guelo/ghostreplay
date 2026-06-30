@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useSearchParams } from "react-router-dom";
 import { ApiError, fetchAnalysis, type SessionAnalysis } from "../utils/api";
+import { projectExactBest } from "../utils/projectExactBest";
 import AnalysisBoard from "../components/AnalysisBoard";
 import GameReviewStats from "../components/GameReviewStats";
 import AppNav from "../components/AppNav";
@@ -94,10 +95,23 @@ function GameAnalysisPage() {
   const playerColor = analysis?.player_color;
   const missingColor = analysis && !playerColor;
 
+  // Mirror the exact-best projection the live/interactive paths already apply
+  // (g-kfxj): a played move equal to the TRUSTED position best is promoted to
+  // 'best' (loss 0) so its star matches the on-board best-arrow. Project once at
+  // this seam and feed the result to every consumer of the moves so the board and
+  // the review stats stay internally consistent.
+  const projectedMoves = useMemo(
+    () =>
+      analysis
+        ? projectExactBest(analysis.moves, analysis.position_analysis)
+        : null,
+    [analysis],
+  );
+
   const { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat } =
     useGameReviewStats({
       selectedId: id,
-      moves: missingColor ? null : (analysis?.moves ?? null),
+      moves: missingColor ? null : projectedMoves,
       playerColor: playerColor ?? 'white',
     });
 
@@ -129,14 +143,14 @@ function GameAnalysisPage() {
             </p>
           )}
 
-          {!loading && !error && analysis && playerColor && sideStats && (
+          {!loading && !error && analysis && playerColor && sideStats && projectedMoves && (
             <div className="analysis-pane">
               <div className="analysis-pane__shell">
                 <AnalysisBoard
                   key={id}
-                  moves={analysis.moves}
+                  moves={projectedMoves}
                   boardOrientation={playerColor}
-                  initialMoveIndex={analysis.moves.length > 0 ? 0 : undefined}
+                  initialMoveIndex={projectedMoves.length > 0 ? 0 : undefined}
                   positionAnalysis={analysis.position_analysis}
                   highlightedMoves={highlightedMoves}
                   onGraphMoveClick={handleGraphMoveClick}
