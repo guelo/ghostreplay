@@ -8,7 +8,7 @@ import {
 } from '../utils/debugLog'
 import './DebugOverlay.css'
 
-const LEVELS: LogLevel[] = ['log', 'info', 'warn', 'error', 'debug']
+const LEVELS: LogLevel[] = ['log', 'info', 'warn', 'error', 'debug', 'net']
 
 function formatTs(ts: number): string {
   const d = new Date(ts)
@@ -112,7 +112,13 @@ export default function DebugOverlay() {
               .slice()
               .reverse()
               .map((e) => (
-                <li key={e.id} className={'debug-entry debug-entry--' + e.level}>
+                <li
+                  key={e.id}
+                  className={
+                    'debug-entry debug-entry--' + e.level +
+                    (e.level === 'net' && e.net && !e.net.ok ? ' debug-entry--net-fail' : '')
+                  }
+                >
                   <span className="debug-entry__ts">{formatTs(e.ts)}</span>
                   <span className="debug-entry__level">{e.level}</span>
                   <pre className="debug-entry__args">{e.args}</pre>

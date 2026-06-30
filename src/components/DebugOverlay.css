@@ -85,6 +85,11 @@
   color: #ef6b6b;
 }
 
+.debug-chip--net.is-active {
+  border-color: #2a7f8f;
+  color: #4fd0e0;
+}
+
 .debug-overlay__search {
   flex: 1;
   min-width: 80px;
@@ -139,4 +144,12 @@
 
 .debug-entry--debug {
   opacity: 0.7;
+}
+
+.debug-entry--net {
+  color: #4fd0e0; /* teal — distinct from log/warn/error */
+}
+
+.debug-entry--net-fail {
+  color: #ef6b6b; /* reuse error red for failed requests */
 }
