@@ -4337,9 +4337,15 @@
     position: relative;
 }
 
-/* What-if (variation) mode: wash out the board so it reads as a
-   hypothetical, disabled-looking exploration rather than the live line. */
-.analysis-board__board-frame--variation {
+/* What-if (variation) mode: wash out only the board squares (and the pieces +
+   highlight tints nested inside them) so the position reads as a hypothetical,
+   disabled-looking exploration — while move arrows and the eval-icon badge keep
+   full saturation/contrast for legibility. saturate/brightness/contrast are
+   per-pixel point filters, so filtering each square independently is visually
+   identical to filtering the whole board — no seams. Depends on react-chessboard
+   tagging every square with data-square; if a future upgrade drops it the wash
+   simply stops (squares show full color) rather than breaking layout. */
+.analysis-board__board-frame--variation [data-square] {
     filter: saturate(0.55) brightness(1.06) contrast(0.95);
     transition: filter 0.2s ease;
 }

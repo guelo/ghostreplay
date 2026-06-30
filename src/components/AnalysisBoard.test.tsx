@@ -359,6 +359,30 @@ describe('AnalysisBoard — what-if graph', () => {
     expect(screen.getByTestId('footer-stats')).toBeTruthy()
   })
 
+  // The board wash-out (App.css: .analysis-board__board-frame--variation
+  // [data-square]) hangs off this class, so guard that it toggles with the
+  // variation state. The filter itself can't be asserted in jsdom.
+  it('marks the board frame as a variation only while in what-if mode', () => {
+    const node = makeNode({})
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+
+    const { container } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(
+      container.querySelector('.analysis-board__board-frame--variation'),
+    ).toBeTruthy()
+  })
+
+  it('does not mark the board frame as a variation on the main line', () => {
+    // beforeEach resets mockSelectedVarNodeId to null (main line).
+    const { container } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    const frame = container.querySelector('.analysis-board__board-frame')
+    expect(frame).toBeTruthy()
+    expect(frame?.classList.contains('analysis-board__board-frame--variation')).toBe(false)
+  })
+
   it('builds a variationLine with an anchor at the departure move and a pending tip', () => {
     const node = makeNode({})
     mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
