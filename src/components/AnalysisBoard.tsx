@@ -1432,7 +1432,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               </span>
             )}
           </div>
-          {showEngineArrows && engineLinesDisplay.some(Boolean) && (
+          {showEngineArrows && (
             <div className="analysis-board__engine-lines">
               {[0, 1, 2].map((i) => {
                 const line = engineLinesDisplay[i];

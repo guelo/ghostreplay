@@ -1358,6 +1358,30 @@ describe('AnalysisBoard MoveList', () => {
 
     expect(screen.getAllByRole('button', { name: /Show engine line/ })).toHaveLength(1)
   })
+
+  it('reserves the engine-line row while recomputing so the MoveList does not jitter', () => {
+    // Seed a real line whose engineInfoFen points at an OLD position while the
+    // board shows the latest position. engineInfoFen !== displayedFen, so the
+    // stale line is filtered out (no buttons), but the row must stay mounted to
+    // hold its height during the recompute gap.
+    mockEngineInfoRef.current = [{ pv: ['g1f3'], score: { type: 'cp', value: 42 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[0].fen_after
+
+    const { container } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(container.querySelector('.analysis-board__engine-lines')).not.toBeNull()
+    expect(screen.queryAllByRole('button', { name: /Show engine line/ })).toHaveLength(0)
+  })
+
+  it('does not reserve the engine-line row when engine lines are turned off', () => {
+    const { container } = render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(container.querySelector('.analysis-board__engine-lines')).not.toBeNull()
+
+    fireEvent.click(screen.getByLabelText('Engine lines'))
+
+    expect(container.querySelector('.analysis-board__engine-lines')).toBeNull()
+  })
 })
 
 describe('AnalysisBoard — engine line hover', () => {
