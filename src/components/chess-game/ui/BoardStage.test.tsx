@@ -356,4 +356,23 @@ describe("BoardStage", () => {
     fireEvent.click(backdrop!);
     expect(props.onPromotionCancel).toHaveBeenCalledTimes(1);
   });
+
+  it("washes the board when reviewing a past move", () => {
+    const props = makeProps();
+    const { container } = render(<BoardStage {...props} isReviewingPast />);
+    expect(
+      container.querySelector(".chessboard-square-measure--reviewing"),
+    ).not.toBeNull();
+  });
+
+  it("does not wash the board on the live position", () => {
+    const props = makeProps();
+    const { container } = render(<BoardStage {...props} />);
+    expect(
+      container.querySelector(".chessboard-square-measure--reviewing"),
+    ).toBeNull();
+    expect(
+      container.querySelector(".chessboard-square-measure"),
+    ).not.toBeNull();
+  });
 });

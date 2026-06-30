@@ -404,6 +404,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
 
+  // During a LIVE game, washes the board when the user is reviewing a past move
+  // (navigated back, or a blunder/drill-fail jumped backward). Uses displayedIndex
+  // (latest normalized to last ply) rather than `viewIndex !== null` so a non-null
+  // latest index — e.g. a graph click on the rightmost point — does NOT wash.
+  const isReviewingPast = isGameActive && displayedIndex < moveHistory.length - 1;
+
   const isPlayerMoveIndex = useCallback(
     (index: number) => {
       if (index < 0) return false;
@@ -1916,6 +1922,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 arrows={blunderArrows}
                 showStartOverlay={showStartOverlay}
                 isGameActive={isGameActive}
+                isReviewingPast={isReviewingPast}
                 isStoppedDrill={isStoppedDrill}
                 isStartingGame={isStartingGame}
                 onCloseStartOverlay={handleCloseStartOverlay}

@@ -20,6 +20,9 @@ type BoardStageProps = {
   arrows: { startSquare: string; endSquare: string; color: string }[];
   showStartOverlay: boolean;
   isGameActive: boolean;
+  // Live game + not on the latest move: wash the squares so the board reads as
+  // history, not the live position (a lighter cousin of the what-if wash).
+  isReviewingPast?: boolean;
   // Allows the start overlay to open over a stopped drill (isGameActive stays
   // true so handleNewDrill can abandon the failed session when a new drill starts).
   isStoppedDrill?: boolean;
@@ -98,6 +101,7 @@ const BoardStage = ({
   arrows,
   showStartOverlay,
   isGameActive,
+  isReviewingPast = false,
   isStoppedDrill = false,
   isStartingGame,
   onCloseStartOverlay,
@@ -326,7 +330,10 @@ const BoardStage = ({
               onCancel={onPromotionCancel}
             />
           )}
-          <div ref={boardSquareRef} className="chessboard-square-measure">
+          <div
+            ref={boardSquareRef}
+            className={`chessboard-square-measure${isReviewingPast ? " chessboard-square-measure--reviewing" : ""}`}
+          >
             <Chessboard
               key={boardInstanceKey}
               options={{
