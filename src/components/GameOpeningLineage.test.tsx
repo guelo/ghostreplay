@@ -5,12 +5,6 @@ import { MemoryRouter } from "react-router-dom";
 import GameOpeningLineage from "./GameOpeningLineage";
 import type { OpeningLineageItem, OpeningScoreDeltaItem } from "../utils/api";
 
-vi.mock("react-chessboard", () => ({
-  Chessboard: ({ options }: { options: Record<string, unknown> }) => (
-    <div data-testid="lineage-board" data-position={options.position as string} />
-  ),
-}));
-
 function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
   return {
     opening_key: "key",
@@ -79,18 +73,18 @@ describe("GameOpeningLineage", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("renders chips broadest -> deepest in order", () => {
+  it("renders cards broadest -> deepest in order", () => {
     renderLineage([
       makeItem({ opening_key: "k1", opening_name: "Open Game" }),
       makeItem({ opening_key: "k2", opening_name: "Ruy Lopez", depth: 1 }),
       makeItem({ opening_key: "k3", opening_name: "Berlin Defense", depth: 2 }),
     ]);
 
-    const groups = screen.getAllByRole("group");
-    expect(groups.map((g) => g.getAttribute("aria-label"))).toEqual([
-      "Open Game",
-      "Ruy Lopez",
-      "Berlin Defense",
+    const cards = screen.getAllByRole("button");
+    expect(cards.map((c) => c.getAttribute("aria-label"))).toEqual([
+      "Select Open Game and toggle details",
+      "Select Ruy Lopez and toggle details",
+      "Select Berlin Defense and toggle details",
     ]);
   });
 
@@ -118,7 +112,7 @@ describe("GameOpeningLineage", () => {
     );
   });
 
-  it("expanding replaces the chip with the card and fires onSelectRoot once", async () => {
+  it("expanding replaces the compact card with the expanded card and fires onSelectRoot once", async () => {
     const user = userEvent.setup();
     const item = makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" });
     const onSelectRoot = vi.fn();
@@ -126,21 +120,16 @@ describe("GameOpeningLineage", () => {
 
     const toggle = screen.getByRole("button", { name: /Select Ruy Lopez/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(screen.queryByTestId("lineage-board")).not.toBeInTheDocument();
 
     await user.click(toggle);
 
     expect(onSelectRoot).toHaveBeenCalledTimes(1);
     expect(onSelectRoot).toHaveBeenCalledWith(item);
-    // The collapsed chip is gone, replaced by the expanded card.
+    // The collapsed card is gone, replaced by the expanded card.
     expect(
       screen.queryByRole("button", { name: /Select Ruy Lopez/ }),
     ).not.toBeInTheDocument();
-    expect(screen.getByTestId("lineage-board")).toHaveAttribute(
-      "data-position",
-      "k1",
-    );
-    // The link + Start Drill only exist inside the expanded card.
+    // The link + Start Drill only exist in/around the expanded card.
     expect(
       screen.getByRole("link", { name: /View in Openings/ }),
     ).toBeInTheDocument();
@@ -148,11 +137,10 @@ describe("GameOpeningLineage", () => {
       screen.getByRole("button", { name: /Start Drill/ }),
     ).toBeInTheDocument();
 
-    // Clicking the card surface (not the buttons) collapses it back to a chip.
+    // Clicking the card surface (not the buttons) collapses it back.
     await user.click(
       screen.getByRole("button", { name: /Collapse Ruy Lopez details/ }),
     );
-    expect(screen.queryByTestId("lineage-board")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /Select Ruy Lopez/ }),
     ).toHaveAttribute("aria-expanded", "false");
@@ -174,14 +162,15 @@ describe("GameOpeningLineage", () => {
     expect(onStartDrill).toHaveBeenCalledWith(item);
   });
 
-  it("shows muted tone and em-dash score for a null-score opening", () => {
+  it("shows the no-data grade token and em-dash score for a null-score opening", () => {
     renderLineage([
       makeItem({ opening_key: "k1", opening_name: "Unknown", score: null }),
     ]);
 
-    const group = screen.getByRole("group", { name: "Unknown" });
-    expect(group.className).toContain("game-opening-chip--muted");
-    expect(within(group).getByText("—")).toBeInTheDocument();
+    const card = screen.getByRole("button", { name: /Select Unknown/ });
+    expect(card.className).toContain("tree-node-card--grade-none");
+    // Both the score and the grade tag dash for a null score.
+    expect(within(card).getAllByText("—").length).toBeGreaterThanOrEqual(1);
   });
 
   it("hides Start Drill in the expanded card when onStartDrill is omitted", async () => {
@@ -226,11 +215,14 @@ describe("GameOpeningLineage", () => {
 
     await user.click(toggle);
 
-    // Tapping still expands the card in place.
-    expect(screen.getByTestId("lineage-board")).toHaveAttribute(
-      "data-position",
-      "k1",
-    );
+    // Tapping still expands the card in place: the compact toggle is replaced
+    // and the expanded card's "View in Openings" link appears.
+    expect(
+      screen.queryByRole("button", { name: "Show Ruy Lopez details" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /View in Openings/ }),
+    ).toBeInTheDocument();
   });
 
   describe("score-diff badge (g-3gmc)", () => {
@@ -335,16 +327,15 @@ describe("GameOpeningLineage", () => {
         },
       );
 
-      // Collapsed: badge present next to the chip.
+      // Collapsed: badge present next to the card.
       expect(screen.getByText("+3 → 44")).toBeInTheDocument();
 
       await user.click(screen.getByRole("button", { name: /Select Ruy Lopez/ }));
 
-      // Still present once expanded, and NOT inside the card/board body — it is a
+      // Still present once expanded, and NOT inside the card body — it is a
       // direct child of the <li>, a sibling of the expanded card.
       const badge = screen.getByText("+3 → 44");
       expect(badge).toBeInTheDocument();
-      expect(screen.getByTestId("lineage-board")).not.toContainElement(badge);
       expect(badge.parentElement?.tagName).toBe("LI");
     });
   });

@@ -1,11 +1,9 @@
 import { useMemo, useState } from "react";
-import OpeningFamilyCard from "./OpeningFamilyCard";
+import { Link } from "react-router-dom";
+import OpeningTreeNodeCard, {
+  type OpeningTreeNodeView,
+} from "./OpeningTreeNodeCard";
 import { buildOpeningsSearchParams } from "../openings/route";
-import {
-  formatScore,
-  getPriorityLabel,
-  getPriorityTone,
-} from "../openings/format";
 import type {
   OpeningLineageItem,
   OpeningPlayerColor,
@@ -46,12 +44,41 @@ function badgeFor(change: OpeningScoreDeltaItem | undefined): LineageBadge | nul
 }
 
 /**
- * Compact vertical stack of opening chips (broadest -> deepest), shared by the
- * /history analysis footer and the live game chess-panel. Each chip is a button
- * that toggles an inline OpeningFamilyCard. When `onSelectRoot` is provided it
- * ALSO selects that opening's root on the board/MoveList/graph (history); when
- * omitted the chip is expand-only (live panel). The /openings link and the
- * optional Start Drill button live inside the expanded card.
+ * Map a lineage item (an opening family identified by a position) onto the
+ * tree-node card's view-model. A family has no SAN / ply / eval, so those
+ * move-only fields are nulled out and the card is rendered with `kind="family"`
+ * (name as header, no move label / Eval tile / move-type chips). `depth` feeds
+ * `ply` for completeness only — family mode never reads it.
+ */
+function toNodeView(item: OpeningLineageItem): OpeningTreeNodeView {
+  return {
+    ply: item.depth,
+    san: null,
+    openingName: item.opening_name,
+    eco: item.eco,
+    inBook: true,
+    isUserSelected: false,
+    score: item.score,
+    evalCp: null,
+    evalMate: null,
+    coverage: item.coverage,
+    gameCount: item.game_count,
+    confidence: item.confidence,
+    isTerminal: false,
+    terminalReason: null,
+    drillOpeningKey: item.opening_key,
+  };
+}
+
+/**
+ * Compact vertical stack of opening cards (broadest -> deepest), shared by the
+ * /history analysis footer and the live game chess-panel. Each entry is a
+ * compact `OpeningTreeNodeCard` (family mode) that expands in place to the
+ * expanded variant — the same card /openings uses, minus the mini board. When
+ * `onSelectRoot` is provided, tapping a card ALSO selects that opening's root on
+ * the board/MoveList/graph (history); when omitted the card is expand-only (live
+ * panel). The "View in Openings" link is re-homed as the expanded card's footer,
+ * and the optional Start Drill button lives inside the expanded card.
  */
 function GameOpeningLineage({
   playerColor,
@@ -76,10 +103,7 @@ function GameOpeningLineage({
       <p className="game-opening-lineage__label">Openings</p>
       <ol className="game-opening-lineage__list">
         {lineage.map((item, index) => {
-          const tone = getPriorityTone(item.score);
-          const statusLabel = getPriorityLabel(item.score);
           const isExpanded = expandedKey === item.opening_key;
-          const isUnscored = item.score === null;
           const cardId = `opening-card-${index}`;
           const openingsHref = `/openings?${buildOpeningsSearchParams({
             playerColor,
@@ -87,6 +111,7 @@ function GameOpeningLineage({
           })}`;
           const badge = badgeFor(changeByKey.get(item.opening_key));
           const badgeSign = badge && badge.diff > 0 ? "+" : "";
+          const view = toNodeView(item);
 
           return (
             <li
@@ -95,80 +120,51 @@ function GameOpeningLineage({
               style={{ "--lineage-depth": index } as React.CSSProperties}
             >
               {isExpanded ? (
-                // Expanded card replaces the collapsed chip. Clicking its surface
-                // (outside the link / Start Drill buttons) collapses it again.
-                <div
-                  id={cardId}
-                  className={`opening-family-card opening-family-card--analysis opening-family-card--${tone}`}
-                >
-                  <OpeningFamilyCard
-                    openingName={item.opening_name}
-                    openingKey={item.opening_key}
-                    playerColor={playerColor}
-                    score={item.score}
-                    coverage={item.coverage}
-                    gameCount={item.game_count}
-                    confidence={item.confidence}
-                    isUnscored={isUnscored}
-                    openingsHref={openingsHref}
+                // Expanded card replaces the collapsed one; its full-surface
+                // overlay button collapses it. The re-homed "View in Openings"
+                // link is the card's footer (a sibling of the card, not covered
+                // by the overlay), so tapping it never collapses the card.
+                <div className="opening-lineage-card" id={cardId}>
+                  <OpeningTreeNodeCard
+                    variant="expanded"
+                    kind="family"
+                    node={view}
                     onStartDrill={
                       onStartDrill ? () => onStartDrill(item) : undefined
                     }
                     onCollapse={() => setExpandedKey(null)}
                   />
+                  <Link
+                    className="opening-lineage-card__openings-link"
+                    to={openingsHref}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    View in Openings
+                  </Link>
                 </div>
               ) : (
-                <div
-                  className={`game-opening-chip game-opening-chip--${tone}`}
-                  role="group"
-                  aria-label={item.opening_name}
-                >
-                  {index > 0 && (
-                    <span
-                      className="game-opening-chip__connector"
-                      aria-hidden="true"
-                    >
-                      {"└"}
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    className="game-opening-chip__toggle"
-                    aria-expanded={isExpanded}
-                    aria-controls={cardId}
-                    // Wording reflects the action: history selects a root + toggles
-                    // details; the live panel only expands the card in place.
-                    aria-label={
-                      onSelectRoot
-                        ? `Select ${item.opening_name} and toggle details`
-                        : `Show ${item.opening_name} details`
-                    }
-                    onClick={() => {
-                      setExpandedKey(item.opening_key);
-                      onSelectRoot?.(item);
-                    }}
-                  >
-                    <span
-                      className={`game-opening-chip__tone game-opening-chip__tone--${tone}`}
-                      aria-hidden="true"
-                    />
-                    <span className="game-opening-chip__name">
-                      {item.opening_name}
-                    </span>
-                    <span className="game-opening-chip__score">
-                      {formatScore(item.score)}
-                    </span>
-                    <span
-                      className="game-opening-chip__grade"
-                      aria-label={`Status ${statusLabel}`}
-                    >
-                      {statusLabel}
-                    </span>
-                  </button>
-                </div>
+                <OpeningTreeNodeCard
+                  variant="compact"
+                  kind="family"
+                  node={view}
+                  // Wording reflects the action: history selects a root + toggles
+                  // details; the live panel only expands the card in place.
+                  ariaLabel={
+                    onSelectRoot
+                      ? `Select ${item.opening_name} and toggle details`
+                      : `Show ${item.opening_name} details`
+                  }
+                  onSelect={() => {
+                    setExpandedKey(item.opening_key);
+                    onSelectRoot?.(item);
+                  }}
+                  isSelected={isExpanded}
+                  isExpanded={isExpanded}
+                  controlsId={cardId}
+                />
               )}
               {/* Inline score-diff badge (g-3gmc): sibling of the card, to its
-                  right, shown in both collapsed-chip and expanded-card states. */}
+                  right, shown in both collapsed and expanded states. */}
               {badge && (
                 <span
                   className={`game-opening-lineage__delta game-opening-lineage__delta--${badge.dir}`}

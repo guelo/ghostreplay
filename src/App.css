@@ -4350,6 +4350,15 @@
     transition: filter 0.2s ease;
 }
 
+/* Reviewing a past move during a LIVE game: a lighter cousin of the what-if wash
+   (.analysis-board__board-frame--variation) — same per-square [data-square] scoping so
+   blunder arrows stay vivid, but noticeably LESS desaturated so the live game still reads
+   as in-progress, not a disabled hypothetical. */
+.chessboard-square-measure--reviewing [data-square] {
+    filter: saturate(0.78) brightness(1.03) contrast(0.97);
+    transition: filter 0.2s ease;
+}
+
 /* Eval-icon badges overlaid on the analysis board */
 .board-eval-icons {
     position: absolute;
@@ -7374,214 +7383,6 @@
     }
 }
 
-.opening-family-card {
-    --opening-card-accent: var(--brand-primary);
-    position: relative;
-    overflow: hidden;
-    display: grid;
-    grid-template-rows: auto auto auto 1fr;
-    gap: 0.95rem;
-    min-height: 320px;
-    min-width: 0;
-    width: 100%;
-    padding: 1.05rem;
-    border: 1px solid var(--border-color);
-    border-radius: 1.3rem;
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--color-white) 78%, var(--card-bg)),
-            color-mix(in srgb, var(--bg-secondary) 70%, var(--card-bg))
-        );
-    box-shadow: var(--shadow-md);
-}
-
-.opening-family-card::before {
-    content: "";
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: 4px;
-    background: var(--opening-card-accent);
-}
-
-.opening-family-card--alert {
-    --opening-card-accent: var(--error);
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--error) 10%, var(--card-bg)),
-            color-mix(in srgb, var(--color-white) 74%, var(--card-bg))
-        );
-}
-
-.opening-family-card--watch {
-    --opening-card-accent: var(--warning-dark);
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--warning) 14%, var(--card-bg)),
-            color-mix(in srgb, var(--color-white) 76%, var(--card-bg))
-        );
-}
-
-.opening-family-card--steady {
-    --opening-card-accent: var(--success-dark);
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--success) 9%, var(--card-bg)),
-            color-mix(in srgb, var(--color-white) 76%, var(--card-bg))
-        );
-}
-
-.opening-family-card--muted {
-    --opening-card-accent: var(--text-tertiary);
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--bg-secondary) 78%, var(--card-bg)),
-            color-mix(in srgb, var(--color-white) 82%, var(--card-bg))
-        );
-}
-
-.opening-family-card__headline {
-    display: flex;
-    flex-direction: column;
-    gap: 0.45rem;
-}
-
-.opening-family-card__title {
-    margin: 0;
-    font-size: 1.15rem;
-    line-height: 1.15;
-    color: var(--text-primary);
-    overflow-wrap: anywhere;
-}
-
-.opening-family-card__subhint {
-    margin: 0;
-    color: var(--text-tertiary);
-    font-size: 0.88rem;
-    line-height: 1.25;
-}
-
-.opening-family-card__metrics {
-    margin: 0;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.7rem;
-    align-self: end;
-    min-width: 0;
-}
-
-.opening-family-card__overview {
-    display: grid;
-    grid-template-columns: 180px minmax(0, 1fr);
-    gap: 0.85rem;
-    align-items: stretch;
-}
-
-.opening-family-card__board {
-    width: 180px;
-    height: 180px;
-    justify-self: start;
-    overflow: hidden;
-    border: 1px solid color-mix(in srgb, var(--opening-card-accent) 24%, var(--border-color));
-    border-radius: 1rem;
-    background: color-mix(in srgb, var(--color-white) 78%, var(--bg-primary));
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-white) 62%, transparent);
-}
-
-.opening-family-card__board > * {
-    width: 100%;
-    height: 100%;
-}
-
-.opening-family-card__score-panel {
-    margin: 0;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-        "score"
-        "grade";
-    gap: 0.2rem;
-    min-width: 0;
-}
-
-.opening-family-card__score-metric {
-    min-width: 0;
-    padding: 0.75rem 0.8rem;
-    border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
-    border-radius: 1rem;
-    background: color-mix(in srgb, var(--color-white) 72%, var(--bg-primary));
-}
-
-.opening-family-card__score-metric {
-    grid-area: score;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: center;
-    text-align: center;
-    gap: 0.35rem;
-    background:
-        linear-gradient(
-            180deg,
-            color-mix(in srgb, var(--opening-card-accent) 16%, var(--card-bg)),
-            color-mix(in srgb, var(--color-white) 78%, var(--bg-primary))
-        );
-}
-
-.opening-family-card__score-metric dt,
-.opening-family-card__metric dt {
-    margin: 0;
-    font-size: clamp(0.62rem, 1.8vw, 0.72rem);
-    font-weight: 700;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-    color: var(--text-tertiary);
-    line-height: 1.2;
-    white-space: nowrap;
-}
-
-.opening-family-card__score-metric dd {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: clamp(1.85rem, 3.4vw, 2.35rem);
-    line-height: 0.95;
-    font-weight: 800;
-    letter-spacing: -0.04em;
-}
-
-.opening-family-card__grade {
-    grid-area: grade;
-    display: grid;
-    place-items: center;
-    text-align: center;
-    color: color-mix(in srgb, var(--opening-card-accent) 76%, var(--text-primary));
-    font-size: clamp(1.7rem, 3.1vw, 2.2rem);
-    line-height: 0.95;
-    font-weight: 800;
-    letter-spacing: -0.05em;
-}
-
-.opening-family-card__metric {
-    min-width: 0;
-    padding: 0.8rem 0.85rem;
-    border: 1px solid color-mix(in srgb, var(--border-color) 92%, var(--color-white));
-    border-radius: 0.95rem;
-    background: color-mix(in srgb, var(--color-white) 72%, var(--bg-primary));
-}
-
-.opening-family-card__metric dd {
-    margin: 0;
-    color: var(--text-primary);
-    font-size: 1.25rem;
-    line-height: 1.1;
-    font-weight: 700;
-    overflow-wrap: anywhere;
-}
-
 /* Stats page */
 .stats-shell {
     display: flex;
@@ -8341,31 +8142,6 @@
         line-height: 1;
     }
 
-    .opening-family-card__overview {
-        grid-template-columns: 1fr;
-    }
-
-    .opening-family-card__score-panel {
-        grid-template-columns: minmax(0, 1fr) auto;
-        grid-template-areas: "score grade";
-        align-items: end;
-        gap: 0.65rem;
-    }
-
-    .opening-family-card__board {
-        width: 180px;
-        height: 180px;
-    }
-
-    .opening-family-card__metrics {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .opening-family-card__grade {
-        justify-self: center;
-        align-self: center;
-    }
-
     .chess-layout {
         grid-template-columns: 1fr;
         grid-template-areas:
@@ -8642,24 +8418,6 @@
     text-align: center;
 }
 
-.opening-family-card__drill-button {
-    border: 1px solid var(--border-color-strong);
-    background: var(--button-secondary-bg);
-    color: var(--text-primary);
-    padding: 0.3rem 0.75rem;
-    border-radius: 999px;
-    font-weight: 600;
-    font-size: 0.8rem;
-    cursor: pointer;
-    transition: border-color 200ms ease, background 200ms ease;
-}
-
-.opening-family-card__drill-button:hover {
-    border-color: var(--text-primary);
-    background: var(--gradient-brand);
-    color: var(--text-on-gradient);
-}
-
 @media (max-width: 767px) {
     .game-page .chess-start-scroll--drill {
         max-height: min(60vh, 380px);
@@ -8668,11 +8426,6 @@
     /* Beat the generic .chess-start-panel 22rem cap for drill mode. */
     .game-page .chess-start-panel--drill {
         width: min(calc(100vw - 1.5rem), 30rem);
-    }
-
-    .opening-family-card__drill-button {
-        padding: 0.25rem 0.5rem;
-        font-size: 0.75rem;
     }
 }
 
@@ -8711,8 +8464,8 @@
     padding-left: calc(var(--lineage-depth, 0) * 0.65rem);
 }
 
-.game-opening-lineage__item > .game-opening-chip,
-.game-opening-lineage__item > .opening-family-card {
+.game-opening-lineage__item > .tree-node-card,
+.game-opening-lineage__item > .opening-lineage-card {
     flex: 1 1 auto;
     min-width: 0;
 }
@@ -8734,196 +8487,48 @@
     color: var(--error);
 }
 
-.game-opening-chip {
-    --chip-accent: var(--text-tertiary);
+/* Expanded lineage entry: the tree-node card plus a re-homed "View in Openings"
+   footer link (the /openings card has no such link). The link sits below the
+   card as a sibling, so it is outside the card's collapse overlay and stays
+   clickable. */
+.opening-lineage-card {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 0.4rem;
-    padding: 0.3rem 0.45rem;
-    border-radius: 0.5rem;
-    background: color-mix(in srgb, var(--bg-secondary) 60%, var(--card-bg));
-    border-left: 3px solid var(--chip-accent);
-}
-
-.game-opening-chip--alert {
-    --chip-accent: var(--error);
-}
-.game-opening-chip--watch {
-    --chip-accent: var(--warning-dark);
-}
-.game-opening-chip--steady {
-    --chip-accent: var(--success-dark);
-}
-.game-opening-chip--muted {
-    --chip-accent: var(--text-tertiary);
-}
-
-.game-opening-chip__connector {
-    color: var(--text-tertiary);
-    font-size: 0.75rem;
-    line-height: 1;
-}
-
-.game-opening-chip__toggle {
-    flex: 1;
     min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0;
-    background: none;
-    border: none;
-    cursor: pointer;
-    text-align: left;
-    font-size: 0.76rem;
-    color: var(--text-primary);
-    text-decoration: none;
 }
 
-.game-opening-chip__toggle:hover .game-opening-chip__name,
-.game-opening-chip__toggle:focus-visible .game-opening-chip__name {
-    text-decoration: underline;
-}
-
-.game-opening-chip__tone {
-    flex: 0 0 auto;
-    width: 0.5rem;
-    height: 0.5rem;
-    border-radius: 50%;
-    background: var(--chip-accent);
-}
-
-.game-opening-chip__name {
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.game-opening-chip__score {
-    flex: 0 0 auto;
-    font-variant-numeric: tabular-nums;
-    font-weight: 600;
-}
-
-.game-opening-chip__grade {
-    flex: 0 0 auto;
-    font-size: 0.66rem;
-    font-weight: 700;
-    color: var(--chip-accent);
-}
-
-/* Compact card revealed when a lineage chip is expanded */
-.opening-family-card--analysis {
-    min-height: 0;
-    gap: 0.55rem;
-    padding: 0.65rem;
-    margin-top: 0.35rem;
-    border-radius: 0.75rem;
-    background: color-mix(in srgb, var(--bg-secondary) 50%, var(--card-bg));
-    box-shadow: none;
-    font-size: 0.78rem;
-}
-
-.opening-family-card--analysis .opening-family-card__title {
-    font-size: 0.92rem;
-}
-
-/* Compact: keep the score/grade panel to the right of the smaller board. */
-.opening-family-card--analysis .opening-family-card__overview {
-    grid-template-columns: 110px minmax(0, 1fr);
-    gap: 0.55rem;
-    align-items: center;
-}
-
-.opening-family-card--analysis .opening-family-card__board {
-    width: 110px;
-    height: 110px;
-    max-width: 100%;
-}
-
-/* Stretched click target that collapses the card; sits behind the footer so the
-   link + Start Drill stay clickable (same pattern as __drill-nav). */
-.opening-family-card__collapse-nav {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    margin: 0;
-    padding: 0;
-    border: none;
-    background: none;
-    cursor: pointer;
-    z-index: 0;
-}
-
-/* Footer actions inside the expanded analysis card: link + Start Drill.
-   Wrap/stack so they don't overflow the 200-280px footer column. Raised above
-   the collapse-nav so its controls stay clickable. */
-.opening-family-card__analysis-footer {
-    position: relative;
-    z-index: 1;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.4rem 0.6rem;
-    margin-top: 0.1rem;
-}
-
-.opening-family-card__analysis-link {
+.opening-lineage-card__openings-link {
+    align-self: flex-start;
     font-size: 0.74rem;
     font-weight: 600;
     color: var(--accent, var(--text-primary));
     text-decoration: none;
 }
 
-.opening-family-card__analysis-link:hover,
-.opening-family-card__analysis-link:focus-visible {
+.opening-lineage-card__openings-link:hover,
+.opening-lineage-card__openings-link:focus-visible {
     text-decoration: underline;
 }
 
 /* ---- Live game chess-panel: opening lineage compact fit ----
-   The lineage shares /history's components but lives in the ~240px
-   (--game-panel-width) game panel, so the expanded analysis card needs a
-   smaller board and tamed score/grade typography to stay inside the column.
-   Scoped to .chess-panel__openings so /history (wider) is untouched. */
+   The lineage shares /history's tree-node cards but lives in the ~240px
+   (--game-panel-width) game panel. The expanded card is sized for the 232px
+   /openings active column, so tame the metrics grid to two-up and trim the
+   depth step so deep cards fit the narrower inner panel. Scoped to
+   .chess-panel__openings so /history (wider) is untouched. */
 .chess-panel__openings {
     min-width: 0;
 }
 
-/* Shrink the board column so board + score panel fit ~208px of inner width.
-   Trimmed to 76px (from 84px) so the right-side score-diff badge (g-3gmc) fits
-   beside an expanded analysis card without overflowing the 240px panel. */
-.chess-panel__openings .opening-family-card--analysis .opening-family-card__overview {
-    grid-template-columns: 76px minmax(0, 1fr);
-    gap: 0.45rem;
-}
-
-.chess-panel__openings .opening-family-card--analysis .opening-family-card__board {
-    width: 76px;
-    height: 76px;
-}
-
-/* Cap the large score number / grade so they don't overflow the narrow panel. */
-.chess-panel__openings .opening-family-card__score-metric dd {
-    font-size: 1.4rem;
-}
-
-.chess-panel__openings .opening-family-card__grade {
-    font-size: 1.25rem;
-}
-
-/* Two-up so coverage / games / confidence wrap inside 240px. */
-.chess-panel__openings .opening-family-card__metrics {
+/* Two-up so coverage / games / confidence wrap inside the narrow panel. */
+.chess-panel__openings .tree-node-card__metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.5rem;
 }
 
-/* Smaller depth step so deep chips don't run off the right edge of the panel.
+/* Smaller depth step so deep cards don't run off the right edge of the panel.
    The badge pins to the card's top-right (flex-start) in the narrow panel so an
-   expanded analysis card keeps the diff visible without widening the 240px
-   column (g-3gmc). */
+   expanded card keeps the diff visible without widening the 240px column. */
 .chess-panel__openings .game-opening-lineage__item {
     align-items: flex-start;
     padding-left: calc(var(--lineage-depth, 0) * 0.4rem);
@@ -10690,6 +10295,9 @@ button.tree-node-card--compact {
    background (matching the selected/collapsed cards) and a lifted shadow that
    eases in to read as elevation above the surrounding tree. */
 .tree-node-card--expanded {
+    /* Positioning context for the optional full-surface collapse overlay
+       (lineage in-place expansion); harmless on /openings (no overlay there). */
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
@@ -10821,6 +10429,10 @@ button.tree-node-card--compact {
 }
 
 .tree-node-card__drill-button {
+    /* Raised above the collapse overlay (z-index:0) so it stays clickable when
+       the card is rendered with a collapse surface (lineage expansion). */
+    position: relative;
+    z-index: 1;
     align-self: stretch;
     padding: 0.4rem 0.75rem;
     border: 1px solid var(--border-color-strong);
@@ -10842,4 +10454,35 @@ button.tree-node-card--compact {
 .tree-node-card__drill-button:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--grade-accent) 60%, transparent);
     outline-offset: 2px;
+}
+
+/* Stretched click target that collapses the expanded card; sits behind the
+   raised Start Drill button so that control stays clickable (same pattern as
+   the former .opening-family-card__collapse-nav). */
+.tree-node-card__collapse-nav {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    z-index: 0;
+}
+
+/* --- Family mode: opening-lineage card (/history & /play) ----------------- */
+/* The lineage entry identifies an opening family by position — no SAN/eval — so
+   the name is the primary/header text and the score panel drops the Eval tile. */
+.tree-node-card__move--family {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tree-node-card--family .tree-node-card__score-panel {
+    grid-template-columns: minmax(0, 1fr);
 }

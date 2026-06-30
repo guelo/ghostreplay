@@ -56,6 +56,13 @@ interface OpeningTreeNodeCardProps {
   variant: "compact" | "expanded";
   node: OpeningTreeNodeView;
 
+  /** Rendering mode. "move" (default) is the /openings tree-node card (move
+   *  label + Eval tile + move-type chips). "family" is the /history & /play
+   *  opening-lineage card: a position-identified opening family with no SAN /
+   *  ply / eval — the name becomes the header, the Eval tile and move-type chips
+   *  are dropped, and the ECO (when present) is the compact secondary line. */
+  kind?: "move" | "family";
+
   /** Compact: when provided, the card renders as a selection `<button>`. */
   onSelect?: () => void;
   /** Compact: selected/on-path highlight + `aria-pressed`. */
@@ -64,9 +71,16 @@ interface OpeningTreeNodeCardProps {
   isExpanded?: boolean;
   /** Compact: when set, sets `aria-controls` (disclosure reuse). */
   controlsId?: string;
+  /** Compact: overrides the selection button's accessible name. Without it the
+   *  name collapses to the visible text; the lineage passes its action name. */
+  ariaLabel?: string;
 
   /** Expanded: handler for the owned "Start Drill" button. */
   onStartDrill?: () => void;
+  /** Expanded: when set, a full-surface overlay button collapses the card (used
+   *  by the in-place lineage expansion). Requires `--expanded` to be a
+   *  positioning context; the Start Drill button is raised above the overlay. */
+  onCollapse?: () => void;
 }
 
 /**
@@ -242,8 +256,41 @@ function SelectedMoveChip() {
   );
 }
 
-/** Compact body: two lines (SAN + score/grade, then opening name + eval). */
-function CompactBody({ node }: { node: OpeningTreeNodeView }) {
+/** Compact body: two lines (SAN + score/grade, then opening name + eval). In
+ *  family mode the primary line is the opening name (with score/grade) and the
+ *  secondary line is the ECO when present — no SAN/eval/move-type chips. */
+function CompactBody({
+  node,
+  kind,
+}: {
+  node: OpeningTreeNodeView;
+  kind: "move" | "family";
+}) {
+  if (kind === "family") {
+    const familyName = formatOpeningName(node.openingName);
+    return (
+      <>
+        <span className="tree-node-card__line tree-node-card__line--primary">
+          <span
+            className="tree-node-card__move tree-node-card__move--family"
+            title={familyName}
+          >
+            {familyName}
+          </span>
+          <span className="tree-node-card__primary-right">
+            <span className="tree-node-card__score">{formatScore(node.score)}</span>
+            <GradeTag score={node.score} />
+          </span>
+        </span>
+        {node.eco && (
+          <span className="tree-node-card__line tree-node-card__line--secondary">
+            <span className="tree-node-card__name">{node.eco}</span>
+          </span>
+        )}
+      </>
+    );
+  }
+
   const isRoot = node.san === null;
   const isUserSelected = !isRoot && node.isUserSelected;
   const isOffBook = !isRoot && !node.inBook && !node.isUserSelected;
@@ -273,24 +320,77 @@ function CompactBody({ node }: { node: OpeningTreeNodeView }) {
   );
 }
 
-/** Expanded body: header, score/eval panel, metrics, terminal note, drill. */
+/** Expanded body: header, score/eval panel, metrics, terminal note, drill. In
+ *  family mode the header is the opening name (no move label), the score panel
+ *  drops the Eval tile, and there is no name-line/move-type chip/terminal note —
+ *  a family has no SAN/eval. Metrics and Start Drill render as in move mode. */
 function ExpandedBody({
   node,
+  kind,
   onStartDrill,
 }: {
   node: OpeningTreeNodeView;
+  kind: "move" | "family";
   onStartDrill?: () => void;
 }) {
+  // Every expanded card is drillable; the page decides drillability by passing
+  // onStartDrill (wired for move/family cards, omitted for the synthesized root
+  // and the live-panel lineage). drillOpeningKey no longer gates this.
+  const showDrill = onStartDrill != null;
+
+  if (kind === "family") {
+    const familyName = formatOpeningName(node.openingName);
+    return (
+      <>
+        <div className="tree-node-card__header">
+          <span className="tree-node-card__move-label" title={familyName}>
+            {familyName}
+          </span>
+        </div>
+
+        <dl className="tree-node-card__score-panel">
+          <div className="tree-node-card__score-metric">
+            <dt>Score</dt>
+            <dd className="tree-node-card__score-value">
+              {formatScore(node.score)}
+              <GradeTag score={node.score} />
+            </dd>
+          </div>
+        </dl>
+
+        <dl className="tree-node-card__metrics">
+          <div className="tree-node-card__metric">
+            <dt>Coverage</dt>
+            <dd>{formatPercent(node.coverage)}</dd>
+          </div>
+          <div className="tree-node-card__metric">
+            <dt>Games</dt>
+            <dd>{formatGames(node.gameCount)}</dd>
+          </div>
+          <div className="tree-node-card__metric">
+            <dt>Confidence</dt>
+            <dd>{formatPercent(node.confidence)}</dd>
+          </div>
+        </dl>
+
+        {showDrill && (
+          <button
+            type="button"
+            className="tree-node-card__drill-button"
+            onClick={onStartDrill}
+          >
+            Start Drill
+          </button>
+        )}
+      </>
+    );
+  }
+
   const isRoot = node.san === null;
   const isUserSelected = !isRoot && node.isUserSelected;
   const isOffBook = !isRoot && !node.inBook && !node.isUserSelected;
   const name = formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
-  // Every expanded move card is drillable; the page decides drillability by
-  // passing onStartDrill (wired for move cards, omitted for the synthesized
-  // root). drillOpeningKey no longer gates this — it denotes named-root identity
-  // only, and cards inherit names far more broadly than roots are registered.
-  const showDrill = onStartDrill != null;
 
   return (
     <>
@@ -367,16 +467,20 @@ function ExpandedBody({
 function OpeningTreeNodeCard({
   variant,
   node,
+  kind = "move",
   onSelect,
   isSelected,
   isExpanded,
   controlsId,
+  ariaLabel,
   onStartDrill,
+  onCollapse,
 }: OpeningTreeNodeCardProps) {
   const className = [
     "tree-node-card",
     `tree-node-card--${variant}`,
     `tree-node-card--grade-${getGradeToken(node.score)}`,
+    kind === "family" ? "tree-node-card--family" : "",
     isSelected ? "tree-node-card--selected" : "",
   ]
     .filter(Boolean)
@@ -389,25 +493,36 @@ function OpeningTreeNodeCard({
           type="button"
           className={className}
           onClick={onSelect}
+          aria-label={ariaLabel}
           aria-pressed={!!isSelected}
           aria-expanded={isExpanded === undefined ? undefined : isExpanded}
           aria-controls={controlsId}
         >
-          <CompactBody node={node} />
+          <CompactBody node={node} kind={kind} />
         </button>
       );
     }
 
     return (
       <div className={className}>
-        <CompactBody node={node} />
+        <CompactBody node={node} kind={kind} />
       </div>
     );
   }
 
   return (
     <div className={className}>
-      <ExpandedBody node={node} onStartDrill={onStartDrill} />
+      {onCollapse && (
+        // Full-surface overlay that collapses the card. Sits behind the Start
+        // Drill button (raised via z-index) so that control stays clickable.
+        <button
+          type="button"
+          className="tree-node-card__collapse-nav"
+          aria-label={`Collapse ${formatOpeningName(node.openingName)} details`}
+          onClick={onCollapse}
+        />
+      )}
+      <ExpandedBody node={node} kind={kind} onStartDrill={onStartDrill} />
     </div>
   );
 }

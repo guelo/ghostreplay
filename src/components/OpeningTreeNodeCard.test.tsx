@@ -402,3 +402,124 @@ describe("OpeningTreeNodeCard — expanded", () => {
     expect(screen.getByLabelText(label)).toBeInTheDocument();
   });
 });
+
+// An opening-lineage family: position-identified, so no SAN/ply/eval. inBook is
+// always true and isUserSelected false, so the move-type chips never apply.
+const familyView: OpeningTreeNodeView = {
+  ply: 2,
+  san: null,
+  openingName: "Ruy Lopez",
+  eco: "C60",
+  inBook: true,
+  isUserSelected: false,
+  score: 72,
+  evalCp: null,
+  evalMate: null,
+  coverage: 0.5,
+  gameCount: 1234,
+  confidence: 0.8,
+  isTerminal: false,
+  terminalReason: null,
+  drillOpeningKey: "ruy-key",
+};
+
+describe("OpeningTreeNodeCard — family mode", () => {
+  it("compact: shows the name as the primary line (not Start/SAN) with score, grade, and ECO", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        kind="family"
+        node={familyView}
+        onSelect={vi.fn()}
+        ariaLabel="Select Ruy Lopez and toggle details"
+      />,
+    );
+
+    // Name is the primary line; no "Start"/SAN.
+    expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
+    expect(screen.queryByText("Start")).toBeNull();
+    // Score + grade ride alongside.
+    expect(screen.getByText("72")).toBeInTheDocument();
+    expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
+    // ECO is the muted secondary line.
+    expect(screen.getByText("C60")).toBeInTheDocument();
+    // The supplied ariaLabel becomes the button's accessible name.
+    expect(
+      screen.getByRole("button", { name: "Select Ruy Lopez and toggle details" }),
+    ).toBeInTheDocument();
+  });
+
+  it("compact: never shows move-type chips or an eval, even when inBook is false", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        kind="family"
+        node={{ ...familyView, inBook: false, isUserSelected: true }}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    // Family mode has no off-book / your-move concept and no eval slot.
+    expect(screen.queryByText("Off book")).toBeNull();
+    expect(screen.queryByText("Your move")).toBeNull();
+    expect(screen.queryByText("+1.2")).toBeNull();
+  });
+
+  it("compact: renders single-line when there is no ECO", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        kind="family"
+        node={{ ...familyView, eco: null }}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
+    expect(screen.queryByText("C60")).toBeNull();
+  });
+
+  it("expanded: name header (no move label), no Eval tile, the three metrics", () => {
+    render(
+      <OpeningTreeNodeCard variant="expanded" kind="family" node={familyView} />,
+    );
+
+    expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
+    expect(screen.queryByText("Starting position")).toBeNull();
+    // The Eval tile is dropped in family mode.
+    expect(screen.queryByText("Eval")).toBeNull();
+    // The Score tile + the three metrics remain.
+    expect(screen.getByText("Score")).toBeInTheDocument();
+    expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
+    expect(screen.getByText("Coverage")).toBeInTheDocument();
+    expect(screen.getByText("Games")).toBeInTheDocument();
+    expect(screen.getByText((1234).toLocaleString())).toBeInTheDocument();
+    expect(screen.getByText("Confidence")).toBeInTheDocument();
+  });
+
+  it("expanded: a collapse surface fires onCollapse while Start Drill still fires", async () => {
+    const user = userEvent.setup();
+    const onCollapse = vi.fn();
+    const onStartDrill = vi.fn();
+    render(
+      <OpeningTreeNodeCard
+        variant="expanded"
+        kind="family"
+        node={familyView}
+        onCollapse={onCollapse}
+        onStartDrill={onStartDrill}
+      />,
+    );
+
+    // Start Drill fires its own handler and does NOT collapse the card.
+    await user.click(screen.getByRole("button", { name: "Start Drill" }));
+    expect(onStartDrill).toHaveBeenCalledTimes(1);
+    expect(onCollapse).not.toHaveBeenCalled();
+
+    // The full-surface collapse overlay fires onCollapse.
+    await user.click(
+      screen.getByRole("button", { name: /Collapse Ruy Lopez details/ }),
+    );
+    expect(onCollapse).toHaveBeenCalledTimes(1);
+  });
+});
