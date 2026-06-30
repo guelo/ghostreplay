@@ -1,17 +1,13 @@
-import { Chessboard, defaultPieces } from "react-chessboard";
+import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
 import React, { memo, useRef } from "react";
 import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
-import OpponentAvatar from "./OpponentAvatar";
-import DrillSetupPanel from "./DrillSetupPanel";
+import StartPanel, { type StartDrillDraft } from "./StartPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 import type { BoardNotice } from "../types";
 
 type BoardOrientation = "white" | "black";
-
-const WhiteKing = defaultPieces.wK;
-const BlackKing = defaultPieces.bK;
 
 type BoardStageProps = {
   boardInstanceKey: number;
@@ -30,14 +26,16 @@ type BoardStageProps = {
   isStartingGame: boolean;
   onCloseStartOverlay: () => void;
   maiaEloBins: readonly number[];
-  engineElo: number;
-  onEngineEloChange: (elo: number) => void;
-  botLabel: string;
-  winDelta: number;
-  lossDelta: number;
-  onPlayWhite: () => void;
-  onPlayRandom: () => void;
-  onPlayBlack: () => void;
+  // Seeds for the start panel — non-committed. StartPanel drafts from these and
+  // commits to game state only on Start, so opening/cancelling never mutates it.
+  seedEngineElo: number;
+  seedStrictnessCp: number;
+  seedColor: "white" | "black";
+  seedOpening: OpeningRootItem | null;
+  seedLine: string[] | null;
+  playerRating: number;
+  isProvisional: boolean;
+  onStartPlay: (side: "white" | "random" | "black", engineElo: number) => void;
   startError: string | null;
   showRevertWarning: boolean;
   isRevertPending: boolean;
@@ -62,13 +60,7 @@ type BoardStageProps = {
   onSwitchToPlayMode?: () => void;
   onSwitchToDrillMode?: () => void;
   openingFamilies?: Array<{ family_name: string; roots: OpeningRootItem[] }> | null;
-  selectedDrillOpening?: OpeningRootItem | null;
-  drillPlayerColor?: "white" | "black";
-  drillStrictnessCp?: number;
-  onSelectDrillOpening?: (opening: OpeningRootItem | null) => void;
-  onDrillPlayerColorChange?: (color: "white" | "black") => void;
-  onDrillStrictnessChange?: (cp: number) => void;
-  onStartDrill?: () => void;
+  onStartDrill: (draft: StartDrillDraft) => void;
   isLoadingOpenings?: boolean;
   // Repeat-mistake spotlight: nonce trigger + completion callback.
   srsFailTrigger?: SrsFailTrigger | null;
@@ -110,14 +102,14 @@ const BoardStage = ({
   isStartingGame,
   onCloseStartOverlay,
   maiaEloBins,
-  engineElo,
-  onEngineEloChange,
-  botLabel,
-  winDelta,
-  lossDelta,
-  onPlayWhite,
-  onPlayRandom,
-  onPlayBlack,
+  seedEngineElo,
+  seedStrictnessCp,
+  seedColor,
+  seedOpening,
+  seedLine,
+  playerRating,
+  isProvisional,
+  onStartPlay,
   startError,
   showRevertWarning,
   isRevertPending,
@@ -140,12 +132,6 @@ const BoardStage = ({
   onSwitchToPlayMode,
   onSwitchToDrillMode,
   openingFamilies,
-  selectedDrillOpening,
-  drillPlayerColor = "white",
-  drillStrictnessCp = 25,
-  onSelectDrillOpening,
-  onDrillPlayerColorChange,
-  onDrillStrictnessChange,
   onStartDrill,
   isLoadingOpenings = false,
   srsFailTrigger = null,
@@ -218,139 +204,26 @@ const BoardStage = ({
           )}
           {showStartOverlay && (!isGameActive || isStoppedDrill) && (
             <div className="chessboard-overlay">
-              <div className={`chess-start-panel${isDrillMode ? " chess-start-panel--drill" : ""}`}>
-                <button
-                  className="chess-start-close"
-                  type="button"
-                  onClick={onCloseStartOverlay}
-                  disabled={isStartingGame}
-                  aria-label="Close"
-                >
-                  ×
-                </button>
-
-                <div className="mode-toggle-row segmented-toggle">
-                  <button
-                    className={`chess-button toggle${!isDrillMode ? " active" : ""}`}
-                    type="button"
-                    onClick={onSwitchToPlayMode}
-                    disabled={isStartingGame}
-                  >
-                    Play
-                  </button>
-                  <button
-                    className={`chess-button toggle${isDrillMode ? " active" : ""}`}
-                    type="button"
-                    onClick={onSwitchToDrillMode}
-                    disabled={isStartingGame}
-                  >
-                    Drill
-                  </button>
-                </div>
-
-                <div className={`chess-start-scroll${isDrillMode ? " chess-start-scroll--drill" : ""}`}>
-                  {isDrillMode ? (
-                    <DrillSetupPanel
-                      openingFamilies={openingFamilies ?? null}
-                      selectedOpening={selectedDrillOpening ?? null}
-                      playerColor={drillPlayerColor}
-                      engineElo={engineElo}
-                      strictnessCp={drillStrictnessCp}
-                      maiaEloBins={maiaEloBins}
-                      botLabel={botLabel}
-                      isLoadingOpenings={isLoadingOpenings}
-                      isStarting={isStartingGame}
-                      startError={startError}
-                      onSelectOpening={onSelectDrillOpening ?? (() => {})}
-                      onPlayerColorChange={onDrillPlayerColorChange ?? (() => {})}
-                      onEngineEloChange={onEngineEloChange}
-                      onStrictnessChange={onDrillStrictnessChange ?? (() => {})}
-                      onStartDrill={onStartDrill ?? (() => {})}
-                    />
-                  ) : (
-                    <>
-                      <p className="chess-start-title">Difficulty</p>
-                      <div className="chess-elo-selector">
-                        <div className="chess-elo-slider-row">
-                          <input
-                            type="range"
-                            min={0}
-                            max={maiaEloBins.length - 1}
-                            step={1}
-                            value={maiaEloBins.indexOf(engineElo)}
-                            onChange={(e) => {
-                              const nextElo = maiaEloBins[Number(e.target.value)];
-                              if (nextElo !== undefined) {
-                                onEngineEloChange(nextElo);
-                              }
-                            }}
-                            disabled={isStartingGame}
-                            className="chess-elo-slider"
-                          />
-                        </div>
-                        <div className="chess-elo-bot-row">
-                          <OpponentAvatar
-                            mode="engine"
-                            engineElo={engineElo}
-                            size={70}
-                          />
-                          <span className="chess-elo-label">{botLabel}</span>
-                        </div>
-                      </div>
-                      <p className="elo-stakes">
-                        <span className="elo-stakes__win">Win +{winDelta}</span>
-                        {" / "}
-                        <span className="elo-stakes__loss">Loss {lossDelta}</span>
-                      </p>
-                      <p className="chess-start-title">Side</p>
-                      <div className="chess-start-options">
-                        <button
-                          className="play-side-button"
-                          type="button"
-                          aria-label="Play White"
-                          onClick={onPlayWhite}
-                          disabled={isStartingGame}
-                        >
-                          <span className="play-side-button__piece">
-                            <WhiteKing />
-                          </span>
-                          <span className="play-side-button__label">White</span>
-                        </button>
-                        <button
-                          className="play-side-button"
-                          type="button"
-                          aria-label="Play Random"
-                          onClick={onPlayRandom}
-                          disabled={isStartingGame}
-                        >
-                          <span className="play-side-button__piece play-side-button__piece--split">
-                            <span className="play-side-king play-side-king--left">
-                              <WhiteKing />
-                            </span>
-                            <span className="play-side-king play-side-king--right">
-                              <BlackKing />
-                            </span>
-                          </span>
-                          <span className="play-side-button__label">Random</span>
-                        </button>
-                        <button
-                          className="play-side-button"
-                          type="button"
-                          aria-label="Play Black"
-                          onClick={onPlayBlack}
-                          disabled={isStartingGame}
-                        >
-                          <span className="play-side-button__piece">
-                            <BlackKing />
-                          </span>
-                          <span className="play-side-button__label">Black</span>
-                        </button>
-                      </div>
-                      {startError && <p className="chess-start-error">{startError}</p>}
-                    </>
-                  )}
-                </div>
-              </div>
+              <StartPanel
+                isDrillMode={isDrillMode}
+                isStartingGame={isStartingGame}
+                startError={startError}
+                onClose={onCloseStartOverlay}
+                onSwitchToPlayMode={onSwitchToPlayMode ?? (() => {})}
+                onSwitchToDrillMode={onSwitchToDrillMode ?? (() => {})}
+                maiaEloBins={maiaEloBins}
+                seedEngineElo={seedEngineElo}
+                seedStrictnessCp={seedStrictnessCp}
+                seedColor={seedColor}
+                seedOpening={seedOpening}
+                seedLine={seedLine}
+                playerRating={playerRating}
+                isProvisional={isProvisional}
+                openingFamilies={openingFamilies ?? null}
+                isLoadingOpenings={isLoadingOpenings}
+                onStartPlay={onStartPlay}
+                onStartDrill={onStartDrill}
+              />
             </div>
           )}
           {showRevertWarning && (

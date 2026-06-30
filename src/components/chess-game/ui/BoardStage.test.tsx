@@ -70,10 +70,8 @@ const makeProps = () => {
   const onPieceDrop = vi.fn().mockReturnValue(true);
   const onSquareClick = vi.fn();
   const onCloseStartOverlay = vi.fn();
-  const onEngineEloChange = vi.fn();
-  const onPlayWhite = vi.fn();
-  const onPlayRandom = vi.fn();
-  const onPlayBlack = vi.fn();
+  const onStartPlay = vi.fn();
+  const onStartDrill = vi.fn();
   const onRevertAnyway = vi.fn();
   const onCancelRevert = vi.fn();
   const onResignAnyway = vi.fn();
@@ -92,14 +90,15 @@ const makeProps = () => {
     isStartingGame: false,
     onCloseStartOverlay,
     maiaEloBins: [800, 1000, 1200] as const,
-    engineElo: 1000,
-    onEngineEloChange,
-    botLabel: "Ghost Master 1000",
-    winDelta: 12,
-    lossDelta: -8,
-    onPlayWhite,
-    onPlayRandom,
-    onPlayBlack,
+    seedEngineElo: 1000,
+    seedStrictnessCp: 25,
+    seedColor: "white" as const,
+    seedOpening: null,
+    seedLine: null,
+    playerRating: 1200,
+    isProvisional: false,
+    onStartPlay,
+    onStartDrill,
     startError: null,
     showRevertWarning: false,
     isRevertPending: false,
@@ -161,24 +160,27 @@ describe("BoardStage", () => {
     expect(props.onSquareClick).toHaveBeenCalledWith({ square: "e2" });
   });
 
-  it("handles start-overlay actions and elo selection", () => {
+  it("drafts the difficulty locally and commits it on Start", () => {
     const props = makeProps();
     render(<BoardStage {...props} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /close/i }));
+    // Dragging the slider is local to the panel — it must not touch game state.
     fireEvent.change(screen.getByRole("slider"), { target: { value: "2" } });
+    expect(props.onStartPlay).not.toHaveBeenCalled();
+
+    // Each side button commits the dragged elo (bins[2] === 1200) on Start.
     fireEvent.click(screen.getByRole("button", { name: /play white/i }));
     fireEvent.click(screen.getByRole("button", { name: /play random/i }));
     fireEvent.click(screen.getByRole("button", { name: /play black/i }));
+    expect(props.onStartPlay).toHaveBeenCalledWith("white", 1200);
+    expect(props.onStartPlay).toHaveBeenCalledWith("random", 1200);
+    expect(props.onStartPlay).toHaveBeenCalledWith("black", 1200);
 
+    fireEvent.click(screen.getByRole("button", { name: /close/i }));
     expect(props.onCloseStartOverlay).toHaveBeenCalledTimes(1);
-    expect(props.onEngineEloChange).toHaveBeenCalledWith(1200);
-    expect(props.onPlayWhite).toHaveBeenCalledTimes(1);
-    expect(props.onPlayRandom).toHaveBeenCalledTimes(1);
-    expect(props.onPlayBlack).toHaveBeenCalledTimes(1);
   });
 
-  it("updates the popup opponent avatar when engineElo changes", () => {
+  it("resyncs the popup opponent avatar when the difficulty seed changes", () => {
     const props = makeProps();
     const { container, rerender } = render(<BoardStage {...props} />);
 
@@ -187,7 +189,7 @@ describe("BoardStage", () => {
     ) as HTMLImageElement | null;
     expect(initial?.getAttribute("src")).toBe(getOpponentAvatarSrc(1000));
 
-    rerender(<BoardStage {...props} engineElo={1200} />);
+    rerender(<BoardStage {...props} seedEngineElo={1200} />);
     const updated = container.querySelector(
       "img.opponent-avatar",
     ) as HTMLImageElement | null;

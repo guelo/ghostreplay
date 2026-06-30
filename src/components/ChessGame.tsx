@@ -50,9 +50,10 @@ import {
   MAIA_ELO_BINS,
   STARTING_FEN,
 } from "./chess-game/config";
-import { eloStakes, sampleEloBin } from "./chess-game/elo";
+import { sampleEloBin } from "./chess-game/elo";
 import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
+import type { StartDrillDraft } from "./chess-game/ui/StartPanel";
 import GameInfoPanel from "./chess-game/ui/GameInfoPanel";
 import GameOpeningLineage from "./GameOpeningLineage";
 import PostGameBanner from "./chess-game/ui/PostGameBanner";
@@ -302,6 +303,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const [isDrillMode, setIsDrillMode] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
   const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
+  // Non-committed seed for the start panel's difficulty (play + drill). The panel
+  // drafts from this and commits to the store only on Start, so opening/cancelling
+  // the popup never mutates the live engineElo (g-fxrm).
+  const [seedEngineElo, setSeedEngineElo] = useState(
+    () => useGameStore.getState().engineElo,
+  );
   // Drill side is independent of normal-play's store playerColorChoice (which
   // also feeds normal-game random); drill never offers Random.
   const [drillPlayerColor, setDrillPlayerColor] = useState<"white" | "black">("white");
@@ -731,6 +738,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setIsStartingGame,
     setStartError,
     setShowStartOverlay,
+    setSeedEngineElo,
     setBlunderAlert,
     setShowFlash,
     setBlunderReviewId,
@@ -1063,9 +1071,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       if (typeof prefs.strictnessCp === "number") {
         setDrillStrictnessCp(prefs.strictnessCp);
       }
-      if (typeof prefs.engineElo === "number") {
-        setEngineElo(prefs.engineElo);
-      }
+      // Difficulty is NOT seeded here: it is always a fresh sample near the
+      // player's rating (g-ncvm), set by the idle rating fetch / New Game / gear.
+      // Loading the stored prefs.engineElo would clobber that sample (g-fxrm).
       if (!skipNavColor) {
         if (prefs.playerColor === "white" || prefs.playerColor === "black") {
           setDrillPlayerColor(prefs.playerColor);
@@ -1587,11 +1595,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   };
 
   const gameStatusBadge = deriveGameStatusBadge(isGameActive, gameResult);
-  const { winDelta, lossDelta } = eloStakes(
-    playerRating,
-    engineElo,
-    isProvisional,
-  );
   const squareStyles = useMemo(
     () => ({ ...lastMoveSquares, ...optionSquares }),
     [lastMoveSquares, optionSquares],
@@ -1607,47 +1610,36 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     }
   }, []);
 
-  // Picking from the roots list is always a registered-root drill: drop any
-  // ad-hoc line so a stale line can't attach to a root drill (which would make
-  // the backend reject it as a non-root key with a mismatched line).
-  const handleSelectDrillOpening = useCallback((opening: OpeningRootItem | null) => {
-    adHocLineRef.current = null;
-    setSelectedDrillOpening(opening);
-  }, []);
-
-  const handleStartDrill = useCallback(async () => {
-    if (!selectedDrillOpening) return;
-
+  const handleStartDrill = useCallback(async (draft: StartDrillDraft) => {
+    // The draft carries the committed values from the start panel; the panel
+    // guards against a null opening (Start is disabled until one is picked).
     const result = await handleNewDrill({
-      openingKey: selectedDrillOpening.opening_key,
-      playerColor: drillPlayerColor,
-      engineElo: engineElo,
-      strictness: strictnessFromCp(drillStrictnessCp),
-      strictnessCp: drillStrictnessCp,
+      openingKey: draft.opening.opening_key,
+      playerColor: draft.playerColor,
+      engineElo: draft.engineElo,
+      strictness: strictnessFromCp(draft.strictnessCp),
+      strictnessCp: draft.strictnessCp,
       // null for a registered root → backend drills it via the book BFS; a line
       // (incl. an off-book card's exact played line) drives the strict route.
-      line: adHocLineRef.current ?? undefined,
+      line: draft.line ?? undefined,
     });
 
     if (result) {
+      // Sync the seed scratch to the committed draft so a later overlay open
+      // can't resurrect a stale ad-hoc opening/line after the panel locally
+      // switched openings (g-fxrm). A null draft line clears the ad-hoc ref.
+      setSelectedDrillOpening(draft.opening);
+      adHocLineRef.current = draft.line;
       // Only discard the prior stopped drill's failed index once the
       // replacement drill is actually live — a failed start returns to the
       // old stopped drill, which still needs its targeted barrier/index.
       drillFailedMoveIndexRef.current = null;
       setAnalyzeError(null);
-      if (chess.turn() !== (drillPlayerColor === "white" ? "w" : "b")) {
+      if (chess.turn() !== (draft.playerColor === "white" ? "w" : "b")) {
         void applyOpponentMove(result.fen, result.uciHistory);
       }
     }
-  }, [
-    selectedDrillOpening,
-    engineElo,
-    drillStrictnessCp,
-    handleNewDrill,
-    chess,
-    applyOpponentMove,
-    drillPlayerColor,
-  ]);
+  }, [handleNewDrill, chess, applyOpponentMove]);
 
   // Open the drill setup overlay for changing settings (gear button / fallback).
   // Does NOT clear gameResult, so the natural-end banner is preserved and can be
@@ -1664,8 +1656,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       skipStickyPrefillRef.current = true;
       setDrillStrictnessCp(s.drillStrictnessCp ?? drillStrictnessCp);
       // Re-randomize opponent difficulty (g-ncvm), mirroring the New Game
-      // popup; the user can still adjust the slider before Start.
-      setEngineElo(sampleEloBin(s.playerRating));
+      // popup; the user can still adjust the slider before Start. Seeds the
+      // panel draft only — the store commits on Start, not on open (g-fxrm).
+      setSeedEngineElo(sampleEloBin(s.playerRating));
       setDrillPlayerColor(s.playerColor === "black" ? "black" : "white");
       if (s.drillLine != null) {
         // Ad-hoc drill: restore the synthetic selection + line from the durable
@@ -1764,21 +1757,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const handleSwitchToDrillMode = useCallback(() => setIsDrillMode(true), []);
   const handleSwitchToPlayMode = useCallback(() => setIsDrillMode(false), []);
 
-  const handleEngineEloChange = useCallback(
-    (elo: number) => setEngineElo(elo as (typeof MAIA_ELO_BINS)[number]),
-    [],
-  );
-  const handlePlayWhite = useCallback(
-    () => void handleNewGame("white"),
-    [handleNewGame],
-  );
-  const handlePlayRandom = useCallback(
-    () => void handleNewGame("random"),
-    [handleNewGame],
-  );
-  const handlePlayBlack = useCallback(
-    () => void handleNewGame("black"),
-    [handleNewGame],
+  const handleStartPlay = useCallback(
+    (side: "white" | "random" | "black", elo: number) => {
+      // Commit the drafted difficulty to the store, then start: handleNewGame
+      // reads engineElo via getState(), and Zustand's set is synchronous.
+      setEngineElo(elo as (typeof MAIA_ELO_BINS)[number]);
+      void handleNewGame(side);
+    },
+    [handleNewGame, setEngineElo],
   );
   const handleToggleGhostInfo = useCallback(
     () => setShowGhostInfo((v) => !v),
@@ -1934,14 +1920,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 isStartingGame={isStartingGame}
                 onCloseStartOverlay={handleCloseStartOverlay}
                 maiaEloBins={MAIA_ELO_BINS}
-                engineElo={engineElo}
-                onEngineEloChange={handleEngineEloChange}
-                botLabel={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
-                winDelta={winDelta}
-                lossDelta={lossDelta}
-                onPlayWhite={handlePlayWhite}
-                onPlayRandom={handlePlayRandom}
-                onPlayBlack={handlePlayBlack}
+                seedEngineElo={seedEngineElo}
+                seedStrictnessCp={drillStrictnessCp}
+                seedColor={drillPlayerColor}
+                seedOpening={selectedDrillOpening}
+                seedLine={adHocLineRef.current}
+                playerRating={playerRating}
+                isProvisional={isProvisional}
+                onStartPlay={handleStartPlay}
                 startError={startError}
                 showRevertWarning={showRevertWarning}
                 isRevertPending={isRevertPending}
@@ -1964,12 +1950,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onSwitchToPlayMode={handleSwitchToPlayMode}
                 onSwitchToDrillMode={handleSwitchToDrillMode}
                 openingFamilies={openingFamilies}
-                selectedDrillOpening={selectedDrillOpening}
-                drillPlayerColor={drillPlayerColor}
-                drillStrictnessCp={drillStrictnessCp}
-                onSelectDrillOpening={handleSelectDrillOpening}
-                onDrillPlayerColorChange={setDrillPlayerColor}
-                onDrillStrictnessChange={setDrillStrictnessCp}
                 onStartDrill={handleStartDrill}
                 isLoadingOpenings={isLoadingOpenings}
                 srsFailTrigger={srsFailTrigger}

@@ -131,6 +131,7 @@ const setup = ({
   const setIsStartingGame = vi.fn();
   const setStartError = vi.fn();
   const setShowStartOverlay = vi.fn();
+  const setSeedEngineElo = vi.fn();
   const setBlunderAlert = vi.fn();
   const setShowFlash = vi.fn();
   const setBlunderReviewId = vi.fn();
@@ -162,6 +163,7 @@ const setup = ({
       setIsStartingGame,
       setStartError,
       setShowStartOverlay,
+      setSeedEngineElo,
       setBlunderAlert,
       setShowFlash,
       setBlunderReviewId,
@@ -189,6 +191,7 @@ const setup = ({
     setShowRevertWarning,
     setShowPostGamePrompt,
     setShowStartOverlay,
+    setSeedEngineElo,
     setResolvedReview,
     coordinator,
     getResolvedReview: () => currentResolvedReview,
@@ -605,12 +608,15 @@ describe("useChessGameLifecycle", () => {
     );
   });
 
-  it("shows start overlay and resets side choice to random", async () => {
-    const { result, setShowPostGamePrompt, setShowStartOverlay } =
+  it("shows start overlay, resets side to random, and seeds difficulty without mutating the store", async () => {
+    const { result, setShowPostGamePrompt, setShowStartOverlay, setSeedEngineElo } =
       setup({ playerRating: 1350 });
 
     await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
 
+    // The idle-mount rating fetch already seeded once; isolate the New Game click.
+    setSeedEngineElo.mockClear();
+    const eloBefore = useGameStore.getState().engineElo;
     act(() => {
       result.current.handleShowStartOverlay();
     });
@@ -618,6 +624,20 @@ describe("useChessGameLifecycle", () => {
     expect(useGameStore.getState().playerColorChoice).toBe("random");
     expect(setShowPostGamePrompt).toHaveBeenCalledWith(false);
     expect(setShowStartOverlay).toHaveBeenCalledWith(true);
+    // Difficulty is re-randomized into the panel seed, NOT the committed store
+    // engineElo — opening the New Game popup must not touch game state (g-fxrm).
+    expect(setSeedEngineElo).toHaveBeenCalledTimes(1);
+    expect(useGameStore.getState().engineElo).toBe(eloBefore);
+  });
+
+  it("seeds the panel difficulty from the rating sample on idle mount without mutating the store", async () => {
+    const { setSeedEngineElo } = setup({ playerRating: 1350 });
+    const eloBefore = useGameStore.getState().engineElo;
+
+    // The idle (no game, no drill) rating fetch samples a difficulty near the
+    // rating. In the draft model it must seed the panel, not the committed store.
+    await waitFor(() => expect(setSeedEngineElo).toHaveBeenCalled());
+    expect(useGameStore.getState().engineElo).toBe(eloBefore);
   });
 
   it("preserves the final move review state when terminal game finalization runs", async () => {

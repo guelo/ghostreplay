@@ -56,6 +56,9 @@ type UseChessGameLifecycleArgs = {
   setIsStartingGame: Dispatch<SetStateAction<boolean>>;
   setStartError: Dispatch<SetStateAction<string | null>>;
   setShowStartOverlay: Dispatch<SetStateAction<boolean>>;
+  // Non-committed difficulty seed for the start panel (g-fxrm): post-game New
+  // Game samples into this, not the committed store engineElo.
+  setSeedEngineElo: Dispatch<SetStateAction<number>>;
   setBlunderAlert: Dispatch<SetStateAction<BlunderAlert | null>>;
   setShowFlash: Dispatch<SetStateAction<boolean>>;
   setBlunderReviewId: Dispatch<SetStateAction<number | null>>;
@@ -92,6 +95,7 @@ export const useChessGameLifecycle = ({
   setIsStartingGame,
   setStartError,
   setShowStartOverlay,
+  setSeedEngineElo,
   setBlunderAlert,
   setShowFlash,
   setBlunderReviewId,
@@ -199,7 +203,10 @@ export const useChessGameLifecycle = ({
         // abandoned drill still in the store; skip resampling so the post-drill
         // UI shows the Elo you just played. Again/gear resample on action.
         if (!s.isGameActive && s.drillState === null) {
-          s.setEngineElo(sampleEloBin(data.current_rating));
+          // Seed the panel difficulty only (g-fxrm) — an idle mount must not
+          // mutate the committed store engineElo; it commits on Start. seedEngineElo
+          // resyncs into the open panel so the first start uses this sample.
+          setSeedEngineElo(sampleEloBin(data.current_rating));
         }
       })
       .catch(() => {});
@@ -1037,10 +1044,13 @@ export const useChessGameLifecycle = ({
     store.setPlayerColorChoice("random");
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
-    store.setEngineElo(sampleEloBin(store.playerRating));
+    // Re-randomize difficulty (g-ncvm) into the panel seed only — opening the
+    // popup must not mutate the committed store engineElo (g-fxrm).
+    setSeedEngineElo(sampleEloBin(store.playerRating));
   }, [
     setShowPostGamePrompt,
     setShowStartOverlay,
+    setSeedEngineElo,
   ]);
 
   const handleViewAnalysis = useCallback(() => {

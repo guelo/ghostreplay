@@ -3,7 +3,7 @@ import { Chess } from "chess.js";
 import { render, screen, fireEvent, waitFor, act, within } from "../test/utils";
 import ChessGame from "./ChessGame";
 import { useGameStore } from "../stores/useGameStore";
-import { STARTING_FEN, MAIA_ELO_BINS } from "./chess-game/config";
+import { STARTING_FEN, MAIA_ELO_BINS, MAIA_BOT_NAMES } from "./chess-game/config";
 import { setMatchMedia } from "../test/setup";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import type { AnalysisResult } from "../hooks/useMoveAnalysis";
@@ -630,6 +630,47 @@ describe("ChessGame characterization safeguards", () => {
     await waitFor(() => {
       expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
     });
+  });
+
+  it("seeds the New Game popup difficulty from the rating sample — not the stored drill pref — without mutating the committed store (g-fxrm)", async () => {
+    // A conflicting sticky drill pref must NOT seed the popup difficulty.
+    localStorage.setItem(
+      "ghostreplay_drill_prefs",
+      JSON.stringify({ openingKey: "k", engineElo: 2000, strictnessCp: 25, playerColor: "white" }),
+    );
+    // Known committed store value; idle-mount/New Game sampling must leave it alone.
+    useGameStore.setState({ engineElo: 800 });
+    // Math.random === 0 → sampleEloBin returns MAIA_ELO_BINS[0].
+    vi.spyOn(Math, "random").mockReturnValue(0);
+
+    render(<ChessGame />);
+
+    // Overlay is open on mount (play mode). After the idle rating fetch resolves
+    // the panel shows the sampled bot — and the committed store value is NOT
+    // mutated (Finding 2: idle mount seeds the panel, not the store).
+    await waitFor(() => {
+      expect(
+        screen.getByText(MAIA_BOT_NAMES[MAIA_ELO_BINS[0]]),
+      ).toBeInTheDocument();
+    });
+    expect(useGameStore.getState().engineElo).toBe(800);
+
+    // Close, then reopen via New Game. This is the closed→open transition that
+    // re-runs the prefill AFTER the fresh sample — the case where a clobbering
+    // prefill would overwrite the sampled bot with the stored 2000 pref. The
+    // panel must still show the sampled bot, not the pref (Finding 1).
+    fireEvent.click(screen.getByRole("button", { name: /^close$/i }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByText(MAIA_BOT_NAMES[MAIA_ELO_BINS[0]]),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(MAIA_BOT_NAMES[2000])).not.toBeInTheDocument();
+
+    localStorage.removeItem("ghostreplay_drill_prefs");
   });
 
   it("stops a post-root drill when player analysis exceeds strictness", async () => {
@@ -1834,10 +1875,14 @@ describe("ChessGame characterization safeguards", () => {
     expect(
       await screen.findByRole("button", { name: /start drill/i }),
     ).toBeInTheDocument();
-    // Difficulty is re-randomized to MAIA_ELO_BINS[0] (mocked) — neither the
-    // store's 1500 nor localStorage's 800. Side/strictness/opening still show
-    // store-wins-over-localStorage below.
-    expect(useGameStore.getState().engineElo).toBe(MAIA_ELO_BINS[0]);
+    // Difficulty is re-randomized to MAIA_ELO_BINS[0] (mocked) and seeds the
+    // panel draft only; opening the overlay does NOT mutate the store engineElo
+    // (g-fxrm) — it commits on Start. The panel shows the sampled bot, while the
+    // committed store value stays at the prior 1500.
+    expect(useGameStore.getState().engineElo).toBe(1500);
+    expect(
+      screen.getByText(MAIA_BOT_NAMES[MAIA_ELO_BINS[0]]),
+    ).toBeInTheDocument();
     // Drill side is now local state, decoupled from the store playerColorChoice;
     // the White side king button should be active (from the store's player_color).
     expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass(
@@ -1961,6 +2006,69 @@ describe("ChessGame characterization safeguards", () => {
         line: ["e2e4", "c7c5"],
       });
     });
+  });
+
+  it("switches an ad-hoc card to a registered opening and starts a clean drill, dropping the ad-hoc line (g-fxrm)", async () => {
+    // Roots resolve so the panel offers a registered opening to switch to.
+    getOpeningRootsMock.mockResolvedValue({
+      families: [
+        {
+          family_name: "Italian",
+          roots: [
+            {
+              opening_key: "italian-key",
+              opening_name: "Italian Game",
+              opening_family: "Italian",
+              eco: "C50",
+              depth: 1,
+            },
+          ],
+        },
+      ],
+    });
+    // Ad-hoc card nav: synthetic opening + the full line.
+    mockLocation = {
+      state: {
+        drillSetup: {
+          targetFen: "adhoc-fen",
+          line: ["e2e4", "c7c5"],
+          displayName: "Custom Najdorf",
+          eco: null,
+          playerColor: "white",
+        },
+      },
+      pathname: "/play",
+    };
+
+    render(<ChessGame />);
+
+    // The panel seeds the ad-hoc opening.
+    await waitFor(() => {
+      expect(screen.getByRole("combobox")).toHaveTextContent("Custom Najdorf");
+    });
+
+    // Switch to the registered opening. In the draft model this is local to the
+    // panel and drops the ad-hoc line; ChessGame's seed scratch is not touched
+    // until Start, where handleStartDrill syncs it from the committed draft.
+    fireEvent.click(screen.getByRole("combobox"));
+    fireEvent.click(await screen.findByRole("option", { name: /Italian Game/ }));
+
+    // Start the registered drill — the API must get the registered key with NO
+    // ad-hoc line attached (g-fxrm Finding 2): the stale line cannot ride along.
+    startDrillMock.mockResolvedValueOnce(
+      makeDrillResponse({ opening_key: "italian-key", opening_name: "Italian Game" }),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /start drill/i }));
+    });
+    await waitFor(() => {
+      expect(startDrillMock).toHaveBeenCalledWith(
+        expect.objectContaining({ opening_key: "italian-key", line: undefined }),
+      );
+    });
+    // The committed draft line is null, so the seed scratch is cleared (the
+    // durable store line is likewise null), preventing later resurrection.
+    expect(useGameStore.getState().drillLine).toBeNull();
   });
 
   // Reaches the natural-end PostGameBanner ("Another drill") branch by resigning
