@@ -4355,7 +4355,7 @@
    blunder arrows stay vivid, but noticeably LESS desaturated so the live game still reads
    as in-progress, not a disabled hypothetical. */
 .chessboard-square-measure--reviewing [data-square] {
-    filter: saturate(0.78) brightness(1.03) contrast(0.97);
+    filter: saturate(0.58) brightness(1.03) contrast(0.97) ;
     transition: filter 0.2s ease;
 }
 
