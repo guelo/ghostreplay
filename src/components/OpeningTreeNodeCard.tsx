@@ -44,7 +44,6 @@ export interface OpeningTreeNodeView {
   coverage: number | null;
   /** Distinct sessions reaching this node (never raw sample_size). */
   gameCount: number | null;
-  confidence: number | null;
   isTerminal: boolean;
   /** checkmate | stalemate | opening_boundary | no_children; null when not terminal. */
   terminalReason: string | null;
@@ -367,10 +366,6 @@ function ExpandedBody({
             <dt>Games</dt>
             <dd>{formatGames(node.gameCount)}</dd>
           </div>
-          <div className="tree-node-card__metric">
-            <dt>Confidence</dt>
-            <dd>{formatPercent(node.confidence)}</dd>
-          </div>
         </dl>
 
         {showDrill && (
@@ -431,10 +426,6 @@ function ExpandedBody({
         <div className="tree-node-card__metric">
           <dt>Games</dt>
           <dd>{formatGames(node.gameCount)}</dd>
-        </div>
-        <div className="tree-node-card__metric">
-          <dt>Confidence</dt>
-          <dd>{formatPercent(node.confidence)}</dd>
         </div>
       </dl>
 

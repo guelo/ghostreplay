@@ -8513,17 +8513,12 @@
 
 /* ---- Live game chess-panel: opening lineage compact fit ----
    The lineage shares /history's tree-node cards but lives in the ~240px
-   (--game-panel-width) game panel. The expanded card is sized for the 232px
-   /openings active column, so tame the metrics grid to two-up and trim the
-   depth step so deep cards fit the narrower inner panel. Scoped to
-   .chess-panel__openings so /history (wider) is untouched. */
+   (--game-panel-width) game panel. Reset min-width and trim the depth step so
+   deep cards fit the narrower inner panel. Scoped to .chess-panel__openings so
+   /history (wider) is untouched. (The metrics grid is two-up globally, so no
+   panel-scoped override is needed for it.) */
 .chess-panel__openings {
     min-width: 0;
-}
-
-/* Two-up so coverage / games / confidence wrap inside the narrow panel. */
-.chess-panel__openings .tree-node-card__metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* Smaller depth step so deep cards don't run off the right edge of the panel.
@@ -10369,7 +10364,7 @@ button.tree-node-card--compact {
 }
 
 .tree-node-card__metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .tree-node-card__score-metric,

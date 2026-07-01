@@ -110,7 +110,6 @@ describe("nodeToView", () => {
       opening_score: 61,
       coverage: 0.4,
       game_count: 12,
-      confidence: 0.7,
       eval_cp: 40,
       eval_mate: 3,
     });
@@ -152,13 +151,11 @@ describe("synthesizeRootView", () => {
       root_opening_score: 72,
       root_coverage: 0.6,
       root_game_count: 15,
-      root_confidence: 0.8,
     });
     const view = synthesizeRootView(response, false, 2);
     expect(view.score).toBe(72);
     expect(view.coverage).toBe(0.6);
     expect(view.gameCount).toBe(15);
-    expect(view.confidence).toBe(0.8);
   });
 
   it("root metrics are null when response has no batch data", () => {
@@ -167,7 +164,6 @@ describe("synthesizeRootView", () => {
     expect(view.score).toBeNull();
     expect(view.coverage).toBeNull();
     expect(view.gameCount).toBeNull();
-    expect(view.confidence).toBeNull();
   });
 
   it("propagates terminal/drill only when fetched for the root", () => {

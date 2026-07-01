@@ -18,7 +18,6 @@ const childView: OpeningTreeNodeView = {
   evalMate: null,
   coverage: 0.5,
   gameCount: 1234,
-  confidence: 0.8,
   isTerminal: false,
   terminalReason: null,
   drillOpeningKey: null,
@@ -37,7 +36,6 @@ const rootView: OpeningTreeNodeView = {
   evalMate: null,
   coverage: null,
   gameCount: null,
-  confidence: null,
   isTerminal: false,
   terminalReason: null,
   drillOpeningKey: null,
@@ -296,7 +294,6 @@ describe("OpeningTreeNodeCard — expanded", () => {
     expect(screen.getByText("+1.2")).toBeInTheDocument();
 
     expect(screen.getByText("Coverage")).toBeInTheDocument();
-    expect(screen.getByText("Confidence")).toBeInTheDocument();
     // Games comes from gameCount, localized.
     expect(screen.getByText("Games")).toBeInTheDocument();
     expect(screen.getByText((1234).toLocaleString())).toBeInTheDocument();
@@ -384,8 +381,8 @@ describe("OpeningTreeNodeCard — expanded", () => {
     expect(screen.getByText("Starting position")).toBeInTheDocument();
     expect(screen.queryByText("Unclassified")).toBeNull();
     expect(screen.getByText("+0.4")).toBeInTheDocument();
-    // Coverage/Games/Confidence all dash on the root.
-    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(3);
+    // Coverage/Games both dash on the root.
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });
 
   it.each<[number | null, string]>([
@@ -417,7 +414,6 @@ const familyView: OpeningTreeNodeView = {
   evalMate: null,
   coverage: 0.5,
   gameCount: 1234,
-  confidence: 0.8,
   isTerminal: false,
   terminalReason: null,
   drillOpeningKey: "ruy-key",
@@ -479,7 +475,7 @@ describe("OpeningTreeNodeCard — family mode", () => {
     expect(screen.queryByText("C60")).toBeNull();
   });
 
-  it("expanded: name header (no move label), no Eval tile, the three metrics", () => {
+  it("expanded: name header (no move label), no Eval tile, the two metrics", () => {
     render(
       <OpeningTreeNodeCard variant="expanded" kind="family" node={familyView} />,
     );
@@ -488,13 +484,13 @@ describe("OpeningTreeNodeCard — family mode", () => {
     expect(screen.queryByText("Starting position")).toBeNull();
     // The Eval tile is dropped in family mode.
     expect(screen.queryByText("Eval")).toBeNull();
-    // The Score tile + the three metrics remain.
+    // The Score tile + the two metrics remain.
     expect(screen.getByText("Score")).toBeInTheDocument();
     expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
     expect(screen.getByText("Coverage")).toBeInTheDocument();
     expect(screen.getByText("Games")).toBeInTheDocument();
     expect(screen.getByText((1234).toLocaleString())).toBeInTheDocument();
-    expect(screen.getByText("Confidence")).toBeInTheDocument();
+    expect(screen.queryByText("Confidence")).toBeNull();
   });
 
   it("expanded: a collapse surface fires onCollapse while Start Drill still fires", async () => {

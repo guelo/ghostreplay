@@ -63,7 +63,6 @@ function toNodeView(item: OpeningLineageItem): OpeningTreeNodeView {
     evalMate: null,
     coverage: item.coverage,
     gameCount: item.game_count,
-    confidence: item.confidence,
     isTerminal: false,
     terminalReason: null,
     drillOpeningKey: item.opening_key,

@@ -54,10 +54,6 @@ function OpeningsMetricsLegend() {
                             <dd>Measures how well you know the opening. Based on your play in games and drills. Graded from A-F</dd>
                             <dt>Coverage</dt>
                             <dd>How much of the opening's variations you've explored </dd>
-                            <dt>Confidence</dt>
-                            <dd>How confident we are in your opening score based on how many games you've played and how much coverage</dd>
-
-
           </dl>
           <p className="openings-metrics-legend__section-title">Move types</p>
           <ul className="openings-metrics-legend__types">
