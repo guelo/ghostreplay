@@ -1,48 +1,68 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.accuracy import (
+    AccuracyMove,
+    compute_game_accuracy,
+    expected_total_moves_from_pgn,
+)
 from app.db import get_db
-from app.models import Blunder, GameSession, Move, Position, RatingHistory, SessionMove
+from app.models import (
+    Blunder,
+    BlunderReview,
+    GameSession,
+    RatingHistory,
+    SessionMove,
+    UserOpeningScore,
+)
+from app.opening_cache import list_cached_opening_scores
 from app.rating import DEFAULT_RATING
 from app.rating_scores import latest_rating_order, scores_for_row
 from app.security import TokenPayload, get_current_user
-from app.session_contracts import normal_play_started_at, normal_play_started_at_expr, visible_session_filter
+from app.session_contracts import normal_play_started_at_expr, visible_session_filter
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
-
-class GameRecord(BaseModel):
-    wins: int
-    losses: int
-    draws: int
-    resigns: int
-    abandons: int
+# Consecutive-pass streak at which a blunder is considered "mastered". A
+# BlunderReview whose pass_streak_after equals this value is the N-1 -> N
+# crossing that counts as one training conversion.
+MASTERY_THRESHOLD = 3
 
 
 class GamesSummary(BaseModel):
     played: int
-    completed: int
-    active: int
-    record: GameRecord
-    avg_duration_seconds: int
+    score_pct: float | None
+    wins: int
+    losses: int
+    draws: int
     avg_moves: float
+
+
+class MoveQualityDistribution(BaseModel):
+    inaccuracy: float
+    mistake: float
+    blunder: float
+
+
+class MoveSummary(BaseModel):
+    accuracy_pct: float | None
+    mistake_free_game_rate: float | None
+    # None (not an all-zeros dict) when there are zero classified player moves.
+    quality_distribution: MoveQualityDistribution | None
 
 
 class ColorSummary(BaseModel):
     games: int
-    completed: int
-    wins: int
-    losses: int
-    draws: int
-    avg_cpl: float
-    blunders_per_100_moves: float
+    score_pct: float | None
+    accuracy_pct: float | None
 
 
 class ColorSplitSummary(BaseModel):
@@ -50,21 +70,19 @@ class ColorSplitSummary(BaseModel):
     black: ColorSummary
 
 
-class MoveQualityDistribution(BaseModel):
-    best: float
-    excellent: float
-    good: float
-    inaccuracy: float
-    mistake: float
-    blunder: float
-
-
-class MoveSummary(BaseModel):
-    player_moves: int
-    avg_cpl: float
-    mistakes_per_100_moves: float
-    blunders_per_100_moves: float
-    quality_distribution: MoveQualityDistribution
+class TrainingSummary(BaseModel):
+    # Review Retention (all-time): fraction of reviewed blunders currently held
+    # (pass_streak >= 1).
+    retention_pct: float | None
+    reviewed_blunders: int
+    retained_blunders: int
+    # Review Pass Rate (windowed by reviewed_at).
+    review_pass_rate: float | None
+    reviews_total: int
+    reviews_passed: int
+    # Distinct blunders that crossed the mastery threshold in the window.
+    conversions_in_window: int
+    mastery_threshold: int
 
 
 class TopCostlyBlunder(BaseModel):
@@ -77,45 +95,64 @@ class TopCostlyBlunder(BaseModel):
 
 class LibrarySummary(BaseModel):
     blunders_total: int
-    positions_total: int
-    edges_total: int
     new_blunders_in_window: int
     avg_blunder_eval_loss_cp: int
     top_costly_blunders: list[TopCostlyBlunder]
 
 
-class DataCompletenessSummary(BaseModel):
-    sessions_with_uploaded_moves_pct: float
-    notes: list[str]
+class OpeningStat(BaseModel):
+    opening_name: str
+    opening_family: str
+    player_color: str
+    opening_score: float
+    sample_size: int
+    game_count: int
 
 
-class PerfectStreakSummary(BaseModel):
-    personal_best: int
-
-
-class StatsAchievementsSummary(BaseModel):
-    perfect_streak: PerfectStreakSummary
+class OpeningsSummary(BaseModel):
+    strongest: list[OpeningStat]
+    weakest: list[OpeningStat]
 
 
 class StatsSummaryResponse(BaseModel):
     window_days: int
     generated_at: datetime
     games: GamesSummary
-    colors: ColorSplitSummary
     moves: MoveSummary
+    colors: ColorSplitSummary
+    training: TrainingSummary
     library: LibrarySummary
-    achievements: StatsAchievementsSummary
-    data_completeness: DataCompletenessSummary
+    openings: OpeningsSummary
 
 
 def _round1(value: float) -> float:
     return round(value, 1)
 
 
-def _safe_rate(numerator: int, denominator: int) -> float:
+def _rate(numerator: int, denominator: int) -> float | None:
+    """Percentage, or None when the denominator is 0 (Rate contract)."""
     if denominator <= 0:
-        return 0.0
+        return None
     return _round1((numerator * 100.0) / denominator)
+
+
+def _score_pct(wins: int, losses: int, draws: int) -> float | None:
+    """(W + 0.5*D) / decided * 100, or None when no games are decided."""
+    decided = wins + losses + draws
+    if decided == 0:
+        return None
+    return _round1((wins + 0.5 * draws) * 100.0 / decided)
+
+
+def _opening_stat(row: UserOpeningScore) -> OpeningStat:
+    return OpeningStat(
+        opening_name=row.opening_name,
+        opening_family=row.opening_family,
+        player_color=row.player_color,
+        opening_score=row.opening_score,
+        sample_size=row.sample_size,
+        game_count=row.game_count,
+    )
 
 
 class CurrentRatingResponse(BaseModel):
@@ -210,16 +247,15 @@ def get_rating_history(
     )
 
 
-def _base_color_summary() -> ColorSummary:
-    return ColorSummary(
-        games=0,
-        completed=0,
-        wins=0,
-        losses=0,
-        draws=0,
-        avg_cpl=0.0,
-        blunders_per_100_moves=0.0,
-    )
+# Perfect Streak is dropped from the /summary response and the stats page, but the
+# standalone /achievements endpoint is retained: ChessGame's in-game streak toast
+# still reads the personal best from it.
+class PerfectStreakSummary(BaseModel):
+    personal_best: int
+
+
+class StatsAchievementsSummary(BaseModel):
+    perfect_streak: PerfectStreakSummary
 
 
 def _perfect_streak_summary(db: Session, user_id: int) -> StatsAchievementsSummary:
@@ -309,67 +345,55 @@ def get_stats_summary(
         }
 
     played = len(sessions)
-    completed = 0
-    active = 0
     wins = 0
     losses = 0
     draws = 0
-    resigns = 0
-    abandons = 0
-    ended_duration_seconds: list[float] = []
     total_moves_across_sessions = 0
 
     per_color_games = {
-        "white": {"games": 0, "completed": 0, "wins": 0, "losses": 0, "draws": 0},
-        "black": {"games": 0, "completed": 0, "wins": 0, "losses": 0, "draws": 0},
+        "white": {"games": 0, "wins": 0, "losses": 0, "draws": 0},
+        "black": {"games": 0, "wins": 0, "losses": 0, "draws": 0},
     }
+    # Ended (status == "ended") sessions only: the denominator for the
+    # mistake-free rate and the population for accuracy. In-progress games must
+    # not inflate either.
+    ended_sessions: list[GameSession] = []
+    color_by_session: dict[uuid.UUID, str] = {}
 
     for session in sessions:
-        player_color = "black" if session.player_color == "black" else "white"
-        per_color_games[player_color]["games"] += 1
-
+        color_key = "black" if session.player_color == "black" else "white"
+        color_by_session[session.id] = color_key
+        per_color_games[color_key]["games"] += 1
         total_moves_across_sessions += move_count_by_session.get(session.id, 0)
 
         if session.status == "ended":
-            completed += 1
-            per_color_games[player_color]["completed"] += 1
-            if session.ended_at is not None:
-                ended_duration_seconds.append(
-                    (session.ended_at - normal_play_started_at(session)).total_seconds()
-                )
-        elif session.status == "active":
-            active += 1
+            ended_sessions.append(session)
 
+        # Losses fold checkmate losses + resigns + abandons — all are losses from
+        # the player's view — so W-L-D sums to decided games.
         if session.result == "checkmate_win":
             wins += 1
-            per_color_games[player_color]["wins"] += 1
-        elif session.result == "checkmate_loss":
+            per_color_games[color_key]["wins"] += 1
+        elif session.result in ("checkmate_loss", "resign", "abandon"):
             losses += 1
-            per_color_games[player_color]["losses"] += 1
+            per_color_games[color_key]["losses"] += 1
         elif session.result == "draw":
             draws += 1
-            per_color_games[player_color]["draws"] += 1
-        elif session.result == "resign":
-            resigns += 1
-        elif session.result == "abandon":
-            abandons += 1
+            per_color_games[color_key]["draws"] += 1
 
-    avg_duration_seconds = (
-        int(round(sum(ended_duration_seconds) / len(ended_duration_seconds)))
-        if ended_duration_seconds
-        else 0
-    )
     avg_moves = (
         _round1(total_moves_across_sessions / played)
         if played > 0
         else 0.0
     )
+    score_pct = _score_pct(wins, losses, draws)
 
-    player_move_rows: list[tuple[str, str | None, int | None]] = []
+    # --- Per-move quality + per-session blunder counts (player moves only) ---
+    player_move_rows: list[tuple[uuid.UUID, str | None]] = []
     if session_ids:
         player_move_rows = (
-            db.query(GameSession.player_color, SessionMove.classification, SessionMove.eval_delta)
-            .join(SessionMove, SessionMove.session_id == GameSession.id)
+            db.query(SessionMove.session_id, SessionMove.classification)
+            .join(GameSession, GameSession.id == SessionMove.session_id)
             .filter(
                 GameSession.id.in_(session_ids),
                 SessionMove.color == GameSession.player_color,
@@ -377,95 +401,143 @@ def get_stats_summary(
             .all()
         )
 
-    player_moves = len(player_move_rows)
-    cpl_values: list[int] = []
-    mistake_count = 0
-    blunder_count = 0
-    quality_counts = {
-        "best": 0,
-        "excellent": 0,
-        "good": 0,
-        "inaccuracy": 0,
-        "mistake": 0,
-        "blunder": 0,
-    }
-    by_color_move_totals = {"white": 0, "black": 0}
-    by_color_cpl_values: dict[str, list[int]] = {"white": [], "black": []}
-    by_color_blunders = {"white": 0, "black": 0}
-
-    for player_color, classification, eval_delta in player_move_rows:
-        color_key = "black" if player_color == "black" else "white"
-        by_color_move_totals[color_key] += 1
-
-        if eval_delta is not None:
-            normalized = max(eval_delta, 0)
-            cpl_values.append(normalized)
-            by_color_cpl_values[color_key].append(normalized)
-
-        if classification == "mistake":
-            mistake_count += 1
-        if classification == "blunder":
-            blunder_count += 1
-            by_color_blunders[color_key] += 1
+    classified_move_total = 0
+    quality_counts = {"inaccuracy": 0, "mistake": 0, "blunder": 0}
+    blunder_moves_by_session: dict[uuid.UUID, int] = defaultdict(int)
+    for move_session_id, classification in player_move_rows:
+        if classification is not None:
+            classified_move_total += 1
         if classification in quality_counts:
             quality_counts[classification] += 1
+        if classification == "blunder":
+            blunder_moves_by_session[move_session_id] += 1
 
-    classified_move_total = sum(quality_counts.values())
-    avg_cpl = _round1(sum(cpl_values) / len(cpl_values)) if cpl_values else 0.0
-
-    colors = {
-        "white": _base_color_summary(),
-        "black": _base_color_summary(),
-    }
-    for color in ("white", "black"):
-        color_cpl_values = by_color_cpl_values[color]
-        colors[color] = ColorSummary(
-            games=per_color_games[color]["games"],
-            completed=per_color_games[color]["completed"],
-            wins=per_color_games[color]["wins"],
-            losses=per_color_games[color]["losses"],
-            draws=per_color_games[color]["draws"],
-            avg_cpl=(
-                _round1(sum(color_cpl_values) / len(color_cpl_values))
-                if color_cpl_values
-                else 0.0
-            ),
-            blunders_per_100_moves=_safe_rate(
-                by_color_blunders[color], by_color_move_totals[color]
-            ),
+    if classified_move_total == 0:
+        quality_distribution: MoveQualityDistribution | None = None
+    else:
+        quality_distribution = MoveQualityDistribution(
+            inaccuracy=_round1(quality_counts["inaccuracy"] * 100.0 / classified_move_total),
+            mistake=_round1(quality_counts["mistake"] * 100.0 / classified_move_total),
+            blunder=_round1(quality_counts["blunder"] * 100.0 / classified_move_total),
         )
 
-    quality_distribution = MoveQualityDistribution(
-        best=_safe_rate(quality_counts["best"], classified_move_total),
-        excellent=_safe_rate(quality_counts["excellent"], classified_move_total),
-        good=_safe_rate(quality_counts["good"], classified_move_total),
-        inaccuracy=_safe_rate(quality_counts["inaccuracy"], classified_move_total),
-        mistake=_safe_rate(quality_counts["mistake"], classified_move_total),
-        blunder=_safe_rate(quality_counts["blunder"], classified_move_total),
+    # A game is clean if the player made zero blunder moves in it.
+    clean_ended = sum(
+        1 for session in ended_sessions
+        if blunder_moves_by_session.get(session.id, 0) == 0
+    )
+    mistake_free_game_rate = _rate(clean_ended, len(ended_sessions))
+
+    # --- Whole-game accuracy over ended sessions (mirrors history.py) ---
+    accuracy_by_session: dict[uuid.UUID, int | None] = {}
+    ended_session_ids = [session.id for session in ended_sessions]
+    if ended_session_ids:
+        color_order = case((SessionMove.color == "white", 0), else_=1)
+        move_rows = (
+            db.query(
+                SessionMove.session_id,
+                SessionMove.color,
+                SessionMove.eval_cp,
+                SessionMove.eval_mate,
+            )
+            .filter(SessionMove.session_id.in_(ended_session_ids))
+            .order_by(SessionMove.move_number.asc(), color_order.asc())
+            .all()
+        )
+        moves_by_session: dict[uuid.UUID, list[AccuracyMove]] = {}
+        for row in move_rows:
+            moves_by_session.setdefault(row.session_id, []).append(
+                AccuracyMove(color=row.color, eval_cp=row.eval_cp, eval_mate=row.eval_mate)
+            )
+        for session in ended_sessions:
+            accuracy_by_session[session.id] = compute_game_accuracy(
+                moves_by_session.get(session.id, []),
+                player_color=session.player_color,
+                expected_total_moves=expected_total_moves_from_pgn(session.pgn),
+            )
+
+    def _mean_accuracy(ids: list[uuid.UUID]) -> float | None:
+        values = [
+            accuracy_by_session[sid]
+            for sid in ids
+            if accuracy_by_session.get(sid) is not None
+        ]
+        if not values:
+            return None
+        return _round1(sum(values) / len(values))  # type: ignore[arg-type]
+
+    accuracy_pct = _mean_accuracy(ended_session_ids)
+
+    colors: dict[str, ColorSummary] = {}
+    for color in ("white", "black"):
+        color_ended_ids = [
+            sid for sid in ended_session_ids if color_by_session.get(sid) == color
+        ]
+        pg = per_color_games[color]
+        colors[color] = ColorSummary(
+            games=pg["games"],
+            score_pct=_score_pct(pg["wins"], pg["losses"], pg["draws"]),
+            accuracy_pct=_mean_accuracy(color_ended_ids),
+        )
+
+    # --- Training (SRS) --------------------------------------------------------
+    # BlunderReview has no user_id, so every review query joins Blunder and
+    # filters on Blunder.user_id.
+    reviewed_blunders = int(
+        (
+            db.query(func.count(Blunder.id))
+            .filter(Blunder.user_id == user.user_id, Blunder.last_reviewed_at.isnot(None))
+            .scalar()
+        )
+        or 0
+    )
+    retained_blunders = int(
+        (
+            db.query(func.count(Blunder.id))
+            .filter(Blunder.user_id == user.user_id, Blunder.pass_streak >= 1)
+            .scalar()
+        )
+        or 0
+    )
+    retention_pct = _rate(retained_blunders, reviewed_blunders)
+
+    reviews_base = (
+        db.query(BlunderReview)
+        .join(Blunder, Blunder.id == BlunderReview.blunder_id)
+        .filter(Blunder.user_id == user.user_id)
+    )
+    if cutoff is not None:
+        reviews_base = reviews_base.filter(BlunderReview.reviewed_at >= cutoff)
+    reviews_total = reviews_base.count()
+    reviews_passed = reviews_base.filter(BlunderReview.passed.is_(True)).count()
+    review_pass_rate = _rate(reviews_passed, reviews_total)
+
+    conversions_query = (
+        db.query(func.count(func.distinct(BlunderReview.blunder_id)))
+        .join(Blunder, Blunder.id == BlunderReview.blunder_id)
+        .filter(
+            Blunder.user_id == user.user_id,
+            BlunderReview.pass_streak_after == MASTERY_THRESHOLD,
+        )
+    )
+    if cutoff is not None:
+        conversions_query = conversions_query.filter(BlunderReview.reviewed_at >= cutoff)
+    conversions_in_window = int(conversions_query.scalar() or 0)
+
+    # --- Library (all-time) ----------------------------------------------------
+    blunders_total = int(
+        (
+            db.query(func.count(Blunder.id))
+            .filter(Blunder.user_id == user.user_id)
+            .scalar()
+        )
+        or 0
     )
 
-    blunders_total = (
-        db.query(func.count(Blunder.id))
-        .filter(Blunder.user_id == user.user_id)
-        .scalar()
-    ) or 0
-    positions_total = (
-        db.query(func.count(Position.id))
-        .filter(Position.user_id == user.user_id)
-        .scalar()
-    ) or 0
-    edges_total = (
-        db.query(func.count())
-        .select_from(Move)
-        .join(Position, Position.id == Move.from_position_id)
-        .filter(Position.user_id == user.user_id)
-        .scalar()
-    ) or 0
-
-    window_blunders_query = db.query(Blunder).filter(Blunder.user_id == user.user_id)
+    window_blunders_query = db.query(func.count(Blunder.id)).filter(Blunder.user_id == user.user_id)
     if cutoff is not None:
         window_blunders_query = window_blunders_query.filter(Blunder.created_at >= cutoff)
-    new_blunders_in_window = window_blunders_query.count()
+    new_blunders_in_window = int(window_blunders_query.scalar() or 0)
 
     avg_blunder_eval_loss_cp_raw = (
         db.query(func.avg(Blunder.eval_loss_cp))
@@ -496,55 +568,56 @@ def get_stats_summary(
         for row in top_costly_blunders_rows
     ]
 
-    sessions_with_uploaded_moves = sum(
-        1 for session_id in session_ids if move_count_by_session.get(session_id, 0) > 0
-    )
-    sessions_with_uploaded_moves_pct = _safe_rate(
-        sessions_with_uploaded_moves, played
-    )
+    # --- Openings (all-time, latest scored batch) ------------------------------
+    _, white_opening_rows = list_cached_opening_scores(db, user.user_id, "white")
+    _, black_opening_rows = list_cached_opening_scores(db, user.user_id, "black")
+    opening_rows = [
+        row
+        for row in (*white_opening_rows, *black_opening_rows)
+        if row.sample_size >= 3
+    ]
+    opening_rows.sort(key=lambda row: row.opening_score)
+    strongest = [_opening_stat(row) for row in reversed(opening_rows[-3:])]
+    weakest = [_opening_stat(row) for row in opening_rows[:3]]
 
     return StatsSummaryResponse(
         window_days=window_days,
         generated_at=now,
         games=GamesSummary(
             played=played,
-            completed=completed,
-            active=active,
-            record=GameRecord(
-                wins=wins,
-                losses=losses,
-                draws=draws,
-                resigns=resigns,
-                abandons=abandons,
-            ),
-            avg_duration_seconds=avg_duration_seconds,
+            score_pct=score_pct,
+            wins=wins,
+            losses=losses,
+            draws=draws,
             avg_moves=avg_moves,
+        ),
+        moves=MoveSummary(
+            accuracy_pct=accuracy_pct,
+            mistake_free_game_rate=mistake_free_game_rate,
+            quality_distribution=quality_distribution,
         ),
         colors=ColorSplitSummary(
             white=colors["white"],
             black=colors["black"],
         ),
-        moves=MoveSummary(
-            player_moves=player_moves,
-            avg_cpl=avg_cpl,
-            mistakes_per_100_moves=_safe_rate(mistake_count, player_moves),
-            blunders_per_100_moves=_safe_rate(blunder_count, player_moves),
-            quality_distribution=quality_distribution,
+        training=TrainingSummary(
+            retention_pct=retention_pct,
+            reviewed_blunders=reviewed_blunders,
+            retained_blunders=retained_blunders,
+            review_pass_rate=review_pass_rate,
+            reviews_total=reviews_total,
+            reviews_passed=reviews_passed,
+            conversions_in_window=conversions_in_window,
+            mastery_threshold=MASTERY_THRESHOLD,
         ),
         library=LibrarySummary(
-            blunders_total=int(blunders_total),
-            positions_total=int(positions_total),
-            edges_total=int(edges_total),
+            blunders_total=blunders_total,
             new_blunders_in_window=new_blunders_in_window,
             avg_blunder_eval_loss_cp=avg_blunder_eval_loss_cp,
             top_costly_blunders=top_costly_blunders,
         ),
-        achievements=_perfect_streak_summary(db, user.user_id),
-        data_completeness=DataCompletenessSummary(
-            sessions_with_uploaded_moves_pct=sessions_with_uploaded_moves_pct,
-            notes=[
-                "Per-move metrics use player moves only.",
-                "SRS review stats are excluded until review outcomes are persisted.",
-            ],
+        openings=OpeningsSummary(
+            strongest=strongest,
+            weakest=weakest,
         ),
     )

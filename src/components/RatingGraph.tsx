@@ -180,10 +180,12 @@ function rangesEqual(
 
 function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   const [showProvisional, setShowProvisional] = useState(true);
+  // Elo is the primary scale; the Chess.com / Lichess overlays stay available via
+  // their checkboxes but start hidden so the graph isn't three-line noise by default.
   const [visibleSeries, setVisibleSeries] = useState<Record<RatingScoreKey, boolean>>({
     elo: true,
-    chesscom: true,
-    lichess: true,
+    chesscom: false,
+    lichess: false,
   });
   const [data, setData] = useState<RatingHistoryResponse | null>(null);
   const [loading, setLoading] = useState(true);

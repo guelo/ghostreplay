@@ -6,6 +6,8 @@ import {
 } from "../utils/api";
 import AppNav from "../components/AppNav";
 import RatingGraph from "../components/RatingGraph";
+import { accuracyColor } from "../utils/statColor";
+import { formatScore } from "../openings/format";
 import { captureEvent } from "../analytics/posthog";
 import "../App.css";
 
@@ -17,34 +19,22 @@ const WINDOW_OPTIONS: Array<{ label: string; value: StatsWindowDays }> = [
   { label: "All", value: 0 },
 ];
 
+// Best/Excellent/Good buckets are intentionally dropped — the distribution now
+// surfaces only the three mistake grades.
 const QUALITY_KEYS = [
-  { key: "best", label: "Best" },
-  { key: "excellent", label: "Excellent" },
-  { key: "good", label: "Good" },
   { key: "inaccuracy", label: "Inaccuracy" },
   { key: "mistake", label: "Mistake" },
   { key: "blunder", label: "Blunder" },
 ] as const;
 
-function formatPercent(value: number): string {
-  return `${value.toFixed(1)}%`;
+// Rate/percentage fields are `number | null`; null (empty denominator) renders as
+// an em dash rather than a misleading 0.0%.
+function formatPercent(value: number | null): string {
+  return value == null ? "—" : `${value.toFixed(1)}%`;
 }
 
 function formatAverage(value: number): string {
   return value.toFixed(1);
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds <= 0) {
-    return "0m 0s";
-  }
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainingSeconds = seconds % 60;
-  if (hours > 0) {
-    return `${hours}h ${minutes}m`;
-  }
-  return `${minutes}m ${remainingSeconds}s`;
 }
 
 function formatDate(iso: string): string {
@@ -60,11 +50,7 @@ function formatDate(iso: string): string {
 }
 
 function isEmptySummary(data: StatsSummaryResponse): boolean {
-  return (
-    data.games.played === 0 &&
-    data.moves.player_moves === 0 &&
-    data.library.blunders_total === 0
-  );
+  return data.games.played === 0 && data.library.blunders_total === 0;
 }
 
 function StatsPage() {
@@ -103,6 +89,11 @@ function StatsPage() {
       cancelled = true;
     };
   }, [windowDays, retryCount]);
+
+  const openingsEmpty =
+    summary != null &&
+    summary.openings.strongest.length === 0 &&
+    summary.openings.weakest.length === 0;
 
   return (
     <main className="app-shell">
@@ -178,57 +169,21 @@ function StatsPage() {
               )}
 
               <section className="stats-section">
-                <h2 className="stats-section__title">Games</h2>
-                <div className="stats-grid">
+                <h2 className="stats-section__title">Results</h2>
+                <div className="stats-grid stats-grid--three">
+                  <article className="stats-card">
+                    <p className="stats-card__label">Score</p>
+                    <p className="stats-card__value">
+                      {formatPercent(summary.games.score_pct)}
+                    </p>
+                    <p className="stats-card__inline">
+                      {summary.games.wins}–{summary.games.losses}–
+                      {summary.games.draws} W–L–D
+                    </p>
+                  </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Played</p>
                     <p className="stats-card__value">{summary.games.played}</p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Completed</p>
-                    <p className="stats-card__value">
-                      {summary.games.completed}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Active</p>
-                    <p className="stats-card__value">{summary.games.active}</p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Wins</p>
-                    <p className="stats-card__value">
-                      {summary.games.record.wins}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Losses</p>
-                    <p className="stats-card__value">
-                      {summary.games.record.losses}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Draws</p>
-                    <p className="stats-card__value">
-                      {summary.games.record.draws}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Resigns</p>
-                    <p className="stats-card__value">
-                      {summary.games.record.resigns}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Abandons</p>
-                    <p className="stats-card__value">
-                      {summary.games.record.abandons}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Avg Duration</p>
-                    <p className="stats-card__value">
-                      {formatDuration(summary.games.avg_duration_seconds)}
-                    </p>
                   </article>
                   <article className="stats-card">
                     <p className="stats-card__label">Avg Moves</p>
@@ -240,68 +195,56 @@ function StatsPage() {
               </section>
 
               <section className="stats-section">
-                <h2 className="stats-section__title">Move Quality</h2>
-                <div className="stats-grid stats-grid--four">
+                <h2 className="stats-section__title">Accuracy &amp; Mistakes</h2>
+                <div className="stats-grid stats-grid--two">
                   <article className="stats-card">
-                    <p className="stats-card__label">Player Moves</p>
-                    <p className="stats-card__value">
-                      {summary.moves.player_moves}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Avg CPL</p>
-                    <p className="stats-card__value">
-                      {formatAverage(summary.moves.avg_cpl)}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Mistakes / 100</p>
-                    <p className="stats-card__value">
-                      {formatPercent(summary.moves.mistakes_per_100_moves)}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Blunders / 100</p>
-                    <p className="stats-card__value">
-                      {formatPercent(summary.moves.blunders_per_100_moves)}
-                    </p>
-                  </article>
-                </div>
-                <div
-                  className="stats-quality-list"
-                  role="list"
-                  aria-label="Move quality distribution"
-                >
-                  {QUALITY_KEYS.map((item) => (
-                    <div
-                      key={item.key}
-                      className="stats-quality-item"
-                      role="listitem"
+                    <p className="stats-card__label">Accuracy</p>
+                    <p
+                      className="stats-card__value"
+                      style={
+                        summary.moves.accuracy_pct != null
+                          ? { color: accuracyColor(summary.moves.accuracy_pct) }
+                          : undefined
+                      }
                     >
-                      <span className="stats-quality-item__label">
-                        {item.label}
-                      </span>
-                      <span className="stats-quality-item__value">
-                        {formatPercent(
-                          summary.moves.quality_distribution[item.key],
-                        )}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </section>
-
-              <section className="stats-section">
-                <h2 className="stats-section__title">Achievements</h2>
-                <div className="stats-grid stats-grid--three">
-                  <article className="stats-card stats-card--achievement">
-                    <p className="stats-card__label">All-time</p>
-                    <p className="stats-card__value">
-                      ⭐ {summary.achievements.perfect_streak.personal_best}
+                      {formatPercent(summary.moves.accuracy_pct)}
                     </p>
-                    <p className="stats-card__inline">Perfect streak</p>
+                  </article>
+                  <article className="stats-card">
+                    <p className="stats-card__label">Mistake-Free Games</p>
+                    <p className="stats-card__value">
+                      {formatPercent(summary.moves.mistake_free_game_rate)}
+                    </p>
                   </article>
                 </div>
+                {summary.moves.quality_distribution ? (
+                  <div
+                    className="stats-quality-list"
+                    role="list"
+                    aria-label="Move quality distribution"
+                  >
+                    {QUALITY_KEYS.map((item) => (
+                      <div
+                        key={item.key}
+                        className="stats-quality-item"
+                        role="listitem"
+                      >
+                        <span className="stats-quality-item__label">
+                          {item.label}
+                        </span>
+                        <span className="stats-quality-item__value">
+                          {formatPercent(
+                            summary.moves.quality_distribution![item.key],
+                          )}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="stats-list-card__empty">
+                    No analyzed moves in this window yet.
+                  </p>
+                )}
               </section>
 
               <section className="stats-section">
@@ -313,13 +256,11 @@ function StatsPage() {
                       Games: {summary.colors.white.games}
                     </p>
                     <p className="stats-card__inline">
-                      Avg CPL: {formatAverage(summary.colors.white.avg_cpl)}
+                      Score: {formatPercent(summary.colors.white.score_pct)}
                     </p>
                     <p className="stats-card__inline">
-                      Blunders / 100:{" "}
-                      {formatPercent(
-                        summary.colors.white.blunders_per_100_moves,
-                      )}
+                      Accuracy:{" "}
+                      {formatPercent(summary.colors.white.accuracy_pct)}
                     </p>
                   </article>
                   <article className="stats-card">
@@ -328,13 +269,46 @@ function StatsPage() {
                       Games: {summary.colors.black.games}
                     </p>
                     <p className="stats-card__inline">
-                      Avg CPL: {formatAverage(summary.colors.black.avg_cpl)}
+                      Score: {formatPercent(summary.colors.black.score_pct)}
                     </p>
                     <p className="stats-card__inline">
-                      Blunders / 100:{" "}
-                      {formatPercent(
-                        summary.colors.black.blunders_per_100_moves,
-                      )}
+                      Accuracy:{" "}
+                      {formatPercent(summary.colors.black.accuracy_pct)}
+                    </p>
+                  </article>
+                </div>
+              </section>
+
+              <section className="stats-section">
+                <h2 className="stats-section__title">Training</h2>
+                <div className="stats-grid stats-grid--three">
+                  <article className="stats-card">
+                    <p className="stats-card__label">Review Retention</p>
+                    <p className="stats-card__value">
+                      {formatPercent(summary.training.retention_pct)}
+                    </p>
+                    <p className="stats-card__inline">
+                      {summary.training.retained_blunders}/
+                      {summary.training.reviewed_blunders} held · All-time
+                    </p>
+                  </article>
+                  <article className="stats-card">
+                    <p className="stats-card__label">Review Pass Rate</p>
+                    <p className="stats-card__value">
+                      {formatPercent(summary.training.review_pass_rate)}
+                    </p>
+                    <p className="stats-card__inline">
+                      {summary.training.reviews_passed}/
+                      {summary.training.reviews_total} reviews
+                    </p>
+                  </article>
+                  <article className="stats-card">
+                    <p className="stats-card__label">Blunders Mastered</p>
+                    <p className="stats-card__value">
+                      {summary.training.conversions_in_window}
+                    </p>
+                    <p className="stats-card__inline">
+                      Reached {summary.training.mastery_threshold}-pass streak
                     </p>
                   </article>
                 </div>
@@ -344,39 +318,30 @@ function StatsPage() {
                 <h2 className="stats-section__title">Library</h2>
                 <div className="stats-grid stats-grid--three">
                   <article className="stats-card">
-                    <p className="stats-card__label">Blunders Total</p>
-                    <p className="stats-card__value">
-                      {summary.library.blunders_total}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Positions Total</p>
-                    <p className="stats-card__value">
-                      {summary.library.positions_total}
-                    </p>
-                  </article>
-                  <article className="stats-card">
-                    <p className="stats-card__label">Edges Total</p>
-                    <p className="stats-card__value">
-                      {summary.library.edges_total}
-                    </p>
-                  </article>
-                  <article className="stats-card">
                     <p className="stats-card__label">New Blunders</p>
                     <p className="stats-card__value">
                       {summary.library.new_blunders_in_window}
                     </p>
                   </article>
                   <article className="stats-card">
+                    <p className="stats-card__label">Blunders Total</p>
+                    <p className="stats-card__value">
+                      {summary.library.blunders_total}
+                    </p>
+                    <p className="stats-card__inline">All-time</p>
+                  </article>
+                  <article className="stats-card">
                     <p className="stats-card__label">Avg Blunder Loss (cp)</p>
                     <p className="stats-card__value">
                       {summary.library.avg_blunder_eval_loss_cp}
                     </p>
+                    <p className="stats-card__inline">All-time</p>
                   </article>
                 </div>
                 <div className="stats-list-card">
                   <h3 className="stats-list-card__title">
                     Top Costly Blunders
+                    <span className="stats-card__inline"> · All-time</span>
                   </h3>
                   {summary.library.top_costly_blunders.length === 0 ? (
                     <p className="stats-list-card__empty">
@@ -401,25 +366,58 @@ function StatsPage() {
                 </div>
               </section>
 
-              <section className="stats-section">
-                <h2 className="stats-section__title">Data Completeness</h2>
-                <div className="stats-list-card">
-                  <p className="stats-card__inline">
-                    Sessions with uploaded moves:{" "}
-                    <strong>
-                      {formatPercent(
-                        summary.data_completeness
-                          .sessions_with_uploaded_moves_pct,
+              {!openingsEmpty && (
+                <section className="stats-section">
+                  <h2 className="stats-section__title">
+                    Openings
+                    <span className="stats-card__inline"> · All-time</span>
+                  </h2>
+                  <div className="stats-grid stats-grid--two">
+                    <div className="stats-list-card">
+                      <h3 className="stats-list-card__title">Strongest</h3>
+                      {summary.openings.strongest.length === 0 ? (
+                        <p className="stats-list-card__empty">
+                          Not enough data yet.
+                        </p>
+                      ) : (
+                        <ul className="stats-list-card__list">
+                          {summary.openings.strongest.map((opening) => (
+                            <li
+                              key={`${opening.player_color}-${opening.opening_name}`}
+                              className="stats-list-card__item"
+                            >
+                              <span>{opening.opening_name}</span>
+                              <span>{opening.player_color}</span>
+                              <span>{formatScore(opening.opening_score)}</span>
+                            </li>
+                          ))}
+                        </ul>
                       )}
-                    </strong>
-                  </p>
-                  <ul className="stats-notes">
-                    {summary.data_completeness.notes.map((note) => (
-                      <li key={note}>{note}</li>
-                    ))}
-                  </ul>
-                </div>
-              </section>
+                    </div>
+                    <div className="stats-list-card">
+                      <h3 className="stats-list-card__title">Weakest</h3>
+                      {summary.openings.weakest.length === 0 ? (
+                        <p className="stats-list-card__empty">
+                          Not enough data yet.
+                        </p>
+                      ) : (
+                        <ul className="stats-list-card__list">
+                          {summary.openings.weakest.map((opening) => (
+                            <li
+                              key={`${opening.player_color}-${opening.opening_name}`}
+                              className="stats-list-card__item"
+                            >
+                              <span>{opening.opening_name}</span>
+                              <span>{opening.player_color}</span>
+                              <span>{formatScore(opening.opening_score)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              )}
             </>
           )}
         </section>

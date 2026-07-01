@@ -1499,31 +1499,19 @@ export const getOpeningScoreDelta = async (
 
 export type StatsWindowDays = 0 | 7 | 30 | 90 | 365
 
-export interface StatsGameRecord {
+export interface StatsGamesSummary {
+  played: number
+  score_pct: number | null
   wins: number
   losses: number
   draws: number
-  resigns: number
-  abandons: number
-}
-
-export interface StatsGamesSummary {
-  played: number
-  completed: number
-  active: number
-  record: StatsGameRecord
-  avg_duration_seconds: number
   avg_moves: number
 }
 
 export interface StatsColorSummary {
   games: number
-  completed: number
-  wins: number
-  losses: number
-  draws: number
-  avg_cpl: number
-  blunders_per_100_moves: number
+  score_pct: number | null
+  accuracy_pct: number | null
 }
 
 export interface StatsColorSplitSummary {
@@ -1532,20 +1520,27 @@ export interface StatsColorSplitSummary {
 }
 
 export interface StatsMoveQualityDistribution {
-  best: number
-  excellent: number
-  good: number
   inaccuracy: number
   mistake: number
   blunder: number
 }
 
 export interface StatsMoveSummary {
-  player_moves: number
-  avg_cpl: number
-  mistakes_per_100_moves: number
-  blunders_per_100_moves: number
-  quality_distribution: StatsMoveQualityDistribution
+  accuracy_pct: number | null
+  mistake_free_game_rate: number | null
+  // null when there are zero classified player moves.
+  quality_distribution: StatsMoveQualityDistribution | null
+}
+
+export interface StatsTrainingSummary {
+  retention_pct: number | null
+  reviewed_blunders: number
+  retained_blunders: number
+  review_pass_rate: number | null
+  reviews_total: number
+  reviews_passed: number
+  conversions_in_window: number
+  mastery_threshold: number
 }
 
 export interface StatsTopCostlyBlunder {
@@ -1558,35 +1553,44 @@ export interface StatsTopCostlyBlunder {
 
 export interface StatsLibrarySummary {
   blunders_total: number
-  positions_total: number
-  edges_total: number
   new_blunders_in_window: number
   avg_blunder_eval_loss_cp: number
   top_costly_blunders: StatsTopCostlyBlunder[]
 }
 
-export interface StatsDataCompletenessSummary {
-  sessions_with_uploaded_moves_pct: number
-  notes: string[]
+export interface StatsOpeningStat {
+  opening_name: string
+  opening_family: string
+  player_color: string
+  opening_score: number
+  sample_size: number
+  game_count: number
 }
 
-export interface PerfectStreakSummary {
-  personal_best: number
-}
-
-export interface StatsAchievementsSummary {
-  perfect_streak: PerfectStreakSummary
+export interface StatsOpeningsSummary {
+  strongest: StatsOpeningStat[]
+  weakest: StatsOpeningStat[]
 }
 
 export interface StatsSummaryResponse {
   window_days: number
   generated_at: string
   games: StatsGamesSummary
-  colors: StatsColorSplitSummary
   moves: StatsMoveSummary
+  colors: StatsColorSplitSummary
+  training: StatsTrainingSummary
   library: StatsLibrarySummary
-  achievements: StatsAchievementsSummary
-  data_completeness: StatsDataCompletenessSummary
+  openings: StatsOpeningsSummary
+}
+
+// Perfect Streak is served only by the standalone /achievements endpoint (used
+// by the in-game streak toast); it is no longer part of the stats summary.
+export interface PerfectStreakSummary {
+  personal_best: number
+}
+
+export interface StatsAchievementsSummary {
+  perfect_streak: PerfectStreakSummary
 }
 
 /**

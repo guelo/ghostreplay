@@ -128,6 +128,21 @@ describe("RatingGraph", () => {
     });
   });
 
+  describe("series visibility defaults", () => {
+    it("shows only Elo by default; Chess.com and Lichess start hidden", async () => {
+      fetchRatingHistoryMock.mockResolvedValue(makeResponse(0, 10));
+      render(<RatingGraph windowDays={0} presetKey={0} />);
+
+      await waitFor(() => {
+        expect(screen.getByLabelText("Elo")).toBeInTheDocument();
+      });
+
+      expect((screen.getByLabelText("Elo") as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByLabelText("Chess.com") as HTMLInputElement).checked).toBe(false);
+      expect((screen.getByLabelText("Lichess") as HTMLInputElement).checked).toBe(false);
+    });
+  });
+
   describe("data fetching", () => {
     it("fetches all data once on mount regardless of windowDays", async () => {
       fetchRatingHistoryMock.mockResolvedValue(makeResponse(5, 4));

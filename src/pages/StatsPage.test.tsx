@@ -33,56 +33,37 @@ const baseSummary = {
   generated_at: "2026-02-01T00:00:00Z",
   games: {
     played: 12,
-    completed: 10,
-    active: 2,
-    record: {
-      wins: 5,
-      losses: 3,
-      draws: 2,
-      resigns: 1,
-      abandons: 1,
-    },
-    avg_duration_seconds: 3660,
+    score_pct: 58.3,
+    wins: 5,
+    losses: 3,
+    draws: 2,
     avg_moves: 37.5,
   },
-  colors: {
-    white: {
-      games: 6,
-      completed: 5,
-      wins: 3,
-      losses: 1,
-      draws: 1,
-      avg_cpl: 42.5,
-      blunders_per_100_moves: 1.2,
-    },
-    black: {
-      games: 6,
-      completed: 5,
-      wins: 2,
-      losses: 2,
-      draws: 1,
-      avg_cpl: 55.5,
-      blunders_per_100_moves: 2.4,
-    },
-  },
   moves: {
-    player_moves: 340,
-    avg_cpl: 49.2,
-    mistakes_per_100_moves: 6.7,
-    blunders_per_100_moves: 1.8,
+    accuracy_pct: 84.2,
+    mistake_free_game_rate: 40.0,
     quality_distribution: {
-      best: 20.5,
-      excellent: 24.5,
-      good: 28.0,
       inaccuracy: 14.0,
       mistake: 9.0,
       blunder: 4.0,
     },
   },
+  colors: {
+    white: { games: 6, score_pct: 62.5, accuracy_pct: 85.0 },
+    black: { games: 6, score_pct: 54.0, accuracy_pct: 83.0 },
+  },
+  training: {
+    retention_pct: 66.7,
+    reviewed_blunders: 9,
+    retained_blunders: 6,
+    review_pass_rate: 75.0,
+    reviews_total: 20,
+    reviews_passed: 15,
+    conversions_in_window: 4,
+    mastery_threshold: 3,
+  },
   library: {
     blunders_total: 73,
-    positions_total: 64,
-    edges_total: 188,
     new_blunders_in_window: 9,
     avg_blunder_eval_loss_cp: 185,
     top_costly_blunders: [
@@ -95,16 +76,26 @@ const baseSummary = {
       },
     ],
   },
-  achievements: {
-    perfect_streak: {
-      personal_best: 8,
-    },
-  },
-  data_completeness: {
-    sessions_with_uploaded_moves_pct: 66.7,
-    notes: [
-      "Per-move metrics use player moves only.",
-      "SRS review stats are excluded until review outcomes are persisted.",
+  openings: {
+    strongest: [
+      {
+        opening_name: "Ruy Lopez",
+        opening_family: "Ruy Lopez",
+        player_color: "white",
+        opening_score: 55,
+        sample_size: 10,
+        game_count: 8,
+      },
+    ],
+    weakest: [
+      {
+        opening_name: "Sicilian",
+        opening_family: "Sicilian",
+        player_color: "black",
+        opening_score: 21,
+        sample_size: 8,
+        game_count: 6,
+      },
     ],
   },
 };
@@ -124,7 +115,7 @@ describe("StatsPage", () => {
     captureEventMock.mockReset();
   });
 
-  it("loads and renders stats values", async () => {
+  it("loads and renders the reworked sections", async () => {
     getStatsSummaryMock.mockResolvedValueOnce(baseSummary);
 
     renderPage();
@@ -132,49 +123,41 @@ describe("StatsPage", () => {
     expect(screen.getByText("Loading stats...")).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByText("Move Quality")).toBeInTheDocument();
+      expect(screen.getByText("Results")).toBeInTheDocument();
     });
 
     expect(getStatsSummaryMock).toHaveBeenCalledWith(30);
+    // New framing: rates over raw counts.
+    expect(screen.getByText("58.3%")).toBeInTheDocument(); // Score %
+    expect(screen.getByText("84.2%")).toBeInTheDocument(); // Accuracy %
+    expect(screen.getByText("5–3–2 W–L–D")).toBeInTheDocument();
+    // Training conversion.
+    expect(screen.getByText("Blunders Mastered")).toBeInTheDocument();
+    expect(screen.getByText("Reached 3-pass streak")).toBeInTheDocument();
+    // Openings strongest / weakest.
+    expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
+    expect(screen.getByText("Sicilian")).toBeInTheDocument();
+    // Top costly blunder still shown.
     expect(screen.getByText("Qxh7+ vs Re1")).toBeInTheDocument();
-    expect(screen.getByText("Perfect streak")).toBeInTheDocument();
-    expect(screen.getByText("⭐ 8")).toBeInTheDocument();
-    expect(screen.getByText("66.7%")).toBeInTheDocument();
+
+    // Removed sections must be gone.
+    expect(screen.queryByText("Perfect streak")).not.toBeInTheDocument();
+    expect(screen.queryByText("Data Completeness")).not.toBeInTheDocument();
+    expect(screen.queryByText("Positions Total")).not.toBeInTheDocument();
   });
 
-  it("handles empty and zero data", async () => {
+  it("renders em dashes for null rates and hides the distribution when there are no moves", async () => {
     getStatsSummaryMock.mockResolvedValueOnce({
       ...baseSummary,
-      games: {
-        ...baseSummary.games,
-        played: 0,
-        completed: 0,
-        active: 0,
-        avg_duration_seconds: 0,
-        avg_moves: 0,
-      },
+      games: { ...baseSummary.games, played: 0, score_pct: null },
       moves: {
-        ...baseSummary.moves,
-        player_moves: 0,
-        avg_cpl: 0,
-        mistakes_per_100_moves: 0,
-        blunders_per_100_moves: 0,
-        quality_distribution: {
-          best: 0,
-          excellent: 0,
-          good: 0,
-          inaccuracy: 0,
-          mistake: 0,
-          blunder: 0,
-        },
+        accuracy_pct: null,
+        mistake_free_game_rate: null,
+        quality_distribution: null,
       },
       library: {
         ...baseSummary.library,
         blunders_total: 0,
-        positions_total: 0,
-        edges_total: 0,
-        new_blunders_in_window: 0,
-        avg_blunder_eval_loss_cp: 0,
         top_costly_blunders: [],
       },
     });
@@ -187,8 +170,30 @@ describe("StatsPage", () => {
       ).toBeInTheDocument();
     });
 
+    expect(
+      screen.getByText("No analyzed moves in this window yet."),
+    ).toBeInTheDocument();
     expect(screen.getByText("No blunders captured yet.")).toBeInTheDocument();
-    expect(screen.getAllByText("0.0%").length).toBeGreaterThan(0);
+    // Null rates render as em dashes (never a misleading 0.0%).
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  });
+
+  it("hides the Openings section when both lists are empty", async () => {
+    getStatsSummaryMock.mockResolvedValueOnce({
+      ...baseSummary,
+      openings: { strongest: [], weakest: [] },
+    });
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText("Results")).toBeInTheDocument();
+    });
+
+    // The nav still links to /openings; assert the section's own sub-headings
+    // (unique to the stats Openings block) are absent instead.
+    expect(screen.queryByText("Strongest")).not.toBeInTheDocument();
+    expect(screen.queryByText("Weakest")).not.toBeInTheDocument();
   });
 
   it("shows fetch failure and retries successfully", async () => {
@@ -205,7 +210,7 @@ describe("StatsPage", () => {
     await user.click(screen.getByRole("button", { name: "Retry" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Move Quality")).toBeInTheDocument();
+      expect(screen.getByText("Results")).toBeInTheDocument();
     });
 
     expect(getStatsSummaryMock).toHaveBeenCalledTimes(2);
@@ -224,7 +229,7 @@ describe("StatsPage", () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText("Games")).toBeInTheDocument();
+      expect(screen.getByText("Results")).toBeInTheDocument();
     });
 
     await user.click(screen.getAllByRole("button", { name: "90d" })[0]);
@@ -243,7 +248,7 @@ describe("StatsPage", () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText("Games")).toBeInTheDocument();
+      expect(screen.getByText("Results")).toBeInTheDocument();
     });
 
     // Clicking the already-active 30d button is a no-op for analytics.
@@ -264,7 +269,7 @@ describe("StatsPage", () => {
 
     // Wait for initial load to complete (default is 30d)
     await waitFor(() => {
-      expect(screen.getByText("Games")).toBeInTheDocument();
+      expect(screen.getByText("Results")).toBeInTheDocument();
     });
 
     const fetchCountBefore = getStatsSummaryMock.mock.calls.length;
@@ -276,7 +281,7 @@ describe("StatsPage", () => {
     expect(getStatsSummaryMock).toHaveBeenCalledTimes(fetchCountBefore);
 
     // Page should NOT be in loading state — stats content still visible
-    expect(screen.getByText("Games")).toBeInTheDocument();
+    expect(screen.getByText("Results")).toBeInTheDocument();
     expect(screen.queryByText("Loading stats...")).not.toBeInTheDocument();
   });
 });
