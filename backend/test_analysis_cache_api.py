@@ -713,7 +713,7 @@ def test_game_upload_does_not_downgrade_canonical_row(
     assert result["authoritative"] is True
 
 
-# --- Backend-computed trust: contract_satisfied + trusted_for_resolution ---
+# --- Backend-computed trust: contract_satisfied + grain trust ---
 
 
 def _canonical_v2_seed_values():
@@ -726,6 +726,7 @@ def _canonical_v2_seed_values():
 def _seed_v2_canonical(db_session, **overrides):
     row = {
         "fen_before": STARTING_FEN, "move_uci": "e2e4", "move_san": "e4",
+        "normalized_fen_before": normalize_fen(STARTING_FEN),
         "best_move_uci": "e2e4", "best_move_san": "e4",
         "best_line_uci": "e2e4 e7e5", "eval_delta": 0, "classification": "best",
         "played_eval": 20, "best_eval": 20, "source": "precomputed",
@@ -743,21 +744,25 @@ def _lookup_e4(client, auth_headers):
     ).json()["results"][f"{STARTING_FEN}::e2e4"]
 
 
-def test_trusted_for_resolution_true_for_authoritative_v2_row(
+def test_grain_trust_true_for_authoritative_v2_row(
     client, auth_headers, db_session
 ):
+    # The legacy v2 projection still confers BOTH grains in Phase 1: a declared-v2
+    # canonical row is move_trusted (delta-agnostic move-grain projection) and
+    # position_trusted (its normalized FEN resolves via the legacy-v2 fallback).
     _seed_v2_canonical(db_session)
     result = _lookup_e4(client, auth_headers)
     assert result["authoritative"] is True
     assert result["contract_satisfied"] is True
-    assert result["trusted_for_resolution"] is True
+    assert result["move_trusted"] is True
+    assert result["position_trusted"] is True
 
 
 def test_trust_false_when_contract_is_v1_even_if_authoritative(
     client, auth_headers, db_session
 ):
-    # v1 contract: identity is authoritative and v1's own validation passes, but
-    # trust requires resolver-complete-v2 specifically.
+    # v1 contract: identity is authoritative and v1's own validation passes, but a
+    # v1 row confers neither grain; only the legacy v2 projection does.
     _seed_cache(db_session, [{
         "fen_before": STARTING_FEN, "move_uci": "e2e4", "move_san": "e4",
         "best_move_uci": "e2e4", "best_move_san": "e4",
@@ -768,7 +773,8 @@ def test_trust_false_when_contract_is_v1_even_if_authoritative(
     result = _lookup_e4(client, auth_headers)
     assert result["authoritative"] is True
     assert result["contract_satisfied"] is True  # v1 validator passes
-    assert result["trusted_for_resolution"] is False
+    assert result["move_trusted"] is False
+    assert result["position_trusted"] is False
 
 
 def test_trust_false_when_not_authoritative(
@@ -789,7 +795,8 @@ def test_trust_false_when_not_authoritative(
     )
     result = _lookup_e4(client, lambda: auth_headers(user_id=123))
     assert result["authoritative"] is False
-    assert result["trusted_for_resolution"] is False
+    assert result["move_trusted"] is False
+    assert result["position_trusted"] is False
 
 
 def test_trust_false_when_v2_validation_fails(client, auth_headers, db_session):
@@ -799,8 +806,9 @@ def test_trust_false_when_v2_validation_fails(client, auth_headers, db_session):
     _seed_v2_canonical(db_session, eval_delta=40)
     result = _lookup_e4(client, auth_headers)
     assert result["authoritative"] is True
+    # The grain gates deliberately don't re-validate the delta, so this row stays
+    # grain-trusted; the declared-v2 contract diagnostic is what fails closed.
     assert result["contract_satisfied"] is False
-    assert result["trusted_for_resolution"] is False
 
 
 # --- Phase 4: grain-split lookup (separate position + move evidence) -----------
@@ -912,7 +920,6 @@ def test_lookup_position_only_emits_position_grain(client, auth_headers, db_sess
     assert result["classification"] is None
     assert result["authoritative"] is False
     assert result["contract_satisfied"] is False
-    assert result["trusted_for_resolution"] is False
     assert result["position_eval_loss_cp"] is None
 
 

@@ -168,10 +168,11 @@ def test_lookup_move_evals_trusted_canonical_still_resolves(session):
     )
 
     # The seed is the point of this companion: only TRUST distinguishes the rows.
-    # Both are contract-valid, but only the canonical row is trusted-for-resolution,
-    # so the Phase-4 gate keeps the canonical eval rather than returning None.
-    assert _trust_flags(canonical)[2] is True
-    assert _trust_flags(browser)[2] is False
+    # Both are contract-valid (contract_satisfied True), but only the canonical row
+    # is authoritative, so the Phase-4 gate keeps the canonical eval rather than
+    # returning None. _trust_flags returns (authoritative, contract_satisfied).
+    assert _trust_flags(canonical) == (True, True)
+    assert _trust_flags(browser) == (False, True)
 
     result = lookup_move_evals(session, [(POS_A, "f1c4")])[(POS_A, "f1c4")]
 

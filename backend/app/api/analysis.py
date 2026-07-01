@@ -15,7 +15,7 @@ from app.analysis_profiles import (
 )
 from app.analysis_trust import cache_row_as_move_dict, move_trust_flags
 from app.db import get_db
-from app.evidence_contracts import RESOLVER_COMPLETE_V2, contract_satisfied
+from app.evidence_contracts import contract_satisfied
 from app.fen import normalize_fen
 from app.models import AnalysisCache
 from app.position_analysis_repo import TrustedPosition, resolve_trusted_positions
@@ -80,15 +80,9 @@ class CachedAnalysisResult(BaseModel):
     # authoritative profile (same validation the write comparator uses).
     authoritative: bool = False
     # True when the move row's evidence passes its DECLARED contract's semantic
-    # validation. Diagnostics only — trust additionally requires authoritative
-    # identity and the resolver-complete-v2 contract (see trusted_for_resolution).
+    # validation. Diagnostics only — trust is decided per grain by
+    # position_trusted / move_trusted below.
     contract_satisfied: bool = False
-    # Legacy backend-owned trust decision: the move row is authoritative AND
-    # declares resolver-complete-v2 AND that contract's semantic validation
-    # passes. As of Phase 5 the frontend no longer reads this — it keys off the
-    # grain-specific position_trusted/move_trusted pair below. Still emitted
-    # transitionally; removal is a later cleanup once no consumer reads it.
-    trusted_for_resolution: bool = False
     # Grain-specific trust (g-position-analysis Phase 4), independent of one another:
     #   position_trusted — a trusted position was resolved (drives the best_* fields).
     #   move_trusted      — this move row's played evidence passes the move-grain gate.
@@ -126,16 +120,11 @@ def _row_contract_data(row: AnalysisCache) -> dict:
     }
 
 
-def _trust_flags(row: AnalysisCache) -> tuple[bool, bool, bool]:
-    """Return (authoritative, contract_satisfied, trusted_for_resolution)."""
+def _trust_flags(row: AnalysisCache) -> tuple[bool, bool]:
+    """Return (authoritative, contract_satisfied)."""
     authoritative = _is_authoritative(row)
     satisfied = contract_satisfied(row.evidence_contract_id, _row_contract_data(row))
-    trusted = (
-        authoritative
-        and row.evidence_contract_id == RESOLVER_COMPLETE_V2
-        and satisfied
-    )
-    return authoritative, satisfied, trusted
+    return authoritative, satisfied
 
 
 def _position_eval_loss_cp(
@@ -244,7 +233,7 @@ def lookup_analysis(
         norm = norm_by_fen.get(position.fen)
         tp = resolved.get(norm) if norm else None
         if row is not None:
-            authoritative, satisfied, trusted = _trust_flags(row)
+            authoritative, satisfied = _trust_flags(row)
             _, _, move_trusted = move_trust_flags(cache_row_as_move_dict(row))
             # The flattened best-move fields are derived from the trusted position
             # payload (null when untrusted), never from this move row. The
@@ -267,7 +256,6 @@ def lookup_analysis(
                 evidence_contract_id=row.evidence_contract_id,
                 authoritative=authoritative,
                 contract_satisfied=satisfied,
-                trusted_for_resolution=trusted,
                 position_trusted=tp is not None,
                 move_trusted=move_trusted,
                 # Backend-derived trusted CP loss; null unless every guard passes
@@ -304,7 +292,6 @@ def lookup_analysis(
                 evidence_contract_id=None,
                 authoritative=False,
                 contract_satisfied=False,
-                trusted_for_resolution=False,
                 position_trusted=True,
                 move_trusted=False,
                 position_eval_loss_cp=None,

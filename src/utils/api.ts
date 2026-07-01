@@ -964,12 +964,6 @@ export interface CachedAnalysis {
    * semantic validation. Diagnostics only — does not by itself confer trust.
    */
   contract_satisfied?: boolean
-  /**
-   * @deprecated Superseded by the grain-specific `position_trusted` /
-   * `move_trusted` pair. The backend still emits it transitionally, but the
-   * frontend no longer reads it — trust is now decided per grain.
-   */
-  trusted_for_resolution?: boolean
 }
 
 interface AnalysisLookupRequest {

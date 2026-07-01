@@ -25,7 +25,8 @@ Coverage:
 * AC6 — SRS exactly-once: ``POST /api/srs/review`` records exactly one review row
   and moves ``pass_streak`` per the recordable comparator, across the matrix.
 * Canonical trust round-trip: a canonical row written through the shared writer
-  surfaces as ``trusted_for_resolution`` with its delta intact, idempotently.
+  surfaces as ``move_trusted``/``position_trusted`` with its delta intact,
+  idempotently.
 """
 from __future__ import annotations
 
@@ -237,7 +238,8 @@ def test_canonical_row_trusted_and_idempotent(client, auth_headers, db_session, 
         headers=auth_headers(),
     ).json()["results"][f"{FEN}::{move}"]
     assert result["eval_delta"] == delta
-    assert result["trusted_for_resolution"] is True
+    assert result["move_trusted"] is True
+    assert result["position_trusted"] is True
 
     db_session.rollback()
     count = (
