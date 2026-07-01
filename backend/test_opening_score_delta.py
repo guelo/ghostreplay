@@ -6,13 +6,17 @@ natural-end, drill accuracy-fail, and the off-route route-check failure path.
 """
 
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import chess
 import pytest
 
+from conftest import TestingSessionLocal
+
 from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
+from app.opening_baseline_scheduler import OpeningBaselineScheduler
 from app.opening_cache import (
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
@@ -27,8 +31,29 @@ from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 from app.opening_score_delta import (
     compute_opening_score_delta,
     read_opening_score_delta,
+    run_baseline_snapshot_job,
     snapshot_opening_baseline,
 )
+
+
+@contextmanager
+def _injected_baseline_scheduler():
+    """Bind a non-autostart ``OpeningBaselineScheduler`` into both /start handler
+    aliases so a test can drive async baseline capture deterministically with
+    ``run_due()`` (overrides the autouse ``_no_op_baseline_enqueue`` for this block).
+    """
+    sched = OpeningBaselineScheduler(
+        session_factory=TestingSessionLocal, auto_start=False
+    )
+
+    def _enqueue(session_id, user_id, player_color):
+        sched.enqueue(session_id, user_id, player_color)
+
+    with (
+        patch("app.api.game.enqueue_baseline_snapshot", _enqueue),
+        patch("app.api.drills.enqueue_baseline_snapshot", _enqueue),
+    ):
+        yield sched
 
 # The helper imports get_opening_roots / load_cached_rows into its own namespace,
 # and lazy-imports the scheduler funcs from app.opening_score_scheduler.
@@ -172,12 +197,15 @@ def _add_score_row(db_session, *, batch_id, opening_key, opening_score,
 
 
 def _make_session(db_session, *, user_id=123, player_color="white",
-                  baseline=None) -> GameSession:
+                  baseline=None, status="ended",
+                  started_at=datetime(2026, 3, 1, tzinfo=timezone.utc)) -> GameSession:
     sid = uuid.uuid4()
     db_session.add(GameSession(
         id=sid, user_id=user_id,
-        started_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-        status="ended", result="checkmate_win", engine_elo=1500,
+        started_at=started_at,
+        status=status,
+        result="checkmate_win" if status == "ended" else None,
+        engine_elo=1500,
         player_color=player_color, session_mode="normal",
         opening_score_baseline=baseline,
     ))
@@ -508,18 +536,39 @@ def test_delta_logs_source_and_compute_ms(db_session, caplog):
     assert "compute_ms=" in caplog.text
 
 
-def test_game_start_succeeds_when_baseline_snapshot_fails(client, auth_headers, db_session):
-    # Endpoint contract: a snapshot failure degrades the baseline to NULL but the
-    # game must still start.
+def test_baseline_job_swallows_capture_failure(db_session):
+    # Re-homed from the synchronous /start path (g-mxeo): a capture failure inside
+    # the worker job never raises, leaves the baseline NULL, and does not crash.
+    session = _make_session(
+        db_session, status="active",
+        started_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+    )
     with patch(
         "app.opening_score_delta.list_cached_opening_scores",
         side_effect=RuntimeError("db boom"),
     ):
-        resp = client.post(
-            "/api/game/start",
-            json={"engine_elo": 1500, "player_color": "white"},
-            headers=auth_headers(user_id=123),
+        source = run_baseline_snapshot_job(
+            db_session, session.id, session.user_id, session.player_color
         )
+    assert source == "failed"
+    db_session.expire_all()
+    refreshed = db_session.query(GameSession).filter(
+        GameSession.id == session.id
+    ).one()
+    assert refreshed.opening_score_baseline is None
+
+
+def test_game_start_returns_201_with_null_when_enqueue_best_effort(
+    client, auth_headers, db_session
+):
+    # Endpoint contract: /start returns 201 with a NULL baseline immediately —
+    # capture is async and best-effort, so an enqueue no-op/failure never regresses
+    # the response (autouse _no_op_baseline_enqueue stubs the enqueue to a no-op).
+    resp = client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "white"},
+        headers=auth_headers(user_id=123),
+    )
     assert resp.status_code == 201
     session = db_session.query(GameSession).filter(
         GameSession.id == uuid.UUID(resp.json()["session_id"])
@@ -528,23 +577,29 @@ def test_game_start_succeeds_when_baseline_snapshot_fails(client, auth_headers, 
 
 
 def test_game_start_does_not_block_on_scheduler(client, auth_headers, db_session):
-    # Endpoint-level regression: a fresh cache populates the baseline AND the start
-    # path never calls refresh_now (no 5s scheduler wait before the game begins).
+    # Endpoint-level regression: the baseline is NULL immediately (async capture),
+    # the drained worker populates it from a fresh cache, and NO refresh_now runs.
     batch_id = _make_batch(db_session)
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
     db_session.commit()
 
     with patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh:
-        resp = client.post(
-            "/api/game/start",
-            json={"engine_elo": 1500, "player_color": "white"},
-            headers=auth_headers(user_id=123),
-        )
+        with _injected_baseline_scheduler() as sched:
+            resp = client.post(
+                "/api/game/start",
+                json={"engine_elo": 1500, "player_color": "white"},
+                headers=auth_headers(user_id=123),
+            )
+            assert resp.status_code == 201
+            sid = uuid.UUID(resp.json()["session_id"])
+            immediate = db_session.query(GameSession).filter(
+                GameSession.id == sid
+            ).one()
+            assert immediate.opening_score_baseline is None
+            sched.run_due()
 
-    assert resp.status_code == 201
-    session = db_session.query(GameSession).filter(
-        GameSession.id == uuid.UUID(resp.json()["session_id"])
-    ).one()
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
     assert json.loads(session.opening_score_baseline) == {RUY_KEY: 41.0}
     mock_refresh.assert_not_called()
@@ -556,12 +611,18 @@ def test_drill_start_does_not_block_on_scheduler(client, auth_headers, db_sessio
     db_session.commit()
 
     with patch("app.opening_score_scheduler.refresh_now", new=Mock()) as mock_refresh:
-        start = _start_drill(client, auth_headers)
+        with _injected_baseline_scheduler() as sched:
+            start = _start_drill(client, auth_headers)
+            assert start.status_code == 201
+            sid = uuid.UUID(start.json()["session_id"])
+            immediate = db_session.query(GameSession).filter(
+                GameSession.id == sid
+            ).one()
+            assert immediate.opening_score_baseline is None
+            sched.run_due()
 
-    assert start.status_code == 201
-    session = db_session.query(GameSession).filter(
-        GameSession.id == uuid.UUID(start.json()["session_id"])
-    ).one()
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
     assert json.loads(session.opening_score_baseline) == {KP_KEY: 33.0}
     mock_refresh.assert_not_called()
@@ -825,15 +886,21 @@ def test_game_start_populates_baseline(client, auth_headers, db_session):
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=41.0)
     db_session.commit()
 
-    resp = client.post(
-        "/api/game/start",
-        json={"engine_elo": 1500, "player_color": "white"},
-        headers=auth_headers(user_id=123),
-    )
-    assert resp.status_code == 201
-    session = db_session.query(GameSession).filter(
-        GameSession.id == uuid.UUID(resp.json()["session_id"])
-    ).one()
+    with _injected_baseline_scheduler() as sched:
+        resp = client.post(
+            "/api/game/start",
+            json={"engine_elo": 1500, "player_color": "white"},
+            headers=auth_headers(user_id=123),
+        )
+        assert resp.status_code == 201
+        sid = uuid.UUID(resp.json()["session_id"])
+        # Immediate value is NULL — capture is async (g-mxeo).
+        immediate = db_session.query(GameSession).filter(GameSession.id == sid).one()
+        assert immediate.opening_score_baseline is None
+        sched.run_due()
+
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
     assert json.loads(session.opening_score_baseline) == {RUY_KEY: 41.0}
 
@@ -907,11 +974,16 @@ def test_drill_start_populates_baseline(client, auth_headers, db_session):
     _add_score_row(db_session, batch_id=batch_id, opening_key=KP_KEY, opening_score=33.0)
     db_session.commit()
 
-    start = _start_drill(client, auth_headers)
-    assert start.status_code == 201
-    session = db_session.query(GameSession).filter(
-        GameSession.id == uuid.UUID(start.json()["session_id"])
-    ).one()
+    with _injected_baseline_scheduler() as sched:
+        start = _start_drill(client, auth_headers)
+        assert start.status_code == 201
+        sid = uuid.UUID(start.json()["session_id"])
+        immediate = db_session.query(GameSession).filter(GameSession.id == sid).one()
+        assert immediate.opening_score_baseline is None
+        sched.run_due()
+
+    db_session.expire_all()
+    session = db_session.query(GameSession).filter(GameSession.id == sid).one()
     import json
     assert json.loads(session.opening_score_baseline) == {KP_KEY: 33.0}
 

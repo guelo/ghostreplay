@@ -673,6 +673,16 @@ def raw_evidence_inputs_digest(
     ``normalize_fen`` in Python — exactly as the runtime consumer keys
     ``resolve_trusted_positions`` — NOT from the nullable stored
     ``normalized_fen_before`` column, so digest key == runtime key by construction.
+
+    MAINTENANCE (g-mxeo): the SESSION-SCOPED sources below — session_moves (SM|),
+    ghost-target blunders via ``source_session_id`` (GT|), and blunder_reviews
+    (BR|) — are ALSO enumerated by the opening-baseline persist guard in
+    ``opening_score_delta.run_baseline_snapshot_job`` (its NOT EXISTS clauses),
+    which is that guard's airtight, clock-independent correctness check. If you add
+    a new source here that a single session can contribute (i.e. scoped to a
+    session_id / source_session_id), add a matching NOT EXISTS clause there too, or
+    a session feeding only the new source could receive a wrongly-attributed
+    baseline.
     """
     lines: list[str] = []
 

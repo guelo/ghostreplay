@@ -20,12 +20,12 @@ from app.drill_steering import (
 )
 from app.fen import normalize_fen
 from app.models import GameSession, decode_uci_line, encode_uci_line
+from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_graph import get_opening_graph
 from app.opening_roots import derive_family, get_opening_roots
 from app.opening_score_delta import (
     OpeningScoreDeltaItem,
     compute_opening_score_delta,
-    snapshot_opening_baseline,
 )
 from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
@@ -263,12 +263,6 @@ def start_drill(
         drill_opening_key = normalized_target
         drill_line = encode_uci_line(request.line)
 
-    # Snapshot opening scores before any drill move uploads (best-effort), so the
-    # end-of-drill delta has a stable "before" — mirrors the game-start path.
-    opening_score_baseline = snapshot_opening_baseline(
-        db, user.user_id, request.player_color.value
-    )
-
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -284,11 +278,16 @@ def start_drill(
         drill_line=drill_line,
         drill_strictness=request.strictness.value,
         drill_strictness_cp=request.strictness_cp,
-        opening_score_baseline=opening_score_baseline,
+        opening_score_baseline=None,
     )
     db.add(session)
     db.commit()
     db.refresh(session)
+    # Capture the opening-score baseline OFF the request thread (g-mxeo) — mirrors
+    # the game-start path. The worker fills it only when the pre-session batch is
+    # provably fresh and dated strictly before ``started_at``; otherwise it stays
+    # NULL and the end-of-drill delta degrades to "no delta". Best-effort.
+    enqueue_baseline_snapshot(session.id, user.user_id, request.player_color.value)
     contract = _contract(session)
     capture(
         str(user.user_id),

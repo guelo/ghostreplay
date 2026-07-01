@@ -22,6 +22,7 @@ from app.models import (
     SessionMove,
     UserOpeningScore,
 )
+import app.opening_cache as oc
 from app.opening_cache import (
     OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
     ensure_opening_scores,
@@ -219,6 +220,73 @@ def test_recompute_writes_one_coherent_batch(db_session):
     assert all(row.user_id == 123 for row in rows)
     assert all(row.player_color == "black" for row in rows)
     assert all(row.computed_at == batch.computed_at for row in rows)
+
+
+class _MonoClock:
+    """A monotonic fake ``_utcnow`` that advances one second per call, so read
+    wrappers and the ``computed_at`` sample land on strictly increasing ticks."""
+
+    def __init__(self) -> None:
+        self._t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def __call__(self) -> datetime:
+        self._t = self._t + timedelta(seconds=1)
+        return self._t
+
+
+def _naive(dt: datetime) -> datetime:
+    # SQLite round-trips DateTime(timezone=True) as a naive value; strip tz on both
+    # sides of the comparison so an aware/naive TypeError can't mask the assertion.
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
+
+
+def _assert_computed_at_after_reads(db_session, recompute_call):
+    # g-mxeo invariant: computed_at is an UPPER BOUND on the evidence reads (sampled
+    # AFTER the fingerprint + overlay reads). Each read wrapper advances the shared
+    # clock and records its post-read tick; the writer's _utcnow() sample must land
+    # on a strictly later tick than both. (Old lower-bound behaviour — sampling
+    # computed_at before the reads — would fail this: the reads would tick past it.)
+    clock = _MonoClock()
+    recorded: dict[str, datetime] = {}
+    real_fp = oc.opening_score_raw_inputs_fingerprint
+    real_overlay = oc.overlay_evidence
+
+    def fp_wrap(*args, **kwargs):
+        result = real_fp(*args, **kwargs)
+        recorded["fp"] = clock()
+        return result
+
+    def overlay_wrap(*args, **kwargs):
+        result = real_overlay(*args, **kwargs)
+        recorded["overlay"] = clock()
+        return result
+
+    with (
+        patch("app.opening_cache._utcnow", clock),
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", fp_wrap),
+        patch("app.opening_cache.overlay_evidence", overlay_wrap),
+    ):
+        batch = recompute_call()
+
+    assert batch is not None
+    assert "fp" in recorded and "overlay" in recorded
+    latest_read = max(recorded["fp"], recorded["overlay"])
+    assert _naive(batch.computed_at) >= _naive(latest_read)
+
+
+def test_computed_at_is_evidence_read_upper_bound_direct(db_session):
+    _seed_black_opening_session(db_session)
+    _assert_computed_at_after_reads(
+        db_session, lambda: recompute_opening_scores(db_session, 123, "black")
+    )
+
+
+def test_computed_at_is_evidence_read_upper_bound_if_needed(db_session):
+    _seed_black_opening_session(db_session)
+    _assert_computed_at_after_reads(
+        db_session,
+        lambda: recompute_opening_scores_if_needed(db_session, 123, "black"),
+    )
 
 
 def test_recompute_releases_db_transaction_before_scoring(db_session):

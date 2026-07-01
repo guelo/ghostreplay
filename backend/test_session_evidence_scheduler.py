@@ -430,16 +430,19 @@ def test_flush_pending_times_out_on_wedged_run():
     sched.shutdown(drain=True, timeout=5.0)
 
 
-def test_lifespan_starts_both_and_drains_evidence_before_opening(monkeypatch):
-    # The lifespan starts both schedulers, and on teardown drains the evidence
-    # scheduler BEFORE shutting down the opening scheduler. Order is load-bearing:
-    # the evidence drain enqueues opening-score recomputes via request_recompute,
-    # which silently early-returns once the opening scheduler's _shutdown is set.
+def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(monkeypatch):
+    # The lifespan starts all three schedulers, and on teardown drains them in a
+    # load-bearing order: the baseline scheduler (a leaf worker) FIRST, then the
+    # evidence scheduler BEFORE the opening scheduler — the evidence drain enqueues
+    # opening-score recomputes via request_recompute, which silently early-returns
+    # once the opening scheduler's _shutdown is set.
     parent = Mock()
     opening = Mock()
     evidence = Mock()
+    baseline = Mock()
     parent.attach_mock(opening, "opening")
     parent.attach_mock(evidence, "evidence")
+    parent.attach_mock(baseline, "baseline")
 
     connection = Mock()
     connection.__enter__ = Mock(return_value=connection)
@@ -447,6 +450,7 @@ def test_lifespan_starts_both_and_drains_evidence_before_opening(monkeypatch):
 
     monkeypatch.setattr(main, "get_scheduler", lambda: opening)
     monkeypatch.setattr(main, "get_evidence_scheduler", lambda: evidence)
+    monkeypatch.setattr(main, "get_baseline_scheduler", lambda: baseline)
     monkeypatch.setattr(main.engine, "connect", lambda: connection)
     monkeypatch.setattr(main.engine, "dispose", Mock())
 
@@ -458,11 +462,14 @@ def test_lifespan_starts_both_and_drains_evidence_before_opening(monkeypatch):
 
     opening.start.assert_called_once_with()
     evidence.start.assert_called_once_with()
+    baseline.start.assert_called_once_with()
     opening.shutdown.assert_called_once_with(drain=True)
     evidence.shutdown.assert_called_once_with(drain=True)
+    baseline.shutdown.assert_called_once_with(drain=True)
 
     shutdown_calls = [c for c in parent.mock_calls if c[0].endswith(".shutdown")]
     assert shutdown_calls == [
+        call.baseline.shutdown(drain=True),
         call.evidence.shutdown(drain=True),
         call.opening.shutdown(drain=True),
     ]

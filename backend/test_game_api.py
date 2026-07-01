@@ -6,8 +6,64 @@ Run with: pytest test_game_api.py -v
 import uuid
 import random
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
-from app.models import Blunder, BlunderReview, GameSession, RatingHistory
+from conftest import TestingSessionLocal
+
+import app.opening_cache as oc
+from app.models import (
+    Blunder,
+    BlunderReview,
+    GameSession,
+    OpeningScoreBatch,
+    RatingHistory,
+    UserOpeningScore,
+)
+from app.opening_baseline_scheduler import OpeningBaselineScheduler
+from app.opening_cache import (
+    opening_score_inputs_fingerprint,
+    opening_score_raw_inputs_fingerprint,
+)
+from app.opening_graph import get_opening_graph
+from app.opening_roots import get_opening_roots
+
+
+def _seed_fresh_batch(db, *, user_id, player_color, computed_at, scores):
+    """Seed a provably-fresh opening-score batch + rows for (user_id, player_color)."""
+    batch = OpeningScoreBatch(
+        user_id=user_id, player_color=player_color, generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(
+            get_opening_graph(), get_opening_roots()
+        ),
+        inputs_fingerprint=opening_score_raw_inputs_fingerprint(
+            db, user_id, player_color
+        ),
+        computed_at=computed_at,
+    )
+    db.add(batch)
+    db.flush()
+    for key, score in scores.items():
+        db.add(UserOpeningScore(
+            batch_id=batch.id, user_id=user_id, player_color=player_color,
+            opening_key=key, opening_name="x", opening_family="x",
+            opening_score=score, confidence=0.5, coverage=0.5, weighted_depth=1.0,
+            sample_size=5, computed_at=computed_at,
+        ))
+    db.commit()
+    return batch.id
+
+
+def _inject_baseline_scheduler(module: str):
+    """Return (scheduler, patch-context) binding a non-autostart baseline scheduler
+    into ``<module>.enqueue_baseline_snapshot`` so a test can drain it with run_due()."""
+    sched = OpeningBaselineScheduler(
+        session_factory=TestingSessionLocal, auto_start=False
+    )
+
+    def _enqueue(session_id, user_id, player_color):
+        sched.enqueue(session_id, user_id, player_color)
+
+    return sched, patch(f"{module}.enqueue_baseline_snapshot", _enqueue)
 
 
 def test_start_game_success(client, auth_headers):
@@ -1885,6 +1941,83 @@ def test_next_opponent_move_invalid_fen(client, auth_headers, create_game_sessio
 
     assert response.status_code == 400
     assert "invalid fen" in response.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# g-mxeo: opening-baseline capture moved OFF the /start request path
+# ---------------------------------------------------------------------------
+def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db_session):
+    # Load-bearing contract: NO O(evidence) digest runs before the /start response.
+    # A fresh pre-session batch exists so the drained worker CAN capture; the digest
+    # count must be 0 when the response returns and increment exactly 0 -> 1 only
+    # across the explicit run_due() drain (proving it moved off the request thread).
+    #
+    # A dedicated user_id isolates the counter from any background opening-score
+    # recompute thread a sibling test's /game/end may have left running (those fire
+    # the digest for OTHER users); we count only digests for THIS test's user.
+    baseline_user = 990101
+    _seed_fresh_batch(
+        db_session, user_id=baseline_user, player_color="white",
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        scores={"opening-x": 41.0},
+    )
+    calls = {"n": 0}
+    real_digest = oc.raw_evidence_inputs_digest
+
+    def counting_digest(db, user_id, player_color, *args, **kwargs):
+        if user_id == baseline_user:
+            calls["n"] += 1
+        return real_digest(db, user_id, player_color, *args, **kwargs)
+
+    sched, enqueue_patch = _inject_baseline_scheduler("app.api.game")
+    with patch("app.opening_cache.raw_evidence_inputs_digest", counting_digest), enqueue_patch:
+        resp = client.post(
+            "/api/game/start",
+            json={"engine_elo": 1500, "player_color": "white"},
+            headers=auth_headers(user_id=baseline_user),
+        )
+        assert resp.status_code == 201
+        sid = uuid.UUID(resp.json()["session_id"])
+
+        # Exactly one queued job, and NO digest ran on the request path.
+        with sched._cond:
+            assert len(sched._pending) == 1
+        assert calls["n"] == 0
+
+        # The digest runs exactly once, only across the drained job.
+        sched.run_due()
+        assert calls["n"] == 1
+
+    db_session.expire_all()
+    session = db_session.get(GameSession, sid)
+    import json
+    assert json.loads(session.opening_score_baseline) == {"opening-x": 41.0}
+
+
+def test_game_start_baseline_null_when_date_guard_loses_race(client, auth_headers, db_session):
+    # End-to-end race loss: only a POST-session batch exists when the worker drains,
+    # so the strict date guard rejects it and the baseline degrades to NULL (no delta).
+    sched, enqueue_patch = _inject_baseline_scheduler("app.api.game")
+    with enqueue_patch:
+        resp = client.post(
+            "/api/game/start",
+            json={"engine_elo": 1500, "player_color": "white"},
+            headers=auth_headers(user_id=123),
+        )
+        assert resp.status_code == 201
+        sid = uuid.UUID(resp.json()["session_id"])
+
+        # A recompute lands AFTER the session started (post-session batch).
+        _seed_fresh_batch(
+            db_session, user_id=123, player_color="white",
+            computed_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            scores={"opening-x": 41.0},
+        )
+        sched.run_due()
+
+    db_session.expire_all()
+    session = db_session.get(GameSession, sid)
+    assert session.opening_score_baseline is None
 
 
 if __name__ == "__main__":

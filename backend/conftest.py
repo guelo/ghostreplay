@@ -500,14 +500,34 @@ def _sync_session_evidence():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_op_baseline_enqueue():
+    """Stop /start handlers from spawning the real opening-baseline daemon (g-mxeo).
+
+    In production ``start_game`` / ``start_drill`` call ``enqueue_baseline_snapshot``,
+    which enqueues onto the module-singleton ``OpeningBaselineScheduler`` bound to the
+    real ``SessionLocal`` — a background thread that would bypass ``TestingSessionLocal``.
+    Patch the bound aliases imported into the API modules so the default is a no-op
+    recorder. Tests that assert async capture inject their own non-autostart
+    ``OpeningBaselineScheduler(session_factory=TestingSessionLocal)`` and patch these
+    aliases to enqueue into it, then drive it with ``run_due()``.
+    """
+    with patch("app.api.game.enqueue_baseline_snapshot") as game_stub, patch(
+        "app.api.drills.enqueue_baseline_snapshot"
+    ) as drills_stub:
+        yield game_stub, drills_stub
+
+
 @pytest.fixture
 def client(_db_override):
-    # Patch get_evidence_scheduler (and get_scheduler) so the FastAPI lifespan
-    # never starts a real daemon thread bound to the production SessionLocal
-    # during tests; the _sync_session_evidence shim handles endpoint behaviour.
+    # Patch the scheduler getters so the FastAPI lifespan never starts a real daemon
+    # thread bound to the production SessionLocal during tests; the
+    # _sync_session_evidence / _no_op_baseline_enqueue shims handle endpoint behaviour.
     with patch("app.main.engine", engine), patch(
         "app.main.get_scheduler"
-    ) as get_scheduler, patch("app.main.get_evidence_scheduler"):
+    ) as get_scheduler, patch("app.main.get_evidence_scheduler"), patch(
+        "app.main.get_baseline_scheduler"
+    ):
         with TestClient(app) as client:
             yield client
 
@@ -621,7 +641,9 @@ def pg_client(pg_engine, pg_session_factory):
     app.dependency_overrides[get_db] = _override_pg_db
     with patch("app.main.engine", pg_engine), patch(
         "app.main.get_scheduler"
-    ), patch("app.main.get_evidence_scheduler"):
+    ), patch("app.main.get_evidence_scheduler"), patch(
+        "app.main.get_baseline_scheduler"
+    ):
         with TestClient(app) as pg_test_client:
             yield pg_test_client
     app.dependency_overrides.pop(get_db, None)

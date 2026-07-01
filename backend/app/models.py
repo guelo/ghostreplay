@@ -218,15 +218,17 @@ class GameSession(Base):
     # echo back the recorded id; blunder_idempotency_key is the decision key.
     recorded_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, nullable=True)
     blunder_idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # Per-session snapshot of the user's opening scores at session start, as a
-    # JSON-encoded {opening_key: opening_score} map (Text, JSON-as-string per the
-    # repo convention). Captured before any of this session's moves are uploaded
-    # so end-of-session opening-score deltas have a stable "before" to diff
-    # against (live games feed request_recompute incrementally, so the cached
-    # score already reflects most of the game by the time it ends). NULL on older
-    # sessions or when the snapshot was best-effort skipped (delta then omitted);
-    # "{}" means "snapshot taken, user had no scored openings yet" (every crossed
-    # opening reads as new). See app/opening_score_delta.py.
+    # Per-session snapshot of the user's opening scores, as a JSON-encoded
+    # {opening_key: opening_score} map (Text, JSON-as-string per the repo
+    # convention), so end-of-session opening-score deltas have a stable "before" to
+    # diff against (live games feed request_recompute incrementally, so the cached
+    # score already reflects most of the game by the time it ends). Captured
+    # ASYNCHRONOUSLY shortly after session start by the OpeningBaselineScheduler
+    # worker (g-mxeo), and persisted ONLY when the pre-session cached batch is
+    # provably fresh AND dated STRICTLY BEFORE started_at; otherwise it remains
+    # NULL. NULL (older sessions, best-effort skip/race, or a dropped job) omits
+    # the delta; "{}" means "captured, user had no scored openings yet" (every
+    # crossed opening reads as new). See app/opening_score_delta.py.
     opening_score_baseline: Mapped[str | None] = mapped_column(Text)
 
 

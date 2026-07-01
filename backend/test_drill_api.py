@@ -6,9 +6,25 @@ from unittest.mock import patch
 
 import chess
 
-from app.models import AnalysisCache, Blunder, GameSession, RatingHistory, SessionMove
-from app.opening_graph import OpeningGraph, OpeningGraphNode
-from app.opening_roots import OpeningRoot, OpeningRoots
+from conftest import TestingSessionLocal
+
+import app.opening_cache as oc
+from app.models import (
+    AnalysisCache,
+    Blunder,
+    GameSession,
+    OpeningScoreBatch,
+    RatingHistory,
+    SessionMove,
+    UserOpeningScore,
+)
+from app.opening_baseline_scheduler import OpeningBaselineScheduler
+from app.opening_cache import (
+    opening_score_inputs_fingerprint,
+    opening_score_raw_inputs_fingerprint,
+)
+from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
+from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
 START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
@@ -1615,3 +1631,84 @@ def test_adhoc_start_rejects_line_revisiting_a_position(client, auth_headers):
     )
     assert r.status_code == 422
     assert "revisits" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# g-mxeo: opening-baseline capture moved OFF the /drills/start request path
+# ---------------------------------------------------------------------------
+def _seed_fresh_batch(db, *, user_id, player_color, computed_at, scores):
+    batch = OpeningScoreBatch(
+        user_id=user_id, player_color=player_color, generation=1,
+        registry_fingerprint=opening_score_inputs_fingerprint(
+            get_opening_graph(), get_opening_roots()
+        ),
+        inputs_fingerprint=opening_score_raw_inputs_fingerprint(
+            db, user_id, player_color
+        ),
+        computed_at=computed_at,
+    )
+    db.add(batch)
+    db.flush()
+    for key, score in scores.items():
+        db.add(UserOpeningScore(
+            batch_id=batch.id, user_id=user_id, player_color=player_color,
+            opening_key=key, opening_name="x", opening_family="x",
+            opening_score=score, confidence=0.5, coverage=0.5, weighted_depth=1.0,
+            sample_size=5, computed_at=computed_at,
+        ))
+    db.commit()
+
+
+def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, db_session):
+    # Mirrors the game-start acceptance: NO O(evidence) digest before the /start
+    # response; it runs exactly once, only across the drained baseline job. A
+    # dedicated user_id isolates the counter from any background opening-score
+    # recompute thread a sibling test may have left running.
+    baseline_user = 990202
+    _seed_fresh_batch(
+        db_session, user_id=baseline_user, player_color="black",
+        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        scores={"opening-x": 55.0},
+    )
+    calls = {"n": 0}
+    real_digest = oc.raw_evidence_inputs_digest
+
+    def counting_digest(db, user_id, player_color, *args, **kwargs):
+        if user_id == baseline_user:
+            calls["n"] += 1
+        return real_digest(db, user_id, player_color, *args, **kwargs)
+
+    sched = OpeningBaselineScheduler(
+        session_factory=TestingSessionLocal, auto_start=False
+    )
+
+    def _enqueue(session_id, user_id, player_color):
+        sched.enqueue(session_id, user_id, player_color)
+
+    with (
+        patch("app.opening_cache.raw_evidence_inputs_digest", counting_digest),
+        patch("app.api.drills.enqueue_baseline_snapshot", _enqueue),
+        patch("app.api.drills.get_opening_roots", return_value=_roots()),
+    ):
+        resp = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": ROOT_FEN, "player_color": "black",
+                "engine_elo": 1500, "strictness": "standard",
+            },
+            headers=auth_headers(user_id=baseline_user),
+        )
+        assert resp.status_code == 201
+        sid = uuid.UUID(resp.json()["session_id"])
+
+        with sched._cond:
+            assert len(sched._pending) == 1
+        assert calls["n"] == 0
+
+        sched.run_due()
+        assert calls["n"] == 1
+
+    db_session.expire_all()
+    session = db_session.get(GameSession, sid)
+    import json
+    assert json.loads(session.opening_score_baseline) == {"opening-x": 55.0}

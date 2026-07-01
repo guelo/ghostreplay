@@ -97,6 +97,20 @@ def _validate_player_color(player_color: str) -> None:
         raise ValueError(f"Unsupported player_color: {player_color}")
 
 
+def _utcnow() -> datetime:
+    """Small seam around ``datetime.now(timezone.utc)`` so tests can control
+    timestamp ordering (g-mxeo).
+
+    ``recompute_opening_scores`` samples the batch's ``computed_at`` through this
+    AFTER the fingerprint + overlay evidence reads, making ``computed_at`` an UPPER
+    BOUND on the evidence reflected in the batch. The opening-baseline date guard
+    (``opening_score_delta._capture_baseline_json``) relies on that invariant: a
+    batch with ``computed_at < session.started_at`` cannot contain any of the
+    session's evidence, so it is safe to persist as the pre-session baseline.
+    """
+    return datetime.now(timezone.utc)
+
+
 def opening_score_inputs_fingerprint(
     graph: OpeningGraph,
     roots: OpeningRoots,
@@ -869,8 +883,6 @@ def recompute_opening_scores(
         # effects (generation reservation) so misuse cannot leave dangling state.
         raise ValueError("inputs_fingerprint is required when overlay is provided")
     generation = reserve_opening_score_generation(db, user_id, player_color)
-    if computed_at is None:
-        computed_at = datetime.now(timezone.utc)
     graph = get_opening_graph()
     roots = get_opening_roots()
     if inputs_fingerprint is None:
@@ -886,6 +898,14 @@ def recompute_opening_scores(
     # Without this, repeated requests can sit idle in transaction and exhaust
     # the pool while score computation is still running.
     db.rollback()
+    # Sample computed_at AFTER the fingerprint + overlay reads (or the prebuilt
+    # overlay the caller passed) so it is an UPPER BOUND on the evidence reflected
+    # in this batch, not a lower bound (g-mxeo). The opening-baseline date guard
+    # depends on this: a batch dated strictly before a session's start then cannot
+    # possibly contain that session's evidence. A caller that passes an explicit
+    # computed_at (tests / controlled ordering) keeps its value.
+    if computed_at is None:
+        computed_at = _utcnow()
     scores, position_scores = _build_cached_scores(
         player_color, graph, overlay, roots, computed_at
     )
@@ -1119,13 +1139,15 @@ def recompute_opening_scores_if_needed(
             return None
         started = time.monotonic()
         overlay = overlay_evidence(db, user_id, player_color, graph)
+        # Do NOT pass computed_at=now: the writer samples it AFTER the fingerprint
+        # + overlay reads above so it stays an upper bound on the batch's evidence
+        # (g-mxeo). ``now`` is kept only for the decay-staleness gate below.
         result = recompute_opening_scores(
             db,
             user_id,
             player_color,
             overlay=overlay,
             inputs_fingerprint=raw_fingerprint,
-            computed_at=now,
         )
         _emit_opening_scores_recomputed(
             db,
@@ -1173,13 +1195,15 @@ def recompute_opening_scores_if_needed(
     # overlay and recompute.
     started = time.monotonic()
     overlay = overlay_evidence(db, user_id, player_color, graph)
+    # As in the cache-miss branch: let the writer sample computed_at after these
+    # reads so it remains an evidence-read upper bound (g-mxeo). ``now`` above is
+    # for the decay-staleness gate only.
     result = recompute_opening_scores(
         db,
         user_id,
         player_color,
         overlay=overlay,
         inputs_fingerprint=raw_fingerprint,
-        computed_at=now,
     )
     _emit_opening_scores_recomputed(
         db,

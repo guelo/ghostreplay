@@ -3,16 +3,27 @@
 A game or drill that ends recomputes the user's opening scores and reports how
 the *played* openings' scores changed, broadest -> deepest. The "after" side is
 the freshly-recomputed cached score; the "before" side is the per-session
-baseline snapshotted at session start (``GameSession.opening_score_baseline``).
+baseline captured shortly after session start (``GameSession.opening_score_baseline``).
 
 Why a baseline is required: opening scores are cumulative over all evidence and
 live play feeds ``request_recompute`` incrementally as moves upload, so by the
 time a session ends the cached score already reflects most of that session. There
 is no "pre-session" score left to diff against unless it was captured up front.
 
-Both helpers are best-effort and never raise: the delta is supplementary to the
-end-of-session response (rating change, drill contract), so a failure degrades to
-"no delta shown" rather than breaking the endpoint.
+ASYNC CAPTURE (g-mxeo): proving the cached batch fresh costs an O(all-evidence)
+digest that ballooned start latency, so capture no longer runs inline on the
+``/start`` request. The start handler enqueues a job on ``OpeningBaselineScheduler``
+and returns immediately; the worker calls ``run_baseline_snapshot_job`` shortly
+after. Because that races this session's own evidence, the worker persists a
+baseline ONLY when the pre-session cached batch is provably fresh AND dated
+STRICTLY BEFORE ``session.started_at`` (``computed_at`` is an evidence-read upper
+bound — see ``opening_cache._utcnow``). Otherwise the baseline stays NULL and the
+end-of-session delta degrades to "no delta". A post-session baseline is never
+written.
+
+Both public helpers are best-effort and never raise: the delta is supplementary
+to the end-of-session response (rating change, drill contract), so a failure
+degrades to "no delta shown" rather than breaking the endpoint.
 """
 
 from __future__ import annotations
@@ -20,12 +31,20 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 from pydantic import BaseModel
-from sqlalchemy import case
+from sqlalchemy import case, select, update
 from sqlalchemy.orm import Session
 
-from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
+from app.models import (
+    Blunder,
+    BlunderReview,
+    GameSession,
+    OpeningScoreBatch,
+    SessionMove,
+    UserOpeningScore,
+)
 from app.opening_cache import (
     _is_batch_fresh,
     has_opening_evidence,
@@ -34,6 +53,16 @@ from app.opening_cache import (
 from app.opening_roots import get_opening_roots, played_opening_chain
 
 logger = logging.getLogger(__name__)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Coerce a datetime to timezone-aware UTC, treating naive as UTC.
+
+    SQLite test paths and older rows can return naive datetimes; normalizing both
+    sides before an ordering comparison avoids the aware/naive ``TypeError``.
+    Mirrors the guard around ``opening_cache.recompute_opening_scores_if_needed``.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
 class OpeningScoreDeltaItem(BaseModel):
@@ -58,86 +87,109 @@ class OpeningScoreDeltaItem(BaseModel):
     is_new: bool
 
 
-def snapshot_opening_baseline(
-    db: Session, user_id: int, player_color: str
-) -> str | None:
-    """Capture the user's current opening scores as a JSON ``{key: score}`` map.
+def _capture_baseline_json(
+    db: Session,
+    user_id: int,
+    player_color: str,
+    *,
+    not_after: datetime | None,
+    skip_when_inflight: bool,
+) -> tuple[str | None, str]:
+    """Capture the current opening scores as a JSON ``{key: score}`` map — PURE.
 
-    Returns the JSON string to persist into ``GameSession.opening_score_baseline``
-    (``"{}"`` when the user has no opening evidence yet — a valid empty baseline,
-    so the session's first openings later read as new), or None when no confident
-    baseline can be captured (delta then omitted at session end). Best-effort: any
-    failure leaves the baseline NULL rather than blocking session creation.
+    Returns ``(json_or_none, source)``. No ``try/except``, no rollback, no logging,
+    no timing ``finally`` — the two best-effort wrappers own those, and unexpected
+    DB errors propagate to them. ``json_or_none`` is ``"{}"`` (valid empty baseline
+    for a user with no evidence, so the session's first openings later read as new),
+    a JSON score map, or None (no confident baseline — delta then omitted).
 
-    NON-BLOCKING (g-fix-start-latency): this runs on the game/drill start hot path
-    and must NEVER wait on the opening-score scheduler. It reads the latest cached
-    batch directly via ``list_cached_opening_scores`` (no ``refresh_now``, no
-    enqueue, no blocking) and only returns a confident baseline when that batch is
-    PROVABLY current — registry + raw-input fingerprints match and no stale branch
-    keys (``_is_batch_fresh``). A stale or cold-with-evidence cache yields NULL
-    instead: diffing a stale "before" against the end-of-session fresh "after"
-    would over-attribute prior sessions' gains to the just-ended one, so degrading
-    to "no delta" is preferred over a misattributed one. Only a user with
-    genuinely no evidence gets the empty ``"{}"`` baseline.
+    Guards, in order:
 
-    CHEAP-GATE (g-1iul): the freshness proof (``_is_batch_fresh`` ->
-    ``raw_evidence_inputs_digest``) is O(evidence) and python-chess-heavy, so it
-    ballooned to ~9.6s when it serialized (GIL-bound) against a RUNNING background
-    recompute. This snapshot is ONE-SHOT (no later poll re-checks it), so it gates
-    that digest behind an IN-FLIGHT-ONLY probe (``is_recompute_inflight``), NOT the
-    broader pending-or-in-flight ``is_recompute_scheduled`` the poll uses: a
-    merely-pending entry is idle (no GIL contention, only the residual ~1.3s digest
-    tracked by g-mxeo), and gating on it would PERMANENTLY drop the baseline for
-    any session that starts during the common debounce window. So only a RUNNING
-    recompute makes the snapshot skip the digest and degrade to no-baseline.
+    - No cached batch: ``("{}", "empty_no_evidence")`` when ``has_opening_evidence``
+      is false, else ``(None, "skipped_cold")`` (a cold cache with evidence cannot
+      prove a baseline; persisting one would falsely mark every existing opening
+      "new" at session end).
+    - ``skip_when_inflight`` (synchronous start path, g-1iul): while a recompute is
+      RUNNING, the freshness digest (``_is_batch_fresh`` -> ``raw_evidence_inputs_digest``)
+      GIL-serializes against it (the ~9.6s pathology), so degrade to
+      ``(None, "skipped_recompute_inflight")`` WITHOUT paying it. The evidence probe
+      only runs in the no-batch case (to keep a brand-new user's empty baseline).
+      The async worker passes ``skip_when_inflight=False``: it is off the request
+      thread, so correctness comes from the strict date/freshness proof instead.
+    - ``not_after`` date guard (async worker, g-mxeo): if the batch's normalized
+      ``computed_at >= not_after``, the batch may already reflect this session's
+      evidence (``computed_at`` is an evidence-read upper bound), so return
+      ``(None, "skipped_post_session_batch")`` BEFORE paying the O(evidence) digest.
+      The predicate is strict: a batch tying ``started_at`` at clock resolution
+      cannot be proven pre-session and is rejected.
+    - Freshness: a provably-stale batch returns ``(None, "skipped_stale")``; a fresh
+      batch returns ``(json.dumps({key: score}), "cached_fresh")``.
     """
-    t0 = time.perf_counter()
-    source = "failed"
-    try:
-        # Cheap indexed batch+rows read first (no fingerprint/digest).
-        batch, rows = list_cached_opening_scores(db, user_id, player_color)
+    # Cheap indexed batch+rows read first (no fingerprint/digest).
+    batch, rows = list_cached_opening_scores(db, user_id, player_color)
 
+    if skip_when_inflight:
         # IN-FLIGHT-ONLY gate (lazy import: the scheduler imports opening_cache at
         # module load, so a top-level import risks a cycle). A RUNNING recompute is
         # the only thing that makes the O(evidence) digest serialize against the
-        # worker (the 9.6s pathology); skip it. A pending/debounced entry is
-        # deliberately NOT gated here (see docstring) so its fresh baseline is still
-        # captured.
+        # worker; a pending/debounced entry is idle and NOT gated here.
         from app.opening_score_scheduler import is_recompute_inflight
 
         if is_recompute_inflight(user_id, player_color):
             if batch is not None:
-                # The running worker is rebuilding the batch and we cannot prove the
+                # Running worker is rebuilding the batch; we cannot prove the
                 # current one fresh without paying the digest it would serialize
                 # against. Degrade to no-baseline (NO evidence probe, NO digest).
-                source = "skipped_recompute_inflight"
-                return None
+                return None, "skipped_recompute_inflight"
             # No batch: only now pay the evidence probe to keep a brand-new user's
             # valid empty baseline. Confined to the batch-is-None case.
             if has_opening_evidence(db, user_id, player_color):
-                source = "skipped_recompute_inflight"
-                return None
-            source = "empty_no_evidence"
-            return "{}"
+                return None, "skipped_recompute_inflight"
+            return "{}", "empty_no_evidence"
 
-        # Quiescent: prove freshness (the O(evidence) digest; residual g-mxeo).
-        if batch is None:
-            # No batch yet. Distinguish a brand-new user (no evidence -> valid
-            # empty baseline) from a cold cache that still has evidence (cannot
-            # prove a baseline -> skip, else session-end falsely marks every
-            # existing opening "new").
-            if has_opening_evidence(db, user_id, player_color):
-                source = "skipped_cold"
-                return None
-            source = "empty_no_evidence"
-            return "{}"
-        if not _is_batch_fresh(db, batch, rows):
-            # Cache exists but is provably stale (evidence/registry drift or legacy
-            # branch keys). Persisting it would reintroduce the misattribution.
-            source = "skipped_stale"
-            return None
-        source = "cached_fresh"
-        return json.dumps({row.opening_key: row.opening_score for row in rows})
+    if batch is None:
+        # No batch yet. Distinguish a brand-new user (no evidence -> valid empty
+        # baseline) from a cold cache that still has evidence (cannot prove a
+        # baseline -> skip, else session-end falsely marks every opening "new").
+        if has_opening_evidence(db, user_id, player_color):
+            return None, "skipped_cold"
+        return "{}", "empty_no_evidence"
+
+    # Date guard (g-mxeo): reject a batch that may already reflect this session's
+    # evidence BEFORE paying the O(evidence) freshness digest. Strict ``>=``: a
+    # batch whose computed_at ties started_at cannot be proven pre-session.
+    if not_after is not None and _as_utc(batch.computed_at) >= _as_utc(not_after):
+        return None, "skipped_post_session_batch"
+
+    if not _is_batch_fresh(db, batch, rows):
+        # Cache exists but is provably stale (evidence/registry drift or legacy
+        # branch keys). Persisting it would reintroduce the misattribution.
+        return None, "skipped_stale"
+    return json.dumps({row.opening_key: row.opening_score for row in rows}), "cached_fresh"
+
+
+def snapshot_opening_baseline(
+    db: Session, user_id: int, player_color: str
+) -> str | None:
+    """Best-effort SYNCHRONOUS baseline capture — thin wrapper over
+    ``_capture_baseline_json`` for direct tests and any legacy callers.
+
+    After g-mxeo, production start handlers no longer call this; the baseline is
+    captured asynchronously by ``run_baseline_snapshot_job`` on the
+    ``OpeningBaselineScheduler`` worker. This wrapper preserves the original
+    contract: it never raises, rolls back best-effort on failure, returns None on
+    failure, gates the O(evidence) digest behind the in-flight-only probe
+    (``skip_when_inflight=True``), and logs the ``opening_baseline_snapshot ...``
+    line. It passes ``not_after=None`` (no date guard): a synchronous capture runs
+    BEFORE the session INSERT, so it races nothing.
+    """
+    t0 = time.perf_counter()
+    source = "failed"
+    try:
+        result, source = _capture_baseline_json(
+            db, user_id, player_color, not_after=None, skip_when_inflight=True
+        )
+        return result
     except Exception:  # noqa: BLE001 — best-effort snapshot must never block start
         # A failed read can abort the transaction (esp. Postgres); roll back so
         # the caller's session-create insert/commit is not poisoned. Guard the
@@ -160,6 +212,141 @@ def snapshot_opening_baseline(
         # the route's duration_ms (HTTPLoggingMiddleware) proves start latency.
         logger.info(
             "opening_baseline_snapshot user_id=%s color=%s source=%s snapshot_ms=%.2f",
+            user_id,
+            player_color,
+            source,
+            (time.perf_counter() - t0) * 1000.0,
+        )
+
+
+def run_baseline_snapshot_job(
+    db: Session, session_id, user_id: int, player_color: str
+) -> str:
+    """Async opening-baseline capture job for ``OpeningBaselineScheduler`` — NEVER
+    raises. Returns a ``source`` string (also logged) describing the outcome.
+
+    The queued ``user_id``/``player_color`` are UNTRUSTED routing hints, not
+    authoritative capture inputs. A stale or mis-routed duplicate enqueue carrying
+    the wrong pair would otherwise capture ANOTHER user's/color's cached scores and
+    persist them onto this session. So capture always keys off the SESSION ROW's own
+    ``user_id``/``player_color``; the queued copies are used only for logging and one
+    cheap sanity check.
+
+    Flow:
+
+    1. Session missing -> ``"missing_session"``.
+    2. Baseline already set -> ``"already_set"`` (idempotent).
+    3. Session not active -> ``"not_active"`` (cheap early-exit; the UPDATE re-checks
+       it atomically).
+    4. Queued hints disagree with the row -> ``"session_mismatch"`` (surface the
+       upstream bug; correctness does not depend on it — capture uses the row).
+    5. Capture from the ROW via ``_capture_baseline_json`` with the strict date guard
+       (``not_after=session.started_at``) and ``skip_when_inflight=False``.
+    6. None -> leave the baseline NULL, return the helper's source.
+    7. Persist via a single conditional UPDATE that re-checks ``status="active"``,
+       the captured identity, NULL baseline, and the absence of any session-scoped
+       evidence — atomic with the write. ``rowcount == 1`` returns the helper source;
+       otherwise ``"raced_evidence_or_already_set"``.
+    8. Unexpected errors -> guarded rollback, ``"failed"``, never crash the worker.
+    """
+    t0 = time.perf_counter()
+    source = "failed"
+    try:
+        session = db.get(GameSession, session_id)
+        if session is None:
+            source = "missing_session"
+            return source
+        if session.opening_score_baseline is not None:
+            source = "already_set"
+            return source
+        if session.status != "active":
+            source = "not_active"
+            return source
+        if (user_id, player_color) != (session.user_id, session.player_color):
+            # Mis-routed / stale enqueue. Capture would use the row either way, so
+            # correctness does not depend on this check; it surfaces the upstream
+            # bug rather than silently doing the right thing.
+            source = "session_mismatch"
+            return source
+
+        json_str, source = _capture_baseline_json(
+            db,
+            session.user_id,
+            session.player_color,
+            not_after=session.started_at,
+            skip_when_inflight=False,
+        )
+        if json_str is None:
+            return source
+
+        # Defense-in-depth persist (typed SQLAlchemy Core so the UUID id binds on
+        # both the SQLite test schema — id TEXT — and Postgres — id UUID). A single
+        # conditional UPDATE re-checks status/identity, NULL-baseline idempotency,
+        # and the absence of any session-scoped evidence, ATOMIC with the write. The
+        # session_moves.session_id index covers its check; the review/blunder checks
+        # may table-scan but run once per session start on the background worker.
+        #
+        # AIRTIGHTNESS: these NOT EXISTS clauses — not the date guard — are the real
+        # correctness guarantee. They directly assert the invariant that matters
+        # ("has this session fed any evidence yet?") and are clock-INDEPENDENT; the
+        # date guard is a cheap clock-DEPENDENT early-out that can be fooled by
+        # DB/app clock skew. So the clauses must enumerate EVERY session-scoped
+        # source that feeds ``raw_evidence_inputs_digest``: session_moves (SM|),
+        # ghost-target blunders via source_session_id (GT|), and blunder_reviews
+        # (BR|). (The digest's analysis_cache/position_analysis grains are global,
+        # not session-attributable, so they are intentionally absent here.)
+        # MAINTENANCE: any NEW session-scoped evidence source added to
+        # ``raw_evidence_inputs_digest`` MUST also get a NOT EXISTS clause here —
+        # otherwise a session contributing only that source would slip past this
+        # airtight check and be protected by the clock-dependent date guard alone.
+        stmt = (
+            update(GameSession)
+            .where(GameSession.id == session_id)
+            .where(GameSession.status == "active")
+            .where(GameSession.user_id == session.user_id)
+            .where(GameSession.player_color == session.player_color)
+            .where(GameSession.opening_score_baseline.is_(None))
+            .where(
+                ~select(SessionMove.id)
+                .where(SessionMove.session_id == GameSession.id)
+                .exists()
+            )
+            .where(
+                ~select(BlunderReview.id)
+                .where(BlunderReview.session_id == GameSession.id)
+                .exists()
+            )
+            .where(
+                ~select(Blunder.id)
+                .where(Blunder.source_session_id == GameSession.id)
+                .exists()
+            )
+            .values(opening_score_baseline=json_str)
+        )
+        persisted = db.execute(stmt).rowcount == 1
+        db.commit()
+        if not persisted:
+            source = "raced_evidence_or_already_set"
+        return source
+    except Exception:  # noqa: BLE001 — worker job must never crash the scheduler
+        source = "failed"
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "opening_baseline_job source=failed session_id=%s user_id=%s color=%s",
+            session_id,
+            user_id,
+            player_color,
+            exc_info=True,
+        )
+        return source
+    finally:
+        # Fields go IN THE MESSAGE (root formatter prints %(message)s only).
+        logger.info(
+            "opening_baseline_job session_id=%s user_id=%s color=%s source=%s snapshot_ms=%.2f",
+            session_id,
             user_id,
             player_color,
             source,

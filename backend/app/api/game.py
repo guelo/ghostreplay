@@ -19,11 +19,11 @@ from app.db import get_db
 from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory, decode_uci_line
+from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_graph import get_opening_graph
 from app.opening_score_delta import (
     OpeningScoreDeltaItem,
     compute_opening_score_delta,
-    snapshot_opening_baseline,
 )
 from app.posthog_client import capture
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
@@ -628,13 +628,6 @@ def start_game(
 
     Returns the session_id to be used for subsequent game operations.
     """
-    # Snapshot the user's current opening scores BEFORE any of this game's moves
-    # upload, so end-of-game deltas have a stable "before" to diff against
-    # (best-effort; NULL leaves the delta omitted rather than blocking start).
-    opening_score_baseline = snapshot_opening_baseline(
-        db, user.user_id, request.player_color.value
-    )
-
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user.user_id,
@@ -644,12 +637,20 @@ def start_game(
         blunder_recorded=False,
         player_color=request.player_color.value,
         session_mode="normal",
-        opening_score_baseline=opening_score_baseline,
+        opening_score_baseline=None,
     )
 
     db.add(session)
     db.commit()
     db.refresh(session)
+
+    # Capture the opening-score baseline OFF the request thread (g-mxeo): proving
+    # the cached batch fresh costs an O(all-evidence) digest. The worker fills
+    # ``opening_score_baseline`` shortly after, only when the pre-session batch is
+    # provably fresh and dated strictly before ``started_at``; otherwise it stays
+    # NULL and the end-of-game delta degrades to "no delta". Best-effort: an
+    # enqueue failure must not regress /start from 201.
+    enqueue_baseline_snapshot(session.id, user.user_id, request.player_color.value)
 
     capture(
         str(user.user_id),
