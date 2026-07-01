@@ -26,10 +26,12 @@ describe('analytics/posthog', () => {
     resetMock.mockClear()
     captureMock.mockClear()
     vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
   })
 
   afterEach(() => {
     vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
   })
 
   it('does not initialize when no token is present', async () => {
@@ -48,6 +50,30 @@ describe('analytics/posthog', () => {
     mod.initAnalytics()
     expect(initMock).not.toHaveBeenCalled()
     expect(mod.isAnalyticsEnabled()).toBe(false)
+  })
+
+  it('does not initialize when Global Privacy Control is signaled', async () => {
+    // The SDK ignores navigator.globalPrivacyControl, so our pre-init gate must
+    // skip init entirely — leaving analytics off even with a valid token.
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
+    vi.stubGlobal('navigator', { globalPrivacyControl: true })
+    const mod = await import('./posthog')
+    mod.initAnalytics()
+    expect(initMock).not.toHaveBeenCalled()
+    expect(mod.isAnalyticsEnabled()).toBe(false)
+  })
+
+  it('initializes normally when Global Privacy Control is not asserted', async () => {
+    // A falsy globalPrivacyControl (or its absence) must NOT block init — only
+    // an explicit `true` is a GPC signal.
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_PROJECT_TOKEN', 'phc_test')
+    vi.stubEnv('VITE_PUBLIC_POSTHOG_DISABLED', '')
+    vi.stubGlobal('navigator', { globalPrivacyControl: false })
+    const mod = await import('./posthog')
+    mod.initAnalytics()
+    expect(initMock).toHaveBeenCalledTimes(1)
+    expect(mod.isAnalyticsEnabled()).toBe(true)
   })
 
   it('no-ops identify/reset/capture when disabled', async () => {
@@ -78,6 +104,9 @@ describe('analytics/posthog', () => {
         capture_pageview: 'history_change',
         disable_session_recording: true,
         autocapture: true,
+        // Honor Do Not Track: the SDK opts capture out when a yes-like
+        // doNotTrack/msDoNotTrack signal is present.
+        respect_dnt: true,
       }),
     )
     // An absolute host lets the SDK derive its own UI host — we must NOT pin

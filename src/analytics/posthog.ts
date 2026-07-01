@@ -27,6 +27,24 @@ function isDisabled(): boolean {
 }
 
 /**
+ * Global Privacy Control (https://globalprivacycontrol.org/) exposes a
+ * `navigator.globalPrivacyControl` boolean when the user's browser/extension
+ * asserts a do-not-sell/share preference. Unlike Do Not Track, the PostHog SDK
+ * does NOT read it (see node_modules/posthog-js consent.js `_getDnt`, which only
+ * checks doNotTrack/msDoNotTrack), so we gate init ourselves: when GPC is set we
+ * skip initialization entirely — no SDK load, no cookies, no network — matching
+ * the "don't init" posture of an explicit opt-out. (DNT itself is left to the
+ * SDK via `respect_dnt: true` below.)
+ */
+function isGpcSignaled(): boolean {
+  return (
+    typeof navigator !== 'undefined' &&
+    (navigator as Navigator & { globalPrivacyControl?: boolean })
+      .globalPrivacyControl === true
+  )
+}
+
+/**
  * Initialize the PostHog singleton. Idempotent and safe to call when disabled
  * (no token or opt-out) — in that case it does nothing and leaves analytics off.
  * Must run before the app renders (see `main.tsx`) so autocapture/pageviews and
@@ -35,7 +53,7 @@ function isDisabled(): boolean {
 export function initAnalytics(): void {
   if (enabled) return
   const token = import.meta.env.VITE_PUBLIC_POSTHOG_PROJECT_TOKEN
-  if (!token || isDisabled()) return
+  if (!token || isDisabled() || isGpcSignaled()) return
   const apiHost = import.meta.env.VITE_PUBLIC_POSTHOG_HOST || DEFAULT_HOST
   posthog.init(token, {
     api_host: apiHost,
@@ -52,6 +70,11 @@ export function initAnalytics(): void {
     capture_pageview: 'history_change',
     autocapture: true,
     disable_session_recording: true,
+    // Honor Do Not Track: with this set the SDK opts capture out when
+    // navigator.doNotTrack / msDoNotTrack / window.doNotTrack is yes-like.
+    // (GPC is handled separately in isGpcSignaled() above, which the SDK
+    // ignores.)
+    respect_dnt: true,
   })
   enabled = true
 }
