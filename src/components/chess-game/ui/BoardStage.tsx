@@ -40,7 +40,7 @@ type BoardStageProps = {
   // Seeds for the start panel — non-committed. StartPanel drafts from these and
   // commits to game state only on Start, so opening/cancelling never mutates it.
   seedEngineElo: number;
-  seedStrictnessCp: number;
+  seedStrictnessCp: number | null;
   seedColor: "white" | "black";
   seedOpening: OpeningRootItem | null;
   seedLine: string[] | null;

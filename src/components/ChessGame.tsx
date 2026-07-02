@@ -319,7 +319,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // ---- Drill state --------------------------------------------------
   const [isDrillMode, setIsDrillMode] = useState(false);
   const [selectedDrillOpening, setSelectedDrillOpening] = useState<OpeningRootItem | null>(null);
-  const [drillStrictnessCp, setDrillStrictnessCp] = useState(25);
+  // Always null on every panel open (g-09mu force-always): no saved pref or
+  // store value pre-selects a strictness tier — the user must consciously pick
+  // one each time. The committed cp lives in the game store, not here.
+  const [drillStrictnessCp, setDrillStrictnessCp] = useState<number | null>(null);
   // Non-committed seed for the start panel's difficulty (play + drill). The panel
   // drafts from this and commits to the store only on Start, so opening/cancelling
   // the popup never mutates the live engineElo (g-fxrm).
@@ -1102,7 +1105,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     const skipNavColor = navColorRef.current;
     navColorRef.current = false;
     // handleAgainSettings already seeded the panel from live store state; don't
-    // let localStorage (which rounds strictness) clobber the exact values.
+    // let localStorage clobber those values.
     if (skipStickyPrefillRef.current) {
       skipStickyPrefillRef.current = false;
       return;
@@ -1111,9 +1114,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const raw = localStorage.getItem("ghostreplay_drill_prefs");
       if (!raw) return;
       const prefs = JSON.parse(raw);
-      if (typeof prefs.strictnessCp === "number") {
-        setDrillStrictnessCp(prefs.strictnessCp);
-      }
+      // Strictness is never prefilled (g-09mu force-always): the panel opens
+      // with no tier selected so the user makes a conscious choice every time.
       // Difficulty is NOT seeded here: it is always a fresh sample near the
       // player's rating (g-ncvm), set by the idle rating fetch / New Game / gear.
       // Loading the stored prefs.engineElo would clobber that sample (g-fxrm).
@@ -1774,11 +1776,12 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setIsReviewedDrillReturn(false);
     const s = useGameStore.getState();
     if (s.drillOpeningKey != null) {
-      // Seed the setup panel from the live (exact) store state — these win over
-      // localStorage, which rounds strictness to 0/25/50. Guard the localStorage
-      // prefill effect so it doesn't clobber these values.
+      // Seed the setup panel from the live (exact) store state. Guard the
+      // localStorage prefill effect so it doesn't clobber these values.
       skipStickyPrefillRef.current = true;
-      setDrillStrictnessCp(s.drillStrictnessCp ?? drillStrictnessCp);
+      // Strictness is NOT reseeded from the store (g-09mu force-always): the
+      // reopened panel starts with no tier selected, forcing a fresh pick.
+      setDrillStrictnessCp(null);
       // Re-randomize opponent difficulty (g-ncvm), mirroring the New Game
       // popup; the user can still adjust the slider before Start. Seeds the
       // panel draft only — the store commits on Start, not on open (g-fxrm).
@@ -1811,7 +1814,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drillStrictnessCp]);
+  }, []);
 
   // Instantly restart the drill: opening/side/strictness replay exactly, but
   // opponent difficulty is re-randomized with the New Game algorithm (g-ncvm).

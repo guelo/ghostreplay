@@ -799,10 +799,12 @@ export const useChessGameLifecycle = ({
         setEngineMessage(null);
 
         try {
+          // strictnessCp is intentionally not persisted (g-09mu force-always):
+          // the setup panel never prefills strictness, so a stored value would
+          // never be read.
           const prefs = {
             openingKey: options.openingKey,
             engineElo: options.engineElo,
-            strictnessCp: options.strictness === "strict" ? 0 : options.strictness === "standard" ? 25 : 50,
             playerColor: options.playerColor,
           };
           localStorage.setItem("ghostreplay_drill_prefs", JSON.stringify(prefs));

@@ -91,7 +91,8 @@ const makeProps = () => {
     onCloseStartOverlay,
     maiaEloBins: [800, 1000, 1200] as const,
     seedEngineElo: 1000,
-    seedStrictnessCp: 25,
+    // Mirrors the force-always production default (g-09mu): no tier pre-selected.
+    seedStrictnessCp: null,
     seedColor: "white" as const,
     seedOpening: null,
     seedLine: null,

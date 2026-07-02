@@ -1905,16 +1905,55 @@ describe("ChessGame characterization safeguards", () => {
     expect(screen.getByRole("button", { name: /^white$/i })).toHaveClass(
       "play-side-button--active",
     );
-    // Exact 20cp strictness from the store, not the rounded 50 from localStorage.
-    await waitFor(() => {
-      expect(screen.getByText(/20 cp loss allowed/i)).toBeInTheDocument();
-    });
-    expect(screen.queryByText(/50 cp loss allowed/i)).not.toBeInTheDocument();
+    // Strictness is force-always (g-09mu): neither the store's exact 20cp nor
+    // the localStorage 50 pre-selects a tier — the panel opens unset and Start
+    // is gated until the user picks one.
+    expect(
+      screen.getByText(/choose how strict — this decides when the drill ends/i),
+    ).toBeInTheDocument();
+    for (const name of [/^strict$/i, /^standard$/i, /^lenient$/i]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+    }
+    expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
     // The store's opening is selected, not the localStorage one (picker trigger
     // shows the selected opening name).
     await waitFor(() => {
       expect(screen.getByRole("combobox")).toHaveTextContent("Target");
     });
+    localStorage.removeItem("ghostreplay_drill_prefs");
+  });
+
+  it("opens the drill setup with no tier selected even when a saved strictnessCp pref exists (g-09mu force-always)", async () => {
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    // A legacy pref with strictnessCp must NOT pre-select a tier.
+    localStorage.setItem(
+      "ghostreplay_drill_prefs",
+      JSON.stringify({ engineElo: 1000, strictnessCp: 50, playerColor: "white" }),
+    );
+
+    render(<ChessGame />);
+
+    // Overlay is open on mount (play mode); switch to the Drill tab.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^drill$/i }));
+    });
+
+    expect(
+      await screen.findByRole("button", { name: /start drill/i }),
+    ).toBeDisabled();
+    for (const name of [/^strict$/i, /^standard$/i, /^lenient$/i]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
+    }
+    expect(
+      screen.getByText(/choose how strict — this decides when the drill ends/i),
+    ).toBeInTheDocument();
+
     localStorage.removeItem("ghostreplay_drill_prefs");
   });
 
@@ -1950,10 +1989,13 @@ describe("ChessGame characterization safeguards", () => {
       fireEvent.click(gear);
     });
 
-    // Opening resolves and Start Drill becomes enabled.
+    // Opening resolves; Start Drill stays gated until a strictness tier is
+    // picked (g-09mu force-always), then enables.
     await waitFor(() => {
       expect(screen.getByRole("combobox")).toHaveTextContent("Target");
     });
+    expect(screen.getByRole("button", { name: /start drill/i })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
     expect(
       screen.getByRole("button", { name: /start drill/i }),
     ).not.toBeDisabled();
@@ -1999,11 +2041,14 @@ describe("ChessGame characterization safeguards", () => {
     render(<ChessGame />);
 
     // The picker shows the synthesized name despite the failed roots fetch, and
-    // Start Drill is enabled (it gates on the selection, not the roots list).
+    // Start Drill gates only on the selection + a strictness tier pick — not
+    // the roots list.
     const start = await screen.findByRole("button", { name: /start drill/i });
     await waitFor(() => {
       expect(screen.getByRole("combobox")).toHaveTextContent("Sicilian Defense");
     });
+    expect(start).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
     expect(start).not.toBeDisabled();
 
     startDrillMock.mockResolvedValueOnce(
@@ -2069,6 +2114,9 @@ describe("ChessGame characterization safeguards", () => {
     // until Start, where handleStartDrill syncs it from the committed draft.
     fireEvent.click(screen.getByRole("combobox"));
     fireEvent.click(await screen.findByRole("option", { name: /Italian Game/ }));
+
+    // Pick a strictness tier — Start is gated until one is chosen (g-09mu).
+    fireEvent.click(screen.getByRole("button", { name: /^standard$/i }));
 
     // Start the registered drill — the API must get the registered key with NO
     // ad-hoc line attached (g-fxrm Finding 2): the stale line cannot ride along.

@@ -33,7 +33,9 @@ type StartPanelProps = {
   // WITHOUT committing to the game store. The panel drafts from these and only
   // commits on Start, so opening/cancelling the popup never mutates game state.
   seedEngineElo: number;
-  seedStrictnessCp: number;
+  // Always null in practice (g-09mu force-always): every panel open starts with
+  // no strictness tier selected so the user makes a conscious choice.
+  seedStrictnessCp: number | null;
   seedColor: "white" | "black";
   seedOpening: OpeningRootItem | null;
   seedLine: string[] | null;
@@ -163,7 +165,7 @@ const StartPanel = ({
             onEngineEloChange={setDraftElo}
             onStrictnessChange={setDraftStrictnessCp}
             onStartDrill={() => {
-              if (!draftOpening) return;
+              if (!draftOpening || draftStrictnessCp == null) return;
               onStartDrill({
                 engineElo: draftElo,
                 strictnessCp: draftStrictnessCp,

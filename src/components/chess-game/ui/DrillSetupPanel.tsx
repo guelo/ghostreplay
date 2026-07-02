@@ -3,7 +3,12 @@ import { defaultPieces } from "react-chessboard";
 import type { OpeningRootItem } from "../../../utils/api";
 import OpponentAvatar from "./OpponentAvatar";
 import OpeningPicker from "./OpeningPicker";
-import { strictnessFromCp } from "./DrillSetupPanel.helpers";
+import {
+  STRICTNESS_TIERS,
+  bandForCp,
+  strictnessFromCp,
+  strictnessStopCopy,
+} from "./DrillSetupPanel.helpers";
 
 const WhiteKing = defaultPieces.wK;
 const BlackKing = defaultPieces.bK;
@@ -14,7 +19,8 @@ type DrillSetupPanelProps = {
   selectedOpening: OpeningRootItem | null;
   playerColor: "white" | "black";
   engineElo: number;
-  strictnessCp: number;
+  // null = no tier chosen yet; Start stays disabled until the user picks one.
+  strictnessCp: number | null;
   maiaEloBins: readonly number[];
   botLabel: string;
 
@@ -30,13 +36,6 @@ type DrillSetupPanelProps = {
   onStrictnessChange: (cp: number) => void;
   onStartDrill: () => void;
 };
-
-function labelForStrictnessCp(cp: number): string {
-  const tier = strictnessFromCp(cp);
-  if (tier === "strict") return `Strict — ${cp} cp loss allowed (perfect)`;
-  if (tier === "standard") return `Standard — ~${cp} cp loss allowed`;
-  return `Lenient — ${cp} cp loss allowed`;
-}
 
 const DrillSetupPanel = ({
   openingFamilies,
@@ -128,19 +127,51 @@ const DrillSetupPanel = ({
       <div className="drill-field">
         <span className="drill-field__label">Strictness</span>
         <div className="drill-field__control">
-          <div className="strictness-slider-row">
-            <input
-              type="range"
-              min={0}
-              max={50}
-              step={1}
-              value={strictnessCp}
-              onChange={(e) => onStrictnessChange(Number(e.target.value))}
-              disabled={isStarting}
-              className="chess-elo-slider"
-            />
+          <div
+            className="strictness-tier-grid"
+            role="group"
+            aria-label="Strictness"
+            aria-describedby="strictness-stop-copy"
+          >
+            {STRICTNESS_TIERS.map((tier) => {
+              const isActive =
+                strictnessCp != null && strictnessFromCp(strictnessCp) === tier.tier;
+              return (
+                <button
+                  key={tier.tier}
+                  className={`strictness-tier-button${isActive ? " strictness-tier-button--active" : ""}`}
+                  type="button"
+                  title={tier.blurb}
+                  aria-pressed={isActive}
+                  onClick={() => onStrictnessChange(tier.seedCp)}
+                  disabled={isStarting}
+                >
+                  {tier.label}
+                </button>
+              );
+            })}
           </div>
-          <span className="strictness-label">{labelForStrictnessCp(strictnessCp)}</span>
+          <span className="strictness-label" id="strictness-stop-copy">
+            {strictnessCp == null
+              ? "Choose how strict — this decides when the drill ends."
+              : strictnessStopCopy(strictnessCp)}
+          </span>
+          {strictnessCp != null && (
+            <div className="strictness-slider-row">
+              <input
+                type="range"
+                min={bandForCp(strictnessCp).min}
+                max={bandForCp(strictnessCp).max}
+                step={1}
+                value={strictnessCp}
+                aria-label="Fine-tune strictness"
+                aria-describedby="strictness-stop-copy"
+                onChange={(e) => onStrictnessChange(Number(e.target.value))}
+                disabled={isStarting}
+                className="chess-elo-slider"
+              />
+            </div>
+          )}
         </div>
       </div>
 
@@ -148,7 +179,7 @@ const DrillSetupPanel = ({
         className="chess-button primary"
         type="button"
         onClick={onStartDrill}
-        disabled={isStarting || !selectedOpening}
+        disabled={isStarting || !selectedOpening || strictnessCp == null}
       >
         {isStarting ? "Starting..." : "Start Drill"}
       </button>

@@ -2733,6 +2733,15 @@ A custom `strictness_cp` integer (0–50) overrides the tier value.
 At `strictness_cp = 0`, the drill requires the exact engine best move; non-best
 moves fail even when post-move eval noise resolves to 0cp loss or better.
 
+**Drill setup (force-always, g-09mu):** the setup panel opens with **no
+strictness tier pre-selected on every open** — fresh opens, opens with a saved
+pref, and gear/Again-settings opens alike. Start Drill is gated until the user
+picks a tier. The UI maps tiers to seed cps **Strict → 0 (exact-best),
+Standard → 25, Lenient → 50**, then offers a fine-tune slider constrained to
+the tier's band (0–15 / 16–35 / 36–50). This is a UI affordance over the
+existing cp-is-source-of-truth contract: the wire `strictness` tier stays
+derived from the chosen cp.
+
 ### 17.4 Route Check
 
 `POST /api/drills/:id/route-check` is called after each move. The backend builds a `DrillRouteMap` to classify the current position, branching on whether the target is in the book graph (`route_map_for_target`):

@@ -2461,6 +2461,15 @@
     cursor: not-allowed;
 }
 
+/* Start Drill is gated until an opening AND a strictness tier are picked
+   (g-09mu); the gate must read as disabled, not as a clickable primary. */
+.chess-start-panel .chess-button.primary:disabled {
+    background: var(--bg-tertiary);
+    color: var(--text-tertiary);
+    box-shadow: none;
+    cursor: not-allowed;
+}
+
 .chess-button:hover {
     border-color: var(--text-primary);
 }
@@ -8341,12 +8350,58 @@
     width: 100%;
 }
 
+/* Forced strictness tier choice (g-09mu): three cards, none active until the
+   user picks one — the natural "unset" state a slider can't express. */
+.strictness-tier-grid {
+    display: flex;
+    gap: 0.5rem;
+    width: 100%;
+}
+
+.strictness-tier-button {
+    flex: 1;
+    padding: 0.5rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color-strong);
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.strictness-tier-button:hover:not(:disabled) {
+    border-color: var(--brand-primary);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.strictness-tier-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.strictness-tier-button--active {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    box-shadow: var(--shadow-md);
+}
+
+.strictness-tier-button--active:disabled {
+    opacity: 0.7;
+}
+
 .strictness-label {
     font-size: 0.9rem;
     font-weight: 600;
     color: var(--text-primary);
-    min-height: 1.25rem;
+    /* Two lines reserved: the dynamic stop-condition copy wraps at panel
+       width, and unset → set must not shift the layout below. */
+    min-height: 2.5rem;
     display: block;
+    margin-top: 0.4rem;
 }
 
 /* ---- Drill setup: short/wide left-labeled rows (g-pr8z) ---- */
