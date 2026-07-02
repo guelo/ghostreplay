@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { render } from '../test/utils'
+import { render, screen, userEvent } from '../test/utils'
 import AnalysisGraph from './AnalysisGraph'
 import { cpToWinningChances } from './AnalysisGraph.helpers'
 
@@ -523,5 +523,90 @@ describe('AnalysisGraph — variation (what-if) overlay', () => {
     expect(line).toBeTruthy()
     const verts = (line!.getAttribute('d') ?? '').match(/[ML]/g) ?? []
     expect(verts.length).toBe(1)
+  })
+})
+
+describe('AnalysisGraph — info button', () => {
+  it('toggles an explanatory popup when the info button is clicked', async () => {
+    const user = userEvent.setup()
+    onSelectMove.mockClear()
+    render(
+      <AnalysisGraph
+        evals={[0, 50, -30]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+      />,
+    )
+
+    const btn = screen.getByRole('button', {
+      name: /what does the evaluation graph show/i,
+    })
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+
+    await user.click(btn)
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toHaveTextContent(/win chance/i)
+    expect(tooltip).toHaveTextContent(/jump to a move/i)
+
+    // Clicking the info button must not navigate the graph.
+    expect(onSelectMove).not.toHaveBeenCalled()
+
+    await user.click(btn)
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('closes the popup when clicking outside', async () => {
+    const user = userEvent.setup()
+    render(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+      />,
+    )
+
+    await user.click(
+      screen.getByRole('button', { name: /what does the evaluation graph show/i }),
+    )
+    expect(screen.getByRole('tooltip')).toBeInTheDocument()
+
+    await user.click(document.body)
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('labels the axis directions from the board orientation', async () => {
+    const user = userEvent.setup()
+    const { rerender } = render(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+      />,
+    )
+
+    await user.click(
+      screen.getByRole('button', { name: /what does the evaluation graph show/i }),
+    )
+    // White orientation: "You" on top, "Ghost" on the bottom.
+    let tooltip = screen.getByRole('tooltip')
+    expect(tooltip.querySelector('strong')).toHaveTextContent('You')
+    expect(tooltip).toHaveTextContent(/rises\s+toward\s+You/i)
+    expect(tooltip).toHaveTextContent(/falls\s+toward\s+Ghost/i)
+
+    rerender(
+      <AnalysisGraph
+        evals={[0, 50]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        playerColor="black"
+      />,
+    )
+    // Black orientation flips the labels.
+    tooltip = screen.getByRole('tooltip')
+    expect(tooltip).toHaveTextContent(/rises\s+toward\s+Ghost/i)
+    expect(tooltip).toHaveTextContent(/falls\s+toward\s+You/i)
   })
 })

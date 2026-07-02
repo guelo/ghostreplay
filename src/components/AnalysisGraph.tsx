@@ -2,6 +2,7 @@ import { memo, useCallback, useId, useRef, useMemo } from "react";
 import { mateToCp } from "../workers/analysisUtils";
 import { formatWhiteEval } from "./MoveRow.helpers";
 import { cpToWinningChances } from "./AnalysisGraph.helpers";
+import InfoHelpButton from "./InfoHelpButton";
 
 type HighlightedMoves = {
   indices: number[];
@@ -478,6 +479,19 @@ const AnalysisGraph = ({
           </div>
         </div>
       )}
+      <InfoHelpButton
+        ariaLabel="What does the evaluation graph show?"
+        className="analysis-graph__info"
+        popupClassName="info-help-popup--right"
+      >
+        <p>
+          Position evaluation after each move.
+        </p>
+        <p>
+          Click the graph to jump to a move — the red line marks the current
+          one.
+        </p>
+      </InfoHelpButton>
     </div>
   );
 };

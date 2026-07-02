@@ -4416,10 +4416,31 @@
 
 /* Analysis evaluation graph */
 .analysis-graph {
+    position: relative;
     cursor: crosshair;
     border-radius: 0.5rem;
     border: 1px solid var(--bg-tertiary);
     margin-top: 0.5rem;
+}
+
+/* ⓘ help button pinned to the graph's top-right corner (over the eval area). */
+.analysis-graph__info {
+    position: absolute;
+    top: 0.3rem;
+    right: 0.4rem;
+    z-index: 3;
+    display: inline-flex;
+}
+
+.analysis-graph__info .info-help-btn {
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--graph-bg) 70%, transparent);
+    padding: 0.1rem;
+}
+
+.analysis-graph__info .info-help-btn:hover {
+    color: var(--text-primary);
+    background: var(--graph-bg);
 }
 
 .analysis-graph > svg {
