@@ -546,8 +546,9 @@ describe('AnalysisGraph — info button', () => {
 
     await user.click(btn)
     const tooltip = screen.getByRole('tooltip')
-    expect(tooltip).toHaveTextContent(/win chance/i)
+    expect(tooltip).toHaveTextContent(/position evaluation after each move/i)
     expect(tooltip).toHaveTextContent(/jump to a move/i)
+    expect(tooltip).toHaveTextContent(/red line marks the current/i)
 
     // Clicking the info button must not navigate the graph.
     expect(onSelectMove).not.toHaveBeenCalled()
@@ -576,7 +577,7 @@ describe('AnalysisGraph — info button', () => {
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
-  it('labels the axis directions from the board orientation', async () => {
+  it('keeps the popup explanation stable when the board orientation changes', async () => {
     const user = userEvent.setup()
     const { rerender } = render(
       <AnalysisGraph
@@ -590,11 +591,9 @@ describe('AnalysisGraph — info button', () => {
     await user.click(
       screen.getByRole('button', { name: /what does the evaluation graph show/i }),
     )
-    // White orientation: "You" on top, "Ghost" on the bottom.
     let tooltip = screen.getByRole('tooltip')
-    expect(tooltip.querySelector('strong')).toHaveTextContent('You')
-    expect(tooltip).toHaveTextContent(/rises\s+toward\s+You/i)
-    expect(tooltip).toHaveTextContent(/falls\s+toward\s+Ghost/i)
+    expect(tooltip).toHaveTextContent(/position evaluation after each move/i)
+    expect(tooltip).toHaveTextContent(/jump to a move/i)
 
     rerender(
       <AnalysisGraph
@@ -604,9 +603,8 @@ describe('AnalysisGraph — info button', () => {
         playerColor="black"
       />,
     )
-    // Black orientation flips the labels.
     tooltip = screen.getByRole('tooltip')
-    expect(tooltip).toHaveTextContent(/rises\s+toward\s+Ghost/i)
-    expect(tooltip).toHaveTextContent(/falls\s+toward\s+You/i)
+    expect(tooltip).toHaveTextContent(/position evaluation after each move/i)
+    expect(tooltip).toHaveTextContent(/jump to a move/i)
   })
 })
