@@ -1,8 +1,8 @@
-import { memo, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { memo, type ReactNode, type RefObject } from "react";
 import StaticMiniBoard from "./StaticMiniBoard";
-import SettingsGearIcon from "./SettingsGearIcon";
-import type { RatingScoreKey, RatingScores, TargetBlunderSrs } from "../../../utils/api";
-import { getRatingDisplayLabel, resolveDisplayScore, useGameStore } from "../../../stores/useGameStore";
+import SoundToggleIcon from "./SoundToggleIcon";
+import type { RatingScores, TargetBlunderSrs } from "../../../utils/api";
+import { useGameStore } from "../../../stores/useGameStore";
 import { deriveOpponentAvatarMood, type GameResult } from "../domain/status";
 import OpponentAvatar from "./OpponentAvatar";
 import MaterialDisplay from "../../MaterialDisplay";
@@ -24,8 +24,6 @@ type GameInfoPanelProps = {
   playerRating: number;
   isProvisional: boolean;
   ratingScores?: RatingScores;
-  ratingDisplayType?: RatingScoreKey;
-  onRatingDisplayTypeChange?: (type: RatingScoreKey) => void;
   opponentMode: OpponentMode;
   opponentName: string;
   engineElo: number;
@@ -136,8 +134,6 @@ const GameInfoPanel = ({
   playerRating,
   isProvisional,
   ratingScores,
-  ratingDisplayType = "elo",
-  onRatingDisplayTypeChange,
   opponentMode,
   opponentName,
   engineElo,
@@ -155,59 +151,16 @@ const GameInfoPanel = ({
   materialFen,
   materialPerspective,
 }: GameInfoPanelProps) => {
-  const [showSettings, setShowSettings] = useState(false);
-  const gearButtonRef = useRef<HTMLButtonElement | null>(null);
-  const dialogRef = useRef<HTMLDivElement | null>(null);
   const soundMuted = useGameStore((s) => s.soundMuted);
-  const soundVolume = useGameStore((s) => s.soundVolume);
   const setSoundMuted = useGameStore((s) => s.setSoundMuted);
-  const setSoundVolume = useGameStore((s) => s.setSoundVolume);
-  const volumePercent = Math.round(soundVolume * 100);
-
-  useEffect(() => {
-    if (!showSettings) return;
-
-    const closeAndRestore = () => {
-      setShowSettings(false);
-      gearButtonRef.current?.focus();
-    };
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        closeAndRestore();
-      }
-    };
-
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (
-        dialogRef.current?.contains(target) ||
-        gearButtonRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setShowSettings(false);
-    };
-
-    dialogRef.current?.focus();
-    document.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("pointerdown", handlePointerDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("pointerdown", handlePointerDown);
-    };
-  }, [showSettings]);
 
   const resolvedScores = ratingScores ?? {
     elo: { rating: playerRating, is_provisional: isProvisional },
     chesscom: null,
     lichess: null,
   };
-  const displayScore = resolveDisplayScore(resolvedScores, ratingDisplayType);
-  const displayLabel = getRatingDisplayLabel(
-    resolvedScores[ratingDisplayType] ? ratingDisplayType : "elo",
-  );
+  const displayScore = resolvedScores.elo;
+  const displayLabel = "Elo";
   return (
     <div className="chess-panel" aria-live="polite">
       <div className="panel-header">
@@ -221,70 +174,15 @@ const GameInfoPanel = ({
         )}
         <span className="panel-settings">
           <button
-            ref={gearButtonRef}
-            className="rating-settings-button"
+            className="panel-sound-toggle"
             type="button"
-            aria-label="Game settings"
-            title="Game settings"
-            aria-haspopup="dialog"
-            aria-expanded={showSettings}
-            onClick={() => setShowSettings((value) => !value)}
+            aria-label={soundMuted ? "Unmute sound" : "Mute sound"}
+            title={soundMuted ? "Unmute" : "Mute"}
+            aria-pressed={soundMuted}
+            onClick={() => setSoundMuted(!soundMuted)}
           >
-            <SettingsGearIcon />
+            <SoundToggleIcon muted={soundMuted} />
           </button>
-          {showSettings && (
-            <div
-              ref={dialogRef}
-              className="panel-settings__popover rating-settings-popover"
-              role="dialog"
-              aria-label="Game settings"
-              tabIndex={-1}
-            >
-              <div className="panel-settings__section">
-                <span className="panel-settings__heading">Sound</span>
-                <label className="rating-settings-option">
-                  <input
-                    type="checkbox"
-                    checked={soundMuted}
-                    onChange={(e) => setSoundMuted(e.target.checked)}
-                  />
-                  Mute
-                </label>
-                <label className="rating-settings-option panel-settings__volume">
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    step={1}
-                    value={volumePercent}
-                    disabled={soundMuted}
-                    aria-label="Volume"
-                    aria-valuetext={`${volumePercent}%`}
-                    onChange={(e) =>
-                      setSoundVolume(Number(e.target.value) / 100)
-                    }
-                  />
-                  <span className="panel-settings__volume-value">
-                    {volumePercent}%
-                  </span>
-                </label>
-              </div>
-              <div className="panel-settings__section">
-                <span className="panel-settings__heading">Rating display</span>
-                {(["elo", "chesscom", "lichess"] as const).map((type) => (
-                  <label key={type} className="rating-settings-option">
-                    <input
-                      type="radio"
-                      name="rating-display-type"
-                      checked={ratingDisplayType === type}
-                      onChange={() => onRatingDisplayTypeChange?.(type)}
-                    />
-                    {getRatingDisplayLabel(type)}
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
         </span>
       </div>
       {gameStatusBadge && (

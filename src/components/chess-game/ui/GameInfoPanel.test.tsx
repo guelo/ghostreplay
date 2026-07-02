@@ -264,71 +264,41 @@ describe("GameInfoPanel", () => {
     expect(container.querySelector(".chess-panel__material")).toBeNull();
   });
 
-  describe("game settings popover", () => {
+  describe("mute toggle", () => {
     beforeEach(() => {
-      useGameStore.setState({ soundMuted: false, soundVolume: 1 });
+      useGameStore.setState({ soundMuted: false });
     });
 
     afterEach(() => {
       vi.restoreAllMocks();
     });
 
-    it("opens settings via the gear and flips aria-expanded", () => {
+    it("renders a mute button (no gear/popover) when unmuted", () => {
       render(<GameInfoPanel {...makeProps()} />);
-      const gear = screen.getByRole("button", { name: /game settings/i });
-      expect(gear).toHaveAttribute("aria-expanded", "false");
-
-      fireEvent.click(gear);
-      expect(gear).toHaveAttribute("aria-expanded", "true");
-      expect(screen.getByRole("dialog", { name: /game settings/i })).toBeInTheDocument();
+      const button = screen.getByRole("button", { name: "Mute sound" });
+      expect(button).toHaveAttribute("aria-pressed", "false");
+      expect(screen.queryByRole("button", { name: /game settings/i })).toBeNull();
+      expect(screen.queryByRole("dialog")).toBeNull();
     });
 
-    it("toggling mute calls setSoundMuted and disables the slider", () => {
+    it("clicking the button mutes when currently unmuted", () => {
       const setSoundMuted = vi.spyOn(useGameStore.getState(), "setSoundMuted");
       render(<GameInfoPanel {...makeProps()} />);
-      fireEvent.click(screen.getByRole("button", { name: /game settings/i }));
 
-      fireEvent.click(screen.getByLabelText("Mute"));
+      fireEvent.click(screen.getByRole("button", { name: "Mute sound" }));
       expect(setSoundMuted).toHaveBeenCalledWith(true);
+    });
 
+    it("reflects the muted state and unmutes on click", () => {
       useGameStore.setState({ soundMuted: true });
-      expect(screen.getByLabelText("Volume")).toBeDisabled();
-    });
-
-    it("moving the slider converts percent to a 0-1 value", () => {
-      const setSoundVolume = vi.spyOn(useGameStore.getState(), "setSoundVolume");
+      const setSoundMuted = vi.spyOn(useGameStore.getState(), "setSoundMuted");
       render(<GameInfoPanel {...makeProps()} />);
-      fireEvent.click(screen.getByRole("button", { name: /game settings/i }));
 
-      fireEvent.change(screen.getByLabelText("Volume"), {
-        target: { value: "40" },
-      });
-      expect(setSoundVolume).toHaveBeenCalledWith(0.4);
-    });
+      const button = screen.getByRole("button", { name: "Unmute sound" });
+      expect(button).toHaveAttribute("aria-pressed", "true");
 
-    it("closes on Escape and restores focus to the gear", () => {
-      render(<GameInfoPanel {...makeProps()} />);
-      const gear = screen.getByRole("button", { name: /game settings/i });
-      fireEvent.click(gear);
-      expect(screen.getByRole("dialog")).toBeInTheDocument();
-
-      fireEvent.keyDown(document, { key: "Escape" });
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-      expect(gear).toHaveFocus();
-    });
-
-    it("still switches the rating display from the popover", () => {
-      const onRatingDisplayTypeChange = vi.fn();
-      render(
-        <GameInfoPanel
-          {...makeProps()}
-          onRatingDisplayTypeChange={onRatingDisplayTypeChange}
-        />,
-      );
-      fireEvent.click(screen.getByRole("button", { name: /game settings/i }));
-
-      fireEvent.click(screen.getByLabelText("Lichess"));
-      expect(onRatingDisplayTypeChange).toHaveBeenCalledWith("lichess");
+      fireEvent.click(button);
+      expect(setSoundMuted).toHaveBeenCalledWith(false);
     });
   });
 
