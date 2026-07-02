@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { normalize_fen } from "../utils/fen";
 import {
   fetchHistory,
   fetchAnalysis,
@@ -131,10 +130,10 @@ function HistoryPage() {
   // yet) disables the hook entirely, preserving the zero-move fetch skip. The
   // game is finished here, so no polling.
   const analysisMoveCount = analysis?.moves.length ?? 0;
-  const { lineage: openingLineage } = useSessionOpenings(
-    analysisMoveCount > 0 ? selectedId : null,
-    { refetchKey: analysisMoveCount },
-  );
+  const { lineage: openingLineage, startPly: openingStartPly } =
+    useSessionOpenings(analysisMoveCount > 0 ? selectedId : null, {
+      refetchKey: analysisMoveCount,
+    });
 
   const selectedGame = games.find((g) => g.session_id === selectedId) ?? null;
   const playerColor = (selectedGame?.player_color as 'white' | 'black') ?? 'white';
@@ -169,12 +168,13 @@ function HistoryPage() {
 
   const handleSelectRoot = useCallback(
     (item: OpeningLineageItem) => {
-      const moves = analysis?.moves ?? [];
-      const targetFen = normalize_fen(item.opening_key);
-      const idx = moves.findIndex(
-        (m) => normalize_fen(m.fen_after) === targetFen,
-      );
-      if (idx !== -1) {
+      // `item.moves` is the played SAN prefix up to and INCLUDING the crossing
+      // move, so its last index is that move's index in `analysis.moves` (same
+      // session-move ordering) — a per-crossing index, so a repeated opening root
+      // jumps to ITS crossing rather than a first FEN match.
+      const idx = item.moves.length - 1;
+      const moveCount = analysis?.moves.length ?? 0;
+      if (idx >= 0 && idx < moveCount) {
         boardRef.current?.jumpToMove(idx);
       }
     },
@@ -275,6 +275,7 @@ function HistoryPage() {
                         <GameOpeningLineage
                           playerColor={playerColor}
                           lineage={openingLineage}
+                          startPly={openingStartPly}
                           onSelectRoot={handleSelectRoot}
                           onStartDrill={handleStartDrill}
                         />

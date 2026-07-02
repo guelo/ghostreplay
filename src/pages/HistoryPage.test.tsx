@@ -128,7 +128,7 @@ describe('HistoryPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     setMatchMedia(false);
-    mockFetchSessionOpenings.mockResolvedValue({ player_color: 'white', lineage: [] });
+    mockFetchSessionOpenings.mockResolvedValue({ player_color: 'white', lineage: [], start_ply: 1 });
   });
 
   it('fetches history and analysis, then renders board with initialMoveIndex=0 for non-empty game', async () => {
@@ -237,8 +237,10 @@ describe('HistoryPage', () => {
           sample_size: 10,
           game_count: 3,
           path: [],
+          moves: ['e4'],
         },
       ],
+      start_ply: 1,
     });
 
     render(
@@ -266,8 +268,9 @@ describe('HistoryPage', () => {
       player_color: 'white',
       lineage: [
         {
-          // opening_key normalizes to ANALYSIS_RESPONSE.moves[2].fen_after, so a
-          // correct lookup yields index 2 (guards against a hardcoded-zero jump).
+          // moves is the played SAN prefix up to and including the crossing move
+          // (3 moves), so the jump targets index moves.length - 1 = 2 (guards
+          // against a hardcoded-zero jump).
           opening_key: 'rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2',
           opening_name: 'Open Game',
           opening_family: 'Open Game',
@@ -279,8 +282,10 @@ describe('HistoryPage', () => {
           sample_size: 8,
           game_count: 2,
           path: [],
+          moves: ['e4', 'c5', 'Nf3'],
         },
       ],
+      start_ply: 1,
     });
 
     render(
@@ -298,15 +303,16 @@ describe('HistoryPage', () => {
     expect(mockJumpToMove).toHaveBeenCalledWith(2);
   });
 
-  it('clicking an opening chip with no matching move does not jump the board', async () => {
+  it('does not jump the board when the crossing move is beyond the loaded analysis', async () => {
     const user = userEvent.setup();
     mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    // Analysis has only 3 moves loaded...
     mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
     mockFetchSessionOpenings.mockResolvedValue({
       player_color: 'white',
       lineage: [
         {
-          opening_key: 'unmatched-fen-key',
+          opening_key: 'deep-key',
           opening_name: 'Mystery Line',
           opening_family: 'Mystery',
           eco: null,
@@ -317,8 +323,12 @@ describe('HistoryPage', () => {
           sample_size: 2,
           game_count: 1,
           path: [],
+          // ...but this opening's crossing move is index 4 (5-move prefix), out
+          // of range for the 3 loaded analysis moves, so the guard skips the jump.
+          moves: ['e4', 'c5', 'Nf3', 'Nc6', 'Bb5'],
         },
       ],
+      start_ply: 1,
     });
 
     render(
@@ -355,8 +365,10 @@ describe('HistoryPage', () => {
           sample_size: 10,
           game_count: 3,
           path: [],
+          moves: ['e4'],
         },
       ],
+      start_ply: 1,
     });
 
     render(

@@ -21,6 +21,8 @@ from app.opening_roots import (
     build_opening_roots,
     derive_family,
     get_opening_roots,
+    played_opening_chain,
+    played_opening_chain_indexed,
 )
 
 
@@ -691,3 +693,76 @@ class TestSingleton:
         _reset_opening_roots_for_testing()
         r2 = get_opening_roots()
         assert r1 is not r2
+
+
+# ---------------------------------------------------------------------------
+# Played-order opening chain (indexed)
+# ---------------------------------------------------------------------------
+
+
+def _roots_from_fens(specs: list[tuple[str, str]]) -> OpeningRoots:
+    """Build a tiny OpeningRoots from (fen, name) pairs. FENs are normalized to
+    the 4-field opening_key form so the walk's own normalization matches."""
+    roots: dict[str, OpeningRoot] = {}
+    for depth, (fen, name) in enumerate(specs, start=1):
+        key = _fen_from_board(chess.Board(fen))
+        roots[key] = OpeningRoot(
+            opening_key=key,
+            opening_name=name,
+            opening_family=name,
+            eco=None,
+            depth=depth,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        )
+    ownership = {key: frozenset({key}) for key in roots}
+    return OpeningRoots(roots, ownership)
+
+
+# Three real positions used to exercise the walk (they need not form a legal
+# game — the walk just consumes the FEN list in order).
+_FEN_E4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"  # after 1.e4
+_FEN_D4 = "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1"  # after 1.d4
+
+
+class TestPlayedOpeningChainIndexed:
+    def test_records_each_crossing_move_index(self):
+        roots = _roots_from_fens([(_FEN_E4, "King's Pawn"), (_FEN_D4, "Queen's Pawn")])
+        key_e4 = _fen_from_board(chess.Board(_FEN_E4))
+        key_d4 = _fen_from_board(chess.Board(_FEN_D4))
+        # A non-boundary position (None) sits between the two crossings.
+        fens = [_FEN_E4, None, _FEN_D4]
+
+        chain = played_opening_chain_indexed(fens, roots)
+
+        assert [(r.opening_key, i) for r, i in chain] == [
+            (key_e4, 0),
+            (key_d4, 2),
+        ]
+
+    def test_dedupes_only_consecutive_repeats_keeping_own_index(self):
+        # A root reached, left, and reached AGAIN keeps its own (later) crossing
+        # index — it is not collapsed onto the first crossing (only consecutive
+        # repeats dedupe). This is the fragility the indexed walk fixes.
+        roots = _roots_from_fens([(_FEN_E4, "King's Pawn"), (_FEN_D4, "Queen's Pawn")])
+        key_e4 = _fen_from_board(chess.Board(_FEN_E4))
+        key_d4 = _fen_from_board(chess.Board(_FEN_D4))
+        # E4, E4 (consecutive dup), D4, E4 (non-consecutive return).
+        fens = [_FEN_E4, _FEN_E4, _FEN_D4, _FEN_E4]
+
+        chain = played_opening_chain_indexed(fens, roots)
+
+        assert [(r.opening_key, i) for r, i in chain] == [
+            (key_e4, 0),  # consecutive dup at index 1 is skipped
+            (key_d4, 2),
+            (key_e4, 3),  # the non-consecutive return keeps index 3, not 0
+        ]
+
+    def test_played_opening_chain_matches_indexed_roots(self):
+        # The plain chain is exactly the roots of the indexed chain (single-
+        # sourced dedup/normalization).
+        roots = _roots_from_fens([(_FEN_E4, "King's Pawn"), (_FEN_D4, "Queen's Pawn")])
+        fens = [_FEN_E4, _FEN_E4, _FEN_D4]
+        assert played_opening_chain(fens, roots) == [
+            r for r, _ in played_opening_chain_indexed(fens, roots)
+        ]

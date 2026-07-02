@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
+  buildMoveListTokens,
   formatGames,
-  formatMoveLabel,
   formatOpeningName,
   formatPercent,
   formatScore,
@@ -49,6 +49,12 @@ export interface OpeningTreeNodeView {
   terminalReason: string | null;
   /** Drillable-root key from the API; non-null => Start Drill is offered. */
   drillOpeningKey: string | null;
+  /** SAN moves that produced this node/opening, oldest-first, with this node's
+   *  own move as the LAST (bold) token. Empty for the synthesized root; the card
+   *  then renders no secondary move-list line. */
+  moveListSan: string[];
+  /** Ply of `moveListSan[0]` (1 = White's move 1); anchors move numbering. */
+  moveListStartPly: number;
 }
 
 interface OpeningTreeNodeCardProps {
@@ -80,6 +86,11 @@ interface OpeningTreeNodeCardProps {
    *  by the in-place lineage expansion). Requires `--expanded` to be a
    *  positioning context; the Start Drill button is raised above the overlay. */
   onCollapse?: () => void;
+  /** Expanded: optional footer node (e.g. a "View in Openings" link) rendered
+   *  inside the card, raised above the `onCollapse` overlay so it stays
+   *  clickable. Its clicks are stopped from bubbling so a tap never collapses the
+   *  card. Kept as an injected node so the card stays router-free. */
+  footerAction?: ReactNode;
 }
 
 /**
@@ -255,9 +266,60 @@ function SelectedMoveChip() {
   );
 }
 
-/** Compact body: two lines (SAN + score/grade, then opening name + eval). In
- *  family mode the primary line is the opening name (with score/grade) and the
- *  secondary line is the ECO when present — no SAN/eval/move-type chips. */
+/** The synthesized `/openings` start card — never a family card (whose `san` is
+ *  also null and whose `moves` may defensively be `[]`). Only this renders as
+ *  "Starting position" with no move list. */
+function isSynthesizedRoot(node: OpeningTreeNodeView, kind: "move" | "family") {
+  return (
+    kind === "move" &&
+    node.ply === 0 &&
+    node.san === null &&
+    node.openingName == null
+  );
+}
+
+/**
+ * Inline move-list line ("1.e4 c6 2.Bc4") shared by both variants, with the last
+ * (crossing) move bold to disambiguate sibling cards that share an inherited
+ * name. Compact truncates to one line (with a full-text `title`); expanded wraps.
+ * Renders nothing when there are no moves (the root / a defensive empty family).
+ */
+function MoveListLine({
+  sanMoves,
+  startPly,
+  variant,
+}: {
+  sanMoves: string[];
+  startPly: number;
+  variant: "compact" | "expanded";
+}) {
+  const tokens = buildMoveListTokens(sanMoves, startPly);
+  if (tokens.length === 0) {
+    return null;
+  }
+  const fullText = tokens.map((token) => token.text).join(" ");
+  return (
+    <span
+      className={`tree-node-card__move-list tree-node-card__move-list--${variant}`}
+      title={variant === "compact" ? fullText : undefined}
+    >
+      {tokens.map((token, index) =>
+        token.isLast ? (
+          <strong key={index} className="tree-node-card__move-list-last">
+            {token.text}
+          </strong>
+        ) : (
+          <span key={index}>{token.text} </span>
+        ),
+      )}
+    </span>
+  );
+}
+
+/** Compact body: primary line = opening name + score/grade; secondary line = the
+ *  played move list (last move bold). The `move` kind keeps the move-type chips
+ *  (before the list) and the eval (right); the `family` kind shows just the move
+ *  list. The synthesized `/openings` root shows "Starting position", no list. */
 function CompactBody({
   node,
   kind,
@@ -265,64 +327,48 @@ function CompactBody({
   node: OpeningTreeNodeView;
   kind: "move" | "family";
 }) {
-  if (kind === "family") {
-    const familyName = formatOpeningName(node.openingName);
-    return (
-      <>
-        <span className="tree-node-card__line tree-node-card__line--primary">
-          <span
-            className="tree-node-card__move tree-node-card__move--family"
-            title={familyName}
-          >
-            {familyName}
-          </span>
-          <span className="tree-node-card__primary-right">
-            <span className="tree-node-card__score">{formatScore(node.score)}</span>
-            <GradeTag score={node.score} />
-          </span>
-        </span>
-        {node.eco && (
-          <span className="tree-node-card__line tree-node-card__line--secondary">
-            <span className="tree-node-card__name">{node.eco}</span>
-          </span>
-        )}
-      </>
-    );
-  }
-
-  const isRoot = node.san === null;
-  const isUserSelected = !isRoot && node.isUserSelected;
-  const isOffBook = !isRoot && !node.inBook && !node.isUserSelected;
-  const name = formatOpeningName(node.openingName);
+  const isRoot = isSynthesizedRoot(node, kind);
+  const isMove = kind === "move";
+  const isUserSelected = isMove && !isRoot && node.isUserSelected;
+  const isOffBook = isMove && !isRoot && !node.inBook && !node.isUserSelected;
+  const name = isRoot ? "Starting position" : formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
 
   return (
     <>
       <span className="tree-node-card__line tree-node-card__line--primary">
-        <span className="tree-node-card__move">{node.san ?? "Start"}</span>
+        <span
+          className="tree-node-card__move tree-node-card__move--name"
+          title={name}
+        >
+          {name}
+        </span>
         <span className="tree-node-card__primary-right">
           <span className="tree-node-card__score">{formatScore(node.score)}</span>
           <GradeTag score={node.score} />
         </span>
       </span>
-      <span className="tree-node-card__line tree-node-card__line--secondary">
-        {isUserSelected && <SelectedMoveChip />}
-        {isOffBook && <OffBookChip />}
-        {!isRoot && (
-          <span className="tree-node-card__name" title={name}>
-            {name}
-          </span>
-        )}
-        <span className="tree-node-card__eval">{evalText}</span>
-      </span>
+      {!isRoot && (isMove || node.moveListSan.length > 0) && (
+        <span className="tree-node-card__line tree-node-card__line--secondary">
+          {isUserSelected && <SelectedMoveChip />}
+          {isOffBook && <OffBookChip />}
+          <MoveListLine
+            sanMoves={node.moveListSan}
+            startPly={node.moveListStartPly}
+            variant="compact"
+          />
+          {isMove && <span className="tree-node-card__eval">{evalText}</span>}
+        </span>
+      )}
     </>
   );
 }
 
-/** Expanded body: header, score/eval panel, metrics, terminal note, drill. In
- *  family mode the header is the opening name (no move label), the score panel
- *  drops the Eval tile, and there is no name-line/move-type chip/terminal note —
- *  a family has no SAN/eval. Metrics and Start Drill render as in move mode. */
+/** Expanded body: header (opening name), the played move list under it, the
+ *  score/eval panel, metrics, terminal note, and Start Drill. The `family` kind
+ *  drops the Eval tile, the move-type chips and the terminal note (a family has
+ *  no SAN/eval); the synthesized `/openings` root shows "Starting position" with
+ *  no move list. */
 function ExpandedBody({
   node,
   kind,
@@ -337,67 +383,28 @@ function ExpandedBody({
   // and the live-panel lineage). drillOpeningKey no longer gates this.
   const showDrill = onStartDrill != null;
 
-  if (kind === "family") {
-    const familyName = formatOpeningName(node.openingName);
-    return (
-      <>
-        <div className="tree-node-card__header">
-          <span className="tree-node-card__move-label" title={familyName}>
-            {familyName}
-          </span>
-        </div>
-
-        <dl className="tree-node-card__score-panel">
-          <div className="tree-node-card__score-metric">
-            <dt>Score</dt>
-            <dd className="tree-node-card__score-value">
-              {formatScore(node.score)}
-              <GradeTag score={node.score} />
-            </dd>
-          </div>
-        </dl>
-
-        <dl className="tree-node-card__metrics">
-          <div className="tree-node-card__metric">
-            <dt>Coverage</dt>
-            <dd>{formatPercent(node.coverage)}</dd>
-          </div>
-          <div className="tree-node-card__metric">
-            <dt>Games</dt>
-            <dd>{formatGames(node.gameCount)}</dd>
-          </div>
-        </dl>
-
-        {showDrill && (
-          <button
-            type="button"
-            className="tree-node-card__drill-button"
-            onClick={onStartDrill}
-          >
-            Start Drill
-          </button>
-        )}
-      </>
-    );
-  }
-
-  const isRoot = node.san === null;
-  const isUserSelected = !isRoot && node.isUserSelected;
-  const isOffBook = !isRoot && !node.inBook && !node.isUserSelected;
-  const name = formatOpeningName(node.openingName);
+  const isRoot = isSynthesizedRoot(node, kind);
+  const isMove = kind === "move";
+  const isUserSelected = isMove && !isRoot && node.isUserSelected;
+  const isOffBook = isMove && !isRoot && !node.inBook && !node.isUserSelected;
+  const headerLabel = isRoot
+    ? "Starting position"
+    : formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
 
   return (
     <>
       <div className="tree-node-card__header">
-        <span className="tree-node-card__move-label">
-          {formatMoveLabel(node.ply, node.san)}
+        <span className="tree-node-card__move-label" title={headerLabel}>
+          {headerLabel}
         </span>
         {!isRoot && (
           <span className="tree-node-card__name-line">
-            <span className="tree-node-card__name" title={name}>
-              {name}
-            </span>
+            <MoveListLine
+              sanMoves={node.moveListSan}
+              startPly={node.moveListStartPly}
+              variant="expanded"
+            />
             {isUserSelected && <SelectedMoveChip />}
             {isOffBook && <OffBookChip />}
           </span>
@@ -412,10 +419,12 @@ function ExpandedBody({
             <GradeTag score={node.score} />
           </dd>
         </div>
-        <div className="tree-node-card__score-metric">
-          <dt>Eval</dt>
-          <dd>{evalText}</dd>
-        </div>
+        {isMove && (
+          <div className="tree-node-card__score-metric">
+            <dt>Eval</dt>
+            <dd>{evalText}</dd>
+          </div>
+        )}
       </dl>
 
       <dl className="tree-node-card__metrics">
@@ -429,7 +438,7 @@ function ExpandedBody({
         </div>
       </dl>
 
-      {node.isTerminal && (
+      {isMove && node.isTerminal && (
         <p className="tree-node-card__terminal">
           {formatTerminalReason(node.terminalReason)}
         </p>
@@ -466,6 +475,7 @@ function OpeningTreeNodeCard({
   ariaLabel,
   onStartDrill,
   onCollapse,
+  footerAction,
 }: OpeningTreeNodeCardProps) {
   const className = [
     "tree-node-card",
@@ -514,6 +524,16 @@ function OpeningTreeNodeCard({
         />
       )}
       <ExpandedBody node={node} kind={kind} onStartDrill={onStartDrill} />
+      {footerAction && (
+        // Raised above the collapse overlay (z-index) so it stays clickable; its
+        // clicks are stopped so tapping it never collapses the card.
+        <div
+          className="tree-node-card__footer-action"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {footerAction}
+        </div>
+      )}
     </div>
   );
 }

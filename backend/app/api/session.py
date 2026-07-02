@@ -29,7 +29,7 @@ from app.accuracy import (
 from app.fen import active_color, fen_hash, normalize_fen
 from app.opening_cache import load_cached_rows
 from app.opening_score_scheduler import request_recompute
-from app.opening_roots import get_opening_roots, played_opening_chain
+from app.opening_roots import get_opening_roots, played_opening_chain_indexed
 from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
 from app.session_evidence_scheduler import enqueue_session_evidence
@@ -201,11 +201,20 @@ class OpeningLineageItem(BaseModel):
     sample_size: int | None
     game_count: int | None
     path: list[str]
+    # The player's actual SAN moves up to and including the move that crossed
+    # into this opening (e.g. ["e4", "c6", "Bc4"] for a Hillbilly Attack item).
+    # Numbering is anchored by SessionOpeningsResponse.start_ply.
+    moves: list[str]
 
 
 class SessionOpeningsResponse(BaseModel):
     player_color: str
     lineage: list[OpeningLineageItem]
+    # Ply of moves[0] across all lineage items (1 = White's move 1). Constant
+    # because every item's move prefix starts at the game's first stored move;
+    # computed authoritatively from move_number/color so drill lineages whose
+    # stored moves don't start at ply 1 still number correctly.
+    start_ply: int = 1
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -1359,12 +1368,26 @@ def get_session_openings(
     roots_registry = get_opening_roots()
 
     # Walk played positions in move order; whenever a position is a boundary
-    # opening root, append it to the chain (dedup consecutive). The order roots
-    # are crossed in is broadest -> deepest along this game's DAG path.
-    chain = played_opening_chain([move.fen_after for move in session_moves], roots_registry)
+    # opening root, append it to the chain (dedup consecutive) together with the
+    # move index that crossed it. The order roots are crossed in is broadest ->
+    # deepest along this game's DAG path.
+    chain = played_opening_chain_indexed(
+        [move.fen_after for move in session_moves], roots_registry
+    )
 
     if not chain:
-        return SessionOpeningsResponse(player_color=player_color, lineage=[])
+        return SessionOpeningsResponse(
+            player_color=player_color, lineage=[], start_ply=1
+        )
+
+    # Ply of the game's first stored move, computed authoritatively from
+    # move_number/color (not assumed to be 1) so a drill whose stored moves start
+    # mid-game still numbers correctly. All lineage prefixes share moves[0], so
+    # this ply is constant across items.
+    first_move = session_moves[0]
+    start_ply = (first_move.move_number - 1) * 2 + (
+        1 if first_move.color == MoveColor.WHITE.value else 2
+    )
 
     # Direct-row lineage scores (matching the /openings card). Stale-while-
     # revalidate reader: warm reads serve the cached batch and schedule a
@@ -1373,7 +1396,7 @@ def get_session_openings(
     rows_by_key = {row.opening_key: row for row in cached_rows}  # already snapshotted
 
     lineage: list[OpeningLineageItem] = []
-    for index, root in enumerate(chain):
+    for index, (root, move_index) in enumerate(chain):
         direct = rows_by_key.get(root.opening_key)
         scored = direct is not None
         lineage.append(
@@ -1388,8 +1411,12 @@ def get_session_openings(
                 coverage=direct.coverage if scored else None,
                 sample_size=direct.sample_size if scored else None,
                 game_count=direct.game_count if scored else None,
-                path=[prev.opening_key for prev in chain[:index]],
+                path=[prev.opening_key for prev, _ in chain[:index]],
+                # The player's SAN prefix up to and including the crossing move.
+                moves=[m.move_san for m in session_moves[: move_index + 1]],
             )
         )
 
-    return SessionOpeningsResponse(player_color=player_color, lineage=lineage)
+    return SessionOpeningsResponse(
+        player_color=player_color, lineage=lineage, start_ply=start_ply
+    )

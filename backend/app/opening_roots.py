@@ -449,6 +449,40 @@ def _reset_opening_roots_for_testing() -> None:
 # ---------------------------------------------------------------------------
 
 
+def played_opening_chain_indexed(
+    fens_in_move_order: list[str | None],
+    roots: OpeningRoots,
+) -> list[tuple[OpeningRoot, int]]:
+    """Walk played positions in MOVE ORDER, appending each boundary opening root
+    crossed together with the MOVE INDEX at which it was crossed (deduping
+    consecutive repeats).
+
+    Returns the broadest -> deepest chain of `(root, index)` pairs along this
+    game's DAG path. `index` is the position in `fens_in_move_order` whose
+    resulting position IS that boundary root — the crossing move. Consumers slice
+    the played move list up to and including `index` to recover the SAN prefix
+    that produced the opening.
+
+    Keeping the per-crossing index (rather than re-deriving it) is what makes a
+    NON-consecutive repeated root safe: each crossing keeps its own index, so a
+    root reached, left, and reached again does not collapse onto the first
+    crossing's prefix. Order comes from the move-order walk, NOT from
+    OpeningRoot.depth (which is graph BFS depth, not authoritative played order).
+    """
+    chain: list[tuple[OpeningRoot, int]] = []
+    for index, fen in enumerate(fens_in_move_order):
+        opening_key = _normalize_opening_key(fen)
+        if opening_key is None:
+            continue
+        root = roots.get_root(opening_key)
+        if root is None:
+            continue
+        if chain and chain[-1][0].opening_key == root.opening_key:
+            continue
+        chain.append((root, index))
+    return chain
+
+
 def played_opening_chain(
     fens_in_move_order: list[str | None],
     roots: OpeningRoots,
@@ -458,20 +492,10 @@ def played_opening_chain(
 
     Returns the broadest -> deepest chain of roots along this game's DAG path.
     Order comes from the move-order walk, NOT from OpeningRoot.depth (which is
-    graph BFS depth, not authoritative played order).
+    graph BFS depth, not authoritative played order). Derived from
+    played_opening_chain_indexed so dedup + normalization stay single-sourced.
     """
-    chain: list[OpeningRoot] = []
-    for fen in fens_in_move_order:
-        opening_key = _normalize_opening_key(fen)
-        if opening_key is None:
-            continue
-        root = roots.get_root(opening_key)
-        if root is None:
-            continue
-        if chain and chain[-1].opening_key == root.opening_key:
-            continue
-        chain.append(root)
-    return chain
+    return [root for root, _ in played_opening_chain_indexed(fens_in_move_order, roots)]
 
 
 def deepest_opening_name(

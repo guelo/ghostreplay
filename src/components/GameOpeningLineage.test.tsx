@@ -18,6 +18,7 @@ function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
     sample_size: 5,
     game_count: 2,
     path: [],
+    moves: [],
     ...overrides,
   };
 }
@@ -45,6 +46,7 @@ function renderLineage(
     onSelectRoot?: (item: OpeningLineageItem) => void;
     onStartDrill?: (item: OpeningLineageItem) => void;
     scoreChanges?: OpeningScoreDeltaItem[] | null;
+    startPly?: number;
   } = {},
 ) {
   const onSelectRoot = handlers.onSelectRoot ?? vi.fn();
@@ -54,6 +56,7 @@ function renderLineage(
       <GameOpeningLineage
         playerColor="white"
         lineage={lineage}
+        startPly={handlers.startPly ?? 1}
         scoreChanges={handlers.scoreChanges}
         onSelectRoot={onSelectRoot}
         onStartDrill={onStartDrill}
@@ -88,7 +91,7 @@ describe("GameOpeningLineage", () => {
     ]);
   });
 
-  it("links to the opening page from inside the expanded card", async () => {
+  it("links to the opening page from inside the expanded card without collapsing it", async () => {
     const user = userEvent.setup();
     renderLineage([
       makeItem({
@@ -110,6 +113,70 @@ describe("GameOpeningLineage", () => {
       "href",
       "/openings?color=white&opening=deep-key",
     );
+    // The link is rendered inside the expanded card (as its footer action).
+    expect(
+      link.closest(".tree-node-card--expanded"),
+    ).toBeInTheDocument();
+
+    // Tapping the link does not collapse the card (its click is stopped).
+    await user.click(link);
+    expect(screen.queryByRole("button", { name: /Select Berlin Defense/ })).not
+      .toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /View in Openings/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("expands each crossing independently when the same opening root repeats", async () => {
+    const user = userEvent.setup();
+    // A lineage can (defensively) cross the same opening_key as two separate
+    // crossings; keying by opening_key alone would expand both at once.
+    renderLineage([
+      makeItem({
+        opening_key: "dup",
+        opening_name: "First Crossing",
+        moves: ["e4"],
+      }),
+      makeItem({
+        opening_key: "dup",
+        opening_name: "Second Crossing",
+        moves: ["e4", "e5", "d4"],
+      }),
+    ]);
+
+    await user.click(
+      screen.getByRole("button", { name: /Select First Crossing/ }),
+    );
+
+    // Only the first crossing expanded; the second stays a compact toggle.
+    expect(
+      screen.queryByRole("button", { name: /Select First Crossing/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Select Second Crossing/ }),
+    ).toBeInTheDocument();
+    // Exactly one card expanded → exactly one "View in Openings" link.
+    expect(screen.getAllByRole("link", { name: /View in Openings/ })).toHaveLength(
+      1,
+    );
+  });
+
+  it("renders each card's played move list with the last move bold", () => {
+    renderLineage(
+      [
+        makeItem({
+          opening_key: "k1",
+          opening_name: "Caro-Kann Defense: Hillbilly Attack",
+          moves: ["e4", "c6", "Bc4"],
+        }),
+      ],
+      { startPly: 1 },
+    );
+
+    // "1.e4 c6 2.Bc4" with the crossing move (2.Bc4) bold.
+    expect(screen.getByText("1.e4")).toBeInTheDocument();
+    expect(screen.getByText("c6")).toBeInTheDocument();
+    expect(screen.getByText("2.Bc4").tagName).toBe("STRONG");
   });
 
   it("expanding replaces the compact card with the expanded card and fires onSelectRoot once", async () => {
@@ -180,6 +247,7 @@ describe("GameOpeningLineage", () => {
         <GameOpeningLineage
           playerColor="white"
           lineage={[makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })]}
+          startPly={1}
           onSelectRoot={vi.fn()}
         />
       </MemoryRouter>,
@@ -203,6 +271,7 @@ describe("GameOpeningLineage", () => {
         <GameOpeningLineage
           playerColor="white"
           lineage={[makeItem({ opening_key: "k1", opening_name: "Ruy Lopez" })]}
+          startPly={1}
         />
       </MemoryRouter>,
     );

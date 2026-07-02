@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  buildMoveListTokens,
   formatGames,
   formatMoveLabel,
   formatOpeningName,
@@ -115,5 +116,34 @@ describe('tree-card helpers', () => {
   it('formatOpeningName passes through names and defaults null to "Unclassified"', () => {
     expect(formatOpeningName('Sicilian Defense')).toBe('Sicilian Defense')
     expect(formatOpeningName(null)).toBe('Unclassified')
+  })
+})
+
+describe('buildMoveListTokens', () => {
+  it('numbers White plies and bares Black plies, flagging the last', () => {
+    const tokens = buildMoveListTokens(['e4', 'c6', 'Bc4'], 1)
+    expect(tokens).toEqual([
+      { text: '1.e4', isLast: false },
+      { text: 'c6', isLast: false },
+      { text: '2.Bc4', isLast: true },
+    ])
+  })
+
+  it('honors a non-1 startPly (drill starting mid-game)', () => {
+    // startPly 4 = Black's move 2, so the first token is a bare Black SAN and the
+    // next is White's move 3.
+    const tokens = buildMoveListTokens(['Nc6', 'Bb5'], 4)
+    expect(tokens.map((t) => t.text)).toEqual(['Nc6', '3.Bb5'])
+  })
+
+  it('short-circuits empty input regardless of startPly', () => {
+    expect(buildMoveListTokens([], 1)).toEqual([])
+    expect(buildMoveListTokens([], 7)).toEqual([])
+    expect(buildMoveListTokens([], null)).toEqual([])
+  })
+
+  it('treats a null/0 startPly as White move 1', () => {
+    expect(buildMoveListTokens(['e4'], null)[0].text).toBe('1.e4')
+    expect(buildMoveListTokens(['e4'], 0)[0].text).toBe('1.e4')
   })
 })

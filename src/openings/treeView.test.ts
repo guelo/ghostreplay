@@ -416,6 +416,55 @@ describe("buildTreeView", () => {
     expect(view.columns[1].nodes.map((n) => n.uci)).toEqual(["e2e4"]);
   });
 
+  it("builds each node's played move list (shared prefix + own last move), startPly 1", () => {
+    const view = buildTreeView(
+      makeResponse({
+        canonical_line: ["e2e4", "e7e5"],
+        columns: [
+          makeColumn(
+            0,
+            [
+              makeNode({ uci: "e2e4", san: "e4", ply: 1 }),
+              makeNode({ uci: "d2d4", san: "d4", ply: 1 }),
+            ],
+            "e2e4",
+          ),
+          makeColumn(
+            1,
+            [
+              makeNode({ uci: "e7e5", san: "e5", ply: 2 }),
+              makeNode({ uci: "c7c5", san: "c5", ply: 2 }),
+            ],
+            "e7e5",
+          ),
+        ],
+      }),
+      {
+        selectionLine: ["e2e4", "e7e5"],
+        loadedThroughPly: 2,
+        isExactResponseLine: true,
+      },
+    );
+
+    // The synthesized root has no move list.
+    expect(view.columns[0].nodes[0].view.moveListSan).toEqual([]);
+
+    const col0 = view.columns.find((c) => c.lineIndex === 0)!;
+    expect(col0.nodes.find((n) => n.uci === "e2e4")!.view.moveListSan).toEqual([
+      "e4",
+    ]);
+
+    const col1 = view.columns.find((c) => c.lineIndex === 1)!;
+    // The selected node and its sibling share the "e4" prefix but differ in the
+    // last (bold) move.
+    const selected = col1.nodes.find((n) => n.uci === "e7e5")!;
+    const sibling = col1.nodes.find((n) => n.uci === "c7c5")!;
+    expect(selected.view.moveListSan).toEqual(["e4", "e5"]);
+    expect(sibling.view.moveListSan).toEqual(["e4", "c5"]);
+    expect(selected.view.moveListStartPly).toBe(1);
+    expect(sibling.view.moveListStartPly).toBe(1);
+  });
+
   it("derives the board from the effective line, not selected_fen", () => {
     const view = buildTreeView(
       makeResponse({

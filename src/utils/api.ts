@@ -1169,11 +1169,17 @@ export interface OpeningLineageItem {
   sample_size: number | null
   game_count: number | null
   path: string[]
+  /** The player's actual SAN moves up to and including the move that crossed
+   *  into this opening (e.g. ["e4", "c6", "Bc4"]). Numbered from `start_ply`. */
+  moves: string[]
 }
 
 export interface SessionOpeningsResponse {
   player_color: OpeningPlayerColor
   lineage: OpeningLineageItem[]
+  /** Ply of `moves[0]` (1 = White's move 1). Constant across all lineage items;
+   *  anchors move numbering so a drill starting mid-game still numbers right. */
+  start_ply: number
 }
 
 /**

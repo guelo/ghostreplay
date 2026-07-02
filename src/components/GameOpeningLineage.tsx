@@ -13,6 +13,9 @@ import type {
 interface GameOpeningLineageProps {
   playerColor: OpeningPlayerColor;
   lineage: OpeningLineageItem[];
+  /** Ply of each item's `moves[0]` (1 = White's move 1); anchors move-list
+   *  numbering on the cards. From the session-openings response. */
+  startPly: number;
   /** Post-game/drill opening-score changes (g-xanz), keyed by opening_key. When
    *  provided, a changed opening shows an inline diff badge to the right of its
    *  card (g-3gmc). Null during live play -> no badges. */
@@ -47,10 +50,15 @@ function badgeFor(change: OpeningScoreDeltaItem | undefined): LineageBadge | nul
  * Map a lineage item (an opening family identified by a position) onto the
  * tree-node card's view-model. A family has no SAN / ply / eval, so those
  * move-only fields are nulled out and the card is rendered with `kind="family"`
- * (name as header, no move label / Eval tile / move-type chips). `depth` feeds
- * `ply` for completeness only — family mode never reads it.
+ * (name as header, played move list as the secondary line, no Eval tile /
+ * move-type chips). `depth` feeds `ply` for completeness only — family mode
+ * never reads it. `moveListSan` is the player's actual SAN prefix, numbered from
+ * `startPly`.
  */
-function toNodeView(item: OpeningLineageItem): OpeningTreeNodeView {
+function toNodeView(
+  item: OpeningLineageItem,
+  startPly: number,
+): OpeningTreeNodeView {
   return {
     ply: item.depth,
     san: null,
@@ -66,6 +74,8 @@ function toNodeView(item: OpeningLineageItem): OpeningTreeNodeView {
     isTerminal: false,
     terminalReason: null,
     drillOpeningKey: item.opening_key,
+    moveListSan: item.moves,
+    moveListStartPly: startPly,
   };
 }
 
@@ -82,10 +92,15 @@ function toNodeView(item: OpeningLineageItem): OpeningTreeNodeView {
 function GameOpeningLineage({
   playerColor,
   lineage,
+  startPly,
   scoreChanges,
   onSelectRoot,
   onStartDrill,
 }: GameOpeningLineageProps) {
+  // Track expansion by a per-occurrence key (opening_key + index), not the bare
+  // opening_key: a lineage can (defensively) repeat the same root as separate
+  // crossings, and keying by opening_key alone would collide React keys and
+  // expand every matching card at once.
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
 
   const changeByKey = useMemo(
@@ -102,7 +117,8 @@ function GameOpeningLineage({
       <p className="game-opening-lineage__label">Openings</p>
       <ol className="game-opening-lineage__list">
         {lineage.map((item, index) => {
-          const isExpanded = expandedKey === item.opening_key;
+          const cardKey = `${item.opening_key}:${index}`;
+          const isExpanded = expandedKey === cardKey;
           const cardId = `opening-card-${index}`;
           const openingsHref = `/openings?${buildOpeningsSearchParams({
             playerColor,
@@ -110,19 +126,21 @@ function GameOpeningLineage({
           })}`;
           const badge = badgeFor(changeByKey.get(item.opening_key));
           const badgeSign = badge && badge.diff > 0 ? "+" : "";
-          const view = toNodeView(item);
+          const view = toNodeView(item, startPly);
 
           return (
             <li
-              key={item.opening_key}
+              key={cardKey}
               className="game-opening-lineage__item"
               style={{ "--lineage-depth": index } as React.CSSProperties}
             >
               {isExpanded ? (
                 // Expanded card replaces the collapsed one; its full-surface
-                // overlay button collapses it. The re-homed "View in Openings"
-                // link is the card's footer (a sibling of the card, not covered
-                // by the overlay), so tapping it never collapses the card.
+                // overlay button collapses it. The "View in Openings" link is
+                // passed as the card's footerAction — rendered inside the card,
+                // raised above the collapse overlay, with its clicks stopped so
+                // tapping it never collapses the card. This component owns the
+                // router Link so the card stays router-free.
                 <div className="opening-lineage-card" id={cardId}>
                   <OpeningTreeNodeCard
                     variant="expanded"
@@ -132,14 +150,15 @@ function GameOpeningLineage({
                       onStartDrill ? () => onStartDrill(item) : undefined
                     }
                     onCollapse={() => setExpandedKey(null)}
+                    footerAction={
+                      <Link
+                        className="opening-lineage-card__openings-link"
+                        to={openingsHref}
+                      >
+                        View in Openings
+                      </Link>
+                    }
                   />
-                  <Link
-                    className="opening-lineage-card__openings-link"
-                    to={openingsHref}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    View in Openings
-                  </Link>
                 </div>
               ) : (
                 <OpeningTreeNodeCard
@@ -154,7 +173,7 @@ function GameOpeningLineage({
                       : `Show ${item.opening_name} details`
                   }
                   onSelect={() => {
-                    setExpandedKey(item.opening_key);
+                    setExpandedKey(cardKey);
                     onSelectRoot?.(item);
                   }}
                   isSelected={isExpanded}

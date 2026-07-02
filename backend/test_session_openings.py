@@ -127,6 +127,22 @@ def _ruy_roots() -> OpeningRoots:
     })
 
 
+# Caro-Kann: Hillbilly Attack — the design's worked example (1.e4 c6 2.Bc4).
+CARO_SANS = ["e4", "c6", "Bc4"]
+_CARO_FENS = _fens_after(CARO_SANS)
+CARO_KP_KEY = _CARO_FENS[0]    # after 1. e4
+CARO_KEY = _CARO_FENS[1]       # after 1... c6
+HILLBILLY_KEY = _CARO_FENS[2]  # after 2. Bc4
+
+
+def _caro_roots() -> OpeningRoots:
+    return _make_roots({
+        CARO_KP_KEY: {"name": "King's Pawn Game", "family": "King's Pawn Game", "eco": "B00", "depth": 1, "parents": []},
+        CARO_KEY: {"name": "Caro-Kann Defense", "family": "Caro-Kann Defense", "eco": "B10", "depth": 2, "parents": [CARO_KP_KEY]},
+        HILLBILLY_KEY: {"name": "Caro-Kann Defense: Hillbilly Attack", "family": "Caro-Kann Defense", "eco": "B10", "depth": 3, "parents": [CARO_KEY]},
+    })
+
+
 def _add_score_row(db_session, *, batch_id, opening_key, opening_name, opening_family,
                    opening_score, confidence=0.5, coverage=0.5, sample_size=5,
                    player_color="white"):
@@ -219,6 +235,79 @@ def test_openings_ordered_lineage(client, auth_headers, create_game_session, db_
     assert data["lineage"][0]["path"] == []
     assert data["lineage"][1]["path"] == [KP_KEY]
     assert data["lineage"][2]["path"] == [KP_KEY, RUY_KEY]
+
+
+def test_openings_moves_prefix_and_start_ply(client, auth_headers, create_game_session, db_session):
+    """Each item carries the played SAN prefix up to and including its crossing
+    move, growing broadest -> deepest; start_ply is 1 for a normal game."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
+
+    data = resp.json()
+    assert data["start_ply"] == 1
+    moves = {item["opening_key"]: item["moves"] for item in data["lineage"]}
+    assert moves[KP_KEY] == ["e4"]
+    assert moves[RUY_KEY] == ["e4", "e5", "Nf3", "Nc6", "Bb5"]
+    assert moves[MORPHY_KEY] == ["e4", "e5", "Nf3", "Nc6", "Bb5", "a6"]
+
+
+def test_openings_caro_kann_hillbilly_named_example(client, auth_headers, create_game_session, db_session):
+    """The design's worked example: the Hillbilly Attack item's moves are
+    ["e4", "c6", "Bc4"] (rendered "1.e4 c6 2.Bc4" with the last move bold)."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    _insert_moves(db_session, session_id, CARO_SANS)
+
+    with patch(PATCH_ROOTS, return_value=_caro_roots()):
+        resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
+
+    data = resp.json()
+    assert data["start_ply"] == 1
+    by_key = {item["opening_key"]: item for item in data["lineage"]}
+    assert by_key[CARO_KP_KEY]["moves"] == ["e4"]
+    assert by_key[CARO_KEY]["moves"] == ["e4", "c6"]
+    assert by_key[HILLBILLY_KEY]["moves"] == ["e4", "c6", "Bc4"]
+
+
+def test_openings_drill_start_ply_numbers_moves_from_move_number(
+    client, auth_headers, create_game_session, db_session
+):
+    """A drill whose stored moves begin mid-game (move 3) reports start_ply from
+    move_number/color (5), not an assumed 1 — so client numbering stays correct.
+    Only the moves actually stored appear in each item's prefix."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    # Full FENs come from replaying the whole Ruy line, but only 3.Bb5 / 3...a6
+    # are STORED (as a mid-game drill would store its own moves).
+    full = _full_fens_after(RUY_SANS)
+    for move_number, color, san, fen_after in [
+        (3, "white", "Bb5", full[4]),
+        (3, "black", "a6", full[5]),
+    ]:
+        db_session.add(
+            SessionMove(
+                session_id=uuid.UUID(session_id),
+                move_number=move_number,
+                color=color,
+                move_san=san,
+                fen_after=fen_after,
+                segment="normal",
+            )
+        )
+    db_session.commit()
+
+    with patch(PATCH_ROOTS, return_value=_ruy_roots()):
+        resp = client.get(f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123))
+
+    data = resp.json()
+    # 3.Bb5 is White's move 3 -> ply (3-1)*2 + 1 = 5.
+    assert data["start_ply"] == 5
+    by_key = {item["opening_key"]: item for item in data["lineage"]}
+    # KP (1.e4) was never stored, so it is not in the chain.
+    assert KP_KEY not in by_key
+    assert by_key[RUY_KEY]["moves"] == ["Bb5"]
+    assert by_key[MORPHY_KEY]["moves"] == ["Bb5", "a6"]
 
 
 def test_openings_transposition_played_chain_only(client, auth_headers, create_game_session, db_session):

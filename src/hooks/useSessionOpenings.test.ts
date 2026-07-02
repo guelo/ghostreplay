@@ -50,6 +50,7 @@ function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
     sample_size: 5,
     game_count: 2,
     path: [],
+    moves: [],
     ...overrides,
   };
 }
@@ -57,12 +58,14 @@ function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
 function response(
   keys: string[],
   playerColor: OpeningPlayerColor = "white",
+  startPly = 1,
 ): SessionOpeningsResponse {
   return {
     player_color: playerColor,
     lineage: keys.map((opening_key, depth) =>
       makeItem({ opening_key, opening_name: opening_key, depth }),
     ),
+    start_ply: startPly,
   };
 }
 
@@ -122,11 +125,11 @@ describe("useSessionOpenings", () => {
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
   });
 
-  it("fetches once and exposes the lineage + playerColor", async () => {
+  it("fetches once and exposes the lineage + playerColor + startPly", async () => {
     const { result } = renderHook(() =>
       useSessionOpenings("a", { refetchKey: 1 }),
     );
-    await resolveFetch(0, response(["k1", "k2"], "black"));
+    await resolveFetch(0, response(["k1", "k2"], "black", 3));
 
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
     expect(result.current.lineage.map((i) => i.opening_key)).toEqual([
@@ -134,6 +137,7 @@ describe("useSessionOpenings", () => {
       "k2",
     ]);
     expect(result.current.playerColor).toBe("black");
+    expect(result.current.startPly).toBe(3);
   });
 
   it("refetches when refetchKey changes", async () => {

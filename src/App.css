@@ -10490,8 +10490,16 @@ button.tree-node-card--compact {
 
 /* --- Family mode: opening-lineage card (/history & /play) ----------------- */
 /* The lineage entry identifies an opening family by position — no SAN/eval — so
-   the name is the primary/header text and the score panel drops the Eval tile. */
-.tree-node-card__move--family {
+   the score panel drops the Eval tile (the name-led header is shared with the
+   /openings move card via .tree-node-card__move--name). */
+.tree-node-card--family .tree-node-card__score-panel {
+    grid-template-columns: minmax(0, 1fr);
+}
+
+/* --- Name-led header + played move list (all surfaces, g-d65n) ------------ */
+/* The primary line leads with the opening NAME on every surface; it truncates as
+   the lead so the score/grade always stay visible. */
+.tree-node-card__move--name {
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -10499,6 +10507,49 @@ button.tree-node-card--compact {
     white-space: nowrap;
 }
 
-.tree-node-card--family .tree-node-card__score-panel {
-    grid-template-columns: minmax(0, 1fr);
+/* The played move list ("1.e4 c6 2.Bc4") is the secondary line; the last
+   (crossing) move is bold to disambiguate siblings that share a name. */
+.tree-node-card__move-list {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+}
+
+.tree-node-card__move-list-last {
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+/* Compact: one truncated line (full text in the title). The growing flex child
+   of the secondary line, so chips/eval keep their intrinsic width. */
+.tree-node-card__move-list--compact {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Expanded: wraps to as many lines as needed — no truncation. */
+.tree-node-card__move-list--expanded {
+    min-width: 0;
+    white-space: normal;
+}
+
+/* Expanded header: the name wraps (no truncation) and the move list wraps below
+   it, chips flowing after. */
+.tree-node-card--expanded .tree-node-card__move-label {
+    white-space: normal;
+}
+
+.tree-node-card--expanded .tree-node-card__name-line {
+    flex-wrap: wrap;
+}
+
+/* "View in Openings" footer link lives inside the expanded card; raised above
+   the collapse overlay (z-index:0) so it stays clickable. */
+.tree-node-card__footer-action {
+    position: relative;
+    z-index: 1;
+    display: flex;
 }

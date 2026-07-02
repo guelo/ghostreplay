@@ -99,6 +99,20 @@ const mockNavigate = vi.fn();
 vi.mock("react-router-dom", () => ({
   useLocation: () => mockLocation,
   useNavigate: () => mockNavigate,
+  // The expanded opening-lineage card renders a "View in Openings" Link footer.
+  Link: ({
+    to,
+    children,
+    ...rest
+  }: {
+    to: string;
+    children?: import("react").ReactNode;
+    className?: string;
+  }) => (
+    <a href={to} {...rest}>
+      {children}
+    </a>
+  ),
 }));
 
 import { gameAnalysisStore } from "../stores/createAnalysisStore";
@@ -321,6 +335,7 @@ beforeEach(() => {
   fetchSessionOpeningsMock.mockResolvedValue({
     player_color: "white",
     lineage: [],
+    start_ply: 1,
   });
   captureEventMock.mockReset();
   getStatsAchievementsMock.mockReset();
@@ -756,8 +771,10 @@ describe("ChessGame characterization safeguards", () => {
           sample_size: 5,
           game_count: 2,
           path: [],
+          moves: ["e4"],
         },
       ],
+      start_ply: 1,
     });
     // The accuracy stop carries the opening-score delta on the failDrill contract.
     failDrillMock.mockResolvedValueOnce({
@@ -3444,8 +3461,10 @@ describe("ChessGame opening lineage", () => {
           sample_size: 5,
           game_count: 2,
           path: [],
+          moves: ["e4"],
         },
       ],
+      start_ply: 1,
     });
 
     render(<ChessGame />);
@@ -3496,8 +3515,10 @@ describe("ChessGame opening lineage", () => {
           sample_size: 5,
           game_count: 2,
           path: [],
+          moves: ["e4"],
         },
       ],
+      start_ply: 1,
     });
 
     render(<ChessGame />);
@@ -3527,6 +3548,143 @@ describe("ChessGame opening lineage", () => {
     expect(
       screen.getByRole("region", { name: "Openings played" }),
     ).toBeInTheDocument();
+  });
+
+  // --- Post-game lineage actions on /play (g-d65n, history parity) ----------
+
+  const LINEAGE_FEN_E4 =
+    "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
+  const LINEAGE_FEN_E5 =
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2";
+
+  function lineageResponse(openingKey: string) {
+    return {
+      player_color: "white",
+      lineage: [
+        {
+          opening_key: openingKey,
+          opening_name: "King's Pawn Game",
+          opening_family: "King's Pawn",
+          eco: "C20",
+          depth: 0,
+          score: 60,
+          confidence: 0.5,
+          coverage: 0.5,
+          sample_size: 5,
+          game_count: 2,
+          path: [],
+          moves: ["e4"],
+        },
+      ],
+      start_ply: 1,
+    };
+  }
+
+  it("during active play, selecting a card reviews the opening position but offers no Start Drill", async () => {
+    fetchSessionOpeningsMock.mockResolvedValue(lineageResponse(LINEAGE_FEN_E4));
+    useGameStore.setState({
+      sessionId: "session-active-lineage",
+      isGameActive: true,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [
+        { san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" },
+        { san: "e5", fen: LINEAGE_FEN_E5, uci: "e7e5" },
+      ],
+      liveFen: LINEAGE_FEN_E5,
+    });
+    render(<ChessGame />);
+
+    // The board starts at the live position (after 1...e5).
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      LINEAGE_FEN_E5,
+    );
+
+    // Board navigation is wired during play (history parity), so the card is
+    // selectable ("Select …") even while the game is live.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Select King's Pawn Game/ }),
+    );
+
+    // Selecting reviews the opening's past position without disturbing the live
+    // game (the store's live position is untouched — only viewIndex moves).
+    await waitFor(() =>
+      expect(screen.getByTestId("chessboard")).toHaveAttribute(
+        "data-position",
+        LINEAGE_FEN_E4,
+      ),
+    );
+    // Start Drill is post-game only — not offered mid-game.
+    expect(
+      screen.queryByRole("button", { name: /start drill/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("post-game lineage offers Start Drill that opens the drill setup (route-state intercept)", async () => {
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    fetchSessionOpeningsMock.mockResolvedValue(lineageResponse("k1"));
+    useGameStore.setState({
+      sessionId: "session-postgame-drill",
+      isGameActive: false,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [{ san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" }],
+      gameResult: { type: "resign", message: "Resigned." },
+      liveFen: LINEAGE_FEN_E4,
+    });
+    render(<ChessGame />);
+
+    // Post-game the card is selectable ("Select …"), and expanding reveals Start
+    // Drill (onStartDrill wired once gameResult !== null).
+    const toggle = await screen.findByRole("button", {
+      name: /Select King's Pawn Game/,
+    });
+    fireEvent.click(toggle);
+
+    const drill = await screen.findByRole("button", { name: /start drill/i });
+    // Opening the drill setup fetches the opening roots (overlay opened in drill
+    // mode) — mirroring the /openings route-state intercept flow, not a direct
+    // openingFamilies resolution (which is null post-game until the overlay).
+    // Clear first: this describe doesn't reset the mock between tests, so assert
+    // the Start Drill CLICK specifically is what triggers the roots fetch.
+    getOpeningRootsMock.mockClear();
+    fireEvent.click(drill);
+    await waitFor(() => expect(getOpeningRootsMock).toHaveBeenCalled());
+  });
+
+  it("post-game lineage select jumps the board to the opening's position", async () => {
+    // opening_key matches the first move's FEN, so selecting jumps to move 0.
+    fetchSessionOpeningsMock.mockResolvedValue(lineageResponse(LINEAGE_FEN_E4));
+    useGameStore.setState({
+      sessionId: "session-postgame-nav",
+      isGameActive: false,
+      playerColor: "white",
+      boardOrientation: "white",
+      moveHistory: [
+        { san: "e4", fen: LINEAGE_FEN_E4, uci: "e2e4" },
+        { san: "e5", fen: LINEAGE_FEN_E5, uci: "e7e5" },
+      ],
+      gameResult: { type: "resign", message: "Resigned." },
+      liveFen: LINEAGE_FEN_E5,
+    });
+    render(<ChessGame />);
+
+    // The board starts at the live/final position (after 1...e5).
+    const board = screen.getByTestId("chessboard");
+    expect(board).toHaveAttribute("data-position", LINEAGE_FEN_E5);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Select King's Pawn Game/ }),
+    );
+
+    // Selecting the card jumps the board back to the King's Pawn position (move 0).
+    await waitFor(() =>
+      expect(screen.getByTestId("chessboard")).toHaveAttribute(
+        "data-position",
+        LINEAGE_FEN_E4,
+      ),
+    );
   });
 
   it("refetches the lineage at terminal and shows the inline score-diff badge after resign (g-3gmc)", async () => {
@@ -3585,8 +3743,10 @@ describe("ChessGame opening lineage", () => {
           sample_size: 5,
           game_count: 2,
           path: [],
+          moves: ["e4"],
         },
       ],
+      start_ply: 1,
     });
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));

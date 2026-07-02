@@ -132,6 +132,44 @@ export function formatMoveLabel(ply: number | null, san: string | null): string 
   return isWhite ? `${moveNumber}. ${san}` : `${moveNumber}… ${san}`;
 }
 
+/** One rendered move in an opening card's move-list line. `isLast` marks the
+ *  move that crossed into the opening — the card bolds it to disambiguate
+ *  sibling cards that share an inherited name. */
+export interface MoveListToken {
+  text: string;
+  isLast: boolean;
+}
+
+/**
+ * Turn a SAN move list into display tokens ("1.e4", "c6", "2.Bc4"), numbered
+ * from `startPly` (the ply of `sanMoves[0]`; 1 = White's move 1). White plies
+ * (odd) get an "{n}." prefix; Black plies print the SAN alone. The card joins
+ * tokens with spaces and bolds the `isLast` token.
+ *
+ * Empty input short-circuits to `[]` regardless of `startPly`, so the defensive
+ * empty case (a family card with `moves: []`) renders no secondary line.
+ */
+export function buildMoveListTokens(
+  sanMoves: string[],
+  startPly?: number | null,
+): MoveListToken[] {
+  // Nullish guard is defensive: a stale/partial API response (or a test fixture)
+  // may omit the list; the type says string[] but real data can lag the schema.
+  if (!sanMoves || sanMoves.length === 0) {
+    return [];
+  }
+  const base = startPly == null || startPly <= 0 ? 1 : startPly;
+  return sanMoves.map((san, index) => {
+    const ply = base + index;
+    const isWhite = ply % 2 === 1;
+    const moveNumber = Math.ceil(ply / 2);
+    return {
+      text: isWhite ? `${moveNumber}.${san}` : san,
+      isLast: index === sanMoves.length - 1,
+    };
+  });
+}
+
 /** Human-readable reason a tree line terminates. */
 export function formatTerminalReason(reason: string | null): string {
   switch (reason) {

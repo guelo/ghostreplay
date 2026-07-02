@@ -19,6 +19,7 @@ interface SessionOpeningsState {
   sessionId: string | null;
   lineage: OpeningLineageItem[];
   playerColor: OpeningPlayerColor;
+  startPly: number;
 }
 
 // Stable empty reference so a session change / disabled hook does not churn
@@ -52,11 +53,16 @@ const EMPTY_LINEAGE: OpeningLineageItem[] = [];
 export function useSessionOpenings(
   sessionId: string | null,
   { refetchKey, pollIntervalMs, active = false }: UseSessionOpeningsOptions,
-): { lineage: OpeningLineageItem[]; playerColor: OpeningPlayerColor } {
+): {
+  lineage: OpeningLineageItem[];
+  playerColor: OpeningPlayerColor;
+  startPly: number;
+} {
   const [state, setState] = useState<SessionOpeningsState>({
     sessionId: null,
     lineage: EMPTY_LINEAGE,
     playerColor: "white",
+    startPly: 1,
   });
 
   // Monotonic across ALL fetches (data-change + poll) so only the latest issued
@@ -89,6 +95,7 @@ export function useSessionOpenings(
           sessionId: sid,
           lineage: data.lineage,
           playerColor: data.player_color,
+          startPly: data.start_ply,
         });
       })
       .catch(() => {
@@ -98,7 +105,12 @@ export function useSessionOpenings(
         setState((prev) =>
           prev.sessionId === sid
             ? prev
-            : { sessionId: sid, lineage: EMPTY_LINEAGE, playerColor: "white" },
+            : {
+                sessionId: sid,
+                lineage: EMPTY_LINEAGE,
+                playerColor: "white",
+                startPly: 1,
+              },
         );
       });
   }, []);
@@ -138,5 +150,6 @@ export function useSessionOpenings(
   return {
     lineage: matches ? state.lineage : EMPTY_LINEAGE,
     playerColor: matches ? state.playerColor : "white",
+    startPly: matches ? state.startPly : 1,
   };
 }

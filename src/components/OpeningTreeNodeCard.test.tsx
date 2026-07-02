@@ -21,6 +21,8 @@ const childView: OpeningTreeNodeView = {
   isTerminal: false,
   terminalReason: null,
   drillOpeningKey: null,
+  moveListSan: ["e4", "e5", "Nf3"],
+  moveListStartPly: 1,
 };
 
 // The synthesized root: no SAN/name/score, eval from root_eval only.
@@ -39,6 +41,8 @@ const rootView: OpeningTreeNodeView = {
   isTerminal: false,
   terminalReason: null,
   drillOpeningKey: null,
+  moveListSan: [],
+  moveListStartPly: 1,
 };
 
 describe("OpeningTreeNodeCard — compact", () => {
@@ -71,7 +75,7 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(screen.getByRole("button")).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("shows SAN, score, grade, full opening name, and eval", () => {
+  it("leads with the opening name, then score, grade, move list (last bold), and eval", () => {
     render(
       <OpeningTreeNodeCard
         variant="compact"
@@ -80,14 +84,18 @@ describe("OpeningTreeNodeCard — compact", () => {
       />,
     );
 
-    expect(screen.getByText("Nf3")).toBeInTheDocument();
-    expect(screen.getByText("72")).toBeInTheDocument();
-
-    const grade = screen.getByLabelText("Grade A");
-    expect(grade).toHaveTextContent("A");
-
+    // The name is the primary (top) label, truncating as the lead.
     const name = screen.getByText("Ruy Lopez");
+    expect(name).toHaveClass("tree-node-card__move--name");
     expect(name).toHaveAttribute("title", "Ruy Lopez");
+
+    expect(screen.getByText("72")).toBeInTheDocument();
+    expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
+
+    // The played move list is the secondary line; the last move is bold.
+    expect(screen.getByText("1.e4")).toBeInTheDocument();
+    const last = screen.getByText("2.Nf3");
+    expect(last.tagName).toBe("STRONG");
 
     expect(screen.getByText("+1.2")).toBeInTheDocument();
   });
@@ -163,7 +171,7 @@ describe("OpeningTreeNodeCard — compact", () => {
   it("renders a static (non-button) card when no onSelect is given", () => {
     render(<OpeningTreeNodeCard variant="compact" node={childView} />);
     expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.getByText("Nf3")).toBeInTheDocument();
+    expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
   });
 
   it("shows an 'Off book' chip for off-book moves and hides it for book moves", () => {
@@ -265,7 +273,7 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(screen.queryByText("Off book")).toBeNull();
   });
 
-  it("renders the root as 'Start' with eval but no name slot", () => {
+  it("renders the synthesized root as 'Starting position' with no secondary line", () => {
     render(
       <OpeningTreeNodeCard
         variant="compact"
@@ -274,21 +282,28 @@ describe("OpeningTreeNodeCard — compact", () => {
       />,
     );
 
-    expect(screen.getByText("Start")).toBeInTheDocument();
-    expect(screen.getByText("+0.4")).toBeInTheDocument();
-    // No name fallback at the root — the name slot is omitted entirely.
+    expect(screen.getByText("Starting position")).toBeInTheDocument();
+    // No "Unclassified" fallback — the root gets its own label.
     expect(screen.queryByText("Unclassified")).toBeNull();
+    // The root has no move list and no secondary line, so the start eval that
+    // would ride the secondary line is not shown on the compact root.
+    expect(screen.queryByText("+0.4")).toBeNull();
     // Score dashes; grade tag reports "No data".
     expect(screen.getByLabelText("No data")).toHaveTextContent("—");
   });
 });
 
 describe("OpeningTreeNodeCard — expanded", () => {
-  it("is not a button and renders the move label, score+grade, eval, and metrics", () => {
+  it("is not a button and renders the name header, move list, score+grade, eval, and metrics", () => {
     render(<OpeningTreeNodeCard variant="expanded" node={childView} />);
 
     expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.getByText("2. Nf3")).toBeInTheDocument();
+    // Header leads with the opening name (not the move label).
+    const header = screen.getByText("Ruy Lopez");
+    expect(header).toHaveClass("tree-node-card__move-label");
+    // The played move list renders under the header, last move bold.
+    expect(screen.getByText("1.e4")).toBeInTheDocument();
+    expect(screen.getByText("2.Nf3").tagName).toBe("STRONG");
     expect(screen.getByText("72")).toBeInTheDocument();
     expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
     expect(screen.getByText("+1.2")).toBeInTheDocument();
@@ -417,10 +432,12 @@ const familyView: OpeningTreeNodeView = {
   isTerminal: false,
   terminalReason: null,
   drillOpeningKey: "ruy-key",
+  moveListSan: ["e4", "e5", "Nf3", "Nc6", "Bb5"],
+  moveListStartPly: 1,
 };
 
 describe("OpeningTreeNodeCard — family mode", () => {
-  it("compact: shows the name as the primary line (not Start/SAN) with score, grade, and ECO", () => {
+  it("compact: shows the name as the primary line with score, grade, and the played move list", () => {
     render(
       <OpeningTreeNodeCard
         variant="compact"
@@ -437,8 +454,10 @@ describe("OpeningTreeNodeCard — family mode", () => {
     // Score + grade ride alongside.
     expect(screen.getByText("72")).toBeInTheDocument();
     expect(screen.getByLabelText("Grade A")).toHaveTextContent("A");
-    // ECO is the muted secondary line.
-    expect(screen.getByText("C60")).toBeInTheDocument();
+    // The played move list is the secondary line (not the ECO), last move bold.
+    expect(screen.getByText("1.e4")).toBeInTheDocument();
+    expect(screen.getByText("3.Bb5").tagName).toBe("STRONG");
+    expect(screen.queryByText("C60")).toBeNull();
     // The supplied ariaLabel becomes the button's accessible name.
     expect(
       screen.getByRole("button", { name: "Select Ruy Lopez and toggle details" }),
@@ -461,18 +480,23 @@ describe("OpeningTreeNodeCard — family mode", () => {
     expect(screen.queryByText("+1.2")).toBeNull();
   });
 
-  it("compact: renders single-line when there is no ECO", () => {
+  it("compact: a family with no moves shows only the name — never 'Starting position'", () => {
+    // A family card's san is also null, but it is NOT the synthesized /openings
+    // root, so it must never read as "Starting position"; with no moves it just
+    // renders the name and no secondary line.
     render(
       <OpeningTreeNodeCard
         variant="compact"
         kind="family"
-        node={{ ...familyView, eco: null }}
+        node={{ ...familyView, moveListSan: [] }}
         onSelect={vi.fn()}
       />,
     );
 
     expect(screen.getByText("Ruy Lopez")).toBeInTheDocument();
-    expect(screen.queryByText("C60")).toBeNull();
+    expect(screen.queryByText("Starting position")).toBeNull();
+    // No move list rendered (no tokens).
+    expect(screen.queryByText("1.e4")).toBeNull();
   });
 
   it("expanded: name header (no move label), no Eval tile, the two metrics", () => {
@@ -517,5 +541,50 @@ describe("OpeningTreeNodeCard — family mode", () => {
       screen.getByRole("button", { name: /Collapse Ruy Lopez details/ }),
     );
     expect(onCollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it("expanded: renders footerAction inside the card; clicking it does not collapse", async () => {
+    const user = userEvent.setup();
+    const onCollapse = vi.fn();
+    const onFooter = vi.fn();
+    render(
+      <OpeningTreeNodeCard
+        variant="expanded"
+        kind="family"
+        node={familyView}
+        onCollapse={onCollapse}
+        footerAction={
+          <button type="button" onClick={onFooter}>
+            View in Openings
+          </button>
+        }
+      />,
+    );
+
+    // The footer action lives inside the card (a descendant of the expanded card).
+    const card = document.querySelector(".tree-node-card--expanded");
+    const footer = screen.getByRole("button", { name: "View in Openings" });
+    expect(card).toContainElement(footer);
+
+    // Tapping it fires its own handler and does NOT collapse the card.
+    await user.click(footer);
+    expect(onFooter).toHaveBeenCalledTimes(1);
+    expect(onCollapse).not.toHaveBeenCalled();
+  });
+});
+
+describe("OpeningTreeNodeCard — move list truncation", () => {
+  it("compact truncates the move list to one line; expanded wraps it", () => {
+    const { rerender } = render(
+      <OpeningTreeNodeCard variant="compact" node={childView} />,
+    );
+    const compact = screen.getByText("1.e4").closest(".tree-node-card__move-list");
+    expect(compact).toHaveClass("tree-node-card__move-list--compact");
+
+    rerender(<OpeningTreeNodeCard variant="expanded" node={childView} />);
+    const expanded = screen
+      .getByText("1.e4")
+      .closest(".tree-node-card__move-list");
+    expect(expanded).toHaveClass("tree-node-card__move-list--expanded");
   });
 });

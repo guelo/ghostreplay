@@ -16,7 +16,7 @@ import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
 import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
-import type { OpeningRootItem } from "../utils/api";
+import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
 import { checkDrillRoute, failDrill, getOpeningRoots } from "../utils/api";
 import {
   gameAnalysisStore,
@@ -388,8 +388,11 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // Live opening-lineage hierarchy (broadest -> deepest), driven from the active
   // session. Refetches as moves accumulate and polls while the game is active to
   // converge the analysis+upload lag. Expand-only: no board-jump, no Start Drill.
-  const { lineage: openingLineage, playerColor: openingLineagePlayerColor } =
-    useSessionOpenings(sessionId, {
+  const {
+    lineage: openingLineage,
+    playerColor: openingLineagePlayerColor,
+    startPly: openingLineageStartPly,
+  } = useSessionOpenings(sessionId, {
       // Force one extra refetch at a terminal event (g-3gmc): a resign/fast-stop
       // sets openingScoreChanges WITHOUT adding a move and with polling already
       // off, so the lineage can still be empty when the deltas land. During play
@@ -1120,6 +1123,45 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     pendingDrillSetupRef.current = null;
   }, [openingFamilies]);
   // -------------------------------------------------------------------
+
+  // Opening-lineage actions on /play (history parity).
+
+  // Board navigation: jump the board to review the opening's position, mirroring
+  // /history's handleSelectRoot. `item.moves` is the played SAN prefix up to and
+  // INCLUDING the crossing move, so its last index is that move's index in the
+  // session's move list (== moveHistory order) — a per-crossing index, so a
+  // repeated opening root jumps to ITS crossing, not a first FEN match. Wired
+  // during play AND post-game: it only reviews a past position (viewIndex), never
+  // disturbing the live game.
+  const handleLineageSelectRoot = useCallback(
+    (item: OpeningLineageItem) => {
+      const idx = item.moves.length - 1;
+      if (idx >= 0 && idx < moveHistory.length) {
+        handleNavigate(idx);
+      }
+    },
+    [moveHistory, handleNavigate],
+  );
+
+  // Start Drill: mirror the /openings route-state intercept flow rather than
+  // resolving openingFamilies directly — that list is null post-game until the
+  // overlay opens it (the L1034 effect fetches only when showStartOverlay &&
+  // isDrillMode). Seeding the pending setup + opening the overlay triggers that
+  // fetch; the roots-match effect then resolves pendingDrillSetupRef ->
+  // setSelectedDrillOpening. Not handleStartDrill (needs a full draft) or
+  // handleShowStartOverlay alone (doesn't set drill mode / seed the ref).
+  const handleLineageStartDrill = useCallback(
+    (item: OpeningLineageItem) => {
+      setIsDrillMode(true);
+      adHocLineRef.current = null;
+      pendingDrillSetupRef.current = {
+        openingKey: item.opening_key,
+        playerColor,
+      };
+      setShowStartOverlay(true);
+    },
+    [playerColor],
+  );
 
   const isPostRootMoveStillCurrent = useCallback(
     (
@@ -1898,7 +1940,16 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                   <GameOpeningLineage
                     playerColor={openingLineagePlayerColor}
                     lineage={openingLineage}
+                    startPly={openingLineageStartPly}
                     scoreChanges={openingScoreChanges}
+                    // Board navigation works during play AND post-game (history
+                    // parity): selecting a card only REVIEWS the opening's past
+                    // position (viewIndex) — it never disturbs the live game.
+                    // Start Drill is post-game only (gameResult !== null).
+                    onSelectRoot={handleLineageSelectRoot}
+                    onStartDrill={
+                      gameResult !== null ? handleLineageStartDrill : undefined
+                    }
                   />
                 </div>
               ) : null

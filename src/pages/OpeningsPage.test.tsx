@@ -356,12 +356,22 @@ function lineIndexes(): number[] {
     .map((el) => Number(el.getAttribute("data-line-index")));
 }
 
-/** Click a compact node card by its SAN move text. */
+/** Click a compact node card by its move. Cards now lead with the opening name;
+ *  the move appears as the bold last token of the card's played move list
+ *  ("1.e4" for White, a bare SAN for Black). The synthesized root card leads with
+ *  "Starting position". */
 function clickMove(san: string) {
-  const moveSpan = screen.getByText(san, {
-    selector: ".tree-node-card__move",
-  });
-  fireEvent.click(moveSpan.closest("button") as HTMLButtonElement);
+  const target =
+    san === "Start"
+      ? screen.getByText("Starting position", {
+          selector: ".tree-node-card__move--name",
+        })
+      : screen
+          .getAllByText(/\S/, { selector: ".tree-node-card__move-list-last" })
+          .find((el) => (el.textContent ?? "").replace(/^\d+\./, "") === san);
+  fireEvent.click(
+    (target as HTMLElement).closest("button") as HTMLButtonElement,
+  );
 }
 
 /** Fire the board's onSquareClick for a square (the click-to-move entry). */
@@ -398,7 +408,7 @@ describe("OpeningsPage tree", () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
     renderAt("/openings?color=white");
 
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
     expect(lineIndexes()).toEqual([-1, 0]);
     expect(screen.getByTestId("opening-card-board")).toHaveAttribute(
       "data-orientation",
@@ -411,7 +421,7 @@ describe("OpeningsPage tree", () => {
   it("captures opening_explored when a move node is selected", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
     clickMove("e4");
@@ -512,7 +522,7 @@ describe("OpeningsPage tree", () => {
   it("syncs a navigable board drop to the tree and rejects illegal drops", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Illegal drop (e2→e5 is not a legal pawn move) → resolveDrop returns null →
     // rejected, board snaps back, no exploration captured.
@@ -560,7 +570,7 @@ describe("OpeningsPage tree", () => {
   it("extends the line for a legal off-tree board drop (third move type)", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // a2a3 is legal but not a node in the frontier column. Previously this was
     // rejected (board snapped back); now it extends the line as a user-selected
@@ -586,8 +596,8 @@ describe("OpeningsPage tree", () => {
     });
     // The refetch settles into a3 as the deepest selected (expanded) node; let
     // it land so the state update doesn't trail as an act() warning.
-    await screen.findByText("1. a3", {
-      selector: ".tree-node-card__move-label",
+    await screen.findByText("1.a3", {
+      selector: ".tree-node-card__move-list-last",
     });
     // "Your move" chip flags the third move type on the expanded card.
     expect(screen.getByText("Your move")).toBeInTheDocument();
@@ -597,7 +607,7 @@ describe("OpeningsPage tree", () => {
   it("off-tree board drop: loading spinner renders inside the frontier column, not a new column", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Keep the off-tree (a2a3) refetch pending so the loading state is visible.
     const pending = deferred<TreeResponse>();
@@ -628,14 +638,14 @@ describe("OpeningsPage tree", () => {
     // Still just root + the one frontier column; the book siblings remain.
     expect(lineIndexes()).toEqual([-1, 0]);
     expect(
-      screen.getByText("e4", { selector: ".tree-node-card__move" }),
+      screen.getByText("1.e4", { selector: ".tree-node-card__move-list-last" }),
     ).toBeInTheDocument();
 
     // Resolving settles a3 into that same column as the expanded "Your move"
     // card and clears the footer.
     act(() => pending.resolve(WHITE_A3));
-    await screen.findByText("1. a3", {
-      selector: ".tree-node-card__move-label",
+    await screen.findByText("1.a3", {
+      selector: ".tree-node-card__move-list-last",
     });
     expect(screen.getByText("Your move")).toBeInTheDocument();
     expect(
@@ -646,7 +656,7 @@ describe("OpeningsPage tree", () => {
   it("switches perspective: flips orientation, preserves the line, refetches at root", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
     expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
 
     getOpeningTreeMock.mockResolvedValueOnce(BLACK_ROOT);
@@ -674,7 +684,7 @@ describe("OpeningsPage tree", () => {
       "/openings?color=white",
       <Nav to="/openings?color=white&opening=somefen" label="go-legacy" />,
     );
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_E4);
     fireEvent.click(screen.getByText("go-legacy"));
@@ -711,7 +721,7 @@ describe("OpeningsPage tree", () => {
   it("does not canonicalize backward while a fresh selection is still pending", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Keep the e2e4 fetch pending.
     getOpeningTreeMock.mockReturnValueOnce(deferred<TreeResponse>().promise);
@@ -753,7 +763,7 @@ describe("OpeningsPage tree", () => {
         label="go-deep"
       />,
     );
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     const pending = deferred<TreeResponse>();
     getOpeningTreeMock.mockReturnValueOnce(pending.promise);
@@ -804,17 +814,17 @@ describe("OpeningsPage tree", () => {
       }),
     );
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // The navigable move is a selection button…
     expect(
       screen
-        .getByText("e4", { selector: ".tree-node-card__move" })
+        .getByText("1.e4", { selector: ".tree-node-card__move-list-last" })
         .closest("button"),
     ).not.toBeNull();
     // …the boundary move renders as a plain (non-button) card.
-    const boundary = screen.getByText("h4", {
-      selector: ".tree-node-card__move",
+    const boundary = screen.getByText("1.h4", {
+      selector: ".tree-node-card__move-list-last",
     });
     expect(boundary.closest("button")).toBeNull();
 
@@ -856,14 +866,14 @@ describe("OpeningsPage tree", () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
 
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
     expect(lineIndexes()).toEqual([-1, 0]);
   });
 
   it("shows an append error + Retry while keeping the existing columns", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     getOpeningTreeMock.mockRejectedValueOnce(new Error("append down"));
     clickMove("e4");
@@ -880,7 +890,7 @@ describe("OpeningsPage tree", () => {
   it("ignores a stale response that settles during a color switch", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Switch to black with a pending (slow) black fetch…
     const blackPending = deferred<TreeResponse>();
@@ -945,8 +955,8 @@ describe("OpeningsPage tree", () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_E4);
     renderAt("/openings?color=white&move=e2e4");
     // e2e4 is the deepest selected node here → expanded (move label "1. e4").
-    await screen.findByText("1. e4", {
-      selector: ".tree-node-card__move-label",
+    await screen.findByText("1.e4", {
+      selector: ".tree-node-card__move-list-last",
     });
 
     // drill_opening_key is null on this node, but the card is still drillable.
@@ -998,7 +1008,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
   it("selects a piece on click, paints legal-move hints, then moves on the second click", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // First click selects the e2 pawn: legal dots (e3, e4) + a source highlight
     // are painted, and nothing navigates yet.
@@ -1029,7 +1039,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
   it("extends the line for a legal off-tree square click (third move type)", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // a2→a3 is legal but not a frontier node → extend the line (g-obh5),
     // routed through the same path as the drag.
@@ -1043,15 +1053,15 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
       depth: 1,
       player_color: "white",
     });
-    await screen.findByText("1. a3", {
-      selector: ".tree-node-card__move-label",
+    await screen.findByText("1.a3", {
+      selector: ".tree-node-card__move-list-last",
     });
   });
 
   it("does not select an opponent piece or an empty square", async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Black pawn (not the side to move) → no hints.
     clickSquare("e7");
@@ -1068,7 +1078,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
   it("clears hints (no navigation) when the second click is an illegal destination", async () => {
     getOpeningTreeMock.mockResolvedValue(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     clickSquare("e2");
     expect(squareStyles().e4).toBeDefined();
@@ -1085,7 +1095,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
   it("locks the board with a loading overlay while a move-triggered refetch is in flight", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Settled → no board overlay.
     expect(
@@ -1120,7 +1130,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
   it("clears stale hints when the perspective is switched at the same root FEN", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Select e2 at the root (hints painted).
     clickSquare("e2");
@@ -1142,7 +1152,7 @@ describe("OpeningsPage click-to-move (g-0b6q)", () => {
   it("clears stale hints when the board position changes via a tree click", async () => {
     getOpeningTreeMock.mockResolvedValueOnce(WHITE_ROOT);
     renderAt("/openings?color=white");
-    await screen.findByText("e4", { selector: ".tree-node-card__move" });
+    await screen.findByText("1.e4", { selector: ".tree-node-card__move-list-last" });
 
     // Select e2 (hints shown), then navigate via a tree node instead of the
     // board: the position changes, so the e2 hints must not linger.
@@ -1184,7 +1194,7 @@ describe("OpeningsPage cold-cache setup (g-k4z2)", () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
       expect(
-        screen.getByText("e4", { selector: ".tree-node-card__move" }),
+        screen.getByText("1.e4", { selector: ".tree-node-card__move-list-last" }),
       ).toBeInTheDocument();
       expect(getOpeningTreeMock).toHaveBeenCalledTimes(1);
     } finally {

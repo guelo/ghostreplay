@@ -143,6 +143,10 @@ export function nodeToView(node: TreeNode): OpeningTreeNodeView {
     isTerminal: node.terminal_reason != null,
     terminalReason: node.terminal_reason,
     drillOpeningKey: node.drill_opening_key,
+    // Placeholder; buildTreeView fills the real played prefix (it owns the line
+    // replay). Tree lines always start at White's move 1.
+    moveListSan: [],
+    moveListStartPly: 1,
   };
 }
 
@@ -176,6 +180,9 @@ export function synthesizeRootView(
     isTerminal: fetchedForRoot ? response.selected_is_terminal : false,
     terminalReason: fetchedForRoot ? response.selected_terminal_reason : null,
     drillOpeningKey: fetchedForRoot ? response.drill_opening_key : null,
+    // The synthesized root is the start position — no move list.
+    moveListSan: [],
+    moveListStartPly: 1,
   };
 }
 
@@ -212,6 +219,25 @@ export function replayLine(line: string[]): BoardState {
     lastMove = played;
   }
   return { fen: chess.fen(), lastMove };
+}
+
+/**
+ * Replay a UCI line from the start and return the SAN of each move, stopping at
+ * the first illegal move. Used to build the per-node played-move-list prefix
+ * once (rather than replaying per node), since each node already carries its own
+ * SAN — only the ancestors' SANs need deriving.
+ */
+function replayLineSan(line: string[]): string[] {
+  const chess = new Chess();
+  const sans: string[] = [];
+  for (const uci of line) {
+    const played = applyUci(chess, uci);
+    if (!played) {
+      break;
+    }
+    sans.push(chess.history().at(-1) ?? "");
+  }
+  return sans;
 }
 
 /**
@@ -274,6 +300,11 @@ export function buildTreeView(
   const { selectionLine, loadedThroughPly, isExactResponseLine } = options;
   const k = selectionLine.length;
 
+  // Replay the selected line ONCE for the ancestors' SANs; each node's own SAN is
+  // already present, so a node's played-move list is the shared prefix up to its
+  // column plus its own move. Tree lines always start at White's move 1.
+  const prefixSan = replayLineSan(selectionLine);
+
   const rootColumn: DisplayColumn = {
     kind: "root",
     lineIndex: -1,
@@ -313,9 +344,15 @@ export function buildTreeView(
       .filter((node) => !(node.is_user_selected && node.uci !== selectedUci))
       .map((node) => {
         const isSelected = node.uci === selectedUci;
+        // Played move list to reach this node: the ancestors' SANs (shared by all
+        // nodes in this column) plus this node's own SAN as the last (bold) token.
+        const moveListSan =
+          node.san == null
+            ? []
+            : prefixSan.slice(0, lineIndex).concat(node.san);
         return {
           key: node.uci,
-          view: nodeToView(node),
+          view: { ...nodeToView(node), moveListSan, moveListStartPly: 1 },
           uci: node.uci,
           childFen: node.child_fen,
           isSelected,
