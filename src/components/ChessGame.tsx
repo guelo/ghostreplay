@@ -269,7 +269,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const playerRating = useGameStore((s) => s.playerRating);
   const isProvisional = useGameStore((s) => s.isProvisional);
   const ratingScores = useGameStore((s) => s.ratingScores);
-  const ratingDisplayType = useGameStore((s) => s.ratingDisplayType);
   const scoreChanges = useGameStore((s) => s.scoreChanges);
   const openingScoreChanges = useGameStore((s) => s.openingScoreChanges);
   const ratingChange = useGameStore((s) => s.ratingChange);
@@ -413,6 +412,15 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // latest index — e.g. a graph click on the rightmost point — does NOT wash.
   const isReviewingPast = isGameActive && displayedIndex < moveHistory.length - 1;
 
+  // Nonce bumped on a board interaction (click OR drag) while reviewing a past
+  // move, so BoardStage can shake the board (g-1y68 A3). A monotonic counter
+  // re-arms the shake on every attempt even when the reviewing state itself
+  // hasn't changed.
+  const [reviewNudge, setReviewNudge] = useState(0);
+  const triggerReviewShake = useCallback(() => {
+    setReviewNudge((n) => n + 1);
+  }, []);
+
   const isPlayerMoveIndex = useCallback(
     (index: number) => {
       if (index < 0) return false;
@@ -471,6 +479,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     },
     [analysisStore, clearBlunderBoardOverride, clearMoveHighlights, isPlayerMoveIndex, pendingPromotion],
   );
+
+  // Return-to-live for the floating board pill (g-1y68 A1) — the same path the
+  // move list's ⟩⟩ button uses. Firing it nulls viewIndex, which flips
+  // isReviewingPast false and unmounts every reviewing cue in one commit.
+  const handleReturnToLive = useCallback(() => {
+    handleNavigate(null);
+  }, [handleNavigate]);
 
   const getMoveOptions = useCallback(
     (square: string): boolean => {
@@ -1369,7 +1384,25 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
         return; // picker is open, ignore board clicks (backdrop handles cancel)
       }
 
-      if (isRevertPending || isBlunderBoardOverrideActive) {
+      if (isRevertPending) {
+        clearMoveHighlights();
+        return;
+      }
+
+      // Reviewing a past move: pieces can't be moved. Instead of a silent no-op
+      // that leaves users confused, shake the board to point them at the
+      // return-to-live pill (g-1y68 A3, click path; the drag path lives in
+      // handleDropPiece). This runs BEFORE the blunder/drill-fail guard on
+      // purpose: the rewind those trigger IS the core "blunder is shown, why
+      // can't I move?" moment g-1y68 targets. Scoped to isReviewingPast — the
+      // broader waiting-for-opponent case below stays a silent no-op.
+      if (isReviewingPast) {
+        clearMoveHighlights();
+        triggerReviewShake();
+        return;
+      }
+
+      if (isBlunderBoardOverrideActive) {
         clearMoveHighlights();
         return;
       }
@@ -1410,6 +1443,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       chess,
       isGameActive,
       isBlunderBoardOverrideActive,
+      isReviewingPast,
       isRevertPending,
       isViewingLive,
       pendingPromotion,
@@ -1418,6 +1452,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       applyPlayerMoveAndAdvance,
       clearMoveHighlights,
       getMoveOptions,
+      triggerReviewShake,
     ],
   );
 
@@ -1559,7 +1594,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       sourceSquare,
       targetSquare,
     }: PieceDropHandlerArgs) => {
-      if (isRevertPending || isBlunderBoardOverrideActive || !targetSquare) {
+      if (isRevertPending || !targetSquare) {
+        return false;
+      }
+
+      // Reviewing a past move (manual nav OR a blunder/drill-fail rewind):
+      // dragging is enabled only so a drag ATTEMPT lands here (players make moves
+      // by dragging, not just clicking). Reject the drop and shake to point at
+      // the return-to-live pill (g-1y68 A3, drag path; the click path lives in
+      // handleSquareClick). Runs before the blunder/drill-fail guard so the core
+      // "blunder is shown" rewind gets the cue too.
+      if (isReviewingPast) {
+        triggerReviewShake();
+        return false;
+      }
+
+      if (isBlunderBoardOverrideActive) {
         return false;
       }
 
@@ -1577,7 +1627,14 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
       return true;
     },
-    [continueAfterPlayerMove, handleDrop, isBlunderBoardOverrideActive, isRevertPending],
+    [
+      continueAfterPlayerMove,
+      handleDrop,
+      isBlunderBoardOverrideActive,
+      isReviewingPast,
+      isRevertPending,
+      triggerReviewShake,
+    ],
   );
 
   const handlePromotionPick = useCallback(
@@ -1859,7 +1916,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setEngineMessage,
   ]);
 
-  const allowDragging =
+  const canDragLiveMove =
     isGameActive &&
     engineStatus === "ready" &&
     isPlayersTurn &&
@@ -1867,6 +1924,13 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     !isThinking &&
     isViewingLive &&
     !isBlunderBoardOverrideActive;
+  // Also let the piece lift while reviewing a past move — not to allow a move
+  // (handleDropPiece rejects it) but so a drag ATTEMPT fires onPieceDrop and can
+  // trigger the return-to-live shake (g-1y68 A3 drag path). Includes the
+  // blunder/drill-fail rewind (the core g-1y68 case); only the revert dialog,
+  // a true modal, stays non-interactive.
+  const allowDragging =
+    canDragLiveMove || (isReviewingPast && !isRevertPending);
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
   const hasBelowBoardContent = moveHistory.length > 0 || !isGameActive;
 
@@ -1919,8 +1983,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
             playerRating={playerRating}
             isProvisional={isProvisional}
             ratingScores={ratingScores}
-            ratingDisplayType={ratingDisplayType}
-            onRatingDisplayTypeChange={useGameStore.getState().setRatingDisplayType}
             opponentMode={opponentMode}
             opponentName={MAIA_BOT_NAMES[engineElo as keyof typeof MAIA_BOT_NAMES]}
             engineElo={engineElo}
@@ -1974,6 +2036,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 showStartOverlay={showStartOverlay}
                 isGameActive={isGameActive}
                 isReviewingPast={isReviewingPast}
+                onReturnToLive={handleReturnToLive}
+                reviewNudge={reviewNudge}
                 isStoppedDrill={isStoppedDrill}
                 isStartingGame={isStartingGame}
                 onCloseStartOverlay={handleCloseStartOverlay}
@@ -2030,7 +2094,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 drillActionsDisabled={isStartingGame}
                 ratingChange={ratingChange}
                 scoreChanges={scoreChanges}
-                ratingDisplayType={ratingDisplayType}
                 onViewAnalysis={handleViewAnalysis}
                 onShowStartOverlay={handleShowStartOverlay}
                 onViewHistory={handleViewHistory}

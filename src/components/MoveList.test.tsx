@@ -1317,3 +1317,68 @@ describe('MoveList — header eval mate codes', () => {
     expect(header?.textContent).toBe('#')
   })
 })
+
+describe('MoveList return-to-live emphasis (g-1y68 A2)', () => {
+  const twoMoves = [
+    { san: 'e4', eval: 30 },
+    { san: 'e5', eval: 20 },
+  ]
+
+  it('emphasizes the ⟩⟩ button with a LIVE label while reviewing a live game', () => {
+    const { container, getByText } = render(
+      <MoveList
+        moves={twoMoves}
+        currentIndex={0}
+        onNavigate={noop}
+        isGameActive
+      />,
+    )
+    expect(
+      container.querySelector('.move-nav-button--return-live'),
+    ).not.toBeNull()
+    expect(getByText('LIVE')).toBeInTheDocument()
+  })
+
+  it('does not emphasize when already at the latest move', () => {
+    const { container, queryByText } = render(
+      <MoveList
+        moves={twoMoves}
+        currentIndex={null}
+        onNavigate={noop}
+        isGameActive
+      />,
+    )
+    expect(container.querySelector('.move-nav-button--return-live')).toBeNull()
+    expect(queryByText('LIVE')).toBeNull()
+  })
+
+  it('does not emphasize when the game is over', () => {
+    const { container } = render(
+      <MoveList
+        moves={twoMoves}
+        currentIndex={0}
+        onNavigate={noop}
+        isGameActive={false}
+      />,
+    )
+    expect(container.querySelector('.move-nav-button--return-live')).toBeNull()
+  })
+
+  it('still returns to the latest move when the emphasized button is clicked', () => {
+    const onNavigate = vi.fn()
+    const { container } = render(
+      <MoveList
+        moves={twoMoves}
+        currentIndex={0}
+        onNavigate={onNavigate}
+        isGameActive
+      />,
+    )
+    const button = container.querySelector(
+      '.move-nav-button--return-live',
+    ) as HTMLButtonElement
+    expect(button).not.toBeNull()
+    fireEvent.click(button)
+    expect(onNavigate).toHaveBeenCalledWith(null)
+  })
+})

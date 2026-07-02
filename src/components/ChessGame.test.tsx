@@ -2169,6 +2169,112 @@ describe("ChessGame characterization safeguards", () => {
       screen.queryByRole("button", { name: /start drill/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("shakes the board and blocks the move on a board CLICK while reviewing a past move (g-1y68 A3)", async () => {
+    await startGameAsWhite();
+
+    // Play e4; the beforeEach mock auto-replies d5, giving a 2-ply live game.
+    await act(async () => {
+      capturedSquareClick?.({ square: "e2" });
+    });
+    await act(async () => {
+      capturedSquareClick?.({ square: "e4" });
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().moveHistory).toHaveLength(2);
+    });
+
+    // Park on the first ply — live game, reviewing a past move.
+    act(() => {
+      useGameStore.getState().setViewIndex(0);
+    });
+
+    const movesBefore = useGameStore.getState().moveHistory.length;
+    const opponentCallsBefore = getNextOpponentMoveMock.mock.calls.length;
+
+    await act(async () => {
+      capturedSquareClick?.({ square: "e2" });
+    });
+
+    // No move attempted, no opponent request, and the board shakes.
+    expect(useGameStore.getState().moveHistory).toHaveLength(movesBefore);
+    expect(getNextOpponentMoveMock.mock.calls.length).toBe(opponentCallsBefore);
+    expect(
+      document.querySelector(".chessboard-square-measure--nudge"),
+    ).not.toBeNull();
+  });
+
+  it("shakes the board and rejects a DRAG while reviewing a past move (g-1y68 A3)", async () => {
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedSquareClick?.({ square: "e2" });
+    });
+    await act(async () => {
+      capturedSquareClick?.({ square: "e4" });
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().moveHistory).toHaveLength(2);
+    });
+
+    act(() => {
+      useGameStore.getState().setViewIndex(0);
+    });
+
+    // The board is draggable while reviewing purely so a drag attempt reaches us.
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-allow-dragging",
+      "true",
+    );
+
+    const movesBefore = useGameStore.getState().moveHistory.length;
+    const opponentCallsBefore = getNextOpponentMoveMock.mock.calls.length;
+
+    let dropResult: boolean | undefined;
+    await act(async () => {
+      dropResult = capturedPieceDrop?.({
+        sourceSquare: "e2",
+        targetSquare: "e4",
+      });
+    });
+
+    // Drop rejected (piece snaps back), no move, no opponent request, shake fires.
+    expect(dropResult).toBe(false);
+    expect(useGameStore.getState().moveHistory).toHaveLength(movesBefore);
+    expect(getNextOpponentMoveMock.mock.calls.length).toBe(opponentCallsBefore);
+    expect(
+      document.querySelector(".chessboard-square-measure--nudge"),
+    ).not.toBeNull();
+  });
+
+  it("does not shake on a board click while merely waiting for the opponent (g-1y68 A3)", async () => {
+    await startGameAsWhite();
+
+    // Hold the opponent reply pending so the board stays live but not the
+    // player's turn — a different situation that must stay a silent no-op.
+    getNextOpponentMoveMock.mockReset();
+    getNextOpponentMoveMock.mockReturnValueOnce(new Promise(() => {}));
+
+    await act(async () => {
+      capturedSquareClick?.({ square: "e2" });
+    });
+    await act(async () => {
+      capturedSquareClick?.({ square: "e4" });
+    });
+    await waitFor(() => {
+      expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    });
+
+    await act(async () => {
+      capturedSquareClick?.({ square: "d2" });
+    });
+
+    expect(useGameStore.getState().moveHistory).toHaveLength(1);
+    expect(
+      document.querySelector(".chessboard-square-measure--nudge"),
+    ).toBeNull();
+  });
+
 });
 
 describe("ChessGame eval bar behavior", () => {
@@ -4151,7 +4257,7 @@ describe("ChessGame blunder board rewind", () => {
     );
   });
 
-  it("ignores square-click interaction while the blunder rewind override is active", async () => {
+  it("shakes but blocks the move on a board click during the blunder rewind override (g-1y68 A3)", async () => {
     const { sourceFenBeforeBlunder } = await reachDelayedPlayerBlunder();
 
     vi.useFakeTimers();
@@ -4167,15 +4273,22 @@ describe("ChessGame blunder board rewind", () => {
       capturedSquareClick?.({ square: "e4" });
     });
 
+    // No move applied and no opponent request, but the blunder rewind IS the core
+    // "why can't I move?" moment — so the board now shakes toward the pill.
     expect(useGameStore.getState().moveHistory).toHaveLength(moveCountBeforeClick);
     expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
       "data-position",
       sourceFenBeforeBlunder,
     );
+    expect(
+      document.querySelector(".chessboard-square-measure--nudge"),
+    ).not.toBeNull();
+    // Dragging is enabled during review only so a drag attempt can be caught and
+    // rejected (handleDropPiece), not so a move can land.
     expect(screen.getByTestId("chessboard")).toHaveAttribute(
       "data-allow-dragging",
-      "false",
+      "true",
     );
   });
 

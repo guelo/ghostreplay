@@ -422,6 +422,17 @@ const MoveList = ({
 
   const isAtStart = effectiveIndex === -1 && !isVariationActive;
   const isAtLatest = currentIndex === null && !isVariationActive;
+  // Dramatize the ⟩⟩ ("go to latest") button while the user is parked on a past
+  // ply of a live game (g-1y68 A2). Mirrors the board's `isReviewingPast`
+  // exactly (isGameActive && displayedIndex < len-1, where displayedIndex is
+  // currentIndex ?? len-1), so it also stays off when a graph click lands on the
+  // rightmost point (currentIndex === len-1). Only shows while the button is
+  // actionable — never during a variation.
+  const emphasizeLatest =
+    !!isGameActive &&
+    !isVariationActive &&
+    currentIndex !== null &&
+    currentIndex < moves.length - 1;
   const hasAddButton = Boolean(onAddSelectedMove);
   const isAddEnabled =
     hasAddButton &&
@@ -553,13 +564,16 @@ const MoveList = ({
           ⟩
         </button>
         <button
-          className="move-nav-button"
+          className={`move-nav-button${emphasizeLatest ? " move-nav-button--return-live" : ""}`}
           type="button"
           onClick={handleLatest}
           disabled={isInteractionDisabled || isAtLatest}
           title="Go to current position"
         >
           ⟩⟩
+          {emphasizeLatest && (
+            <span className="move-nav-button__live-label">LIVE</span>
+          )}
         </button>
       </div>
 

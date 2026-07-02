@@ -2815,6 +2815,65 @@
     100% { opacity: 1; transform: scale(1); }
 }
 
+/* g-1y68 A1 — floating "Return to live" pill, tucked into the bottom-right
+   corner of the board so most of the bottom-right squares stay visible. The
+   primary fix for "I don't know how to get back": pulses gently and returns to
+   the latest move on click. pointer-events must be auto — the sibling toast
+   layer above it may be click-through. */
+.board-return-live {
+    position: absolute;
+    bottom: 0.5rem;
+    right: 0.5rem;
+    z-index: 9;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 1.1rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    pointer-events: auto;
+    box-shadow: var(--shadow-lg);
+    /* Entrance is a plain rise (no horizontal centering to preserve now that the
+       pill is corner-anchored); the pulse animates only box-shadow. */
+    animation:
+        blunder-toast-in 250ms ease-out,
+        board-return-live-pulse 2s ease-in-out 250ms infinite;
+}
+
+.board-return-live:hover {
+    filter: brightness(1.06);
+}
+
+.board-return-live:focus-visible {
+    outline: 2px solid var(--text-on-gradient);
+    outline-offset: 2px;
+}
+
+.board-return-live__glyph {
+    font-size: 1rem;
+    line-height: 1;
+}
+
+@keyframes board-return-live-pulse {
+    0%,
+    100% {
+        box-shadow:
+            var(--shadow-lg),
+            0 0 0 0 color-mix(in srgb, var(--brand-primary) 55%, transparent);
+    }
+    50% {
+        box-shadow:
+            var(--shadow-lg),
+            0 0 0 8px color-mix(in srgb, var(--brand-primary) 0%, transparent);
+    }
+}
+
 .chessboard-overlay {
     position: fixed;
     inset: 0;
@@ -4359,6 +4418,48 @@
     transition: filter 0.2s ease;
 }
 
+/* g-1y68 B2 — amber frame while reviewing: reads as "different mode" more
+   legibly than the wash alone. Ring lives on the measuring wrapper via
+   box-shadow (NOT border/outline that would alter the measured box and shift
+   the board). Coexists with the inner board's drop shadow set in boardStyle. */
+.chessboard-square-measure--reviewing {
+    border-radius: 3px;
+    box-shadow:
+        0 0 0 3px color-mix(in srgb, var(--warning) 78%, transparent),
+        0 0 18px 2px color-mix(in srgb, var(--warning) 32%, transparent);
+    transition: box-shadow 0.2s ease;
+}
+
+/* g-1y68 A3 — brief shake on a board interaction (click or drag) during review,
+   answering "why can't I move?". Transform on the wrapper (not the filter wash on
+   the squares), so the two animations don't fight. Self-clears when the class is
+   removed (BoardStage timeout). */
+.chessboard-square-measure--nudge {
+    animation: board-review-nudge 320ms ease-in-out;
+}
+
+@keyframes board-review-nudge {
+    0%,
+    100% {
+        transform: translateX(0);
+    }
+    15% {
+        transform: translateX(-7px);
+    }
+    30% {
+        transform: translateX(6px);
+    }
+    45% {
+        transform: translateX(-5px);
+    }
+    60% {
+        transform: translateX(4px);
+    }
+    75% {
+        transform: translateX(-2px);
+    }
+}
+
 /* Eval-icon badges overlaid on the analysis board */
 .board-eval-icons {
     position: absolute;
@@ -5117,73 +5218,10 @@
 }
 
 .panel-settings {
-    position: relative;
     display: inline-flex;
 }
 
-/* Compound selector to outrank the generic .rating-settings-popover rule
-   (defined later) for the anchoring/sizing the panel popover needs. */
-.rating-settings-popover.panel-settings__popover {
-    right: 0;
-    left: auto;
-    min-width: 12rem;
-    max-width: min(16rem, calc(100vw - 2rem));
-}
-
-.panel-settings__section {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-    padding: 0.25rem 0;
-}
-
-.panel-settings__section + .panel-settings__section {
-    border-top: 1px solid var(--border-color);
-    margin-top: 0.2rem;
-    padding-top: 0.4rem;
-}
-
-.panel-settings__heading {
-    padding: 0.1rem 0.4rem;
-    font-size: 0.72rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--text-tertiary);
-}
-
-.panel-settings__volume {
-    gap: 0.5rem;
-}
-
-.panel-settings__volume input[type="range"] {
-    flex: 1 1 auto;
-    width: 100%;
-    accent-color: var(--accent, #7c6fe0);
-    cursor: pointer;
-}
-
-.panel-settings__volume input[type="range"]:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-}
-
-.panel-settings__volume-value {
-    flex: 0 0 auto;
-    min-width: 2.6rem;
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    font-size: 0.8rem;
-}
-
-.rating-settings-anchor {
-    position: relative;
-    display: inline-flex;
-    margin-left: 0.35rem;
-    vertical-align: middle;
-}
-
-.rating-settings-button {
+.panel-sound-toggle {
     width: 24px;
     height: 24px;
     border: 1px solid var(--border-color);
@@ -5197,38 +5235,14 @@
     cursor: pointer;
 }
 
-.rating-settings-button:hover {
+.panel-sound-toggle:hover {
     color: var(--text-primary);
     background: var(--bg-tertiary);
 }
 
-.rating-settings-popover {
-    position: absolute;
-    top: calc(100% + 0.35rem);
-    left: 0;
-    z-index: 12;
-    min-width: 8.5rem;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    background: var(--card-bg);
-    box-shadow: 0 10px 30px rgb(0 0 0 / 18%);
-    padding: 0.4rem;
-}
-
-.rating-settings-option {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    padding: 0.35rem 0.4rem;
-    color: var(--text-secondary);
-    font-size: 0.84rem;
-    white-space: nowrap;
-    cursor: pointer;
-}
-
-.rating-settings-option input {
-    margin: 0;
-    accent-color: var(--accent, #7c6fe0);
+.panel-sound-toggle[aria-pressed="true"] {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
 }
 .move-bubble--srs-fail {
     display: flex;
@@ -5780,6 +5794,33 @@
     cursor: not-allowed;
 }
 
+/* g-1y68 A2 (mobile) — return-to-live emphasis for the horizontal move strip.
+   The vertical list dramatizes its ⟩⟩ button; the horizontal list has no
+   jump-to-latest arrow, so surface a dedicated brand-filled pill that only
+   appears while reviewing a past ply of a live game. */
+.h-move-arrow--return-live {
+    width: auto;
+    gap: 0.3rem;
+    padding: 0 0.6rem;
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    font-size: 1rem;
+    animation: move-nav-return-live-pulse 2s ease-in-out infinite;
+}
+
+.h-move-arrow--return-live:hover:not(:disabled) {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    filter: brightness(1.06);
+}
+
+.h-move-arrow__live-label {
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+}
+
 .h-move-list__strip {
     flex: 1 1 auto;
     min-width: 0;
@@ -5970,6 +6011,54 @@
 .move-nav-button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+}
+
+/* g-1y68 A2 — reinforce the return-to-live action for eyes in the move list.
+   While reviewing a past ply of a live game the ⟩⟩ button fills with the brand
+   color, grows to fit a "LIVE" label, and pulses to draw the eye. */
+.move-nav-button--return-live {
+    flex: 1.9 1 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    border-color: transparent;
+    background: var(--gradient-brand);
+    color: var(--text-on-gradient);
+    animation: move-nav-return-live-pulse 2s ease-in-out infinite;
+}
+
+.move-nav-button--return-live:hover:not(:disabled) {
+    border-color: transparent;
+    background: var(--gradient-brand);
+    filter: brightness(1.06);
+}
+
+.move-nav-button__live-label {
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+}
+
+@keyframes move-nav-return-live-pulse {
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand-primary) 50%, transparent);
+    }
+    50% {
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--brand-primary) 0%, transparent);
+    }
+}
+
+/* g-1y68 — honor reduced-motion: keep the cues (color/frame/label) but drop the
+   pulses, shake, and slide-in entrances. */
+@media (prefers-reduced-motion: reduce) {
+    .board-return-live,
+    .move-nav-button--return-live,
+    .h-move-arrow--return-live,
+    .chessboard-square-measure--nudge {
+        animation: none;
+    }
 }
 
 .move-list-scroll {

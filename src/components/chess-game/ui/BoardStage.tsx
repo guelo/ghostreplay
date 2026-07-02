@@ -1,6 +1,6 @@
 import { Chessboard } from "react-chessboard";
 import type { PieceDropHandlerArgs } from "react-chessboard";
-import React, { memo, useRef } from "react";
+import React, { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
 import StartPanel, { type StartDrillDraft } from "./StartPanel";
@@ -23,6 +23,13 @@ type BoardStageProps = {
   // Live game + not on the latest move: wash the squares so the board reads as
   // history, not the live position (a lighter cousin of the what-if wash).
   isReviewingPast?: boolean;
+  // Return-to-live action fired by the floating pill (g-1y68 A1). Same path as
+  // the move list's ⟩⟩ button (handleNavigate(null)).
+  onReturnToLive?: () => void;
+  // Nonce bumped when the user tries to interact with the board (click or drag)
+  // while reviewing; drives a short board shake to answer "why can't I move?"
+  // (g-1y68 A3).
+  reviewNudge?: number;
   // Allows the start overlay to open over a stopped drill (isGameActive stays
   // true so handleNewDrill can abandon the failed session when a new drill starts).
   isStoppedDrill?: boolean;
@@ -102,6 +109,8 @@ const BoardStage = ({
   showStartOverlay,
   isGameActive,
   isReviewingPast = false,
+  onReturnToLive,
+  reviewNudge = 0,
   isStoppedDrill = false,
   isStartingGame,
   onCloseStartOverlay,
@@ -142,6 +151,59 @@ const BoardStage = ({
   onSrsFailDone,
 }: BoardStageProps) => {
   const boardSquareRef = useRef<HTMLDivElement | null>(null);
+
+  // The return-to-live pill (A1) only shows while the user is genuinely parked on
+  // a past ply of a live game AND no modal-ish overlay owns the board. The
+  // overlays already imply !isGameActive (start/ended) or sit centered over the
+  // board (revert/resign/promotion); gate defensively so it never peeks out from
+  // behind a dialog.
+  const showReviewingCues =
+    isReviewingPast &&
+    !showStartOverlay &&
+    !showEndedScrim &&
+    !showRevertWarning &&
+    !showResignWarning &&
+    !isRevertPending &&
+    !pendingPromotion;
+
+  // Short board shake fired on a review-time interaction (A3). Driven by a nonce
+  // so each attempt re-arms it. Uses a transform animation on the measuring
+  // wrapper — a different property/element than the g-9y2a filter wash, so the
+  // two don't fight.
+  //
+  // Arm the shake during render (the adjust-state-during-render pattern, same as
+  // HorizontalMoveList's popup dismissal) rather than in an effect, so we don't
+  // trip react-hooks/set-state-in-effect.
+  const [shownNudge, setShownNudge] = useState(reviewNudge);
+  const [isShaking, setIsShaking] = useState(false);
+  if (shownNudge !== reviewNudge) {
+    setShownNudge(reviewNudge);
+    if (reviewNudge > 0) setIsShaking(true);
+  }
+
+  // Restart the CSS animation on a rapid re-arm: the class stays applied across
+  // renders, so the keyframes wouldn't retrigger on their own — drop it, force a
+  // reflow, and re-add before paint (layout effect) so the second click/drag
+  // shakes again. React still owns the class via `isShaking`, so an unrelated
+  // re-render mid-shake can't clobber it.
+  useLayoutEffect(() => {
+    if (!isShaking || shownNudge <= 0) return;
+    const el = boardSquareRef.current;
+    if (!el) return;
+    el.classList.remove("chessboard-square-measure--nudge");
+    void el.offsetWidth; // force reflow
+    el.classList.add("chessboard-square-measure--nudge");
+  }, [shownNudge, isShaking]);
+
+  // Self-clear the shake after the keyframe; the timer resets on every re-arm
+  // (shownNudge in deps). setState lives in the timer callback, not the effect
+  // body, so this stays clear of react-hooks/set-state-in-effect.
+  useEffect(() => {
+    if (!isShaking) return;
+    const timer = window.setTimeout(() => setIsShaking(false), 350);
+    return () => window.clearTimeout(timer);
+  }, [isShaking, shownNudge]);
+
   return (
       <div className="chessboard-board-area">
           {streakToast && (
@@ -332,7 +394,7 @@ const BoardStage = ({
           )}
           <div
             ref={boardSquareRef}
-            className={`chessboard-square-measure${isReviewingPast ? " chessboard-square-measure--reviewing" : ""}`}
+            className={`chessboard-square-measure${isReviewingPast ? " chessboard-square-measure--reviewing" : ""}${isShaking ? " chessboard-square-measure--nudge" : ""}`}
           >
             <Chessboard
               key={boardInstanceKey}
@@ -357,6 +419,18 @@ const BoardStage = ({
               }}
             />
           </div>
+          {showReviewingCues && onReturnToLive && (
+            <button
+              type="button"
+              className="board-return-live"
+              onClick={onReturnToLive}
+            >
+              <span className="board-return-live__glyph" aria-hidden="true">
+                ⟩⟩
+              </span>
+              Return to live
+            </button>
+          )}
           <SrsFailSpotlight
             trigger={srsFailTrigger}
             targetRef={boardSquareRef}

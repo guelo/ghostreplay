@@ -375,4 +375,84 @@ describe("BoardStage", () => {
       container.querySelector(".chessboard-square-measure"),
     ).not.toBeNull();
   });
+
+  it("shows the return-to-live pill while reviewing and fires onReturnToLive on click", () => {
+    const props = makeProps();
+    const onReturnToLive = vi.fn();
+    render(
+      <BoardStage
+        {...props}
+        showStartOverlay={false}
+        isGameActive
+        isReviewingPast
+        onReturnToLive={onReturnToLive}
+      />,
+    );
+
+    const pill = screen.getByRole("button", { name: /return to live/i });
+    expect(pill).toBeInTheDocument();
+    fireEvent.click(pill);
+    expect(onReturnToLive).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show the return-to-live pill on the live position", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        showStartOverlay={false}
+        isGameActive
+        onReturnToLive={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /return to live/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("suppresses the return-to-live pill while a modal overlay owns the board", () => {
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        showStartOverlay={false}
+        isGameActive
+        isReviewingPast
+        onReturnToLive={vi.fn()}
+        showRevertWarning
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /return to live/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shakes the board when the review nudge nonce increments", () => {
+    const props = makeProps();
+    const { container, rerender } = render(
+      <BoardStage
+        {...props}
+        showStartOverlay={false}
+        isGameActive
+        isReviewingPast
+        reviewNudge={0}
+      />,
+    );
+    expect(
+      container.querySelector(".chessboard-square-measure--nudge"),
+    ).toBeNull();
+
+    rerender(
+      <BoardStage
+        {...props}
+        showStartOverlay={false}
+        isGameActive
+        isReviewingPast
+        reviewNudge={1}
+      />,
+    );
+    expect(
+      container.querySelector(".chessboard-square-measure--nudge"),
+    ).not.toBeNull();
+  });
 });

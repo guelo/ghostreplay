@@ -57,6 +57,15 @@ const HorizontalMoveList = ({
     ? navigateDown!(selectedVarNodeId!) != null
     : moves.length > 0 && effectiveIndex < moves.length - 1;
 
+  // Reviewing a past ply of a live game — mirrors the board's isReviewingPast
+  // (isGameActive && currentIndex < len-1). Surfaces the mobile counterpart of
+  // the vertical list's return-to-live emphasis (g-1y68 A2).
+  const emphasizeLatest =
+    isGameActive &&
+    !isVariationActive &&
+    currentIndex !== null &&
+    currentIndex < moves.length - 1;
+
   const closePopup = useCallback(() => setOpenPopupIndex(null), []);
 
   const handlePrev = useCallback(() => {
@@ -98,6 +107,13 @@ const HorizontalMoveList = ({
     },
     [isInteractionDisabled, closePopup, moves.length, onNavigate, isVariationActive, onVarSelect],
   );
+
+  const handleLatest = useCallback(() => {
+    if (isInteractionDisabled) return;
+    closePopup();
+    if (isVariationActive) onVarSelect!(null);
+    onNavigate(null);
+  }, [isInteractionDisabled, closePopup, isVariationActive, onVarSelect, onNavigate]);
 
   // Autoscroll the strip to the latest move only when a new move is appended
   // (not on navigation — back/forward must not yank the scroll position).
@@ -325,6 +341,18 @@ const HorizontalMoveList = ({
         >
           ›
         </button>
+        {emphasizeLatest && (
+          <button
+            className="h-move-arrow h-move-arrow--return-live"
+            type="button"
+            onClick={handleLatest}
+            disabled={isInteractionDisabled}
+            title="Go to current position"
+            aria-label="Return to live"
+          >
+            ⟩⟩<span className="h-move-arrow__live-label">LIVE</span>
+          </button>
+        )}
       </div>
       {openPopupIndex != null &&
         popupMsgs &&

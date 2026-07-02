@@ -243,4 +243,35 @@ describe("HorizontalMoveList — variations", () => {
     fireEvent.click(getByLabelText("Next move"));
     expect(navigateDown).toHaveBeenCalledWith("v1");
   });
+
+  describe("return-to-live emphasis (g-1y68 A2, mobile)", () => {
+    it("shows a return-to-live button with a LIVE label while reviewing a live game", () => {
+      const { getByLabelText, getByText } = renderList({
+        currentIndex: 0,
+        isGameActive: true,
+      });
+      const button = getByLabelText("Return to live") as HTMLButtonElement;
+      expect(button).toBeTruthy();
+      expect(button.className).toContain("h-move-arrow--return-live");
+      expect(getByText("LIVE")).toBeTruthy();
+    });
+
+    it("does not show the button at the latest move or when the game is over", () => {
+      const atLatest = renderList({ currentIndex: null, isGameActive: true });
+      expect(within(atLatest.container).queryByLabelText("Return to live")).toBeNull();
+      atLatest.unmount();
+
+      const gameOver = renderList({ currentIndex: 0, isGameActive: false });
+      expect(within(gameOver.container).queryByLabelText("Return to live")).toBeNull();
+    });
+
+    it("returns to the latest move when the button is clicked", () => {
+      const { getByLabelText, onNavigate } = renderList({
+        currentIndex: 0,
+        isGameActive: true,
+      });
+      fireEvent.click(getByLabelText("Return to live"));
+      expect(onNavigate).toHaveBeenCalledWith(null);
+    });
+  });
 });
