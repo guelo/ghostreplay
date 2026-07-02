@@ -82,6 +82,13 @@ type UseChessGameLifecycleArgs = {
    * "Again" banner never lingers once a fresh session is live.
    */
   clearReviewedDrillReturn?: () => void;
+  /**
+   * Fired once per session at the single genuine-end choke point (g-8079),
+   * under the exact same gate as end-game audio — so it is suppressed for
+   * practice-continuation ends, drill-abandon, and "practice ended". Drives the
+   * dramatic win/loss/draw fanfare over the board.
+   */
+  onGameFinished?: (result: GameResult) => void;
 };
 
 export const useChessGameLifecycle = ({
@@ -114,9 +121,13 @@ export const useChessGameLifecycle = ({
   setPendingPromotion,
   clearBlunderBoardOverride,
   clearReviewedDrillReturn,
+  onGameFinished,
 }: UseChessGameLifecycleArgs) => {
   const revertExecutionIdRef = useRef(0);
-  const playedEndGameAudioSessionIdRef = useRef<string | null>(null);
+  // Per-session dedupe for the end-game announcement (audio + fanfare). Set to
+  // the finalizing session id the first time it announces, so a duplicate
+  // same-session finalization stays silent.
+  const announcedEndGameSessionIdRef = useRef<string | null>(null);
   const isCurrentRevertExecution = useCallback(
     (executionId: number) => revertExecutionIdRef.current === executionId,
     [],
@@ -158,10 +169,13 @@ export const useChessGameLifecycle = ({
       if (
         (options?.playEndGameAudio ?? true) &&
         finalizingSessionId &&
-        playedEndGameAudioSessionIdRef.current !== finalizingSessionId
+        announcedEndGameSessionIdRef.current !== finalizingSessionId
       ) {
-        playedEndGameAudioSessionIdRef.current = finalizingSessionId;
+        announcedEndGameSessionIdRef.current = finalizingSessionId;
         playEndGameAudio(result);
+        // Fire the fanfare from the same gate/choke point as audio: genuine ends
+        // only, once per session (g-8079).
+        onGameFinished?.(result);
       }
       setBlunderReviewId(null);
       setBlunderReviewSrs(null);
@@ -181,6 +195,7 @@ export const useChessGameLifecycle = ({
       setResolvedReview,
       setPendingPromotion,
       setShowPostGamePrompt,
+      onGameFinished,
     ],
   );
 
@@ -276,16 +291,20 @@ export const useChessGameLifecycle = ({
       const loser = chess.turn() === "w" ? "white" : "black";
       const playerWon = store.playerColor !== loser;
       result = playerWon
-        ? { type: "checkmate_win", message: "Checkmate! You won!" }
-        : { type: "checkmate_loss", message: "Checkmate! You lost." };
+        ? { type: "checkmate_win", message: "Checkmate! You won!", reason: "checkmate" }
+        : { type: "checkmate_loss", message: "Checkmate! You lost.", reason: "checkmate" };
     } else if (chess.isStalemate()) {
-      result = { type: "draw", message: "Stalemate! The game is a draw." };
+      result = { type: "draw", message: "Stalemate! The game is a draw.", reason: "stalemate" };
     } else if (chess.isThreefoldRepetition()) {
-      result = { type: "draw", message: "Draw by threefold repetition." };
+      result = { type: "draw", message: "Draw by threefold repetition.", reason: "threefold" };
     } else if (chess.isInsufficientMaterial()) {
-      result = { type: "draw", message: "Draw by insufficient material." };
+      result = { type: "draw", message: "Draw by insufficient material.", reason: "insufficient" };
+    } else if (chess.isDrawByFiftyMoves()) {
+      // Checked BEFORE the generic isDraw() (which also returns true here) so
+      // the fanfare names the fifty-move rule instead of a bare "Draw" (g-8079).
+      result = { type: "draw", message: "Draw by the fifty-move rule.", reason: "fifty_move" };
     } else if (chess.isDraw()) {
-      result = { type: "draw", message: "The game is a draw." };
+      result = { type: "draw", message: "The game is a draw.", reason: "draw" };
     }
 
     if (result) {
@@ -554,7 +573,7 @@ export const useChessGameLifecycle = ({
         setIsStartingGame(true);
         setStartError(null);
         revertExecutionIdRef.current += 1;
-        playedEndGameAudioSessionIdRef.current = null;
+        announcedEndGameSessionIdRef.current = null;
 
         const store = useGameStore.getState();
         if (
@@ -689,7 +708,7 @@ export const useChessGameLifecycle = ({
         setIsStartingGame(true);
         setStartError(null);
         revertExecutionIdRef.current += 1;
-        playedEndGameAudioSessionIdRef.current = null;
+        announcedEndGameSessionIdRef.current = null;
 
         const store = useGameStore.getState();
         if (store.sessionId && store.isGameActive && !store.isPracticeContinuation) {
@@ -932,8 +951,14 @@ export const useChessGameLifecycle = ({
       // Reconcile the warm delta to the provably-fresh value once the background
       // recompute lands (g-fix-end-latency).
       void pollFreshOpeningDelta(finalizingSessionId);
+      // The only resign path that reaches the fanfare (audio gate default-on), so
+      // tag its reason for the termination-type subtitle (g-8079). The three
+      // pseudo-end resign literals (abandonStoppedDrill "Drill abandoned.",
+      // handleResign practice-ended + drill-abandoned) pass playEndGameAudio:false
+      // and never display, so they are intentionally left untagged; the optional
+      // reason + type fallback (resign→resignation) still covers any future display.
       finishLocalGame(
-        { type: "resign", message: "You resigned." },
+        { type: "resign", message: "You resigned.", reason: "resignation" },
         { finalizingSessionId },
       );
     } catch (error) {
@@ -968,7 +993,7 @@ export const useChessGameLifecycle = ({
     const store = useGameStore.getState();
     revertExecutionIdRef.current += 1;
     chess.reset();
-    playedEndGameAudioSessionIdRef.current = null;
+    announcedEndGameSessionIdRef.current = null;
     store.setLiveFen(chess.fen());
     store.setBoardOrientation(store.playerColor);
     setEngineMessage(null);

@@ -2834,6 +2834,50 @@ describe("ChessGame blunder recording", () => {
     ).toBeDisabled();
   });
 
+  it("shows the end-game fanfare at game end, clears it on start-overlay open, and does not replay on cancel (g-8079)", async () => {
+    await startGameAsWhite();
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+
+    // Resign to reach a genuine end — the single choke point fires the fanfare.
+    fireEvent.click(screen.getByRole("button", { name: /resign/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Are you sure?")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("Resign"));
+    await waitFor(() => {
+      expect(screen.getByText("You resigned.")).toBeInTheDocument();
+    });
+
+    // Fanfare shows centered over the board, naming the loss + termination type.
+    const fanfare = document.querySelector(".end-game-fanfare");
+    expect(fanfare).not.toBeNull();
+    expect(fanfare).toHaveClass("end-game-fanfare--loss");
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Defeat");
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__reason")?.textContent,
+    ).toBe("Resignation");
+
+    // Opening the post-game start overlay ends the terminal display state
+    // (showEndedScrim → false); the parent clear effect drops the nonce.
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    await waitFor(() => {
+      expect(document.querySelector(".end-game-fanfare")).toBeNull();
+    });
+
+    // Regression: cancelling the overlay restores the ended state
+    // (showEndedScrim false→true) but must NOT replay the stale fanfare.
+    fireEvent.click(screen.getByRole("button", { name: /close/i }));
+    await waitFor(() => {
+      expect(screen.getByText("You resigned.")).toBeInTheDocument();
+    });
+    expect(document.querySelector(".end-game-fanfare")).toBeNull();
+  });
+
   it("shows re-hook notification when opponent mode switches from engine to ghost", async () => {
     getNextOpponentMoveMock
       .mockResolvedValueOnce({

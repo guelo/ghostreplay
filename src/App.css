@@ -8746,6 +8746,110 @@
     }
 }
 
+/* ---- End-game fanfare (g-8079): dramatic win/loss/draw over the board ---- */
+/* Centered card over the already-dimmed board (clips to .chessboard-board-area,
+   sits above .chessboard-ended-scrim). Borrows the SrsFail visual language —
+   scale-in → hold → shrink-out, click-to-skip — without the portal machinery. */
+.end-game-fanfare {
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    display: grid;
+    place-items: center;
+    pointer-events: auto;
+    cursor: pointer;
+    animation: end-game-fanfare-fade-in 200ms ease;
+}
+
+.end-game-fanfare--shrink {
+    opacity: 0;
+    transition: opacity 450ms ease;
+}
+
+@keyframes end-game-fanfare-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* A real <button> for the focus + keyboard dismiss path — reset the UA chrome
+   and inherit the app font so the headline/reason spans render unchanged. */
+.end-game-fanfare__inner {
+    appearance: none;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 1.1rem 2.4rem;
+    border-radius: 18px;
+    border: 2px solid var(--border-color);
+    border-top-width: 5px;
+    background: var(--overlay-bg);
+    box-shadow: 0 18px 48px rgba(2, 6, 23, 0.5);
+    backdrop-filter: blur(4px);
+    text-align: center;
+    transform-origin: center;
+    animation: review-overlay-in 300ms ease-out;
+}
+
+.end-game-fanfare__inner--shrink {
+    transform: scale(0.12);
+    opacity: 0;
+    transition: transform 450ms cubic-bezier(0.5, 0, 0.75, 0), opacity 450ms ease;
+}
+
+.end-game-fanfare__headline {
+    font-size: clamp(2.1rem, 6vw, 3.4rem);
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.01em;
+}
+
+.end-game-fanfare__reason {
+    font-size: clamp(0.95rem, 2.4vw, 1.2rem);
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+/* Outcome accents: border-top + headline color. */
+.end-game-fanfare--win .end-game-fanfare__inner {
+    border-top-color: var(--success);
+}
+.end-game-fanfare--win .end-game-fanfare__headline {
+    color: var(--success);
+}
+.end-game-fanfare--loss .end-game-fanfare__inner {
+    border-top-color: var(--eval-blunder);
+}
+.end-game-fanfare--loss .end-game-fanfare__headline {
+    color: var(--eval-blunder);
+}
+.end-game-fanfare--draw .end-game-fanfare__inner {
+    border-top-color: var(--warning);
+}
+.end-game-fanfare--draw .end-game-fanfare__headline {
+    color: var(--text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .end-game-fanfare,
+    .end-game-fanfare--shrink {
+        animation: none;
+        transition: opacity 300ms ease;
+    }
+    .end-game-fanfare__inner {
+        animation: none;
+    }
+    .end-game-fanfare__inner--shrink {
+        transform: none;
+        transition: opacity 300ms ease;
+    }
+}
+
 /* Home page: compact haunted clubhouse */
 .home-page__content {
     gap: clamp(3.75rem, 7vw, 6.5rem);

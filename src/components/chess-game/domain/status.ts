@@ -1,6 +1,71 @@
+// How a finished game reached its terminal state. Optional on GameResult so
+// existing/synthetic constructions (and any untagged pseudo-end) stay valid and
+// fall back to a type-derived default (see deriveEndGameAnnouncement).
+export type GameEndReason =
+  | "checkmate"
+  | "stalemate"
+  | "threefold"
+  | "insufficient"
+  | "fifty_move"
+  | "draw"
+  | "resignation";
+
 export type GameResult = {
   type: "checkmate_win" | "checkmate_loss" | "draw" | "resign";
   message: string;
+  reason?: GameEndReason;
+};
+
+// Human-facing termination labels for the end-game fanfare subtitle (g-8079).
+export const REASON_LABELS: Record<GameEndReason, string> = {
+  checkmate: "Checkmate",
+  stalemate: "Stalemate",
+  threefold: "Threefold repetition",
+  insufficient: "Insufficient material",
+  fifty_move: "Fifty-move rule",
+  draw: "Draw",
+  resignation: "Resignation",
+};
+
+// Fallback reason when a GameResult carries no explicit `reason` (older/synthetic
+// constructions). Keyed off the coarse result type.
+const defaultReasonFor = (type: GameResult["type"]): GameEndReason => {
+  switch (type) {
+    case "checkmate_win":
+    case "checkmate_loss":
+      return "checkmate";
+    case "resign":
+      return "resignation";
+    case "draw":
+    default:
+      return "draw";
+  }
+};
+
+export type EndGameAnnouncement = {
+  outcome: "win" | "loss" | "draw";
+  headline: string;
+  reason: string;
+};
+
+/**
+ * Pure mapping from a finished GameResult to the dramatic over-the-board fanfare
+ * copy (g-8079): the big outcome word + the termination-type subtitle. A missing
+ * `reason` falls back to the type-derived default so no path renders blank.
+ */
+export const deriveEndGameAnnouncement = (
+  result: GameResult,
+): EndGameAnnouncement => {
+  const outcome =
+    result.type === "checkmate_win"
+      ? "win"
+      : result.type === "draw"
+        ? "draw"
+        : "loss";
+  const headline =
+    outcome === "win" ? "Victory" : outcome === "draw" ? "Draw" : "Defeat";
+  const reason = REASON_LABELS[result.reason ?? defaultReasonFor(result.type)];
+  return { outcome, headline, reason };
 };
 
 /**

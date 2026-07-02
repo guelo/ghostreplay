@@ -150,6 +150,7 @@ const setup = ({
     currentResolvedReview =
       typeof value === "function" ? value(currentResolvedReview) : value;
   });
+  const onGameFinished = vi.fn();
 
   const { result } = renderHook(() =>
     useChessGameLifecycle({
@@ -180,6 +181,7 @@ const setup = ({
       setShowResignWarning: vi.fn(),
       setResolvedReview,
       setPendingPromotion: vi.fn(),
+      onGameFinished,
     }),
   );
 
@@ -193,6 +195,7 @@ const setup = ({
     setShowStartOverlay,
     setSeedEngineElo,
     setResolvedReview,
+    onGameFinished,
     coordinator,
     getResolvedReview: () => currentResolvedReview,
   };
@@ -1875,5 +1878,298 @@ describe("useChessGameLifecycle", () => {
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
       expect.objectContaining({ recomputeOpportunity: true }),
     );
+  });
+
+  describe("end-game announcement (reason tagging + onGameFinished)", () => {
+    // Load-bearing coverage for g-8079: synthetic GameResults in the component
+    // tests can't catch a missed `reason` on a real lifecycle path, so drive the
+    // actual terminal branches and assert the STORED gameResult.reason plus the
+    // onGameFinished payload.
+    const endGameResolves = (result: string) =>
+      endGameMock.mockResolvedValueOnce({
+        session_id: "session-123",
+        result,
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: null,
+      });
+
+    it("tags a checkmate win 'checkmate' and fires onGameFinished once", async () => {
+      const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+      const move = chess.move({ from: "g6", to: "g7" });
+      if (!move || !chess.isCheckmate()) {
+        throw new Error("Unable to construct checkmate win position");
+      }
+      const { result, onGameFinished } = setup({
+        chess,
+        moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+      endGameResolves("checkmate_win");
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      await waitFor(() =>
+        expect(useGameStore.getState().isGameActive).toBe(false),
+      );
+      expect(useGameStore.getState().gameResult).toMatchObject({
+        type: "checkmate_win",
+        reason: "checkmate",
+      });
+      expect(onGameFinished).toHaveBeenCalledTimes(1);
+      expect(onGameFinished).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "checkmate_win", reason: "checkmate" }),
+      );
+    });
+
+    it("tags a checkmate loss 'checkmate'", async () => {
+      const chess = new Chess("7K/8/6qk/8/8/8/8/8 b - - 0 1");
+      const move = chess.move({ from: "g6", to: "g7" });
+      if (!move || !chess.isCheckmate()) {
+        throw new Error("Unable to construct checkmate loss position");
+      }
+      const { result, onGameFinished } = setup({
+        chess,
+        moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+      endGameResolves("checkmate_loss");
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      await waitFor(() =>
+        expect(useGameStore.getState().isGameActive).toBe(false),
+      );
+      expect(useGameStore.getState().gameResult).toMatchObject({
+        type: "checkmate_loss",
+        reason: "checkmate",
+      });
+      expect(onGameFinished).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "checkmate_loss", reason: "checkmate" }),
+      );
+    });
+
+    it.each([
+      ["stalemate", "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1", undefined, "stalemate"],
+      ["insufficient material", "k7/8/K7/8/8/8/8/8 w - - 0 1", undefined, "insufficient"],
+      ["fifty-move", "4k3/8/4K3/4R3/8/8/8/8 w - - 100 60", undefined, "fifty_move"],
+    ] as const)(
+      "tags a %s draw with its reason and fires onGameFinished",
+      async (_label, fen, _moves, expectedReason) => {
+        const chess = new Chess(fen);
+        const { result, onGameFinished } = setup({
+          chess,
+          isGameActive: true,
+          isRated: false,
+          playerColor: "white",
+        });
+        await waitFor(() =>
+          expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+        );
+        endGameResolves("draw");
+
+        await act(async () => {
+          await result.current.handleGameEnd();
+        });
+
+        await waitFor(() =>
+          expect(useGameStore.getState().isGameActive).toBe(false),
+        );
+        expect(useGameStore.getState().gameResult).toMatchObject({
+          type: "draw",
+          reason: expectedReason,
+        });
+        expect(onGameFinished).toHaveBeenCalledWith(
+          expect.objectContaining({ type: "draw", reason: expectedReason }),
+        );
+      },
+    );
+
+    it("tags a threefold-repetition draw 'threefold'", async () => {
+      // Threefold needs real repeated positions in the Chess instance; a bare
+      // FEN can't express the position-count history.
+      const chess = new Chess();
+      for (const m of ["Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Ng8"]) {
+        chess.move(m);
+      }
+      if (!chess.isThreefoldRepetition()) {
+        throw new Error("Unable to construct threefold position");
+      }
+      const { result, onGameFinished } = setup({
+        chess,
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+      endGameResolves("draw");
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      await waitFor(() =>
+        expect(useGameStore.getState().isGameActive).toBe(false),
+      );
+      expect(useGameStore.getState().gameResult).toMatchObject({
+        type: "draw",
+        reason: "threefold",
+      });
+      expect(onGameFinished).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "draw", reason: "threefold" }),
+      );
+    });
+
+    it("tags a genuine resignation 'resignation' and fires onGameFinished", async () => {
+      const chess = new Chess();
+      chess.move("e4");
+      const { result, onGameFinished } = setup({
+        chess,
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+      endGameResolves("resign");
+
+      act(() => {
+        result.current.executeResign();
+      });
+
+      await waitFor(() =>
+        expect(useGameStore.getState().isGameActive).toBe(false),
+      );
+      expect(useGameStore.getState().gameResult).toMatchObject({
+        type: "resign",
+        reason: "resignation",
+      });
+      expect(onGameFinished).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "resign", reason: "resignation" }),
+      );
+    });
+
+    it("does not fire onGameFinished for a practice-continuation end", async () => {
+      const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+      const move = chess.move({ from: "g6", to: "g7" });
+      if (!move || !chess.isCheckmate()) {
+        throw new Error("Unable to construct checkmate position");
+      }
+      const { result, onGameFinished } = setup({
+        chess,
+        moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+        isGameActive: true,
+        isRated: false,
+        isPracticeContinuation: true,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      expect(useGameStore.getState().isGameActive).toBe(false);
+      expect(onGameFinished).not.toHaveBeenCalled();
+    });
+
+    it("does not fire onGameFinished when a practice continuation is resigned", async () => {
+      const chess = new Chess();
+      chess.move("e4");
+      const { result, onGameFinished } = setup({
+        chess,
+        isGameActive: true,
+        isRated: false,
+        isPracticeContinuation: true,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+
+      act(() => {
+        result.current.executeResign();
+      });
+
+      await waitFor(() =>
+        expect(useGameStore.getState().isGameActive).toBe(false),
+      );
+      expect(onGameFinished).not.toHaveBeenCalled();
+    });
+
+    it("does not fire onGameFinished when an unconverted drill is abandoned", async () => {
+      const { result, onGameFinished } = setup({
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
+      });
+      useGameStore.setState({
+        sessionId: "drill-session-123",
+        drillOpeningKey: "target-fen",
+        drillState: "failed",
+        drillStrictness: "standard",
+      });
+      abandonDrillMock.mockResolvedValueOnce({
+        session_id: "drill-session-123",
+        drill_state: "abandoned",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+
+      act(() => {
+        result.current.executeResign();
+      });
+
+      await waitFor(() =>
+        expect(useGameStore.getState().isGameActive).toBe(false),
+      );
+      expect(onGameFinished).not.toHaveBeenCalled();
+    });
+
+    it("fires onGameFinished at most once per session on duplicate finalization", async () => {
+      const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
+      const move = chess.move({ from: "g6", to: "g7" });
+      if (!move || !chess.isCheckmate()) {
+        throw new Error("Unable to construct checkmate position");
+      }
+      const { result, onGameFinished } = setup({
+        chess,
+        moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+        isGameActive: true,
+        isRated: false,
+        playerColor: "white",
+      });
+      await waitFor(() =>
+        expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1),
+      );
+      endGameResolves("checkmate_win");
+      endGameResolves("checkmate_win");
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+        await result.current.handleGameEnd();
+      });
+
+      expect(onGameFinished).toHaveBeenCalledTimes(1);
+    });
   });
 });

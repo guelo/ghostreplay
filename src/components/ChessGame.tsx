@@ -45,6 +45,8 @@ import {
   deriveGameStatusBadge,
   deriveStatusText,
 } from "./chess-game/domain/status";
+import type { GameResult } from "./chess-game/domain/status";
+import type { EndGameFanfareTrigger } from "./chess-game/ui/EndGameFanfare";
 import {
   MAIA_BOT_NAMES,
   MAIA_ELO_BINS,
@@ -240,6 +242,22 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     moveIndex: number;
   } | null>(null);
   const srsFailNonceRef = useRef(0);
+  // Dramatic win/loss/draw fanfare over the board (g-8079). Nonce trigger set by
+  // the lifecycle's single genuine-end choke point (onGameFinished). Defined here
+  // (above useChessGameLifecycle) so triggerEndGameFanfare is in scope when passed
+  // in as onGameFinished.
+  const [endGameFanfare, setEndGameFanfare] =
+    useState<EndGameFanfareTrigger | null>(null);
+  const endGameFanfareNonceRef = useRef(0);
+  // Bump the nonce so the fanfare (re)starts cleanly; fired from the lifecycle's
+  // single genuine-end choke point (onGameFinished), once per session (g-8079).
+  const triggerEndGameFanfare = useCallback((result: GameResult) => {
+    endGameFanfareNonceRef.current += 1;
+    setEndGameFanfare({ id: endGameFanfareNonceRef.current, result });
+  }, []);
+  const handleEndGameFanfareDone = useCallback((id: number) => {
+    setEndGameFanfare((prev) => (prev?.id === id ? null : prev));
+  }, []);
   const [drillFailInfo, setDrillFailInfo] = useState<DrillFailInfo | null>(null);
   const [showPostGamePrompt, setShowPostGamePrompt] = useState(false);
   const [analysisMapSnapshot, setAnalysisMapSnapshot] = useState(
@@ -781,6 +799,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setPendingPromotion,
     clearBlunderBoardOverride,
     clearReviewedDrillReturn: () => setIsReviewedDrillReturn(false),
+    onGameFinished: triggerEndGameFanfare,
   });
 
   // "Analyze" drill-end action (g-a406): snapshot the just-played drill while
@@ -1934,6 +1953,18 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const showEndedScrim = !isGameActive && gameResult !== null && !showStartOverlay;
   const hasBelowBoardContent = moveHistory.length > 0 || !isGameActive;
 
+  // Drop the fanfare nonce whenever the terminal display state ends (g-8079).
+  // Required for correctness on top of the render gate below: unmounting the
+  // child (gate → null) runs its timer cleanup, so onDone may never fire and the
+  // nonce would linger forever; and reopening→cancelling the post-game start
+  // overlay (showEndedScrim false→true) would otherwise replay the stale nonce.
+  // Clearing on the false transition covers new game (isGameActive→true), reset
+  // (gameResult→null), and start-overlay open in one place, and never clobbers
+  // the just-set trigger at game end (that render has showEndedScrim === true).
+  useEffect(() => {
+    if (!showEndedScrim) setEndGameFanfare(null);
+  }, [showEndedScrim]);
+
   // Mobile portrait: when below-board content (the analysis graph) first
   // appears, scroll the nav/hamburger header out of view so the graph lands in
   // the viewport. Only on a false→true transition while narrow; seed on first
@@ -2076,6 +2107,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 isLoadingOpenings={isLoadingOpenings}
                 srsFailTrigger={srsFailTrigger}
                 onSrsFailDone={handleSrsFailDone}
+                endGameFanfareTrigger={
+                  showEndedScrim && !pendingPromotion ? endGameFanfare : null
+                }
+                onEndGameFanfareDone={handleEndGameFanfareDone}
               />
             </div>
           </div>

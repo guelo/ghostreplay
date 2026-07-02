@@ -5,6 +5,7 @@ import type { OpeningRootItem } from "../../../utils/api";
 import { PromotionPicker } from "./PromotionPicker";
 import StartPanel, { type StartDrillDraft } from "./StartPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
+import EndGameFanfare, { type EndGameFanfareTrigger } from "./EndGameFanfare";
 import type { BoardNotice } from "../types";
 
 type BoardOrientation = "white" | "black";
@@ -75,6 +76,9 @@ type BoardStageProps = {
   // Repeat-mistake spotlight: nonce trigger + completion callback.
   srsFailTrigger?: SrsFailTrigger | null;
   onSrsFailDone?: (id: number) => void;
+  // Dramatic win/loss/draw fanfare (g-8079): nonce trigger + completion callback.
+  endGameFanfareTrigger?: EndGameFanfareTrigger | null;
+  onEndGameFanfareDone?: (id: number) => void;
 };
 
 const WarningTriangleIcon = () => (
@@ -149,6 +153,8 @@ const BoardStage = ({
   isLoadingOpenings = false,
   srsFailTrigger = null,
   onSrsFailDone,
+  endGameFanfareTrigger = null,
+  onEndGameFanfareDone,
 }: BoardStageProps) => {
   const boardSquareRef = useRef<HTMLDivElement | null>(null);
 
@@ -435,6 +441,10 @@ const BoardStage = ({
             trigger={srsFailTrigger}
             targetRef={boardSquareRef}
             onDone={onSrsFailDone ?? (() => {})}
+          />
+          <EndGameFanfare
+            trigger={endGameFanfareTrigger}
+            onDone={onEndGameFanfareDone ?? (() => {})}
           />
       </div>
   );

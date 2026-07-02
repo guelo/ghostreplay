@@ -427,6 +427,38 @@ describe("BoardStage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("renders the end-game fanfare when a trigger is provided", () => {
+    const props = makeProps();
+    const { container } = render(
+      <BoardStage
+        {...props}
+        endGameFanfareTrigger={{
+          id: 1,
+          result: {
+            type: "checkmate_win",
+            message: "Checkmate! You won!",
+            reason: "checkmate",
+          },
+        }}
+      />,
+    );
+
+    const fanfare = container.querySelector(".end-game-fanfare--win");
+    expect(fanfare).not.toBeNull();
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__headline")?.textContent,
+    ).toBe("Victory");
+    expect(
+      fanfare?.querySelector(".end-game-fanfare__reason")?.textContent,
+    ).toBe("Checkmate");
+  });
+
+  it("does not render the end-game fanfare without a trigger", () => {
+    const props = makeProps();
+    const { container } = render(<BoardStage {...props} />);
+    expect(container.querySelector(".end-game-fanfare")).toBeNull();
+  });
+
   it("shakes the board when the review nudge nonce increments", () => {
     const props = makeProps();
     const { container, rerender } = render(
