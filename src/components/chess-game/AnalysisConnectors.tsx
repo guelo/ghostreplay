@@ -72,7 +72,7 @@ ConnectedEvalBar.displayName = "ConnectedEvalBar";
 // ---------------------------------------------------------------------------
 
 type ConnectedAnalysisGraphProps = {
-  onSelectMove: (index: number) => void;
+  onSelectMove: (index: number | null) => void;
 };
 
 export const ConnectedAnalysisGraph = memo(
@@ -85,6 +85,18 @@ export const ConnectedAnalysisGraph = memo(
 
     const selectedMoveIndex =
       moveHistory.length === 0 ? null : (viewIndex ?? moveHistory.length - 1);
+
+    // Normalize a graph click on the session's latest ply to null so the board
+    // stays live (matches MoveList behavior). Compares against the full move
+    // history length, not the trimmed `evals` length, so selecting the rightmost
+    // *plotted* point while later moves are still unanalyzed stays historical.
+    const handleSelectMove = useCallback(
+      (index: number) => {
+        const latestPly = moveHistory.length - 1;
+        onSelectMove(index === latestPly ? null : index);
+      },
+      [moveHistory.length, onSelectMove],
+    );
 
     const evals = useMemo(() => {
       const raw = moveHistory.map((_, i) => {
@@ -135,7 +147,7 @@ export const ConnectedAnalysisGraph = memo(
       <AnalysisGraph
         evals={evals}
         currentIndex={selectedMoveIndex}
-        onSelectMove={onSelectMove}
+        onSelectMove={handleSelectMove}
         playerColor={playerColor}
         evalCp={selectedEval.cp}
         evalMate={selectedEval.mate}

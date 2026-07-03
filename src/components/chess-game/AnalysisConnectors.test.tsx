@@ -130,6 +130,105 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
 });
 
 // ---------------------------------------------------------------------------
+// ConnectedAnalysisGraph — latest-move normalization
+// ---------------------------------------------------------------------------
+
+describe("ConnectedAnalysisGraph — latest-move normalization", () => {
+  let store: ReturnType<typeof createAnalysisStore>;
+
+  beforeEach(() => {
+    capturedProps = {};
+    useGameStore.setState(initialGameState, true);
+    store = createAnalysisStore();
+  });
+
+  function renderConnected(onSelectMove: (index: number | null) => void) {
+    return render(
+      <AnalysisStoreProvider value={store}>
+        <ConnectedAnalysisGraph onSelectMove={onSelectMove} />
+      </AnalysisStoreProvider>,
+    );
+  }
+
+  it("normalizes a click on the latest fully-analyzed ply to null", () => {
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: null, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: 50, bestEval: 50, bestMove: "e5", delta: 0, classification: "best", blunder: false })],
+        [2, makeAnalysis({ playedEval: 30, bestEval: 30, bestMove: "Nf3", delta: 0, classification: "best", blunder: false })],
+      ]),
+    });
+
+    const onSelectMove = vi.fn();
+    renderConnected(onSelectMove);
+
+    const forwarded = capturedProps.onSelectMove as (index: number) => void;
+    act(() => forwarded(2));
+    expect(onSelectMove).toHaveBeenCalledWith(null);
+  });
+
+  it("forwards a numeric index for earlier plotted points", () => {
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: null, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: 50, bestEval: 50, bestMove: "e5", delta: 0, classification: "best", blunder: false })],
+        [2, makeAnalysis({ playedEval: 30, bestEval: 30, bestMove: "Nf3", delta: 0, classification: "best", blunder: false })],
+      ]),
+    });
+
+    const onSelectMove = vi.fn();
+    renderConnected(onSelectMove);
+
+    const forwarded = capturedProps.onSelectMove as (index: number) => void;
+    act(() => forwarded(1));
+    expect(onSelectMove).toHaveBeenCalledWith(1);
+    act(() => forwarded(0));
+    expect(onSelectMove).toHaveBeenCalledWith(0);
+  });
+
+  it("keeps the rightmost plotted point historical when later moves are unanalyzed", () => {
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: null, playerColor: "white" });
+    // Only indices 0-2 analyzed; index 3 absent → trimmed from evals.
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: 50, bestEval: 50, bestMove: "e5", delta: 0, classification: "best", blunder: false })],
+        [2, makeAnalysis({ playedEval: 30, bestEval: 30, bestMove: "Nf3", delta: 0, classification: "best", blunder: false })],
+      ]),
+    });
+
+    const onSelectMove = vi.fn();
+    renderConnected(onSelectMove);
+
+    // The trim leaves index 2 as the rightmost selectable resolved point.
+    expect((capturedProps.evals as unknown[]).length).toBe(3);
+
+    const forwarded = capturedProps.onSelectMove as (index: number) => void;
+    act(() => forwarded(2));
+    // 2 !== moveHistory.length - 1 (=3), so it stays historical, not null.
+    expect(onSelectMove).toHaveBeenCalledWith(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // ConnectedMoveList — freshlyResolved filtering
 // ---------------------------------------------------------------------------
 
