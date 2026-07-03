@@ -406,8 +406,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, [reviewFailModal, blunderAlert, drillFailInfo]);
 
   // Live opening-lineage hierarchy (broadest -> deepest), driven from the active
-  // session. Refetches as moves accumulate and polls while the game is active to
-  // converge the analysis+upload lag. Expand-only: no board-jump, no Start Drill.
+  // session. Refetches as moves accumulate; a bounded per-move lag re-poll (not
+  // a fixed interval) converges the analysis+upload lag for plies that land
+  // server-side after the local move event. Expand-only: no board-jump, no
+  // Start Drill.
   const {
     lineage: openingLineage,
     playerColor: openingLineagePlayerColor,
@@ -420,7 +422,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // (flag +1) while moveHistory is frozen, so the key strictly increases ->
       // exactly one refetch that loads the cards the badges attach to.
       refetchKey: moveHistory.length + (openingScoreChanges ? 1 : 0),
-      pollIntervalMs: 2000,
+      lagRepollMs: 1500,
       active: isGameActive,
     });
 

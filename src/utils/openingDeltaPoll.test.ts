@@ -128,6 +128,76 @@ describe("pollFreshOpeningDelta", () => {
     expect(useGameStore.getState().openingScoreChanges).toBeNull();
   });
 
+  it("joins the in-flight loop on a same-session double-start", async () => {
+    const fresh = [makeItem("k1", 55)];
+    getOpeningScoreDeltaMock
+      .mockResolvedValueOnce({ opening_score_changes: null, is_fresh: false })
+      .mockResolvedValueOnce({ opening_score_changes: fresh, is_fresh: true });
+
+    // Overlapping terminal paths both start the poll for the same session.
+    const p1 = pollFreshOpeningDelta("s1");
+    const p2 = pollFreshOpeningDelta("s1");
+    expect(p2).toBe(p1);
+
+    await tick(); // attempt 1 — not fresh
+    await tick(); // attempt 2 — fresh
+    await p1;
+
+    // A single loop's request count — the double-start added none.
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(2);
+    expect(useGameStore.getState().openingScoreChanges).toEqual(fresh);
+  });
+
+  it("starts a new loop for the same session after the previous one completes", async () => {
+    getOpeningScoreDeltaMock.mockResolvedValue({
+      opening_score_changes: null,
+      is_fresh: true,
+    });
+
+    const first = pollFreshOpeningDelta("s1");
+    await tick();
+    await first;
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(1);
+
+    // The guard cleared on completion: a later call polls again.
+    const second = pollFreshOpeningDelta("s1");
+    expect(second).not.toBe(first);
+    await tick();
+    await second;
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not block a new session's loop while an old session's loop is mid-flight", async () => {
+    const s2fresh = [makeItem("k2", 61)];
+    getOpeningScoreDeltaMock.mockImplementation(async (sid: unknown) =>
+      sid === "s2"
+        ? { opening_score_changes: s2fresh, is_fresh: true }
+        : { opening_score_changes: null, is_fresh: false },
+    );
+
+    const s1loop = pollFreshOpeningDelta("s1");
+    await tick(); // s1 attempt 1 — not fresh, keeps looping
+
+    // A new game takes over mid-flight.
+    useGameStore.setState({ sessionId: "s2" });
+    const s2loop = pollFreshOpeningDelta("s2");
+    expect(s2loop).not.toBe(s1loop);
+
+    // s1 bails on its store check without a request; s2 commits its fresh delta.
+    await tick();
+    await s2loop;
+    await s1loop;
+    expect(useGameStore.getState().openingScoreChanges).toEqual(s2fresh);
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(2); // 1× s1, 1× s2
+
+    // Both guards are clear afterwards: a fresh s2 call polls again.
+    const again = pollFreshOpeningDelta("s2");
+    expect(again).not.toBe(s2loop);
+    await tick();
+    await again;
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(3);
+  });
+
   it("retries after a rejected (timed-out) request instead of failing", async () => {
     const fresh = [makeItem("k1", 33)];
     getOpeningScoreDeltaMock

@@ -175,34 +175,81 @@ describe("useSessionOpenings", () => {
     ]);
   });
 
-  it("polls while active to converge an upload-lagged fetch", async () => {
+  it("re-polls a bounded number of times while active, then goes quiet", async () => {
     const { result } = renderHook(() =>
       useSessionOpenings("a", {
         refetchKey: 1,
-        pollIntervalMs: 4000,
+        lagRepollMs: 1500,
         active: true,
       }),
     );
-    // First (shallow) response.
+    // First (shallow) response from the immediate fetch.
     await resolveFetch(0, response(["k1"]));
     expect(result.current.lineage.map((i) => i.opening_key)).toEqual(["k1"]);
 
-    // Next poll tick fires a new request; the deeper lineage is now available.
-    await advance(4000);
+    // Re-poll tick 1 fires a new request; the deeper lineage is now available.
+    // The next tick is armed only in this fetch's .finally(), so each poll
+    // fetch must settle before advancing to the next tick.
+    await advance(1500);
     expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
     await resolveFetch(1, response(["k1", "k2"]));
     expect(result.current.lineage.map((i) => i.opening_key)).toEqual([
       "k1",
       "k2",
     ]);
+
+    // Re-poll tick 2 — the last of the bounded chain.
+    await advance(1500);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(3);
+    await resolveFetch(2, response(["k1", "k2"]));
+
+    // Chain exhausted: no further requests no matter how long we wait.
+    await advance(30000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(3);
   });
 
-  it("stops polling when active flips false without firing a new fetch", async () => {
+  it("re-arms the bounded re-poll when refetchKey changes", async () => {
+    const { rerender } = renderHook(
+      ({ key }: { key: number }) =>
+        useSessionOpenings("a", {
+          refetchKey: key,
+          lagRepollMs: 1500,
+          active: true,
+        }),
+      { initialProps: { key: 1 } },
+    );
+    // Exhaust the first arm: immediate fetch + 2 re-poll ticks.
+    await resolveFetch(0, response(["k1"]));
+    await advance(1500);
+    await resolveFetch(1, response(["k1"]));
+    await advance(1500);
+    await resolveFetch(2, response(["k1"]));
+    await advance(30000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(3);
+
+    // A key bump (new move) re-arms: another immediate fetch + 2 more ticks.
+    rerender({ key: 2 });
+    await flush();
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(4);
+    await resolveFetch(3, response(["k1", "k2"]));
+    await advance(1500);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(5);
+    await resolveFetch(4, response(["k1", "k2"]));
+    await advance(1500);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(6);
+    await resolveFetch(5, response(["k1", "k2"]));
+
+    // Second chain exhausted too.
+    await advance(30000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(6);
+  });
+
+  it("stops re-polling when active flips false without firing a new fetch", async () => {
     const { rerender } = renderHook(
       ({ active }: { active: boolean }) =>
         useSessionOpenings("a", {
           refetchKey: 1,
-          pollIntervalMs: 4000,
+          lagRepollMs: 4000,
           active,
         }),
       { initialProps: { active: true } },

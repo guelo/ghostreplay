@@ -8,10 +8,11 @@ import {
 interface UseSessionOpeningsOptions {
   /** Bump to force a refetch (live move count, or analysis move count). */
   refetchKey: number;
-  /** When set together with `active`, poll on this interval to converge the
-   *  upload->display lag. Omit (or `active=false`) to disable polling. */
-  pollIntervalMs?: number;
-  /** Gate polling — only poll while the game is active. */
+  /** When set together with `active`, schedule a bounded series of delayed
+   *  re-fetches (up to LAG_REPOLL_MAX_TICKS) after each `refetchKey` change to
+   *  converge the upload->display lag. Omit (or `active=false`) to disable. */
+  lagRepollMs?: number;
+  /** Gate the lag re-poll — only re-poll while the game is active. */
   active?: boolean;
 }
 
@@ -26,6 +27,11 @@ interface SessionOpeningsState {
 // renders via a fresh array each time.
 const EMPTY_LINEAGE: OpeningLineageItem[] = [];
 
+// How many delayed re-fetches follow each refetchKey change while active. Two
+// ticks cover a ply whose server-side upload/analysis lands after the local
+// move event; when the position is stable there is no further traffic.
+const LAG_REPOLL_MAX_TICKS = 2;
+
 /**
  * Fetch a session's opening lineage (broadest -> deepest) for live + history
  * display. Owns the session-scoped state and reset so callers never leak one
@@ -37,10 +43,12 @@ const EMPTY_LINEAGE: OpeningLineageItem[] = [];
  *    of the previous game's stack — held until the new session's fetch commits.
  *  - Same-session refetches keep the prior lineage on screen until the new result
  *    resolves (no empty flash between ticks).
- *  - With `pollIntervalMs` + `active`, a sequential poll (never setInterval, never
- *    a synchronous fetch) converges the lag for plies that upload after their
- *    local move event. The poll effect cannot fetch — only re-arm — so toggling
- *    `active` never triggers a data fetch (finding C).
+ *  - With `lagRepollMs` + `active`, a bounded sequential re-poll (at most
+ *    LAG_REPOLL_MAX_TICKS delayed re-fetches per refetchKey change; never
+ *    setInterval, never a synchronous fetch) converges the lag for plies that
+ *    upload after their local move event, then goes quiet — no fixed-interval
+ *    traffic while idle at a position. The re-poll effect cannot fetch — only
+ *    re-arm — so toggling `active` never triggers a data fetch (finding C).
  *  - Out-of-order safety: a monotonic sequence number ensures a slow OLDER
  *    response can never overwrite a newer/deeper lineage for the same session.
  *
@@ -52,7 +60,7 @@ const EMPTY_LINEAGE: OpeningLineageItem[] = [];
  */
 export function useSessionOpenings(
   sessionId: string | null,
-  { refetchKey, pollIntervalMs, active = false }: UseSessionOpeningsOptions,
+  { refetchKey, lagRepollMs, active = false }: UseSessionOpeningsOptions,
 ): {
   lineage: OpeningLineageItem[];
   playerColor: OpeningPlayerColor;
@@ -122,27 +130,31 @@ export function useSessionOpenings(
     void doFetch(sessionId);
   }, [sessionId, refetchKey, doFetch]);
 
-  // Poll while active. Fires ONLY on a timer tick (never synchronously),
-  // re-arming after each request settles so requests never overlap. Tearing down
-  // (active false / dep change / unmount) cancels the cycle so no further ticks.
+  // Bounded lag re-poll while active: each (sessionId, refetchKey, active) arm
+  // schedules at most LAG_REPOLL_MAX_TICKS delayed re-fetches, then goes quiet.
+  // Fires ONLY on a timer tick (never synchronously), re-arming after each
+  // request settles so requests never overlap. Tearing down (active false /
+  // dep change / unmount) cancels the cycle so no further ticks.
   useEffect(() => {
-    if (sessionId == null || !active || !pollIntervalMs) return;
+    if (sessionId == null || !active || !lagRepollMs) return;
     const sid = sessionId;
     let cancelled = false;
+    let ticksLeft = LAG_REPOLL_MAX_TICKS;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = () => {
       if (cancelled) return;
+      ticksLeft -= 1;
       void doFetch(sid).finally(() => {
-        if (cancelled) return;
-        timer = setTimeout(tick, pollIntervalMs);
+        if (cancelled || ticksLeft <= 0) return;
+        timer = setTimeout(tick, lagRepollMs);
       });
     };
-    timer = setTimeout(tick, pollIntervalMs);
+    timer = setTimeout(tick, lagRepollMs);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [sessionId, refetchKey, active, pollIntervalMs, doFetch]);
+  }, [sessionId, refetchKey, active, lagRepollMs, doFetch]);
 
   // Prior data is shown ONLY for the same session: a session change yields []
   // synchronously, held until the new session's fetch commits.

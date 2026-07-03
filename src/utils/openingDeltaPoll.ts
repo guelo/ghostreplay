@@ -24,7 +24,22 @@ const DELTA_POLL_REQUEST_TIMEOUT_MS = 4000;
  * before it can repopulate a stale banner. Each request carries its own
  * `AbortSignal.timeout` so a hung GET can't stall the loop.
  */
-export async function pollFreshOpeningDelta(sessionId: string): Promise<void> {
+
+// In-flight loops keyed by session; a same-session double-start (overlapping
+// terminal paths) joins the running loop instead of spawning a second one.
+const runningLoops = new Map<string, Promise<void>>();
+
+export function pollFreshOpeningDelta(sessionId: string): Promise<void> {
+  const existing = runningLoops.get(sessionId);
+  if (existing) return existing;
+  const loop = runDeltaPollLoop(sessionId).finally(() => {
+    runningLoops.delete(sessionId);
+  });
+  runningLoops.set(sessionId, loop);
+  return loop;
+}
+
+async function runDeltaPollLoop(sessionId: string): Promise<void> {
   for (let attempt = 0; attempt < DELTA_POLL_MAX_ATTEMPTS; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, DELTA_POLL_INTERVAL_MS));
     // Superseded by a new game/drill — abandon without writing a stale banner.
