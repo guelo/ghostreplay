@@ -21,6 +21,10 @@ function GameAnalysisPage() {
   const [processing, setProcessing] = useState(false);
   const pollCountRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialAnalysisRequestRef = useRef<{
+    sessionId: string;
+    promise: Promise<SessionAnalysis>;
+  } | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -35,8 +39,30 @@ function GameAnalysisPage() {
     setAnalysis(null);
     /* eslint-enable react-hooks/set-state-in-effect */
 
+    const getInitialAnalysisRequest = () => {
+      const cached = initialAnalysisRequestRef.current;
+      if (cached?.sessionId === id) return cached.promise;
+
+      const promise = fetchAnalysis(id);
+      initialAnalysisRequestRef.current = { sessionId: id, promise };
+      void promise.then(
+        () => {
+          if (initialAnalysisRequestRef.current?.promise === promise) {
+            initialAnalysisRequestRef.current = null;
+          }
+        },
+        () => {
+          if (initialAnalysisRequestRef.current?.promise === promise) {
+            initialAnalysisRequestRef.current = null;
+          }
+        },
+      );
+      return promise;
+    };
+
     const doFetch = (isInitial: boolean) => {
-      fetchAnalysis(id)
+      const request = isInitial ? getInitialAnalysisRequest() : fetchAnalysis(id);
+      request
         .then((data) => {
           if (cancelled) return;
           setAnalysis(data);

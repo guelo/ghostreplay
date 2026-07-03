@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -49,6 +50,16 @@ function renderPage(path: string) {
     <MemoryRouter initialEntries={[path]}>
       <GameAnalysisPage />
     </MemoryRouter>,
+  );
+}
+
+function renderStrictPage(path: string) {
+  return render(
+    <StrictMode>
+      <MemoryRouter initialEntries={[path]}>
+        <GameAnalysisPage />
+      </MemoryRouter>
+    </StrictMode>,
   );
 }
 
@@ -132,6 +143,19 @@ describe('GameAnalysisPage', () => {
       'data-initial-move',
       '0',
     );
+  });
+
+  it('reuses the initial analysis request during StrictMode effect replay', async () => {
+    mockFetchAnalysis.mockResolvedValue(ANALYSIS_RESPONSE);
+
+    renderStrictPage('/game?id=abc-123');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+    });
+
+    expect(mockFetchAnalysis).toHaveBeenCalledTimes(1);
+    expect(mockFetchAnalysis).toHaveBeenCalledWith('abc-123');
   });
 
   it('fetches analysis and renders board without initialMoveIndex for empty game', async () => {
