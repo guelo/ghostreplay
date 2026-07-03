@@ -23,6 +23,7 @@ afterEach(() => {
   uninstallConsoleCapture()
   try {
     localStorage.removeItem('gr.debugLog')
+    localStorage.removeItem('gr.debugBody')
   } catch {
     /* ignore */
   }

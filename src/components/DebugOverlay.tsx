@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
   clear,
   getEntries,
+  isBodyCaptureEnabled,
+  setBodyCapture,
   subscribe,
   type LogEntry,
   type LogLevel,
@@ -23,6 +25,7 @@ export default function DebugOverlay() {
   )
   const [levelFilter, setLevelFilter] = useState<Set<LogLevel>>(new Set(LEVELS))
   const [textFilter, setTextFilter] = useState('')
+  const [bodiesOn, setBodiesOn] = useState(isBodyCaptureEnabled)
 
   const entries = useSyncExternalStore(subscribe, getEntries)
 
@@ -62,6 +65,12 @@ export default function DebugOverlay() {
     void navigator.clipboard?.writeText(text)
   }
 
+  const toggleBodies = () => {
+    const next = !bodiesOn
+    setBodiesOn(next)
+    setBodyCapture(next)
+  }
+
   return (
     <>
       {/* Discreet mobile corner hotspot. */}
@@ -79,6 +88,15 @@ export default function DebugOverlay() {
             <span className="debug-overlay__count">
               {filtered.length}/{entries.length}
             </span>
+            {/* Opt-in gate for redacted request/response body capture (g-bsg9). */}
+            <button
+              type="button"
+              aria-pressed={bodiesOn}
+              className={'debug-toggle' + (bodiesOn ? ' is-active' : '')}
+              onClick={toggleBodies}
+            >
+              Bodies
+            </button>
             <button type="button" onClick={copyAll}>Copy</button>
             <button type="button" onClick={() => clear()}>Clear</button>
             <button type="button" onClick={() => setOpen(false)}>✕</button>

@@ -90,6 +90,16 @@
   color: #4fd0e0;
 }
 
+.debug-toggle {
+  opacity: 0.6;
+}
+
+.debug-toggle.is-active {
+  opacity: 1;
+  border-color: #2a7f8f; /* mirror .debug-chip--net.is-active — bodies are a net feature */
+  color: #4fd0e0;
+}
+
 .debug-overlay__search {
   flex: 1;
   min-width: 80px;

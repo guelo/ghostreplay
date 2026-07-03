@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import DebugOverlay from './DebugOverlay'
-import { installConsoleCapture, uninstallConsoleCapture } from '../utils/debugLog'
+import {
+  installConsoleCapture,
+  isBodyCaptureEnabled,
+  uninstallConsoleCapture,
+} from '../utils/debugLog'
 
 let originalWindowFetch: typeof window.fetch | undefined
 
@@ -131,5 +135,22 @@ describe('DebugOverlay', () => {
     const row = screen.getByText(/\/api\/game\/end/).closest('li')
     expect(row).toHaveClass('debug-entry--net')
     expect(row).toHaveClass('debug-entry--net-fail')
+  })
+
+  it('renders a Bodies toggle that flips body capture', () => {
+    render(<DebugOverlay />)
+    openOverlay()
+
+    const btn = screen.getByRole('button', { name: 'Bodies' })
+    expect(btn).toHaveAttribute('aria-pressed', 'false')
+    expect(isBodyCaptureEnabled()).toBe(false)
+
+    fireEvent.click(btn)
+    expect(btn).toHaveAttribute('aria-pressed', 'true')
+    expect(isBodyCaptureEnabled()).toBe(true)
+
+    fireEvent.click(btn)
+    expect(btn).toHaveAttribute('aria-pressed', 'false')
+    expect(isBodyCaptureEnabled()).toBe(false)
   })
 })
