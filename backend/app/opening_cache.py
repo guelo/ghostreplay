@@ -29,6 +29,7 @@ from app.opening_aggregate import (
 )
 from app.opening_evidence import (
     OPENING_EVIDENCE_INPUTS_VERSION,
+    SESSION_EVIDENCE_ELIGIBLE_SQL,
     EdgeEvidence,
     EvidenceOverlay,
     overlay_evidence,
@@ -803,8 +804,12 @@ def list_opening_score_candidate_pairs(
     if limit is not None and limit < 0:
         raise ValueError("limit must be >= 0")
 
+    # Session-scoped arms mirror the overlay/digest eligibility gate so that
+    # "has evidence" ⇔ "the overlay would produce at least one row". Manual
+    # blunders (no source session) are always eligible, matching the
+    # ``gs.id IS NULL`` branch in the overlay/digest.
     sql_parts = [
-        """
+        f"""
         SELECT pairs.user_id, pairs.player_color
         FROM (
             SELECT DISTINCT gs.user_id AS user_id, gs.player_color AS player_color
@@ -812,6 +817,7 @@ def list_opening_score_candidate_pairs(
             JOIN game_sessions gs ON gs.id = sm.session_id
             WHERE sm.fen_before IS NOT NULL
               AND gs.session_mode IN ('normal', 'drill')
+              AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
 
             UNION
 
@@ -827,6 +833,7 @@ def list_opening_score_candidate_pairs(
             LEFT JOIN game_sessions gs ON gs.id = b.source_session_id
             WHERE gs.player_color IS NOT NULL
               AND gs.session_mode IN ('normal', 'drill')
+              AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
         ) pairs
     """
     ]

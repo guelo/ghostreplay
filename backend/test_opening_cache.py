@@ -142,13 +142,15 @@ def _mock_opening_cache_singletons():
         yield
 
 
-def _create_session_row(db_session, *, user_id: int, player_color: str) -> GameSession:
+def _create_session_row(
+    db_session, *, user_id: int, player_color: str, status: str = "ended"
+) -> GameSession:
     session = GameSession(
         id=uuid.uuid4(),
         user_id=user_id,
         started_at=datetime.now(timezone.utc),
-        status="completed",
-        result="win",
+        status=status,
+        result="win" if status == "ended" else None,
         engine_elo=1500,
         player_color=player_color,
     )
@@ -157,8 +159,12 @@ def _create_session_row(db_session, *, user_id: int, player_color: str) -> GameS
     return session
 
 
-def _seed_black_opening_session(db_session, *, user_id: int = 123) -> GameSession:
-    session = _create_session_row(db_session, user_id=user_id, player_color="black")
+def _seed_black_opening_session(
+    db_session, *, user_id: int = 123, status: str = "ended"
+) -> GameSession:
+    session = _create_session_row(
+        db_session, user_id=user_id, player_color="black", status=status
+    )
     db_session.add_all(
         [
             SessionMove(
@@ -665,7 +671,12 @@ def test_session_upload_refreshes_relevant_opening_snapshot(
     assert response.status_code == 200
     # The endpoint enqueues a coalesced recompute rather than running it inline;
     # drive that recompute directly to assert the snapshot it would produce.
+    # End the session first: an in-progress session's moves are not evidence.
     session_stub.assert_called_once_with(123, "black")
+    game_session = db_session.get(GameSession, uuid.UUID(session_id))
+    game_session.status = "ended"
+    game_session.ended_at = datetime.now(timezone.utc)
+    db_session.commit()
     recompute_opening_scores_if_needed(db_session, 123, "black")
     db_session.commit()
     db_session.expire_all()
@@ -720,6 +731,12 @@ def test_srs_review_refreshes_relevant_opening_snapshot(
 
     assert response.status_code == 200
     srs_stub.assert_called_once_with(123, "black")
+    # End the originating session: a blunder sourced from an in-progress
+    # session is not evidence until that session terminates.
+    game_session = db_session.get(GameSession, uuid.UUID(session_id))
+    game_session.status = "ended"
+    game_session.ended_at = datetime.now(timezone.utc)
+    db_session.commit()
     recompute_opening_scores_if_needed(db_session, 123, "black")
     db_session.commit()
     db_session.expire_all()
@@ -1343,6 +1360,102 @@ def test_raw_fp_flips_on_registry_version_change(db_session, monkeypatch, const)
     monkeypatch.setattr(f"app.opening_cache.{const}", bumped)
 
     assert _raw_fp(db_session) != before
+
+
+def test_raw_fp_ignores_in_progress_session_moves(db_session):
+    # g-dmd1 regression: live-play move upserts land in an ACTIVE session and
+    # must NOT flip the fingerprint — otherwise every poll-triggered gate check
+    # sees evidence_change and pays a full overlay rebuild, looping the worker.
+    _seed_black_opening_session(db_session)
+    before = _raw_fp(db_session)
+
+    live = _seed_black_opening_session(db_session, status="active")
+    assert _raw_fp(db_session) == before
+
+    live.status = "ended"
+    live.ended_at = datetime.now(timezone.utc)
+    db_session.commit()
+
+    assert _raw_fp(db_session) != before
+
+
+def test_active_only_user_has_no_opening_evidence(db_session):
+    # The existence gate must agree with the overlay/digest eligibility rule:
+    # an in-progress session's moves are not evidence yet, so
+    # has_opening_evidence must be False while the overlay builds empty.
+    session = _seed_black_opening_session(db_session, status="active")
+
+    assert oc.has_opening_evidence(db_session, 123, "black") is False
+    overlay = _real_overlay_evidence(db_session, 123, "black", _make_graph())
+    assert overlay.nodes == {}
+
+    session.status = "ended"
+    session.ended_at = datetime.now(timezone.utc)
+    db_session.commit()
+
+    assert oc.has_opening_evidence(db_session, 123, "black") is True
+    overlay = _real_overlay_evidence(db_session, 123, "black", _make_graph())
+    assert overlay.nodes != {}
+
+
+def test_active_only_user_baseline_is_empty_no_evidence(db_session):
+    # With the existence gate aligned, a user whose only session is still
+    # active gets a valid EMPTY baseline (openings later read as new) — not
+    # skipped_cold, which would drop the end-of-first-game delta.
+    from app.opening_score_delta import _capture_baseline_json
+
+    _seed_black_opening_session(db_session, status="active")
+
+    json_str, source = _capture_baseline_json(
+        db_session, 123, "black",
+        not_after=datetime.now(timezone.utc),
+        skip_when_inflight=False,
+    )
+    assert source == "empty_no_evidence"
+    assert json_str == "{}"
+
+
+def test_manual_blunder_counts_as_evidence_regardless_of_session_status(db_session):
+    # Manual blunders (no source session) mirror the gs.id IS NULL branch in
+    # the overlay/digest: always eligible.
+    position = Position(
+        user_id=123, fen_hash="manual-gate", fen_raw=KNIGHT_OPENING_FULL,
+        active_color="black",
+    )
+    db_session.add(position)
+    db_session.flush()
+    db_session.add(
+        Blunder(
+            user_id=123,
+            position_id=position.id,
+            bad_move_san="Qh5",
+            best_move_san="Nc6",
+            eval_loss_cp=120,
+            source_session_id=None,
+        )
+    )
+    db_session.commit()
+
+    assert oc.has_opening_evidence(db_session, 123, "black") is True
+
+
+def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
+    # A batch stamped under an older OPENING_EVIDENCE_INPUTS_VERSION mismatches
+    # the current fingerprint exactly once (self-healing recompute); the next
+    # unchanged trigger serves the rebuilt batch without recomputing.
+    _seed_black_opening_session(db_session)
+
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert first is not None
+    first.inputs_fingerprint = "pre-raw-v4-stamp"
+    db_session.commit()
+
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    third = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None and third is not None
+    assert second.id != first.id
+    assert third.id == second.id
 
 
 def test_if_needed_fast_path_does_not_build_overlay(db_session):

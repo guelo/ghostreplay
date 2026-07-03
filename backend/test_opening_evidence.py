@@ -17,11 +17,13 @@ from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_pro
 from app.fen import normalize_fen
 from app.models import AnalysisCache, PositionAnalysisRow
 from app.opening_evidence import (
+    OPENING_EVIDENCE_INPUTS_VERSION,
     EdgeEvidence,
     EvidenceOverlay,
     NodeEvidence,
     observed_off_book_fens,
     overlay_evidence,
+    raw_evidence_inputs_digest,
 )
 from app.opening_graph import (
     OpeningGraph,
@@ -112,8 +114,10 @@ def _insert_session(
     player_color: str = "white",
     started_at: str = "2026-01-01 10:00:00",
     ended_at: str | None = "2026-01-01 11:00:00",
+    status: str = "ended",
     session_mode: str = "normal",
     drill_state: str | None = None,
+    drill_terminal_reason: str | None = None,
     normal_started_at: str | None = None,
     converted_at: str | None = None,
     rated_start_ply: int | None = None,
@@ -123,21 +127,25 @@ def _insert_session(
     db.execute(text("""
         INSERT INTO game_sessions (
             id, user_id, started_at, ended_at, status, engine_elo, player_color,
-            is_rated, session_mode, drill_state, normal_started_at, converted_at, rated_start_ply
+            is_rated, session_mode, drill_state, drill_terminal_reason,
+            normal_started_at, converted_at, rated_start_ply
         )
         VALUES (
-            :id, :uid, :sa, :ea, 'completed', 1500, :pc,
-            :is_rated, :session_mode, :drill_state, :normal_started_at, :converted_at, :rated_start_ply
+            :id, :uid, :sa, :ea, :status, 1500, :pc,
+            :is_rated, :session_mode, :drill_state, :drill_terminal_reason,
+            :normal_started_at, :converted_at, :rated_start_ply
         )
     """), {
         "id": sid,
         "uid": user_id,
         "sa": started_at,
         "ea": ended_at,
+        "status": status,
         "pc": player_color,
         "is_rated": is_rated,
         "session_mode": session_mode,
         "drill_state": drill_state,
+        "drill_terminal_reason": drill_terminal_reason,
         "normal_started_at": normal_started_at,
         "converted_at": converted_at,
         "rated_start_ply": rated_start_ply,
@@ -241,12 +249,29 @@ class TestLiveMoves:
         assert edge.live_passes == 1
         assert edge.uci == "e2e4"
 
-    def test_unconverted_drill_contributes_live_evidence(self, db_session, branching_graph):
-        # Amended drill policy (2026-06-01): pre-continue drill uploads feed the
-        # same regular opening-evidence path as normal games.
+    def test_active_drill_excluded_from_evidence(self, db_session, branching_graph):
+        # In-progress sessions feed no evidence: session_moves are upserted
+        # per-move during live play, so including them would flip the freshness
+        # digest on every move (g-dmd1).
         _insert_user(db_session)
         sid = _insert_session(
-            db_session, session_mode="drill", drill_state="active", is_rated=False
+            db_session, status="active", ended_at=None,
+            session_mode="drill", drill_state="active", is_rated=False,
+        )
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        assert ov.nodes == {}
+        assert ov.edges == {}
+
+    def test_ended_unconverted_drill_contributes_evidence(self, db_session, branching_graph):
+        # Amended drill policy (2026-06-01): drill uploads feed the same regular
+        # opening-evidence path as normal games once the session has ended —
+        # rated or not.
+        _insert_user(db_session)
+        sid = _insert_session(
+            db_session, session_mode="drill", drill_state="abandoned", is_rated=False
         )
         _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
 
@@ -770,6 +795,116 @@ class TestGhostTargets:
 
         ov = overlay_evidence(db_session, 1, "white", branching_graph)
         assert FEN_ROOT not in ov.nodes
+
+    def test_ghost_target_from_active_session_excluded_until_ended(
+        self, db_session, branching_graph
+    ):
+        # Blunders are recorded mid-game, so a live session's blunder must not
+        # become a ghost target (or flip the digest) until the session ends.
+        _insert_user(db_session)
+        empty_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+        sid = _insert_session(db_session, status="active", ended_at=None)
+        pos_id = _insert_position(db_session, 1, RAW_ROOT, "roothash", "white")
+        _insert_blunder(db_session, 1, pos_id, source_session_id=sid)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert FEN_ROOT not in ov.nodes
+        assert raw_evidence_inputs_digest(db_session, 1, "white") == empty_digest
+
+        db_session.execute(
+            text("UPDATE game_sessions SET status='ended', ended_at='2026-01-01 11:00:00'"
+                 " WHERE id = :sid"),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.nodes[FEN_ROOT].is_ghost_target is True
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != empty_digest
+
+    def test_manual_ghost_target_in_digest_without_any_session(
+        self, db_session, branching_graph
+    ):
+        # Manually-seeded blunders (no source session) are always eligible.
+        _insert_user(db_session)
+        empty_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+        pos_id = _insert_position(db_session, 1, RAW_ROOT, "roothash", "white")
+        _insert_blunder(db_session, 1, pos_id, source_session_id=None)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.nodes[FEN_ROOT].is_ghost_target is True
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != empty_digest
+
+
+class TestSessionEligibilityParity:
+    """In-progress sessions affect NEITHER the digest NOR the overlay, and BOTH
+    once terminal (g-dmd1). The digest is the freshness proxy for the overlay's
+    inputs, so the two selections must always agree."""
+
+    def test_inputs_version_bumped_for_eligibility_narrowing(self):
+        # The eligibility gate changed the digest's row selection; pre-change
+        # batches must self-heal via a version mismatch, not serve as fresh.
+        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v4"
+
+    def test_in_progress_session_affects_neither_digest_nor_overlay(
+        self, db_session, branching_graph
+    ):
+        _insert_user(db_session)
+        empty_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+
+        sid = _insert_session(db_session, status="active", ended_at=None)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.nodes == {}
+        assert ov.edges == {}
+        assert raw_evidence_inputs_digest(db_session, 1, "white") == empty_digest
+
+        db_session.execute(
+            text("UPDATE game_sessions SET status='ended', ended_at='2026-01-01 11:00:00'"
+                 " WHERE id = :sid"),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.nodes[FEN_ROOT].live_attempts == 1
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != empty_digest
+
+    def test_accuracy_failed_drill_counts_while_still_active(
+        self, db_session, branching_graph
+    ):
+        # POST /api/drills/{id}/fail (accuracy) computes an opening-score delta
+        # WITHOUT ending the session (so /continue stays possible); its quiescent
+        # played chain must be included or the end-of-drill delta reads empty.
+        _insert_user(db_session)
+        empty_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+        sid = _insert_session(
+            db_session, status="active", ended_at=None, session_mode="drill",
+            drill_state="failed", drill_terminal_reason="accuracy", is_rated=False,
+        )
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.nodes[FEN_ROOT].live_attempts == 1
+        assert raw_evidence_inputs_digest(db_session, 1, "white") != empty_digest
+
+    def test_off_route_failed_drill_excluded_while_active(
+        self, db_session, branching_graph
+    ):
+        # Off-route fail computes no delta and its final move may not be durable
+        # yet; the drill folds in only once the session properly ends.
+        _insert_user(db_session)
+        empty_digest = raw_evidence_inputs_digest(db_session, 1, "white")
+        sid = _insert_session(
+            db_session, status="active", ended_at=None, session_mode="drill",
+            drill_state="failed", drill_terminal_reason="off_route", is_rated=False,
+        )
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=20)
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert ov.nodes == {}
+        assert raw_evidence_inputs_digest(db_session, 1, "white") == empty_digest
 
 
 class TestContinuousQuality:

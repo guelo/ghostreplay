@@ -299,6 +299,9 @@ def run_baseline_snapshot_job(
         # ``raw_evidence_inputs_digest`` MUST also get a NOT EXISTS clause here —
         # otherwise a session contributing only that source would slip past this
         # airtight check and be protected by the clock-dependent date guard alone.
+        # (Since SESSION_EVIDENCE_ELIGIBLE_SQL excludes in-progress sessions from
+        # the digest, a brand-new active session can no longer feed evidence at
+        # all — these clauses are belt-and-suspenders on top of that narrowing.)
         stmt = (
             update(GameSession)
             .where(GameSession.id == session_id)

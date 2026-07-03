@@ -440,7 +440,7 @@ def test_family_scores_bootstrap_on_cache_miss(client, auth_headers, db_session)
         id=uuid.uuid4(),
         user_id=123,
         started_at=datetime.now(timezone.utc),
-        status="completed",
+        status="ended",
         result="win",
         engine_elo=1500,
         player_color="black",

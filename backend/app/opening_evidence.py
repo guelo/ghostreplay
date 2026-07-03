@@ -72,7 +72,28 @@ PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/deb
 #   - the set of columns the overlay consumes from any of these tables.
 # (DIVIDER_VERSION, QUALITY_VERSION, TAU_WC, TAU_CP, SCORE_MODEL_VERSION already
 # live in ``opening_score_inputs_fingerprint`` and remain there.)
-OPENING_EVIDENCE_INPUTS_VERSION = "raw-v3"
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v4"
+
+# Session-eligibility predicate applied to EVERY session-scoped evidence
+# selection (aliased ``gs``). The overlay and the freshness digest must apply
+# it identically — the digest is the freshness proxy for the overlay's inputs.
+#
+# Only terminal sessions feed opening evidence. session_moves are upserted
+# per-move during live play, so an in-progress session would flip the digest
+# on every move and force a full overlay rebuild per recompute trigger
+# (g-dmd1: continuous >90% CPU recompute loop during gameplay).
+#
+# The one terminal-while-active state is an accuracy-failed drill:
+# POST /api/drills/{id}/fail computes an opening-score delta WITHOUT ending
+# the session (``status`` stays 'active' so /continue can convert it into a
+# rated game), so its quiescent played chain must count. A /continue flips
+# ``drill_state`` to 'converted' → excluded again until the true session end.
+# Off-route-failed drills compute no delta and their final move may not be
+# durable yet, so they wait for the session to properly end.
+SESSION_EVIDENCE_ELIGIBLE_SQL = (
+    "(gs.status = 'ended' OR (gs.drill_state = 'failed'"
+    " AND gs.drill_terminal_reason = 'accuracy'))"
+)
 
 # White-before-black ordering within a single (session, move_number).
 _COLOR_RANK = {"white": 0, "black": 1}
@@ -298,7 +319,7 @@ def _build_move_rows(
     interval. Sessions with broken continuity are excluded and counted.
     """
     rows = db.execute(
-        text("""
+        text(f"""
             SELECT sm.session_id, sm.move_number, sm.color,
                    sm.fen_before, sm.fen_after, sm.move_san,
                    sm.eval_delta, sm.eval_cp, sm.best_move_eval_cp,
@@ -309,6 +330,7 @@ def _build_move_rows(
               AND gs.player_color = :player_color
               AND sm.fen_before IS NOT NULL
               AND gs.session_mode IN ('normal', 'drill')
+              AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
@@ -531,8 +553,12 @@ def _collect_ghost_targets(
     graph: OpeningGraph,
     overlay: EvidenceOverlay,
 ) -> None:
+    # Manually-seeded blunders (gs.id IS NULL) are always eligible; a blunder
+    # recorded mid-game in a live session waits for that session to terminate
+    # (blunders are written at detection time, so they would otherwise flip the
+    # digest during play).
     rows = db.execute(
-        text("""
+        text(f"""
             SELECT p.fen_raw
             FROM blunders b
             JOIN positions p ON p.id = b.position_id
@@ -540,7 +566,8 @@ def _collect_ghost_targets(
             WHERE b.user_id = :user_id
               AND (gs.player_color = :player_color
                    OR (b.source_session_id IS NULL AND p.active_color = :player_color))
-              AND (gs.id IS NULL OR gs.session_mode IN ('normal', 'drill'))
+              AND (gs.id IS NULL OR (gs.session_mode IN ('normal', 'drill')
+                   AND {SESSION_EVIDENCE_ELIGIBLE_SQL}))
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
@@ -559,6 +586,11 @@ def _collect_reviews(
     graph: OpeningGraph,
     overlay: EvidenceOverlay,
 ) -> None:
+    # Deliberately NOT gated on SESSION_EVIDENCE_ELIGIBLE_SQL: ``gs`` here is
+    # the blunder's ORIGINATING game session, which is long ended by review
+    # time; a new review row flips the digest via ``reviewed_at`` regardless.
+    # If a gate is ever added, apply it to BOTH this query and digest
+    # section 4 together.
     rows = db.execute(
         text("""
             SELECT p.fen_raw, br.passed, br.reviewed_at
@@ -658,8 +690,8 @@ def raw_evidence_inputs_digest(
 
     Scoping is INTENTIONALLY broad where it diverges from the overlay (e.g. all
     session moves are hashed, not just opening-interval premoves; the candidate
-    set is every player-color session move lacking a primary eval, not just
-    opening premoves): a broader digest can only cause an unnecessary
+    set is every eligible-session player-color move lacking a primary eval, not
+    just opening premoves): a broader digest can only cause an unnecessary
     (still-correct) rebuild, never a missed change. Semantic-only changes that
     leave every raw row unchanged are covered by
     ``OPENING_EVIDENCE_INPUTS_VERSION``, folded in by the caller.
@@ -689,7 +721,7 @@ def raw_evidence_inputs_digest(
     # 1. Session moves (mirrors _build_move_rows). Same SELECT, but we hash the
     #    scalar columns and stop instead of replaying boards.
     session_rows = db.execute(
-        text("""
+        text(f"""
             SELECT sm.session_id, sm.move_number, sm.color,
                    sm.fen_before, sm.fen_after, sm.move_san,
                    sm.eval_delta, sm.eval_cp, sm.best_move_eval_cp,
@@ -700,6 +732,7 @@ def raw_evidence_inputs_digest(
               AND gs.player_color = :player_color
               AND sm.fen_before IS NOT NULL
               AND gs.session_mode IN ('normal', 'drill')
+              AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
@@ -735,7 +768,7 @@ def raw_evidence_inputs_digest(
     #    normalized_fen_before column (which may be NULL/stale on a still
     #    move-trusted row), so digest key == runtime key by construction.
     candidate_rows = db.execute(
-        text("""
+        text(f"""
             SELECT DISTINCT sm.fen_before
             FROM session_moves sm
             JOIN game_sessions gs ON gs.id = sm.session_id
@@ -745,6 +778,7 @@ def raw_evidence_inputs_digest(
               AND sm.fen_before IS NOT NULL
               AND (sm.eval_cp IS NULL OR sm.best_move_eval_cp IS NULL)
               AND gs.session_mode IN ('normal', 'drill')
+              AND {SESSION_EVIDENCE_ELIGIBLE_SQL}
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
@@ -867,7 +901,7 @@ def raw_evidence_inputs_digest(
 
     # 3. Ghost targets (mirrors _collect_ghost_targets).
     ghost_rows = db.execute(
-        text("""
+        text(f"""
             SELECT p.fen_raw
             FROM blunders b
             JOIN positions p ON p.id = b.position_id
@@ -875,7 +909,8 @@ def raw_evidence_inputs_digest(
             WHERE b.user_id = :user_id
               AND (gs.player_color = :player_color
                    OR (b.source_session_id IS NULL AND p.active_color = :player_color))
-              AND (gs.id IS NULL OR gs.session_mode IN ('normal', 'drill'))
+              AND (gs.id IS NULL OR (gs.session_mode IN ('normal', 'drill')
+                   AND {SESSION_EVIDENCE_ELIGIBLE_SQL}))
         """),
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
