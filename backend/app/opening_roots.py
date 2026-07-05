@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 from collections import deque
 from dataclasses import dataclass
 
@@ -428,14 +429,23 @@ def build_opening_roots(graph: OpeningGraph) -> OpeningRoots:
 # ---------------------------------------------------------------------------
 
 _opening_roots: OpeningRoots | None = None
+_opening_roots_lock = threading.Lock()
 
 
 def get_opening_roots() -> OpeningRoots:
-    """Return the singleton opening roots registry, building on first access."""
+    """Return the singleton opening roots registry, building on first access.
+    Single-flight: concurrent first callers block on one build rather than each
+    launching a redundant build."""
     global _opening_roots
-    if _opening_roots is None:
-        _opening_roots = build_opening_roots(get_opening_graph())
-    return _opening_roots
+    roots = _opening_roots
+    if roots is not None:
+        return roots
+    with _opening_roots_lock:
+        if _opening_roots is None:
+            # Only assign on success — a raised build leaves the singleton
+            # None so the next caller retries rather than caching a failure.
+            _opening_roots = build_opening_roots(get_opening_graph())
+        return _opening_roots
 
 
 def _reset_opening_roots_for_testing() -> None:

@@ -523,6 +523,71 @@ class TestSingleton:
         sig = inspect.signature(real_fn)
         assert len(sig.parameters) == 0
 
+    def test_concurrent_first_access_builds_once(self, monkeypatch):
+        """N threads hitting the cold path simultaneously trigger exactly one
+        build and all receive the same graph object (single-flight)."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        n = 16
+        count_lock = threading.Lock()
+        build_count = 0
+        sentinel = object()
+
+        def _slow_build(*args, **kwargs):
+            nonlocal build_count
+            with count_lock:
+                build_count += 1
+            time.sleep(0.05)
+            return sentinel
+
+        monkeypatch.setattr("app.opening_graph.build_opening_graph", _slow_build)
+        _reset_opening_graph_for_testing()
+
+        barrier = threading.Barrier(n)
+
+        def _worker():
+            barrier.wait(timeout=2)
+            return get_opening_graph()
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_worker) for _ in range(n)]
+            results = [f.result(timeout=5) for f in futures]
+
+        assert build_count == 1
+        assert all(r is results[0] for r in results)
+        assert results[0] is sentinel
+
+    def test_failure_leaves_singleton_none_and_retries(self, monkeypatch):
+        """A build that raises must not poison the singleton; the next caller
+        retries and succeeds."""
+        import threading
+
+        count_lock = threading.Lock()
+        build_count = 0
+        sentinel = object()
+
+        def _flaky_build(*args, **kwargs):
+            nonlocal build_count
+            with count_lock:
+                build_count += 1
+                current = build_count
+            if current == 1:
+                raise RuntimeError("boom")
+            return sentinel
+
+        monkeypatch.setattr("app.opening_graph.build_opening_graph", _flaky_build)
+        _reset_opening_graph_for_testing()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            get_opening_graph()
+        assert opening_graph_module._opening_graph is None
+
+        result = get_opening_graph()
+        assert result is sentinel
+        assert build_count == 2
+
 
 # -- Cache --
 

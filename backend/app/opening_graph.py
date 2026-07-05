@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import pickle
+import threading
 from pathlib import Path
 from types import MappingProxyType
 
@@ -336,14 +337,23 @@ def build_opening_graph(
 # -- Singleton --
 
 _opening_graph: OpeningGraph | None = None
+_opening_graph_lock = threading.Lock()
 
 
 def get_opening_graph() -> OpeningGraph:
-    """Return the singleton opening graph (default paths), building on first access."""
+    """Return the singleton opening graph (default paths), building on first
+    access. Single-flight: concurrent first callers block on one build rather
+    than each launching a redundant ~30s build."""
     global _opening_graph
-    if _opening_graph is None:
-        _opening_graph = build_opening_graph()
-    return _opening_graph
+    graph = _opening_graph
+    if graph is not None:
+        return graph
+    with _opening_graph_lock:
+        if _opening_graph is None:
+            # Only assign on success — a raised build leaves the singleton
+            # None so the next caller retries rather than caching a failure.
+            _opening_graph = build_opening_graph()
+        return _opening_graph
 
 
 def _reset_opening_graph_for_testing() -> None:

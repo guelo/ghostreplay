@@ -14,6 +14,7 @@ from app.opening_graph import (
     _fen_from_board,
     build_opening_graph,
 )
+import app.opening_roots as opening_roots_module
 from app.opening_roots import (
     OpeningRoot,
     OpeningRoots,
@@ -693,6 +694,85 @@ class TestSingleton:
         _reset_opening_roots_for_testing()
         r2 = get_opening_roots()
         assert r1 is not r2
+
+
+class TestRootsSingleFlight:
+    @pytest.fixture(autouse=True)
+    def _isolate(self):
+        _reset_opening_roots_for_testing()
+        yield
+        _reset_opening_roots_for_testing()
+
+    def test_concurrent_first_access_builds_once(self, monkeypatch):
+        """N threads hitting the cold path simultaneously trigger exactly one
+        build and all receive the same roots object (single-flight)."""
+        import threading
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+
+        n = 16
+        count_lock = threading.Lock()
+        build_count = 0
+        sentinel = object()
+
+        def _slow_build(_graph):
+            nonlocal build_count
+            with count_lock:
+                build_count += 1
+            time.sleep(0.05)
+            return sentinel
+
+        monkeypatch.setattr("app.opening_roots.build_opening_roots", _slow_build)
+        monkeypatch.setattr(
+            "app.opening_roots.get_opening_graph", lambda: object()
+        )
+        _reset_opening_roots_for_testing()
+
+        barrier = threading.Barrier(n)
+
+        def _worker():
+            barrier.wait(timeout=2)
+            return get_opening_roots()
+
+        with ThreadPoolExecutor(max_workers=n) as pool:
+            futures = [pool.submit(_worker) for _ in range(n)]
+            results = [f.result(timeout=5) for f in futures]
+
+        assert build_count == 1
+        assert all(r is results[0] for r in results)
+        assert results[0] is sentinel
+
+    def test_failure_leaves_singleton_none_and_retries(self, monkeypatch):
+        """A build that raises must not poison the singleton; the next caller
+        retries and succeeds."""
+        import threading
+
+        count_lock = threading.Lock()
+        build_count = 0
+        sentinel = object()
+
+        def _flaky_build(_graph):
+            nonlocal build_count
+            with count_lock:
+                build_count += 1
+                current = build_count
+            if current == 1:
+                raise RuntimeError("boom")
+            return sentinel
+
+        monkeypatch.setattr("app.opening_roots.build_opening_roots", _flaky_build)
+        monkeypatch.setattr(
+            "app.opening_roots.get_opening_graph", lambda: object()
+        )
+        _reset_opening_roots_for_testing()
+
+        with pytest.raises(RuntimeError, match="boom"):
+            get_opening_roots()
+        assert opening_roots_module._opening_roots is None
+
+        result = get_opening_roots()
+        assert result is sentinel
+        assert build_count == 2
 
 
 # ---------------------------------------------------------------------------
