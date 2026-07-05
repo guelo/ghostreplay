@@ -22,7 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections import Counter, defaultdict
+import threading
+from collections import Counter, OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -30,6 +31,7 @@ import chess
 from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
+import app.game_phase as game_phase
 from app.analysis_profiles import (
     IDENTITY_FIELDS,
     StrengthComparison,
@@ -150,7 +152,7 @@ class EdgeEvidence:
     quality_count: int = 0
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class PhaseSample:
     """Per-session phase-horizon telemetry captured where ``divide`` already runs.
 
@@ -197,6 +199,210 @@ class _MoveRow:
     def identity(self) -> tuple[str, int, str]:
         """Stable per-move identity used to record each session move once."""
         return (str(self.session_id), self.move_number, self.color)
+
+
+# ---------------------------------------------------------------------------
+# Per-session evidence REPLAY cache (g-25mp).
+#
+# The expensive part of ``_build_move_rows`` is the per-session board REPLAY:
+# ``reconstruct_board_sequence`` + Lichess ``divide`` + opening-premove
+# extraction. That work is a PURE deterministic function of one session's own
+# ``session_moves`` rows plus DIVIDER_VERSION / OPENING_EVIDENCE_INPUTS_VERSION —
+# it is graph-independent and analysis_cache-independent (those are consumed
+# later, in passes 2/3 and ``_apply_cache_fallbacks``, over the merged rows).
+# So we memoize ONLY the replay product per session_id in a bounded in-process
+# LRU; a rebuild then replays only new/changed/unseen sessions and loads the
+# rest (including previously-excluded broken sessions) from cache.
+#
+# NOT cached: move quality (recomputed cheaply on copy-out, so a
+# QUALITY_VERSION/TAU_WC/TAU_CP bump needs no invalidation) and the
+# analysis_cache fallbacks (re-applied to the merged rows each build).
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedMove:
+    """A frozen opening-interval premove — the RAW replay product for one ply.
+
+    Carries only what a fresh mutable ``_MoveRow`` needs to be rebuilt on
+    copy-out, plus the raw ``eval_cp``/``best_move_eval_cp`` the copy-out
+    consults to recompute quality and decide the analysis_cache fallback. It
+    deliberately has NO ``quality``/``quality_source`` so the cached value can
+    never be poisoned by ``_apply_cache_fallbacks`` (which mutates only the
+    fresh copies).
+    """
+
+    session_id: str
+    move_number: int
+    color: str
+    norm_before: str
+    norm_after: str
+    fen_before_raw: str
+    move_san: str
+    eval_delta: int | None
+    eval_cp: int | None
+    best_move_eval_cp: int | None
+    session_ts: datetime | str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedSession:
+    """The memoized replay product for one session.
+
+    ``excluded`` sessions (ContinuityError during reconstruction) carry an empty
+    ``moves`` tuple, no ``phase_sample``, and the warning message so it is logged
+    once per content rather than once per rebuild.
+    """
+
+    moves: tuple[_CachedMove, ...]
+    phase_sample: PhaseSample | None
+    excluded: bool
+    exclusion_msg: str
+
+
+# Bound PRIMARILY by total cached ``_CachedMove`` rows, not session count —
+# memory is driven by the FEN-ish string payload each row carries. Measured
+# per-row cost (frozen slots dataclass deep-walked with sys.getsizeof over its
+# string/datetime payloads on a representative row) is ~744 B; the 120k cap
+# below therefore targets a ~90 MB ceiling. Only opening-interval premoves are
+# cached (a fraction of a session's plies), so a heavy user's whole working set
+# is a few thousand rows — comfortably (many ×) below this cap, which is the
+# CONTRACT the "replay only the new session" claim depends on: a per-user
+# working set larger than the budget evicts mid-build and re-replays wholesale
+# (still correct, only slower; evictions are logged and warned). A coarse
+# session-count backstop guards against pathological many-tiny-session sets.
+_SESSION_CACHE_MAX_ROWS = 120_000
+_SESSION_CACHE_MAX_SESSIONS = 100_000
+_WARNED_EXCLUSIONS_MAX = 10_000
+
+# session_id -> (content_hash, _CachedSession). LRU: MRU at the end.
+_SESSION_EVIDENCE_CACHE: "OrderedDict[str, tuple[str, _CachedSession]]" = OrderedDict()
+# (session_id, content_hash) already-warned set, bounded independently so an
+# excluded session warns once per content even after its value entry is evicted.
+_WARNED_EXCLUSIONS: "OrderedDict[tuple[str, str], None]" = OrderedDict()
+# One lock guards ALL of the structures above and the counters below.
+_SESSION_EVIDENCE_LOCK = threading.Lock()
+_session_cache_rows = 0  # running total of cached _CachedMove across the LRU
+_session_cache_evictions = 0  # cumulative rows evicted (observability / tests)
+
+
+def _sm_line(r) -> str:
+    """Canonical per-row ``SM|`` projection shared by the freshness digest
+    (section 1) and the per-session content hash, so "same raw rows → same
+    line" holds by construction across both consumers."""
+    return "SM|" + "|".join(
+        (
+            str(r.session_id),
+            str(r.move_number),
+            str(r.color),
+            str(r.fen_before),
+            str(r.fen_after),
+            str(r.move_san),
+            str(r.eval_delta),
+            str(r.eval_cp),
+            str(r.best_move_eval_cp),
+            _digest_ts(r.session_ts),
+        )
+    )
+
+
+def _session_content_hash(srows) -> str:
+    """Content hash over one session's rows + the two REPLAY version tags.
+
+    Folds ``game_phase.DIVIDER_VERSION`` (read as a LIVE module attribute so a
+    monkeypatch is observed) and ``OPENING_EVIDENCE_INPUTS_VERSION`` in, so any
+    version bump misses every entry and forces full re-derivation. QUALITY /
+    TAU constants are deliberately absent — quality is recomputed on copy-out.
+    """
+    lines = sorted(_sm_line(r) for r in srows)
+    payload = "\n".join(lines)
+    payload += f"\n\x00DIVIDER={game_phase.DIVIDER_VERSION}"
+    payload += f"\n\x00INPUTS={OPENING_EVIDENCE_INPUTS_VERSION}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _session_cache_get(session_id: str, content_hash: str) -> _CachedSession | None:
+    """Return the cached value iff present AND its content hash matches."""
+    with _SESSION_EVIDENCE_LOCK:
+        entry = _SESSION_EVIDENCE_CACHE.get(session_id)
+        if entry is None or entry[0] != content_hash:
+            return None
+        _SESSION_EVIDENCE_CACHE.move_to_end(session_id)
+        return entry[1]
+
+
+def _session_cache_put(session_id: str, content_hash: str, value: _CachedSession) -> int:
+    """LRU insert; evict whole LRU-first sessions until under the row budget.
+
+    Returns the number of rows THIS call evicted, so the caller can accumulate a
+    precise build-local total rather than diffing the shared cumulative counter
+    (which other threads mutate concurrently — overlay_evidence runs on both
+    request threads and the scheduler daemon).
+    """
+    global _session_cache_rows, _session_cache_evictions
+    with _SESSION_EVIDENCE_LOCK:
+        existing = _SESSION_EVIDENCE_CACHE.pop(session_id, None)
+        if existing is not None:
+            _session_cache_rows -= len(existing[1].moves)
+        _SESSION_EVIDENCE_CACHE[session_id] = (content_hash, value)  # inserted MRU
+        _session_cache_rows += len(value.moves)
+        evicted_here = 0
+        while _SESSION_EVIDENCE_CACHE and (
+            _session_cache_rows > _SESSION_CACHE_MAX_ROWS
+            or len(_SESSION_EVIDENCE_CACHE) > _SESSION_CACHE_MAX_SESSIONS
+        ):
+            _, (_, evicted_val) = _SESSION_EVIDENCE_CACHE.popitem(last=False)
+            _session_cache_rows -= len(evicted_val.moves)
+            _session_cache_evictions += len(evicted_val.moves)
+            evicted_here += len(evicted_val.moves)
+        return evicted_here
+
+
+def _mark_exclusion_warned_if_new(session_id: str, content_hash: str) -> bool:
+    """Atomic check-and-mark: return True only to the FIRST caller for a given
+    ``(session_id, content_hash)``, so concurrent misses on the same broken
+    session log the exclusion exactly once. The caller logs outside the lock."""
+    key = (session_id, content_hash)
+    with _SESSION_EVIDENCE_LOCK:
+        if key in _WARNED_EXCLUSIONS:
+            _WARNED_EXCLUSIONS.move_to_end(key)
+            return False
+        _WARNED_EXCLUSIONS[key] = None
+        # Under sustained pressure on THIS set (more distinct broken contents
+        # than the cap) the guarantee degrades to "once per retained key" —
+        # acceptable, warnings are diagnostic.
+        while len(_WARNED_EXCLUSIONS) > _WARNED_EXCLUSIONS_MAX:
+            _WARNED_EXCLUSIONS.popitem(last=False)
+        return True
+
+
+def reset_session_evidence_cache() -> None:
+    """Clear the value LRU, the warned-exclusion set, and all counters.
+
+    Test hook (conftest autouse fixture) so cross-test state cannot leak and the
+    instrumented replay counts stay deterministic.
+    """
+    global _session_cache_rows, _session_cache_evictions
+    with _SESSION_EVIDENCE_LOCK:
+        _SESSION_EVIDENCE_CACHE.clear()
+        _WARNED_EXCLUSIONS.clear()
+        _session_cache_rows = 0
+        _session_cache_evictions = 0
+
+
+def session_evidence_cache_session_count() -> int:
+    with _SESSION_EVIDENCE_LOCK:
+        return len(_SESSION_EVIDENCE_CACHE)
+
+
+def session_evidence_cache_row_count() -> int:
+    with _SESSION_EVIDENCE_LOCK:
+        return _session_cache_rows
+
+
+def session_evidence_cache_eviction_count() -> int:
+    with _SESSION_EVIDENCE_LOCK:
+        return _session_cache_evictions
 
 
 def _get_or_create_node(nodes: dict[str, NodeEvidence], fen: str) -> NodeEvidence:
@@ -306,6 +512,57 @@ def _apply_move(
     _record_edge(overlay.edges, mr, uci, is_user_move)
 
 
+def _derive_session(srows) -> _CachedSession:
+    """Pure per-session board REPLAY — the memoized expensive work (g-25mp).
+
+    Reconstructs the line, runs the Lichess divider, and extracts the
+    opening-interval premoves as frozen ``_CachedMove`` rows. Depends ONLY on
+    this session's own sorted rows (graph- and analysis_cache-independent).
+    Returns an excluded verdict on ``ContinuityError``. Does NO logging and NO
+    overlay mutation — the caller owns those so they happen once per rebuild
+    regardless of cache hit/miss, and the warning fires only on a miss.
+    """
+    triples = [(r.fen_before, r.fen_after, r.move_san) for r in srows]
+    try:
+        boards = reconstruct_board_sequence(triples)
+    except ContinuityError as exc:
+        return _CachedSession(
+            moves=(), phase_sample=None, excluded=True, exclusion_msg=str(exc)
+        )
+
+    division = divide(boards)
+    phase_sample = PhaseSample(
+        opening_interval_len=division.opening_size,
+        middle_ply=division.middle,
+        end_ply=division.end,
+    )
+    moves: list[_CachedMove] = []
+    for index, r in enumerate(srows):
+        if not is_opening_premove(division, index):
+            continue
+        moves.append(
+            _CachedMove(
+                session_id=str(r.session_id),
+                move_number=r.move_number,
+                color=r.color,
+                norm_before=normalize_fen(r.fen_before),
+                norm_after=normalize_fen(r.fen_after),
+                fen_before_raw=r.fen_before,
+                move_san=r.move_san,
+                eval_delta=r.eval_delta,
+                eval_cp=r.eval_cp,
+                best_move_eval_cp=r.best_move_eval_cp,
+                session_ts=r.session_ts,
+            )
+        )
+    return _CachedSession(
+        moves=tuple(moves),
+        phase_sample=phase_sample,
+        excluded=False,
+        exclusion_msg="",
+    )
+
+
 def _build_move_rows(
     db: Session,
     user_id: int,
@@ -314,9 +571,13 @@ def _build_move_rows(
 ) -> list[_MoveRow]:
     """Load session moves, phase-tag them, and attach continuous quality.
 
-    Groups rows by session, reconstructs each board line, runs the exact Lichess
-    divider, and keeps only moves whose pre-move position is inside the opening
-    interval. Sessions with broken continuity are excluded and counted.
+    Groups rows by session; for each session, the expensive board REPLAY
+    (reconstruct + divide + opening-premove extraction) is served from an
+    in-process per-session cache (``_derive_session`` on a miss). Quality is
+    recomputed on copy-out into a FRESH mutable ``_MoveRow`` per cached premove,
+    so a QUALITY/TAU version bump honours automatically with no cache
+    invalidation and ``_apply_cache_fallbacks`` can never poison the frozen
+    cached value. Sessions with broken continuity are excluded and counted.
     """
     rows = db.execute(
         text(f"""
@@ -339,71 +600,88 @@ def _build_move_rows(
     for row in rows:
         by_session[str(row.session_id)].append(row)
 
-    # First pass per session: reconstruct the line, divide it, and keep opening
-    # moves. Quality is resolved from the primary session_moves evals or the
-    # eval_delta fallback now; analysis_cache fallbacks are filled in afterwards.
     opening_moves: list[_MoveRow] = []
     # Candidates needing an analysis_cache lookup: index into opening_moves plus
     # the (fen_before_raw, uci, side_to_move) lookup key.
     cache_candidates: list[tuple[int, str, str, str]] = []
 
-    for srows in by_session.values():
+    # Build-local eviction tally (rows this rebuild evicted). NOT a diff of the
+    # shared cumulative counter: other threads mutate it concurrently, which
+    # would over/under-count and misattribute this user's warning.
+    evicted_rows = 0
+
+    # Iterate sessions in a DETERMINISTIC order: the SELECT has no ORDER BY, so
+    # by_session insertion order follows DB row order and is not stable across
+    # runs. sorted(by_session) makes phase_samples order and cache_candidates
+    # indices identical between an incremental and a from-scratch build.
+    for sid in sorted(by_session):
+        srows = by_session[sid]
         srows.sort(key=lambda r: (r.move_number, _COLOR_RANK.get(r.color, 0)))
-        triples = [(r.fen_before, r.fen_after, r.move_san) for r in srows]
-        try:
-            boards = reconstruct_board_sequence(triples)
-        except ContinuityError as exc:
+        content_hash = _session_content_hash(srows)
+        cached = _session_cache_get(sid, content_hash)
+        if cached is None:
+            cached = _derive_session(srows)  # REPLAY happens here only (miss)
+            if cached.excluded and _mark_exclusion_warned_if_new(sid, content_hash):
+                logger.warning(
+                    "excluding session %s from opening evidence: %s",
+                    sid,
+                    cached.exclusion_msg,
+                )
+            evicted_rows += _session_cache_put(sid, content_hash, cached)
+
+        if cached.excluded:
             overlay.excluded_sessions += 1
-            logger.warning(
-                "excluding session %s from opening evidence: %s",
-                srows[0].session_id,
-                exc,
-            )
             continue
 
-        division = divide(boards)
-        overlay.phase_samples.append(
-            PhaseSample(
-                opening_interval_len=division.opening_size,
-                middle_ply=division.middle,
-                end_ply=division.end,
-            )
-        )
-        for index, r in enumerate(srows):
-            if not is_opening_premove(division, index):
-                continue
-            norm_before = normalize_fen(r.fen_before)
-            norm_after = normalize_fen(r.fen_after)
+        overlay.phase_samples.append(cached.phase_sample)  # frozen → safe to share
+        # COPY-OUT: build a fresh MUTABLE _MoveRow per frozen _CachedMove, with
+        # quality recomputed live so a QUALITY/TAU bump needs no invalidation.
+        for cm in cached.moves:
             quality, source = move_quality(
-                eval_cp=r.eval_cp,
-                best_move_eval_cp=r.best_move_eval_cp,
-                eval_delta=r.eval_delta,
+                eval_cp=cm.eval_cp,
+                best_move_eval_cp=cm.best_move_eval_cp,
+                eval_delta=cm.eval_delta,
             )
             mr = _MoveRow(
-                session_id=str(r.session_id),
-                move_number=r.move_number,
-                color=r.color,
-                norm_before=norm_before,
-                norm_after=norm_after,
-                fen_before_raw=r.fen_before,
-                move_san=r.move_san,
-                eval_delta=r.eval_delta,
+                session_id=cm.session_id,
+                move_number=cm.move_number,
+                color=cm.color,
+                norm_before=cm.norm_before,
+                norm_after=cm.norm_after,
+                fen_before_raw=cm.fen_before_raw,
+                move_san=cm.move_san,
+                eval_delta=cm.eval_delta,
                 quality=quality,
                 quality_source=source,
-                session_ts=r.session_ts,
+                session_ts=cm.session_ts,
             )
             # A user move that fell back to eval_delta (or has no signal yet) may
             # be upgradable to a win-chance score from analysis_cache.
             needs_cache = (
-                r.color == player_color
-                and (r.eval_cp is None or r.best_move_eval_cp is None)
+                cm.color == player_color
+                and (cm.eval_cp is None or cm.best_move_eval_cp is None)
             )
             if needs_cache:
-                uci = _uci_from_san(norm_before, r.move_san)
+                uci = _uci_from_san(cm.norm_before, cm.move_san)
                 if uci is not None:
-                    stm = "w" if " w " in r.fen_before else "b"
-                    cache_candidates.append((len(opening_moves), r.fen_before, uci, stm))
+                    stm = "w" if " w " in cm.fen_before_raw else "b"
+                    cache_candidates.append(
+                        (len(opening_moves), cm.fen_before_raw, uci, stm)
+                    )
             opening_moves.append(mr)
+
+    if evicted_rows > 0:
+        # Silent thrash reads as "incremental working" while it re-replays
+        # everything; surface it so an undersized budget is diagnosable. The
+        # count is build-local (summed from each _session_cache_put), so it is
+        # precise for this user even under concurrent rebuilds on other threads.
+        logger.warning(
+            "session-evidence cache evicted %d rows during build for "
+            "user=%s color=%s — _SESSION_CACHE_MAX_ROWS may be undersized",
+            evicted_rows,
+            user_id,
+            player_color,
+        )
 
     _apply_cache_fallbacks(db, opening_moves, cache_candidates)
     return opening_moves
@@ -737,23 +1015,10 @@ def raw_evidence_inputs_digest(
         {"user_id": user_id, "player_color": player_color},
     ).fetchall()
     for r in session_rows:
-        lines.append(
-            "SM|"
-            + "|".join(
-                (
-                    str(r.session_id),
-                    str(r.move_number),
-                    str(r.color),
-                    str(r.fen_before),
-                    str(r.fen_after),
-                    str(r.move_san),
-                    str(r.eval_delta),
-                    str(r.eval_cp),
-                    str(r.best_move_eval_cp),
-                    _digest_ts(r.session_ts),
-                )
-            )
-        )
+        # Shared per-row projection with the per-session content hash
+        # (_session_content_hash), so "same raw rows → same line" holds across
+        # both the freshness digest and the replay cache by construction.
+        lines.append(_sm_line(r))
 
     # 2. Trusted-source fallback subset (mirrors _apply_cache_fallbacks /
     #    resolve_trusted_positions). The cache fallback now pairs a TRUSTED

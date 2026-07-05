@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
 import tempfile
 import uuid
@@ -13,6 +14,8 @@ import chess
 import pytest
 from sqlalchemy import text
 
+import app.game_phase as game_phase
+import app.opening_evidence as opening_evidence
 from app.analysis_profiles import CANONICAL_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.fen import normalize_fen
 from app.models import AnalysisCache, PositionAnalysisRow
@@ -24,6 +27,8 @@ from app.opening_evidence import (
     observed_off_book_fens,
     overlay_evidence,
     raw_evidence_inputs_digest,
+    reset_session_evidence_cache,
+    session_evidence_cache_eviction_count,
 )
 from app.opening_graph import (
     OpeningGraph,
@@ -1553,3 +1558,340 @@ def test_observed_off_book_fens_empty_when_all_edges_in_book():
     overlay.edges[(FEN_ROOT, FEN_E4)] = EdgeEvidence(FEN_ROOT, FEN_E4, "e2e4")
 
     assert observed_off_book_fens(overlay, graph) == set()
+
+
+# ---------------------------------------------------------------------------
+# g-25mp: incremental per-session opening-evidence REPLAY cache.
+# ---------------------------------------------------------------------------
+
+
+class _ReplayCounter:
+    """Wraps ``reconstruct_board_sequence`` to count how many sessions replay."""
+
+    def __init__(self, real):
+        self._real = real
+        self.count = 0
+
+    def __call__(self, moves):
+        self.count += 1
+        return self._real(moves)
+
+
+def _insert_line(db, sid, uci_moves, *, eval_delta=10, eval_cp=None, best_move_eval_cp=None):
+    """Insert a continuous, legal session line as session_moves rows."""
+    board = chess.Board()
+    for ply, uci in enumerate(uci_moves):
+        move = chess.Move.from_uci(uci)
+        san = board.san(move)
+        fen_before = board.fen()
+        color = "white" if board.turn == chess.WHITE else "black"
+        board.push(move)
+        _insert_move(
+            db, sid, ply // 2 + 1, color, san, fen_before, board.fen(),
+            eval_delta=eval_delta, eval_cp=eval_cp, best_move_eval_cp=best_move_eval_cp,
+        )
+
+
+def _insert_discontinuous_session(db, sid):
+    """Two white moves whose fens don't chain → ContinuityError on replay."""
+    _insert_move(db, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10)
+    # move 2's fen_before (after 1.e4 e5) does not equal move 1's fen_after (RAW_E4).
+    _insert_move(db, sid, 2, "white", "Nf3", RAW_E4E5, RAW_E4E5NF3, eval_delta=10)
+
+
+def _assert_overlay_equal(a, b):
+    assert a.nodes == b.nodes
+    assert a.edges == b.edges
+    assert a.source_counts == b.source_counts
+    assert a.excluded_sessions == b.excluded_sessions
+    assert a.phase_samples == b.phase_samples
+
+
+class TestIncrementalReplayCache:
+    def test_append_one_session_replays_only_that_session(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """Primary acceptance: first build replays every session; after appending
+        one finished session, the next build replays ONLY the new one."""
+        _insert_user(db_session)
+        for _ in range(3):
+            sid = _insert_session(db_session)
+            _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 3  # cold build replays all N
+
+        counter.count = 0
+        new_sid = _insert_session(db_session)
+        _insert_line(db_session, new_sid, ["e2e4", "c7c5"])
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1  # only the appended session replayed
+
+    def test_unchanged_rebuild_replays_nothing(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        _insert_user(db_session)
+        for _ in range(2):
+            sid = _insert_session(db_session)
+            _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        overlay_evidence(db_session, 1, "white", branching_graph)
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 0  # every session served from cache
+
+
+class TestExcludedSessionWarnOnce:
+    def test_excluded_warns_once_across_builds(self, db_session, branching_graph, caplog):
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_discontinuous_session(db_session, sid)
+
+        with caplog.at_level(logging.WARNING, logger="app.opening_evidence"):
+            ov1 = overlay_evidence(db_session, 1, "white", branching_graph)
+            ov2 = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        warns = [r for r in caplog.records if "excluding session" in r.getMessage()]
+        assert len(warns) == 1  # logged once per content, not once per rebuild
+        assert ov1.excluded_sessions == 1
+        assert ov2.excluded_sessions == 1
+
+        # Changing the session content → new content hash → warns again.
+        caplog.clear()
+        db_session.execute(
+            text(
+                "UPDATE session_moves SET eval_delta = 99 "
+                "WHERE session_id = :sid AND move_number = 1"
+            ),
+            {"sid": sid},
+        )
+        db_session.commit()
+        with caplog.at_level(logging.WARNING, logger="app.opening_evidence"):
+            ov3 = overlay_evidence(db_session, 1, "white", branching_graph)
+        warns2 = [r for r in caplog.records if "excluding session" in r.getMessage()]
+        assert len(warns2) == 1
+        assert ov3.excluded_sessions == 1
+
+
+class TestDifferentialParity:
+    """incremental (cache warm) overlay == from-scratch overlay, across scenarios."""
+
+    def test_parity_new_session_appended(self, db_session, branching_graph):
+        _insert_user(db_session)
+        sid1 = _insert_session(db_session)
+        _insert_line(db_session, sid1, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        overlay_evidence(db_session, 1, "white", branching_graph)  # warm
+
+        sid2 = _insert_session(db_session)
+        _insert_line(db_session, sid2, ["e2e4", "c7c5"])
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        _assert_overlay_equal(incr, scratch)
+
+    def test_parity_eval_backfill_invalidates(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        overlay_evidence(db_session, 1, "white", branching_graph)  # warm (eval_delta)
+
+        # Backfill primary evals on the existing rows → content hash flips.
+        db_session.execute(
+            text(
+                "UPDATE session_moves SET eval_cp = 30, best_move_eval_cp = 55, "
+                "eval_delta = 25 WHERE session_id = :sid"
+            ),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 1  # the backfilled session re-derived
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        # If the cache had served the pre-backfill value, quality source would
+        # differ (eval_delta vs session_eval) and this would fail.
+        _assert_overlay_equal(incr, scratch)
+
+    def test_parity_with_excluded_session(self, db_session, branching_graph):
+        _insert_user(db_session)
+        sid_ok = _insert_session(db_session)
+        _insert_line(db_session, sid_ok, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        sid_bad = _insert_session(db_session)
+        _insert_discontinuous_session(db_session, sid_bad)
+        overlay_evidence(db_session, 1, "white", branching_graph)  # warm
+
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert incr.excluded_sessions == 1
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        _assert_overlay_equal(incr, scratch)
+
+    def test_parity_divider_version_bump(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        _insert_user(db_session)
+        for _ in range(2):
+            sid = _insert_session(db_session)
+            _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        overlay_evidence(db_session, 1, "white", branching_graph)  # warm
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        monkeypatch.setattr(game_phase, "DIVIDER_VERSION", "divider-test-bump")
+
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 2  # version bump forced full re-derivation
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        _assert_overlay_equal(incr, scratch)
+
+    def test_parity_inputs_version_bump(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        _insert_user(db_session)
+        for _ in range(2):
+            sid = _insert_session(db_session)
+            _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+        overlay_evidence(db_session, 1, "white", branching_graph)  # warm
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        monkeypatch.setattr(
+            opening_evidence, "OPENING_EVIDENCE_INPUTS_VERSION", "raw-test-bump"
+        )
+
+        incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count == 2
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        _assert_overlay_equal(incr, scratch)
+
+    def test_fallback_applies_after_cache_hit(self, db_session, branching_graph):
+        """analysis_cache fallback runs OUTSIDE the cache: it applies on the miss
+        AND on a later hit, proving cached rows aren't mutated and fallbacks
+        re-run over the merged rows each build."""
+        from app.opening_quality import (
+            SOURCE_ANALYSIS_CACHE,
+            quality_from_win_chance_loss,
+        )
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        _insert_canonical_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+        )
+
+        expected = quality_from_win_chance_loss(20, -30)
+        ov1 = overlay_evidence(db_session, 1, "white", branching_graph)  # miss
+        ov2 = overlay_evidence(db_session, 1, "white", branching_graph)  # hit
+        for ov in (ov1, ov2):
+            assert ov.nodes[FEN_ROOT].quality_sum == pytest.approx(expected)
+            assert ov.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+    def test_quality_recomputed_on_cache_hit(
+        self, db_session, branching_graph, monkeypatch
+    ):
+        """Finding-1 guard: quality is recomputed on copy-out, not served from a
+        cached derived value. Patching ``move_quality`` after warming the cache
+        changes the output on a HIT even though the replay never re-runs."""
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(
+            db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4,
+            eval_cp=30, best_move_eval_cp=55,
+        )
+        ov1 = overlay_evidence(db_session, 1, "white", branching_graph)  # warm
+        base_q = ov1.nodes[FEN_ROOT].quality_sum
+        assert ov1.nodes[FEN_ROOT].quality_count == 1
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        real_move_quality = opening_evidence.move_quality
+        SHIFT = 0.25
+
+        def _shifted(**kwargs):
+            q, source = real_move_quality(**kwargs)
+            return (None if q is None else q + SHIFT, source)
+
+        monkeypatch.setattr(opening_evidence, "move_quality", _shifted)
+
+        ov2 = overlay_evidence(db_session, 1, "white", branching_graph)  # cache hit
+        assert counter.count == 0  # replay untouched — served from cache
+        assert ov2.nodes[FEN_ROOT].quality_sum == pytest.approx(base_q + SHIFT)
+
+
+class TestCacheMutationAliasing:
+    def test_cached_entry_holds_unresolved_replay_product(
+        self, db_session, branching_graph
+    ):
+        """The cache stores the RAW replay product; ``_apply_cache_fallbacks``
+        upgrades only the fresh copies, never the frozen cached rows."""
+        from app.opening_quality import SOURCE_ANALYSIS_CACHE
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=40)
+        _insert_canonical_cache(
+            db_session, RAW_ROOT, "e2e4", "e4",
+            played_eval=-30, best_eval=20,
+            best_move_uci="d2d4", best_line_uci="d2d4 d7d5",
+        )
+
+        ov1 = overlay_evidence(db_session, 1, "white", branching_graph)  # miss + fallback
+        assert ov1.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+        _, cached_session = opening_evidence._SESSION_EVIDENCE_CACHE[sid]
+        assert cached_session.moves
+        for cm in cached_session.moves:
+            # Raw evals unchanged; the frozen row has no quality field to poison.
+            assert cm.eval_cp is None and cm.best_move_eval_cp is None
+            assert not hasattr(cm, "quality")
+
+        ov2 = overlay_evidence(db_session, 1, "white", branching_graph)  # hit
+        assert ov2.source_counts[SOURCE_ANALYSIS_CACHE] == 1
+
+
+class TestDegradedUnderBudget:
+    def test_thrash_stays_correct(self, db_session, branching_graph, monkeypatch, caplog):
+        """With the row budget below the working set, entries evict mid-build and
+        sessions re-replay — output stays correct, evictions are counted/warned,
+        and the 'replay only the new session' claim degrades (documented)."""
+        _insert_user(db_session)
+        for _ in range(4):
+            sid = _insert_session(db_session)
+            _insert_line(db_session, sid, ["e2e4", "e7e5", "g1f3", "b8c6"])
+
+        monkeypatch.setattr(opening_evidence, "_SESSION_CACHE_MAX_ROWS", 3)
+
+        with caplog.at_level(logging.WARNING, logger="app.opening_evidence"):
+            incr = overlay_evidence(db_session, 1, "white", branching_graph)
+        assert session_evidence_cache_eviction_count() > 0
+        assert any("cache evicted" in r.getMessage() for r in caplog.records)
+
+        reset_session_evidence_cache()
+        scratch = overlay_evidence(db_session, 1, "white", branching_graph)
+        _assert_overlay_equal(incr, scratch)  # correctness holds under thrash
+
+        counter = _ReplayCounter(opening_evidence.reconstruct_board_sequence)
+        monkeypatch.setattr(opening_evidence, "reconstruct_board_sequence", counter)
+        new_sid = _insert_session(db_session)
+        _insert_line(db_session, new_sid, ["e2e4", "c7c5"])
+        overlay_evidence(db_session, 1, "white", branching_graph)
+        assert counter.count > 1  # more than just the appended session replayed

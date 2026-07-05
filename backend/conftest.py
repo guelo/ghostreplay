@@ -518,6 +518,22 @@ def _no_op_baseline_enqueue():
         yield game_stub, drills_stub
 
 
+@pytest.fixture(autouse=True)
+def _reset_session_evidence_cache():
+    """Clear the per-session opening-evidence replay cache between tests (g-25mp).
+
+    The cache is a module-level in-process LRU keyed by session_id; without a
+    reset, a session created in one test could serve a stale replay product to
+    another, and the instrumented ``reconstruct_board_sequence`` call counts the
+    incremental-replay tests assert on would leak across tests.
+    """
+    from app.opening_evidence import reset_session_evidence_cache
+
+    reset_session_evidence_cache()
+    yield
+    reset_session_evidence_cache()
+
+
 @pytest.fixture
 def client(_db_override):
     # Patch the scheduler getters so the FastAPI lifespan never starts a real daemon
