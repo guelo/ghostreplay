@@ -453,6 +453,8 @@ def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(mo
     monkeypatch.setattr(main, "get_baseline_scheduler", lambda: baseline)
     monkeypatch.setattr(main.engine, "connect", lambda: connection)
     monkeypatch.setattr(main.engine, "dispose", Mock())
+    start_prewarm = Mock()
+    monkeypatch.setattr(main, "start_prewarm", start_prewarm)
 
     async def exercise_lifespan():
         async with main.lifespan(main.app):
@@ -463,6 +465,7 @@ def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(mo
     opening.start.assert_called_once_with()
     evidence.start.assert_called_once_with()
     baseline.start.assert_called_once_with()
+    start_prewarm.assert_called_once_with()
     opening.shutdown.assert_called_once_with(drain=True)
     evidence.shutdown.assert_called_once_with(drain=True)
     baseline.shutdown.assert_called_once_with(drain=True)

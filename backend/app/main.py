@@ -22,6 +22,7 @@ from app.api.session import router as session_router
 from app.api.srs import router as srs_router
 from app.db import engine
 from app.opening_baseline_scheduler import get_baseline_scheduler
+from app.opening_prewarm import start_prewarm
 from app.opening_score_scheduler import get_scheduler
 from app.session_evidence_scheduler import get_evidence_scheduler
 from app.posthog_client import shutdown as posthog_shutdown
@@ -62,6 +63,17 @@ async def lifespan(app: FastAPI):
         get_baseline_scheduler().start()
     except Exception:
         logging.getLogger(__name__).exception("opening baseline scheduler failed to start")
+
+    # Kick off the opening graph/roots build in a background daemon thread
+    # (g-prewarm-openings) so the first opening request after a cold deploy
+    # doesn't pay the 30-60s build in-request. Must not block startup: Railway
+    # health-checks /health with a 30s timeout and this lifespan body runs
+    # before the server accepts requests, so only spawn here — never join. A
+    # spawn failure degrades to the existing lazy single-flight build.
+    try:
+        start_prewarm()
+    except Exception:
+        logging.getLogger(__name__).exception("opening prewarm failed to start")
 
     try:
         yield

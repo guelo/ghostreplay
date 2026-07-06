@@ -512,6 +512,8 @@ def test_lifespan_swallows_shutdown_timeout_and_disposes_engine(monkeypatch):
     monkeypatch.setattr(main.engine, "connect", lambda: connection)
     dispose = Mock()
     monkeypatch.setattr(main.engine, "dispose", dispose)
+    start_prewarm = Mock()
+    monkeypatch.setattr(main, "start_prewarm", start_prewarm)
 
     async def exercise_lifespan():
         async with main.lifespan(main.app):
@@ -521,6 +523,7 @@ def test_lifespan_swallows_shutdown_timeout_and_disposes_engine(monkeypatch):
 
     scheduler.start.assert_called_once_with()
     scheduler.shutdown.assert_called_once_with(drain=True)
+    start_prewarm.assert_called_once_with()
     dispose.assert_called_once_with()
 
 

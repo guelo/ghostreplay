@@ -543,7 +543,7 @@ def client(_db_override):
         "app.main.get_scheduler"
     ) as get_scheduler, patch("app.main.get_evidence_scheduler"), patch(
         "app.main.get_baseline_scheduler"
-    ):
+    ), patch("app.main.start_prewarm"):
         with TestClient(app) as client:
             yield client
 
@@ -659,7 +659,7 @@ def pg_client(pg_engine, pg_session_factory):
         "app.main.get_scheduler"
     ), patch("app.main.get_evidence_scheduler"), patch(
         "app.main.get_baseline_scheduler"
-    ):
+    ), patch("app.main.start_prewarm"):
         with TestClient(app) as pg_test_client:
             yield pg_test_client
     app.dependency_overrides.pop(get_db, None)

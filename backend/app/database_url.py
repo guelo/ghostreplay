@@ -38,6 +38,16 @@ def _database_url_from_pg_env() -> str | None:
     )
 
 
+def is_deploy_platform() -> bool:
+    """True when running on a managed deploy platform (Railway/Render)."""
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_PROJECT_ID")
+        or os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+    )
+
+
 def resolve_database_url() -> str:
     for env_name in ("DATABASE_URL", "DATABASE_PRIVATE_URL", "DATABASE_PUBLIC_URL"):
         database_url = os.getenv(env_name)
@@ -48,12 +58,7 @@ def resolve_database_url() -> str:
     if pg_database_url:
         return pg_database_url
 
-    if (
-        os.getenv("RAILWAY_ENVIRONMENT")
-        or os.getenv("RAILWAY_PROJECT_ID")
-        or os.getenv("RENDER")
-        or os.getenv("RENDER_SERVICE_ID")
-    ):
+    if is_deploy_platform():
         raise RuntimeError(
             "Database configuration is missing. Set DATABASE_URL or attach managed "
             "Postgres variables to this service."

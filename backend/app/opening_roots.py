@@ -448,6 +448,16 @@ def get_opening_roots() -> OpeningRoots:
         return _opening_roots
 
 
+def is_opening_roots_warm() -> bool:
+    """True once the roots singleton is built. Never triggers a build.
+
+    Reads the module global at call time — callers must use this (or the
+    module attribute) rather than importing ``_opening_roots``, which would
+    bind a stale ``None`` reference.
+    """
+    return _opening_roots is not None
+
+
 def _reset_opening_roots_for_testing() -> None:
     """Clear the singleton so the next call rebuilds."""
     global _opening_roots
