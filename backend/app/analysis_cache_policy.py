@@ -59,6 +59,11 @@ class Reason(str, Enum):
     INCOMPATIBLE_KEEP = "incompatible_keep"
     INCOMING_LESS_COMPLETE_KEEP = "incoming_less_complete_keep"
     DUPLICATE_CONFLICT = "duplicate_conflict"
+    # The batch writer could neither write nor resolve this key: under a
+    # persistent concurrent deleter it vanished at every lock and lost every
+    # ON CONFLICT re-insert past the recovery-pass budget. NOT an accepted write
+    # (the incoming row is not stored) — callers should treat it as a failure.
+    RECOVERY_ABORTED_KEEP = "recovery_aborted_keep"
 
 
 @dataclass(frozen=True)

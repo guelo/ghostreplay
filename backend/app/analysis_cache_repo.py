@@ -14,8 +14,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import Counter
+from contextlib import nullcontext
+from itertools import groupby
 
+from sqlalchemy import tuple_
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -51,6 +56,25 @@ _sqlite_config_lock = threading.Lock()
 # How long SQLite waits for a competing writer's lock before raising BUSY.
 _SQLITE_BUSY_TIMEOUT_MS = 10_000
 _SQLITE_MAX_RETRIES = 8
+
+# Retries for PostgreSQL deadlock / serialization-failure aborts (see
+# _run_postgresql). The batch is fully re-run on a fresh session — safe because
+# the whole read-decide-write unit is a single transaction.
+_PG_MAX_RETRIES = 8
+
+# Max bind parameters per statement. PostgreSQL caps the extended protocol at
+# 65535; SQLite's SQLITE_MAX_VARIABLE_NUMBER is 32766 (>= 3.32). We stay well
+# under the tighter (SQLite) limit so an oversized batch is split into several
+# ordered statements instead of the driver raising and rolling back the whole
+# transaction (losing every row). Chunks of a key-sorted run stay key-ordered,
+# so the ascending lock-acquisition invariant is preserved across chunks.
+_MAX_BIND_PARAMS = 30_000
+
+# Bounded re-resolution passes for the PG-only vanished-row (TOCTOU) recovery: a
+# key that conflicts on insert, is deleted before the lock, is recovered, then is
+# re-created by a concurrent writer must be re-decided. Each pass consumes one
+# such race; a small cap guards against a pathological repeat-deleter.
+_MAX_TOCTOU_PASSES = 3
 
 
 def _sqlite_write_engine(bind):
@@ -322,45 +346,237 @@ def _apply_update(row: AnalysisCache, data: dict, *, full: bool) -> None:
                 setattr(row, f, data[f])
 
 
-def _process_row(session: Session, data: dict) -> Reason:
-    """Read-decide-write a single already-locked key. Caller holds the lock."""
-    key = _key(data)
-    existing_row = (
-        session.query(AnalysisCache)
-        .filter(
-            AnalysisCache.fen_before == key[0],
-            AnalysisCache.move_uci == key[1],
-        )
-        .with_for_update(of=AnalysisCache)
-        .first()
-        if session.bind and session.bind.dialect.name == "postgresql"
-        else session.query(AnalysisCache)
-        .filter(
-            AnalysisCache.fen_before == key[0],
-            AnalysisCache.move_uci == key[1],
-        )
-        .first()
-    )
+def _insert_cols(data: dict) -> dict:
+    """Column dict for an INSERT of ``data``.
 
-    incoming_proj = _project(data)
-    existing_proj = _project(_row_to_dict(existing_row)) if existing_row else None
+    Absent keys are OMITTED (never sent as ``None``) so column server defaults
+    apply — critically ``source`` (NOT NULL, ``server_default="game"``). The
+    derived ``normalized_fen_before`` is always present.
+    """
+    cols = {
+        k: data.get(k)
+        for k in ("fen_before", "move_uci", *_WRITABLE_FIELDS)
+        if k in data
+    }
+    cols["normalized_fen_before"] = _normalized(data["fen_before"])
+    return cols
+
+
+def _signature_runs(valid_rows: list[dict]) -> list[list[dict]]:
+    """Split key-sorted valid rows into maximal contiguous same-signature runs.
+
+    A "signature" is the set of present INSERT columns; a multi-row ``.values([...])``
+    needs a uniform column set, so rows are grouped by signature. Grouping is done
+    over CONTIGUOUS runs only (never reordered), so insert execution still visits
+    keys in global ascending order — the load-bearing invariant that keeps
+    concurrent ``ON CONFLICT DO NOTHING`` inserts of the same new key from
+    deadlocking on Postgres speculative-insertion locks. Every real caller emits a
+    single signature → exactly one run → one INSERT.
+    """
+    return [list(g) for _, g in groupby(valid_rows, key=lambda r: frozenset(r["cols"]))]
+
+
+def _param_chunks(rows: list[dict], params_per_row: int):
+    """Yield key-ordered slices of ``rows`` that each stay under the bind-param
+    budget (:data:`_MAX_BIND_PARAMS`).
+
+    Rows arrive key-sorted, and each yielded slice is contiguous, so global
+    ascending key order is preserved across chunks — the invariant that keeps
+    concurrent inserts / lock acquisitions from deadlocking.
+    """
+    assert params_per_row > 0, "params_per_row must be positive"
+    step = max(1, _MAX_BIND_PARAMS // params_per_row)
+    for i in range(0, len(rows), step):
+        yield rows[i : i + step]
+
+
+def _insert_missing(session: Session, rows: list[dict], *, insert) -> set[tuple[str, str]]:
+    """``INSERT ... ON CONFLICT DO NOTHING`` over key-sorted ``rows``; return the
+    SET of freshly inserted keys.
+
+    Rows are grouped into contiguous same-signature runs (a multi-row ``VALUES``
+    insert needs a uniform column set), and each run is split into bind-param-
+    budgeted chunks. Both groupings preserve global ascending key order, so
+    concurrent inserts of the same new key never swap order and deadlock on
+    Postgres speculative-insertion locks. ``RETURNING`` yields only rows actually
+    inserted (DO NOTHING skips conflicts); callers use the SET, never position.
+    (``RETURNING`` requires SQLite >= 3.35 — a documented floor for this module.)
+    """
+    inserted: set[tuple[str, str]] = set()
+    for run in _signature_runs(rows):
+        for chunk in _param_chunks(run, len(run[0]["cols"])):
+            stmt = (
+                insert(AnalysisCache)
+                .values([r["cols"] for r in chunk])
+                .on_conflict_do_nothing(
+                    index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci]
+                )
+                .returning(AnalysisCache.fen_before, AnalysisCache.move_uci)
+            )
+            for row in session.execute(stmt):
+                inserted.add((row[0], row[1]))
+    return inserted
+
+
+def _lock_existing(
+    session: Session, conflicted: list[dict], *, for_update: bool
+) -> dict[tuple[str, str], AnalysisCache]:
+    """Read (optionally ``FOR UPDATE``-lock) the rows for key-sorted ``conflicted``.
+
+    Split into bind-param-budgeted chunks over the two-column key tuple; each
+    chunk's ``ORDER BY (fen_before, move_uci)`` and the contiguous key-sorted
+    slicing mean locks are acquired in one global ascending order (no deadlock).
+    """
+    existing: dict[tuple[str, str], AnalysisCache] = {}
+    for chunk in _param_chunks(conflicted, 2):  # 2 bind params per key tuple
+        query = (
+            session.query(AnalysisCache)
+            .filter(
+                tuple_(AnalysisCache.fen_before, AnalysisCache.move_uci).in_(
+                    [r["key"] for r in chunk]
+                )
+            )
+            .order_by(AnalysisCache.fen_before, AnalysisCache.move_uci)
+        )
+        if for_update:
+            query = query.with_for_update(of=AnalysisCache)
+        for row in query.all():
+            existing[(row.fen_before, row.move_uci)] = row
+    return existing
+
+
+def _resolve_conflict(
+    r: dict,
+    existing_row: AnalysisCache,
+    reason_by_key: dict[tuple[str, str], Reason],
+) -> None:
+    """Apply the replacement policy for one pre-existing key (in-memory decide +
+    ORM mutation); record the resulting Reason."""
+    key, data, incoming_proj = r["key"], r["data"], r["proj"]
+    existing_proj = _project(_row_to_dict(existing_row))
     decision, reason = decide_analysis_cache_replacement(existing_proj, incoming_proj)
-
-    if decision is Decision.INSERT:
-        cols = {k: data.get(k) for k in ("fen_before", "move_uci", *_WRITABLE_FIELDS) if k in data}
-        cols["normalized_fen_before"] = _normalized(data["fen_before"])
-        session.add(AnalysisCache(**cols))
-    elif decision is Decision.REPLACE:
+    if decision is Decision.REPLACE:
         _apply_update(existing_row, data, full=True)
     elif decision is Decision.MERGE:
         merged = _build_merged(
             _row_to_dict(existing_row), data, data.get("evidence_contract_id")
         )
         if merged is None:
-            return Reason.MERGE_CONFLICT_KEEP
-        _apply_update(existing_row, merged, full=False)
-    # KEEP: nothing to do.
-    return reason
+            reason = Reason.MERGE_CONFLICT_KEEP
+        else:
+            _apply_update(existing_row, merged, full=False)
+    # KEEP: nothing to write.
+    reason_by_key[key] = reason
+
+
+def _run_batch(
+    session: Session,
+    surviving: list[dict],
+    *,
+    insert,
+    for_update: bool,
+) -> list[tuple[tuple[str, str], Reason]]:
+    """Set-based read-decide-write for an already-deduped, key-sorted batch.
+
+    ``insert`` is the dialect INSERT constructor (``postgresql_insert`` /
+    ``sqlite_insert``); ``for_update`` toggles the ``FOR UPDATE`` lock on the
+    conflict SELECT (Postgres only). Replaces the per-row loop with a bounded
+    number of statements while preserving verdict semantics and the returned
+    ``(key, Reason)`` cardinality/order exactly. Commits the whole batch once.
+    Returns one result per surviving key in key-sorted order.
+    """
+    reason_by_key: dict[tuple[str, str], Reason] = {}
+
+    # Steps 1-2: partition validity in memory (invalid rows do no DB work) and
+    # hoist normalize_fen once per valid row. valid_rows stays key-sorted.
+    valid_rows: list[dict] = []
+    for data in surviving:
+        key = _key(data)
+        proj = _project(data)
+        if not incoming_is_valid(proj):
+            reason_by_key[key] = Reason.INVALID_INCOMING_KEEP
+            continue
+        valid_rows.append(
+            {"data": data, "key": key, "proj": proj, "cols": _insert_cols(data)}
+        )
+
+    # Step 3: insert missing keys in global key order (RETURNING -> the SET of
+    # freshly inserted keys). NEW_KEY for each; the rest pre-existed.
+    inserted_keys = _insert_missing(session, valid_rows, insert=insert)
+    for r in valid_rows:
+        if r["key"] in inserted_keys:
+            reason_by_key[r["key"]] = Reason.NEW_KEY
+
+    # Steps 4-6: resolve pre-existing (conflicted) keys. A key can vanish between
+    # the insert-conflict and the lock (PG-only TOCTOU: a concurrent deleter). We
+    # recover it with an ordered ON CONFLICT DO NOTHING insert rather than a bare
+    # add: that keeps the recovery on the same deadlock-safe, IntegrityError-free
+    # path as Step 3 (a concurrent writer that re-created the key wins the DO
+    # NOTHING instead of aborting the whole batch), and re-decides any it kept.
+    pending = [r for r in valid_rows if r["key"] not in inserted_keys]
+    for _ in range(_MAX_TOCTOU_PASSES):
+        if not pending:
+            break
+        existing_by_key = _lock_existing(session, pending, for_update=for_update)
+        vanished: list[dict] = []
+        for r in pending:
+            existing_row = existing_by_key.get(r["key"])
+            if existing_row is None:
+                vanished.append(r)
+            else:
+                _resolve_conflict(r, existing_row, reason_by_key)
+        if not vanished:
+            pending = []
+            break
+        recovered = _insert_missing(session, vanished, insert=insert)
+        for r in vanished:
+            if r["key"] in recovered:
+                reason_by_key[r["key"]] = Reason.NEW_KEY
+        # Keys a concurrent writer re-created (not recovered) loop back to be
+        # re-locked and re-decided against that live row.
+        pending = [r for r in vanished if r["key"] not in recovered]
+
+    # Terminal resolution for keys that oscillated past the pass budget (vanished
+    # at every lock, lost every re-insert under a persistent concurrent deleter).
+    # One final lock+decide pins whatever is now visible; anything STILL absent
+    # was neither written nor resolved, so it must NOT be reported as an insert.
+    # Report RECOVERY_ABORTED_KEEP and warn instead of a phantom NEW_KEY.
+    if pending:
+        existing_by_key = _lock_existing(session, pending, for_update=for_update)
+        for r in pending:
+            existing_row = existing_by_key.get(r["key"])
+            if existing_row is not None:
+                _resolve_conflict(r, existing_row, reason_by_key)
+            else:
+                reason_by_key[r["key"]] = Reason.RECOVERY_ABORTED_KEEP
+                log.warning(
+                    "analysis_cache recovery aborted for %r after %d passes: "
+                    "concurrent-writer churn, incoming row not stored",
+                    r["key"],
+                    _MAX_TOCTOU_PASSES,
+                )
+
+    # Step 7: one commit for the whole batch.
+    session.commit()
+
+    # Step 8: results in key-sorted survivor order (invalid interleaved), matching
+    # the per-row loop's return cardinality/order exactly.
+    return [(_key(data), reason_by_key[_key(data)]) for data in surviving]
+
+
+def _log_batch_summary(results: list[tuple[tuple[str, str], Reason]]) -> None:
+    """One aggregate audit line per batch (replaces the per-row wall of logs).
+
+    The per-key verdicts are still emitted at DEBUG so "which FEN/move was
+    rejected and why" stays answerable from logs (the sole production caller
+    discards the returned list) without the INFO-level wall of the old loop.
+    """
+    counts = Counter(reason.value for _, reason in results)
+    rendered = ", ".join(f"{verdict}={counts[verdict]}" for verdict in sorted(counts))
+    log.info("analysis_cache batch: %d rows -> %s", len(results), rendered)
+    if log.isEnabledFor(logging.DEBUG):
+        for (fen, uci), reason in results:
+            log.debug("analysis_cache %s::%s -> %s", fen, uci, reason.value)
 
 
 def write_analysis_cache_rows(
@@ -391,43 +607,57 @@ def write_analysis_cache_rows(
     # Sort by key so concurrent overlapping batches lock in the same order.
     surviving.sort(key=_key)
 
-    if dialect == "sqlite":
+    if not surviving:
+        # Every row was rejected in dedupe: no survivor to write, so skip the
+        # dispatch entirely rather than take the SQLite write lock / open a PG
+        # transaction only to commit nothing.
+        results = []
+    elif dialect == "sqlite":
         # Dedicated IMMEDIATE-mode engine for file DBs (BEGIN IMMEDIATE is scoped
         # to this engine, never the shared/read engine); caller bind for :memory:.
         write_engine = _sqlite_write_engine(bind)
         results = _run_sqlite(sessionmaker(bind=write_engine), surviving)
-    else:  # postgresql: insert-first + FOR UPDATE per key
+    else:  # postgresql: batched ON CONFLICT insert + one FOR UPDATE lock select
         results = _run_postgresql(sessionmaker(bind=bind), surviving)
 
     results = dedupe_results + results
-    for key, reason in results:
-        log.info("analysis_cache %s::%s -> %s", key[0], key[1], reason.value)
+    _log_batch_summary(results)
     return results
 
 
-def _run_sqlite(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], Reason]]:
-    """Run the batch under BEGIN IMMEDIATE, retrying on SQLITE_BUSY.
+def _run_batch_with_retry(
+    factory,
+    surviving: list[dict],
+    *,
+    insert,
+    for_update: bool,
+    is_retryable,
+    max_retries: int,
+    lock=None,
+) -> list[tuple[tuple[str, str], Reason]]:
+    """Run one batch on a fresh session, retrying transient conflicts.
 
-    The whole batch is one transaction (the BEGIN IMMEDIATE is emitted on first
-    statement). On a BUSY/locked error the transaction is rolled back and the
-    entire batch is retried with bounded backoff.
+    Shared driver for both dialects (they differ only in the INSERT constructor,
+    the ``FOR UPDATE`` toggle, the retryable-error classifier, the retry bound,
+    and — SQLite only — the in-process write lock held for the attempt). Only
+    ``is_retryable`` errors are retried with bounded backoff; any other exception
+    rolls back and propagates. The whole read-decide-write unit is one
+    transaction, so a full re-run is safe.
     """
     attempt = 0
     while True:
-        with _sqlite_write_lock:
+        with (lock if lock is not None else nullcontext()):
             session = factory()
             try:
-                out: list[tuple[tuple[str, str], Reason]] = []
-                for data in surviving:
-                    out.append((_key(data), _process_row(session, data)))
-                session.commit()
-                return out
+                return _run_batch(
+                    session, surviving, insert=insert, for_update=for_update
+                )
             except OperationalError as exc:
                 session.rollback()
-                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                if not is_retryable(exc):
                     raise
                 attempt += 1
-                if attempt > _SQLITE_MAX_RETRIES:
+                if attempt > max_retries:
                     raise
             except Exception:
                 session.rollback()
@@ -437,45 +667,56 @@ def _run_sqlite(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], R
         time.sleep(0.05 * attempt)
 
 
-def _run_postgresql(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], Reason]]:
-    session = factory()
-    try:
-        out: list[tuple[tuple[str, str], Reason]] = []
-        for data in surviving:
-            out.append((_key(data), _process_pg_row(session, data)))
-        session.commit()
-        return out
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
+def _is_busy_error(exc: OperationalError) -> bool:
+    """True for a SQLite BUSY/locked error (the competing writer's reservation)."""
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
 
 
-def _process_pg_row(session: Session, data: dict) -> Reason:
-    """PostgreSQL: validate, insert-first, then FOR UPDATE + decide."""
-    incoming_proj = _project(data)
-    # Same validity gate as the comparator: contract satisfied AND no
-    # unverifiable profile claim. The insert-success path must not bypass this.
-    if not incoming_is_valid(incoming_proj):
-        return Reason.INVALID_INCOMING_KEEP
+def _is_retryable_pg_error(exc: OperationalError) -> bool:
+    """True for a PostgreSQL deadlock or serialization failure (safe to re-run).
 
-    insert_cols = {
-        k: data.get(k)
-        for k in ("fen_before", "move_uci", *_WRITABLE_FIELDS)
-        if k in data
-    }
-    insert_cols["normalized_fen_before"] = _normalized(data["fen_before"])
-    stmt = (
-        postgresql_insert(AnalysisCache)
-        .values(insert_cols)
-        .on_conflict_do_nothing(
-            index_elements=[AnalysisCache.fen_before, AnalysisCache.move_uci]
-        )
+    ``40P01`` = deadlock_detected, ``40001`` = serialization_failure. The vanished-
+    row recovery can, under a concurrent deleter, briefly invert the ascending
+    lock order and trip the deadlock detector; re-running the whole batch on a
+    fresh transaction resolves it (mirrors the SQLite BUSY retry).
+    """
+    orig = getattr(exc, "orig", None)
+    pgcode = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+    if pgcode in ("40P01", "40001"):
+        return True
+    # Fallback for a driver that doesn't surface the SQLSTATE: match the actual
+    # PG wording ("could not serialize access due to ...", "deadlock detected").
+    text = str(exc).lower()
+    return "deadlock" in text or "could not serialize" in text
+
+
+def _run_sqlite(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], Reason]]:
+    """Run the batch under BEGIN IMMEDIATE, retrying on SQLITE_BUSY.
+
+    The whole batch is one transaction (the BEGIN IMMEDIATE is emitted on first
+    statement). On a BUSY/locked error it rolls back and retries with bounded
+    backoff, holding the in-process write lock for each attempt. No FOR UPDATE —
+    the write reservation already serializes writers.
+    """
+    return _run_batch_with_retry(
+        factory,
+        surviving,
+        insert=sqlite_insert,
+        for_update=False,
+        is_retryable=_is_busy_error,
+        max_retries=_SQLITE_MAX_RETRIES,
+        lock=_sqlite_write_lock,
     )
-    result = session.execute(stmt)
-    if result.rowcount and result.rowcount > 0:
-        # We inserted the (already-validated) row; nothing else to do.
-        return Reason.NEW_KEY
-    # Row pre-existed: lock it and run the comparator.
-    return _process_row(session, data)
+
+
+def _run_postgresql(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], Reason]]:
+    """Run the batch with a single FOR UPDATE lock select, retrying deadlocks."""
+    return _run_batch_with_retry(
+        factory,
+        surviving,
+        insert=postgresql_insert,
+        for_update=True,
+        is_retryable=_is_retryable_pg_error,
+        max_retries=_PG_MAX_RETRIES,
+    )
