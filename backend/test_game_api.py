@@ -3,6 +3,9 @@ Simple test for POST /api/game/start endpoint.
 
 Run with: pytest test_game_api.py -v
 """
+import logging
+import re
+import time
 import uuid
 import random
 from datetime import datetime, timedelta, timezone
@@ -1237,6 +1240,61 @@ def test_find_ghost_move_selects_just_due_blunder(db_session):
 
     assert move_san == "m1"
     assert target_blunder_id is not None
+
+
+def test_find_ghost_move_slow_log_includes_opening_family_timer(db_session, monkeypatch, caplog):
+    """Slow ghost-search logs report nonzero time spent resolving the opening family."""
+    from app.api import game as game_api
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    fen_start = "8/8/8/8/8/8/K7/5k2 b - - 0 1"
+    fen_blunder = "8/8/8/8/8/8/1K6/5k2 w - - 0 2"
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_blunder = Position(user_id=user_id, fen_hash=fen_hash(fen_blunder), fen_raw=fen_blunder, active_color="white")
+    db_session.add_all([pos_start, pos_blunder])
+    db_session.flush()
+
+    db_session.add(Move(from_position_id=pos_start.id, move_san="m1", to_position_id=pos_blunder.id))
+    db_session.add(Blunder(
+        user_id=user_id,
+        position_id=pos_blunder.id,
+        bad_move_san="bad",
+        best_move_san="good",
+        eval_loss_cp=200,
+        opening_family="Test Family",
+        last_reviewed_at=datetime.now(timezone.utc) - timedelta(hours=5),
+    ))
+    db_session.commit()
+
+    def fake_detect_opening_family(_fen):
+        time.sleep(0.001)
+        return "Test Family"
+
+    monkeypatch.setattr(game_api, "SLOW_GHOST_SEARCH_LOG_MS", 0)
+    monkeypatch.setattr(game_api, "detect_opening_family", fake_detect_opening_family)
+
+    with caplog.at_level(logging.INFO, logger="app.api.game"):
+        move_san, target_blunder_id, _, _ = game_api.find_ghost_move(
+            db=db_session,
+            user_id=user_id,
+            fen=fen_start,
+            player_color="white",
+        )
+
+    assert move_san == "m1"
+    assert target_blunder_id is not None
+    slow_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "ghost_move_search slow outcome=selected" in record.getMessage()
+    ]
+    assert len(slow_messages) == 1
+    match = re.search(r"opening_family_ms=(\d+\.\d+)", slow_messages[0])
+    assert match is not None
+    assert float(match.group(1)) >= 1.0
 
 
 def test_find_ghost_move_ignores_current_session_opportunity(db_session):

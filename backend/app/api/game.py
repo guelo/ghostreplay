@@ -271,6 +271,7 @@ def find_ghost_move(
     current_fen_hash = fen_hash(fen)
     position_lookup_ms = 0.0
     cte_ms = 0.0
+    opening_family_ms = 0.0
     opportunity_ms = 0.0
     repeat_history_ms = 0.0
 
@@ -288,8 +289,9 @@ def find_ghost_move(
         logger.info(
             "ghost_move_search slow outcome=%s user_id=%s fen_hash=%s "
             "player_color=%s total_ms=%.3f position_lookup_ms=%.3f "
-            "cte_ms=%.3f opportunity_ms=%.3f repeat_history_ms=%.3f "
-            "position_id=%s candidate_count=%d scored_count=%d group_count=%d",
+            "cte_ms=%.3f opening_family_ms=%.3f opportunity_ms=%.3f "
+            "repeat_history_ms=%.3f position_id=%s candidate_count=%d "
+            "scored_count=%d group_count=%d",
             outcome,
             user_id,
             current_fen_hash,
@@ -297,6 +299,7 @@ def find_ghost_move(
             total_ms,
             position_lookup_ms,
             cte_ms,
+            opening_family_ms,
             opportunity_ms,
             repeat_history_ms,
             position_id,
@@ -380,7 +383,12 @@ def find_ghost_move(
         return (None, None, None, None)
 
     now = datetime.now(timezone.utc)
-    current_opening_family = detect_opening_family(fen) if any(row[7] for row in candidate_rows) else None
+    if any(row[7] for row in candidate_rows):
+        opening_family_started = time.perf_counter()
+        current_opening_family = detect_opening_family(fen)
+        opening_family_ms = _elapsed_ms(opening_family_started)
+    else:
+        current_opening_family = None
     opportunity_started = time.perf_counter()
     # Exclude the in-progress game session: the game we are steering toward the
     # blunder in must not count as a missed opportunity against that blunder, or
