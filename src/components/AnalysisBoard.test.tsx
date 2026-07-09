@@ -1722,6 +1722,75 @@ describe('AnalysisBoard — AnalysisGraph props', () => {
     expect(evals[1]).toBeLessThan(0) // white is getting mated
     expect(capturedGraphProps.evalMate).toBe(-2) // white-perspective: loss in 2
   })
+
+  // g-j7br: the truly-unevaluated terminal-mate shape (eval_cp AND eval_mate both
+  // null) is the bug — the persistence race can upload the checkmating move before
+  // its search resolves. The last point must peg to the winner from fen_after, not
+  // land null-coerced on the equal line, and the badge must show #.
+  it('pegs an unevaluated terminal mate to the winner (white wins) and shows #', () => {
+    const wonByMate: AnalysisMove[] = [
+      ...moves,
+      {
+        move_number: 2,
+        color: 'white',
+        move_san: 'Qxf7#',
+        // Scholar's mate — index 2 (even) → white delivered mate.
+        fen_after: 'r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4',
+        eval_cp: null,
+        eval_mate: null, // never evaluated (both channels null)
+        best_move_san: 'Qxf7#',
+        best_move_eval_cp: null,
+        eval_delta: null,
+        classification: 'best',
+      },
+    ]
+
+    render(<AnalysisBoard moves={wonByMate} boardOrientation="white" />)
+
+    expect(capturedGraphProps.isCheckmate).toBe(true)
+    const evals = capturedGraphProps.evals as (number | null)[]
+    // Even ply → white mates → strongly positive, NOT null and NOT the 0 line.
+    expect(evals[2]).toBe(10000)
+    expect(capturedGraphProps.evalCp).toBe(10000)
+  })
+
+  it('pegs an unevaluated terminal mate to the winner (white loses) and shows #', () => {
+    const lostByMate: AnalysisMove[] = [
+      {
+        move_number: 1,
+        color: 'white',
+        move_san: 'f3',
+        fen_after: 'rnbqkbnr/pppppppp/8/8/8/5P2/PPPPP1PP/RNBQKBNR b KQkq - 0 1',
+        eval_cp: -50,
+        eval_mate: null,
+        best_move_san: 'e4',
+        best_move_eval_cp: 30,
+        eval_delta: 80,
+        classification: 'inaccuracy',
+      },
+      {
+        move_number: 1,
+        color: 'black',
+        move_san: 'Qh4#',
+        // Fool's mate — index 1 (odd) → black delivered mate, white is mated.
+        fen_after: 'rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3',
+        eval_cp: null,
+        eval_mate: null, // never evaluated (both channels null)
+        best_move_san: 'Qh4#',
+        best_move_eval_cp: null,
+        eval_delta: null,
+        classification: 'best',
+      },
+    ]
+
+    render(<AnalysisBoard moves={lostByMate} boardOrientation="black" />)
+
+    expect(capturedGraphProps.isCheckmate).toBe(true)
+    const evals = capturedGraphProps.evals as (number | null)[]
+    // Odd ply → black mates → white-perspective strongly negative.
+    expect(evals[1]).toBe(-10000)
+    expect(capturedGraphProps.evalCp).toBe(-10000)
+  })
 })
 
 describe('AnalysisBoard — variation tree integration', () => {

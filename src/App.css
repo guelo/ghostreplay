@@ -4586,6 +4586,10 @@
     opacity: 0.7;
 }
 
+.analysis-graph__line-dot {
+    fill: var(--graph-line);
+}
+
 .analysis-graph__streaming-dot {
     fill: var(--graph-line);
     opacity: 0.8;

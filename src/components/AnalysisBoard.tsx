@@ -13,7 +13,8 @@ import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useAnalysisEvidence } from "../services/analysisEvidence";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { isTrustedExactBestHit, moverMateToWhiteCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
+import { isTrustedExactBestHit, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
+import { isCheckmateFen, whiteCpForMove } from "../utils/moveGraphEval";
 import { projectExactBest } from "../utils/projectExactBest";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
@@ -512,19 +513,17 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     [effectiveMoves],
   );
 
-  // Extract eval values for the graph, falling back to mateToCp for mate-only moves
-  const evals = useMemo(
-    () =>
-      effectiveMoves.map((m, i) =>
-        // eval_cp and eval_mate are both mover-perspective. For mate-only moves,
-        // moverMateToWhiteCp derives a correctly-signed white cp (incl. the
-        // mate-0 winner via ply parity).
-        m.eval_cp != null
-          ? toWhitePerspective(m.eval_cp, i)
-          : moverMateToWhiteCp(m.eval_mate, i),
-      ),
-    [effectiveMoves],
-  );
+  // Extract eval values for the graph. whiteCpForMove prefers the CP channel,
+  // then a correctly-signed mate cp; for the terminal ply it also synthesizes an
+  // unevaluated checkmate (both channels null) from fen_after so a final mate
+  // never lands on the equal line. fen_after is passed only for the last ply —
+  // checkmate can only be the last move.
+  const evals = useMemo(() => {
+    const lastIdx = effectiveMoves.length - 1;
+    return effectiveMoves.map((m, i) =>
+      whiteCpForMove(m.eval_cp, m.eval_mate, i, i === lastIdx ? m.fen_after : null),
+    );
+  }, [effectiveMoves]);
 
   // FEN at the position before the current move (needed for arrow SAN→UCI)
   const fenBeforeCurrentMove = useMemo(() => {
@@ -1028,6 +1027,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
       effectiveIndex,
     );
   }, [isInVariation, effectiveIndex, currentMove]);
+
+  // Badge checkmate signal for the main line, derived from the displayed FEN.
+  // currentEvalMate === 0 misses an unevaluated terminal mate (both eval channels
+  // null) — the exact shape this bug is about — so drive the # badge from the FEN.
+  const isCheckmateDisplayed = useMemo(
+    () => isCheckmateFen(displayedFen),
+    [displayedFen],
+  );
 
   // Variation eval for eval bar (white perspective)
   const varEvalCp = useMemo(() => {
@@ -1729,7 +1736,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             }
             evalMate={isInVariation ? varEvalMate : currentEvalMate}
             isCheckmate={
-              (!isInVariation && currentEvalMate === 0) ||
+              (!isInVariation && isCheckmateDisplayed) ||
               (isInVariation && varEvalMate === 0)
             }
             variationLine={variationLine}

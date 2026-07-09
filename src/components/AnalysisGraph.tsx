@@ -114,33 +114,59 @@ const AnalysisGraph = ({
     [chartH, midY],
   );
 
-  // Build points array using the winning-chances scale.
+  // Build points array using the winning-chances scale. A missing eval becomes a
+  // null hole (NOT cpToY(0)) so it is never planted on the equal line; points keeps
+  // the same length/index alignment as evals for the highlight-dot lookup.
   const points = useMemo(() => {
     if (n === 0) return [];
     return evals.map((ev, i) => {
+      if (ev == null) return null;
       const x = PAD_X + i * stepX;
-      const y = cpToY(ev ?? 0);
+      const y = cpToY(ev);
       return [x, y] as [number, number];
     });
   }, [evals, n, stepX, cpToY]);
 
-  // Area path: trace points then close to zero line
+  // Area path: one filled area per contiguous non-null run, each closed to the zero
+  // line. For an all-non-null series this is byte-identical to a single-run trace.
   const areaPath = useMemo(() => {
     if (points.length === 0) return "";
-    const lineSegments = points
-      .map(([x, y], i) => (i === 0 ? `M${x},${y}` : `L${x},${y}`))
-      .join(" ");
-    const lastX = points[points.length - 1][0];
-    const firstX = points[0][0];
-    return `${lineSegments} L${lastX},${midY} L${firstX},${midY} Z`;
+    const runs: string[] = [];
+    let run: [number, number][] = [];
+    const flush = () => {
+      if (run.length === 0) return;
+      const seg = run
+        .map(([x, y], i) => (i === 0 ? `M${x},${y}` : `L${x},${y}`))
+        .join(" ");
+      const lastX = run[run.length - 1][0];
+      const firstX = run[0][0];
+      runs.push(`${seg} L${lastX},${midY} L${firstX},${midY} Z`);
+      run = [];
+    };
+    for (const pt of points) {
+      if (pt === null) flush();
+      else run.push(pt);
+    }
+    flush();
+    return runs.join(" ");
   }, [points, midY]);
 
-  // Line path (just the eval curve, no fill closure)
+  // Line path (just the eval curve, no fill closure). Breaks across null gaps —
+  // starting a fresh subpath after each hole — instead of interpolating through 0.
   const linePath = useMemo(() => {
     if (points.length === 0) return "";
-    return points
-      .map(([x, y], i) => (i === 0 ? `M${x},${y}` : `L${x},${y}`))
-      .join(" ");
+    let d = "";
+    let startNew = true;
+    for (const pt of points) {
+      if (pt === null) {
+        startNew = true;
+        continue;
+      }
+      const [x, y] = pt;
+      d += (d === "" ? "" : " ") + (startNew ? `M${x},${y}` : `L${x},${y}`);
+      startNew = false;
+    }
+    return d;
   }, [points]);
 
   // Streaming eval: dashed line from last confirmed point to streaming point
@@ -153,9 +179,45 @@ const AnalysisGraph = ({
 
   const dashedPath = useMemo(() => {
     if (!streamingPoint || points.length === 0) return "";
-    const lastPoint = points[points.length - 1];
+    // Anchor to the last non-null point — a trailing null hole has no coordinates.
+    let lastPoint: [number, number] | null = null;
+    for (let i = points.length - 1; i >= 0; i -= 1) {
+      const pt = points[i];
+      if (pt !== null) {
+        lastPoint = pt;
+        break;
+      }
+    }
+    if (!lastPoint) return "";
     return `M${lastPoint[0]},${lastPoint[1]} L${streamingPoint[0]},${streamingPoint[1]}`;
   }, [streamingPoint, points]);
+
+  // A one-point run paints nothing: an SVG path with only a moveto has no stroke,
+  // and its area closes to zero width. Emit an explicit dot for each isolated point
+  // (both neighbors null/absent) so a lone eval — e.g. a synthesized terminal
+  // checkmate while every earlier ply is still pending — stays visible. Runs of
+  // length >= 2 paint via linePath/areaPath. Skip the point the streaming dash
+  // already anchors to (it is visible through the dash).
+  const soloDots = useMemo(() => {
+    const dots: { cx: number; cy: number }[] = [];
+    let lastNonNull = -1;
+    for (let i = points.length - 1; i >= 0; i -= 1) {
+      if (points[i] !== null) {
+        lastNonNull = i;
+        break;
+      }
+    }
+    for (let i = 0; i < points.length; i += 1) {
+      const pt = points[i];
+      if (pt === null) continue;
+      const prevNull = i === 0 || points[i - 1] === null;
+      const nextNull = i === points.length - 1 || points[i + 1] === null;
+      if (!prevNull || !nextNull) continue;
+      if (i === lastNonNull && dashedPath) continue;
+      dots.push({ cx: pt[0], cy: pt[1] });
+    }
+    return dots;
+  }, [points, dashedPath]);
 
   // Hollow circles for pending moves (excluding the one being streamed)
   const pendingCircles = useMemo(() => {
@@ -318,6 +380,17 @@ const AnalysisGraph = ({
 
         {/* Eval curve line */}
         <path d={linePath} className="analysis-graph__line" />
+
+        {/* Dots for isolated single-point runs (a lone vertex paints no line) */}
+        {soloDots.map((c) => (
+          <circle
+            key={`solo-${c.cx}`}
+            cx={c.cx}
+            cy={c.cy}
+            r={2.5}
+            className="analysis-graph__line-dot"
+          />
+        ))}
 
         {/* What-if (variation) overlay */}
         {variationGeometry && variationGeometry.path && (

@@ -436,6 +436,107 @@ describe('AnalysisGraph — incremental geometry', () => {
   })
 })
 
+describe('AnalysisGraph — missing evals (null holes)', () => {
+  // midY = PAD_Y + chartH/2 = 4 + (120 - 8)/2 = 60 — the equal line.
+  const MID_Y = 60
+
+  it('does not plant a trailing null eval on the equal line', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[300, null]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const points = getLinePoints(container)
+    // Only the resolved point is plotted; the trailing null is skipped, not
+    // drawn at midY.
+    expect(points).toHaveLength(1)
+    expect(points.every((p) => p.y !== MID_Y)).toBe(true)
+    // A lone vertex paints no line, so it must show an explicit dot instead.
+    const dots = container.querySelectorAll('.analysis-graph__line-dot')
+    expect(dots).toHaveLength(1)
+    expect(Number((dots[0] as SVGCircleElement).getAttribute('cy'))).not.toBe(MID_Y)
+  })
+
+  it('renders a visible dot for a lone eval that would otherwise paint nothing', () => {
+    // Sparse series — only the synthesized terminal checkmate is non-null (every
+    // earlier ply still pending). Its one-point run emits just an SVG moveto (no
+    // stroke) and a zero-width area, so without a dot the point is invisible.
+    const { container } = render(
+      <AnalysisGraph
+        evals={[null, null, 10000]}
+        currentIndex={2}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const dots = container.querySelectorAll('.analysis-graph__line-dot')
+    expect(dots).toHaveLength(1)
+    const cy = Number((dots[0] as SVGCircleElement).getAttribute('cy'))
+    expect(cy).not.toBe(MID_Y)
+    expect(cy).toBeLessThan(MID_Y) // pegged high = white winning, not the equal line
+  })
+
+  it('anchors the streaming dash to the last non-null point, not a trailing null', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[300, null]}
+        currentIndex={1}
+        onSelectMove={onSelectMove}
+        streamingEval={{ index: 2, cp: 200 }}
+      />,
+    )
+
+    const dashed = getPathD(container, 'analysis-graph__line--streaming') ?? ''
+    // Dash must start from the resolved vertex (index 0), never from a null hole.
+    expect(dashed).toMatch(/^M[0-9.]+,[0-9.]+ L/)
+    const startY = Number(dashed.match(/^M[0-9.]+,([0-9.]+)/)?.[1])
+    expect(startY).not.toBe(MID_Y)
+    // The streaming dash already makes that vertex visible, so no redundant dot.
+    expect(container.querySelectorAll('.analysis-graph__line-dot')).toHaveLength(0)
+  })
+
+  it('breaks the line and area into separate subpaths across an interior null', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[300, 200, null, -200, -300]}
+        currentIndex={4}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    const line = getPathD(container, 'analysis-graph__line') ?? ''
+    // Two runs → two `M` move-to commands (the line is broken, not interpolated).
+    expect((line.match(/M/g) ?? []).length).toBe(2)
+
+    const points = getLinePoints(container)
+    expect(points).toHaveLength(4)
+    // No vertex parked on the equal line despite the interior gap.
+    expect(points.every((p) => p.y !== MID_Y)).toBe(true)
+
+    // The filled area is split into one closed run per contiguous segment.
+    const area = getPathD(container, 'analysis-graph__area-white') ?? ''
+    expect((area.match(/Z/g) ?? []).length).toBe(2)
+
+    // Both runs have length >= 2 and paint a line, so no isolated-point dots.
+    expect(container.querySelectorAll('.analysis-graph__line-dot')).toHaveLength(0)
+  })
+
+  it('renders no isolated dots for a fully contiguous series', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, 50, -30, 120]}
+        currentIndex={3}
+        onSelectMove={onSelectMove}
+      />,
+    )
+
+    expect(container.querySelectorAll('.analysis-graph__line-dot')).toHaveLength(0)
+  })
+})
+
 describe('AnalysisGraph — variation (what-if) overlay', () => {
   it('renders the dashed variation polyline and pending dots', () => {
     const { container } = render(

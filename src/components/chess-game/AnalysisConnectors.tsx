@@ -3,6 +3,7 @@ import { Chess } from "chess.js";
 import { useAnalysisStore, useAnalysisStoreApi } from "../../stores/createAnalysisStore";
 import { useGameStore } from "../../stores/useGameStore";
 import { moverMateToWhiteCp, toWhitePerspective, toWhitePerspectiveMate } from "../../workers/analysisUtils";
+import { isCheckmateFen, whiteCpForMove } from "../../utils/moveGraphEval";
 import {
   deriveAnnotatedMoves,
 } from "./domain/movePresentation";
@@ -24,9 +25,21 @@ function selectedEvalFromMap(
     { playedEval?: number | null; playedEvalMate?: number | null }
   >,
   selectedMoveIndex: number | null,
+  selectedFen: string | null,
 ): { cp: number | null; mate: number | null } {
   if (selectedMoveIndex === null || selectedMoveIndex < 0) {
     return { cp: null, mate: null };
+  }
+  const selected = analysisMap.get(selectedMoveIndex);
+  // Terminal checkmate with no stored eval: the winner is known from the FEN, so
+  // peg to it (extreme ±cp + mate 0) instead of inheriting a prior move's eval.
+  // Gated on the selected move's FEN because a numeric eval must always win.
+  if (
+    selected?.playedEval == null &&
+    selected?.playedEvalMate == null &&
+    isCheckmateFen(selectedFen)
+  ) {
+    return { cp: moverMateToWhiteCp(0, selectedMoveIndex), mate: 0 };
   }
   for (let idx = selectedMoveIndex; idx >= 0; idx -= 1) {
     const analysis = analysisMap.get(idx);
@@ -55,7 +68,13 @@ export const ConnectedEvalBar = memo(() => {
   const selectedMoveIndex =
     moveHistory.length === 0 ? null : (viewIndex ?? moveHistory.length - 1);
 
-  const selectedEval = selectedEvalFromMap(analysisMap, selectedMoveIndex);
+  const selectedEval = selectedEvalFromMap(
+    analysisMap,
+    selectedMoveIndex,
+    selectedMoveIndex === null
+      ? null
+      : moveHistory[selectedMoveIndex]?.fen ?? null,
+  );
 
   return (
     <EvalBar
@@ -99,13 +118,19 @@ export const ConnectedAnalysisGraph = memo(
     );
 
     const evals = useMemo(() => {
-      const raw = moveHistory.map((_, i) => {
+      const lastIdx = moveHistory.length - 1;
+      // whiteCpForMove prefers the CP channel, then a correctly-signed mate cp,
+      // and for the terminal ply synthesizes an unevaluated checkmate (both
+      // channels null/absent) from the post-move FEN. Applied BEFORE trailing-null
+      // trimming so a synthesized terminal mate survives the trim.
+      const raw = moveHistory.map((mv, i) => {
         const a = analysisMap.get(i);
-        if (a?.playedEval != null) {
-          return toWhitePerspective(a.playedEval, i);
-        }
-        // Mate-only entries still plot a point via a correctly-signed mate cp.
-        return moverMateToWhiteCp(a?.playedEvalMate ?? null, i);
+        return whiteCpForMove(
+          a?.playedEval ?? null,
+          a?.playedEvalMate ?? null,
+          i,
+          i === lastIdx ? mv.fen : null,
+        );
       });
       let end = raw.length;
       while (end > 0 && raw[end - 1] === null) end--;
@@ -114,13 +139,25 @@ export const ConnectedAnalysisGraph = memo(
 
     const pendingIndices = useMemo(() => {
       const pending: number[] = [];
+      const lastIdx = moveHistory.length - 1;
       for (let i = 0; i < moveHistory.length; i++) {
-        if (!analysisMap.has(i)) pending.push(i);
+        if (analysisMap.has(i)) continue;
+        // A terminal checkmate ply has a known eval synthesized from its FEN — it
+        // is plotted, not pending, so don't also mark it with a zero-line hollow
+        // dot. Only the last ply can be synthesized, so scope the guard to it.
+        if (i === lastIdx && evals[i] != null) continue;
+        pending.push(i);
       }
       return pending;
-    }, [moveHistory, analysisMap]);
+    }, [moveHistory, analysisMap, evals]);
 
-    const selectedEval = selectedEvalFromMap(analysisMap, selectedMoveIndex);
+    const selectedEval = selectedEvalFromMap(
+      analysisMap,
+      selectedMoveIndex,
+      selectedMoveIndex === null
+        ? null
+        : moveHistory[selectedMoveIndex]?.fen ?? null,
+    );
 
     const graphStreamingEval = useMemo(() => {
       if (!streamingEval) return null;
@@ -133,10 +170,7 @@ export const ConnectedAnalysisGraph = memo(
 
     const isCheckmate = useMemo(() => {
       if (selectedMoveIndex === null) return false;
-      const fen = moveHistory[selectedMoveIndex]?.fen;
-      if (!fen) return false;
-      const chess = new Chess(fen);
-      return chess.isCheckmate();
+      return isCheckmateFen(moveHistory[selectedMoveIndex]?.fen ?? null);
     }, [moveHistory, selectedMoveIndex]);
 
     if (!evals.some((e) => e !== null) && pendingIndices.length === 0) {

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, act } from "../../test/utils";
 import { setMatchMedia } from "../../test/setup";
-import { ConnectedAnalysisGraph, ConnectedMoveList } from "./AnalysisConnectors";
+import { ConnectedAnalysisGraph, ConnectedEvalBar, ConnectedMoveList } from "./AnalysisConnectors";
 import { useGameStore } from "../../stores/useGameStore";
 import {
   AnalysisStoreProvider,
@@ -32,8 +32,22 @@ vi.mock("../AnalysisGraph", () => ({
   },
 }));
 
+// Capture props forwarded to EvalBar
+let capturedEvalBarProps: Record<string, unknown> = {};
+
+vi.mock("../EvalBar", () => ({
+  default: (props: Record<string, unknown>) => {
+    capturedEvalBarProps = props;
+    return <div data-testid="eval-bar" />;
+  },
+}));
+
+// Fool's mate (white to move, mated): black delivers mate at an ODD ply.
 const CHECKMATE_FEN =
   "rnb1kbnr/pppp1ppp/4p3/8/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3";
+// Scholar's mate (black to move, mated): white delivers mate at an EVEN ply.
+const SCHOLARS_MATE_FEN =
+  "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 4";
 const NORMAL_FEN =
   "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1";
 
@@ -126,6 +140,174 @@ describe("ConnectedAnalysisGraph — isCheckmate prop", () => {
     renderConnected();
 
     expect(capturedProps.isCheckmate).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ConnectedAnalysisGraph — terminal checkmate synthesis (g-j7br)
+// ---------------------------------------------------------------------------
+
+describe("ConnectedAnalysisGraph — terminal checkmate synthesis", () => {
+  let store: ReturnType<typeof createAnalysisStore>;
+
+  beforeEach(() => {
+    capturedProps = {};
+    useGameStore.setState(initialGameState, true);
+    store = createAnalysisStore();
+  });
+
+  function renderConnected() {
+    return render(
+      <AnalysisStoreProvider value={store}>
+        <ConnectedAnalysisGraph onSelectMove={vi.fn()} />
+      </AnalysisStoreProvider>,
+    );
+  }
+
+  it("pegs an absent terminal mate (white wins) to the mover and excludes it from pending", () => {
+    // 3 plies; the mating move is index 2 (even → white). It is ABSENT from
+    // analysisMap (the live persistence race), but its FEN is checkmate.
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(SCHOLARS_MATE_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: null, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: 50, bestEval: 50, bestMove: "Nc6", delta: 0, classification: "best", blunder: false })],
+        // index 2 (the checkmate) intentionally absent
+      ]),
+    });
+
+    renderConnected();
+
+    const evals = capturedProps.evals as (number | null)[];
+    expect(evals).toHaveLength(3);
+    expect(evals[2]).toBe(10000); // pegged to white (even ply)
+
+    // finding #2: the synthesized terminal point is NOT re-drawn as a pending dot.
+    expect(capturedProps.pendingIndices).not.toContain(2);
+
+    // finding #1: badge/bar peg to the winner, not the previous move's eval.
+    expect(capturedProps.isCheckmate).toBe(true);
+    expect(capturedProps.evalCp).toBe(10000);
+    expect(capturedProps.evalMate).toBe(0);
+  });
+
+  it("pegs an absent terminal mate (black wins) to the mover", () => {
+    // 4 plies; the mating move is index 3 (odd → black).
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(CHECKMATE_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: null, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "f3", delta: 0, classification: "good", blunder: false })],
+        [1, makeAnalysis({ playedEval: 20, bestEval: 20, bestMove: "e5", delta: 0, classification: "best", blunder: false })],
+        [2, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "g4", delta: 0, classification: "blunder", blunder: true })],
+        // index 3 (the checkmate) intentionally absent
+      ]),
+    });
+
+    renderConnected();
+
+    const evals = capturedProps.evals as (number | null)[];
+    expect(evals).toHaveLength(4);
+    expect(evals[3]).toBe(-10000); // pegged to black (odd ply)
+    expect(capturedProps.pendingIndices).not.toContain(3);
+    expect(capturedProps.evalCp).toBe(-10000);
+    expect(capturedProps.evalMate).toBe(0);
+  });
+
+  it("trims and keeps pending a non-mate absent terminal move", () => {
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN), // not checkmate, absent from map
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: 1, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: 50, bestEval: 50, bestMove: "e5", delta: 0, classification: "best", blunder: false })],
+        // index 2 absent, non-checkmate FEN → not synthesized
+      ]),
+    });
+
+    renderConnected();
+
+    const evals = capturedProps.evals as (number | null)[];
+    // Trailing null trimmed away (no synthesis for a non-mate terminal move).
+    expect(evals).toHaveLength(2);
+    // Still pending-marked so it shows the hollow zero-line marker.
+    expect(capturedProps.pendingIndices).toContain(2);
+  });
+
+  it("pegs the badge to the winner for a resolved-but-eval-less terminal mate row", () => {
+    // The terminal ply IS in analysisMap but both eval channels are null (a
+    // resolved row that never captured the mate eval). selectedEvalFromMap must
+    // short-circuit to the FEN winner instead of walking back to move 1's eval.
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(SCHOLARS_MATE_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: 2, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: -50, bestEval: -50, bestMove: "Nc6", delta: 0, classification: "best", blunder: false })],
+        [2, makeAnalysis({ playedEval: null, playedEvalMate: null, bestEval: null, bestMove: "Qxf7", delta: 0, classification: "best", blunder: false })],
+      ]),
+    });
+
+    renderConnected();
+
+    // Not the previous move's −50; pegged to the mating side.
+    expect(capturedProps.evalCp).toBe(10000);
+    expect(capturedProps.evalMate).toBe(0);
+    expect(capturedProps.isCheckmate).toBe(true);
+  });
+});
+
+describe("ConnectedEvalBar — terminal checkmate synthesis (g-j7br)", () => {
+  let store: ReturnType<typeof createAnalysisStore>;
+
+  beforeEach(() => {
+    capturedEvalBarProps = {};
+    useGameStore.setState(initialGameState, true);
+    store = createAnalysisStore();
+  });
+
+  it("fills the bar toward the winner for an absent terminal mate", () => {
+    const moves: MoveRecord[] = [
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(NORMAL_FEN),
+      makeMoveRecord(SCHOLARS_MATE_FEN),
+    ];
+    useGameStore.setState({ moveHistory: moves, viewIndex: null, playerColor: "white" });
+    store.setState({
+      analysisMap: new Map([
+        [0, makeAnalysis({ playedEval: 0, bestEval: 0, bestMove: "e4", delta: 0, classification: "best", blunder: false })],
+        [1, makeAnalysis({ playedEval: -50, bestEval: -50, bestMove: "Nc6", delta: 0, classification: "best", blunder: false })],
+        // index 2 absent → selectedEvalFromMap short-circuits on the checkmate FEN
+      ]),
+    });
+
+    render(
+      <AnalysisStoreProvider value={store}>
+        <ConnectedEvalBar />
+      </AnalysisStoreProvider>,
+    );
+
+    // Extreme +cp + mate 0 → EvalBar fills to the winner and labels "#".
+    expect(capturedEvalBarProps.whitePerspectiveCp).toBe(10000);
+    expect(capturedEvalBarProps.whitePerspectiveMate).toBe(0);
   });
 });
 
