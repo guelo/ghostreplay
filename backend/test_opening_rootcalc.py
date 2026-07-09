@@ -857,3 +857,222 @@ def test_compute_all_scores_emits_off_book_no_data_rows_without_any_quality():
     assert by_fen[off_book].in_book is False
     assert by_fen[off_book].has_evidence is False
     assert by_fen[off_book].opening_score is None
+
+
+# ---------------------------------------------------------------------------
+# Readiness folds (g-zc3p / g-5bcz): LCB on mastery + opponent-coverage gate.
+#
+# These exercise the scoring MATH, not the tuning: the default config is
+# behavior-neutral (lcb_z=0.0, coverage_fold="off"), so every test passes the
+# fold parameters explicitly.
+# ---------------------------------------------------------------------------
+
+
+def _shared_calc(graph, overlay, roots, config, *, seeds=None):
+    return _SharedCalculator(
+        "white", graph, overlay, roots, config, datetime.now(timezone.utc), seeds=seeds
+    )
+
+
+def test_mastery_lcb_shrinks_thin_evidence():
+    # LCB mastery = clamped normal approx clamp(mean - z*std, 0, 1). At z=0 it is
+    # EXACTLY today's Beta-posterior mean; z>0 shrinks thin evidence below it.
+    fen = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(fen))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[fen] = _quality(fen, 3.0, count=3)  # mean = (3+1)/(3+3) = 4/6
+
+    def mastery(z: float) -> float:
+        return _shared_calc(graph, overlay, roots, RootCalcConfig(lcb_z=z))._mastery(fen)
+
+    assert mastery(0.0) == pytest.approx(4.0 / 6.0)  # unchanged at z=0
+    a, b, total = 4.0, 2.0, 6.0  # a=quality_sum+alpha, b=(count-sum)+beta
+    expected = 4.0 / 6.0 - math.sqrt(a * b / (total * total * (total + 1.0)))
+    assert mastery(1.0) == pytest.approx(expected)
+    assert mastery(1.0) < 4.0 / 6.0
+
+
+def test_mastery_lcb_shrinks_zero_quality_prior_and_clamps():
+    # DECIDED (no quality_count>0 guard): the LCB shrinks the UNEARNED prior too
+    # (~0.33 -> ~0.10 at z=1), the backstop for the gate-alone line-606 leak.
+    fen = _positions([])[0]
+    graph = _graph([[]])
+    roots = _roots(_root(fen))
+    overlay = EvidenceOverlay(1, "white")  # no quality anywhere: prior only
+
+    def mastery(z: float) -> float:
+        return _shared_calc(graph, overlay, roots, RootCalcConfig(lcb_z=z))._mastery(fen)
+
+    assert mastery(0.0) == pytest.approx(1.0 / 3.0)
+    # a=1, b=2, total=3 → mean 1/3, std sqrt(2/36) ≈ 0.236 → ~0.10.
+    assert mastery(1.0) == pytest.approx(1.0 / 3.0 - math.sqrt(2.0 / 36.0))
+    assert mastery(1.0) < 1.0 / 3.0
+    # Aggressive z clamps at 0 rather than going negative.
+    assert mastery(10.0) == 0.0
+
+
+def test_config_fingerprint_includes_readiness_fold_fields():
+    base = root_calc_config_fingerprint()
+    assert base != root_calc_config_fingerprint(RootCalcConfig(lcb_z=1.0))
+    assert base != root_calc_config_fingerprint(RootCalcConfig(coverage_fold="gate"))
+
+
+def test_config_rejects_unknown_coverage_fold():
+    # Fail fast so a bad mode never silently behaves as "gate" in _calc.
+    with pytest.raises(ValueError):
+        RootCalcConfig(coverage_fold="bogus")
+    for mode in ("off", "gate", "gate_x_cov"):
+        assert RootCalcConfig(coverage_fold=mode).coverage_fold == mode
+
+
+def _opponent_root_two_replies():
+    # Player white; the named root is the OPPONENT node after 1.e4 (black to move),
+    # with two book replies: e5 (covered/strong) and c5 (unprepared user leaf).
+    opp = _positions(["e2e4"])[1]
+    covered = _positions(["e2e4", "e7e5"])[2]
+    uncovered = _positions(["e2e4", "c7c5"])[2]
+    graph = _graph([["e2e4", "e7e5"], ["e2e4", "c7c5"]])
+    roots = _roots(_root(opp))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[covered] = _quality(covered, 4.0, count=4)  # mastery 5/7, live=4
+    # `uncovered` has no evidence: prior mastery, subtree not covered.
+    return graph, overlay, roots, opp, covered, uncovered
+
+
+def test_opponent_gate_removes_unprepared_line_freebie():
+    # An unprepared opponent reply (user leaf, no evidence) returns the ~0.33
+    # mastery prior with child_cov=1.0. Under "off" it collects that freebie; the
+    # 0/1 gate ALONE zeroes it (subtree not covered), leaving only the covered reply.
+    graph, overlay, roots, opp, _covered, _unc = _opponent_root_two_replies()
+
+    def score(fold: str) -> float:
+        return compute_root_score(
+            opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold=fold)
+        ).opening_score
+
+    off = score("off")
+    gate = score("gate")
+    # off: 0.5*(5/7) + 0.5*(1/3) over a perfect denominator of 1.0.
+    assert off == pytest.approx(100.0 * (0.5 * (5.0 / 7.0) + 0.5 * (1.0 / 3.0)))
+    # gate: the uncovered reply contributes exactly 0 → only the covered credit.
+    assert gate == pytest.approx(100.0 * (0.5 * (5.0 / 7.0)))
+    assert gate < off
+
+
+def test_perfect_pass_assumes_full_coverage():
+    # The perfect pass uses branch_cov=1.0, so the coverage shortfall bites the
+    # numerator only. Both replies count at full credit in the denominator (=1.0);
+    # had perfect ALSO been gated, the uncovered branch would cancel and the score
+    # would RISE above "off" instead of dropping.
+    graph, overlay, roots, opp, _covered, _unc = _opponent_root_two_replies()
+    off = compute_root_score(
+        opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold="off")
+    ).opening_score
+    gate = compute_root_score(
+        opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold="gate")
+    ).opening_score
+    # Perfect denominator = 1.0 (both replies full credit), so gate == 100*0.5*(5/7).
+    assert gate == pytest.approx(100.0 * 0.5 * (5.0 / 7.0))
+    # If perfect were gated too the denominator would be 0.5 → gate would be ~71 > off.
+    assert gate < off
+
+
+def test_deep_gap_penalized_once_gate_vs_gate_x_cov_diverge():
+    # A coverage gap two opponent-nodes deep: opp1 -> u1 -> opp2 -> {covered, gap}.
+    # The gate applies ONCE, at opp2 (where the gap hangs), γ-discounted upward.
+    # gate_x_cov re-applies it at opp1 via child_cov(u1) — the double-count.
+    opp1 = _positions(["e2e4"])[1]
+    u1 = _positions(["e2e4", "e7e5"])[2]
+    opp2 = _positions(["e2e4", "e7e5", "g1f3"])[3]
+    covered = _positions(["e2e4", "e7e5", "g1f3", "b8c6"])[4]
+    gap = _positions(["e2e4", "e7e5", "g1f3", "d7d6"])[4]
+    graph = _graph(
+        [["e2e4", "e7e5", "g1f3", "b8c6"], ["e2e4", "e7e5", "g1f3", "d7d6"]]
+    )
+    roots = _roots(_root(opp1))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, u1, opp2, "g1f3")
+    overlay.nodes[u1] = _quality(u1, 4.0, count=4)  # covered, mastery 5/7
+    overlay.nodes[covered] = _quality(covered, 4.0, count=4)  # covered reply
+    # `gap` has no evidence: opp2's uncovered reply.
+
+    def score(fold: str) -> float:
+        return compute_root_score(
+            opp1, "white", graph, overlay, roots, RootCalcConfig(coverage_fold=fold)
+        ).opening_score
+
+    off, gate, gate_x_cov = score("off"), score("gate"), score("gate_x_cov")
+    assert off > gate > gate_x_cov
+    # The gap is penalized ONCE under gate but re-applied under gate_x_cov, so the
+    # extra drop from gate→gate_x_cov dwarfs the single off→gate penalty.
+    assert (gate - gate_x_cov) > (off - gate)
+
+
+def test_line_606_gate_alone_leak_returns_node_mastery():
+    # The one shape gate-alone leaks: a covered user node with book children but
+    # NONE prepared returns node mastery (not 0), child_cov=0.0. gate-alone credits
+    # weight*mastery (accepted, small, LCB-shrunk); gate_x_cov zeroes it.
+    opp = _positions(["e2e4"])[1]
+    user_node = _positions(["e2e4", "e7e5"])[2]  # covered, book child, none prepared
+    graph = _graph([["e2e4", "e7e5", "g1f3"]])
+    roots = _roots(_root(opp))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[user_node] = _quality(user_node, 4.0, count=4)  # covered, mastery 5/7
+    # No prepared edge out of user_node → weights empty → the line-606 result shape.
+
+    def score(fold: str) -> float:
+        return compute_root_score(
+            opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold=fold)
+        ).opening_score
+
+    off, gate, gate_x_cov = score("off"), score("gate"), score("gate_x_cov")
+    assert gate == pytest.approx(off)  # gate-alone leaks the node mastery
+    assert gate > 0.0
+    assert gate_x_cov == pytest.approx(0.0)  # child_cov=0 zeroes it
+
+
+def test_weighted_depth_shifts_under_global_lcb_swap():
+    # weighted_depth = mastery*(1+γ*depth_sum) is mastery-driven, so the global LCB
+    # swap lowers it too (an easy-to-miss consequence, hence explicit coverage).
+    root, e4, e5 = _positions(["e2e4", "e7e5"])
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, e4, "e2e4")
+    overlay.nodes[root] = _quality(root, 1.0, count=1)
+    overlay.nodes[e5] = _quality(e5, 1.0, count=1)
+
+    depth0 = compute_root_score(
+        root, "white", graph, overlay, roots, RootCalcConfig(lcb_z=0.0)
+    ).weighted_depth
+    depth1 = compute_root_score(
+        root, "white", graph, overlay, roots, RootCalcConfig(lcb_z=1.0)
+    ).weighted_depth
+    assert depth1 < depth0
+
+
+def test_position_score_hard_zero_for_all_gate_failing_opponent_turn():
+    # compute_position_scores persists opening_score=0.0 with has_evidence=True for
+    # an opponent-turn position whose reply subtrees ALL fail the coverage gate —
+    # a genuine hard zero, DISTINCT from the None / has_evidence=False no-data path.
+    root, opp, user_leaf = _positions(["e2e4", "e7e5"])  # opp=after e4 (black to move)
+    off_book = "8/8/8/8/8/8/4k3/4K3 b - -"  # not in graph, no evidence below
+    graph = _graph([["e2e4", "e7e5"]])
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    # Thin evidence at the reply: subtree live=1, review=0 fails BOTH gate clauses.
+    overlay.nodes[user_leaf] = NodeEvidence(
+        fen=user_leaf, quality_sum=0.5, quality_count=1, live_attempts=1
+    )
+    overlay.edges[(root, off_book)] = EdgeEvidence(root, off_book, "observed")
+
+    calc = _shared_calc(graph, overlay, roots, RootCalcConfig(coverage_fold="gate"))
+    rows = {row.normalized_fen: row for row in calc.compute_position_scores()}
+
+    # The all-gate-failing opponent-turn position: real hard zero, evidence present.
+    assert rows[opp].has_evidence is True
+    assert rows[opp].opening_score == pytest.approx(0.0)
+    # The no-data path is untouched: None score, has_evidence False.
+    assert rows[off_book].has_evidence is False
+    assert rows[off_book].opening_score is None

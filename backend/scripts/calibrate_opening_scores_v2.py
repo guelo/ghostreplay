@@ -36,21 +36,43 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+import chess  # noqa: E402
+
 from app.db import DATABASE_URL  # noqa: E402
-from app.opening_evidence import EvidenceOverlay, PhaseSample, overlay_evidence  # noqa: E402
-from app.opening_graph import OpeningGraph, get_opening_graph  # noqa: E402
+from app.fen import active_color, normalize_fen  # noqa: E402
+from app.opening_evidence import (  # noqa: E402
+    EvidenceOverlay,
+    NodeEvidence,
+    PhaseSample,
+    overlay_evidence,
+)
+from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph  # noqa: E402
 from app.opening_quality import TAU_CP, TAU_WC  # noqa: E402
 from app.opening_rootcalc import (  # noqa: E402
+    COVERAGE_FOLD_MODES,
     SYNTHETIC_INITIAL_FEN,
     CalcTelemetry,
     RootCalcConfig,
     compute_all_root_scores,
+    compute_root_score,
 )
-from app.opening_roots import OpeningRoots, get_opening_roots  # noqa: E402
+from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots  # noqa: E402
 
 DEFAULT_MIN_OBSERVATIONS = 20
 HISTOGRAM_EDGES = (0.0, 20.0, 40.0, 60.0, 80.0, 100.0)
 DEFAULT_PERCENTILES = (5.0, 25.0, 50.0, 75.0, 95.0)
+
+# Calibration-grid sweep defaults (the SET of values measured, NOT a tuning
+# choice — g-5bcz ships no chosen value). Baseline (lcb_z=0.0, coverage_fold="off")
+# is the current model and is always included by ``build_grid``.
+DEFAULT_LCB_Z_GRID = (0.0, 1.0, 1.28)
+DEFAULT_COVERAGE_GRID = ("off", "gate", "gate_x_cov")
+
+# Current (pre-recalibration) grade cutoffs mirrored from src/openings/format.ts
+# getPriorityLabel (A>=50 / B>=38 / C>=28 / D>=22 / F<22). Used ONLY to give the
+# PASS/FAIL diagnostics a readable grade band; recalibrating format.ts to the new
+# combined distribution belongs to the follow-up ship bead, not here.
+GRADE_A, GRADE_B, GRADE_C, GRADE_D = 50.0, 38.0, 28.0, 22.0
 
 # Documented numeric release gates (openingscore_final.md "Calibration Outcome").
 SCORING_LATENCY_GATE_SECONDS = 5.0
@@ -168,6 +190,10 @@ class PairScore:
     user_id: int
     player_color: str
     named_scores: list[float] = field(default_factory=list)
+    # Same named-root scores keyed by opening_key, so per-pair deltas can be matched
+    # opening-to-opening ACROSS grid cells (the plain list above keeps distributions
+    # cheap; the map is what the delta reporting needs).
+    named_score_map: dict[str, float] = field(default_factory=dict)
     synthetic_score: float | None = None
     observation_total: int = 0
     source_counts: Counter[str] = field(default_factory=Counter)
@@ -210,17 +236,19 @@ def score_overlay(
     elapsed = time.perf_counter() - started
 
     synthetic = scores.get(SYNTHETIC_INITIAL_FEN)
-    named_scores = [
-        score.opening_score
+    named_score_map = {
+        key: score.opening_score
         for key, score in scores.items()
         if key != SYNTHETIC_INITIAL_FEN
-    ]
+    }
+    named_scores = list(named_score_map.values())
     observation_total = sum(node.quality_count for node in overlay.nodes.values())
 
     return PairScore(
         user_id=user_id,
         player_color=player_color,
         named_scores=named_scores,
+        named_score_map=named_score_map,
         synthetic_score=synthetic.opening_score if synthetic is not None else None,
         observation_total=observation_total,
         source_counts=Counter(overlay.source_counts),
@@ -242,6 +270,119 @@ def score_pair(
     """Build the overlay for a pair (DB read only) and score it in memory."""
     overlay = overlay_evidence(db, user_id, player_color, graph)
     return score_overlay(user_id, player_color, graph, overlay, roots, config)
+
+
+# ---------------------------------------------------------------------------
+# Calibration grid (g-zc3p / g-5bcz): sweep (lcb_z x coverage_fold) cells
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GridCell:
+    """One (lcb_z, coverage_fold) point of the calibration grid."""
+
+    lcb_z: float
+    coverage_fold: str
+
+    @property
+    def config(self) -> RootCalcConfig:
+        return RootCalcConfig(lcb_z=self.lcb_z, coverage_fold=self.coverage_fold)
+
+    @property
+    def is_baseline(self) -> bool:
+        """The current model: no LCB shrinkage, no coverage gate."""
+        return self.lcb_z == 0.0 and self.coverage_fold == "off"
+
+    @property
+    def label(self) -> str:
+        return f"lcb_z={self.lcb_z:g},cov={self.coverage_fold}"
+
+
+# The current-model cell every grid is measured against.
+BASELINE_CELL = GridCell(0.0, "off")
+
+
+def parse_lcb_z_grid(raw: str | None) -> list[float]:
+    if not raw:
+        return list(DEFAULT_LCB_Z_GRID)
+    return [float(token) for token in raw.split(",") if token.strip()]
+
+
+def parse_coverage_grid(raw: str | None) -> list[str]:
+    if not raw:
+        return list(DEFAULT_COVERAGE_GRID)
+    modes = [token.strip() for token in raw.split(",") if token.strip()]
+    unknown = [mode for mode in modes if mode not in COVERAGE_FOLD_MODES]
+    if unknown:
+        raise ValueError(
+            f"unknown coverage_fold mode(s) {unknown}; "
+            f"valid modes: {sorted(COVERAGE_FOLD_MODES)}"
+        )
+    return modes
+
+
+def build_grid(lcb_zs: list[float], coverage_folds: list[str]) -> list[GridCell]:
+    """Cartesian product of the two axes, with the baseline cell first & deduped."""
+    cells: list[GridCell] = [BASELINE_CELL]
+    seen: set[GridCell] = {BASELINE_CELL}
+    for coverage_fold in coverage_folds:
+        for lcb_z in lcb_zs:
+            cell = GridCell(lcb_z, coverage_fold)
+            if cell not in seen:
+                seen.add(cell)
+                cells.append(cell)
+    return cells
+
+
+def score_pair_grid(
+    db,
+    user_id: int,
+    player_color: str,
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+    grid: list[GridCell],
+) -> dict[GridCell, PairScore]:
+    """Build a pair's overlay ONCE (the ~2.6s cost), then score it per grid cell.
+
+    Naively gridding would rebuild ``overlay_evidence`` O(pairs x cells) times; here
+    the (DB-read) overlay is built once and only the cheap in-memory
+    ``score_overlay`` runs per cell.
+    """
+    overlay = overlay_evidence(db, user_id, player_color, graph)
+    return {
+        cell: score_overlay(user_id, player_color, graph, overlay, roots, cell.config)
+        for cell in grid
+    }
+
+
+def pair_key_deltas(
+    cell_score: PairScore, baseline_score: PairScore
+) -> list[dict[str, object]]:
+    """Per-opening-key delta records vs baseline, for keys present in both.
+
+    Each record keeps the opening key, its baseline and cell scores, and the delta,
+    so the report can emit true per-pair per-opening-key deltas (not just a summary).
+    """
+    base = baseline_score.named_score_map
+    return [
+        {
+            "opening_key": key,
+            "baseline": base[key],
+            "cell": value,
+            "delta": value - base[key],
+        }
+        for key, value in cell_score.named_score_map.items()
+        if key in base
+    ]
+
+
+def summarize_deltas(values: list[float]) -> dict[str, object]:
+    """Count + mean + percentiles for signed deltas (no 0-100 histogram)."""
+    return {
+        "count": len(values),
+        "mean": (sum(values) / len(values)) if values else None,
+        "percentiles": percentiles(values),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +552,323 @@ def build_report(
     }
 
 
+# ---------------------------------------------------------------------------
+# Grid report: per-cell distributions + per-pair per-key deltas vs baseline
+# ---------------------------------------------------------------------------
+
+
+def build_cell_report(
+    cell: GridCell,
+    pair_scores: list[PairScore],
+    baseline_scores: list[PairScore],
+    *,
+    min_observations: int,
+) -> dict[str, object]:
+    """One grid cell's distribution + (for non-baseline cells) deltas vs baseline.
+
+    ``pair_scores`` and ``baseline_scores`` are aligned per pair (same order); a
+    pair is included when its observation total clears ``min_observations`` (the
+    total is config-independent, so the baseline row decides membership).
+    """
+    paired = [
+        (cell_p, base_p)
+        for cell_p, base_p in zip(pair_scores, baseline_scores)
+        if base_p.observation_total >= min_observations
+    ]
+    pooled = [score for cell_p, _ in paired for score in cell_p.named_scores]
+    synthetic = [
+        cell_p.synthetic_score for cell_p, _ in paired if cell_p.synthetic_score is not None
+    ]
+    report: dict[str, object] = {
+        "lcb_z": cell.lcb_z,
+        "coverage_fold": cell.coverage_fold,
+        "baseline": cell.is_baseline,
+        "named_score_distribution": summarize(pooled),
+        "synthetic_hero_distribution": summarize(synthetic),
+    }
+    if not cell.is_baseline:
+        per_pair: list[dict[str, object]] = []
+        pooled_deltas: list[float] = []
+        for cell_p, base_p in paired:
+            records = pair_key_deltas(cell_p, base_p)
+            values = [record["delta"] for record in records]
+            pooled_deltas.extend(values)
+            per_pair.append(
+                {
+                    "user_id": cell_p.user_id,
+                    "player_color": cell_p.player_color,
+                    # Full per-opening-key deltas (opening_key/baseline/cell/delta).
+                    "keys": records,
+                    "summary": summarize_deltas(values),
+                }
+            )
+        report["deltas_vs_baseline"] = {
+            "pooled": summarize_deltas(pooled_deltas),
+            "per_pair": per_pair,
+        }
+    return report
+
+
+def build_grid_report(
+    grid: list[GridCell],
+    pair_grids: list[dict[GridCell, PairScore]],
+    *,
+    min_observations: int,
+) -> dict[str, object]:
+    """Per-cell distributions + deltas across the whole grid."""
+    baseline_scores = [pg[BASELINE_CELL] for pg in pair_grids]
+    cells = [
+        build_cell_report(
+            cell,
+            [pg[cell] for pg in pair_grids],
+            baseline_scores,
+            min_observations=min_observations,
+        )
+        for cell in grid
+    ]
+    return {"cells": cells}
+
+
+# ---------------------------------------------------------------------------
+# PASS/FAIL calibration diagnostics (synthetic overlays scored across the grid)
+# ---------------------------------------------------------------------------
+
+
+def _diag_fen(board: chess.Board) -> str:
+    return normalize_fen(board.fen())
+
+
+def _diag_positions(moves: list[str]) -> list[str]:
+    board = chess.Board()
+    result = [_diag_fen(board)]
+    for uci in moves:
+        board.push_uci(uci)
+        result.append(_diag_fen(board))
+    return result
+
+
+def _diag_graph(paths: list[list[str]]) -> OpeningGraph:
+    nodes: dict[str, OpeningGraphNode] = {}
+    root_fen = _diag_fen(chess.Board())
+    for moves in paths:
+        board = chess.Board()
+        parent = _diag_fen(board)
+        nodes.setdefault(parent, OpeningGraphNode(parent, active_color(parent)))
+        for uci in moves:
+            board.push_uci(uci)
+            child = _diag_fen(board)
+            nodes.setdefault(child, OpeningGraphNode(child, active_color(child)))
+            nodes[parent].children[uci] = child
+            nodes[child].parents.add((parent, uci))
+            parent = child
+    return OpeningGraph(nodes, root_fen)
+
+
+def _diag_roots(*fens: str) -> OpeningRoots:
+    roots = {
+        fen: OpeningRoot(
+            opening_key=fen,
+            opening_name="Diagnostic",
+            opening_family="__diag__",
+            eco=None,
+            depth=0,
+            parent_keys=frozenset(),
+            child_keys=frozenset(),
+        )
+        for fen in fens
+    }
+    return OpeningRoots(roots, {fen: frozenset([fen]) for fen in fens})
+
+
+def _specialist_scenario() -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots, str]:
+    """One-variation specialist: strong in ONE opponent reply, unprepared for the
+    siblings. The scored root is the opponent node after 1.e4 (black to move)."""
+    opp = _diag_positions(["e2e4"])[1]
+    strong = _diag_positions(["e2e4", "e7e5"])[2]
+    graph = _diag_graph(
+        [["e2e4", "e7e5"], ["e2e4", "c7c5"], ["e2e4", "e7e6"]]
+    )
+    overlay = EvidenceOverlay(0, "white")
+    overlay.nodes[strong] = NodeEvidence(
+        fen=strong, quality_sum=4.0, quality_count=4, live_attempts=4
+    )
+    return graph, overlay, _diag_roots(opp), opp
+
+
+def _broad_guard_scenario() -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots, str]:
+    """Broadly-prepared player: real, covered prep across ALL opponent replies."""
+    opp = _diag_positions(["e2e4"])[1]
+    replies = [
+        _diag_positions(["e2e4", "e7e5"])[2],
+        _diag_positions(["e2e4", "c7c5"])[2],
+        _diag_positions(["e2e4", "e7e6"])[2],
+    ]
+    graph = _diag_graph(
+        [["e2e4", "e7e5"], ["e2e4", "c7c5"], ["e2e4", "e7e6"]]
+    )
+    overlay = EvidenceOverlay(0, "white")
+    for reply in replies:
+        overlay.nodes[reply] = NodeEvidence(
+            fen=reply, quality_sum=4.0, quality_count=4, live_attempts=4
+        )
+    return graph, overlay, _diag_roots(opp), opp
+
+
+def _cliff_scenario(
+    *, reviewed: bool
+) -> tuple[OpeningGraph, EvidenceOverlay, OpeningRoots, str]:
+    """Thin-but-earned branch. Evidence is concentrated at ONE node (subtree
+    live=1) so it respects subtree-SUM semantics: a single live attempt fails the
+    gate at coverage_live_threshold>=2 until one review lands. Smearing it across
+    two nodes would reach live>=2 and silently PASS the gate — no cliff."""
+    opp = _diag_positions(["e2e4"])[1]
+    reply = _diag_positions(["e2e4", "e7e5"])[2]
+    graph = _diag_graph([["e2e4", "e7e5"]])
+    overlay = EvidenceOverlay(0, "white")
+    overlay.nodes[reply] = NodeEvidence(
+        fen=reply,
+        quality_sum=0.9,
+        quality_count=1,
+        live_attempts=1,
+        review_attempts=1 if reviewed else 0,
+    )
+    return graph, overlay, _diag_roots(opp), opp
+
+
+def _score_target(
+    target: str,
+    graph: OpeningGraph,
+    overlay: EvidenceOverlay,
+    roots: OpeningRoots,
+    config: RootCalcConfig,
+) -> float:
+    return compute_root_score(
+        target, "white", graph, overlay, roots, config
+    ).opening_score
+
+
+def run_specialist_diagnostic(grid: list[GridCell]) -> dict[str, object]:
+    """TRUE-POSITIVE gate: a one-variation specialist must drop from ~B to ~D/F
+    once the coverage fold is on."""
+    graph, overlay, roots, target = _specialist_scenario()
+    cells = [
+        {
+            "lcb_z": cell.lcb_z,
+            "coverage_fold": cell.coverage_fold,
+            "baseline": cell.is_baseline,
+            "score": _score_target(target, graph, overlay, roots, cell.config),
+        }
+        for cell in grid
+    ]
+    baseline = next(c for c in cells if c["baseline"])
+    fold_on = [c for c in cells if c["coverage_fold"] != "off"]
+    passed: bool | None = None
+    if fold_on:
+        passed = baseline["score"] >= GRADE_B and all(
+            c["score"] < GRADE_C for c in fold_on
+        )
+    return {
+        "name": "one-variation specialist (true-positive)",
+        "baseline_score": baseline["score"],
+        "cells": cells,
+        "passed": passed,
+    }
+
+
+def run_broad_guard_diagnostic(grid: list[GridCell]) -> dict[str, object]:
+    """FALSE-POSITIVE guard: a genuinely broadly-prepared player must NOT crater
+    (stays ~B+) once the fold is on. Run against every cell so both ``gate`` and
+    ``gate_x_cov`` are covered; if this cannot pass under uniform opponent weights
+    at any acceptable z/mode, that is the trip wire to bring g-idgs forward."""
+    graph, overlay, roots, target = _broad_guard_scenario()
+    cells = [
+        {
+            "lcb_z": cell.lcb_z,
+            "coverage_fold": cell.coverage_fold,
+            "baseline": cell.is_baseline,
+            "score": _score_target(target, graph, overlay, roots, cell.config),
+        }
+        for cell in grid
+    ]
+    fold_on = [c for c in cells if c["coverage_fold"] != "off"]
+    passed: bool | None = (
+        all(c["score"] >= GRADE_B for c in fold_on) if fold_on else None
+    )
+    return {
+        "name": "broadly-prepared mainlines (false-positive guard)",
+        "cells": cells,
+        "passed": passed,
+    }
+
+
+def run_cliff_diagnostic(
+    grid: list[GridCell], thresholds: tuple[int, ...] = (1, 2)
+) -> dict[str, object]:
+    """Thin-but-earned cliff: score the same branch at live=1/review=0 vs
+    live=1/review=1, sweeping ``coverage_live_threshold`` so the size of the
+    0->full-credit jump (and whether crediting a single live pass softens it) is
+    visible before grades are recalibrated."""
+    rows: list[dict[str, object]] = []
+    for cell in grid:
+        for threshold in thresholds:
+            config = RootCalcConfig(
+                lcb_z=cell.lcb_z,
+                coverage_fold=cell.coverage_fold,
+                coverage_live_threshold=threshold,
+            )
+            g0, o0, r0, t0 = _cliff_scenario(reviewed=False)
+            g1, o1, r1, t1 = _cliff_scenario(reviewed=True)
+            thin = _score_target(t0, g0, o0, r0, config)
+            after_review = _score_target(t1, g1, o1, r1, config)
+            rows.append(
+                {
+                    "lcb_z": cell.lcb_z,
+                    "coverage_fold": cell.coverage_fold,
+                    "coverage_live_threshold": threshold,
+                    "thin_score": thin,
+                    "reviewed_score": after_review,
+                    "jump": after_review - thin,
+                }
+            )
+
+    # PASS confirms the synthetic actually reproduces the cliff (rather than
+    # silently passing the gate): under the gate at the current threshold=2 the
+    # thin state fails (~0) and jumps up after one review, while crediting a single
+    # live pass (threshold=1) removes the jump. Evaluated at the lowest gate z so
+    # the check is independent of which z values the grid sweeps.
+    def _gate_row(threshold: int) -> dict[str, object] | None:
+        candidates = [
+            row
+            for row in rows
+            if row["coverage_fold"] == "gate"
+            and row["coverage_live_threshold"] == threshold
+        ]
+        return min(candidates, key=lambda row: row["lcb_z"]) if candidates else None
+
+    gate2 = _gate_row(2)
+    gate1 = _gate_row(1)
+    passed: bool | None = None
+    if gate2 is not None and gate1 is not None:
+        passed = (
+            gate2["thin_score"] < 1e-6
+            and gate2["reviewed_score"] > gate2["thin_score"]
+            and abs(gate1["thin_score"] - gate1["reviewed_score"]) < 1e-6
+        )
+    return {
+        "name": "thin-but-earned cliff (0->full-credit jump)",
+        "rows": rows,
+        "passed": passed,
+    }
+
+
+def run_diagnostics(grid: list[GridCell]) -> dict[str, object]:
+    return {
+        "specialist": run_specialist_diagnostic(grid),
+        "broad_guard": run_broad_guard_diagnostic(grid),
+        "cliff": run_cliff_diagnostic(grid),
+    }
+
+
 def render_text(report: dict[str, object]) -> str:
     """Render the report dict as a plain-text summary."""
     cohort = report["cohort"]
@@ -489,7 +947,105 @@ def render_text(report: dict[str, object]) -> str:
             f"Write-bench: cache read {wb.get('cache_read_ms')} ms over "
             f"{wb.get('cached_rows')} cached rows (db={wb.get('database_url')})"
         )
+    if report.get("grid"):
+        lines.append("")
+        _render_grid(report["grid"], lines)
+    if report.get("diagnostics"):
+        lines.append("")
+        _render_diagnostics(report["diagnostics"], lines)
     return "\n".join(lines)
+
+
+def _cell_label(entry: dict[str, object]) -> str:
+    base = " [baseline]" if entry.get("baseline") else ""
+    return f"lcb_z={entry['lcb_z']:g},cov={entry['coverage_fold']}{base}"
+
+
+# Text output shows only the N largest-magnitude per-key movers per cell; the
+# FULL per-pair per-key deltas are always in the --json report.
+DELTA_TEXT_LIMIT = 8
+
+
+def _render_grid(grid: dict[str, object], lines: list[str]) -> None:
+    lines.append("=== Calibration grid (per cell vs baseline) ===")
+    for cell in grid["cells"]:
+        lines.append(f"-- {_cell_label(cell)} --")
+        lines.append(
+            "  named:" + _fmt_summary(cell["named_score_distribution"]).rstrip()
+        )
+        lines.append(
+            "  synthetic:" + _fmt_summary(cell["synthetic_hero_distribution"]).rstrip()
+        )
+        deltas = cell.get("deltas_vs_baseline")
+        if deltas is not None:
+            pooled = deltas["pooled"]
+            pcts = pooled["percentiles"]
+            lines.append(
+                f"  Δ vs baseline (per key): n={pooled['count']} "
+                f"mean={_fmt_opt(pooled['mean'])} "
+                f"p5={_fmt_opt(pcts['p5'])} p50={_fmt_opt(pcts['p50'])} "
+                f"p95={_fmt_opt(pcts['p95'])}"
+            )
+            _render_top_movers(deltas["per_pair"], lines)
+
+
+def _render_top_movers(per_pair: list[dict[str, object]], lines: list[str]) -> None:
+    """Render the largest-|Δ| per-pair per-key movers (bounded; full set in --json)."""
+    movers = [
+        (pair["user_id"], pair["player_color"], record)
+        for pair in per_pair
+        for record in pair["keys"]
+    ]
+    if not movers:
+        return
+    movers.sort(key=lambda item: abs(item[2]["delta"]), reverse=True)
+    for user_id, color, record in movers[:DELTA_TEXT_LIMIT]:
+        lines.append(
+            f"    {user_id}/{color} {record['opening_key']}: "
+            f"{_fmt_opt(record['baseline'])}→{_fmt_opt(record['cell'])} "
+            f"(Δ{record['delta']:+.1f})"
+        )
+    remaining = len(movers) - DELTA_TEXT_LIMIT
+    if remaining > 0:
+        lines.append(
+            f"    … {remaining} more per-key deltas (full set in --json)"
+        )
+
+
+def _render_diagnostic_cells(cells: list[dict[str, object]], lines: list[str]) -> None:
+    for cell in cells:
+        lines.append(f"    {_cell_label(cell)}: score={_fmt_opt(cell['score'])}")
+
+
+def _render_diagnostics(diagnostics: dict[str, object], lines: list[str]) -> None:
+    lines.append("=== Calibration diagnostics (PASS/FAIL) ===")
+
+    specialist = diagnostics["specialist"]
+    lines.append(
+        f"[{_fmt_gate(specialist['passed'])}] {specialist['name']} "
+        f"(baseline {_fmt_opt(specialist['baseline_score'])} → B; "
+        f"fold-on must drop < {GRADE_C:g} = D/F)"
+    )
+    _render_diagnostic_cells(specialist["cells"], lines)
+
+    guard = diagnostics["broad_guard"]
+    lines.append(
+        f"[{_fmt_gate(guard['passed'])}] {guard['name']} "
+        f"(fold-on must stay ≥ {GRADE_B:g} = B+)"
+    )
+    _render_diagnostic_cells(guard["cells"], lines)
+
+    cliff = diagnostics["cliff"]
+    lines.append(f"[{_fmt_gate(cliff['passed'])}] {cliff['name']}")
+    for row in cliff["rows"]:
+        base = " [baseline]" if row["lcb_z"] == 0.0 and row["coverage_fold"] == "off" else ""
+        lines.append(
+            f"    lcb_z={row['lcb_z']:g},cov={row['coverage_fold']},"
+            f"live_thr={row['coverage_live_threshold']}{base}: "
+            f"thin={_fmt_opt(row['thin_score'])} "
+            f"reviewed={_fmt_opt(row['reviewed_score'])} "
+            f"jump={_fmt_opt(row['jump'])}"
+        )
 
 
 def _fmt_gate(passed: bool | None) -> str:
@@ -537,6 +1093,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="Comma-separated user_id:color pairs to restrict the run to.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Limit candidate pairs.")
+    parser.add_argument(
+        "--lcb-z-grid",
+        default=None,
+        help='Comma-separated lcb_z values to sweep (default "0,1.0,1.28"). The '
+        "baseline lcb_z=0.0 is always included.",
+    )
+    parser.add_argument(
+        "--coverage-grid",
+        default=None,
+        help='Comma-separated coverage_fold modes to sweep '
+        '(default "off,gate,gate_x_cov"). Baseline "off" is always included.',
+    )
     parser.add_argument("--json", action="store_true", help="Emit the report as JSON.")
     parser.add_argument(
         "--write-bench",
@@ -627,6 +1195,10 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
     roots = get_opening_roots()
     named_root_count = _named_root_count(roots)
 
+    grid = build_grid(
+        parse_lcb_z_grid(args.lcb_z_grid), parse_coverage_grid(args.coverage_grid)
+    )
+
     users = _parse_user_filter(args.users)
     pairs = _parse_pair_filter(args.pairs)
 
@@ -634,8 +1206,9 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
         candidate_pairs = list_opening_score_candidate_pairs(db, limit=args.limit)
         selected = select_pairs(candidate_pairs, users=users, pairs=pairs)
 
-        pair_scores = [
-            score_pair(db, user_id, player_color, graph, roots)
+        # Build each pair's overlay ONCE and score it for every grid cell.
+        pair_grids = [
+            score_pair_grid(db, user_id, player_color, graph, roots, grid)
             for user_id, player_color in selected
         ]
 
@@ -644,12 +1217,19 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
             bench_user, bench_color = selected[0]
             write_bench = run_write_bench(db, bench_user, bench_color, args.database_url)
 
+    # The baseline cell (current model) drives the top-level distribution/telemetry;
+    # the grid section adds every other cell plus per-key deltas vs that baseline.
+    baseline_scores = [pg[BASELINE_CELL] for pg in pair_grids]
     report = build_report(
-        pair_scores,
+        baseline_scores,
         min_observations=args.min_observations,
         named_root_count=named_root_count,
         write_bench=write_bench,
     )
+    report["grid"] = build_grid_report(
+        grid, pair_grids, min_observations=args.min_observations
+    )
+    report["diagnostics"] = run_diagnostics(grid)
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))

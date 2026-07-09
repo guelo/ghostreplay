@@ -20,6 +20,12 @@ SYNTHETIC_INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 SYNTHETIC_ROOT_NAME = "Repertoire"
 SYNTHETIC_ROOT_FAMILY = "__repertoire__"
 
+# Recognised RootCalcConfig.coverage_fold modes (g-zc3p Part 2). "off" is
+# behavior-neutral (today's ungated score); "gate" is the 0/1 local-coverage gate
+# alone at opponent nodes; "gate_x_cov" additionally multiplies by the child
+# coverage channel (the double-counting arm kept only for the calibration grid).
+COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
+
 
 @dataclass
 class CalcTelemetry:
@@ -62,6 +68,29 @@ class RootCalcConfig:
     k_evidence: float = 5.0
     half_life_days: float = 45.0
     coverage_live_threshold: int = 2
+    # Readiness folds (g-zc3p). Both default to a BEHAVIOR-NEUTRAL value that
+    # reproduces today's score exactly, so landing the fields alone changes no
+    # user's number; the calibration grid sweeps them and a later bead flips the
+    # defaults to the chosen values.
+    #   - lcb_z: strictness of the lower-confidence bound on mastery. 0.0 == the
+    #     plain Beta-posterior mean (today's _mastery); higher z shrinks
+    #     thin-evidence nodes harder (see _mastery).
+    #   - coverage_fold: how the opponent-branch score credit is gated by local
+    #     coverage. "off" == today (no gate); "gate" == the 0/1 gate alone;
+    #     "gate_x_cov" == the double-counting gate*child_cov arm kept only so the
+    #     grid can confirm the double-count empirically (see _calc).
+    lcb_z: float = 0.0
+    coverage_fold: str = "off"
+
+    def __post_init__(self) -> None:
+        # Fail fast on a bad mode rather than letting the _calc opponent branch
+        # silently treat an unknown value as "gate": the CLI validates its grid, but
+        # any direct caller (e.g. a later bead flipping the default) must too.
+        if self.coverage_fold not in COVERAGE_FOLD_MODES:
+            raise ValueError(
+                f"coverage_fold must be one of {sorted(COVERAGE_FOLD_MODES)}; "
+                f"got {self.coverage_fold!r}"
+            )
 
 
 def root_calc_config_fingerprint(config: RootCalcConfig | None = None) -> str:
@@ -484,12 +513,40 @@ class _SharedCalculator:
         return self._weights_cache[fen]
 
     def _mastery(self, fen: str) -> float:
+        """Local mastery: the lower-confidence bound on the Beta posterior mean.
+
+        Quality is treated as fractional Beta successes (``a = quality_sum + alpha``
+        "successes", ``b = (quality_count - quality_sum) + beta`` "failures"); the
+        posterior mean ``a / (a + b)`` is exactly today's mastery. ``lcb_z`` shifts
+        the report down by ``z`` normal-approx standard deviations so thin evidence
+        reads lower and rises toward the mean as reps are earned (g-zc3p Part 1).
+
+        - ``lcb_z == 0.0`` returns the mean UNCHANGED (byte-for-byte today's value),
+          which is the behavior-neutral default.
+        - The bound is a clamped normal approximation ``clamp(mean - z*std, 0, 1)``,
+          NOT ``scipy.stats.beta.ppf`` — scipy is not a backend dependency and numpy
+          has no ``beta.ppf``.
+        - The swap is GLOBAL (every caller of ``_mastery``), and applies to
+          zero-quality nodes too (no ``quality_count > 0`` guard): the LCB shrinks
+          the unearned prior (~0.33 → ~0.10 at z=1), the deliberate backstop for the
+          gate-alone line-606 leak in ``_calc``. Reviews add no quality
+          pseudo-observations — the Beta uses ``quality_count`` only.
+        """
         node = self._overlay_nodes.get(fen)
         quality_sum = node.quality_sum if node is not None else 0.0
         quality_count = node.quality_count if node is not None else 0
-        return (quality_sum + self.config.alpha) / (
+        mean = (quality_sum + self.config.alpha) / (
             quality_count + self.config.alpha + self.config.beta
         )
+        z = self.config.lcb_z
+        if z == 0.0:
+            return mean
+        a = quality_sum + self.config.alpha
+        b = (quality_count - quality_sum) + self.config.beta
+        total = a + b
+        variance = a * b / (total * total * (total + 1.0))
+        lcb = mean - z * math.sqrt(variance)
+        return 0.0 if lcb < 0.0 else (1.0 if lcb > 1.0 else lcb)
 
     def _confidence_components(
         self, fen: str
@@ -621,18 +678,35 @@ class _SharedCalculator:
                     mastery * (1.0 + self.config.gamma * depth_sum),
                 )
         else:
+            # Opponent node: gate each reply's SCORE credit by local coverage so an
+            # unprepared book reply no longer falls back to the ~0.33 mastery prior
+            # (g-zc3p Part 2). Applies at opponent nodes ONLY (user-turn breadth is
+            # not penalized). The COVERAGE accumulator is unchanged from today.
+            #
+            # branch_cov factors:
+            #   - perfect pass OR coverage_fold "off" → 1.0. The perfect pass MUST
+            #     assume full coverage, else the gate would cancel in real/perfect
+            #     and do nothing; "off" is the behavior-neutral default.
+            #   - "gate" → the 0/1 gate ALONE (recommended). Deeper gaps are already
+            #     folded in once by the recursive gate at deeper opponent nodes.
+            #   - "gate_x_cov" → gate * child_cov, the double-counting arm kept only
+            #     so the calibration grid can confirm the over-penalty empirically.
             score_sum = confidence_sum = coverage_sum = depth_sum = 0.0
+            fold = self.config.coverage_fold
             for child, weight in weights.items():
                 child_score, child_conf, child_cov, child_depth = self._calc(
                     child, perfect
                 )
-                score_sum += weight * child_score
+                covered = float(self._subtree_is_locally_covered(child))
+                if perfect or fold == "off":
+                    branch_cov = 1.0
+                elif fold == "gate_x_cov":
+                    branch_cov = covered * child_cov
+                else:  # "gate"
+                    branch_cov = covered
+                score_sum += weight * branch_cov * child_score
                 confidence_sum += weight * child_conf
-                coverage_sum += (
-                    weight
-                    * float(self._subtree_is_locally_covered(child))
-                    * child_cov
-                )
+                coverage_sum += weight * covered * child_cov
                 depth_sum += weight * child_depth
             result = score_sum, confidence_sum, coverage_sum, depth_sum
 
