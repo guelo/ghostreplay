@@ -6,6 +6,13 @@ export type AnalyzeMoveMessage = {
   playerColor: 'white' | 'black'
   moveIndex?: number
   legalMoveCount?: number
+  /**
+   * Search depth for the root, post-played, and post-best searches. Omitted by
+   * the in-game analysis path (defaults to 17); the analysis-board evidence driver
+   * passes 21 to produce stronger, persistable `browser-analysis-v1` evidence
+   * (g-cache-stronger-evals).
+   */
+  depth?: number
 }
 
 export type AnalysisWorkerRequest =

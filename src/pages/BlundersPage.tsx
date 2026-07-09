@@ -512,6 +512,7 @@ function BlundersPage() {
                           key={selected.id}
                           moves={analysis.moves}
                           boardOrientation={boardOrientation}
+                          sessionId={selectedAnalysisSessionId ?? undefined}
                           initialMoveIndex={blunderMoveIndex}
                           positionAnalysis={analysis.position_analysis}
                         />

@@ -10,6 +10,7 @@ import type { VariationNodeId, VarNode } from "../types/variationTree";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useVariationTree } from "../hooks/useVariationTree";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
+import { useAnalysisEvidence } from "../services/analysisEvidence";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
 import { moverMateToWhiteCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
@@ -34,6 +35,10 @@ import {
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 const ENGINE_SEARCH_DEPTH = 21;
 const ENGINE_EVALUATION_DEBOUNCE_MS = 120;
+// Dwell before the evidence driver starts a depth-21 search on the displayed
+// mainline position (g-cache-stronger-evals). Long enough that scrubbing through
+// moves does not spawn a search per intermediate position.
+const EVIDENCE_DWELL_MS = 700;
 
 type AnalysisBoardProps = {
   moves: AnalysisMove[];
@@ -45,6 +50,12 @@ type AnalysisBoardProps = {
   positionAnalysis?: Record<string, PositionAnalysis>;
   highlightedMoves?: { indices: number[]; classification: 'blunder' | 'mistake' | 'inaccuracy' } | null;
   onGraphMoveClick?: () => void;
+  /**
+   * Saved-game session id (g-cache-stronger-evals). When present, the analysis-board
+   * evidence driver persists stronger depth-21 evidence for dwelled mainline moves.
+   * Omitted by the ephemeral drill board so it never writes evidence.
+   */
+  sessionId?: string;
 };
 
 // Convert SAN move to start/end squares using chess.js
@@ -191,13 +202,17 @@ const buildEngineLinePreview = (
   };
 };
 
-const buildMainLineMoveDetails = (
+export const buildMainLineMoveDetails = (
   moves: AnalysisMove[],
   startingFen: string,
 ): MainLineMoveDetails[] => {
   return moves.map((move, index) => {
+    // Prefer the exact wire `fen_before` (g-cache-stronger-evals); fall back to the
+    // previous move's `fen_after` chain only for legacy sessions whose wire field is
+    // null, so existing games still render.
     const fenBefore =
-      index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen;
+      move.fen_before ??
+      (index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen);
     const playedSquares = sanToSquares(fenBefore, move.move_san);
     const bestSquares =
       move.best_move_san && move.best_move_san !== move.move_san
@@ -234,6 +249,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   positionAnalysis,
   highlightedMoves,
   onGraphMoveClick,
+  sessionId,
 }, ref) => {
   const debugEnabled = useMemo(() => isAnalysisBoardDiagnosticsEnabled(), []);
   const isNarrow = useMediaQuery("(max-width: 720px)");
@@ -310,6 +326,44 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   }, [selectedVarNodeId, tree]);
 
   const effectiveIndex = currentIndex ?? moves.length - 1;
+
+  // Analysis-board evidence driver (g-cache-stronger-evals): persist stronger
+  // depth-21 evidence for the mainline move the user is dwelling on. No-ops when
+  // sessionId is absent (drill/ephemeral boards).
+  const { requestEvidence: requestAnalysisEvidence, cancel: cancelAnalysisEvidence } =
+    useAnalysisEvidence(sessionId);
+
+  // Drive one evidence search for the NEXT mainline move after a dwell. Fires only
+  // on the mainline (never a variation), only when a real next move exists with
+  // exact wire keys, and only once the display engine has settled — so the two
+  // engines do not fight. Navigation reruns this effect: cleanup cancels any
+  // in-flight evidence search so an interrupted search never submits.
+  useEffect(() => {
+    if (!sessionId || isInVariation) return;
+    const nextMove = moves[effectiveIndex + 1];
+    const fen = nextMove?.fen_before;
+    const move = nextMove?.move_uci;
+    // Skip legacy moves with null wire fields; the driver never reconstructs them.
+    if (!fen || !move) return;
+    // Defer to the display engine: while it is searching, wait for it to settle.
+    if (engineThinking) return;
+    const playerColor = fenSideToMove(fen) === "w" ? "white" : "black";
+    const timer = window.setTimeout(() => {
+      requestAnalysisEvidence(fen, move, playerColor);
+    }, EVIDENCE_DWELL_MS);
+    return () => {
+      clearTimeout(timer);
+      cancelAnalysisEvidence();
+    };
+  }, [
+    sessionId,
+    isInVariation,
+    effectiveIndex,
+    moves,
+    engineThinking,
+    requestAnalysisEvidence,
+    cancelAnalysisEvidence,
+  ]);
 
   const traceNavigation = useCallback(
     (toIndex: number | null) => {

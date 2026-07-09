@@ -387,6 +387,34 @@ def test_non_browser_untrusted_source_surfaces(session):
     assert out[(POS_A, "f1c4")] == MoveEval(cp=44, mate=None)
 
 
+def test_untrusted_fallback_ranks_analysis_over_game(session):
+    # g-cache-stronger-evals: among untrusted tier-4 survivors at the same normalized
+    # position+move, source_rank("analysis") < source_rank("game"), so an analysis
+    # row outranks a game row when no exact untrusted row exists.
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=10, source="game",
+          trusted=False, analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    _seed(session, fen="r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 6 7",
+          uci="f1c4", played_eval=20, source="analysis",
+          trusted=False, analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=20, mate=None)
+
+
+def test_exact_game_row_beats_normalized_analysis_transposition(session):
+    # The analysis source rank only reorders tier 4 (normalized untrusted). An EXACT
+    # untrusted game row (tier 3) still wins over a normalized analysis row (tier 4).
+    _seed(session, fen=POS_A, uci="f1c4", played_eval=10, source="game",
+          trusted=False, analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    _seed(session, fen=POS_B, uci="f1c4", played_eval=20, source="analysis",
+          trusted=False, analysis_profile_id=BROWSER_PROFILE_ID,
+          evidence_contract_id="resolver-complete-v1")
+    out = lookup_move_evals(session, [(POS_A, "f1c4")])
+    assert out[(POS_A, "f1c4")] == MoveEval(cp=10, mate=None)
+
+
 def test_mixed_batch_trusted_untrusted_and_miss(session):
     # One node trusted (tier 1), one untrusted-only (tier 3), one genuine miss.
     _seed(session, fen=POS_A, uci="f1c4", played_eval=42)               # trusted exact

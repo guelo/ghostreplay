@@ -15,6 +15,7 @@ import {
   getOpeningFamilyScores,
   getStatsSummary,
   getStatsAchievements,
+  submitAnalysisEvidence,
 } from './api'
 
 const fetchMock = vi.fn()
@@ -1099,5 +1100,46 @@ describe('getOpeningFamilyScores', () => {
     await expect(getOpeningFamilyScores('white')).rejects.toThrow(
       'Failed to load opening families: Bad Request',
     )
+  })
+})
+
+describe('submitAnalysisEvidence', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+  })
+
+  const row = {
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    move_uci: 'e2e4',
+    best_move_uci: 'e2e4',
+    best_line_uci: ['e2e4', 'e7e5'],
+    played_eval: 30,
+    played_eval_mate: null,
+    best_eval: 30,
+    best_eval_mate: null,
+    eval_delta: 0,
+    classification: 'best',
+  }
+
+  it('posts rows to the session analysis-evidence endpoint with auth headers', async () => {
+    mockResponse({ results: [{ fen: row.fen, move_uci: 'e2e4', reason: 'new_key' }] })
+
+    const results = await submitAnalysisEvidence('sess-1', [row])
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/session/sess-1/analysis-evidence'),
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ rows: [row] }),
+      }),
+    )
+    expect(results).toEqual([{ fen: row.fen, move_uci: 'e2e4', reason: 'new_key' }])
+  })
+
+  it('short-circuits an empty batch without a request', async () => {
+    const results = await submitAnalysisEvidence('sess-1', [])
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(results).toEqual([])
   })
 })

@@ -289,7 +289,8 @@ describe('BlundersPage', () => {
     await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledWith('source-session'));
     await waitFor(() => expect(mockAnalysisBoard).toHaveBeenCalled());
     expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
-      expect.objectContaining({ initialMoveIndex: 4 }),
+      // The evidence driver session is the same source session the board renders.
+      expect.objectContaining({ initialMoveIndex: 4, sessionId: 'source-session' }),
       undefined,
     );
   });
@@ -317,6 +318,11 @@ describe('BlundersPage', () => {
 
     await waitFor(() => expect(mockFetchAnalysis).toHaveBeenCalledWith('review-session'));
     await waitFor(() => expect(mockAnalysisBoard).toHaveBeenCalled());
+    // Falls back to the review session id when there is no source session.
+    expect(mockAnalysisBoard).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionId: 'review-session' }),
+      undefined,
+    );
   });
 
   it('retries cancelled background opening derivation requests', async () => {

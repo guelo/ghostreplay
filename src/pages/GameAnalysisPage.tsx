@@ -176,6 +176,7 @@ function GameAnalysisPage() {
                   key={id}
                   moves={projectedMoves}
                   boardOrientation={playerColor}
+                  sessionId={id ?? undefined}
                   initialMoveIndex={projectedMoves.length > 0 ? 0 : undefined}
                   positionAnalysis={analysis.position_analysis}
                   highlightedMoves={highlightedMoves}

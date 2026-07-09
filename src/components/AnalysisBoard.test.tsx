@@ -2,7 +2,7 @@ import { Chess } from 'chess.js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '../test/utils'
 import { setMatchMedia } from '../test/setup'
-import AnalysisBoard from './AnalysisBoard'
+import AnalysisBoard, { buildMainLineMoveDetails } from './AnalysisBoard'
 import { computeBoardEvalIcon } from './AnalysisBoard.helpers'
 import type { AnalysisMove } from '../utils/api'
 import type { VariationTree, VarNode } from '../types/variationTree'
@@ -101,6 +101,19 @@ vi.mock('../hooks/useMoveAnalysis', () => ({
 
 vi.mock('../hooks/useStockfishEngine', () => ({
   useStockfishEngine: mockUseStockfishEngine,
+}))
+
+// Evidence driver (g-cache-stronger-evals): spy on requestEvidence/cancel so the
+// gating in AnalysisBoard can be asserted without a real second Stockfish worker.
+const { mockRequestEvidence, mockCancelEvidence } = vi.hoisted(() => ({
+  mockRequestEvidence: vi.fn(),
+  mockCancelEvidence: vi.fn(),
+}))
+vi.mock('../services/analysisEvidence', () => ({
+  useAnalysisEvidence: () => ({
+    requestEvidence: mockRequestEvidence,
+    cancel: mockCancelEvidence,
+  }),
 }))
 
 // --- Prop-capturing mocks ---
@@ -2151,5 +2164,174 @@ describe('computeBoardEvalIcon', () => {
     })
     expect(icon?.left).toBe('88.5%') // mirrored to top-left of edge square
     expect(icon?.top).toBe('2.5%') // clamped at top
+  })
+})
+
+describe('AnalysisBoard evidence driver gating (g-cache-stronger-evals)', () => {
+  const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+  const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+  const wiredMoves: AnalysisMove[] = [
+    { ...moves[0], fen_before: START, move_uci: 'e2e4', fen_after: AFTER_E4 },
+    { ...moves[1], fen_before: AFTER_E4, move_uci: 'c7c5' },
+  ]
+
+  it('requests evidence for the next mainline move after the dwell', () => {
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(mockRequestEvidence).toHaveBeenCalledWith(AFTER_E4, 'c7c5', 'black')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not request evidence when no next move exists (latest position)', () => {
+    vi.useFakeTimers()
+    try {
+      render(<AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" />)
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(mockRequestEvidence).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not request evidence without a sessionId', () => {
+    vi.useFakeTimers()
+    try {
+      render(<AnalysisBoard moves={wiredMoves} boardOrientation="white" initialMoveIndex={0} />)
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(mockRequestEvidence).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not request evidence while in a variation', () => {
+    const node: VarNode = {
+      id: 'var-1',
+      san: 'Bc4',
+      fen: 'rnbqkbnr/pp1ppppp/8/2p5/2B1P3/8/PPPP1PPP/RNBQKNR b KQkq - 1 2',
+      fenBefore: AFTER_E4,
+      uci: 'f1c4',
+      parentId: null,
+      parentGameIndex: 1,
+      branchPlyOffset: 0,
+      children: [],
+      nestingLevel: 0,
+    }
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(mockRequestEvidence).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not request evidence for a move with null wire fields (legacy)', () => {
+    const legacyMoves: AnalysisMove[] = [
+      { ...moves[0], fen_before: START, move_uci: 'e2e4', fen_after: AFTER_E4 },
+      { ...moves[1], fen_before: null, move_uci: null },
+    ]
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard moves={legacyMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(mockRequestEvidence).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('still requests evidence when a trusted position best exists (no trustedBest gate)', () => {
+    vi.useFakeTimers()
+    try {
+      render(
+        <AnalysisBoard
+          moves={wiredMoves}
+          boardOrientation="white"
+          sessionId="s1"
+          initialMoveIndex={0}
+          positionAnalysis={{
+            [AFTER_E4]: {
+              best_move_uci: 'c7c5',
+              best_move_san: 'c5',
+              best_move_eval_cp: -20,
+              best_line_uci: ['c7c5', 'g1f3'],
+              position_trusted: true,
+            },
+          }}
+        />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(700)
+      })
+      expect(mockRequestEvidence).toHaveBeenCalledWith(AFTER_E4, 'c7c5', 'black')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('buildMainLineMoveDetails wire-field migration (g-cache-stronger-evals)', () => {
+  const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+  const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+  const move = (over: Partial<AnalysisMove>): AnalysisMove => ({
+    move_number: 1,
+    color: 'white',
+    move_san: 'e4',
+    fen_after: AFTER_E4,
+    eval_cp: 30,
+    eval_mate: null,
+    best_move_san: null,
+    best_move_eval_cp: null,
+    eval_delta: 0,
+    classification: 'best',
+    ...over,
+  })
+
+  it('prefers the wire fen_before over the chain-reconstructed FEN', () => {
+    // Clock-drift variant: reconstruction for index 0 would use START.
+    const DRIFTED = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 9 5'
+    const details = buildMainLineMoveDetails([move({ fen_before: DRIFTED })], START)
+    expect(details[0].fenBefore).toBe(DRIFTED)
+  })
+
+  it('falls back to reconstruction when the wire fen_before is null (legacy)', () => {
+    const details = buildMainLineMoveDetails([move({ fen_before: null })], START)
+    expect(details[0].fenBefore).toBe(START)
+  })
+
+  it('reconstructs a later move from the previous fen_after when wire is null', () => {
+    const details = buildMainLineMoveDetails(
+      [
+        move({ fen_before: null, move_san: 'e4', fen_after: AFTER_E4 }),
+        move({ fen_before: null, color: 'black', move_san: 'e5', fen_after: START }),
+      ],
+      START,
+    )
+    expect(details[1].fenBefore).toBe(AFTER_E4)
   })
 })

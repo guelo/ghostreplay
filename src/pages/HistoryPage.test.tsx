@@ -59,11 +59,13 @@ vi.mock('../components/AnalysisBoard', () => ({
         initialMoveIndex,
         footer,
         mobileToolbar,
+        sessionId,
       }: {
         boardOrientation: string;
         initialMoveIndex?: number;
         footer?: React.ReactNode;
         mobileToolbar?: React.ReactNode;
+        sessionId?: string;
       },
       ref: React.Ref<{ jumpToMove: (index: number) => void }>,
     ) => {
@@ -73,6 +75,7 @@ vi.mock('../components/AnalysisBoard', () => ({
           data-testid="analysis-board"
           data-orientation={boardOrientation}
           data-initial-move={initialMoveIndex}
+          data-session-id={sessionId}
         >
           {mobileToolbar}
           {footer}
@@ -148,6 +151,8 @@ describe('HistoryPage', () => {
     expect(mockFetchHistory).toHaveBeenCalled();
     expect(mockFetchAnalysis).toHaveBeenCalledWith('abc-123');
     expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-initial-move', '0');
+    // Passes the selected game's session id to the evidence driver.
+    expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-session-id', 'abc-123');
   });
 
   it('captures history_game_selected when a different game is chosen', async () => {

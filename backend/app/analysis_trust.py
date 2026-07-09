@@ -32,11 +32,20 @@ from app.evidence_contracts import (
 
 # Deterministic source preference shared by the position-grain ranking (the repo's
 # legacy fallback) and the move-grain ranking (``tree_eval._move_sort_key``): a
-# precomputed opening-book eval first, then a player-game eval, then any other or
-# unknown source. Hosted here (a neutral module) so both rankings share one
-# definition without an import cycle.
-_SOURCE_RANK = {"precomputed": 0, "game": 1}
-_OTHER_SOURCE_RANK = 2
+# precomputed opening-book eval first, then stronger browser-analysis-board
+# evidence, then a player-game eval, then any other or unknown source. Hosted here
+# (a neutral module) so both rankings share one definition without an import cycle.
+#
+# ``analysis`` (g-cache-stronger-evals) ranks between precomputed and game and is
+# stamped by rows the analysis-evidence endpoint writes. Its ONLY functional effect
+# is in ``tree_eval.lookup_move_evals`` tier 4 (the normalized untrusted
+# transposition fallback): a normalized ``analysis`` row outranks a normalized
+# ``game`` row there ONLY when no exact untrusted row exists (tier 3 exact rows are
+# checked first). Position-grain resolution is unaffected because browser-analysis
+# is non-authoritative and ``resolve_trusted_positions`` pre-filters to trusted rows
+# before sorting, so the ``analysis`` tier is inert for that consumer.
+_SOURCE_RANK = {"precomputed": 0, "analysis": 1, "game": 2}
+_OTHER_SOURCE_RANK = 3
 
 
 def source_rank(source: str | None) -> int:

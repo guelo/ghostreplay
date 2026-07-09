@@ -12,15 +12,18 @@ vi.mock("../components/AnalysisBoard", () => ({
     boardOrientation,
     initialMoveIndex,
     footer,
+    sessionId,
   }: {
     boardOrientation: string;
     initialMoveIndex?: number;
     footer?: ReactNode;
+    sessionId?: string;
   }) => (
     <div
       data-testid="analysis-board"
       data-orientation={boardOrientation}
       data-initial-move={initialMoveIndex}
+      data-session-id={sessionId ?? "none"}
     >
       {footer}
     </div>
@@ -85,6 +88,8 @@ describe("DrillAnalysisPage", () => {
     const board = screen.getByTestId("analysis-board");
     expect(board).toHaveAttribute("data-orientation", "black");
     expect(board).toHaveAttribute("data-initial-move", "0");
+    // The ephemeral drill board passes NO sessionId, so it never writes evidence.
+    expect(board).toHaveAttribute("data-session-id", "none");
     expect(screen.getByText(/not saved/i)).toBeInTheDocument();
   });
 

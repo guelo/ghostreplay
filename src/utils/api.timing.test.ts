@@ -95,6 +95,18 @@ describe('normalizeApiPath', () => {
     )
   })
 
+  it('maps the analysis-evidence route to the exact template (not {id} fallback)', () => {
+    expect(normalizeApiPath(`/api/session/${uuid}/analysis-evidence`)).toBe(
+      '/api/session/{session_id}/analysis-evidence',
+    )
+  })
+
+  it('still maps the sibling session analysis route to its own template', () => {
+    expect(normalizeApiPath(`/api/session/${uuid}/analysis`)).toBe(
+      '/api/session/{session_id}/analysis',
+    )
+  })
+
   it('maps the opening score-delta poll route to the backend template', () => {
     expect(normalizeApiPath(`/api/openings/score-delta/${uuid}`)).toBe(
       '/api/openings/score-delta/{session_id}',

@@ -104,4 +104,37 @@ describe('projectExactBest', () => {
     expect(twice[0].classification).toBe('best')
     expect(twice[0].eval_delta).toBe(0)
   })
+
+  // g-cache-stronger-evals: prefer the exact wire fields over chain reconstruction.
+  it('prefers the wire fen_before over the chain-reconstructed FEN', () => {
+    // Clock-drift variant: reconstruction for index 0 would use STARTING_FEN, but
+    // the entry is keyed ONLY under the drifted wire fen_before. Promotion happens
+    // only if the wire value is used for the lookup.
+    const DRIFTED = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 5 3'
+    const moves = [makeMove({ classification: 'good', fen_before: DRIFTED, move_uci: 'e2e4' })]
+    const out = projectExactBest(moves, { [DRIFTED]: makePos() })
+
+    expect(out[0].classification).toBe('best')
+    expect(out[0].eval_delta).toBe(0)
+  })
+
+  it('prefers the wire move_uci over deriving played UCI from SAN', () => {
+    // SAN is intentionally unparseable; only the wire move_uci can make the played
+    // move equal the trusted best, so promotion proves the wire UCI is used.
+    const moves = [makeMove({ classification: 'good', move_san: 'Zz9', move_uci: 'e2e4' })]
+    const out = projectExactBest(moves, { [STARTING_FEN]: makePos() })
+
+    expect(out[0].classification).toBe('best')
+    expect(out[0].eval_delta).toBe(0)
+  })
+
+  it('falls back to reconstruction when wire fields are null (legacy session)', () => {
+    // No wire fen_before/move_uci: index 0 reconstructs to STARTING_FEN and derives
+    // played UCI from SAN, so a legacy session still projects.
+    const moves = [makeMove({ classification: 'good', fen_before: null, move_uci: null })]
+    const out = projectExactBest(moves, { [STARTING_FEN]: makePos() })
+
+    expect(out[0].classification).toBe('best')
+    expect(out[0].eval_delta).toBe(0)
+  })
 })

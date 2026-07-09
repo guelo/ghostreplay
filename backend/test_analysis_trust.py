@@ -111,6 +111,16 @@ def test_source_rank_ordering():
     assert source_rank(None) == source_rank("anything-unknown")
 
 
+def test_source_rank_analysis_between_precomputed_and_game():
+    # g-cache-stronger-evals: analysis-board evidence ranks below precomputed but
+    # above player-game evidence in the shared source preference.
+    assert source_rank("analysis") == 1
+    assert source_rank("precomputed") < source_rank("analysis") < source_rank("game")
+    # Existing relative order preserved and unknown sources still rank last.
+    assert source_rank("game") < source_rank("other")
+    assert source_rank(None) == source_rank("anything-unknown")
+
+
 # --- row projectors (getattr-based; no ORM import) -----------------------------
 
 

@@ -140,6 +140,11 @@ export const buildDrillAnalysisSnapshot = (
       color: upload.color,
       move_san: upload.move_san,
       fen_after: upload.fen_after,
+      // Exact evidence keys carried through for display-helper parity with backend
+      // responses; the ephemeral drill board passes no sessionId, so the evidence
+      // driver never runs here (g-cache-stronger-evals).
+      fen_before: upload.fen_before,
+      move_uci: upload.move_uci,
       eval_cp: upload.eval_cp,
       eval_mate: upload.eval_mate,
       best_move_san: upload.best_move_san,

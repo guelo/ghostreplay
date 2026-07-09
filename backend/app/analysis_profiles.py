@@ -69,7 +69,13 @@ class Profile:
     multipv: int | None
     analyzer_protocol_version: str | None
     profile_manifest_digest: str | None
-    authoritative: bool  # may this profile replace legacy/other-family rows?
+    authoritative: bool  # canonical: read-trusted, reclaims legacy, resolve-stamped
+    # Replacement eligibility split from authority (g-cache-stronger-evals): a
+    # NON-authoritative profile may still replace a weaker COMPATIBLE profile via an
+    # explicit ``dominates`` edge, without becoming a canonical/read-trusted hit or
+    # gaining legacy-reclamation rights. Defaults False; the manifest loader defaults
+    # it from ``authoritative`` so canonical profiles keep their existing behavior.
+    replacement_eligible: bool = False
     active: bool = True  # current-for-resolution; retired profiles are inactive
     # Legacy single-column network identity, retired from the identity set.
     network_id: str | None = None
@@ -126,7 +132,16 @@ _DIGEST_FIELDS = (
 
 CANONICAL_PROFILE_ID = "canonical-sf18-depth24-v1"
 BROWSER_PROFILE_ID = "browser-game-v1"
+BROWSER_ANALYSIS_PROFILE_ID = "browser-analysis-v1"
 JEFFML_PROFILE_ID = "jeffml-scores-v1"
+
+# The Stockfish-18 lite-single browser analyzer protocol: a root best-move search
+# plus a post-played and post-best search at depth N, ``computeAnalysisResult`` for
+# the eval triple, and ``classifyMoveAdvanced`` classification (accepted only when
+# the worker reports ``canonical===true``). Same method as the browser-game
+# producer, only deeper — bumped independently of ``ANALYZER_PROTOCOL_VERSION``
+# (the canonical analyzer) because it is a distinct producer contract.
+BROWSER_ANALYZER_PROTOCOL_VERSION = "browser-analyzer-v1"
 
 
 def _manifest_digest(values: dict) -> str:
@@ -234,6 +249,10 @@ def _load_manifest(profile_id: str) -> Profile:
         analyzer_protocol_version=m["analyzer_protocol_version"],
         profile_manifest_digest=digest,
         authoritative=m["authoritative"],
+        # A canonical manifest defaults replacement_eligible to its authoritative
+        # value, so existing canonical profiles are unchanged; a manifest can opt a
+        # non-authoritative profile into replacement eligibility explicitly.
+        replacement_eligible=m.get("replacement_eligible", m["authoritative"]),
         active=m["active"],
         dominates=frozenset(m.get("dominates", ())),
     )
@@ -280,8 +299,67 @@ _JEFFML = Profile(
     authoritative=False,
 )
 
+# --- Browser analysis-board profile (g-cache-stronger-evals) -------------------
+#
+# Depth-21 single-PV post-move analyzer evidence produced by reusing
+# analysisWorker.ts at a deeper depth — the SAME protocol as browser-game, only
+# deeper. NON-authoritative (never a trusted /lookup hit, never reclaims legacy
+# rows, never overwrites canonical depth-24) but replacement_eligible, so it can
+# replace the weaker depth-17 browser-game-v1 row through the explicit dominates
+# edge below.
+#
+# ``engine_build`` is the SHA-256 of the compiled WASM artifact
+# node_modules/stockfish/bin/stockfish-18-lite-single.wasm (canonical
+# executable-hash semantics). Surrounding provenance, NOT part of identity:
+#   * JS loader stockfish-18-lite-single.js SHA-256
+#       2278005057f381491f1c9bb3e44c9f5920b3a00bef9759e33cc6582769a1f1fe
+#   * npm package stockfish@18.0.7
+#   * npm integrity
+#       sha512-tJ+bfMAHs4fV7QYiLcHUicx1RzKOQwj8twx/z0iUTauMG+SE3l1rEtRSg+WER81ke3bc5tqKBWEWntUbydkgZg==
+# The lite-single build embeds ONE net nn-9067e33176e8.nnue (SHA-256
+# 9067e33176e8...314d, verified content-addressed by its filename) and has NO
+# small net. This differs from canonical SF18's big net nn-c288c895ea92.nnue, so
+# browser-analysis is network-incompatible with canonical and never dominates it.
+# ``engine_version`` is the UCI id-name token ("Stockfish 18 Lite WASM" -> "18");
+# the npm version 18.0.7 is provenance only.
+#
+# _assert_fully_pinned does not run for non-authoritative profiles, but this
+# profile still pins the full net hash and engine artifact hash for honest
+# provenance and stable read-time identity verification.
+_BROWSER_ANALYSIS_IDENTITY = {
+    "engine_name": "Stockfish",
+    "engine_version": "18",
+    "engine_build": "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1",
+    "eval_file_id": (
+        "nn-9067e33176e8.nnue:"
+        "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+    ),
+    "eval_file_small_id": None,
+    "search_limit_type": "depth",
+    "search_limit_value": 21,
+    "threads": 1,
+    "hash_mb": 128,
+    "multipv": 1,
+    "analyzer_protocol_version": BROWSER_ANALYZER_PROTOCOL_VERSION,
+}
+
+_BROWSER_ANALYSIS = Profile(
+    profile_id=BROWSER_ANALYSIS_PROFILE_ID,
+    # Runtime-observable NNUE filename (RESOLUTION_FIELDS only, NOT identity-
+    # verified and deliberately excluded from stamp_profile_full / the digest).
+    eval_file="nn-9067e33176e8.nnue",
+    eval_file_small=None,
+    profile_manifest_digest=_manifest_digest(_BROWSER_ANALYSIS_IDENTITY),
+    authoritative=False,
+    replacement_eligible=True,
+    active=True,
+    dominates=frozenset({BROWSER_PROFILE_ID}),
+    **_BROWSER_ANALYSIS_IDENTITY,
+)
+
 _REGISTRY: dict[str, Profile] = {
-        p.profile_id: p for p in (_CANONICAL, _CANONICAL_LINUX, _BROWSER, _JEFFML)
+        p.profile_id: p
+        for p in (_CANONICAL, _CANONICAL_LINUX, _BROWSER, _BROWSER_ANALYSIS, _JEFFML)
 }
 
 
@@ -326,6 +404,26 @@ def stamp_identity(profile_id: str) -> dict:
         "analyzer_protocol_version": profile.analyzer_protocol_version,
         "profile_manifest_digest": profile.profile_manifest_digest,
     }
+
+
+def stamp_profile_full(profile_id: str) -> dict:
+    """Full read-time identity stamp for a non-canonical writer (browser-analysis).
+
+    Returns EVERY :data:`IDENTITY_FIELDS` column from the registered profile so a
+    row written outside the ``resolve_profile`` path still ``identity_verified``\\ s
+    against the registry. Canonical writers observe most identity columns at run
+    time and only need the narrower :func:`stamp_identity` manifest fields; the
+    browser-analysis endpoint has no runtime observation, so it stamps all 12.
+
+    Deliberately OMITS the ``RESOLUTION_FIELDS``-only runtime filenames
+    ``eval_file`` / ``eval_file_small``: they are not part of ``IDENTITY_FIELDS`` and
+    adding them would change the identity/digest contract. Returns ``{}`` for an
+    unknown id.
+    """
+    profile = get_profile(profile_id)
+    if profile is None:
+        return {}
+    return {f: getattr(profile, f) for f in IDENTITY_FIELDS}
 
 
 # --- Cross-profile search-strength comparison (g-position-analysis Phase 2) -----

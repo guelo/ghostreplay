@@ -1089,4 +1089,86 @@ describe('analysisWorker', () => {
       vi.useRealTimers()
     }
   })
+
+  it('defaults to go depth 17 when no depth is supplied (in-game path)', async () => {
+    await import('./analysisWorker')
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'no-depth',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e4',
+          playerColor: 'white',
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 17')
+    })
+    expect(engineWorkerPostMessageMock).not.toHaveBeenCalledWith('go depth 21')
+  })
+
+  it('threads the evidence depth into the root, post-played, and post-best searches', async () => {
+    await import('./analysisWorker')
+    engineMessageHandler?.('uciok')
+    engineMessageHandler?.('readyok')
+    engineWorkerPostMessageMock.mockClear()
+
+    // played (e2e3) != best (e2e4) so all THREE searches run.
+    messageHandler?.(
+      new MessageEvent('message', {
+        data: {
+          type: 'analyze-move',
+          id: 'evidence-depth',
+          fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+          move: 'e2e3',
+          playerColor: 'white',
+          depth: 21,
+        } satisfies AnalysisWorkerRequest,
+      }),
+    )
+
+    // Root best search.
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith('go depth 21')
+    })
+    engineMessageHandler?.('info depth 21 multipv 1 score cp 30 pv e2e4 e7e5')
+    engineMessageHandler?.('bestmove e2e4')
+
+    // Post-played search (moves e2e3).
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        expect.stringContaining('moves e2e3'),
+      )
+    })
+    engineMessageHandler?.('info depth 21 score cp 20 pv e7e5')
+    engineMessageHandler?.('bestmove e7e5')
+
+    // Post-best search (moves e2e4).
+    await vi.waitFor(() => {
+      expect(engineWorkerPostMessageMock).toHaveBeenCalledWith(
+        expect.stringContaining('moves e2e4'),
+      )
+    })
+    engineMessageHandler?.('info depth 21 score cp 30 pv e7e5')
+    engineMessageHandler?.('bestmove e7e5')
+
+    await vi.waitFor(() => {
+      expect(postMessageMock).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'analysis', id: 'evidence-depth', canonical: true }),
+      )
+    })
+
+    // All three internal searches used depth 21; none used the default 17.
+    const depthCalls = engineWorkerPostMessageMock.mock.calls.filter(
+      ([c]) => typeof c === 'string' && c.startsWith('go depth'),
+    )
+    expect(depthCalls).toEqual([['go depth 21'], ['go depth 21'], ['go depth 21']])
+  })
 })

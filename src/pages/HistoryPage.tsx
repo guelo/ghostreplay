@@ -255,6 +255,7 @@ function HistoryPage() {
                     key={selectedGame.session_id}
                     moves={analysis.moves}
                     boardOrientation={playerColor}
+                    sessionId={selectedGame.session_id}
                     initialMoveIndex={analysis.moves.length > 0 ? 0 : undefined}
                     positionAnalysis={analysis.position_analysis}
                     highlightedMoves={highlightedMoves}

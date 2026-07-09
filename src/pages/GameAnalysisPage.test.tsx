@@ -31,11 +31,12 @@ vi.mock('../utils/api', async () => {
 
 // Mock AnalysisBoard to avoid pulling in chess rendering
 vi.mock('../components/AnalysisBoard', () => ({
-  default: ({ boardOrientation, initialMoveIndex }: { boardOrientation: string; initialMoveIndex?: number }) => (
+  default: ({ boardOrientation, initialMoveIndex, sessionId }: { boardOrientation: string; initialMoveIndex?: number; sessionId?: string }) => (
     <div
       data-testid="analysis-board"
       data-orientation={boardOrientation}
       data-initial-move={initialMoveIndex}
+      data-session-id={sessionId}
     />
   ),
 }));
@@ -142,6 +143,11 @@ describe('GameAnalysisPage', () => {
     expect(screen.getByTestId('analysis-board')).toHaveAttribute(
       'data-initial-move',
       '0',
+    );
+    // Passes the page's saved-game session id to the evidence driver.
+    expect(screen.getByTestId('analysis-board')).toHaveAttribute(
+      'data-session-id',
+      'abc-123',
     );
   });
 

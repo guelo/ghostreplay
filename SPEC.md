@@ -490,6 +490,90 @@ response exposes `source`, `analysis_profile_id`, `engine_version`, `engine_buil
 `evidence_contract_id`, and an `authoritative` trust flag derived from the same
 validation the writer uses.
 
+**Stronger analysis-board evidence (g-cache-stronger-evals).** The analysis board
+runs a deeper depth-21 search than the in-game depth-17 producer, and that stronger
+evidence is now persistable. Key points:
+
+- **Browser profile ordering** is `browser-game-v1 < browser-analysis-v1 <
+  canonical-24`, expressed by explicit `dominates` edges only — never by raw numeric
+  depth. `browser-analysis-v1` `dominates` `browser-game-v1`; both canonical
+  manifests `dominates` `browser-analysis-v1`.
+- **`authoritative` vs `replacement_eligible`.** `Profile.authoritative` still means
+  canonical: read-trusted on `/lookup`, reclaims legacy rows, `resolve_profile`
+  stamped. A new `replacement_eligible` flag is split out: a NON-authoritative but
+  replacement-eligible profile (`browser-analysis-v1`) may replace a weaker
+  *compatible* profile via a `dominates` edge, but never becomes read-trusted, never
+  reclaims legacy/unidentified rows, and never overwrites canonical depth-24.
+  `replacement_eligible` defaults from `authoritative`, so canonical/browser-game
+  behavior is unchanged (browser-game stays first-wins).
+- **`browser-analyzer-v1`** is the analysisWorker post-move protocol at depth 21 —
+  root best-move + post-played + post-best searches, `computeAnalysisResult`, and
+  `classifyMoveAdvanced` (accepted only when the worker reports `canonical===true`) —
+  the same method as browser-game, just deeper. A hybrid display result (restricted
+  `searchmoves`, an excluded cached best move, or a merged cached line) is NEVER
+  stamped as this profile; only the unrestricted analyzer worker produces evidence.
+- **Exact-key model.** `SessionAnalysisMove` now carries `fen_before` and `move_uci`.
+  The FEN half is the durable `SessionMove.fen_before` (the same bytes browser-game
+  wrote); the UCI half is server-derived from stored SAN via python-chess (SessionMove
+  has no stored UCI). Evidence writes key on those exact values so a depth-21 row
+  lands on the existing depth-17 `browser-game-v1` row. A derivation mismatch degrades
+  gracefully to a near-duplicate `NEW_KEY` insert beside the old row, never
+  corruption. Display helpers (`buildMainLineMoveDetails`, `projectExactBest`) prefer
+  the wire fields with a legacy-only reconstruction fallback; the evidence driver has
+  NO fallback (a null wire field skips the move).
+- **Eval storage.** Evals are stored white-relative; mate is stored both as a finite
+  mate-to-CP `*_eval` and a raw `*_eval_mate` count. The client recomputes `eval_delta`
+  from the white-relative evals and clamps it at `>= 0` (never forwarding the worker's
+  raw mover-relative delta), making each row self-consistent with `resolver-complete-v2`.
+- **Mate fields never veto dominance.** Rule 5's completeness (superset) check strips
+  the optional `played_eval_mate`/`best_eval_mate` before comparing, so a stronger
+  CP-only row replaces a weaker row that merely stored a raw mate count. The exclusion
+  is symmetric and global to Rule 5 (a CP-only canonical write also replaces a browser
+  row that stored mate counts). Same-profile MERGE (Rule 2) is unchanged: there mate
+  fields are genuinely additive and still participate in agreement/superset checks.
+- **Network identity.** `browser-analysis-v1` pins the lite-single net
+  `nn-9067e33176e8.nnue` (full SHA-256 …993f314d), distinct from canonical SF18's big
+  net `nn-c288c895ea92.nnue`, so browser-analysis is network-incompatible with
+  canonical and can never dominate it. `engine_build` is the SHA-256 of the compiled
+  `stockfish-18-lite-single.wasm` artifact; the JS loader hash, npm package version
+  (`stockfish@18.0.7`), and npm integrity are surrounding provenance only.
+  `engine_version="18"` is the UCI `id name` token (npm `18.0.7` is provenance only).
+- **Canonical replacement is guaranteed** for current canonical `resolver-complete-v2`
+  writes replacing browser-analysis; a future canonical `move-complete-v1` would NOT
+  replace a browser-analysis v2 row under the current superset check (cross-grain gap
+  tracked in `g-6xc3`).
+- **Not read-trusted.** Browser-analysis rows are never `/lookup` trusted hits or
+  frontend trusted publications; read-time trust for stronger browser rows is the
+  follow-up `g-v21l`.
+- **Source ranking** is `precomputed < analysis < game < other`. Rows written by the
+  evidence endpoint stamp `source="analysis"`. Its only functional effect is in
+  `tree_eval.lookup_move_evals` tier 4 (the normalized untrusted transposition
+  fallback): a normalized `analysis` row outranks a normalized `game` row there ONLY
+  when no exact untrusted row exists (tier-3 exact rows win first). Position-grain
+  resolution is unaffected (browser-analysis is non-authoritative and
+  `resolve_trusted_positions` pre-filters to trusted rows). Accepted cross-user blast
+  radius: a client-supplied `source="analysis"` row from one user's owned session can
+  outrank a `source="game"` row in other users' tier-4 untrusted fallback — the same
+  broad trust tier as existing browser-game rows, with stricter full-PV legality
+  validation, never crossing into trusted paths.
+- **Endpoint.** `POST /api/session/{session_id}/analysis-evidence` is session-scoped,
+  owner-only, gated on `_should_run_session_move_evidence` (hidden/abandoned drills
+  rejected with `session_not_evidence_eligible`), and guarded by exact mainline
+  membership. SAN is server-derived from validated UCI and never trusted from the
+  client; the backend stamps all profile/authority/source identity. FEN, move,
+  best-move, and full-PV legality are validated (stricter than the browser-game upload,
+  so it may drop otherwise-uploadable rows as a missed upgrade). The response is one
+  entry per submitted row in request order, including `duplicate_request_key` handling.
+  Owned-session client evals are accepted unverified (matching browser-game); server
+  eval re-verification is out of scope. Evidence-writing surfaces are the saved-game
+  `GameAnalysisPage`, `HistoryPage`, and `BlundersPage` boards; `DrillAnalysisPage` and
+  ephemeral boards never write.
+- **Driver.** The evidence driver owns a SECOND Stockfish WASM worker separate from
+  the display engine and is NOT gated on position-grain `trustedBest` (the write policy
+  protects canonical rows). Debounce, dedupe, one-at-a-time scheduling, cancel-on-nav,
+  and display-settled gating bound the competing-engine cost; deeper read-time skip
+  logic is deferred to `g-v21l`.
+
 **Position-truth foundation (g-position-analysis).** `analysis_cache` conflates two
 grains on one row — *position* facts (the position's best move / best line / best
 eval, properties of the normalized FEN) and *move* evidence (a played move's eval /

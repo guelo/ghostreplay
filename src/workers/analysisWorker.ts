@@ -232,10 +232,15 @@ const ensureEngine = async () => {
   return engine;
 };
 
+// Default in-game search depth. The analysis-board evidence driver overrides it
+// with 21 (g-cache-stronger-evals); in-game callers omit depth and stay at 17.
+const DEFAULT_SEARCH_DEPTH = 17;
+
 const runSearch = async (
   fen: string,
   moves: string[],
   onInfo?: (score: EngineScore, depth: number) => void,
+  searchDepth?: number,
 ) => {
   const pendingEngine = await ensureEngine();
 
@@ -255,7 +260,7 @@ const runSearch = async (
       startHeartbeat();
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
-      sendEngineCommand("go depth 17");
+      sendEngineCommand(`go depth ${searchDepth ?? DEFAULT_SEARCH_DEPTH}`);
     },
   );
 };
@@ -530,7 +535,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   await awaitRequestReady();
   throwIfCanceled(request.id);
 
-  const bestSearch = await runSearch(request.fen, []);
+  const bestSearch = await runSearch(request.fen, [], undefined, request.depth);
   throwIfCanceled(request.id);
   const bestMove = bestSearch.bestmove;
 
@@ -574,6 +579,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
             } satisfies AnalysisWorkerResponse);
           }
         },
+        request.depth,
       );
   throwIfCanceled(request.id);
 
@@ -587,7 +593,7 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     if (terminalBestScore) {
       postBestScore = terminalBestScore;
     } else {
-      postBestSearch = await runSearch(request.fen, [bestMove]);
+      postBestSearch = await runSearch(request.fen, [bestMove], undefined, request.depth);
       postBestScore = postBestSearch.score;
     }
   }

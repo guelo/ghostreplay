@@ -37,6 +37,18 @@ EVIDENCE_FIELDS = (
     "classification",
 )
 
+# Optional engine mate annotations. They are NOT a measure of evidence richness:
+# every registered contract's ``required_fields`` excludes them, and a stronger
+# search that resolves a shallow "mate" claim into a finite CP score is BETTER
+# evidence, not less complete. So Rule 5 dominance strips them before its
+# completeness (superset) comparison — a dominant CP-only row must not be blocked
+# with INCOMING_LESS_COMPLETE_KEEP by a weaker row that merely stored a raw mate
+# count. The exclusion is symmetric and global to Rule 5 (it also lets a CP-only
+# canonical write replace a browser row that stored mate counts). Rule 2 same-
+# profile merge is deliberately UNCHANGED: there mate fields are genuinely
+# additive and still participate in agreement + superset-contribution checks.
+OPTIONAL_MATE_FIELDS = frozenset({"played_eval_mate", "best_eval_mate"})
+
 
 class Decision(str, Enum):
     INSERT = "insert"
@@ -92,6 +104,22 @@ class CacheRow:
         # dominance, but they no longer count as trusted/authoritative hits.
         return bool(profile and profile.authoritative and profile.active)
 
+    def is_replacement_eligible(self) -> bool:
+        """May this row participate in dominance replacement / same-profile merge?
+
+        Split from :meth:`is_effectively_authoritative` (g-cache-stronger-evals): a
+        NON-authoritative but replacement-eligible profile (browser-analysis) can
+        replace a weaker COMPATIBLE profile via an explicit ``dominates`` edge, but
+        it is still not canonical — it never becomes a trusted /lookup hit and never
+        reclaims legacy/unidentified rows (those keep true-authority gates). Canonical
+        profiles are replacement-eligible too (defaulted from ``authoritative``), so
+        their behavior is unchanged. Requires an active identity-verified profile.
+        """
+        if not self.identity_verified:
+            return False
+        profile = get_profile(self.analysis_profile_id)
+        return bool(profile and profile.replacement_eligible and profile.active)
+
 
 def _fields_agree(existing: CacheRow, incoming: CacheRow) -> bool:
     """Every overlapping non-null evidence field must agree."""
@@ -135,6 +163,7 @@ def decide_analysis_cache_replacement(
     existing_eff = existing.effective_profile_id()
     incoming_eff = incoming.effective_profile_id()
     incoming_auth = incoming.is_effectively_authoritative()
+    incoming_repl = incoming.is_replacement_eligible()
 
     # Rule 2: same effective (verified) profile.
     if (
@@ -142,8 +171,10 @@ def decide_analysis_cache_replacement(
         and incoming_eff is not None
         and existing_eff == incoming_eff
     ):
-        # Only authoritative profiles may MERGE; others are idempotent (first wins).
-        if not (existing.is_effectively_authoritative() and incoming_auth):
+        # Only replacement-eligible profiles may MERGE; others are idempotent (first
+        # wins). Canonical stays eligible (defaulted from authoritative); browser-
+        # analysis is now eligible and merges; browser-game stays first-wins.
+        if not (existing.is_replacement_eligible() and incoming_repl):
             return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
         # MERGE requires a compatible, strictly-newer-or-equal superset contract.
         if not is_superset_or_successor(
@@ -154,7 +185,9 @@ def decide_analysis_cache_replacement(
             return Decision.KEEP, Reason.MERGE_CONFLICT_KEEP
         # A merge is worthwhile when incoming either contributes a field existing
         # lacks, OR carries a strictly-newer contract (e.g. v1 -> v2) that the
-        # stored row should advertise even though no evidence field changes.
+        # stored row should advertise even though no evidence field changes. Mate
+        # fields are NOT stripped here: for same-profile merge they are genuinely
+        # additive evidence a later write can contribute.
         if incoming.populated_fields - existing.populated_fields:
             return Decision.MERGE, Reason.SAME_PROFILE_SUPERSET_MERGE
         if is_strict_successor(
@@ -163,22 +196,30 @@ def decide_analysis_cache_replacement(
             return Decision.MERGE, Reason.SAME_PROFILE_CONTRACT_UPGRADE
         return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
 
-    # Rule 3: incoming is non-authoritative and not same-profile → never replaces.
-    if not incoming_auth:
+    # Rule 3: incoming is not replacement-eligible and not same-profile → never
+    # replaces. This is the eligibility gate: a non-eligible incoming row (e.g.
+    # browser-game) keeps the existing row and never reaches Rule 5.
+    if not incoming_repl:
         if existing_eff is None:
             return Decision.KEEP, Reason.LEGACY_KEEP_NON_AUTH
         return Decision.KEEP, Reason.NON_AUTHORITATIVE_KEEP
 
-    # From here, incoming is authoritative and differs from existing's profile.
+    # From here, incoming is replacement-eligible (authoritative canonical OR a
+    # non-authoritative but eligible browser profile) and differs from existing.
 
     # Rule 4: existing is effectively legacy (NULL profile or unverified).
+    # Legacy reclamation still requires TRUE authority, independent of the Rule 3
+    # loosening above: a replacement-eligible but non-authoritative incoming row
+    # (browser-analysis) must NOT reclaim legacy/unidentified evidence.
     if existing_eff is None:
+        if not incoming_auth:
+            return Decision.KEEP, Reason.LEGACY_KEEP_NON_AUTH
         legacy_fields = existing.populated_fields
         if incoming.populated_fields >= legacy_fields:
             return Decision.REPLACE, Reason.LEGACY_REPLACED_BY_AUTH
         return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
 
-    # Rule 5: different family, incoming authoritative.
+    # Rule 5: different family, incoming replacement-eligible.
     incoming_profile = get_profile(incoming.analysis_profile_id)
     has_dominates = bool(
         incoming_profile and existing_eff in incoming_profile.dominates
@@ -188,7 +229,13 @@ def decide_analysis_cache_replacement(
     contract_ok = is_superset_or_successor(
         incoming.evidence_contract_id, existing.evidence_contract_id
     )
-    superset_ok = incoming.populated_fields >= existing.populated_fields
+    # Mate annotations never veto dominance: strip them symmetrically before the
+    # completeness comparison so a stronger CP-only row replaces a weaker row that
+    # merely stored raw mate counts. contract_ok still guarantees no contract-
+    # required field is dropped.
+    superset_ok = (incoming.populated_fields - OPTIONAL_MATE_FIELDS) >= (
+        existing.populated_fields - OPTIONAL_MATE_FIELDS
+    )
     if contract_ok and superset_ok:
         return Decision.REPLACE, Reason.DOMINATES_REPLACE
     return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP

@@ -80,6 +80,7 @@ const API_ROUTE_TEMPLATES: ReadonlyArray<readonly [RegExp, string]> = [
   [new RegExp(`^/api/drills/${UUID_SOURCE}/abandon$`, 'i'), '/api/drills/{session_id}/abandon'],
   [new RegExp(`^/api/drills/${UUID_SOURCE}$`, 'i'), '/api/drills/{session_id}'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/moves$`, 'i'), '/api/session/{session_id}/moves'],
+  [new RegExp(`^/api/session/${UUID_SOURCE}/analysis-evidence$`, 'i'), '/api/session/{session_id}/analysis-evidence'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/analysis$`, 'i'), '/api/session/{session_id}/analysis'],
   [new RegExp(`^/api/session/${UUID_SOURCE}/openings$`, 'i'), '/api/session/{session_id}/openings'],
   [new RegExp(`^/api/openings/score-delta/${UUID_SOURCE}$`, 'i'), '/api/openings/score-delta/{session_id}'],
@@ -999,6 +1000,62 @@ export const lookupAnalysisCache = async (
 }
 
 /**
+ * One approved analysis-board evidence row for cache persistence
+ * (g-cache-stronger-evals). White-relative evals; `eval_delta` is recomputed
+ * client-side from those white-relative evals. Carries no SAN, profile, authority,
+ * source, or contract fields — the backend derives SAN, stamps the profile, and
+ * validates the contract.
+ */
+export interface AnalysisEvidenceRow {
+  fen: string
+  move_uci: string
+  best_move_uci: string
+  best_line_uci: string[]
+  played_eval: number | null
+  played_eval_mate: number | null
+  best_eval: number | null
+  best_eval_mate: number | null
+  eval_delta: number | null
+  classification: string | null
+}
+
+export interface AnalysisEvidenceResult {
+  fen: string
+  move_uci: string
+  reason: string
+}
+
+interface AnalysisEvidenceResponse {
+  results: AnalysisEvidenceResult[]
+}
+
+/**
+ * Persist approved depth-21 analysis-board evidence for an owned session's exact
+ * mainline moves. Best-effort like lookup: the caller treats a rejection/throw as
+ * a missed upgrade, never a hard error.
+ */
+export const submitAnalysisEvidence = async (
+  sessionId: string,
+  rows: AnalysisEvidenceRow[],
+): Promise<AnalysisEvidenceResult[]> => {
+  if (rows.length === 0) {
+    return []
+  }
+
+  const data = await requestJson<AnalysisEvidenceResponse>(
+    `${API_BASE_URL}/api/session/${sessionId}/analysis-evidence`,
+    {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ rows }),
+    },
+    { fallbackMessage: 'Failed to submit analysis evidence' },
+  )
+
+  return data.results
+}
+
+/**
  * Record a blunder from a game session
  */
 export const recordBlunder = async (
@@ -1106,6 +1163,17 @@ export interface AnalysisMove {
   color: SessionMoveColor
   move_san: string
   fen_after: string
+  /**
+   * Exact evidence keys (g-cache-stronger-evals). The backend populates these from
+   * the stored `SessionMove.fen_before` plus a python-chess SAN->UCI derivation;
+   * they are null only for legacy moves with a null/unparseable `fen_before`.
+   * Consumers (analysis board, exact-best projection, evidence driver) prefer these
+   * directly and never reconstruct `fen_before` from the previous move's
+   * `fen_after` nor derive played UCI from SAN. Optional so frontend-local snapshots
+   * (drill review) may omit them.
+   */
+  fen_before?: string | null
+  move_uci?: string | null
   eval_cp: number | null
   eval_mate: number | null
   best_move_san: string | null

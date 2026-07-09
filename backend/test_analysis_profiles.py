@@ -186,3 +186,93 @@ def test_strength_non_numeric_unequal_version_is_incomparable():
     # Same non-numeric version + equal depth falls through to EQUAL.
     a2 = dataclasses.replace(base, engine_version="dev-a")
     assert compare_search_strength(a, a2) == StrengthComparison.EQUAL
+
+
+# --- browser-analysis-v1 profile (g-cache-stronger-evals) ----------------------
+
+from app.analysis_profiles import (  # noqa: E402
+    BROWSER_ANALYSIS_PROFILE_ID,
+    IDENTITY_FIELDS,
+    stamp_profile_full,
+)
+
+_WASM_SHA256 = "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1"
+_NET_ID = "nn-9067e33176e8.nnue:9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+
+
+def test_browser_analysis_profile_pinned_identity():
+    p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    assert p is not None
+    assert p.engine_name == "Stockfish"
+    assert p.engine_version == "18"
+    # engine_build is the compiled WASM artifact SHA-256.
+    assert p.engine_build == _WASM_SHA256
+    assert profiles._FULL_SHA256.match(p.engine_build)
+    assert p.search_limit_type == "depth"
+    assert p.search_limit_value == 21
+    assert p.multipv == 1
+    assert p.threads == 1
+    assert p.hash_mb == 128
+    assert p.eval_file == "nn-9067e33176e8.nnue"
+    assert p.eval_file_small is None
+    # Content-addressed full net identity, distinct from canonical's big net.
+    assert p.eval_file_id == _NET_ID
+    name, _, full = p.eval_file_id.rpartition(":")
+    assert name == "nn-9067e33176e8.nnue"
+    assert profiles._FULL_SHA256.match(full)
+    assert full[:12] == "9067e33176e8"
+    assert p.eval_file_small_id is None
+    assert p.analyzer_protocol_version == "browser-analyzer-v1"
+
+
+def test_browser_analysis_profile_authority_and_dominance():
+    p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    assert p.authoritative is False
+    assert p.replacement_eligible is True
+    assert p.active is True
+    assert p.dominates == frozenset({"browser-game-v1"})
+    # Digest is non-null and stable (recomputable from the identity fields).
+    assert p.profile_manifest_digest is not None
+    recomputed = profiles._manifest_digest({f: getattr(p, f) for f in profiles._DIGEST_FIELDS})
+    assert recomputed == p.profile_manifest_digest
+
+
+def test_canonical_manifests_dominate_browser_analysis():
+    for pid in (CANONICAL_PROFILE_ID, LINUX_PROFILE_ID):
+        assert BROWSER_ANALYSIS_PROFILE_ID in get_profile(pid).dominates
+
+
+def test_browser_game_not_replacement_eligible_by_default():
+    assert get_profile(BROWSER_PROFILE_ID).replacement_eligible is False
+
+
+def test_browser_analysis_not_resolvable_from_runtime():
+    # Non-authoritative profiles are never resolve_profile targets; the endpoint
+    # stamps identity from the registry instead.
+    p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    observed = {f: getattr(p, f) for f in RESOLUTION_FIELDS}
+    assert resolve_profile(observed) is None
+
+
+def test_stamp_profile_full_stamps_every_identity_column():
+    p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    stamped = stamp_profile_full(BROWSER_ANALYSIS_PROFILE_ID)
+    assert set(stamped.keys()) == set(IDENTITY_FIELDS)
+    for f in IDENTITY_FIELDS:
+        assert stamped[f] == getattr(p, f)
+    # RESOLUTION_FIELDS-only runtime filenames are deliberately omitted.
+    assert "eval_file" not in stamped
+    assert "eval_file_small" not in stamped
+    assert stamp_profile_full("unknown") == {}
+
+
+def test_stamp_identity_is_narrower_than_stamp_profile_full():
+    narrow = stamp_identity(BROWSER_ANALYSIS_PROFILE_ID)
+    full = stamp_profile_full(BROWSER_ANALYSIS_PROFILE_ID)
+    assert set(narrow.keys()) == {
+        "eval_file_id",
+        "eval_file_small_id",
+        "analyzer_protocol_version",
+        "profile_manifest_digest",
+    }
+    assert set(narrow.keys()) < set(full.keys())

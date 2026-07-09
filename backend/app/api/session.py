@@ -17,9 +17,17 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.analysis_cache_repo import write_analysis_cache_rows
-from app.analysis_profiles import BROWSER_PROFILE_ID
+from app.analysis_profiles import (
+    BROWSER_ANALYSIS_PROFILE_ID,
+    BROWSER_PROFILE_ID,
+    stamp_profile_full,
+)
 from app.centipawn_loss import centipawn_loss, centipawn_loss_expr
-from app.evidence_contracts import select_browser_contract
+from app.evidence_contracts import (
+    RESOLVER_COMPLETE_V2,
+    contract_satisfied,
+    select_browser_contract,
+)
 from app.db import get_db
 from app.accuracy import (
     AccuracyMove,
@@ -145,6 +153,14 @@ class SessionAnalysisMove(BaseModel):
     color: MoveColor
     move_san: str
     fen_after: str
+    # Exact evidence keys (g-cache-stronger-evals): the stored ``SessionMove``
+    # fen_before plus the python-chess SAN->UCI derivation. Null only for legacy
+    # moves whose ``SessionMove.fen_before`` is null or whose SAN fails to parse;
+    # those moves are not evidence-eligible. Consumers (analysis board, evidence
+    # driver, exact-best projection) use these directly and NEVER reconstruct
+    # fen_before from the previous move's fen_after nor derive UCI from SAN.
+    fen_before: str | None = None
+    move_uci: str | None = None
     eval_cp: int | None = None
     eval_mate: int | None = None
     best_move_san: str | None = None
@@ -189,6 +205,50 @@ class SessionAnalysisResponse(BaseModel):
     rated_start_ply: int | None = None
 
 
+class AnalysisEvidenceRow(BaseModel):
+    """One approved analysis-board evidence row submitted for cache persistence.
+
+    White-relative evals; ``eval_delta`` is recomputed client-side from those
+    white-relative evals. Deliberately carries NO SAN, profile, authority, source,
+    or evidence-contract fields — the backend derives SAN, stamps the profile, and
+    validates the contract. ``played_eval`` / ``best_eval`` / ``eval_delta`` /
+    ``classification`` are optional at the wire level so a sparse row degrades to a
+    per-row ``contract_unsatisfied`` rejection rather than a 422 for the whole batch.
+    """
+
+    fen: str = Field(..., min_length=1)
+    move_uci: str = Field(..., min_length=2, max_length=5)
+    best_move_uci: str = Field(..., min_length=2, max_length=5)
+    # Real PVs are ≲ 40 plies; the cap defends against a long legal shuffle line
+    # forcing per-ply python-chess legality generation across up to 60 rows. An
+    # over-cap line 422s the whole batch (a defensive bound well above real PVs).
+    best_line_uci: list[str] = Field(default_factory=list, max_length=64)
+    played_eval: int | None = None
+    played_eval_mate: int | None = None
+    best_eval: int | None = None
+    best_eval_mate: int | None = None
+    eval_delta: int | None = None
+    classification: str | None = None
+
+
+class AnalysisEvidenceRequest(BaseModel):
+    # Cap defensive against a runaway client; normal operation submits one dwelled
+    # move at a time. An over-cap request 422s the whole batch by design.
+    rows: list[AnalysisEvidenceRow] = Field(default_factory=list, max_length=60)
+
+
+class AnalysisEvidenceResult(BaseModel):
+    """Per-submitted-row outcome, one per request row, in request order."""
+
+    fen: str
+    move_uci: str
+    reason: str
+
+
+class AnalysisEvidenceResponse(BaseModel):
+    results: list[AnalysisEvidenceResult]
+
+
 class OpeningLineageItem(BaseModel):
     opening_key: str
     opening_name: str
@@ -227,6 +287,25 @@ def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
 def _ensure_session_owned_by_user(game_session: GameSession, user: TokenPayload) -> None:
     if game_session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
+
+
+def _derive_move_uci(fen_before: str | None, move_san: str | None) -> str | None:
+    """Derive a played move's UCI from a stored ``(fen_before, move_san)`` pair.
+
+    ``SessionMove`` persists SAN but not UCI, so the exact-key model derives the UCI
+    half server-side via python-chess. Returns ``None`` for a null/unparseable FEN
+    or SAN so a legacy move is simply not evidence-eligible. This is the SAN->UCI
+    derivation the endpoint's membership check and the analysis wire fields both use;
+    it is expected to agree with the browser-game upload's chess.js-derived UCI at
+    castling / promotion / en-passant edge cases (covered by targeted tests).
+    """
+    if not fen_before or not move_san:
+        return None
+    try:
+        board = chess.Board(fen_before)
+        return board.parse_san(move_san).uci()
+    except (ValueError, chess.IllegalMoveError, chess.InvalidMoveError):
+        return None
 
 
 def _validate_unique_move_keys(moves: list[SessionMoveInput]) -> None:
@@ -1017,7 +1096,6 @@ def upsert_session_moves(
         if _should_run_session_move_evidence(game_session)
         else []
     )
-
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":
         statement = sqlite_insert(SessionMove).values(values)
@@ -1311,6 +1389,8 @@ def get_session_analysis(
                 color=move.color,
                 move_san=move.move_san,
                 fen_after=move.fen_after,
+                fen_before=move.fen_before,
+                move_uci=_derive_move_uci(move.fen_before, move.move_san),
                 eval_cp=move.eval_cp,
                 eval_mate=move.eval_mate,
                 best_move_san=move.best_move_san,
@@ -1334,6 +1414,226 @@ def get_session_analysis(
         is_complete=is_complete,
         rated_start_ply=game_session.rated_start_ply if game_session.session_mode == DRILL_SESSION_MODE else None,
     )
+
+
+# Per-row rejection reasons the endpoint emits BEFORE the shared writer (the
+# writer only returns Reasons for rows it actually receives). Kept as module
+# constants so tests assert against one definition.
+EVIDENCE_SESSION_NOT_ELIGIBLE = "session_not_evidence_eligible"
+EVIDENCE_NOT_IN_SESSION = "not_in_session"
+EVIDENCE_DUPLICATE_KEY = "duplicate_request_key"
+EVIDENCE_INVALID_LEGALITY = "invalid_legality"
+EVIDENCE_CONTRACT_UNSATISFIED = "contract_unsatisfied"
+# Post-writer anomaly, not a success: the shared writer returned but omitted a
+# survivor key, violating its one-Reason-per-row contract. Surfaced as a distinct
+# reason so a writer regression shows up instead of being masked as new_key.
+EVIDENCE_WRITER_NO_RESULT = "writer_no_result"
+
+
+@dataclass
+class _PreparedEvidenceRow:
+    """One request row after endpoint preparation: either a pre-writer rejection
+    ``reason`` OR a ``cache_row`` dict ready for the shared writer (never both)."""
+
+    fen: str
+    move_uci: str
+    reason: str | None
+    cache_row: dict | None
+
+
+def _parse_legal_uci(board: chess.Board, uci: str) -> chess.Move | None:
+    """Return the move iff ``uci`` is a legal move in ``board``; else ``None``."""
+    try:
+        move = chess.Move.from_uci(uci)
+    except (ValueError, chess.InvalidMoveError):
+        return None
+    return move if move in board.legal_moves else None
+
+
+def _is_legal_line(fen: str, line: list[str]) -> bool:
+    """True when ``line`` is a non-empty legal UCI sequence played from ``fen``.
+
+    Stricter than the browser-game upload path, which does not validate full-PV
+    legality. A malformed FEN or any illegal ply fails closed.
+    """
+    try:
+        board = chess.Board(fen)
+    except (ValueError, chess.InvalidMoveError):
+        return False
+    if not line:
+        return False
+    for uci in line:
+        move = _parse_legal_uci(board, uci)
+        if move is None:
+            return False
+        board.push(move)
+    return True
+
+
+def _session_membership_keys(session_moves: list[SessionMove]) -> set[tuple[str, str]]:
+    """Exact ``(fen_before, played_uci)`` keys for a session's mainline moves.
+
+    The FEN half is the same byte string browser-game rows used; the UCI half is
+    the server-side SAN->UCI re-derivation (``SessionMove`` has no stored UCI). Legacy
+    moves with a null/unparseable ``fen_before`` or SAN are omitted (not eligible).
+    """
+    keys: set[tuple[str, str]] = set()
+    for sm in session_moves:
+        uci = _derive_move_uci(sm.fen_before, sm.move_san)
+        if uci is not None:
+            keys.add((sm.fen_before, uci))
+    return keys
+
+
+def _build_evidence_cache_row(row: AnalysisEvidenceRow) -> tuple[dict | None, str | None]:
+    """Validate legality + contract for one primary row and build the writer dict.
+
+    Returns ``(cache_row, None)`` on success or ``(None, reason)`` on rejection. SAN is
+    derived server-side from the validated UCI and is never trusted from the client;
+    the row is stamped with the ``browser-analysis-v1`` profile identity,
+    ``source="analysis"``, and the ``resolver-complete-v2`` contract, which is then
+    revalidated (a server-side backstop that rechecks ``eval_delta`` from the
+    white-relative evals).
+    """
+    try:
+        board = chess.Board(row.fen)
+    except (ValueError, chess.InvalidMoveError):
+        return None, EVIDENCE_INVALID_LEGALITY
+
+    move = _parse_legal_uci(board, row.move_uci)
+    if move is None:
+        return None, EVIDENCE_INVALID_LEGALITY
+    move_san = board.san(move)
+
+    best_move = _parse_legal_uci(board, row.best_move_uci)
+    if best_move is None:
+        return None, EVIDENCE_INVALID_LEGALITY
+    best_move_san = board.san(best_move)
+
+    if not _is_legal_line(row.fen, row.best_line_uci):
+        return None, EVIDENCE_INVALID_LEGALITY
+
+    cache_row = {
+        "fen_before": row.fen,
+        "move_uci": row.move_uci,
+        "move_san": move_san,
+        "best_move_uci": row.best_move_uci,
+        "best_move_san": best_move_san,
+        "best_line_uci": encode_uci_line(row.best_line_uci),
+        "played_eval": row.played_eval,
+        "played_eval_mate": row.played_eval_mate,
+        "best_eval": row.best_eval,
+        "best_eval_mate": row.best_eval_mate,
+        "eval_delta": row.eval_delta,
+        "classification": row.classification,
+        "source": "analysis",
+        "analysis_profile_id": BROWSER_ANALYSIS_PROFILE_ID,
+        "evidence_contract_id": RESOLVER_COMPLETE_V2,
+        **stamp_profile_full(BROWSER_ANALYSIS_PROFILE_ID),
+    }
+
+    if not contract_satisfied(RESOLVER_COMPLETE_V2, cache_row):
+        return None, EVIDENCE_CONTRACT_UNSATISFIED
+
+    return cache_row, None
+
+
+def _prepare_analysis_evidence_rows(
+    rows: list[AnalysisEvidenceRow],
+    membership: set[tuple[str, str]],
+) -> list[_PreparedEvidenceRow]:
+    """Membership → dedupe → legality → contract, one result per request row in
+    order. The first occurrence of each ``(fen, move_uci)`` that passed membership is
+    primary; later occurrences get ``duplicate_request_key`` and never reach the
+    writer, so the writer receives only unique keys."""
+    prepared: list[_PreparedEvidenceRow] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for row in rows:
+        key = (row.fen, row.move_uci)
+        if key not in membership:
+            prepared.append(
+                _PreparedEvidenceRow(row.fen, row.move_uci, EVIDENCE_NOT_IN_SESSION, None)
+            )
+            continue
+        if key in seen_keys:
+            prepared.append(
+                _PreparedEvidenceRow(row.fen, row.move_uci, EVIDENCE_DUPLICATE_KEY, None)
+            )
+            continue
+        seen_keys.add(key)
+        cache_row, reason = _build_evidence_cache_row(row)
+        prepared.append(_PreparedEvidenceRow(row.fen, row.move_uci, reason, cache_row))
+    return prepared
+
+
+@router.post(
+    "/{session_id}/analysis-evidence",
+    response_model=AnalysisEvidenceResponse,
+)
+def submit_analysis_evidence(
+    session_id: uuid.UUID,
+    request: AnalysisEvidenceRequest,
+    db: Session = Depends(get_db),
+    user: TokenPayload = Depends(get_current_user),
+) -> AnalysisEvidenceResponse:
+    """Persist approved depth-21 analysis-board evidence through the shared cache
+    writer (g-cache-stronger-evals).
+
+    Owner-only and scoped to exact mainline moves of the session. Rows are stamped
+    with the non-authoritative but replacement-eligible ``browser-analysis-v1``
+    profile, so complete evidence can replace a weaker ``browser-game-v1`` row for
+    the same exact ``(fen_before, move_uci)`` but never becomes a trusted /lookup hit,
+    reclaims legacy rows, or overwrites canonical depth-24 evidence.
+    """
+    game_session = _get_session_or_404(db, session_id)
+    _ensure_session_owned_by_user(game_session, user)
+
+    rows = request.rows
+
+    # Session-eligibility backstop: hidden/abandoned drills never write evidence.
+    # Reuses the exact predicate that gates browser-game evidence in
+    # upsert_session_moves — normal sessions and visible/converted drills pass.
+    if not _should_run_session_move_evidence(game_session):
+        return AnalysisEvidenceResponse(
+            results=[
+                AnalysisEvidenceResult(
+                    fen=r.fen,
+                    move_uci=r.move_uci,
+                    reason=EVIDENCE_SESSION_NOT_ELIGIBLE,
+                )
+                for r in rows
+            ]
+        )
+
+    session_moves = (
+        db.query(SessionMove).filter(SessionMove.session_id == session_id).all()
+    )
+    membership = _session_membership_keys(session_moves)
+
+    prepared = _prepare_analysis_evidence_rows(rows, membership)
+
+    survivors = [p.cache_row for p in prepared if p.cache_row is not None]
+    writer_reasons: dict[tuple[str, str], str] = {}
+    if survivors:
+        # Commit immediately before the writer so it receives a clean session with
+        # no open transaction (the membership query above opened one).
+        db.commit()
+        for (fen, uci), reason in write_analysis_cache_rows(db, survivors):
+            writer_reasons[(fen, uci)] = reason.value
+
+    results = [
+        AnalysisEvidenceResult(
+            fen=p.fen,
+            move_uci=p.move_uci,
+            reason=(
+                p.reason
+                if p.reason is not None
+                else writer_reasons.get((p.fen, p.move_uci), EVIDENCE_WRITER_NO_RESULT)
+            ),
+        )
+        for p in prepared
+    ]
+    return AnalysisEvidenceResponse(results=results)
 
 
 @router.get("/{session_id}/openings", response_model=SessionOpeningsResponse)

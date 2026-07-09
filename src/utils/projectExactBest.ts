@@ -55,12 +55,17 @@ export const projectExactBest = (
   if (!positionAnalysis) return moves
 
   return moves.map((move, index) => {
+    // Prefer the exact wire fields (g-cache-stronger-evals); fall back to chain
+    // reconstruction / SAN parsing ONLY for legacy sessions whose wire fields are
+    // null. The backend keys positionAnalysis by the original full `fen_before`, so
+    // the wire value is also the correct lookup key.
     const fenBefore =
-      index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen
+      move.fen_before ??
+      (index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen)
     const entry = positionAnalysis[fenBefore]
     if (!entry || !isTrustedExactBestHit(entry)) return move
 
-    const playedUci = sanToUci(fenBefore, move.move_san)
+    const playedUci = move.move_uci ?? sanToUci(fenBefore, move.move_san)
     if (!playedUci || playedUci !== entry.best_move_uci) return move
 
     // Played move IS the trusted best → PROMOTION. Build a minimal probe so the
