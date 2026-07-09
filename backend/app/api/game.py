@@ -20,6 +20,8 @@ from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory, decode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
+from app.opening_cache import bump_evidence_seq
+from app.opening_evidence import session_is_evidence_eligible
 from app.opening_graph import get_opening_graph
 from app.opening_score_delta import (
     OpeningScoreDeltaItem,
@@ -711,13 +713,18 @@ def end_game(
             detail="Use the drill abandon or continue endpoint before ending this drill",
         )
 
-    # Update session
+    # Update session. The opening-evidence counter bumps ONLY when this write
+    # flips SESSION_EVIDENCE_ELIGIBLE_SQL's truth value (g-jact): ending a session
+    # makes its already-uploaded moves digest-visible in one transition.
+    was_evidence_eligible = session_is_evidence_eligible(session)
     session.status = "ended"
     session.result = request.result.value
     session.ended_at = utcnow()
     session.pgn = request.pgn
     effective_is_rated = session.is_rated if session.session_mode == DRILL_SESSION_MODE else request.is_rated
     session.is_rated = effective_is_rated
+    if session_is_evidence_eligible(session) != was_evidence_eligible:
+        bump_evidence_seq(db, user.user_id, session.player_color)
 
     # Compute rating change for rated results
     rating_change = None

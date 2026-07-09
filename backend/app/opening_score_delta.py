@@ -529,11 +529,12 @@ def read_opening_score_delta(
     batch still building / recompute pending). Best-effort: any failure degrades to
     ``([], False)``.
 
-    Freshness costs an O(evidence) digest, so it is proven at most ONCE per poll
-    (g-xmhv): only a quiescent scheduler reaches ``_is_batch_fresh``. While a
+    Freshness is proven at most ONCE per poll (g-xmhv): only a quiescent scheduler
+    reaches ``_is_batch_fresh`` (cheap since g-jact — counter reads, or a scoped
+    shared digest under analysis churn; never the O(evidence) raw digest). While a
     recompute is pending/in-flight (``is_recompute_scheduled``) the batch is, by
     definition, not yet known-fresh — return ``False`` CHEAPLY and let the next poll
-    re-check once the worker settles. This is what kills the 9-17s poll GETs.
+    re-check once the worker settles.
     """
     try:
         items, batch, rows, status = _delta_items_from_cache(db, session)

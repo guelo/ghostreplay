@@ -21,6 +21,8 @@ from app.drill_steering import (
 from app.fen import normalize_fen
 from app.models import GameSession, decode_uci_line, encode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
+from app.opening_cache import bump_evidence_seq
+from app.opening_evidence import session_is_evidence_eligible
 from app.opening_graph import get_opening_graph
 from app.opening_roots import derive_family, get_opening_roots
 from app.opening_score_delta import (
@@ -330,8 +332,13 @@ def fail_drill(
         raise HTTPException(status_code=422, detail="terminal_reason must be accuracy")
     if session.status != "active" or session.drill_state != "root_reached":
         raise HTTPException(status_code=400, detail="Drill cannot be failed from its current state")
+    # Accuracy-fail flips SESSION_EVIDENCE_ELIGIBLE_SQL false->true without any
+    # timestamp write, so the opening-evidence counter carries the change (g-jact).
+    was_evidence_eligible = session_is_evidence_eligible(session)
     session.drill_state = "failed"
     session.drill_terminal_reason = "accuracy"
+    if session_is_evidence_eligible(session) != was_evidence_eligible:
+        bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
     capture(str(user.user_id), "drill_failed", {"reason": session.drill_terminal_reason})
@@ -361,11 +368,19 @@ def continue_drill(
         raise HTTPException(status_code=400, detail="Drill must be at root or stopped before continuing")
 
     now = utcnow()
+    # Converting an ELIGIBLE accuracy-failed drill (true->false flip) REMOVES its
+    # moves from the opening-evidence set — a digest-visible change the counter
+    # must carry (g-jact). A root_reached->converted transition stays ineligible
+    # on both sides -> no bump. (``segment``, which resegment rewrites, is not
+    # read by the digest — the eligibility flip is the whole signal.)
+    was_evidence_eligible = session_is_evidence_eligible(session)
     session.drill_state = "converted"
     session.is_rated = True
     session.normal_started_at = now
     session.converted_at = now
     session.rated_start_ply = request.current_ply
+    if session_is_evidence_eligible(session) != was_evidence_eligible:
+        bump_evidence_seq(db, user.user_id, session.player_color)
     resegment_session_moves(db, session)
     db.commit()
     db.refresh(session)
@@ -493,6 +508,8 @@ def natural_end_drill(
         raise HTTPException(status_code=400, detail="Drill cannot end naturally from its current state")
     if request.result not in ("checkmate_win", "checkmate_loss", "draw"):
         raise HTTPException(status_code=400, detail="Invalid natural-end result")
+    # status->'ended' flips SESSION_EVIDENCE_ELIGIBLE_SQL false->true (g-jact).
+    was_evidence_eligible = session_is_evidence_eligible(session)
     session.drill_state = "failed"
     session.drill_terminal_reason = "natural_end"
     session.status = "ended"
@@ -500,6 +517,8 @@ def natural_end_drill(
     session.ended_at = utcnow()
     if request.pgn:
         session.pgn = request.pgn
+    if session_is_evidence_eligible(session) != was_evidence_eligible:
+        bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
     capture(str(user.user_id), "drill_natural_end", {"result": request.result})
@@ -523,11 +542,17 @@ def abandon_drill(
     # Already-ended drills (e.g. natural-end finished the session) are no-ops:
     # don't overwrite session.result or ended_at.
     if session.drill_state != "abandoned" and session.status != "ended":
+        # status->'ended' flips eligibility false->true for active/root_reached/
+        # off_route drills; an accuracy-failed drill was already eligible (no
+        # flip, no bump) (g-jact).
+        was_evidence_eligible = session_is_evidence_eligible(session)
         session.drill_state = "abandoned"
         session.status = "ended"
         session.result = "drill_abandon"
         session.ended_at = utcnow()
         session.is_rated = False
+        if session_is_evidence_eligible(session) != was_evidence_eligible:
+            bump_evidence_seq(db, user.user_id, session.player_color)
         db.commit()
         db.refresh(session)
         capture(str(user.user_id), "drill_abandoned", {})

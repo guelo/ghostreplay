@@ -24,7 +24,12 @@ from app.api import session as session_api
 from app.database_url import _normalize_postgres_scheme
 from app.db import get_db
 from app.main import app
-from app.models import Base, GameSession, User
+from app.models import (
+    Base,
+    GameSession,
+    User,
+    ensure_evidence_epoch_infrastructure,
+)
 from app.security import create_access_token, hash_password
 
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
@@ -303,18 +308,54 @@ def _create_test_schema(conn) -> None:
             generation INTEGER NOT NULL,
             registry_fingerprint TEXT,
             inputs_fingerprint TEXT,
+            evidence_seq INTEGER,
+            cache_epoch INTEGER,
+            scoped_shared_digest TEXT,
             computed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(user_id, player_color, generation)
         )
     """))
+    # evidence_seq: per-(user,color) counter over the PER-USER evidence surfaces
+    # (see OpeningScoreCursor.evidence_seq). OUT-OF-BAND-WRITER CONTRACT: anything
+    # mutating session_moves / game_sessions eligibility / blunders /
+    # blunder_reviews outside the app choke-points must bump
+    # OPENING_EVIDENCE_INPUTS_VERSION or advance the affected cursors.
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS opening_score_cursors (
             user_id INTEGER NOT NULL,
             player_color VARCHAR(5) NOT NULL,
             latest_generation INTEGER NOT NULL DEFAULT 0,
+            evidence_seq INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, player_color)
         )
     """))
+    # Global shared-cache change counter (g-jact). The singleton row MUST be
+    # seeded: its triggers UPDATE ... WHERE id = 1 and silently no-op when the
+    # row is missing (epoch never advances -> freshness never provable). The
+    # seed + mandatory shared-table triggers are installed by the shared helper
+    # below (single runtime copy, also used by the E2E seed script); the alembic
+    # migration 20260708_01 carries its own frozen copy of the same DDL.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS evidence_epoch (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            value INTEGER NOT NULL DEFAULT 0
+        )
+    """))
+    ensure_evidence_epoch_infrastructure(conn)
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opening_score_batch_shared_scope (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL,
+            fen TEXT NOT NULL,
+            kind VARCHAR(4) NOT NULL,
+            CHECK (kind IN ('raw','norm')),
+            FOREIGN KEY (batch_id) REFERENCES opening_score_batches(id) ON DELETE CASCADE
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_opening_score_batch_shared_scope_batch "
+        "ON opening_score_batch_shared_scope(batch_id)"
+    ))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS user_opening_scores (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,6 +450,10 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS opening_position_edges"))
     conn.execute(text("DROP TABLE IF EXISTS opening_position_scores"))
     conn.execute(text("DROP TABLE IF EXISTS user_opening_scores"))
+    # NB: dropping analysis_cache / position_analysis below also drops their
+    # evidence_epoch triggers (sqlite drops triggers with their table).
+    conn.execute(text("DROP TABLE IF EXISTS opening_score_batch_shared_scope"))
+    conn.execute(text("DROP TABLE IF EXISTS evidence_epoch"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_cursors"))
     conn.execute(text("DROP TABLE IF EXISTS opening_score_batches"))
     conn.execute(text("DROP TABLE IF EXISTS position_analysis_conflicts"))
@@ -646,6 +691,9 @@ def pg_client(pg_engine, pg_session_factory):
     table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
     with pg_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
+        # Re-seed the evidence_epoch singleton the TRUNCATE just removed — its
+        # triggers UPDATE ... WHERE id = 1 and silently no-op without the row.
+        conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
 
     def _override_pg_db():
         db = pg_session_factory()

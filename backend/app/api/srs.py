@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
+from app.opening_cache import bump_evidence_seq
 from app.opening_score_scheduler import request_recompute
 from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
@@ -165,6 +166,17 @@ def review_blunder(
             pass_streak_after=blunder.pass_streak,
         )
     )
+    # Opening-evidence counter (g-jact): a NEW review row is digest-visible, so
+    # bump in the SAME txn as the insert (a rolled-back duplicate rolls back its
+    # bump too). Color follows the digest's review scoping via
+    # _get_blunder_player_color; None means neither color's digest consumes this
+    # review (no source session AND no matching position color) — skip is
+    # correct, not a gap. The in-place pass_streak/last_reviewed_at writes above
+    # need NO bump: the digest reads only the review rows and fen_raw, never the
+    # blunder's streak columns.
+    player_color = _get_blunder_player_color(db, blunder)
+    if player_color is not None:
+        bump_evidence_seq(db, blunder.user_id, player_color)
     try:
         db.commit()
     except IntegrityError:
@@ -183,7 +195,7 @@ def review_blunder(
         db.refresh(blunder)
         return _srs_response_from_review(blunder, existing)
 
-    player_color = _get_blunder_player_color(db, blunder)
+    # player_color resolved above (pre-commit, alongside the evidence bump).
     recompute_queued = player_color is not None
     if recompute_queued:
         request_recompute(user.user_id, player_color)

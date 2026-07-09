@@ -20,8 +20,8 @@ from app.models import (
 )
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
 from app.opening_cache import (
+    capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
-    opening_score_raw_inputs_fingerprint,
 )
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
@@ -1637,14 +1637,16 @@ def test_adhoc_start_rejects_line_revisiting_a_position(client, auth_headers):
 # g-mxeo: opening-baseline capture moved OFF the /drills/start request path
 # ---------------------------------------------------------------------------
 def _seed_fresh_batch(db, *, user_id, player_color, computed_at, scores):
+    snap = capture_freshness_snapshot(db, user_id, player_color)
     batch = OpeningScoreBatch(
         user_id=user_id, player_color=player_color, generation=1,
         registry_fingerprint=opening_score_inputs_fingerprint(
             get_opening_graph(), get_opening_roots()
         ),
-        inputs_fingerprint=opening_score_raw_inputs_fingerprint(
-            db, user_id, player_color
-        ),
+        inputs_fingerprint=snap.inputs_fingerprint,
+        evidence_seq=snap.evidence_seq,
+        cache_epoch=snap.cache_epoch,
+        scoped_shared_digest=snap.scoped_shared_digest,
         computed_at=computed_at,
     )
     db.add(batch)
@@ -1661,9 +1663,10 @@ def _seed_fresh_batch(db, *, user_id, player_color, computed_at, scores):
 
 def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, db_session):
     # Mirrors the game-start acceptance: NO O(evidence) digest before the /start
-    # response; it runs exactly once, only across the drained baseline job. A
-    # dedicated user_id isolates the counter from any background opening-score
-    # recompute thread a sibling test may have left running.
+    # response — and since g-jact none on the drained baseline job either (the
+    # freshness verdict is the cheap partitioned signal). A dedicated user_id
+    # isolates the counter from any background opening-score recompute thread a
+    # sibling test may have left running.
     baseline_user = 990202
     _seed_fresh_batch(
         db_session, user_id=baseline_user, player_color="black",
@@ -1672,11 +1675,17 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
     )
     calls = {"n": 0}
     real_digest = oc.raw_evidence_inputs_digest
+    real_snapshot = oc.raw_evidence_inputs_snapshot
 
     def counting_digest(db, user_id, player_color, *args, **kwargs):
         if user_id == baseline_user:
             calls["n"] += 1
         return real_digest(db, user_id, player_color, *args, **kwargs)
+
+    def counting_snapshot(db, user_id, player_color, *args, **kwargs):
+        if user_id == baseline_user:
+            calls["n"] += 1
+        return real_snapshot(db, user_id, player_color, *args, **kwargs)
 
     sched = OpeningBaselineScheduler(
         session_factory=TestingSessionLocal, auto_start=False
@@ -1687,6 +1696,7 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
 
     with (
         patch("app.opening_cache.raw_evidence_inputs_digest", counting_digest),
+        patch("app.opening_cache.raw_evidence_inputs_snapshot", counting_snapshot),
         patch("app.api.drills.enqueue_baseline_snapshot", _enqueue),
         patch("app.api.drills.get_opening_roots", return_value=_roots()),
     ):
@@ -1705,8 +1715,10 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
             assert len(sched._pending) == 1
         assert calls["n"] == 0
 
+        # g-jact: the drained job proves freshness via the cheap signal — the
+        # O(evidence) digest never runs, yet the baseline persists below.
         sched.run_due()
-        assert calls["n"] == 1
+        assert calls["n"] == 0
 
     db_session.expire_all()
     session = db_session.get(GameSession, sid)

@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session, aliased
 from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
 from app.models import Blunder, BlunderReview, GameSession, Move, Position
+from app.opening_cache import bump_evidence_seq
+from app.opening_evidence import session_is_evidence_eligible
 from app.posthog_client import capture
 from app.security import TokenPayload, get_current_user
 from app.srs_opportunity import (
@@ -255,7 +257,36 @@ def _upsert_blunder_target(
     )
     db.add(blunder)
     db.flush()
+    _bump_evidence_for_new_blunder(db, blunder)
     return blunder.id, True
+
+
+def _bump_evidence_for_new_blunder(db: Session, blunder: Blunder) -> None:
+    """Advance the opening-evidence counter for a NEW ghost-target row (g-jact).
+
+    Only a digest-visible blunder bumps: a sessionless (manual) blunder is always
+    a ghost target; a session-sourced one counts only when its source session is
+    already evidence-eligible — a live-game blunder waits for the session's own
+    eligibility transition, which folds it in with that bump (no per-move churn).
+
+    The color follows the digest's ghost-target scoping exactly (the source
+    session's ``player_color``, else ``positions.active_color``): bumping the
+    wrong color's counter would leave the right color's batch falsely fresh.
+    Same-transaction with the insert — the caller's commit finalizes both.
+    """
+    if blunder.source_session_id is not None:
+        source = db.get(GameSession, blunder.source_session_id)
+        if source is None or not session_is_evidence_eligible(source):
+            return
+        player_color = source.player_color
+    else:
+        player_color = (
+            db.query(Position.active_color)
+            .filter(Position.id == blunder.position_id)
+            .scalar()
+        )
+    if player_color in ("white", "black"):
+        bump_evidence_seq(db, blunder.user_id, player_color)
 
 
 def _record_target(

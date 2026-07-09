@@ -847,9 +847,11 @@ class TestSessionEligibilityParity:
     inputs, so the two selections must always agree."""
 
     def test_inputs_version_bumped_for_eligibility_narrowing(self):
-        # The eligibility gate changed the digest's row selection; pre-change
-        # batches must self-heal via a version mismatch, not serve as fresh.
-        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v4"
+        # The eligibility gate changed the digest's row selection (raw-v4), and
+        # g-jact moved the version fold into the registry fingerprint (raw-v5);
+        # pre-change batches must self-heal via a version mismatch, not serve
+        # as fresh.
+        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v5"
 
     def test_in_progress_session_affects_neither_digest_nor_overlay(
         self, db_session, branching_graph

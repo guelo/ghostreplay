@@ -18,6 +18,7 @@ import pytest
 from app.models import SessionMove
 from app.opening_cache import (
     OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL,
+    bump_evidence_seq,
     recompute_opening_scores_if_needed,
 )
 from test_opening_cache import _make_graph, _make_roots, _seed_black_opening_session
@@ -96,6 +97,8 @@ def test_evidence_change_reason(db_session, captured):
         .first()
     )
     move.eval_delta = 500
+    # Mirror the production upsert_session_moves choke-point bump (g-jact).
+    bump_evidence_seq(db_session, 123, "black")
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")

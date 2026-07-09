@@ -35,6 +35,7 @@ from app.opening_baseline_scheduler import (
     enqueue_baseline_snapshot,
 )
 from app.opening_cache import (
+    capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
 )
@@ -70,22 +71,30 @@ def _make_session(
 def _seed_batch(
     db, *, user_id=123, player_color="white", computed_at, fresh=True, scores,
 ) -> int:
-    """Seed a batch + score rows. ``fresh=True`` stamps the registry + raw-input
-    fingerprints ``_is_batch_fresh`` checks (a no-evidence user has a deterministic
-    empty raw digest); ``fresh=False`` leaves them mismatched so the batch is
-    provably stale."""
+    """Seed a batch + score rows. ``fresh=True`` stamps the registry fingerprint
+    AND the full g-jact freshness bundle ``_is_batch_fresh`` checks (a no-evidence
+    user has a deterministic empty bundle); ``fresh=False`` leaves them mismatched
+    so the batch is provably stale."""
     if fresh:
         registry_fp = opening_score_inputs_fingerprint(
             get_opening_graph(), get_opening_roots()
         )
-        inputs_fp = opening_score_raw_inputs_fingerprint(db, user_id, player_color)
+        snap = capture_freshness_snapshot(db, user_id, player_color)
+        batch = OpeningScoreBatch(
+            user_id=user_id, player_color=player_color, generation=1,
+            registry_fingerprint=registry_fp,
+            inputs_fingerprint=snap.inputs_fingerprint,
+            evidence_seq=snap.evidence_seq,
+            cache_epoch=snap.cache_epoch,
+            scoped_shared_digest=snap.scoped_shared_digest,
+            computed_at=computed_at,
+        )
     else:
-        registry_fp, inputs_fp = "stale-registry-fp", None
-    batch = OpeningScoreBatch(
-        user_id=user_id, player_color=player_color, generation=1,
-        registry_fingerprint=registry_fp, inputs_fingerprint=inputs_fp,
-        computed_at=computed_at,
-    )
+        batch = OpeningScoreBatch(
+            user_id=user_id, player_color=player_color, generation=1,
+            registry_fingerprint="stale-registry-fp", inputs_fingerprint=None,
+            computed_at=computed_at,
+        )
     db.add(batch)
     db.flush()
     for key, score in scores.items():

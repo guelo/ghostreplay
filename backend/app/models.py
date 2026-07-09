@@ -504,11 +504,158 @@ class OpeningScoreBatch(Base):
     # Content fingerprint over the consumed evidence + registry/config; used to skip
     # recompute when scoring inputs are unchanged. NULL for pre-migration batches.
     inputs_fingerprint: Mapped[str | None] = mapped_column(Text)
+    # Cheap freshness signal (g-jact), stamped at build time and SAMPLED BEFORE the
+    # evidence read so each is a lower bound on the evidence in the batch:
+    # - evidence_seq: the (user_id, player_color) OpeningScoreCursor.evidence_seq at
+    #   build (per-user surfaces: session_moves / eligibility / blunders / reviews);
+    # - cache_epoch: the global evidence_epoch value at build (shared surfaces:
+    #   analysis_cache / position_analysis, advanced by DB triggers);
+    # - scoped_shared_digest: hash over ONLY the shared digest lines (AC|/PA|/ACP|)
+    #   at this batch's stored shared-FEN scope (opening_score_batch_shared_scope),
+    #   so an epoch drift can be resolved without re-scanning session moves.
+    # All NULL on pre-migration batches -> the cheap check reports stale -> rebuild.
+    evidence_seq: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    cache_epoch: Mapped[int | None] = mapped_column(BIGINT_SQLITE)
+    scoped_shared_digest: Mapped[str | None] = mapped_column(Text)
     computed_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False,
     )
+
+
+class EvidenceEpoch(Base):
+    """Single-row global change counter for the SHARED evidence tables (g-jact).
+
+    ``value`` is advanced by MANDATORY database triggers (created in the alembic
+    migration and mirrored in the conftest test schema — they are not part of ORM
+    metadata) on every INSERT/UPDATE/DELETE against ``analysis_cache`` and
+    ``position_analysis``, so any writer — repo txn, repair-script delete, backfill,
+    future code — bumps it without app-level discipline. Only CHANGE matters, never
+    magnitude: the cheap freshness check compares the live value to the one stamped
+    on a batch at build time.
+
+    The singleton row (id=1, value=0) MUST be seeded by the migration/test schema:
+    the triggers do ``UPDATE ... WHERE id = 1``, which silently no-ops when the row
+    is missing. A missing row degrades safely (freshness cannot be proven -> always
+    rebuild) but forfeits the fast path.
+    """
+
+    __tablename__ = "evidence_epoch"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_evidence_epoch_singleton"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    value: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False, server_default="0")
+
+
+# Tables whose writes must advance EvidenceEpoch (mirrored by the 20260708_01
+# migration; keep the two lists in sync).
+EVIDENCE_EPOCH_SHARED_TABLES = ("analysis_cache", "position_analysis")
+
+
+def ensure_evidence_epoch_infrastructure(bind) -> None:
+    """Idempotently seed the ``evidence_epoch`` singleton and (re)create the
+    shared-table triggers on an EXISTING schema.
+
+    ``Base.metadata.create_all`` builds the tables but NOT the trigger DDL or
+    the singleton row — without them ``capture_freshness_snapshot`` stamps a
+    NULL ``cache_epoch`` and no batch can ever be proven fresh. Every non-alembic
+    schema path (the E2E/dev seed script, the hand-written conftest test schema)
+    must call this after creating tables. Alembic-managed databases get the same
+    DDL from the 20260708_01 migration and do not need this.
+
+    ``bind`` is an Engine or Connection; dialect-specific DDL is emitted for
+    sqlite (row-level triggers) and postgresql (statement-level, including
+    TRUNCATE — a maintenance truncate changes shared evidence like any delete).
+    """
+    from sqlalchemy import text as _text
+    from sqlalchemy.engine import Connection as _Connection
+
+    def _install(conn) -> None:
+        dialect = conn.dialect.name
+        if dialect == "postgresql":
+            conn.execute(_text(
+                "INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"
+                " ON CONFLICT (id) DO NOTHING"
+            ))
+            conn.execute(_text(
+                """
+                CREATE OR REPLACE FUNCTION bump_evidence_epoch() RETURNS trigger AS $$
+                BEGIN
+                    UPDATE evidence_epoch SET value = value + 1 WHERE id = 1;
+                    RETURN NULL;
+                END;
+                $$ LANGUAGE plpgsql
+                """
+            ))
+            for table in EVIDENCE_EPOCH_SHARED_TABLES:
+                conn.execute(_text(
+                    f"DROP TRIGGER IF EXISTS trg_{table}_evidence_epoch ON {table}"
+                ))
+                conn.execute(_text(
+                    f"""
+                    CREATE TRIGGER trg_{table}_evidence_epoch
+                    AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON {table}
+                    FOR EACH STATEMENT EXECUTE FUNCTION bump_evidence_epoch()
+                    """
+                ))
+        else:
+            # sqlite (and a best-effort generic fallback): row-level, per-event
+            # (no multi-event or statement-level trigger syntax). N bumps per
+            # batch write are harmless — only change matters, never magnitude.
+            conn.execute(_text(
+                "INSERT OR IGNORE INTO evidence_epoch (id, value) VALUES (1, 0)"
+            ))
+            for table in EVIDENCE_EPOCH_SHARED_TABLES:
+                for event in ("INSERT", "UPDATE", "DELETE"):
+                    conn.execute(_text(
+                        f"""
+                        CREATE TRIGGER IF NOT EXISTS trg_{table}_evidence_epoch_{event.lower()}
+                        AFTER {event} ON {table}
+                        BEGIN
+                            UPDATE evidence_epoch SET value = value + 1 WHERE id = 1;
+                        END
+                        """
+                    ))
+        conn.commit()
+
+    if isinstance(bind, _Connection):
+        _install(bind)
+    else:
+        with bind.connect() as conn:
+            _install(conn)
+
+
+class OpeningScoreBatchSharedScope(Base):
+    """Per-batch shared-FEN scope for the scoped shared freshness digest (g-jact).
+
+    Captured at build time from the raw-input digest derivation itself (the BROAD
+    candidate set — every eligible player-color move lacking a primary eval — NOT
+    the overlay's narrower fallback candidates): ``kind='raw'`` rows hold the raw
+    candidate ``fen_before`` set (exact ``analysis_cache`` move-grain lookups),
+    ``kind='norm'`` rows the normalized-FEN set (``position_analysis`` + legacy
+    ``analysis_cache`` position lookups). When the global ``evidence_epoch`` has
+    drifted past the batch's stamp, freshness re-hashes only the shared digest
+    lines over this stored scope instead of re-deriving it from session moves.
+
+    Cascades on batch delete so retention pruning removes scope rows through the
+    same generation-retention path as the other per-batch read models.
+    """
+
+    __tablename__ = "opening_score_batch_shared_scope"
+    __table_args__ = (
+        CheckConstraint("kind in ('raw','norm')", name="ck_opening_score_batch_shared_scope_kind"),
+        Index("idx_opening_score_batch_shared_scope_batch", "batch_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        BIGINT_SQLITE,
+        ForeignKey("opening_score_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fen: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(String(4), nullable=False)
 
 
 class OpeningPositionScore(Base):
@@ -664,6 +811,25 @@ class OpeningScoreCursor(Base):
     user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True)
     player_color: Mapped[str] = mapped_column(String(5), primary_key=True)
     latest_generation: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # Per-(user,color) change counter over the PER-USER evidence surfaces the
+    # opening-score digest consumes: session_moves content, game_sessions evidence
+    # eligibility (SESSION_EVIDENCE_ELIGIBLE_SQL truth value), ghost-target blunders,
+    # and blunder_reviews. Advanced by ``opening_cache.bump_evidence_seq`` at the
+    # app-level choke-points, in the SAME transaction as the write it accounts for,
+    # via an atomic in-DB column expression (never read-modify-write).
+    #
+    # OUT-OF-BAND-WRITER CONTRACT: any migration or maintenance script that mutates
+    # session_moves, game_sessions (eligibility columns), blunders, or
+    # blunder_reviews WITHOUT going through the app choke-points MUST either bump
+    # OPENING_EVIDENCE_INPUTS_VERSION (globally invalidates every batch via the
+    # registry fingerprint — the simplest safe hammer) or advance evidence_seq for
+    # every affected (user_id, player_color) in the same migration. Otherwise a
+    # stale batch is served as fresh FOREVER (the counter never advances).
+    #
+    # NOTE: this row is also upserted by ``reserve_opening_score_generation``; each
+    # upsert's DO-UPDATE set_ must stay SINGLE-COLUMN (it owns latest_generation,
+    # bump_evidence_seq owns evidence_seq) so neither clobbers the other.
+    evidence_seq: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False, server_default="0")
 
 
 class UserOpeningScore(Base):

@@ -35,7 +35,8 @@ from app.accuracy import (
     expected_total_moves_from_pgn,
 )
 from app.fen import active_color, fen_hash, normalize_fen
-from app.opening_cache import load_cached_rows
+from app.opening_cache import bump_evidence_seq, load_cached_rows
+from app.opening_evidence import session_is_evidence_eligible
 from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain_indexed
 from app.position_analysis_repo import resolve_trusted_positions
@@ -1096,6 +1097,15 @@ def upsert_session_moves(
         if _should_run_session_move_evidence(game_session)
         else []
     )
+    # Opening-evidence counter gate (g-jact): a session_moves write is digest-
+    # visible ONLY for an evidence-eligible session (ended, or accuracy-failed
+    # drill — NOT the _should_run_session_move_evidence gate above, which permits
+    # live sessions). A live upload does not bump (the digest excludes active
+    # sessions; the eligibility transition folds all its moves in with one bump);
+    # a post-end eval-backfill upload does. One bump per eligible upload — the
+    # ON-CONFLICT path can't distinguish insert from update, and over-bumping one
+    # eligible upload is a harmless rebuild, never a false accept.
+    bump_for_evidence = session_is_evidence_eligible(game_session)
     dialect_name = db.bind.dialect.name if db.bind else ""
     if dialect_name == "sqlite":
         statement = sqlite_insert(SessionMove).values(values)
@@ -1132,6 +1142,8 @@ def upsert_session_moves(
                 else:
                     db.add(SessionMove(**value))
 
+            if bump_for_evidence:
+                bump_evidence_seq(db, user.user_id, game_session.player_color)
             db.commit()
         if evidence_moves:
             # Deferred off the request path: the expensive graph/opportunity/
@@ -1196,6 +1208,8 @@ def upsert_session_moves(
         move_count=len(values),
     ):
         db.execute(statement)
+        if bump_for_evidence:
+            bump_evidence_seq(db, user.user_id, game_session.player_color)
         db.commit()
 
     if evidence_moves:

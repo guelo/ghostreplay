@@ -28,6 +28,7 @@ from app.models import (
     Position,
     SessionMove,
     User,
+    ensure_evidence_epoch_infrastructure,
 )
 from app.security import hash_password
 
@@ -294,6 +295,11 @@ def seed_database(database_url: str, *, reset: bool) -> dict[str, SeedUser]:
     if reset:
         Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    # create_all builds tables only: the evidence_epoch singleton row and the
+    # shared-table triggers (g-jact) come from the migration on alembic-managed
+    # DBs, so a metadata-created DB must install them explicitly or no opening
+    # score batch can ever be proven fresh.
+    ensure_evidence_epoch_infrastructure(engine)
 
     users = _load_seed_users()
     with Session(engine) as db:

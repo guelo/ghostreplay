@@ -18,6 +18,7 @@ from conftest import TestingSessionLocal
 from app.models import GameSession, OpeningScoreBatch, SessionMove, UserOpeningScore
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
 from app.opening_cache import (
+    capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
     opening_score_raw_inputs_fingerprint,
 )
@@ -158,27 +159,33 @@ def _ruy_roots() -> OpeningRoots:
 
 def _make_batch(db_session, *, user_id=123, player_color="white", generation=1,
                 fresh=True) -> int:
-    """Seed a batch. ``fresh=True`` stamps the registry + raw-input fingerprints
-    the start-path freshness gate (_is_batch_fresh) checks, so the
+    """Seed a batch. ``fresh=True`` stamps the registry fingerprint AND the full
+    g-jact freshness bundle (inputs fingerprint, evidence_seq, cache_epoch,
+    scoped shared digest) the freshness gate (_is_batch_fresh) checks, so the
     snapshot treats it as provably current (test users carry no evidence -> a
-    deterministic empty raw digest). ``fresh=False`` leaves inputs_fingerprint NULL
+    deterministic empty bundle). ``fresh=False`` leaves the signal NULL
     (legacy/stale) so the gate skips it (source=skipped_stale)."""
     if fresh:
         registry_fp = opening_score_inputs_fingerprint(
             get_opening_graph(), get_opening_roots()
         )
-        inputs_fp = opening_score_raw_inputs_fingerprint(
-            db_session, user_id, player_color
+        snap = capture_freshness_snapshot(db_session, user_id, player_color)
+        batch = OpeningScoreBatch(
+            user_id=user_id, player_color=player_color, generation=generation,
+            registry_fingerprint=registry_fp,
+            inputs_fingerprint=snap.inputs_fingerprint,
+            evidence_seq=snap.evidence_seq,
+            cache_epoch=snap.cache_epoch,
+            scoped_shared_digest=snap.scoped_shared_digest,
+            computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
         )
     else:
-        registry_fp = "fp"
-        inputs_fp = None
-    batch = OpeningScoreBatch(
-        user_id=user_id, player_color=player_color, generation=generation,
-        registry_fingerprint=registry_fp,
-        inputs_fingerprint=inputs_fp,
-        computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
-    )
+        batch = OpeningScoreBatch(
+            user_id=user_id, player_color=player_color, generation=generation,
+            registry_fingerprint="fp",
+            inputs_fingerprint=None,
+            computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
     db_session.add(batch)
     db_session.flush()
     return batch.id
@@ -850,28 +857,36 @@ def test_read_delta_skips_digest_while_recompute_scheduled(db_session):
     assert by_key[RUY_KEY].after == pytest.approx(44.0)
 
 
-def test_read_delta_proves_freshness_once_when_quiescent(db_session):
-    # g-xmhv: a quiescent scheduler is the ONLY path that proves freshness, and it
-    # runs the O(evidence) digest exactly ONCE, returning is_fresh per the verdict.
+def test_read_delta_proves_freshness_cheaply_when_quiescent(db_session):
+    # g-xmhv: a quiescent scheduler is the ONLY path that proves freshness.
+    # g-jact: that proof is now the cheap partitioned signal — the O(evidence)
+    # raw digest/fingerprint must NOT run on the verdict path, yet is_fresh is
+    # still asserted True for a genuinely current batch.
     import json
     session = _make_session(db_session, baseline=json.dumps({RUY_KEY: 41.0}))
     _insert_moves(db_session, session.id, RUY_SANS)
-    batch_id = _make_batch(db_session)  # fresh fingerprints
+    batch_id = _make_batch(db_session)  # fresh fingerprints + signal
     _add_score_row(db_session, batch_id=batch_id, opening_key=RUY_KEY, opening_score=44.0)
     db_session.commit()
 
-    real_fp = opening_score_raw_inputs_fingerprint(db_session, 123, "white")
-    spy = Mock(return_value=real_fp)
+    fp_spy = Mock(
+        side_effect=AssertionError("raw fingerprint must not run on the cheap verdict path")
+    )
+    digest_spy = Mock(
+        side_effect=AssertionError("raw digest must not run on the cheap verdict path")
+    )
     with (
         patch(
             "app.opening_score_scheduler.is_recompute_scheduled", return_value=False
         ),
-        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", new=spy),
+        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", new=fp_spy),
+        patch("app.opening_cache.raw_evidence_inputs_snapshot", new=digest_spy),
         patch(PATCH_ROOTS, return_value=_ruy_roots()),
     ):
         items, is_fresh = read_opening_score_delta(db_session, session)
 
-    spy.assert_called_once()
+    fp_spy.assert_not_called()
+    digest_spy.assert_not_called()
     assert is_fresh is True
     by_key = {item.opening_key: item for item in items}
     assert by_key[RUY_KEY].delta == pytest.approx(3.0)

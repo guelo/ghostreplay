@@ -249,17 +249,17 @@ def _naive(dt: datetime) -> datetime:
 
 def _assert_computed_at_after_reads(db_session, recompute_call):
     # g-mxeo invariant: computed_at is an UPPER BOUND on the evidence reads (sampled
-    # AFTER the fingerprint + overlay reads). Each read wrapper advances the shared
-    # clock and records its post-read tick; the writer's _utcnow() sample must land
-    # on a strictly later tick than both. (Old lower-bound behaviour — sampling
+    # AFTER the freshness-snapshot + overlay reads). Each read wrapper advances the
+    # shared clock and records its post-read tick; the writer's _utcnow() sample must
+    # land on a strictly later tick than both. (Old lower-bound behaviour — sampling
     # computed_at before the reads — would fail this: the reads would tick past it.)
     clock = _MonoClock()
     recorded: dict[str, datetime] = {}
-    real_fp = oc.opening_score_raw_inputs_fingerprint
+    real_snapshot = oc.capture_freshness_snapshot
     real_overlay = oc.overlay_evidence
 
-    def fp_wrap(*args, **kwargs):
-        result = real_fp(*args, **kwargs)
+    def snapshot_wrap(*args, **kwargs):
+        result = real_snapshot(*args, **kwargs)
         recorded["fp"] = clock()
         return result
 
@@ -270,7 +270,7 @@ def _assert_computed_at_after_reads(db_session, recompute_call):
 
     with (
         patch("app.opening_cache._utcnow", clock),
-        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", fp_wrap),
+        patch("app.opening_cache.capture_freshness_snapshot", snapshot_wrap),
         patch("app.opening_cache.overlay_evidence", overlay_wrap),
     ):
         batch = recompute_call()
@@ -836,13 +836,17 @@ def test_if_needed_recomputes_when_evidence_mutated_in_place(db_session):
     first = recompute_opening_scores_if_needed(db_session, 123, "black")
 
     # In-place upsert of a move's eval_delta (no updated_at bump) flips a pass to a
-    # fail, changing the consumed-evidence content fingerprint.
+    # fail, changing the consumed-evidence content. Production reaches this only
+    # through upsert_session_moves, whose choke-point bumps the per-user evidence
+    # counter for an eligible session (g-jact) — mirror that here; a direct ORM
+    # write without the bump is the documented out-of-band-writer caveat.
     move = (
         db_session.query(SessionMove)
         .filter(SessionMove.session_id == session.id, SessionMove.color == "black")
         .first()
     )
     move.eval_delta = 500
+    oc.bump_evidence_seq(db_session, 123, "black")
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
@@ -922,8 +926,10 @@ def test_proven_fresh_true_for_freshly_recomputed_batch(db_session):
 
 
 def test_proven_fresh_false_when_evidence_mutated(db_session):
-    # In-place evidence change (raw digest flips) -> the cached batch is stale even
-    # with NO scheduler work pending; the verdict must catch it.
+    # In-place evidence change -> the cached batch is stale even with NO scheduler
+    # work pending; the verdict must catch it. The bump mirrors the production
+    # upsert_session_moves choke-point (g-jact); a direct ORM write without it is
+    # the documented out-of-band-writer caveat.
     session = _seed_black_opening_session(db_session)
     recompute_opening_scores_if_needed(db_session, 123, "black")
 
@@ -933,6 +939,7 @@ def test_proven_fresh_false_when_evidence_mutated(db_session):
         .first()
     )
     move.eval_delta = 500
+    oc.bump_evidence_seq(db_session, 123, "black")
     db_session.commit()
 
     _, _, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
@@ -1471,13 +1478,15 @@ def test_manual_blunder_counts_as_evidence_regardless_of_session_status(db_sessi
 
 def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
     # A batch stamped under an older OPENING_EVIDENCE_INPUTS_VERSION mismatches
-    # the current fingerprint exactly once (self-healing recompute); the next
-    # unchanged trigger serves the rebuilt batch without recomputing.
+    # exactly once (self-healing recompute); the next unchanged trigger serves the
+    # rebuilt batch without recomputing. Since g-jact the evidence version rides in
+    # the REGISTRY fingerprint, so an older stamp shows up as registry drift.
     _seed_black_opening_session(db_session)
 
     first = recompute_opening_scores_if_needed(db_session, 123, "black")
     assert first is not None
-    first.inputs_fingerprint = "pre-raw-v4-stamp"
+    assert "raw-v5" in first.registry_fingerprint
+    first.registry_fingerprint = first.registry_fingerprint.replace("raw-v5", "raw-v4")
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")
@@ -1521,6 +1530,8 @@ def test_if_needed_builds_overlay_on_real_change(db_session):
 
     move = _black_move(db_session, session)
     move.eval_delta = 500
+    # Mirror the production upsert_session_moves choke-point bump (g-jact).
+    oc.bump_evidence_seq(db_session, 123, "black")
     db_session.commit()
 
     with patch("app.opening_cache.overlay_evidence", wraps=_real_overlay_evidence) as spy:
@@ -1532,24 +1543,24 @@ def test_if_needed_builds_overlay_on_real_change(db_session):
 
 
 def test_recompute_default_computes_fingerprint_before_overlay(db_session):
-    # Race-safety: the stored fingerprint must reflect inputs at-or-before the
-    # scored overlay, never newer. Computing the digest first guarantees that, so
-    # a later fast-path can never serve scores older than their fingerprint.
+    # Race-safety: the stored freshness bundle must reflect inputs at-or-before
+    # the scored overlay, never newer. Capturing the snapshot first guarantees
+    # that, so a later fast-path can never serve scores older than their stamp.
     _seed_black_opening_session(db_session)
     order: list[str] = []
-    real_fp = opening_score_raw_inputs_fingerprint
+    real_snapshot = oc.capture_freshness_snapshot
     real_overlay = _real_overlay_evidence
 
-    def spy_fp(*args, **kwargs):
+    def spy_snapshot(*args, **kwargs):
         order.append("fingerprint")
-        return real_fp(*args, **kwargs)
+        return real_snapshot(*args, **kwargs)
 
     def spy_overlay(*args, **kwargs):
         order.append("overlay")
         return real_overlay(*args, **kwargs)
 
     with (
-        patch("app.opening_cache.opening_score_raw_inputs_fingerprint", side_effect=spy_fp),
+        patch("app.opening_cache.capture_freshness_snapshot", side_effect=spy_snapshot),
         patch("app.opening_cache.overlay_evidence", side_effect=spy_overlay),
     ):
         recompute_opening_scores(db_session, 123, "black")
@@ -1558,13 +1569,13 @@ def test_recompute_default_computes_fingerprint_before_overlay(db_session):
 
 
 def test_recompute_rejects_overlay_without_fingerprint(db_session):
-    # Passing a prebuilt overlay without its matching fingerprint is unsafe (the
-    # function cannot derive a fingerprint that is guaranteed not-newer than the
+    # Passing a prebuilt overlay without its matching freshness snapshot is unsafe
+    # (the function cannot derive a bundle that is guaranteed not-newer than the
     # overlay) and must be rejected before any generation is reserved.
     _seed_black_opening_session(db_session)
     overlay = _real_overlay_evidence(db_session, 123, "black", _make_graph())
 
-    with pytest.raises(ValueError, match="inputs_fingerprint is required"):
+    with pytest.raises(ValueError, match="freshness snapshot is required"):
         recompute_opening_scores(db_session, 123, "black", overlay=overlay)
 
     assert _count_batches(db_session, 123, "black") == 0

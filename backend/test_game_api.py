@@ -24,8 +24,8 @@ from app.models import (
 )
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
 from app.opening_cache import (
+    capture_freshness_snapshot,
     opening_score_inputs_fingerprint,
-    opening_score_raw_inputs_fingerprint,
 )
 from app.opening_graph import get_opening_graph
 from app.opening_roots import get_opening_roots
@@ -33,14 +33,16 @@ from app.opening_roots import get_opening_roots
 
 def _seed_fresh_batch(db, *, user_id, player_color, computed_at, scores):
     """Seed a provably-fresh opening-score batch + rows for (user_id, player_color)."""
+    snap = capture_freshness_snapshot(db, user_id, player_color)
     batch = OpeningScoreBatch(
         user_id=user_id, player_color=player_color, generation=1,
         registry_fingerprint=opening_score_inputs_fingerprint(
             get_opening_graph(), get_opening_roots()
         ),
-        inputs_fingerprint=opening_score_raw_inputs_fingerprint(
-            db, user_id, player_color
-        ),
+        inputs_fingerprint=snap.inputs_fingerprint,
+        evidence_seq=snap.evidence_seq,
+        cache_epoch=snap.cache_epoch,
+        scoped_shared_digest=snap.scoped_shared_digest,
         computed_at=computed_at,
     )
     db.add(batch)
@@ -2005,10 +2007,11 @@ def test_next_opponent_move_invalid_fen(client, auth_headers, create_game_sessio
 # g-mxeo: opening-baseline capture moved OFF the /start request path
 # ---------------------------------------------------------------------------
 def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db_session):
-    # Load-bearing contract: NO O(evidence) digest runs before the /start response.
-    # A fresh pre-session batch exists so the drained worker CAN capture; the digest
-    # count must be 0 when the response returns and increment exactly 0 -> 1 only
-    # across the explicit run_due() drain (proving it moved off the request thread).
+    # Load-bearing contract: NO O(evidence) digest runs before the /start response
+    # (g-mxeo) — and since g-jact none runs on the drained worker either: the
+    # freshness verdict for the seeded batch is the cheap partitioned signal, so
+    # the digest count stays 0 across the entire capture while the baseline still
+    # persists.
     #
     # A dedicated user_id isolates the counter from any background opening-score
     # recompute thread a sibling test's /game/end may have left running (those fire
@@ -2021,14 +2024,24 @@ def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db
     )
     calls = {"n": 0}
     real_digest = oc.raw_evidence_inputs_digest
+    real_snapshot = oc.raw_evidence_inputs_snapshot
 
     def counting_digest(db, user_id, player_color, *args, **kwargs):
         if user_id == baseline_user:
             calls["n"] += 1
         return real_digest(db, user_id, player_color, *args, **kwargs)
 
+    def counting_snapshot(db, user_id, player_color, *args, **kwargs):
+        if user_id == baseline_user:
+            calls["n"] += 1
+        return real_snapshot(db, user_id, player_color, *args, **kwargs)
+
     sched, enqueue_patch = _inject_baseline_scheduler("app.api.game")
-    with patch("app.opening_cache.raw_evidence_inputs_digest", counting_digest), enqueue_patch:
+    with (
+        patch("app.opening_cache.raw_evidence_inputs_digest", counting_digest),
+        patch("app.opening_cache.raw_evidence_inputs_snapshot", counting_snapshot),
+        enqueue_patch,
+    ):
         resp = client.post(
             "/api/game/start",
             json={"engine_elo": 1500, "player_color": "white"},
@@ -2042,9 +2055,10 @@ def test_game_start_does_not_run_digest_on_request_path(client, auth_headers, db
             assert len(sched._pending) == 1
         assert calls["n"] == 0
 
-        # The digest runs exactly once, only across the drained job.
+        # g-jact: the drained job proves freshness via the cheap signal — the
+        # O(evidence) digest never runs, yet the baseline persists below.
         sched.run_due()
-        assert calls["n"] == 1
+        assert calls["n"] == 0
 
     db_session.expire_all()
     session = db_session.get(GameSession, sid)

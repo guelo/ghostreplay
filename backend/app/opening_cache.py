@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Literal
 
-from sqlalchemy import func, text
+from sqlalchemy import func, text, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -14,9 +15,11 @@ from sqlalchemy.orm import Session
 from app.fen import normalize_fen
 from app.game_phase import DIVIDER_VERSION
 from app.models import (
+    EvidenceEpoch,
     OpeningPositionEdge,
     OpeningPositionScore,
     OpeningScoreBatch,
+    OpeningScoreBatchSharedScope,
     OpeningScoreCursor,
     UserOpeningScore,
 )
@@ -28,12 +31,15 @@ from app.opening_aggregate import (
     _snapshot_position_rows,
 )
 from app.opening_evidence import (
+    FRESHNESS_CONTRACT_VERSION,
     OPENING_EVIDENCE_INPUTS_VERSION,
     SESSION_EVIDENCE_ELIGIBLE_SQL,
     EdgeEvidence,
     EvidenceOverlay,
     overlay_evidence,
     raw_evidence_inputs_digest,
+    raw_evidence_inputs_snapshot,
+    shared_scope_digest,
 )
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
@@ -120,12 +126,30 @@ def opening_score_inputs_fingerprint(
     graph: OpeningGraph,
     roots: OpeningRoots,
 ) -> str:
+    """Registry fingerprint — every VERSION/semantic surface, all O(1).
+
+    ``OPENING_EVIDENCE_INPUTS_VERSION`` and ``FRESHNESS_CONTRACT_VERSION`` are
+    folded in here (not into the raw fingerprint) so the cheap freshness check's
+    first, O(1) registry comparison catches evidence-derivation semantic bumps
+    and cheap-signal contract changes on already-stamped batches (g-jact).
+    """
     return (
         f"{graph.fingerprint}:{roots.fingerprint}:{root_calc_config_fingerprint()}"
         f":{SCORE_MODEL_VERSION}:{DIVIDER_VERSION}"
         f":{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
         f":{OPENING_SCORE_CACHE_SCHEMA_VERSION}"
+        f":{OPENING_EVIDENCE_INPUTS_VERSION}:{FRESHNESS_CONTRACT_VERSION}"
     )
+
+
+def _compose_raw_fingerprint(registry_fp: str, row_digest: str) -> str:
+    """Single composition rule for ``inputs_fingerprint`` (build + verify sides).
+
+    No explicit version fold: ``registry_fp`` already carries
+    ``OPENING_EVIDENCE_INPUTS_VERSION`` / ``FRESHNESS_CONTRACT_VERSION``
+    transitively (see ``opening_score_inputs_fingerprint``).
+    """
+    return hashlib.sha256(f"{registry_fp}|{row_digest}".encode("utf-8")).hexdigest()
 
 
 def opening_score_raw_inputs_fingerprint(
@@ -133,35 +157,30 @@ def opening_score_raw_inputs_fingerprint(
     user_id: int,
     player_color: PlayerColor,
 ) -> str:
-    """Cheap freshness fingerprint computed from raw DB rows — no overlay build.
+    """Full freshness fingerprint computed from raw DB rows — no overlay build.
 
     ``overlay_evidence`` is a pure deterministic function of a fixed set of raw DB
     rows plus the graph/roots/config/version constants. So "did anything change?"
     can be answered by hashing the INPUTS to the derivation (cheap SQL, zero board
     work) instead of the OUTPUT (which forces the ~2.6s python-chess replay first).
 
-    Composed from three independent change surfaces:
+    Composed from two surfaces via ``_compose_raw_fingerprint``:
       - ``opening_score_inputs_fingerprint`` — graph/roots/config/scoring/divider/
-        quality versions (registry/config);
-      - ``OPENING_EVIDENCE_INPUTS_VERSION`` — evidence-derivation logic version,
-        covering the residual ``opening_evidence`` semantics the registry does not
-        plus the digest contract itself;
+        quality/evidence-derivation/freshness-contract versions;
       - ``raw_evidence_inputs_digest`` — the ordered raw-row projection.
 
-    If this matches the value stored on the batch, the overlay is provably
-    identical and need never be built. A false-negative (digest changes when
-    nothing relevant did) only causes an unnecessary, still-correct rebuild; the
-    composition avoids false-positives (missing a real change) by covering all
-    inputs plus the two logic versions.
+    O(evidence volume): it full-scans + hashes every session_moves row and
+    IN-queries the shared caches. Since g-jact it is NOT on any warm freshness
+    path — the cheap partitioned signal (``_is_batch_fresh``) answers there —
+    and is computed only on the REBUILD branch (via
+    ``capture_freshness_snapshot``) as the stored source-of-truth digest.
     """
     _validate_player_color(player_color)
     graph = get_opening_graph()
     roots = get_opening_roots()
     registry_fp = opening_score_inputs_fingerprint(graph, roots)
     row_digest = raw_evidence_inputs_digest(db, user_id, player_color)
-    return hashlib.sha256(
-        f"{registry_fp}|{OPENING_EVIDENCE_INPUTS_VERSION}|{row_digest}".encode("utf-8")
-    ).hexdigest()
+    return _compose_raw_fingerprint(registry_fp, row_digest)
 
 
 def prune_old_opening_score_batches(
@@ -338,6 +357,264 @@ def reserve_opening_score_generation(
     return cursor.latest_generation
 
 
+def bump_evidence_seq(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+) -> None:
+    """Advance the per-(user,color) evidence counter — IN THE CALLER'S TXN.
+
+    Called wherever a PER-USER evidence surface changes in a digest-visible way
+    (g-jact): an eligible session_moves upload, an eligibility truth-value flip
+    (end / accuracy-fail / abandon / convert), a new ghost-target blunder, a new
+    blunder review. Executes the upsert but does NOT commit — the caller's commit
+    makes the bump atomic with the evidence write it accounts for, and a rolled
+    back write rolls back its bump.
+
+    The increment is an atomic in-DB column expression (``evidence_seq + 1``
+    under the ON-CONFLICT row lock), NEVER a Python read-modify-write: two
+    concurrent read-add-write bumps would collapse into one advance, and a batch
+    build sampling between their commits would then match forever — the exact
+    false-positive this signal forbids. The DO-UPDATE ``set_`` touches ONLY
+    ``evidence_seq`` so it can never clobber ``latest_generation``, which
+    ``reserve_opening_score_generation`` owns on the same composite-PK row (and
+    vice versa — its ``set_`` must stay single-column too).
+    """
+    _validate_player_color(player_color)
+    dialect_name = db.bind.dialect.name if db.bind else ""
+
+    if dialect_name == "sqlite":
+        stmt = sqlite_insert(OpeningScoreCursor).values(
+            user_id=user_id,
+            player_color=player_color,
+            evidence_seq=1,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[OpeningScoreCursor.user_id, OpeningScoreCursor.player_color],
+            set_={"evidence_seq": OpeningScoreCursor.evidence_seq + 1},
+        )
+        db.execute(stmt)
+        return
+
+    if dialect_name == "postgresql":
+        stmt = postgresql_insert(OpeningScoreCursor).values(
+            user_id=user_id,
+            player_color=player_color,
+            evidence_seq=1,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[OpeningScoreCursor.user_id, OpeningScoreCursor.player_color],
+            set_={"evidence_seq": OpeningScoreCursor.evidence_seq + 1},
+        )
+        db.execute(stmt)
+        return
+
+    # Generic fallback (unused dialects in practice) — mirrors reserve's last
+    # branch; acceptable there since those dialects aren't run concurrently.
+    cursor = (
+        db.query(OpeningScoreCursor)
+        .filter(
+            OpeningScoreCursor.user_id == user_id,
+            OpeningScoreCursor.player_color == player_color,
+        )
+        .first()
+    )
+    if cursor is None:
+        db.add(
+            OpeningScoreCursor(
+                user_id=user_id,
+                player_color=player_color,
+                evidence_seq=1,
+            )
+        )
+    else:
+        cursor.evidence_seq += 1
+
+
+def current_evidence_seq(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+) -> int:
+    """Live per-(user,color) evidence counter; 0 when no cursor row exists yet
+    (bumps upsert the row, so no row ⇔ no bump has ever fired)."""
+    value = (
+        db.query(OpeningScoreCursor.evidence_seq)
+        .filter(
+            OpeningScoreCursor.user_id == user_id,
+            OpeningScoreCursor.player_color == player_color,
+        )
+        .scalar()
+    )
+    return int(value) if value is not None else 0
+
+
+def current_cache_epoch(db: Session) -> int | None:
+    """Live global shared-cache epoch; None when the singleton row is missing
+    (pre-migration / mis-seeded DB — freshness is then never provable, which is
+    the safe degradation: every check rebuilds)."""
+    value = db.query(EvidenceEpoch.value).filter(EvidenceEpoch.id == 1).scalar()
+    return int(value) if value is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class FreshnessSnapshot:
+    """Everything ``recompute_opening_scores`` stamps on a batch for the cheap
+    freshness check (g-jact), captured as ONE bundle so a caller can never pair
+    a newer signal with an older overlay (the hazard the old
+    overlay-requires-fingerprint guard existed to prevent).
+
+    ``evidence_seq`` / ``cache_epoch`` are sampled BEFORE the evidence read they
+    describe, so each stamped value is a LOWER BOUND on the evidence in the
+    batch: a write landing during/after the read advances the live counter above
+    the stamp → the next check sees a mismatch → harmless rebuild, never a false
+    accept. (The OPPOSITE of ``computed_at``, which is sampled after the read as
+    an evidence upper bound for the g-mxeo date guard.)
+
+    ``cache_epoch`` is None when the ``evidence_epoch`` singleton was MISSING at
+    build time, and MUST be stamped as NULL (never coerced to 0): shared writes
+    during a missing-singleton window fire triggers that silently no-op, so no
+    live epoch value can vouch for them. A 0-stamp would alias with a later
+    re-seeded ``(1, 0)`` row and fast-accept over those invisible writes — the
+    exact false positive this signal forbids. A NULL stamp keeps the batch
+    permanently unprovable (``_cheap_evidence_fresh`` treats it as unstamped →
+    always rebuild), which is the safe degradation.
+    """
+
+    inputs_fingerprint: str
+    evidence_seq: int
+    cache_epoch: int | None
+    shared_raw_fens: tuple[str, ...]
+    shared_norm_fens: tuple[str, ...]
+    scoped_shared_digest: str
+
+
+def capture_freshness_snapshot(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+) -> FreshnessSnapshot:
+    """One evidence read → the full freshness bundle for a batch build.
+
+    O(evidence): pays the full raw-input digest. Only the REBUILD branch calls
+    this; warm freshness verdicts go through ``_is_batch_fresh`` and never do.
+    """
+    _validate_player_color(player_color)
+    registry_fp = opening_score_inputs_fingerprint(get_opening_graph(), get_opening_roots())
+    # Counters BEFORE the evidence read (lower-bound discipline — see
+    # FreshnessSnapshot). A missing epoch singleton stamps NULL — never 0: the
+    # triggers no-op while the row is missing, so a 0-stamp would alias with a
+    # later re-seeded (1, 0) row and fast-accept over shared writes the epoch
+    # never saw (see the FreshnessSnapshot docstring). NULL keeps the batch
+    # unstamped → never provably fresh → always rebuild until the singleton
+    # exists and a rebuild re-stamps a real epoch.
+    evidence_seq = current_evidence_seq(db, user_id, player_color)
+    cache_epoch = current_cache_epoch(db)
+    snapshot = raw_evidence_inputs_snapshot(db, user_id, player_color)
+    return FreshnessSnapshot(
+        inputs_fingerprint=_compose_raw_fingerprint(registry_fp, snapshot.digest),
+        evidence_seq=evidence_seq,
+        cache_epoch=cache_epoch,
+        shared_raw_fens=snapshot.shared_raw_fens,
+        shared_norm_fens=snapshot.shared_norm_fens,
+        scoped_shared_digest=snapshot.scoped_shared_digest,
+    )
+
+
+def _load_batch_shared_scope(db: Session, batch_id: int) -> tuple[list[str], list[str]]:
+    """The (raw_fens, norm_fens) shared scope stored for one batch."""
+    rows = (
+        db.query(OpeningScoreBatchSharedScope.fen, OpeningScoreBatchSharedScope.kind)
+        .filter(OpeningScoreBatchSharedScope.batch_id == batch_id)
+        .all()
+    )
+    raw_fens = [fen for fen, kind in rows if kind == "raw"]
+    norm_fens = [fen for fen, kind in rows if kind == "norm"]
+    return raw_fens, norm_fens
+
+
+def _best_effort_rearm(db: Session, batch_id: int, epoch: int) -> None:
+    """Catch a scoped-fresh batch's ``cache_epoch`` up to ``epoch`` so the next
+    check is O(1) again — a PURE OPTIMIZATION, never required for correctness.
+
+    This is a WRITE reached from logically-read paths (the delta poll GET, the
+    baseline worker), so it runs in a short INDEPENDENT session on the caller's
+    bind — never the caller's transaction — and swallows every error (sqlite
+    ``database is locked`` contention included): a failed re-arm only costs one
+    extra scoped re-check next time. Concurrent re-arms racing on one batch are
+    safe: each stamps an epoch sampled BEFORE its own scoped read, so even a
+    stale writer's stamp is a valid lower bound (worst case one extra re-check,
+    never a false accept).
+    """
+    try:
+        rearm_session = Session(bind=db.get_bind())
+        try:
+            rearm_session.execute(
+                update(OpeningScoreBatch)
+                .where(OpeningScoreBatch.id == batch_id)
+                .values(cache_epoch=epoch)
+            )
+            rearm_session.commit()
+        finally:
+            rearm_session.close()
+    except Exception:
+        logger.debug(
+            "opening batch re-arm failed (best-effort) batch_id=%s", batch_id,
+            exc_info=True,
+        )
+
+
+def _cheap_evidence_fresh(db: Session, batch: OpeningScoreBatch) -> bool:
+    """Partitioned cheap evidence-freshness check for one batch (g-jact).
+
+    Covers the EVIDENCE surfaces only — callers own the registry-fingerprint and
+    stale-branch-key checks. Check order:
+
+    1. unstamped signal (NULL signal columns, or a NULL ``inputs_fingerprint``)
+       → False. Covers pre-migration batches (which also fail the registry
+       check upstream via the raw-v5 fold), genuinely corrupt/partial batches,
+       AND batches deliberately stamped with a NULL ``cache_epoch`` because the
+       ``evidence_epoch`` singleton was missing at build time (see
+       ``FreshnessSnapshot`` — a 0-stamp there would alias with a re-seeded
+       row). Treat as stale and let a rebuild re-stamp (no oracle-reseed path).
+    2. epoch singleton missing → False (cannot prove).
+    3. per-user ``evidence_seq`` mismatch → False. Straight to rebuild, NOT the
+       scoped path: a per-user change can add/remove candidate FENs, so the
+       stored scope is no longer valid (matches today's any-per-user-change →
+       full rebuild).
+    4. epoch match → True. The O(1) fast accept: two integer reads total.
+    5. epoch drift → re-hash the shared lines over the STORED scope. Still skips
+       the session_moves scan and the python-chess normalize loop (the digest's
+       dominant costs). Scoped match → True + best-effort re-arm; else False.
+
+    Soundness: True requires seq match (⇒ no per-user change ⇒ scope unchanged)
+    AND (epoch match ⇒ no shared write anywhere, OR scoped match ⇒ no shared
+    change at this batch's positions) ⇒ every ``raw_evidence_inputs_digest``
+    input unchanged ⇒ overlay identical ⇒ scores identical.
+    """
+    if (
+        batch.inputs_fingerprint is None
+        or batch.evidence_seq is None
+        or batch.cache_epoch is None
+        or batch.scoped_shared_digest is None
+    ):
+        return False
+    # Sample the live epoch BEFORE the scoped read below so a re-arm stamp is a
+    # lower bound on the evidence that read saw.
+    epoch = current_cache_epoch(db)
+    if epoch is None:
+        return False
+    if current_evidence_seq(db, batch.user_id, batch.player_color) != batch.evidence_seq:
+        return False
+    if epoch == batch.cache_epoch:
+        return True
+    raw_fens, norm_fens = _load_batch_shared_scope(db, batch.id)
+    if shared_scope_digest(db, raw_fens, norm_fens) == batch.scoped_shared_digest:
+        _best_effort_rearm(db, batch.id, epoch)
+        return True
+    return False
+
+
 def list_cached_opening_scores(
     db: Session,
     user_id: int,
@@ -401,21 +678,28 @@ def _is_batch_fresh(
     batch: OpeningScoreBatch,
     rows: list[UserOpeningScore],
 ) -> bool:
-    """Freshness predicate for an ALREADY-FETCHED batch + its rows.
+    """Freshness predicate for an ALREADY-FETCHED batch + its rows — CHEAP (g-jact).
 
     Single source of truth for "would ``recompute_opening_scores_if_needed`` serve
-    this batch UNCHANGED": the registry fingerprint matches, the raw-input
-    fingerprint matches, and there are no stale branch-key rows. (Time-decay
-    staleness is intentionally ignored — it perturbs scores by a small wall-clock
-    amount, not by un-folded evidence, so gating on it would gut baseline coverage
-    for no correctness benefit.)
+    this batch UNCHANGED": the registry fingerprint matches (graph/roots/config/
+    model AND evidence-derivation/freshness-contract versions, all O(1)), there
+    are no stale branch-key rows, and the partitioned cheap evidence signal holds
+    (``_cheap_evidence_fresh``: per-user ``evidence_seq`` + global ``cache_epoch``
+    + scoped shared digest on epoch drift). (Time-decay staleness is intentionally
+    ignored — it perturbs scores by a small wall-clock amount, not by un-folded
+    evidence, so gating on it would gut baseline coverage for no correctness
+    benefit.)
 
-    EXPENSIVE: ``opening_score_raw_inputs_fingerprint`` -> ``raw_evidence_inputs_digest``
-    is O(evidence volume) (it full-scans + hashes every session_moves +
-    analysis_cache row for the user). Hot paths that only need the items must NOT
-    call this; the end-of-session delta poll gates it behind the cheap
-    ``is_recompute_scheduled`` probe so it runs at most once per poll session, and
-    only when the scheduler is quiescent (g-xmhv).
+    Cost: O(1) when the shared cache is quiescent (two integer reads + the
+    branch-key check); the scoped shared digest over the batch's STORED scope when
+    a shared write happened somewhere (still no session_moves scan and no
+    python-chess normalize loop). The O(evidence) ``raw_evidence_inputs_digest``
+    is NEVER computed here — it survives only on the rebuild branch and as the
+    differential-test reference.
+
+    False-negatives are allowed (harmless rebuild); NO false-positives (see
+    ``_cheap_evidence_fresh``'s soundness note — a stale batch is never served
+    as fresh).
 
     ``batch`` carries its own ``user_id`` / ``player_color``, so callers need not
     re-thread them. Mirrors the fast-path conditions in
@@ -425,14 +709,11 @@ def _is_batch_fresh(
     registry_fingerprint = opening_score_inputs_fingerprint(
         get_opening_graph(), get_opening_roots()
     )
-    raw_fingerprint = opening_score_raw_inputs_fingerprint(
-        db, batch.user_id, batch.player_color
-    )
-    return (
-        batch.registry_fingerprint == registry_fingerprint
-        and batch.inputs_fingerprint == raw_fingerprint
-        and not _batch_has_stale_branch_keys(rows)
-    )
+    if batch.registry_fingerprint != registry_fingerprint:
+        return False
+    if _batch_has_stale_branch_keys(rows):
+        return False
+    return _cheap_evidence_fresh(db, batch)
 
 
 def proven_fresh_opening_scores(
@@ -446,10 +727,12 @@ def proven_fresh_opening_scores(
     Returns ``(batch, rows, is_fresh)``. ``is_fresh`` is True only when a batch
     exists AND ``_is_batch_fresh`` holds (see it for the predicate).
 
-    Cost: one batch+rows read plus the cheap raw-input digest (``cheap SQL, no
-    overlay`` — the ~2.6s python-chess overlay is never built). Built for the
-    session-start hot path, which must capture a confident baseline only when the
-    cache is PROVABLY current and otherwise degrade to NULL without blocking.
+    Cost: one batch+rows read plus the cheap partitioned freshness check —
+    O(1) counter reads when the shared cache is quiescent, the scoped shared
+    digest otherwise; never the O(evidence) raw digest and never the ~2.6s
+    python-chess overlay. Built for the session-start hot path, which must
+    capture a confident baseline only when the cache is PROVABLY current and
+    otherwise degrade to NULL without blocking.
     """
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
     if batch is None:
@@ -881,28 +1164,29 @@ def recompute_opening_scores(
     player_color: PlayerColor,
     *,
     overlay: EvidenceOverlay | None = None,
-    inputs_fingerprint: str | None = None,
+    freshness: FreshnessSnapshot | None = None,
     computed_at: datetime | None = None,
 ) -> OpeningScoreBatch:
     _validate_player_color(player_color)
-    if overlay is not None and inputs_fingerprint is None:
+    if overlay is not None and freshness is None:
         # A prebuilt overlay reflects a specific raw-input snapshot. Deriving the
-        # fingerprint here — after the overlay was built elsewhere — could store a
-        # fingerprint NEWER than the scored overlay if evidence changed in between,
-        # letting a later read fast-path over stale scores. Callers that pass an
-        # overlay must pass its matching fingerprint. Checked before any side
-        # effects (generation reservation) so misuse cannot leave dangling state.
-        raise ValueError("inputs_fingerprint is required when overlay is provided")
+        # freshness bundle here — after the overlay was built elsewhere — could
+        # stamp a signal NEWER than the scored overlay if evidence changed in
+        # between, letting a later read fast-path over stale scores. Callers that
+        # pass an overlay must pass the matching FreshnessSnapshot (sampled before
+        # their overlay evidence read). Checked before any side effects
+        # (generation reservation) so misuse cannot leave dangling state.
+        raise ValueError("freshness snapshot is required when overlay is provided")
     generation = reserve_opening_score_generation(db, user_id, player_color)
     graph = get_opening_graph()
     roots = get_opening_roots()
-    if inputs_fingerprint is None:
-        # Compute the freshness fingerprint BEFORE building the overlay so the
-        # stored fingerprint can never be newer than the scored inputs. If evidence
-        # changes in the gap, the overlay is at-or-newer than the fingerprint, so
-        # the next read recomputes (at most one redundant pass) rather than
+    if freshness is None:
+        # Capture the freshness bundle BEFORE building the overlay so the stored
+        # fingerprint/signal can never be newer than the scored inputs. If
+        # evidence changes in the gap, the overlay is at-or-newer than the stamp,
+        # so the next read recomputes (at most one redundant pass) rather than
         # fast-pathing over stale scores.
-        inputs_fingerprint = opening_score_raw_inputs_fingerprint(db, user_id, player_color)
+        freshness = capture_freshness_snapshot(db, user_id, player_color)
     if overlay is None:
         overlay = overlay_evidence(db, user_id, player_color, graph)
     # Release the checked-out DB connection before the CPU-heavy scoring pass.
@@ -926,13 +1210,29 @@ def recompute_opening_scores(
         player_color=player_color,
         generation=generation,
         registry_fingerprint=opening_score_inputs_fingerprint(graph, roots),
-        inputs_fingerprint=inputs_fingerprint,
+        inputs_fingerprint=freshness.inputs_fingerprint,
+        evidence_seq=freshness.evidence_seq,
+        cache_epoch=freshness.cache_epoch,
+        scoped_shared_digest=freshness.scoped_shared_digest,
         computed_at=computed_at,
     )
 
     try:
         db.add(batch)
         db.flush()
+
+        # Persist the batch's shared-FEN scope so an epoch drift can be resolved
+        # by re-hashing only these positions (see _cheap_evidence_fresh).
+        scope_rows = [
+            OpeningScoreBatchSharedScope(batch_id=batch.id, fen=fen, kind="raw")
+            for fen in freshness.shared_raw_fens
+        ]
+        scope_rows.extend(
+            OpeningScoreBatchSharedScope(batch_id=batch.id, fen=fen, kind="norm")
+            for fen in freshness.shared_norm_fens
+        )
+        if scope_rows:
+            db.add_all(scope_rows)
 
         if scores:
             db.add_all(
@@ -1127,10 +1427,16 @@ def recompute_opening_scores_if_needed(
 
     Recomputes when any of the following holds, else reuses the current batch:
       - cache miss (no batch) and the user has opening evidence,
-      - the evidence ``inputs_fingerprint`` changed (drill bursts), gated by the
-        time-decay interval when nothing else changed,
-      - the ``registry_fingerprint`` drifted (graph/roots/config/model versions),
+      - the cheap evidence signal reports a change (``_cheap_evidence_fresh``:
+        per-user seq / shared epoch / scoped shared digest — g-jact), gated by
+        the time-decay interval when nothing else changed,
+      - the ``registry_fingerprint`` drifted (graph/roots/config/model/evidence
+        versions),
       - the batch has legacy/stale branch-key rows.
+
+    The O(evidence) raw-input digest is computed ONLY on the rebuild branches
+    (inside ``capture_freshness_snapshot``, as the stored source-of-truth
+    ``inputs_fingerprint``) — never on the fast cached-batch return.
 
     Emits ``opening_scores_recomputed`` (with timing + the trigger reason) ONLY
     when an actual recompute runs — never on the fast cached-batch return.
@@ -1138,10 +1444,6 @@ def recompute_opening_scores_if_needed(
     now = datetime.now(timezone.utc)
     graph = get_opening_graph()
     registry_fingerprint = opening_score_inputs_fingerprint(graph, get_opening_roots())
-    # Cheap raw-input digest first — built WITHOUT the overlay. The overlay (which
-    # replays every session's board line through the Lichess divider, ~2.6s for a
-    # few hundred games) is built only on the non-fast paths below.
-    raw_fingerprint = opening_score_raw_inputs_fingerprint(db, user_id, player_color)
 
     batch, rows = list_cached_opening_scores(db, user_id, player_color)
 
@@ -1149,8 +1451,11 @@ def recompute_opening_scores_if_needed(
         if not has_opening_evidence(db, user_id, player_color):
             return None
         started = time.monotonic()
+        # Freshness bundle BEFORE the overlay evidence read (lower-bound
+        # discipline — see FreshnessSnapshot); this is where the full digest runs.
+        freshness = capture_freshness_snapshot(db, user_id, player_color)
         overlay = overlay_evidence(db, user_id, player_color, graph)
-        # Do NOT pass computed_at=now: the writer samples it AFTER the fingerprint
+        # Do NOT pass computed_at=now: the writer samples it AFTER the freshness
         # + overlay reads above so it stays an upper bound on the batch's evidence
         # (g-mxeo). ``now`` is kept only for the decay-staleness gate below.
         result = recompute_opening_scores(
@@ -1158,7 +1463,7 @@ def recompute_opening_scores_if_needed(
             user_id,
             player_color,
             overlay=overlay,
-            inputs_fingerprint=raw_fingerprint,
+            freshness=freshness,
         )
         _emit_opening_scores_recomputed(
             db,
@@ -1177,7 +1482,17 @@ def recompute_opening_scores_if_needed(
 
     registry_drift = batch.registry_fingerprint != registry_fingerprint
     stale_branch_keys = _batch_has_stale_branch_keys(rows)
-    evidence_change = batch.inputs_fingerprint != raw_fingerprint
+    # Cheap partitioned signal in place of the old unconditional raw-digest
+    # fast-gate (g-jact). Skipped when registry/branch-key drift already forces
+    # a rebuild: under shared-cache churn the check's scoped-digest tier is real
+    # work, and its verdict would be moot. The analytics flag then reports False
+    # — "not the trigger", matching the reason priority — rather than "checked
+    # and changed".
+    evidence_change = (
+        not registry_drift
+        and not stale_branch_keys
+        and not _cheap_evidence_fresh(db, batch)
+    )
     decay_staleness = False
 
     if not registry_drift and not stale_branch_keys and not evidence_change:
@@ -1203,8 +1518,10 @@ def recompute_opening_scores_if_needed(
         reason = "decay_staleness"
 
     # Change / registry drift / stale branch keys / decay-staleness: build the
-    # overlay and recompute.
+    # overlay and recompute. The full raw digest runs HERE (rebuild only), inside
+    # capture_freshness_snapshot, sampled before the overlay evidence read.
     started = time.monotonic()
+    freshness = capture_freshness_snapshot(db, user_id, player_color)
     overlay = overlay_evidence(db, user_id, player_color, graph)
     # As in the cache-miss branch: let the writer sample computed_at after these
     # reads so it remains an evidence-read upper bound (g-mxeo). ``now`` above is
@@ -1214,7 +1531,7 @@ def recompute_opening_scores_if_needed(
         user_id,
         player_color,
         overlay=overlay,
-        inputs_fingerprint=raw_fingerprint,
+        freshness=freshness,
     )
     _emit_opening_scores_recomputed(
         db,
