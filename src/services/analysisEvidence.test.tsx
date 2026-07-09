@@ -230,4 +230,45 @@ describe('useAnalysisEvidence', () => {
       expect.objectContaining({ type: 'cancel-analysis', id: first.id }),
     )
   })
+
+  // g-xox0 Part B: consume the endpoint result and surface an accepted upgrade.
+  const upgrade = {
+    classification: 'best' as const,
+    eval_cp: 45,
+    eval_mate: null,
+    best_move_san: 'e4',
+    best_move_eval_cp: 45,
+    eval_delta: 0,
+    authoritative: false,
+  }
+
+  it('fires onAcceptedEvidence with the upgrade on an accepted result', async () => {
+    const onAccepted = vi.fn()
+    submitAnalysisEvidenceMock.mockResolvedValue([
+      { fen: START, move_uci: 'e2e4', reason: 'new_key', upgrade },
+    ])
+    const { result } = renderHook(() => useAnalysisEvidence('s1', onAccepted))
+    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
+    const msg = postedAnalyzeMove()
+    await act(async () => {
+      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
+      await Promise.resolve()
+    })
+    expect(onAccepted).toHaveBeenCalledWith(START, 'e2e4', upgrade)
+  })
+
+  it('does not fire onAcceptedEvidence when the result carries no upgrade', async () => {
+    const onAccepted = vi.fn()
+    submitAnalysisEvidenceMock.mockResolvedValue([
+      { fen: START, move_uci: 'e2e4', reason: 'incompatible_keep', upgrade: null },
+    ])
+    const { result } = renderHook(() => useAnalysisEvidence('s1', onAccepted))
+    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
+    const msg = postedAnalyzeMove()
+    await act(async () => {
+      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
+      await Promise.resolve()
+    })
+    expect(onAccepted).not.toHaveBeenCalled()
+  })
 })

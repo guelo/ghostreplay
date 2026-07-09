@@ -105,15 +105,21 @@ vi.mock('../hooks/useStockfishEngine', () => ({
 
 // Evidence driver (g-cache-stronger-evals): spy on requestEvidence/cancel so the
 // gating in AnalysisBoard can be asserted without a real second Stockfish worker.
-const { mockRequestEvidence, mockCancelEvidence } = vi.hoisted(() => ({
+// Capture the onAcceptedEvidence callback (g-xox0 Part B) so a test can drive the
+// live-overlay path directly.
+const { mockRequestEvidence, mockCancelEvidence, capturedOnAcceptedRef } = vi.hoisted(() => ({
   mockRequestEvidence: vi.fn(),
   mockCancelEvidence: vi.fn(),
+  capturedOnAcceptedRef: { current: undefined as unknown },
 }))
 vi.mock('../services/analysisEvidence', () => ({
-  useAnalysisEvidence: () => ({
-    requestEvidence: mockRequestEvidence,
-    cancel: mockCancelEvidence,
-  }),
+  useAnalysisEvidence: (_sessionId: unknown, onAccepted: unknown) => {
+    capturedOnAcceptedRef.current = onAccepted
+    return {
+      requestEvidence: mockRequestEvidence,
+      cancel: mockCancelEvidence,
+    }
+  },
 }))
 
 // --- Prop-capturing mocks ---
@@ -2333,5 +2339,185 @@ describe('buildMainLineMoveDetails wire-field migration (g-cache-stronger-evals)
       START,
     )
     expect(details[1].fenBefore).toBe(AFTER_E4)
+  })
+})
+
+// --------------------------------------------------------------------------- #
+// Re-annotation overlay (g-xox0): source-aware precedence + consistent display
+// --------------------------------------------------------------------------- #
+describe('AnalysisBoard — re-annotation overlay (g-xox0)', () => {
+  const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+  const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+
+  type Upgrade = NonNullable<AnalysisMove['upgraded']>
+
+  const e4Move = (over: Partial<AnalysisMove> = {}): AnalysisMove => ({
+    move_number: 1,
+    color: 'white',
+    move_san: 'e4',
+    move_uci: 'e2e4',
+    fen_before: START,
+    fen_after: AFTER_E4,
+    eval_cp: 30,
+    eval_mate: null,
+    best_move_san: 'd4',
+    best_move_eval_cp: 50,
+    eval_delta: 60,
+    classification: 'excellent',
+    ...over,
+  })
+
+  const upgrade = (over: Partial<Upgrade> = {}): Upgrade => ({
+    classification: 'best',
+    eval_cp: 80,
+    eval_mate: null,
+    best_move_san: 'e4', // played is now best → no contradictory best-arrow
+    best_move_eval_cp: 80,
+    eval_delta: 0,
+    authoritative: false,
+    ...over,
+  })
+
+  const trustedBest = (bestUci: string) => ({
+    [START]: {
+      best_move_uci: bestUci,
+      best_move_san: bestUci === 'e2e4' ? 'e4' : 'd4',
+      best_move_eval_cp: 30,
+      best_line_uci: [bestUci, 'e7e5'],
+      position_trusted: true,
+    },
+  })
+
+  const badge = () =>
+    (capturedMoveListProps.moves as Array<{ classification: string | null }>)[0]
+      .classification
+  const listEval = () =>
+    (capturedMoveListProps.moves as Array<{ eval: number | null }>)[0].eval
+
+  it('untrusted position: a non-authoritative overlay flips badge, eval, graph, and eval-bar consistently', () => {
+    // g-kgiq: no trusted position evidence for this FEN, so the browser-analysis
+    // overlay applies. Base 'excellent'/d4-best → upgraded 'best'/played-is-best.
+    render(
+      <AnalysisBoard
+        moves={[e4Move({ upgraded: upgrade({ eval_cp: 80 }) })]}
+        boardOrientation="white"
+        initialMoveIndex={0}
+      />,
+    )
+    expect(badge()).toBe('best')
+    expect(listEval()).toBe(80)
+    expect((capturedGraphProps.evals as number[])[0]).toBe(80)
+    expect(capturedEvalBarProps.whitePerspectiveCp).toBe(80)
+    // No stale red "you should have played d4" arrow beside the upgraded best.
+    expect(capturedChessboardProps.arrows).toBeUndefined()
+  })
+
+  it('trusted position + played==best: a NON-authoritative overlay is SKIPPED (stays best/base eval)', () => {
+    render(
+      <AnalysisBoard
+        moves={[e4Move({ eval_cp: 30, upgraded: upgrade({ classification: 'good', eval_cp: 5 }) })]}
+        boardOrientation="white"
+        positionAnalysis={trustedBest('e2e4')}
+        initialMoveIndex={0}
+      />,
+    )
+    // projectExactBest still promotes played==trusted-best to 'best'; the browser-
+    // analysis 'good'/eval-5 was NOT applied (base eval magnitude survives).
+    expect(badge()).toBe('best')
+    expect(listEval()).toBe(30)
+  })
+
+  it('trusted position + played!=best: a NON-authoritative overlay is SKIPPED (keeps base label)', () => {
+    // The case promotion-only projectExactBest cannot repair — the SKIP protects it.
+    render(
+      <AnalysisBoard
+        moves={[e4Move({ classification: 'good', upgraded: upgrade({ classification: 'best', eval_cp: 99 }) })]}
+        boardOrientation="white"
+        positionAnalysis={trustedBest('d2d4')}
+        initialMoveIndex={0}
+      />,
+    )
+    expect(badge()).toBe('good')
+    expect(listEval()).toBe(30)
+  })
+
+  it('trusted position + played==best: an AUTHORITATIVE overlay APPLIES (not suppressed)', () => {
+    render(
+      <AnalysisBoard
+        moves={[e4Move({ eval_cp: 30, upgraded: upgrade({ eval_cp: 99, authoritative: true }) })]}
+        boardOrientation="white"
+        positionAnalysis={trustedBest('e2e4')}
+        initialMoveIndex={0}
+      />,
+    )
+    expect(badge()).toBe('best')
+    expect(listEval()).toBe(99) // canonical overlay eval applied
+  })
+
+  it('HistoryPage-style RAW moves still get the trusted-best promotion via the seam', () => {
+    // No `upgraded` at all; the board seam re-runs projectExactBest so a
+    // played==trusted-best move promotes even though HistoryPage feeds raw moves.
+    render(
+      <AnalysisBoard
+        moves={[e4Move({ classification: 'good', best_move_san: 'd4' })]}
+        boardOrientation="white"
+        positionAnalysis={trustedBest('e2e4')}
+        initialMoveIndex={0}
+      />,
+    )
+    expect(badge()).toBe('best')
+  })
+
+  it('an AUTHORITATIVE fetched upgrade is not shadowed by a stale non-authoritative live one', () => {
+    // A later refetch brings a canonical (authoritative) upgrade for a key this
+    // session already dwelled at d21. The stale non-authoritative live row must not
+    // shadow it — and on a trusted position must not cause the skip to drop it.
+    render(
+      <AnalysisBoard
+        moves={[
+          e4Move({
+            eval_cp: 30,
+            upgraded: upgrade({ classification: 'best', eval_cp: 99, authoritative: true }),
+          }),
+        ]}
+        boardOrientation="white"
+        sessionId="s1"
+        positionAnalysis={trustedBest('e2e4')}
+        initialMoveIndex={0}
+      />,
+    )
+    // Authoritative fetched upgrade applied even at the trusted-best played move.
+    expect(badge()).toBe('best')
+    expect(listEval()).toBe(99)
+    // A stale non-authoritative live upgrade arrives for the same key.
+    const onAcceptedStale = capturedOnAcceptedRef.current as (
+      fen: string,
+      uci: string,
+      up: Upgrade,
+    ) => void
+    act(() => onAcceptedStale(START, 'e2e4', upgrade({ classification: 'good', eval_cp: 5 })))
+    // Canonical truth still wins; it is neither shadowed nor dropped by the skip.
+    expect(badge()).toBe('best')
+    expect(listEval()).toBe(99)
+  })
+
+  it('live path: onAcceptedEvidence patches the open MoveList immediately', () => {
+    render(
+      <AnalysisBoard
+        moves={[e4Move()]}
+        boardOrientation="white"
+        sessionId="s1"
+        initialMoveIndex={0}
+      />,
+    )
+    expect(badge()).toBe('excellent')
+    const onAccepted = capturedOnAcceptedRef.current as (
+      fen: string,
+      uci: string,
+      up: Upgrade,
+    ) => void
+    act(() => onAccepted(START, 'e2e4', upgrade({ eval_cp: 88 })))
+    expect(badge()).toBe('best')
+    expect(listEval()).toBe(88)
   })
 })

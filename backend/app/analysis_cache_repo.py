@@ -25,14 +25,12 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.analysis_cache_policy import (
-    CacheRow,
     Decision,
     Reason,
     decide_analysis_cache_replacement,
     incoming_is_valid,
-    populated_fields_of,
+    project_cache_row,
 )
-from app.analysis_profiles import IDENTITY_FIELDS, get_profile
 from app.evidence_contracts import contract_satisfied, get_contract
 from app.fen import normalize_fen
 from app.models import AnalysisCache
@@ -152,26 +150,6 @@ class UnsupportedDialectError(RuntimeError):
     """Raised when the bound dialect has no safe missing-key write protocol."""
 
 
-def _identity_verified(data: dict) -> bool:
-    """True when stored identity metadata matches the claimed profile."""
-    profile = get_profile(data.get("analysis_profile_id"))
-    if profile is None:
-        return False
-    return all(data.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
-
-
-def _project(data: dict) -> CacheRow:
-    contract_id = data.get("evidence_contract_id")
-    return CacheRow(
-        analysis_profile_id=data.get("analysis_profile_id"),
-        evidence_contract_id=contract_id,
-        identity_verified=_identity_verified(data),
-        contract_satisfied=contract_satisfied(contract_id, data),
-        populated_fields=populated_fields_of(data),
-        values={f: data.get(f) for f in _EVIDENCE_FIELDS},
-    )
-
-
 def _row_to_dict(row: AnalysisCache) -> dict:
     out = {
         "fen_before": row.fen_before,
@@ -265,7 +243,7 @@ def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, s
             by_key[key] = data
             continue
         existing = by_key[key]
-        proj_e, proj_i = _project(existing), _project(data)
+        proj_e, proj_i = project_cache_row(existing), project_cache_row(data)
 
         # Validity (contract + identity) trumps everything: a row that is invalid
         # — failed contract OR an unverifiable profile claim — must never suppress
@@ -453,7 +431,7 @@ def _resolve_conflict(
     """Apply the replacement policy for one pre-existing key (in-memory decide +
     ORM mutation); record the resulting Reason."""
     key, data, incoming_proj = r["key"], r["data"], r["proj"]
-    existing_proj = _project(_row_to_dict(existing_row))
+    existing_proj = project_cache_row(_row_to_dict(existing_row))
     decision, reason = decide_analysis_cache_replacement(existing_proj, incoming_proj)
     if decision is Decision.REPLACE:
         _apply_update(existing_row, data, full=True)
@@ -492,7 +470,7 @@ def _run_batch(
     valid_rows: list[dict] = []
     for data in surviving:
         key = _key(data)
-        proj = _project(data)
+        proj = project_cache_row(data)
         if not incoming_is_valid(proj):
             reason_by_key[key] = Reason.INVALID_INCOMING_KEEP
             continue

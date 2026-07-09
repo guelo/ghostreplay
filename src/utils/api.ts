@@ -1019,10 +1019,33 @@ export interface AnalysisEvidenceRow {
   classification: string | null
 }
 
+/**
+ * A stronger re-annotation of one played move (g-xox0). Built ONCE on the backend
+ * from a stored analysis_cache row in the SAME mover-relative representation as
+ * `AnalysisMove`, so the immediate patch (Part B) and the durable fetch-time overlay
+ * (Part C) cannot diverge. `classification` is the only required field; every
+ * eval/SAN field is nullable. `authoritative` (backend-stamped, NOT re-derived from
+ * profile ids) drives display precedence: a non-authoritative overlay must not
+ * override a trusted position.
+ */
+export interface MoveUpgrade {
+  classification: MoveClassification
+  eval_cp: number | null // mover-relative (matches AnalysisMove.eval_cp)
+  eval_mate: number | null // mover-relative
+  best_move_san: string | null
+  best_move_eval_cp: number | null // side-to-move-relative
+  eval_delta: number | null // side-to-move-relative loss, clamped >= 0
+  authoritative: boolean
+  analysis_profile_id?: string | null
+  depth?: number | null
+}
+
 export interface AnalysisEvidenceResult {
   fen: string
   move_uci: string
   reason: string
+  /** Present (non-null) only when the write was accepted (g-xox0 Part B). */
+  upgrade?: MoveUpgrade | null
 }
 
 interface AnalysisEvidenceResponse {
@@ -1180,6 +1203,15 @@ export interface AnalysisMove {
   best_move_eval_cp: number | null
   eval_delta: number | null
   classification: MoveClassification | null
+  /**
+   * Read-time re-annotation overlay (g-xox0 Part C): a stronger label joined from
+   * analysis_cache for this exact played move, attached ALONGSIDE the base fields
+   * (which stay on original game-time evidence so review stats keep aggregates on
+   * original). Null when no display-upgrade-eligible cache row exists. Optional so
+   * frontend-local snapshots (drill review) may omit it; `projectExactBest` passes
+   * it through untouched.
+   */
+  upgraded?: MoveUpgrade | null
 }
 
 export interface PositionAnalysis {

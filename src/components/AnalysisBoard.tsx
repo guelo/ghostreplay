@@ -4,7 +4,7 @@ import { Chess } from "chess.js";
 import type { Square } from "chess.js";
 import { Chessboard, defaultArrowOptions } from "react-chessboard";
 import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
-import type { AnalysisMove, PositionAnalysis } from "../utils/api";
+import type { AnalysisMove, MoveUpgrade, PositionAnalysis } from "../utils/api";
 import type { EngineInfo } from "../workers/stockfishMessages";
 import type { VariationNodeId, VarNode } from "../types/variationTree";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
@@ -13,7 +13,8 @@ import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useAnalysisEvidence } from "../services/analysisEvidence";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
-import { moverMateToWhiteCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
+import { isTrustedExactBestHit, moverMateToWhiteCp, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
+import { projectExactBest } from "../utils/projectExactBest";
 import AnalysisGraph from "./AnalysisGraph";
 import EvalBar from "./EvalBar";
 import MoveList from "./MoveList";
@@ -327,11 +328,31 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
 
   const effectiveIndex = currentIndex ?? moves.length - 1;
 
+  // Immediate MoveList patch (g-xox0 Part B): local overlay of accepted upgrades
+  // this session's dwell produced, keyed by `${fen_before}::${move_uci}`. `moves` is
+  // a prop, so the upgrade lives here as local state and is applied at the display
+  // seam only (`effectiveMoves`); the page-level review stats deliberately stay on
+  // the pre-upgrade array.
+  const [liveUpgrades, setLiveUpgrades] = useState<Map<string, MoveUpgrade>>(
+    () => new Map(),
+  );
+  const handleAcceptedEvidence = useCallback(
+    (fen: string, moveUci: string, upgrade: MoveUpgrade) => {
+      setLiveUpgrades((prev) => {
+        const next = new Map(prev);
+        next.set(`${fen}::${moveUci}`, upgrade);
+        return next;
+      });
+    },
+    [],
+  );
+
   // Analysis-board evidence driver (g-cache-stronger-evals): persist stronger
   // depth-21 evidence for the mainline move the user is dwelling on. No-ops when
-  // sessionId is absent (drill/ephemeral boards).
+  // sessionId is absent (drill/ephemeral boards). On an accepted write it fires
+  // handleAcceptedEvidence so the open MoveList patches immediately (Part B).
   const { requestEvidence: requestAnalysisEvidence, cancel: cancelAnalysisEvidence } =
-    useAnalysisEvidence(sessionId);
+    useAnalysisEvidence(sessionId, handleAcceptedEvidence);
 
   // Drive one evidence search for the NEXT mainline move after a dwell. Fires only
   // on the mainline (never a variation), only when a real next move exists with
@@ -426,27 +447,75 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     ],
   );
 
+  // Source-aware re-annotation overlay (g-xox0 Parts B + C). Per move, take the live
+  // dwell upgrade (Part B, this session) if present, else the fetch-time `upgraded`
+  // (Part C); live wins, and they should agree. A NON-authoritative (browser-
+  // analysis) overlay is SKIPPED on a TRUSTED position so it never overrides trusted
+  // position truth — this covers the trusted-but-played≠best case promotion-only
+  // projectExactBest cannot repair. An AUTHORITATIVE/canonical overlay ALWAYS applies
+  // (authority comes from the backend-stamped flag, never re-derived here). Then
+  // projectExactBest (pure, promotion-only, idempotent) promotes any played==trusted-
+  // best move — belt-and-suspenders after a skip AND the correction for HistoryPage,
+  // which feeds RAW `analysis.moves`. GameAnalysisPage is already projected, so the
+  // second pass is a no-op there. EVERY display derivation below reads this array;
+  // navigation and the evidence driver keep raw `moves` (immutable wire keys, stable
+  // index — the overlay changes labels/evals only, never array identity or length).
+  const effectiveMoves = useMemo(() => {
+    const overlaid = moves.map((move, index) => {
+      const key =
+        move.fen_before && move.move_uci
+          ? `${move.fen_before}::${move.move_uci}`
+          : null;
+      // Source precedence: the live dwell upgrade (Part B) wins over the fetch-time
+      // one (Part C) — they should agree — EXCEPT never let a stale non-authoritative
+      // live row shadow an AUTHORITATIVE fetched one. A later refetch can bring a
+      // canonical upgrade for a key this session already dwelled at d21; the canonical
+      // truth must win (and must not be dropped by the trusted-position skip below).
+      const live = key ? liveUpgrades.get(key) : undefined;
+      const fetched = move.upgraded;
+      const up =
+        fetched?.authoritative && !live?.authoritative ? fetched : live ?? fetched;
+      if (!up) return move;
+      const fenBefore =
+        move.fen_before ??
+        (index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen);
+      const entry = positionAnalysis?.[fenBefore];
+      const positionTrusted = !!entry && isTrustedExactBestHit(entry);
+      if (!up.authoritative && positionTrusted) return move; // SKIP
+      return {
+        ...move,
+        classification: up.classification,
+        eval_cp: up.eval_cp,
+        eval_mate: up.eval_mate,
+        best_move_san: up.best_move_san,
+        best_move_eval_cp: up.best_move_eval_cp,
+        eval_delta: up.eval_delta,
+      };
+    });
+    return projectExactBest(overlaid, positionAnalysis, startingFen);
+  }, [moves, liveUpgrades, positionAnalysis, startingFen]);
+
   const mainLineMoveDetails = useMemo(
-    () => buildMainLineMoveDetails(moves, startingFen),
-    [moves, startingFen],
+    () => buildMainLineMoveDetails(effectiveMoves, startingFen),
+    [effectiveMoves, startingFen],
   );
 
   // Map AnalysisMove[] to Move[] for MoveList
   const mappedMoves = useMemo(
     () =>
-      moves.map((m, i) => ({
+      effectiveMoves.map((m, i) => ({
         san: m.move_san,
         classification: m.classification,
         eval: toWhitePerspective(m.eval_cp, i),
         evalMate: toWhitePerspectiveMate(m.eval_mate, i),
       })),
-    [moves],
+    [effectiveMoves],
   );
 
   // Extract eval values for the graph, falling back to mateToCp for mate-only moves
   const evals = useMemo(
     () =>
-      moves.map((m, i) =>
+      effectiveMoves.map((m, i) =>
         // eval_cp and eval_mate are both mover-perspective. For mate-only moves,
         // moverMateToWhiteCp derives a correctly-signed white cp (incl. the
         // mate-0 winner via ply parity).
@@ -454,7 +523,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
           ? toWhitePerspective(m.eval_cp, i)
           : moverMateToWhiteCp(m.eval_mate, i),
       ),
-    [moves],
+    [effectiveMoves],
   );
 
   // FEN at the position before the current move (needed for arrow SAN→UCI)
@@ -868,7 +937,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     if (isInVariation) return [];
     if (effectiveIndex < 0 || !fenBeforeCurrentMove) return [];
 
-    const move = moves[effectiveIndex];
+    const move = effectiveMoves[effectiveIndex];
     if (!move) return [];
 
     const result: { startSquare: string; endSquare: string; color: string }[] =
@@ -899,7 +968,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     isInVariation,
     effectiveIndex,
     fenBeforeCurrentMove,
-    moves,
+    effectiveMoves,
     mainLineMoveDetails,
   ]);
 
@@ -914,11 +983,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     return merged.length > 0 ? merged : undefined;
   }, [engineArrows, arrows, showEngineArrows]);
 
-  // Current move data for position info panel
+  // Current move data for position info panel. Reads the overlaid array so the eval
+  // bar / current-move readout follow an upgrade consistently with the badge.
   const currentMove = useMemo(() => {
     if (isInVariation || effectiveIndex < 0) return null;
-    return moves[effectiveIndex] ?? null;
-  }, [isInVariation, effectiveIndex, moves]);
+    return effectiveMoves[effectiveIndex] ?? null;
+  }, [isInVariation, effectiveIndex, effectiveMoves]);
 
   // Live engine eval from top PV line (white perspective)
   const liveEngineEvalCp = useMemo(() => {
@@ -1080,14 +1150,14 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     const square = mainLineMoveDetails[effectiveIndex]?.playedSquares?.to ?? null;
     return computeBoardEvalIcon({
       square,
-      classification: moves[effectiveIndex]?.classification ?? null,
+      classification: effectiveMoves[effectiveIndex]?.classification ?? null,
       boardOrientation,
     });
   }, [
     isInVariation,
     effectiveIndex,
     mainLineMoveDetails,
-    moves,
+    effectiveMoves,
     boardOrientation,
   ]);
 

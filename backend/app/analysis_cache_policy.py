@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from app.analysis_profiles import get_profile
+from app.analysis_profiles import BROWSER_PROFILE_ID, IDENTITY_FIELDS, get_profile
 from app.evidence_contracts import (
     contract_satisfied,
     is_strict_successor,
@@ -244,3 +244,54 @@ def decide_analysis_cache_replacement(
 def populated_fields_of(data: dict) -> frozenset[str]:
     """Evidence fields that are non-null in ``data``."""
     return frozenset(f for f in EVIDENCE_FIELDS if data.get(f) is not None)
+
+
+def _identity_verified(data: dict) -> bool:
+    """True when stored identity metadata matches the claimed profile."""
+    profile = get_profile(data.get("analysis_profile_id"))
+    if profile is None:
+        return False
+    return all(data.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+
+
+def project_cache_row(data: dict) -> CacheRow:
+    """Project a raw cache-row ``dict`` into the minimal :class:`CacheRow`.
+
+    The SINGLE projector for the replacement decision and for read-time display
+    gating (:func:`display_upgrade_eligible`). ``analysis_cache_repo`` re-imports
+    this so there is exactly one projection path (do NOT duplicate it there).
+    """
+    contract_id = data.get("evidence_contract_id")
+    return CacheRow(
+        analysis_profile_id=data.get("analysis_profile_id"),
+        evidence_contract_id=contract_id,
+        identity_verified=_identity_verified(data),
+        contract_satisfied=contract_satisfied(contract_id, data),
+        populated_fields=populated_fields_of(data),
+        values={f: data.get(f) for f in EVIDENCE_FIELDS},
+    )
+
+
+def display_upgrade_eligible(row: CacheRow) -> bool:
+    """True when a stored cache row may re-annotate the played move's MoveList label.
+
+    v1 gate (g-xox0): the row is identity-verified, contract-satisfied, carries a
+    move-grain ``classification`` (so it can re-annotate the played move — bare
+    position-grain / eval-only rows are excluded), and comes from a profile that
+    DOMINATES ``browser-game-v1``. That single ``dominates`` check UNIFIES canonical
+    (its ``dominates`` set includes ``browser-game-v1``) and ``browser-analysis-v1``
+    (``dominates={browser-game-v1}``), and NATURALLY EXCLUDES a ``browser-game-v1``
+    row (does not dominate itself), ``jeffml``, and legacy/unidentified rows (not
+    identity-verified). Non-authority is intentional: overlaying a strictly-stronger
+    browser-analysis label over an already-displayed untrusted browser-game d17 label
+    is not a trust escalation.
+
+    v2 (post-g-mk1d): swap the fixed ``dominates(browser-game-v1)`` test for the
+    row-level strength comparator so dynamic-depth browser-game rows rank too.
+    """
+    if not (row.identity_verified and row.contract_satisfied):
+        return False
+    if "classification" not in row.populated_fields:
+        return False
+    profile = get_profile(row.effective_profile_id())
+    return bool(profile and BROWSER_PROFILE_ID in profile.dominates)

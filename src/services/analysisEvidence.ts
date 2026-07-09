@@ -5,7 +5,14 @@ import type {
 } from '../workers/analysisMessages'
 import { getSideToMove, playerToWhite, playerToWhiteMate } from '../workers/analysisUtils'
 import { submitAnalysisEvidence } from '../utils/api'
-import type { AnalysisEvidenceRow } from '../utils/api'
+import type { AnalysisEvidenceRow, MoveUpgrade } from '../utils/api'
+
+/** Fired when an accepted write returns a stronger re-annotation for a move. */
+export type OnAcceptedEvidence = (
+  fen: string,
+  moveUci: string,
+  upgrade: MoveUpgrade,
+) => void
 
 /**
  * Analysis-board evidence driver (g-cache-stronger-evals).
@@ -87,14 +94,26 @@ export const buildEvidenceRow = (
  * navigation so an interrupted search never submits). Runs one search at a time and
  * dedupes by `(fen, move_uci)` completed this mount. No-ops entirely when
  * `sessionId` is absent (no worker is created).
+ *
+ * When an accepted write returns a `MoveUpgrade`, `onAcceptedEvidence` fires so the
+ * caller can patch the open MoveList immediately (g-xox0 Part B).
  */
-export const useAnalysisEvidence = (sessionId: string | undefined) => {
+export const useAnalysisEvidence = (
+  sessionId: string | undefined,
+  onAcceptedEvidence?: OnAcceptedEvidence,
+) => {
   const workerRef = useRef<Worker | null>(null)
   // Request id + key of the search currently in flight (one at a time).
   const activeIdRef = useRef<string | null>(null)
   const activeKeyRef = useRef<{ fen: string; move: string } | null>(null)
   // Keys analyzed to completion this mount — never re-run/re-submit them.
   const doneKeys = useRef<Set<string>>(new Set())
+  // Stash the latest callback so the worker effect (keyed on sessionId only) always
+  // invokes the current one without re-creating the worker.
+  const onAcceptedRef = useRef<OnAcceptedEvidence | undefined>(onAcceptedEvidence)
+  useEffect(() => {
+    onAcceptedRef.current = onAcceptedEvidence
+  }, [onAcceptedEvidence])
 
   useEffect(() => {
     // The driver only runs for a saved-game session. No sessionId -> no worker.
@@ -120,8 +139,20 @@ export const useAnalysisEvidence = (sessionId: string | undefined) => {
         doneKeys.current.add(evidenceKey(key.fen, key.move))
         const row = buildEvidenceRow(key.fen, key.move, message)
         if (!row) return
-        // Best-effort, like lookup: a rejected upgrade is never a hard error.
-        void submitAnalysisEvidence(sessionId, [row]).catch(() => {})
+        // Best-effort, like lookup: a rejected upgrade is never a hard error. On an
+        // ACCEPTED write the endpoint returns the stronger re-annotation built from
+        // the STORED row; surface it so the caller can patch the open MoveList
+        // immediately (g-xox0 Part B).
+        void submitAnalysisEvidence(sessionId, [row])
+          .then((results) => {
+            const res = results.find(
+              (r) => r.fen === key.fen && r.move_uci === key.move,
+            )
+            if (res?.upgrade) {
+              onAcceptedRef.current?.(key.fen, key.move, res.upgrade)
+            }
+          })
+          .catch(() => {})
       } else if (message.type === 'error') {
         // A scoped/unscoped error frees the slot without marking the key done, so
         // the move can be retried on a later dwell.

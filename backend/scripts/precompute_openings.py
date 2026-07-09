@@ -52,10 +52,10 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.analysis_cache_repo import (
     write_analysis_cache_rows,
-    _identity_verified,
     _row_to_dict,
 )
-from app.analysis_cache_policy import Reason
+# _identity_verified moved to the policy module (g-xox0: single projector home).
+from app.analysis_cache_policy import Reason, _identity_verified
 from app.analysis_profiles import (
     ANALYZER_PROTOCOL_VERSION,
     get_profile,

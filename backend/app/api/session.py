@@ -10,18 +10,20 @@ from enum import Enum
 import chess
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, text
+from sqlalchemy import case, func, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from app.analysis_cache_policy import Reason
 from app.analysis_cache_repo import write_analysis_cache_rows
 from app.analysis_profiles import (
     BROWSER_ANALYSIS_PROFILE_ID,
     BROWSER_PROFILE_ID,
     stamp_profile_full,
 )
+from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
 from app.centipawn_loss import centipawn_loss, centipawn_loss_expr
 from app.evidence_contracts import (
     RESOLVER_COMPLETE_V2,
@@ -43,6 +45,7 @@ from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
 from app.session_evidence_scheduler import enqueue_session_evidence
 from app.models import (
+    AnalysisCache,
     Blunder,
     BlunderOpportunityEvent,
     GameSession,
@@ -169,6 +172,12 @@ class SessionAnalysisMove(BaseModel):
     eval_delta: int | None = None
     classification: MoveClassification | None = None
     segment: str = NORMAL_MOVE_SEGMENT
+    # Read-time re-annotation overlay (g-xox0 Part C): a stronger label for this exact
+    # played move, joined from analysis_cache. Attached ALONGSIDE the base fields —
+    # the base classification/eval_* stay on the ORIGINAL game-time evidence so the FE
+    # stats path (which reads base fields) keeps aggregates on original. Null when no
+    # display-upgrade-eligible cache row exists for (fen_before, move_uci).
+    upgraded: MoveUpgrade | None = None
 
 
 class SessionAnalysisSummary(BaseModel):
@@ -244,6 +253,10 @@ class AnalysisEvidenceResult(BaseModel):
     fen: str
     move_uci: str
     reason: str
+    # Immediate MoveList patch (g-xox0 Part B): the stronger re-annotation built from
+    # the STORED row on an accepted write, else None. Built from the stored (post-
+    # merge) row — NOT the submitted row — so it is exact even when the writer merged.
+    upgrade: MoveUpgrade | None = None
 
 
 class AnalysisEvidenceResponse(BaseModel):
@@ -1392,6 +1405,37 @@ def get_session_analysis(
         expected_total_moves=expected_total_moves,
     )
 
+    # Read-time re-annotation overlay (g-xox0 Part C): join the IMMUTABLE session
+    # moves against analysis_cache by exact (fen_before, move_uci) and attach a
+    # MoveUpgrade for any display-upgrade-eligible stored row (browser-analysis d21
+    # or canonical). Exact-key only: byte-identical fen_before, so it covers this
+    # session on refetch and other sessions whose stored fen_before is identical, but
+    # NOT chess transpositions reached via different move orders / clocks. `move_uci`
+    # is derived once per move here and reused when building the wire moves; the base
+    # classification/eval_* fields stay on ORIGINAL evidence (aggregates read those).
+    derived_moves = [
+        (move, _derive_move_uci(move.fen_before, move.move_san))
+        for move in session_moves
+    ]
+    overlay_keys = [
+        (move.fen_before, uci)
+        for move, uci in derived_moves
+        if move.fen_before and uci
+    ]
+    upgrade_by_key: dict[tuple[str, str], MoveUpgrade] = {}
+    if overlay_keys:
+        stored_rows = (
+            db.query(AnalysisCache)
+            .filter(
+                tuple_(AnalysisCache.fen_before, AnalysisCache.move_uci).in_(overlay_keys)
+            )
+            .all()
+        )
+        for row in stored_rows:
+            upgrade = move_upgrade_for_row(row)
+            if upgrade is not None:
+                upgrade_by_key[(row.fen_before, row.move_uci)] = upgrade
+
     return SessionAnalysisResponse(
         session_id=game_session.id,
         pgn=game_session.pgn,
@@ -1404,7 +1448,7 @@ def get_session_analysis(
                 move_san=move.move_san,
                 fen_after=move.fen_after,
                 fen_before=move.fen_before,
-                move_uci=_derive_move_uci(move.fen_before, move.move_san),
+                move_uci=uci,
                 eval_cp=move.eval_cp,
                 eval_mate=move.eval_mate,
                 best_move_san=move.best_move_san,
@@ -1412,8 +1456,13 @@ def get_session_analysis(
                 eval_delta=centipawn_loss(move.eval_delta),
                 classification=move.classification,
                 segment=move.segment,
+                upgraded=(
+                    upgrade_by_key.get((move.fen_before, uci))
+                    if move.fen_before and uci
+                    else None
+                ),
             )
-            for move in session_moves
+            for move, uci in derived_moves
         ],
         summary=SessionAnalysisSummary(
             blunders=int(summary_row.blunders or 0),
@@ -1442,6 +1491,22 @@ EVIDENCE_CONTRACT_UNSATISFIED = "contract_unsatisfied"
 # survivor key, violating its one-Reason-per-row contract. Surfaced as a distinct
 # reason so a writer regression shows up instead of being masked as new_key.
 EVIDENCE_WRITER_NO_RESULT = "writer_no_result"
+
+# Writer verdicts under which the STORED row is now THIS browser-analysis evidence,
+# so the endpoint emits a MoveUpgrade for the open MoveList (g-xox0 Part B). Every
+# other verdict — the `*_keep` families, `duplicate_conflict`, `recovery_aborted_keep`,
+# and the endpoint pre-writer reasons — leaves the stored row unchanged / unwritten,
+# so it yields no upgrade. `legacy_replaced_by_auth` cannot occur for a non-
+# authoritative profile and is therefore not accepted here.
+_EVIDENCE_ACCEPTED_REASONS = frozenset(
+    {
+        Reason.NEW_KEY.value,
+        Reason.DOMINATES_REPLACE.value,
+        Reason.SAME_PROFILE_SUPERSET_MERGE.value,
+        Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,
+        Reason.SAME_PROFILE_IDEMPOTENT.value,
+    }
+)
 
 
 @dataclass
@@ -1635,6 +1700,31 @@ def submit_analysis_evidence(
         for (fen, uci), reason in write_analysis_cache_rows(db, survivors):
             writer_reasons[(fen, uci)] = reason.value
 
+    # Immediate MoveList patch (g-xox0 Part B): for every ACCEPTED key, read the
+    # STORED (post-merge) row back and emit its MoveUpgrade — NOT the submitted row,
+    # which a same-profile merge may differ from (`_build_merged` keeps existing
+    # non-null fields). Gate through the same `display_upgrade_eligible` seam Part C
+    # uses so B and C never diverge; the client never re-runs the strength comparator.
+    accepted_keys = [
+        (p.fen, p.move_uci)
+        for p in prepared
+        if p.cache_row is not None
+        and writer_reasons.get((p.fen, p.move_uci)) in _EVIDENCE_ACCEPTED_REASONS
+    ]
+    upgrade_by_key: dict[tuple[str, str], MoveUpgrade] = {}
+    if accepted_keys:
+        stored_rows = (
+            db.query(AnalysisCache)
+            .filter(
+                tuple_(AnalysisCache.fen_before, AnalysisCache.move_uci).in_(accepted_keys)
+            )
+            .all()
+        )
+        for row in stored_rows:
+            upgrade = move_upgrade_for_row(row)
+            if upgrade is not None:
+                upgrade_by_key[(row.fen_before, row.move_uci)] = upgrade
+
     results = [
         AnalysisEvidenceResult(
             fen=p.fen,
@@ -1643,6 +1733,17 @@ def submit_analysis_evidence(
                 p.reason
                 if p.reason is not None
                 else writer_reasons.get((p.fen, p.move_uci), EVIDENCE_WRITER_NO_RESULT)
+            ),
+            # Attach the upgrade ONLY to the row that actually reached the writer and
+            # was accepted — not to a later duplicate_request_key row that merely
+            # shares the accepted primary's (fen, move_uci) key (its cache_row is
+            # None). This preserves the contract that every pre-writer rejection
+            # (duplicate_request_key, not_in_session, ...) returns upgrade = None.
+            upgrade=(
+                upgrade_by_key.get((p.fen, p.move_uci))
+                if p.cache_row is not None
+                and writer_reasons.get((p.fen, p.move_uci)) in _EVIDENCE_ACCEPTED_REASONS
+                else None
             ),
         )
         for p in prepared

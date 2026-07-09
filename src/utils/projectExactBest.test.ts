@@ -128,6 +128,30 @@ describe('projectExactBest', () => {
     expect(out[0].eval_delta).toBe(0)
   })
 
+  // g-xox0: projectExactBest must pass the `upgraded` overlay field through untouched
+  // on both the promotion path (new object) and the pass-through path (identity).
+  it('passes the `upgraded` field through untouched', () => {
+    const up = {
+      classification: 'best' as const,
+      eval_cp: 30,
+      eval_mate: null,
+      best_move_san: 'e4',
+      best_move_eval_cp: 30,
+      eval_delta: 0,
+      authoritative: false,
+    }
+    // Promotion path: played (e2e4) equals the trusted best → a NEW object is built.
+    const promoted = projectExactBest(
+      [makeMove({ classification: 'good', move_uci: 'e2e4', upgraded: up })],
+      { [STARTING_FEN]: makePos() },
+    )
+    expect(promoted[0].classification).toBe('best')
+    expect(promoted[0].upgraded).toBe(up)
+    // Pass-through path: no entry → returned by identity, upgraded intact.
+    const passed = projectExactBest([makeMove({ upgraded: up })], {})
+    expect(passed[0].upgraded).toBe(up)
+  })
+
   it('falls back to reconstruction when wire fields are null (legacy session)', () => {
     // No wire fen_before/move_uci: index 0 reconstructs to STARTING_FEN and derives
     // played UCI from SAN, so a legacy session still projects.

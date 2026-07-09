@@ -14,7 +14,13 @@ import chess
 import pytest
 from pydantic import ValidationError
 
-from app.analysis_profiles import BROWSER_ANALYSIS_PROFILE_ID, BROWSER_PROFILE_ID, get_profile
+from app.analysis_profiles import (
+    BROWSER_ANALYSIS_PROFILE_ID,
+    BROWSER_PROFILE_ID,
+    CANONICAL_PROFILE_ID,
+    get_profile,
+    stamp_profile_full,
+)
 from app.api.session import (
     EVIDENCE_CONTRACT_UNSATISFIED,
     EVIDENCE_DUPLICATE_KEY,
@@ -28,6 +34,7 @@ from app.api.session import (
     _prepare_analysis_evidence_rows,
     _session_membership_keys,
 )
+from app.evidence_contracts import RESOLVER_COMPLETE_V2
 from app.fen import normalize_fen
 from app.models import AnalysisCache, GameSession, SessionMove
 
@@ -39,7 +46,10 @@ FEN_AFTER_E5 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #
-def _add_session_move(db, session_id, *, move_number, color, move_san, fen_before, fen_after):
+def _add_session_move(
+    db, session_id, *, move_number, color, move_san, fen_before, fen_after,
+    classification=None,
+):
     db.add(
         SessionMove(
             session_id=uuid.UUID(session_id),
@@ -48,10 +58,69 @@ def _add_session_move(db, session_id, *, move_number, color, move_san, fen_befor
             move_san=move_san,
             fen_before=fen_before,
             fen_after=fen_after,
+            classification=classification,
             segment="normal",
         )
     )
     db.commit()
+
+
+def _seed_browser_analysis_row(
+    db, *, fen, move_uci, move_san="e4", best_move_uci="e2e4", best_move_san="e4",
+    best_line_uci="e2e4 e7e5", played_eval=40, best_eval=40, eval_delta=0,
+    classification="best", played_eval_mate=None, best_eval_mate=None,
+):
+    """Seed an eligible, identity-stamped browser-analysis-v1 (resolver-complete-v2)
+    row — the durable evidence Part C overlays and a same-profile merge/idempotent
+    partner for Part B."""
+    data = dict(
+        fen_before=fen,
+        normalized_fen_before=normalize_fen(fen),
+        move_uci=move_uci,
+        move_san=move_san,
+        best_move_uci=best_move_uci,
+        best_move_san=best_move_san,
+        best_line_uci=best_line_uci,
+        played_eval=played_eval,
+        played_eval_mate=played_eval_mate,
+        best_eval=best_eval,
+        best_eval_mate=best_eval_mate,
+        eval_delta=eval_delta,
+        classification=classification,
+        source="analysis",
+        analysis_profile_id=BROWSER_ANALYSIS_PROFILE_ID,
+        evidence_contract_id=RESOLVER_COMPLETE_V2,
+    )
+    data.update(stamp_profile_full(BROWSER_ANALYSIS_PROFILE_ID))
+    row = AnalysisCache(**data)
+    db.add(row)
+    db.commit()
+    return row
+
+
+def _seed_canonical_row(db, *, fen, move_uci, **overrides):
+    """Seed an identity-stamped canonical (authoritative) resolver-complete-v2 row."""
+    data = dict(
+        fen_before=fen,
+        normalized_fen_before=normalize_fen(fen),
+        move_uci=move_uci,
+        move_san=overrides.get("move_san", "e4"),
+        best_move_uci=overrides.get("best_move_uci", "e2e4"),
+        best_move_san=overrides.get("best_move_san", "e4"),
+        best_line_uci=overrides.get("best_line_uci", "e2e4 e7e5"),
+        played_eval=overrides.get("played_eval", 20),
+        best_eval=overrides.get("best_eval", 20),
+        eval_delta=overrides.get("eval_delta", 0),
+        classification=overrides.get("classification", "best"),
+        source="precomputed",
+        analysis_profile_id=CANONICAL_PROFILE_ID,
+        evidence_contract_id=RESOLVER_COMPLETE_V2,
+    )
+    data.update(stamp_profile_full(CANONICAL_PROFILE_ID))
+    row = AnalysisCache(**data)
+    db.add(row)
+    db.commit()
+    return row
 
 
 def _seed_e4_move(db, session_id):
@@ -534,3 +603,163 @@ def test_session_analysis_wire_fields_null_for_legacy(client, auth_headers, crea
     move = resp.json()["moves"][0]
     assert move["fen_before"] is None
     assert move["move_uci"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Part B — endpoint returns the STORED row's MoveUpgrade on accepted writes
+# --------------------------------------------------------------------------- #
+def test_endpoint_new_key_returns_upgrade(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    resp = _post(client, auth_headers, session_id,
+                 [_evidence_row(played_eval=45, best_eval=45, classification="best")])
+    result = resp.json()["results"][0]
+    assert result["reason"] == "new_key"
+    up = result["upgrade"]
+    assert up is not None
+    assert up["classification"] == "best"
+    # White to move -> mover-relative == white-relative (no flip). Non-authoritative.
+    assert up["eval_cp"] == 45
+    assert up["authoritative"] is False
+    assert up["analysis_profile_id"] == BROWSER_ANALYSIS_PROFILE_ID
+    assert up["depth"] == 21
+
+
+def test_endpoint_dominates_replace_returns_upgrade(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    _seed_browser_game_row(db_session, fen=START, move_uci="e2e4", played_eval=25, best_eval=25)
+    resp = _post(client, auth_headers, session_id,
+                 [_evidence_row(played_eval=60, best_eval=60)])
+    result = resp.json()["results"][0]
+    assert result["reason"] == "dominates_replace"
+    assert result["upgrade"] is not None
+    assert result["upgrade"]["eval_cp"] == 60
+
+
+def test_endpoint_idempotent_reads_stored_not_submitted_row(client, auth_headers, create_game_session, db_session):
+    # Same-profile idempotent MERGE proof: the stored row carries a played_eval_mate
+    # the RESUBMITTED row omits. The endpoint must read the STORED row back, so the
+    # emitted upgrade reflects the stored mate (1), not the submitted None.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    _seed_browser_analysis_row(
+        db_session, fen=START, move_uci="e2e4",
+        played_eval=31900, best_eval=31900, eval_delta=0, classification="best",
+        played_eval_mate=1, best_eval_mate=1,
+    )
+    # Resubmit the SAME key WITHOUT the mate fields -> idempotent keep of the stored row.
+    resp = _post(client, auth_headers, session_id,
+                 [_evidence_row(played_eval=31900, best_eval=31900, eval_delta=0,
+                                classification="best")])
+    result = resp.json()["results"][0]
+    assert result["reason"] == "same_profile_idempotent"
+    up = result["upgrade"]
+    assert up is not None
+    assert up["eval_mate"] == 1  # from the STORED row, not the submitted (None)
+
+
+def test_endpoint_incompatible_keep_no_upgrade(client, auth_headers, create_game_session, db_session):
+    # A canonical row already holds the key; browser-analysis does not dominate
+    # canonical -> incompatible_keep, a NOT-accepted verdict -> no upgrade.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    _seed_canonical_row(db_session, fen=START, move_uci="e2e4", played_eval=20, best_eval=20)
+    resp = _post(client, auth_headers, session_id, [_evidence_row(played_eval=60, best_eval=60)])
+    result = resp.json()["results"][0]
+    assert result["reason"] == "incompatible_keep"
+    assert result["upgrade"] is None
+
+
+def test_endpoint_duplicate_row_does_not_inherit_primary_upgrade(
+    client, auth_headers, create_game_session, db_session
+):
+    # A duplicate_request_key row shares the accepted primary's (fen, move_uci) but
+    # never reached the writer -> it must return upgrade = None even though the
+    # primary (new_key) carries one.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    resp = _post(client, auth_headers, session_id, [_evidence_row(), _evidence_row()])
+    results = resp.json()["results"]
+    assert results[0]["reason"] == "new_key"
+    assert results[0]["upgrade"] is not None
+    assert results[1]["reason"] == EVIDENCE_DUPLICATE_KEY
+    assert results[1]["upgrade"] is None
+
+
+def test_endpoint_rejected_reasons_have_no_upgrade(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    rows = [
+        _evidence_row(fen=FEN_AFTER_E4, move_uci="e7e5", best_move_uci="e7e5",
+                      best_line_uci=("e7e5", "g1f3")),  # not_in_session
+        _evidence_row(played_eval=None),  # contract_unsatisfied
+    ]
+    resp = _post(client, auth_headers, session_id, rows)
+    results = resp.json()["results"]
+    assert results[0]["reason"] == EVIDENCE_NOT_IN_SESSION
+    assert results[0]["upgrade"] is None
+    assert results[1]["reason"] == EVIDENCE_CONTRACT_UNSATISFIED
+    assert results[1]["upgrade"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Part C — read-time overlay in GET /session/{id}/analysis
+# --------------------------------------------------------------------------- #
+def test_session_analysis_overlays_eligible_upgrade(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    # Original game-time evidence graded e4 merely 'excellent'.
+    _add_session_move(db_session, session_id, move_number=1, color="white",
+                      move_san="e4", fen_before=START, fen_after=FEN_AFTER_E4,
+                      classification="excellent")
+    _seed_browser_analysis_row(db_session, fen=START, move_uci="e2e4",
+                               classification="best", played_eval=45, best_eval=45)
+    resp = client.get(f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123))
+    move = resp.json()["moves"][0]
+    # Base field stays on ORIGINAL evidence (aggregates read it); upgrade is alongside.
+    assert move["classification"] == "excellent"
+    assert move["upgraded"] is not None
+    assert move["upgraded"]["classification"] == "best"
+    assert move["upgraded"]["eval_cp"] == 45
+    assert move["upgraded"]["authoritative"] is False
+
+
+def test_session_analysis_no_upgrade_for_browser_game_only(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    _add_session_move(db_session, session_id, move_number=1, color="white",
+                      move_san="e4", fen_before=START, fen_after=FEN_AFTER_E4,
+                      classification="excellent")
+    # Only a browser-game row exists -> it does not dominate itself -> no overlay.
+    _seed_browser_game_row(db_session, fen=START, move_uci="e2e4")
+    resp = client.get(f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123))
+    move = resp.json()["moves"][0]
+    assert move["upgraded"] is None
+
+
+def test_session_analysis_batch_overlays_multiple_moves(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    _add_session_move(db_session, session_id, move_number=1, color="white",
+                      move_san="e4", fen_before=START, fen_after=FEN_AFTER_E4)
+    _add_session_move(db_session, session_id, move_number=1, color="black",
+                      move_san="e5", fen_before=FEN_AFTER_E4, fen_after=FEN_AFTER_E5)
+    _seed_browser_analysis_row(db_session, fen=START, move_uci="e2e4",
+                               classification="best")
+    _seed_browser_analysis_row(db_session, fen=FEN_AFTER_E4, move_uci="e7e5",
+                               move_san="e5", best_move_uci="e7e5", best_move_san="e5",
+                               best_line_uci="e7e5 g1f3", classification="best")
+    resp = client.get(f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123))
+    by_key = {(m["move_number"], m["color"]): m for m in resp.json()["moves"]}
+    assert by_key[(1, "white")]["upgraded"] is not None
+    assert by_key[(1, "black")]["upgraded"] is not None
+    # Black to move at FEN_AFTER_E4 -> mover-relative eval flips vs white-relative 40.
+    assert by_key[(1, "black")]["upgraded"]["eval_cp"] == -40
+
+
+def test_session_analysis_null_move_uci_skipped(client, auth_headers, create_game_session, db_session):
+    # A legacy move with null fen_before yields no join key and must not crash.
+    session_id = create_game_session(user_id=123)
+    _add_session_move(db_session, session_id, move_number=1, color="white",
+                      move_san="e4", fen_before=None, fen_after=FEN_AFTER_E4)
+    resp = client.get(f"/api/session/{session_id}/analysis", headers=auth_headers(user_id=123))
+    assert resp.status_code == 200
+    assert resp.json()["moves"][0]["upgraded"] is None
