@@ -57,13 +57,17 @@ _VALID_PLAYER_COLORS = {"white", "black"}
 # not already captured by graph/roots/config/quality fingerprints, to force a
 # full recompute and invalidate stale snapshots.
 #
+# sm-v2-3: readiness fold calibration (lcb_z=1.0, coverage_fold="gate",
+# coverage_live_threshold=1) shifts the public score semantics from posterior
+# mean mastery toward earned real-game readiness.
+#
 # sm-v2-2: the batch now also carries opening_position_scores (the direct
 # tree position read model, g-tree-score-model). Batches written before this
 # version match the old fingerprint but hold zero position rows, so the fast path
 # (recompute_opening_scores_if_needed) would serve them with no direct rows. The
 # bump changes registry_fingerprint -> registry drift -> exactly one recompute per
 # (user, color) on first read after deploy, backfilling position rows.
-SCORE_MODEL_VERSION = "sm-v2-2"
+SCORE_MODEL_VERSION = "sm-v2-3"
 
 # Persisted-read-model schema version. Bump when the SET of persisted batch
 # read-model tables/columns changes (NOT the scoring math — that is

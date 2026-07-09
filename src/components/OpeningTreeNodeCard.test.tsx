@@ -116,6 +116,20 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("renders a hard zero score as data, not as no-data", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, score: 0 }}
+        onSelect={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("0")).toBeInTheDocument();
+    expect(screen.getByLabelText("Grade F")).toHaveTextContent("F");
+    expect(screen.queryByLabelText("No data")).toBeNull();
+  });
+
   it("falls back to 'Unclassified' for a non-root null name", () => {
     render(
       <OpeningTreeNodeCard
@@ -403,9 +417,9 @@ describe("OpeningTreeNodeCard — expanded", () => {
   it.each<[number | null, string]>([
     [90, "Grade A"],
     [42, "Grade B"],
-    [32, "Grade C"],
-    [24, "Grade D"],
-    [10, "Grade F"],
+    [20, "Grade C"],
+    [4, "Grade D"],
+    [1, "Grade F"],
     [null, "No data"],
   ])("exposes the grade accessible name for score %s", (score, label) => {
     render(

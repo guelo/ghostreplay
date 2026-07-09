@@ -33,25 +33,25 @@ export function formatGames(value: number | null | undefined): string {
   return value.toLocaleString();
 }
 
-// Grade/tone boundaries re-centred onto the observed v2 score distribution
-// (g-g5sg, 2026-06-24 calibration: pooled p50≈33, p95≈55, and six included
-// pairs all median 31–34). The original A≥85…F<45 scale graded ~95% of cards
-// F/alert and conveyed no signal, so the bands now track pooled percentiles:
-// A≥50 (~p95) · B≥38 (~p82) · C≥28 (~p40) · D≥22 (~p12) · F<22; tone alert<25
-// · watch<38. The raw score is still displayed unchanged (formatScore), so a
-// strong card reads e.g. "A · 50" — grade is the relative signal, the number
-// is the absolute quality. See docs/openingscore_final.md "Calibration Outcome
-// (v2)".
+// Grade/tone boundaries re-centred onto the readiness-fold score distribution
+// (g-xnv7, 2026-07-09 final grid: lcb_z=1, coverage_fold=gate,
+// coverage_live_threshold=1; pooled p50≈10, p75≈21, p95≈44 across five
+// included pairs). Bands keep the prior percentile intent after the score now
+// folds sample sufficiency and opponent breadth: A≥44 (~p95), B≥29 (~p82),
+// C≥8 (~p40), D≥2 (~p12), F<2; tone alert<5 (~p25), watch<29. The raw score is
+// still displayed unchanged (formatScore), so grade is the relative signal and
+// the number is the absolute readiness score. See docs/openingscore_final.md
+// "Calibration Outcome (v2)".
 export function getPriorityTone(score: number | null): OpeningTone {
   if (score === null) {
     return "muted";
   }
 
-  if (score < 25) {
+  if (score < 5) {
     return "alert";
   }
 
-  if (score < 38) {
+  if (score < 29) {
     return "watch";
   }
 
@@ -63,19 +63,19 @@ export function getPriorityLabel(score: number | null): string {
     return "No Data";
   }
 
-  if (score >= 50) {
+  if (score >= 44) {
     return "A";
   }
 
-  if (score >= 38) {
+  if (score >= 29) {
     return "B";
   }
 
-  if (score >= 28) {
+  if (score >= 8) {
     return "C";
   }
 
-  if (score >= 22) {
+  if (score >= 2) {
     return "D";
   }
 
@@ -94,8 +94,8 @@ const GRADE_TOKENS: Record<string, GradeToken> = {
 
 /**
  * Single-letter grade as a CSS-friendly token for accent styling. Derived from
- * getPriorityLabel so the A≥85…F<45 thresholds stay single-sourced; null score
- * (no evidence) maps to "none".
+ * getPriorityLabel so thresholds stay single-sourced; null score (no evidence)
+ * maps to "none".
  */
 export function getGradeToken(score: number | null): GradeToken {
   if (score === null) {

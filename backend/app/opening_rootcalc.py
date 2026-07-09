@@ -20,8 +20,8 @@ SYNTHETIC_INITIAL_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
 SYNTHETIC_ROOT_NAME = "Repertoire"
 SYNTHETIC_ROOT_FAMILY = "__repertoire__"
 
-# Recognised RootCalcConfig.coverage_fold modes (g-zc3p Part 2). "off" is
-# behavior-neutral (today's ungated score); "gate" is the 0/1 local-coverage gate
+# Recognised RootCalcConfig.coverage_fold modes (g-zc3p Part 2). "off" is the
+# ungated comparison mode; "gate" is the calibrated 0/1 local-coverage gate
 # alone at opponent nodes; "gate_x_cov" additionally multiplies by the child
 # coverage channel (the double-counting arm kept only for the calibration grid).
 COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
@@ -67,20 +67,17 @@ class RootCalcConfig:
     lambda_review: float = 0.5
     k_evidence: float = 5.0
     half_life_days: float = 45.0
-    coverage_live_threshold: int = 2
-    # Readiness folds (g-zc3p). Both default to a BEHAVIOR-NEUTRAL value that
-    # reproduces today's score exactly, so landing the fields alone changes no
-    # user's number; the calibration grid sweeps them and a later bead flips the
-    # defaults to the chosen values.
-    #   - lcb_z: strictness of the lower-confidence bound on mastery. 0.0 == the
-    #     plain Beta-posterior mean (today's _mastery); higher z shrinks
-    #     thin-evidence nodes harder (see _mastery).
+    coverage_live_threshold: int = 1
+    # Readiness folds (g-zc3p/g-xnv7). The calibrated defaults make the displayed
+    # score read as an earned readiness number.
+    #   - lcb_z: strictness of the lower-confidence bound on mastery. 1.0 is the
+    #     calibrated mild LCB; 0.0 reproduces the plain Beta-posterior mean.
     #   - coverage_fold: how the opponent-branch score credit is gated by local
-    #     coverage. "off" == today (no gate); "gate" == the 0/1 gate alone;
+    #     coverage. "off" == ungated comparison mode; "gate" == the 0/1 gate alone;
     #     "gate_x_cov" == the double-counting gate*child_cov arm kept only so the
     #     grid can confirm the double-count empirically (see _calc).
-    lcb_z: float = 0.0
-    coverage_fold: str = "off"
+    lcb_z: float = 1.0
+    coverage_fold: str = "gate"
 
     def __post_init__(self) -> None:
         # Fail fast on a bad mode rather than letting the _calc opponent branch
@@ -521,8 +518,7 @@ class _SharedCalculator:
         the report down by ``z`` normal-approx standard deviations so thin evidence
         reads lower and rises toward the mean as reps are earned (g-zc3p Part 1).
 
-        - ``lcb_z == 0.0`` returns the mean UNCHANGED (byte-for-byte today's value),
-          which is the behavior-neutral default.
+        - ``lcb_z == 0.0`` returns the mean UNCHANGED (the pre-readiness value).
         - The bound is a clamped normal approximation ``clamp(mean - z*std, 0, 1)``,
           NOT ``scipy.stats.beta.ppf`` — scipy is not a backend dependency and numpy
           has no ``beta.ppf``.
@@ -686,7 +682,7 @@ class _SharedCalculator:
             # branch_cov factors:
             #   - perfect pass OR coverage_fold "off" → 1.0. The perfect pass MUST
             #     assume full coverage, else the gate would cancel in real/perfect
-            #     and do nothing; "off" is the behavior-neutral default.
+            #     and do nothing.
             #   - "gate" → the 0/1 gate ALONE (recommended). Deeper gaps are already
             #     folded in once by the recursive gate at deeper opponent nodes.
             #   - "gate_x_cov" → gate * child_cov, the double-counting arm kept only

@@ -94,6 +94,15 @@ def _quality(
     )
 
 
+def _neutral_config(**overrides) -> RootCalcConfig:
+    return RootCalcConfig(
+        lcb_z=0.0,
+        coverage_fold="off",
+        coverage_live_threshold=2,
+        **overrides,
+    )
+
+
 def _prepared(
     overlay: EvidenceOverlay,
     parent: str,
@@ -118,7 +127,7 @@ def test_mastery_uses_continuous_quality():
     fen = _positions([])[0]
     graph = _graph([[]])
     roots = _roots(_root(fen))
-    config = RootCalcConfig(alpha=1.0, beta=2.0)
+    config = _neutral_config(alpha=1.0, beta=2.0)
 
     prior = compute_root_score(
         fen, "white", graph, EvidenceOverlay(1, "white"), roots, config
@@ -194,7 +203,7 @@ def test_score_recursion_and_weighted_depth():
     _prepared(overlay, root, e4, "e2e4")
     overlay.nodes[root] = _quality(root, 0.5)
     overlay.nodes[e5] = _quality(e5, 0.5)
-    config = RootCalcConfig(alpha=1.0, beta=1.0, gamma=0.5)
+    config = _neutral_config(alpha=1.0, beta=1.0, gamma=0.5)
 
     score = compute_root_score(root, "white", graph, overlay, roots, config)
     assert score.opening_score == pytest.approx(100.0 * 0.625 / 1.5)
@@ -262,8 +271,9 @@ def test_cycle_cut_is_seed_independent_and_renormalized():
     overlay.nodes[a] = _quality(a, 0.8)
     overlay.nodes[b] = _quality(b, 0.6)
 
-    all_scores, _ = compute_all_root_scores("white", graph, overlay, roots)
-    seeded_b = compute_root_score(b, "white", graph, overlay, roots)
+    config = _neutral_config()
+    all_scores, _ = compute_all_root_scores("white", graph, overlay, roots, config)
+    seeded_b = compute_root_score(b, "white", graph, overlay, roots, config)
     assert all_scores[b].opening_score == pytest.approx(seeded_b.opening_score)
     assert all_scores[b].opening_score == pytest.approx(45.0)
     assert all_scores[b].coverage == pytest.approx(100.0)
@@ -273,7 +283,7 @@ def test_cycle_cut_is_seed_independent_and_renormalized():
         graph,
         overlay,
         roots,
-        RootCalcConfig(),
+        config,
         datetime.now(timezone.utc),
         seeds=[a],
     )
@@ -391,7 +401,7 @@ def test_unprepared_descendant_is_not_an_underexposed_branch():
     overlay.nodes[prepared] = _quality(prepared, 0.8, count=2)
     overlay.nodes[ignored] = _quality(ignored, 0.2)
 
-    scores, _ = compute_all_root_scores("white", graph, overlay, roots)
+    scores, _ = compute_all_root_scores("white", graph, overlay, roots, _neutral_config())
     summary = scores[root].underexposed_branch
     assert summary is None or summary.opening_key != ignored
 
@@ -409,7 +419,7 @@ def test_underexposed_value_is_fractional_coverage_gap():
     _prepared(overlay, root, opponent, "e2e4")
     overlay.nodes[child] = _quality(child, 1.0)
 
-    scores, _ = compute_all_root_scores("white", graph, overlay, roots)
+    scores, _ = compute_all_root_scores("white", graph, overlay, roots, _neutral_config())
     assert scores[child].coverage == pytest.approx(0.0)
     summary = scores[root].underexposed_branch
     assert summary is not None
@@ -862,9 +872,9 @@ def test_compute_all_scores_emits_off_book_no_data_rows_without_any_quality():
 # ---------------------------------------------------------------------------
 # Readiness folds (g-zc3p / g-5bcz): LCB on mastery + opponent-coverage gate.
 #
-# These exercise the scoring MATH, not the tuning: the default config is
-# behavior-neutral (lcb_z=0.0, coverage_fold="off"), so every test passes the
-# fold parameters explicitly.
+# These exercise the scoring MATH around the calibrated production defaults
+# (lcb_z=1.0, coverage_fold="gate", coverage_live_threshold=1), so tests that
+# assert pre-fold arithmetic pass the neutral fields explicitly.
 # ---------------------------------------------------------------------------
 
 
@@ -914,8 +924,12 @@ def test_mastery_lcb_shrinks_zero_quality_prior_and_clamps():
 
 def test_config_fingerprint_includes_readiness_fold_fields():
     base = root_calc_config_fingerprint()
-    assert base != root_calc_config_fingerprint(RootCalcConfig(lcb_z=1.0))
-    assert base != root_calc_config_fingerprint(RootCalcConfig(coverage_fold="gate"))
+    assert RootCalcConfig().lcb_z == 1.0
+    assert RootCalcConfig().coverage_fold == "gate"
+    assert RootCalcConfig().coverage_live_threshold == 1
+    assert base != root_calc_config_fingerprint(RootCalcConfig(lcb_z=0.0))
+    assert base != root_calc_config_fingerprint(RootCalcConfig(coverage_fold="off"))
+    assert base != root_calc_config_fingerprint(RootCalcConfig(coverage_live_threshold=2))
 
 
 def test_config_rejects_unknown_coverage_fold():
@@ -948,7 +962,12 @@ def test_opponent_gate_removes_unprepared_line_freebie():
 
     def score(fold: str) -> float:
         return compute_root_score(
-            opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold=fold)
+            opp,
+            "white",
+            graph,
+            overlay,
+            roots,
+            RootCalcConfig(lcb_z=0.0, coverage_fold=fold, coverage_live_threshold=2),
         ).opening_score
 
     off = score("off")
@@ -967,10 +986,20 @@ def test_perfect_pass_assumes_full_coverage():
     # would RISE above "off" instead of dropping.
     graph, overlay, roots, opp, _covered, _unc = _opponent_root_two_replies()
     off = compute_root_score(
-        opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold="off")
+        opp,
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(lcb_z=0.0, coverage_fold="off", coverage_live_threshold=2),
     ).opening_score
     gate = compute_root_score(
-        opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold="gate")
+        opp,
+        "white",
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(lcb_z=0.0, coverage_fold="gate", coverage_live_threshold=2),
     ).opening_score
     # Perfect denominator = 1.0 (both replies full credit), so gate == 100*0.5*(5/7).
     assert gate == pytest.approx(100.0 * 0.5 * (5.0 / 7.0))
@@ -999,7 +1028,12 @@ def test_deep_gap_penalized_once_gate_vs_gate_x_cov_diverge():
 
     def score(fold: str) -> float:
         return compute_root_score(
-            opp1, "white", graph, overlay, roots, RootCalcConfig(coverage_fold=fold)
+            opp1,
+            "white",
+            graph,
+            overlay,
+            roots,
+            RootCalcConfig(lcb_z=0.0, coverage_fold=fold, coverage_live_threshold=2),
         ).opening_score
 
     off, gate, gate_x_cov = score("off"), score("gate"), score("gate_x_cov")
@@ -1023,7 +1057,12 @@ def test_line_606_gate_alone_leak_returns_node_mastery():
 
     def score(fold: str) -> float:
         return compute_root_score(
-            opp, "white", graph, overlay, roots, RootCalcConfig(coverage_fold=fold)
+            opp,
+            "white",
+            graph,
+            overlay,
+            roots,
+            RootCalcConfig(lcb_z=0.0, coverage_fold=fold, coverage_live_threshold=2),
         ).opening_score
 
     off, gate, gate_x_cov = score("off"), score("gate"), score("gate_x_cov")
@@ -1067,7 +1106,12 @@ def test_position_score_hard_zero_for_all_gate_failing_opponent_turn():
     )
     overlay.edges[(root, off_book)] = EdgeEvidence(root, off_book, "observed")
 
-    calc = _shared_calc(graph, overlay, roots, RootCalcConfig(coverage_fold="gate"))
+    calc = _shared_calc(
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(lcb_z=0.0, coverage_fold="gate", coverage_live_threshold=2),
+    )
     rows = {row.normalized_fen: row for row in calc.compute_position_scores()}
 
     # The all-gate-failing opponent-turn position: real hard zero, evidence present.

@@ -4,8 +4,9 @@
 the opening-score **v2** model. v2 is the only live scoring model — there is no
 v1 baseline — so this script *calibrates v2 directly* rather than comparing two
 models. It scores every candidate `(user_id, player_color)` pair **in memory**
-and reports the distributions, source mix, phase-horizon behaviour, and
-recursion accounting needed to decide grade thresholds and the `tau` parameters.
+and reports the distributions, source mix, phase-horizon behaviour, recursion
+accounting, readiness-fold grid, and PASS/FAIL diagnostics needed to decide
+score defaults and grade thresholds.
 
 ## No-write default
 
@@ -64,6 +65,8 @@ The synthetic `__repertoire__` hero row is reported in its **own** section
 | `recursion` | actual-key count and perfect-key count reported **separately** (`_metrics` is keyed `(fen, perfect)`), vs the named-root count |
 | `throughput` | total scoring wall-time, **per-pair scoring latency** (median / p95 / max), and emitted row count |
 | `gates` | pass/fail vs the documented numeric bars: scoring `< 5s/pair` and cache read `< 50ms` (`n/a` when not measured) |
+| `grid` | per-cell distributions for `lcb_z × coverage_fold`, plus per-key deltas vs the pre-readiness baseline |
+| `diagnostics` | one-variation specialist, broad-prepared false-positive guard, and thin-but-earned cliff gates |
 
 The recursion section is the bound proof: actual/perfect key counts scale with
 the number of unique reachable normalized FENs, not the named-root count, and the
@@ -106,6 +109,17 @@ cache.
 | `--users` | all | Comma-separated `user_id`s to restrict to |
 | `--pairs` | all | Comma-separated `user_id:color` pairs to restrict to |
 | `--limit` | none | Limit candidate pairs |
+| `--lcb-z-grid` | `0,1.0,1.28` | Comma-separated LCB strictness values to sweep; `0` is always included |
+| `--coverage-grid` | `off,gate,gate_x_cov` | Comma-separated coverage-fold modes to sweep; `off` is always included |
 | `--json` | off | Emit the report as JSON |
 | `--write-bench` | off | Time one isolated recompute + cache read (needs `--allow-writes` + guarded URL) |
 | `--allow-writes` | off | Required acknowledgement alongside `--write-bench` |
+
+## g-xnv7 calibration decision
+
+The 2026-07-09 g-xnv7 final run chose `lcb_z=1.0`,
+`coverage_fold="gate"`, and `coverage_live_threshold=1`. The chosen grid cell
+reported pooled named-root stats mean `14.6`, p5 `0.4`, p25 `5.1`, p50 `9.8`,
+p75 `20.8`, p95 `43.9` across 478 rows; all three diagnostics passed. Display
+grades were recalibrated once from that combined distribution:
+`A>=44`, `B>=29`, `C>=8`, `D>=2`, `F<2`; tones `alert<5`, `watch<29`.

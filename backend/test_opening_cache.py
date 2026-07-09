@@ -47,6 +47,7 @@ from app.opening_cache import (
 )
 from app.opening_evidence import overlay_evidence as _real_overlay_evidence
 from app.opening_graph import get_opening_graph
+from app.opening_rootcalc import RootCalcConfig, root_calc_config_fingerprint
 from app.opening_roots import get_opening_roots
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -1034,6 +1035,35 @@ def test_model_version_bump_invalidates_existing_batch(db_session, monkeypatch):
     assert second.id != first.id
     assert second.generation > first.generation
     assert _count_batches(db_session, 123, "black") <= 2
+
+
+def test_pre_readiness_config_and_model_version_recomputes_once(db_session):
+    """A batch stamped under the pre-readiness config/version drifts once, then
+    the rebuilt batch serves the fast path."""
+    _seed_black_opening_session(db_session)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert first is not None
+
+    old_config_fp = root_calc_config_fingerprint(
+        RootCalcConfig(lcb_z=0.0, coverage_fold="off", coverage_live_threshold=2)
+    )
+    current_config_fp = root_calc_config_fingerprint()
+    assert old_config_fp != current_config_fp
+    assert oc.SCORE_MODEL_VERSION == "sm-v2-3"
+    first.registry_fingerprint = first.registry_fingerprint.replace(
+        current_config_fp, old_config_fp
+    ).replace(oc.SCORE_MODEL_VERSION, "sm-v2-2")
+    db_session.commit()
+
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    third = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None and third is not None
+    assert second.id != first.id
+    assert third.id == second.id
+    assert second.registry_fingerprint == opening_score_inputs_fingerprint(
+        _make_graph(), _make_roots()
+    )
 
 
 def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkeypatch):

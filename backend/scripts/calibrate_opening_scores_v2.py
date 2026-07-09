@@ -68,10 +68,10 @@ DEFAULT_PERCENTILES = (5.0, 25.0, 50.0, 75.0, 95.0)
 DEFAULT_LCB_Z_GRID = (0.0, 1.0, 1.28)
 DEFAULT_COVERAGE_GRID = ("off", "gate", "gate_x_cov")
 
-# Current (pre-recalibration) grade cutoffs mirrored from src/openings/format.ts
-# getPriorityLabel (A>=50 / B>=38 / C>=28 / D>=22 / F<22). Used ONLY to give the
-# PASS/FAIL diagnostics a readable grade band; recalibrating format.ts to the new
-# combined distribution belongs to the follow-up ship bead, not here.
+# Fixed release-diagnostic gates from the pre-readiness display bands. These are
+# intentionally NOT the current display grades in src/openings/format.ts: they
+# keep the specialist/broad-prep PASS/FAIL tests anchored to the human calibration
+# question that chose the fold values.
 GRADE_A, GRADE_B, GRADE_C, GRADE_D = 50.0, 38.0, 28.0, 22.0
 
 # Documented numeric release gates (openingscore_final.md "Calibration Outcome").

@@ -2,10 +2,11 @@
 
 ## Recommendation
 
-Adopt a side-specific, repertoire-aware opening score with three separate metrics:
+Adopt a side-specific, repertoire-aware readiness score with companion diagnostics:
 
-- `Opening Score`: how well the user currently navigates the opening tree
-- `Confidence`: how much evidence supports that score
+- `Opening Score`: how prepared the user is to play the opening in real games,
+  including sample sufficiency and opponent-response breadth
+- `Confidence`: backend/API evidence freshness and sparsity telemetry
 - `Coverage`: how much of the important opponent-response tree has actually been exposed
 
 This final plan keeps the best product framing from v7 and the better recursion model from v8, with one important refinement:
@@ -18,7 +19,8 @@ That avoids the main failure mode in v8's draft weighting: a weak but frequently
 
 ### Keep from v7
 
-- separate `Opening Score`, `Confidence`, and `Coverage`
+- companion `Opening Score`, `Confidence`, and `Coverage` surfaces, with score
+  now carrying the readiness-critical confidence/coverage signals
 - opponent-turn breadth weighting
 - normalized recursive scoring with a stable `0-100` output
 - `weighted_depth` as a concrete companion to the abstract score
@@ -171,7 +173,9 @@ Consequences:
 
 ### Metric 1: Opening Score
 
-`Opening Score` is the normalized recursive mastery score on a `0-100` scale.
+`Opening Score` is the normalized recursive readiness score on a `0-100` scale.
+Local mastery uses a lower-confidence bound, and opponent replies only contribute
+score credit when their subtree is locally covered.
 
 It should reward:
 
@@ -185,7 +189,7 @@ It should not penalize:
 
 ### Metric 2: Confidence
 
-`Confidence` is the trust level of the score on a `0-100` scale.
+`Confidence` is the backend/API trust level of the evidence on a `0-100` scale.
 
 It rises with:
 
@@ -193,16 +197,22 @@ It rises with:
 - more recent evidence
 - intentional review evidence
 
-It is displayed next to the score, not multiplied into it.
+Sample sufficiency is now folded into the score through the mastery LCB; the
+remaining confidence metric is telemetry for evidence age/sparsity and is not
+surfaced as a separate opening-card tile.
 
 ### Metric 3: Coverage
 
-`Coverage` is the fraction of important opponent-response weight that has actually been exposed with enough evidence to be meaningful.
+`Coverage` is the fraction of important opponent-response weight that has
+actually been exposed with enough evidence to be meaningful.
 
 It exists to separate:
 
 - "you fail here"
 - "you have barely been shown this branch"
+
+Opponent-branch coverage also gates score credit, so the visible score no longer
+grants a prior freebie for opponent replies the user has not prepared.
 
 ## Local Statistics
 
@@ -314,10 +324,13 @@ Use:
 ### Opponent node
 
 ```text
-S_opp(n) = sum over known children e of w_e * S(child_e)
+branch_covered_e = 1 if child subtree is locally covered, else 0
+S_opp(n) = sum over known children e of w_e * branch_covered_e * S(child_e)
 ```
 
-Where `w_e` are opponent reply weights over known book replies.
+Where `w_e` are opponent reply weights over known book replies. In the perfect
+normalization pass, `branch_covered_e = 1` so coverage shortfalls affect only the
+real numerator.
 
 ### User node
 
@@ -356,11 +369,13 @@ OpeningScore = 100 * S(root) / PerfectS(root)
 Using the same prepared-child set in the denominator preserves the intended semantics:
 
 - the score judges how well the user knows the repertoire they have actually trained
-- `Coverage` separately judges how much of the important opponent tree they have faced
+- `Coverage` remains a separate diagnostic for how much of the important
+  opponent tree they have faced
 
 ## Confidence Model
 
-Confidence should be parallel to mastery, not multiplied into it.
+Confidence remains parallel telemetry rather than a final multiplier. Sample
+sufficiency is now folded into local mastery through the LCB.
 
 ### Local confidence
 
@@ -410,10 +425,12 @@ The user should be judged on whether they have been exposed to important opponen
 
 An opponent child branch counts as covered if its subtree has at least one of:
 
-- `2` or more live attempts
-- `1` live attempt plus `1` review event
+- `1` or more live attempts
 
-These thresholds are deliberately conservative. A single accidental appearance should not count as meaningful exposure.
+The historical `1` live plus `1` review clause remains available through
+configuration, but with the calibrated default `coverage_live_threshold = 1` a
+single live pass earns coverage. Thinness is handled by the score's LCB rather
+than by a hard coverage cliff.
 
 ### Recursive coverage
 
@@ -641,7 +658,7 @@ None of those are required for MVP tuning.
 | `lambda_review` | 0.5 |
 | `k_evidence` | 5 |
 | `half_life_days` | 45 |
-| `coverage_live_threshold` | 2 |
+| `coverage_live_threshold` | 1 |
 | `coverage_review_threshold` | `1 live + 1 review` |
 | `tau_wc` | 0.20 |
 | `tau_cp` | 100.0 |
@@ -670,26 +687,41 @@ discontinuity across the old 49↔50cp pass/fail boundary (asserted by
 `test_no_49_50_discontinuity` / `test_context_sensitivity` in
 `backend/test_opening_quality.py`). No change.
 
-### Grade thresholds — **re-centred** (g-g5sg, 2026-06-24)
+### Readiness fold parameters — **chosen** (g-xnv7, 2026-07-09)
 
-`A ≥ 50`, `B ≥ 38`, `C ≥ 28`, `D ≥ 22`, `F < 22`; tones `alert < 25`,
-`watch < 38` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
+`lcb_z = 1.0`, `coverage_fold = "gate"`, `coverage_live_threshold = 1`.
 
-The original `A ≥ 85 … F < 45` scale was retained through the first calibration
-because that cohort was ~95% one user. The **2026-06-24** run (prod Railway DB,
-13 candidate pairs / 6 included at `min_observations = 20`) confirmed the
-low-skewed distribution is **real across users, not a single-user artifact**: all
-six included pairs' medians fall in **30.6–34.1**, while pooled named-score stats
-were mean **32.8**, p5 **18.9** / p25 **25.0** / p50 **33.3** / p75 **36.3** / p95
-**54.7** (n=450), synthetic-hero mean **33.6**. Under the old scale **>75% of
-cards graded F**, ~95% were D-or-F, and **none reached C/A**, so the grade carried
-no differentiating signal.
+The final grid (`backend/.tmp/g-xnv7-final-grid.txt`) used 16 candidate pairs,
+5 included pairs at `min_observations = 20`, and passed all three diagnostics:
+one-variation specialist true-positive, broadly-prepared false-positive guard,
+and thin-but-earned cliff. `gate_x_cov` was rejected because it over-compressed
+the bottom of the real distribution; `gate` kept the intended recursive penalty
+without double-counting deeper coverage gaps. The broad-prepared guard passed, so
+`g-idgs` is not a blocker for this rollout.
 
-The boundaries are therefore re-centred onto the pooled percentiles so grades
-differentiate: `A ≥ 50` (~p95), `B ≥ 38` (~p82), `C ≥ 28` (~p40, the median
-lands mid-C), `D ≥ 22` (~p12), `F < 22`; tones `alert < 25` (~p25, genuinely
-weak) / `watch < 38`. The resulting pooled mix is ≈ A 7% / B 11% / C 42% /
-D 28% / F 12% (median = C).
+At the chosen cell (`lcb_z=1`, `coverage_fold=gate`, live threshold 1), pooled
+named-root stats were mean **14.6**, p5 **0.4** / p25 **5.1** / p50 **9.8** /
+p75 **20.8** / p95 **43.9** (n=478), synthetic-hero mean **27.6**.
+
+`SCORE_MODEL_VERSION` is bumped to `sm-v2-3`; combined with the
+`RootCalcConfig` default change, this causes registry drift and one recompute per
+`(user, color)` on first read. In-flight sessions during deploy can show a
+one-time crop of negative score deltas if their baseline was captured under
+`sm-v2-2`; the next baseline capture self-corrects.
+
+The stats page strongest/weakest top-3 lists sort persisted `opening_score`, so
+specialist openings can reshuffle downward under the readiness fold. That is a
+coherent score-model change, not a stats regression.
+
+### Grade thresholds — **re-centred** (g-xnv7, 2026-07-09)
+
+`A ≥ 44`, `B ≥ 29`, `C ≥ 8`, `D ≥ 2`, `F < 2`; tones `alert < 5`,
+`watch < 29` (`src/openings/format.ts`, pinned by `src/openings/format.test.ts`).
+
+The boundaries are re-centred onto the final combined readiness distribution so
+grades differentiate after the score folds in sample sufficiency and opponent
+breadth: `A ≥ 44` (~p95), `B ≥ 29` (~p82), `C ≥ 8` (~p40), `D ≥ 2` (~p12),
+`F < 2`; tones `alert < 5` (~p25) / `watch < 29`.
 
 > **The raw score is still displayed unchanged** (`formatScore`). Grade and
 > number can read e.g. "**A · 50**" — the grade is the *relative* position on the
@@ -697,11 +729,12 @@ D 28% / F 12% (median = C).
 > a deliberate product decision (keep the honest absolute number rather than hide
 > or rescale it).
 >
-> Grade/tone are display of an unchanged stored score, so this re-centre is
-> **display-only** and does **not** bump `QUALITY_VERSION`. The cohort is still
-> volume-dominated by one user (`user 14` ≈ 95% of pooled rows), so the central
-> tendency is well-supported but the fine 5-band *shape* is one-user-driven;
-> revisit the band placement when more high-observation users exist.
+> Grade/tone are display of an unchanged stored score, so this re-centre does
+> **not** bump `QUALITY_VERSION`. The score-model semantic change itself is
+> represented by `RootCalcConfig` drift and `SCORE_MODEL_VERSION = sm-v2-3`.
+> The cohort is still volume-dominated by one user, so the central tendency is
+> useful but the fine 5-band *shape* should be revisited when more high-observation
+> users exist.
 
 ### Source mix & horizon
 
