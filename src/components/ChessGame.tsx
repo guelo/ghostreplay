@@ -215,14 +215,24 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       useGameStore.getState(),
     ),
   );
-  const [showStartOverlay, setShowStartOverlay] = useState(
-    () =>
-      !isReviewedDrillReturnValid(
+  const [showStartOverlay, setShowStartOverlay] = useState(() => {
+    const store = useGameStore.getState();
+    // Reviewed-drill-return restores the just-played drill with "Again" ready
+    // instead of the popup (g-65ve); it already seeds the overlay hidden.
+    if (
+      isReviewedDrillReturnValid(
         location.state,
         useDrillAnalysisStore.getState().snapshot,
-        useGameStore.getState(),
-      ),
-  );
+        store,
+      )
+    ) {
+      return false;
+    }
+    // A retained session — active OR already-ended — must not re-seed the popup
+    // on remount. Seeding true and relying on the render gate (!isGameActive)
+    // let the stale flag surface the popup the moment the game ended (g-yuvr).
+    return store.sessionId === null;
+  });
   const [blunderAlert, setBlunderAlert] = useState<BlunderAlert | null>(null);
   const [showFlash, setShowFlash] = useState(false);
   const [blunderReviewId, setBlunderReviewId] = useState<number | null>(null);

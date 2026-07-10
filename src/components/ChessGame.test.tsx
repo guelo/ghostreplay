@@ -4016,7 +4016,7 @@ describe("ChessGame remount persistence", () => {
     vi.restoreAllMocks();
   });
 
-  it("preserves analysis data across unmount/remount and flushes coordinator on resign", async () => {
+  it("preserves analysis data across unmount/remount, flushes coordinator on resign, and never shows the start popup at game end or on an ended-session remount (g-yuvr)", async () => {
     startGameMock.mockResolvedValueOnce({
       session_id: "session-remount",
       engine_elo: 1500,
@@ -4085,7 +4085,7 @@ describe("ChessGame remount persistence", () => {
     expect(gameAnalysisStore.getState().analysisMap.size).toBe(2);
 
     // Remount (simulates navigating back to /game)
-    render(<ChessGame />);
+    const { unmount: unmountEnded } = render(<ChessGame />);
 
     // Move list should still show both moves (game store persists moveHistory)
     await waitFor(() => {
@@ -4112,6 +4112,30 @@ describe("ChessGame remount persistence", () => {
         expect.any(Boolean),
       );
     });
+
+    // (a) No new-game popup at game end. endGameMock is awaited before
+    // finishLocalGame flips isGameActive→false and renders the terminal UI, so
+    // waiting on endGameMock alone can pass before the overlay would ever render.
+    // Gate on the post-game banner (finishLocalGame renders role="region"
+    // "Post-game options") so the assertion runs after the terminal UI is live;
+    // on the bug the banner and the erroneous StartPanel coexist and this fails.
+    await screen.findByRole("region", { name: "Post-game options" });
+    // StartPanel is identified by its "Play White" control.
+    expect(
+      screen.queryByRole("button", { name: /play white/i }),
+    ).not.toBeInTheDocument();
+
+    // (b) No popup on an ended-session remount — covers the initializer's
+    // "already-ended session" branch (sessionId non-null, isGameActive=false,
+    // gameResult set). Without the fix, showStartOverlay re-seeds true and the
+    // StartPanel renders; with the fix it seeds false (sessionId non-null).
+    unmountEnded();
+    render(<ChessGame />);
+    // moveHistory persists across remount, so the move list settles the render.
+    await screen.findByRole("button", { name: /e4/i });
+    expect(
+      screen.queryByRole("button", { name: /play white/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not overwrite engine ELO on remount when a game is active", async () => {
@@ -4962,6 +4986,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
   describe.each([
     {
       name: "snapshot present but no marker",
+      endedRecovery: true,
       setup: () => {
         seedAbandonedDrillStore();
         useDrillAnalysisStore.getState().setSnapshot(snapshotFor("drill-1"));
@@ -4969,6 +4994,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     },
     {
       name: "marker/snapshot/store session mismatch",
+      endedRecovery: true,
       setup: () => {
         seedAbandonedDrillStore("drill-1");
         useDrillAnalysisStore.getState().setSnapshot(snapshotFor("other"));
@@ -4977,6 +5003,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     },
     {
       name: "marker present but game still active",
+      endedRecovery: false,
       setup: () => {
         seedAbandonedDrillStore();
         useGameStore.setState({ isGameActive: true });
@@ -4986,6 +5013,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     },
     {
       name: "drill not abandoned",
+      endedRecovery: true,
       setup: () => {
         seedAbandonedDrillStore();
         useGameStore.setState({ drillState: "failed" });
@@ -4995,6 +5023,7 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     },
     {
       name: "incomplete restart settings",
+      endedRecovery: true,
       setup: () => {
         seedAbandonedDrillStore();
         useGameStore.setState({ drillStrictnessCp: null });
@@ -5002,13 +5031,29 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
         setReturnMarker("drill-1");
       },
     },
-  ])("falls back to ordinary /play: $name", ({ setup }) => {
-    it("shows ordinary start UI and no reviewed Again action", () => {
-      setup();
-      render(<ChessGame />);
+  ])(
+    "falls back to ordinary /play: $name",
+    ({ setup, endedRecovery }) => {
+      it("surfaces the ended-session recovery banner (not the auto-opened start popup) and no reviewed Again action", () => {
+        setup();
+        render(<ChessGame />);
 
-      // No reviewed "Again" action exposed.
-      expect(screen.queryByRole("button", { name: /^again$/i })).toBeNull();
-    });
-  });
+        // No reviewed "Again" action exposed.
+        expect(screen.queryByRole("button", { name: /^again$/i })).toBeNull();
+        // The stale start popup must not auto-open (g-yuvr): with sessionId
+        // non-null the overlay seeds hidden, so StartPanel's "Play White" is absent.
+        expect(
+          screen.queryByRole("button", { name: /play white/i }),
+        ).not.toBeInTheDocument();
+
+        if (endedRecovery) {
+          // For an ended, non-null session the PostGameBanner inactive branch
+          // renders a "New game" recovery action, so the user is never stranded.
+          expect(
+            screen.getByRole("button", { name: /new game/i }),
+          ).toBeInTheDocument();
+        }
+      });
+    },
+  );
 });
