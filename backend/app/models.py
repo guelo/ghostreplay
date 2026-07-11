@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -177,6 +178,10 @@ class GameSession(Base):
         ),
         CheckConstraint("rated_start_ply is null or rated_start_ply >= 0", name="ck_game_sessions_rated_start_ply"),
         CheckConstraint(
+            "player_accuracy is null or (player_accuracy >= 0 and player_accuracy <= 100)",
+            name="ck_game_sessions_player_accuracy",
+        ),
+        CheckConstraint(
             "session_mode = 'normal' "
             "or (drill_state = 'converted' and is_rated = true and normal_started_at is not null "
             "and converted_at is not null and rated_start_ply is not null) "
@@ -230,6 +235,14 @@ class GameSession(Base):
     # the delta; "{}" means "captured, user had no scored openings yet" (every
     # crossed opening reads as new). See app/opening_score_delta.py.
     opening_score_baseline: Mapped[str | None] = mapped_column(Text)
+    # Cached session accuracy (Release A schema; writers land in Release B). An
+    # integer 0..100 or NULL for sessions not yet scored, guarded by the named
+    # range CHECK ck_game_sessions_player_accuracy. player_accuracy_algo_version
+    # records which accuracy algorithm produced the cached value so a future
+    # algo bump can invalidate/recompute selectively. Both stay NULL until the
+    # Release B write hooks populate them; nothing reads them yet.
+    player_accuracy: Mapped[int | None] = mapped_column(Integer)
+    player_accuracy_algo_version: Mapped[int | None] = mapped_column(SmallInteger)
 
 
 class Move(Base):
@@ -255,6 +268,19 @@ class RatingHistory(Base):
     __table_args__ = (
         Index("idx_rating_history_user_timestamp", "user_id", "recorded_at"),
         Index("uq_rating_history_game_session", "game_session_id", unique=True),
+        # Durable-head index (Release A). Serves the "latest rated row for a user"
+        # lookup ordered by games_played first: WHERE user_id = ? ORDER BY
+        # games_played DESC, recorded_at DESC, id DESC LIMIT 1. The DESC ordering
+        # on every trailing column lets Postgres satisfy that ORDER BY straight
+        # from the index with no Sort node. The (user_id, recorded_at) index above
+        # remains for chronological history reads.
+        Index(
+            "idx_rating_history_user_chain",
+            "user_id",
+            text("games_played DESC"),
+            text("recorded_at DESC"),
+            text("id DESC"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BIGINT_SQLITE, primary_key=True, autoincrement=True)

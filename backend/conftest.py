@@ -1,11 +1,8 @@
 import os
-import pathlib
 import uuid
 from unittest.mock import patch
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -21,16 +18,21 @@ os.environ["POSTHOG_DISABLED"] = "true"
 os.environ.pop("POSTHOG_PROJECT_TOKEN", None)
 
 from app.api import session as session_api
-from app.database_url import _normalize_postgres_scheme
 from app.db import get_db
 from app.main import app
 from app.models import (
-    Base,
     GameSession,
     User,
     ensure_evidence_epoch_infrastructure,
 )
 from app.security import create_access_token, hash_password
+
+# Activate the PostgreSQL gate plugin (fixtures + @pg_required marker + gate).
+# `from conftest import pg_required` stays valid via the re-export below. Request
+# assert-rewriting BEFORE the import so pytest can instrument the plugin.
+pytest.register_assert_rewrite("pg_gate_plugin")
+pytest_plugins = ["pg_gate_plugin"]
+from pg_gate_plugin import pg_required  # noqa: E402,F401
 
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(
@@ -79,7 +81,10 @@ def _create_test_schema(conn) -> None:
             recorded_blunder_id INTEGER,
             blunder_idempotency_key VARCHAR(64),
             opening_score_baseline TEXT,
+            player_accuracy INTEGER,
+            player_accuracy_algo_version SMALLINT,
             CHECK (session_mode IN ('normal','drill')),
+            CONSTRAINT ck_game_sessions_player_accuracy CHECK (player_accuracy IS NULL OR (player_accuracy >= 0 AND player_accuracy <= 100)),
             CHECK (drill_state IS NULL OR drill_state IN ('active','root_reached','failed','abandoned','converted')),
             CHECK (drill_strictness IS NULL OR drill_strictness IN ('lenient','standard','strict')),
             CHECK (drill_strictness_cp IS NULL OR (drill_strictness_cp >= 0 AND drill_strictness_cp <= 50)),
@@ -204,6 +209,13 @@ def _create_test_schema(conn) -> None:
             UNIQUE(game_session_id)
         )
     """))
+    # Release A durable-head index, kept in sync with the ORM/Alembic definition
+    # (idx_rating_history_user_chain) so backend tests run against the same
+    # rating_history metadata as production.
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS idx_rating_history_user_chain "
+        "ON rating_history (user_id, games_played DESC, recorded_at DESC, id DESC)"
+    ))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS analysis_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -625,92 +637,6 @@ def create_user(db_session):
         return user
 
     return _create_user
-
-
-# ---------------------------------------------------------------------------
-# PostgreSQL-backed fixtures (opt-in via GHOSTREPLAY_TEST_PG_URL).
-#
-# These exercise behaviour SQLite cannot: real SELECT ... FOR UPDATE row locks
-# and the partial unique index on blunder_reviews. Tests decorated with
-# @pg_required skip cleanly when no Postgres URL is configured (e.g. locally),
-# and run for real in CI where the postgres service is available.
-#
-# The schema under test is the ALEMBIC-MIGRATED one (never create_all from
-# models, never drop_all), so PG behaviour tests always exercise the real
-# migrated DDL — including the partial unique index and BigInteger columns the
-# model metadata alone would not validate. The schema is session-scoped and
-# per-test isolation is via TRUNCATE.
-# ---------------------------------------------------------------------------
-
-_PG_URL = os.getenv("GHOSTREPLAY_TEST_PG_URL")
-
-pg_required = pytest.mark.skipif(
-    not _PG_URL,
-    reason="GHOSTREPLAY_TEST_PG_URL not set; PostgreSQL-backed tests skipped",
-)
-
-
-@pytest.fixture(scope="session")
-def pg_engine():
-    if not _PG_URL:
-        pytest.skip("GHOSTREPLAY_TEST_PG_URL not set")
-    url = _normalize_postgres_scheme(_PG_URL)
-
-    # Ensure the migrated schema via Alembic (idempotent: a no-op when CI has
-    # already run `alembic upgrade head`). env.py resolves the URL from
-    # DATABASE_URL, so point it at the test DB for the duration of the upgrade.
-    alembic_ini = pathlib.Path(__file__).resolve().parent / "alembic.ini"
-    prior_database_url = os.environ.get("DATABASE_URL")
-    os.environ["DATABASE_URL"] = url
-    try:
-        command.upgrade(Config(str(alembic_ini)), "head")
-    finally:
-        if prior_database_url is None:
-            os.environ.pop("DATABASE_URL", None)
-        else:
-            os.environ["DATABASE_URL"] = prior_database_url
-
-    pg = create_engine(url)
-    yield pg
-    pg.dispose()
-
-
-@pytest.fixture
-def pg_session_factory(pg_engine):
-    return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
-
-
-@pytest.fixture
-def pg_client(pg_engine, pg_session_factory):
-    """TestClient backed by Postgres, with per-test truncation for isolation.
-
-    Overrides get_db AFTER the autouse SQLite ``_db_override`` so Postgres wins.
-    Each request gets its own session, so concurrent requests can contend for
-    real row locks.
-    """
-    table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
-    with pg_engine.begin() as conn:
-        conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
-        # Re-seed the evidence_epoch singleton the TRUNCATE just removed — its
-        # triggers UPDATE ... WHERE id = 1 and silently no-op without the row.
-        conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
-
-    def _override_pg_db():
-        db = pg_session_factory()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    app.dependency_overrides[get_db] = _override_pg_db
-    with patch("app.main.engine", pg_engine), patch(
-        "app.main.get_scheduler"
-    ), patch("app.main.get_evidence_scheduler"), patch(
-        "app.main.get_baseline_scheduler"
-    ), patch("app.main.start_prewarm"):
-        with TestClient(app) as pg_test_client:
-            yield pg_test_client
-    app.dependency_overrides.pop(get_db, None)
 
 
 @pytest.fixture

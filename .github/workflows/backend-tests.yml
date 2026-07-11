@@ -34,6 +34,11 @@ jobs:
       # drives the pytest pg_* fixtures. Both must point at the same DB.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/ghostreplay_test
       GHOSTREPLAY_TEST_PG_URL: postgresql://postgres:postgres@localhost:5432/ghostreplay_test
+      # Maintenance URL for pg_migration_db: authority to CREATE/DROP the
+      # disposable ghostreplay_mig_test_* databases migration tests build from
+      # base. Points at the always-present `postgres` maintenance DB, never the
+      # shared test DB. Without it the disposable-DB migration tests SKIP.
+      GHOSTREPLAY_TEST_PG_MAINT_URL: postgresql://postgres:postgres@localhost:5432/postgres
     defaults:
       run:
         # alembic.ini lives in backend/, so all migration/test commands run here.
