@@ -2831,28 +2831,54 @@
    layer above it may be click-through. */
 .board-return-live {
     position: absolute;
-    bottom: 0.5rem;
-    right: 0.5rem;
+    bottom: 0.25rem;
+    right: 0.25rem;
     z-index: 9;
     display: inline-flex;
     align-items: center;
     gap: 0.4rem;
-    padding: 0.5rem 1.1rem;
+    height: 1.25rem;
+    padding: 0 1.1rem;
     border: 1px solid transparent;
     border-radius: 999px;
     background: var(--gradient-brand);
     color: var(--text-on-gradient);
     font-size: 0.9rem;
+    line-height: 1;
     font-weight: 700;
     letter-spacing: 0.01em;
     cursor: pointer;
     pointer-events: auto;
+    white-space: nowrap;
     box-shadow: var(--shadow-lg);
+    overflow: hidden;
+    transition: width 200ms ease, height 200ms ease, padding 200ms ease,
+        gap 200ms ease;
     /* Entrance is a plain rise (no horizontal centering to preserve now that the
        pill is corner-anchored); the pulse animates only box-shadow. */
     animation:
         blunder-toast-in 250ms ease-out,
         board-return-live-pulse 2s ease-in-out 250ms infinite;
+}
+
+.board-return-live--tucked {
+    width: var(--board-return-live-size);
+    height: var(--board-return-live-height);
+    justify-content: center;
+    gap: 0;
+    padding: 0;
+}
+
+.board-return-live__label {
+    max-width: 8rem;
+    opacity: 1;
+    overflow: hidden;
+    transition: max-width 200ms ease, opacity 150ms ease;
+}
+
+.board-return-live--tucked .board-return-live__label {
+    max-width: 0;
+    opacity: 0;
 }
 
 .board-return-live:hover {
@@ -6101,6 +6127,11 @@
     .h-move-arrow--return-live,
     .chessboard-square-measure--nudge {
         animation: none;
+    }
+
+    .board-return-live,
+    .board-return-live__label {
+        transition: none;
     }
 }
 

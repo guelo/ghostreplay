@@ -1,6 +1,7 @@
 import React from "react";
-import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "../../../test/utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen } from "../../../test/utils";
+import { setMatchMedia } from "../../../test/setup";
 import BoardStage from "./BoardStage";
 import { getOpponentAvatarSrc } from "../config";
 
@@ -122,6 +123,40 @@ const makeProps = () => {
     boardNotice: null,
   };
 };
+
+type ResizeCallback = ConstructorParameters<typeof ResizeObserver>[0];
+
+class ControlledResizeObserver {
+  static instances: ControlledResizeObserver[] = [];
+  readonly observe = vi.fn((element: Element) => {
+    this.element = element;
+  });
+  readonly disconnect = vi.fn();
+  readonly unobserve = vi.fn();
+  private element: Element | null = null;
+  private readonly callback: ResizeCallback;
+
+  constructor(callback: ResizeCallback) {
+    this.callback = callback;
+    ControlledResizeObserver.instances.push(this);
+  }
+
+  resize(width: number) {
+    if (!this.element) throw new Error("ResizeObserver has no observed element");
+    this.callback(
+      [{ contentRect: { width } as DOMRectReadOnly } as ResizeObserverEntry],
+      this as unknown as ResizeObserver,
+    );
+  }
+}
+
+const reviewingProps = () => ({
+  ...makeProps(),
+  showStartOverlay: false,
+  isGameActive: true,
+  isReviewingPast: true,
+  onReturnToLive: vi.fn(),
+});
 
 describe("BoardStage", () => {
   it("remounts the board when boardInstanceKey changes", () => {
@@ -500,5 +535,107 @@ describe("BoardStage", () => {
     expect(
       container.querySelector(".chessboard-square-measure--nudge"),
     ).not.toBeNull();
+  });
+});
+
+describe("BoardStage return-to-live control", () => {
+  const originalResizeObserver = globalThis.ResizeObserver;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    ControlledResizeObserver.instances = [];
+    globalThis.ResizeObserver = ControlledResizeObserver as unknown as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    globalThis.ResizeObserver = originalResizeObserver;
+    setMatchMedia("(prefers-reduced-motion: reduce)", false);
+  });
+
+  const resizeBoard = (width: number) => {
+    const observer = ControlledResizeObserver.instances.at(-1);
+    if (!observer) throw new Error("Expected a board ResizeObserver");
+    act(() => observer.resize(width));
+    return observer;
+  };
+
+  it.each([
+    { width: 415, tucked: true },
+    { width: 416, tucked: false },
+    { width: 520, tucked: false },
+  ])("classifies a $width px board with one compact breakpoint", ({ width, tucked }) => {
+    render(<BoardStage {...reviewingProps()} />);
+    resizeBoard(width);
+    act(() => vi.advanceTimersByTime(2_000));
+
+    expect(
+      screen
+        .getByRole("button", { name: "Return to live" })
+        .classList.contains("board-return-live--tucked"),
+    ).toBe(tucked);
+  });
+
+  it.each([
+    { reducedMotion: false, advanceMs: 1_999, tucked: false },
+    { reducedMotion: false, advanceMs: 2_000, tucked: true },
+    { reducedMotion: true, advanceMs: 0, tucked: true },
+  ])(
+    "tucks with reducedMotion=$reducedMotion after $advanceMs ms",
+    ({ reducedMotion, advanceMs, tucked }) => {
+      setMatchMedia("(prefers-reduced-motion: reduce)", reducedMotion);
+      render(<BoardStage {...reviewingProps()} />);
+      resizeBoard(360);
+      act(() => vi.advanceTimersByTime(advanceMs));
+
+      expect(
+        screen
+          .getByRole("button", { name: "Return to live" })
+          .classList.contains("board-return-live--tucked"),
+      ).toBe(tucked);
+    },
+  );
+
+  it("preserves its tuck latch through suppression and grow-then-shrink", () => {
+    const props = reviewingProps();
+    const { rerender } = render(<BoardStage {...props} />);
+    resizeBoard(360);
+    act(() => vi.advanceTimersByTime(2_000));
+
+    rerender(<BoardStage {...props} showRevertWarning />);
+    expect(screen.queryByRole("button", { name: "Return to live" })).toBeNull();
+
+    rerender(<BoardStage {...props} />);
+    resizeBoard(520);
+    expect(screen.getByRole("button", { name: "Return to live" })).not.toHaveClass(
+      "board-return-live--tucked",
+    );
+    resizeBoard(360);
+    expect(screen.getByRole("button", { name: "Return to live" })).toHaveClass(
+      "board-return-live--tucked",
+    );
+  });
+
+  it("clears its timer and disconnects its observer on unmount", () => {
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+    const { unmount } = render(<BoardStage {...reviewingProps()} />);
+    const observer = resizeBoard(360);
+
+    unmount();
+
+    expect(clearTimeoutSpy).toHaveBeenCalled();
+    expect(observer.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps its accessible name and click behavior after tucking", () => {
+    const props = reviewingProps();
+    render(<BoardStage {...props} />);
+    resizeBoard(360);
+    act(() => vi.advanceTimersByTime(2_000));
+
+    const button = screen.getByRole("button", { name: "Return to live" });
+    expect(button).toHaveClass("board-return-live--tucked");
+    fireEvent.click(button);
+    expect(props.onReturnToLive).toHaveBeenCalledTimes(1);
   });
 });

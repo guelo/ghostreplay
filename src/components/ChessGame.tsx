@@ -1952,10 +1952,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
 
   const canDragLiveMove =
     isGameActive &&
-    engineStatus === "ready" &&
     isPlayersTurn &&
     !isRevertPending &&
-    !isThinking &&
     isViewingLive &&
     !isBlunderBoardOverrideActive;
   // Also let the piece lift while reviewing a past move — not to allow a move

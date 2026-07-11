@@ -6,6 +6,7 @@ import { PromotionPicker } from "./PromotionPicker";
 import StartPanel, { type StartDrillDraft } from "./StartPanel";
 import SrsFailSpotlight, { type SrsFailTrigger } from "./SrsFailSpotlight";
 import EndGameFanfare, { type EndGameFanfareTrigger } from "./EndGameFanfare";
+import ReturnToLiveButton from "./ReturnToLiveButton";
 import type { BoardNotice } from "../types";
 
 type BoardOrientation = "white" | "black";
@@ -425,17 +426,12 @@ const BoardStage = ({
               }}
             />
           </div>
-          {showReviewingCues && onReturnToLive && (
-            <button
-              type="button"
-              className="board-return-live"
-              onClick={onReturnToLive}
-            >
-              <span className="board-return-live__glyph" aria-hidden="true">
-                ⟩⟩
-              </span>
-              Return to live
-            </button>
+          {isReviewingPast && onReturnToLive && (
+            <ReturnToLiveButton
+              boardRef={boardSquareRef}
+              onReturnToLive={onReturnToLive}
+              suppressed={!showReviewingCues}
+            />
           )}
           <SrsFailSpotlight
             trigger={srsFailTrigger}

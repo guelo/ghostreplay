@@ -72,10 +72,11 @@ vi.mock("../utils/openingDeltaPoll", () => ({
 
 const evaluatePositionMock = vi.fn();
 const lookupOpeningByFenMock = vi.fn();
+let stockfishStatus = "ready";
 
 vi.mock("../hooks/useStockfishEngine", () => ({
   useStockfishEngine: () => ({
-    status: "ready",
+    status: stockfishStatus,
     error: null,
     info: [],
     isThinking: false,
@@ -297,6 +298,7 @@ vi.mock("react-chessboard", () => ({
 const initialGameStoreState = useGameStore.getInitialState();
 
 beforeEach(() => {
+  stockfishStatus = "ready";
   mockLocation = { state: null, pathname: "/play" };
   mockNavigate.mockReset();
   useDrillAnalysisStore.getState().clear();
@@ -523,6 +525,17 @@ describe("ChessGame characterization safeguards", () => {
       expect(startGameMock).toHaveBeenCalled();
     });
   };
+
+  it("keeps live pieces draggable when analysis engine readiness is degraded", async () => {
+    stockfishStatus = "error";
+    await startGameAsWhite();
+
+    expect(screen.getByText("Your turn")).toBeInTheDocument();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-allow-dragging",
+      "true",
+    );
+  });
 
   it("shows the drilling label while a drill is active or at root, but not once converted", async () => {
     await startGameAsWhite();

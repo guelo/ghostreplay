@@ -25,12 +25,34 @@ const playMove = async (
   await boardSquare(page, to).click();
 };
 
+const dragMove = async (
+  page: Page,
+  from: string,
+  to: string,
+): Promise<void> => {
+  const fromBox = await boardSquare(page, from).boundingBox();
+  const toBox = await boardSquare(page, to).boundingBox();
+  if (!fromBox || !toBox) throw new Error("Expected draggable board squares");
+  await page.mouse.move(
+    fromBox.x + fromBox.width / 2,
+    fromBox.y + fromBox.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(toBox.x + toBox.width / 2, toBox.y + toBox.height / 2, {
+    steps: 8,
+  });
+  await page.mouse.up();
+};
+
 const startNewGameAsWhite = async (page: Page): Promise<void> => {
-  await page
-    .locator(".game-end-banner")
-    .getByRole("button", { name: /new game/i })
-    .click();
+  await expect(page.locator(".chessboard-board-area")).toBeVisible();
   const playWhiteButton = page.getByRole("button", { name: /play white/i });
+  if (!(await playWhiteButton.isVisible())) {
+    await page
+      .locator(".game-end-banner")
+      .getByRole("button", { name: /new game/i })
+      .click();
+  }
   await expect(playWhiteButton).toBeVisible();
   await playWhiteButton.click();
 
@@ -49,7 +71,9 @@ const startNewGameAsWhite = async (page: Page): Promise<void> => {
 };
 
 const playToSeededReviewPosition = async (page: Page): Promise<void> => {
-  await playMove(page, "e2", "e4");
+  // Exercise actual pointer dragging for the first live move; later moves keep
+  // the click path covered as well.
+  await dragMove(page, "e2", "e4");
   await waitForMoveCountAtLeast(page, 2);
   await playMove(page, "g1", "f3");
   await waitForMoveCountAtLeast(page, 4);
@@ -73,6 +97,38 @@ test("narrow game layout keeps controls usable and overlays in viewport", async 
 
   await startNewGameAsWhite(page);
   await playToSeededReviewPosition(page);
+
+  // Park on an earlier ply so the on-board return affordance appears. On the
+  // narrow board it announces itself, then tucks to approximately one square.
+  await page.locator(".h-move-list__strip .h-move").first().click();
+  const returnToLive = page.locator("button.board-return-live");
+  await expect(returnToLive).toBeVisible();
+  await expect(returnToLive).toHaveClass(/board-return-live--tucked/, {
+    timeout: 3_000,
+  });
+
+  const compactBox = await returnToLive.boundingBox();
+  const narrowBoardBox = await page.locator(".chessboard-square-measure").boundingBox();
+  expect(compactBox).not.toBeNull();
+  expect(narrowBoardBox).not.toBeNull();
+  const narrowSquareSize = narrowBoardBox!.width / 8;
+  expect(compactBox!.width).toBeLessThanOrEqual(narrowSquareSize * 1.15);
+  expect(compactBox!.height).toBeLessThanOrEqual(narrowSquareSize * 0.575);
+
+  // The same mounted review session expands back to the labeled form when the
+  // board has enough room, then return to live before continuing layout checks.
+  await page.setViewportSize({ width: 900, height: 700 });
+  await expect(page.locator(".chessboard-square-measure")).toHaveCSS(
+    "width",
+    /4\d\dpx|[5-9]\d\dpx/,
+  );
+  await expect(returnToLive).not.toHaveClass(/board-return-live--tucked/);
+  await expect(returnToLive.locator(".board-return-live__label")).toBeVisible();
+  const labeledBox = await returnToLive.boundingBox();
+  expect(labeledBox).not.toBeNull();
+  expect(labeledBox!.height).toBeLessThanOrEqual(22);
+  await returnToLive.click();
+  await page.setViewportSize({ width: 360, height: 740 });
 
   const movesColumn = page.locator(".moves-column");
   const graphArea = page.locator(".chess-graph-area");
