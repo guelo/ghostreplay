@@ -346,10 +346,12 @@ def _signature_runs(valid_rows: list[dict]) -> list[list[dict]]:
     A "signature" is the set of present INSERT columns; a multi-row ``.values([...])``
     needs a uniform column set, so rows are grouped by signature. Grouping is done
     over CONTIGUOUS runs only (never reordered), so insert execution still visits
-    keys in global ascending order — the load-bearing invariant that keeps
-    concurrent ``ON CONFLICT DO NOTHING`` inserts of the same new key from
-    deadlocking on Postgres speculative-insertion locks. Every real caller emits a
-    single signature → exactly one run → one INSERT.
+    keys in global ascending order — which lowers the probability that concurrent
+    ``ON CONFLICT DO NOTHING`` inserts of the same new key swap order and deadlock
+    on Postgres speculative-insertion locks (fewer retries). It is a deadlock-
+    probability heuristic, not a guarantee of deadlock-freedom; any 40P01/40001
+    that still occurs is retried by ``_run_batch_with_retry``. Every real caller
+    emits a single signature → exactly one run → one INSERT.
     """
     return [list(g) for _, g in groupby(valid_rows, key=lambda r: frozenset(r["cols"]))]
 
@@ -359,8 +361,11 @@ def _param_chunks(rows: list[dict], params_per_row: int):
     budget (:data:`_MAX_BIND_PARAMS`).
 
     Rows arrive key-sorted, and each yielded slice is contiguous, so global
-    ascending key order is preserved across chunks — the invariant that keeps
-    concurrent inserts / lock acquisitions from deadlocking.
+    ascending key order is preserved across chunks — the ascending order that
+    lowers deadlock probability (fewer retries) for concurrent inserts / lock
+    acquisitions. It is a probability heuristic, not a guarantee of deadlock-
+    freedom; any 40P01/40001 that still occurs is retried by
+    ``_run_batch_with_retry``.
     """
     assert params_per_row > 0, "params_per_row must be positive"
     step = max(1, _MAX_BIND_PARAMS // params_per_row)
@@ -375,9 +380,11 @@ def _insert_missing(session: Session, rows: list[dict], *, insert) -> set[tuple[
     Rows are grouped into contiguous same-signature runs (a multi-row ``VALUES``
     insert needs a uniform column set), and each run is split into bind-param-
     budgeted chunks. Both groupings preserve global ascending key order, so
-    concurrent inserts of the same new key never swap order and deadlock on
-    Postgres speculative-insertion locks. ``RETURNING`` yields only rows actually
-    inserted (DO NOTHING skips conflicts); callers use the SET, never position.
+    concurrent inserts of the same new key are much less likely to swap order and
+    deadlock on Postgres speculative-insertion locks — a deadlock-probability
+    heuristic, not a proof; any 40P01/40001 that still occurs is retried by
+    ``_run_batch_with_retry``. ``RETURNING`` yields only rows actually inserted
+    (DO NOTHING skips conflicts); callers use the SET, never position.
     (``RETURNING`` requires SQLite >= 3.35 — a documented floor for this module.)
     """
     inserted: set[tuple[str, str]] = set()
@@ -403,7 +410,9 @@ def _lock_existing(
 
     Split into bind-param-budgeted chunks over the two-column key tuple; each
     chunk's ``ORDER BY (fen_before, move_uci)`` and the contiguous key-sorted
-    slicing mean locks are acquired in one global ascending order (no deadlock).
+    slicing mean locks are acquired in one global ascending order, which lowers
+    deadlock probability (fewer retries) but does not guarantee deadlock-freedom;
+    correctness under any 40P01/40001 rests on ``_run_batch_with_retry``.
     """
     existing: dict[tuple[str, str], AnalysisCache] = {}
     for chunk in _param_chunks(conflicted, 2):  # 2 bind params per key tuple
@@ -488,9 +497,12 @@ def _run_batch(
     # Steps 4-6: resolve pre-existing (conflicted) keys. A key can vanish between
     # the insert-conflict and the lock (PG-only TOCTOU: a concurrent deleter). We
     # recover it with an ordered ON CONFLICT DO NOTHING insert rather than a bare
-    # add: that keeps the recovery on the same deadlock-safe, IntegrityError-free
-    # path as Step 3 (a concurrent writer that re-created the key wins the DO
-    # NOTHING instead of aborting the whole batch), and re-decides any it kept.
+    # add: that keeps the recovery on the same IntegrityError-free path as Step 3
+    # (a concurrent writer that re-created the key wins the DO NOTHING instead of
+    # aborting the whole batch), and re-decides any it kept. This recovery insert
+    # is NOT deadlock-free — re-inserting under a concurrent deleter can invert the
+    # ascending lock order — so a resulting 40P01/40001 is absorbed by the bounded
+    # whole-transaction retry (_run_batch_with_retry), not prevented here.
     pending = [r for r in valid_rows if r["key"] not in inserted_keys]
     for _ in range(_MAX_TOCTOU_PASSES):
         if not pending:
@@ -603,6 +615,34 @@ def write_analysis_cache_rows(
     return results
 
 
+def _retryable_error_label(exc: OperationalError, dialect: str) -> str:
+    """Short greppable classification of a retryable error for the retry log.
+
+    PostgreSQL: the SQLSTATE (``40P01`` deadlock / ``40001`` serialization) pulled
+    from ``exc.orig`` (psycopg2 ``pgcode`` / psycopg3 ``sqlstate``), falling back
+    to the PG wording when the driver surfaces no code. SQLite: ``locked``/``busy``.
+    Only ever called on an already-``is_retryable`` error, so ``unknown`` means a
+    classifier/label drift rather than a spurious retry.
+    """
+    if dialect == "postgresql":
+        orig = getattr(exc, "orig", None)
+        code = getattr(orig, "pgcode", None) or getattr(orig, "sqlstate", None)
+        if code:
+            return code
+        text = str(exc).lower()
+        if "deadlock" in text:
+            return "40P01"
+        if "could not serialize" in text:
+            return "40001"
+        return "unknown"
+    text = str(exc).lower()
+    if "locked" in text:
+        return "locked"
+    if "busy" in text:
+        return "busy"
+    return "unknown"
+
+
 def _run_batch_with_retry(
     factory,
     surviving: list[dict],
@@ -611,16 +651,24 @@ def _run_batch_with_retry(
     for_update: bool,
     is_retryable,
     max_retries: int,
+    dialect: str,
     lock=None,
 ) -> list[tuple[tuple[str, str], Reason]]:
     """Run one batch on a fresh session, retrying transient conflicts.
 
     Shared driver for both dialects (they differ only in the INSERT constructor,
     the ``FOR UPDATE`` toggle, the retryable-error classifier, the retry bound,
-    and — SQLite only — the in-process write lock held for the attempt). Only
-    ``is_retryable`` errors are retried with bounded backoff; any other exception
-    rolls back and propagates. The whole read-decide-write unit is one
-    transaction, so a full re-run is safe.
+    the ``dialect`` label, and — SQLite only — the in-process write lock held for
+    the attempt). Only ``is_retryable`` errors are retried with bounded backoff;
+    any other exception rolls back and propagates. The whole read-decide-write
+    unit is one transaction, so a full re-run is safe.
+
+    Every retry AND the final exhaustion emit a structured WARNING carrying the
+    dialect, the classified error (PG SQLSTATE 40P01/40001 or SQLite BUSY/locked),
+    the attempt number + retry bound, and the batch size — so persistent
+    concurrent-writer churn (the risks-section watch-item) is greppable rather
+    than a silent attempt counter. The ``dialect`` label is passed by the caller
+    so the log needs no open session to name the backend.
     """
     attempt = 0
     while True:
@@ -635,7 +683,18 @@ def _run_batch_with_retry(
                 if not is_retryable(exc):
                     raise
                 attempt += 1
-                if attempt > max_retries:
+                exhausted = attempt > max_retries
+                log.warning(
+                    "analysis_cache batch retry %s dialect=%s error=%s "
+                    "attempt=%d max_retries=%d batch_size=%d",
+                    "exhausted" if exhausted else "scheduled",
+                    dialect,
+                    _retryable_error_label(exc, dialect),
+                    attempt,
+                    max_retries,
+                    len(surviving),
+                )
+                if exhausted:
                     raise
             except Exception:
                 session.rollback()
@@ -684,6 +743,7 @@ def _run_sqlite(factory, surviving: list[dict]) -> list[tuple[tuple[str, str], R
         for_update=False,
         is_retryable=_is_busy_error,
         max_retries=_SQLITE_MAX_RETRIES,
+        dialect="sqlite",
         lock=_sqlite_write_lock,
     )
 
@@ -697,4 +757,5 @@ def _run_postgresql(factory, surviving: list[dict]) -> list[tuple[tuple[str, str
         for_update=True,
         is_retryable=_is_retryable_pg_error,
         max_retries=_PG_MAX_RETRIES,
+        dialect="postgresql",
     )

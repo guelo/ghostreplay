@@ -1,9 +1,11 @@
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
 from app.fen import fen_hash
 from app.models import (
@@ -1107,3 +1109,153 @@ def test_session_analysis_converted_drill_includes_drill_prefix_summary(
     assert summary["blunders"] == 1
     assert summary["mistakes"] == 1
     assert summary["average_centipawn_loss"] == round((200 + 40) / 2)
+
+
+# --- g-dckw analysis-cache-write instrumentation (cohort key + finality) --------
+
+
+def test_timed_side_effect_renders_extra_and_body_stamped_fields(caplog):
+    """g-dckw: _timed_side_effect appends **extra fields and a body-stamped field
+    (cache_row_count, known only after the writer runs) between move_count and
+    elapsed_ms, so the analysis_cache_write line is cohortable on the actual
+    written-row count + upload finality rather than the overcounting move_count."""
+    from app.api.session import _timed_side_effect
+
+    sid = uuid.uuid4()
+    with caplog.at_level(logging.INFO, logger="app.api.session"):
+        with _timed_side_effect(
+            "analysis_cache_write",
+            session_id=sid,
+            user_id=7,
+            move_count=8,
+            cache_row_count=0,  # seed; overwritten by the body below
+            final=True,
+            kind="final",
+        ) as fields:
+            fields["cache_row_count"] = 5
+
+    line = next(
+        r.getMessage()
+        for r in caplog.records
+        if "side_effect=analysis_cache_write" in r.getMessage()
+    )
+    assert "move_count=8" in line
+    assert "cache_row_count=5" in line  # body-stamped value, not the seed 0
+    assert "final=True" in line
+    assert "kind=final" in line
+    assert "elapsed_ms=" in line
+    # The extra fields sit between move_count and elapsed_ms (the source format).
+    assert (
+        line.index("move_count=8")
+        < line.index("cache_row_count=5")
+        < line.index("elapsed_ms=")
+    )
+
+
+def test_upsert_analysis_cache_returns_written_row_count():
+    """g-dckw cohort key: _upsert_analysis_cache returns len(cache_values) — the
+    rows the writer actually processes — NOT the uploaded move_count. Moves with
+    no fen_before/move_uci or no eval are filtered before the writer, so the
+    return undercounts move_count for those (why move_count can't bucket the
+    latency cohort)."""
+    from app.api.session import MoveColor, SessionMoveInput, _upsert_analysis_cache
+    from app.models import Base
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+
+    moves = [
+        # Valid: fen_before + move_uci + a played eval -> minimal-played-eval.
+        SessionMoveInput(
+            move_number=1, color=MoveColor.WHITE, move_san="e4",
+            fen_after="after-1", fen_before=STARTING_FEN, move_uci="e2e4", eval_cp=20,
+        ),
+        SessionMoveInput(
+            move_number=1, color=MoveColor.BLACK, move_san="e5",
+            fen_after="after-2", fen_before="pos-2", move_uci="e7e5", eval_cp=-10,
+        ),
+        # Filtered: no eval at all -> dropped before the writer.
+        SessionMoveInput(
+            move_number=2, color=MoveColor.WHITE, move_san="Nf3",
+            fen_after="after-3", fen_before="pos-3", move_uci="g1f3",
+        ),
+        # Filtered: no fen_before/move_uci key -> dropped before the writer.
+        SessionMoveInput(
+            move_number=2, color=MoveColor.BLACK, move_san="Nc6",
+            fen_after="after-4", eval_cp=5,
+        ),
+    ]
+    written = _upsert_analysis_cache(db, moves)
+    db.close()
+    engine.dispose()
+
+    assert written == 2  # 2 of 4 uploaded moves reached the writer
+
+    # And an all-filtered batch reports zero (never a phantom move_count).
+    engine2 = create_engine("sqlite://")
+    Base.metadata.create_all(engine2)
+    db2 = sessionmaker(bind=engine2)()
+    only_filtered = [
+        SessionMoveInput(
+            move_number=3, color=MoveColor.WHITE, move_san="Bb5",
+            fen_after="after-5", fen_before="pos-5", move_uci="f1b5",
+        ),
+    ]
+    assert _upsert_analysis_cache(db2, only_filtered) == 0
+    db2.close()
+    engine2.dispose()
+
+
+def test_analysis_cache_write_logs_true_count_and_error_status_on_writer_failure(
+    monkeypatch, caplog
+):
+    """g-dckw: a writer that raises AFTER receiving a non-empty batch must not be
+    logged as cache_row_count=0 (which would drop a slow failed write into the
+    zero-row latency cohort). The count is stamped before the write, and status
+    stays 'error' (never flipped to ok), so the scrape can exclude the failure."""
+    import app.api.session as session_mod
+    from app.api.session import (
+        MoveColor,
+        SessionMoveInput,
+        _timed_side_effect,
+        _upsert_analysis_cache,
+    )
+    from app.models import Base
+
+    def boom(db, rows):
+        raise RuntimeError("simulated writer failure")
+
+    monkeypatch.setattr(session_mod, "write_analysis_cache_rows", boom)
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    moves = [
+        SessionMoveInput(
+            move_number=1, color=MoveColor.WHITE, move_san="e4",
+            fen_after="after-1", fen_before=STARTING_FEN, move_uci="e2e4", eval_cp=20,
+        ),
+    ]
+    sid = uuid.uuid4()
+
+    with caplog.at_level(logging.INFO, logger="app.api.session"):
+        with pytest.raises(RuntimeError):
+            with _timed_side_effect(
+                "analysis_cache_write",
+                session_id=sid, user_id=7, move_count=1,
+                cache_row_count=0, final=True, kind="final", status="error",
+            ) as cache_fields:
+                _upsert_analysis_cache(db, moves, timing_fields=cache_fields)
+                cache_fields["status"] = "ok"  # never reached — the writer raised
+
+    db.close()
+    engine.dispose()
+
+    line = next(
+        r.getMessage()
+        for r in caplog.records
+        if "side_effect=analysis_cache_write" in r.getMessage()
+    )
+    assert "cache_row_count=1" in line  # true filtered count, NOT the seed 0
+    assert "status=error" in line  # never flipped to ok -> excluded from the scrape

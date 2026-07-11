@@ -1118,9 +1118,92 @@ def test_run_postgresql_reraises_non_retryable(monkeypatch):
     assert calls["n"] == 1  # raised on the first attempt, no retry
 
 
+@pytest.mark.parametrize(
+    "dialect,err_text,pgcode,is_retryable_name,label",
+    [
+        ("sqlite", "database is locked", None, "_is_busy_error", "locked"),
+        ("postgresql", "deadlock detected", "40P01", "_is_retryable_pg_error", "40P01"),
+    ],
+)
+def test_run_batch_with_retry_warns_per_retry_and_on_exhaustion(
+    monkeypatch, caplog, dialect, err_text, pgcode, is_retryable_name, label
+):
+    """g-dckw retry observability: every retry AND the final exhaustion emit a
+    structured WARNING carrying the dialect, the classified error (PG SQLSTATE or
+    SQLite BUSY/locked), the attempt number + retry bound, and the batch size —
+    turning the silent attempt counter into a greppable concurrent-churn signal.
+    Runs in CI on the SQLite path; the PG SQLSTATE label is synthetic (classified
+    via ``_is_retryable_pg_error``), so no live PG is needed."""
+    import app.analysis_cache_repo as repo
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(repo.time, "sleep", lambda *a, **k: None)
+
+    class FakeSession:
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    def always_fail(session, surviving, *, insert, for_update):
+        orig = Exception(err_text)
+        if pgcode is not None:
+            orig.pgcode = pgcode
+        raise OperationalError(err_text, {}, orig)
+
+    monkeypatch.setattr(repo, "_run_batch", always_fail)
+    surviving = [{"fen_before": "k", "move_uci": "e2e4"}]
+
+    with caplog.at_level(logging.WARNING, logger="analysis_cache_repo"):
+        with pytest.raises(OperationalError):
+            repo._run_batch_with_retry(
+                FakeSession,
+                surviving,
+                insert=None,
+                for_update=(dialect == "postgresql"),
+                is_retryable=getattr(repo, is_retryable_name),
+                max_retries=1,  # one scheduled retry, then exhaustion
+                dialect=dialect,
+            )
+
+    warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    scheduled = [m for m in warns if "retry scheduled" in m]
+    exhausted = [m for m in warns if "retry exhausted" in m]
+    assert len(scheduled) == 1, warns  # fires once per retry
+    assert len(exhausted) == 1, warns  # and once on final exhaustion
+    for m in (scheduled[0], exhausted[0]):
+        assert f"dialect={dialect}" in m
+        assert f"error={label}" in m
+        assert "batch_size=1" in m
+    assert "attempt=1 max_retries=1" in scheduled[0]
+    assert "attempt=2 max_retries=1" in exhausted[0]
+
+
 def test_source_default_preserved_on_absent_column(file_db):
     """A row omitting ``source`` stores the server default, never NULL."""
     _, Factory = file_db
+    row = {
+        "fen_before": FEN, "move_uci": "e2e4", "move_san": "e4",
+        "played_eval": 11,
+        "evidence_contract_id": MINIMAL_PLAYED_EVAL,  # legacy (no profile) -> valid
+    }
+    assert "source" not in row
+    s = Factory()
+    write_analysis_cache_rows(s, [row])
+    s.close()
+    s2 = Factory()
+    assert s2.query(AnalysisCache).one().source == "game"
+    s2.close()
+
+
+@pg_required
+def test_source_default_preserved_on_absent_column_pg(pg_db):
+    """PG-gated mirror: a row omitting ``source`` stores the server default on
+    PostgreSQL too. Each dialect applies the column default via its own DDL path,
+    so the SQLite run does not prove PG — the insert-column omission must reach PG
+    intact (never source=None, which would violate NOT NULL / skip the default)."""
+    _, Factory = pg_db
     row = {
         "fen_before": FEN, "move_uci": "e2e4", "move_san": "e4",
         "played_eval": 11,

@@ -772,7 +772,9 @@ def _compute_blunder_opportunity_events(
 def _upsert_analysis_cache(
     db: Session,
     moves: list[SessionMoveInput],
-) -> None:
+    *,
+    timing_fields: dict | None = None,
+) -> int:
     """Upsert browser-game analysis evidence into the global cache.
 
     Evals are converted from player-relative (as uploaded) to white-relative for
@@ -781,7 +783,21 @@ def _upsert_analysis_cache(
     the shared quality-aware writer: game uploads INSERT evidence for keys that
     have none and never replace existing canonical or legacy rows. Each row is
     classified per-shape into the most specific browser-allowed contract; rows
-    matching no allowed contract are rejected (not stored)."""
+    matching no allowed contract are rejected (not stored).
+
+    Returns the number of rows actually handed to the writer (``len(cache_values)``
+    after per-shape filtering) — the cohort key for the ``analysis_cache_write``
+    timing line (g-dckw). This is strictly ≤ the uploaded ``move_count``: moves
+    with no ``fen_before``/``move_uci``, no eval, or matching no allowed contract
+    are dropped here, so ``move_count`` overcounts the rows the write path touches.
+
+    ``timing_fields`` (the mutable dict from :func:`_timed_side_effect`) has its
+    ``cache_row_count`` stamped BEFORE the write is issued. The write is what can
+    raise (an exhausted PG retry, a driver error) and the timing line is logged in
+    ``finally``, so stamping only after a successful write would record a
+    non-empty, possibly-slow failed batch as ``cache_row_count=0`` — falsely in the
+    zero-row cohort. Stamped up front, a failed write logs its true row count (and,
+    via the caller's ``status=error``, is excludable from the latency scrape)."""
     cache_values = []
     for move in moves:
         if move.synthetic_terminal_eval:
@@ -823,13 +839,18 @@ def _upsert_analysis_cache(
         row["evidence_contract_id"] = contract_id
         cache_values.append(row)
 
+    # Stamp the cohort key before the write, which is the step that can raise.
+    if timing_fields is not None:
+        timing_fields["cache_row_count"] = len(cache_values)
+
     if not cache_values:
-        return
+        return 0
 
     # The shared helper owns its own transaction; ensure the caller session is
     # clean (no pending state on this connection) before delegating.
     db.commit()
     write_analysis_cache_rows(db, cache_values)
+    return len(cache_values)
 
 
 def _should_run_session_move_evidence(game_session: GameSession) -> bool:
@@ -850,7 +871,7 @@ def _should_run_session_move_evidence(game_session: GameSession) -> bool:
 
 @contextmanager
 def _timed_side_effect(
-    stage: str, *, session_id: uuid.UUID, user_id: int, move_count: int
+    stage: str, *, session_id: uuid.UUID, user_id: int, move_count: int, **extra
 ):
     """Bracket one synchronous ``upsert_session_moves`` side effect with timing.
 
@@ -858,19 +879,28 @@ def _timed_side_effect(
     ``user_id`` and ``move_count`` so prod logs can attribute /moves latency to a
     specific side effect (see g-zuym). Logged in ``finally`` so a raising side
     effect still records how long it ran before failing.
+
+    Any ``**extra`` fields render as ``key=value`` between ``move_count`` and
+    ``elapsed_ms``. The context manager yields that mutable field dict so a body
+    can stamp a value only known after it runs — e.g. the analysis-cache writer
+    stamps ``cache_row_count`` (the actual written-row count, the cohort key for
+    the g-dckw latency scrape) once it has filtered the upload down to real rows.
     """
+    fields = dict(extra)
     start = time.perf_counter()
     try:
-        yield
+        yield fields
     finally:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
+        extra_rendered = "".join(f" {k}={v}" for k, v in fields.items())
         logger.info(
             "upsert_session_moves side_effect=%s session_id=%s user_id=%s "
-            "move_count=%d elapsed_ms=%.1f",
+            "move_count=%d%s elapsed_ms=%.1f",
             stage,
             session_id,
             user_id,
             move_count,
+            extra_rendered,
             elapsed_ms,
         )
 
@@ -1039,13 +1069,23 @@ def _run_session_move_evidence_side_effects(
                 session_id,
                 user_id,
             )
+    # ``run_opportunity`` is the upload-finality signal (g-y90g): the mid-game
+    # incremental uploader opts out (recompute_opportunity=False), so True marks
+    # an end-of-session final/complete upload. Cohorting the latency scrape on
+    # cache_row_count + finality (not move_count) is g-dckw's measurable win.
     with _timed_side_effect(
         "analysis_cache_write",
         session_id=session_id,
         user_id=user_id,
         move_count=move_count,
-    ):
-        _upsert_analysis_cache(db, evidence_moves)
+        cache_row_count=0,  # stamped with the real filtered count before the write
+        final=run_opportunity,
+        kind="final" if run_opportunity else "live",
+        status="error",  # flipped to ok only once the write returns; a raising
+        # writer leaves status=error so the latency scrape excludes the failure
+    ) as cache_fields:
+        _upsert_analysis_cache(db, evidence_moves, timing_fields=cache_fields)
+        cache_fields["status"] = "ok"
     with _timed_side_effect(
         "recompute_enqueue",
         session_id=session_id,
