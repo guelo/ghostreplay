@@ -150,9 +150,23 @@ export const useChessGameController = ({
       };
       const nextMoveHistory = [...store.moveHistory, nextMove];
 
+      // Preserve the pre-commit navigation mode instead of unconditionally
+      // returning to live. Player moves only commit from live view, so this
+      // stays null (live) for them. But an opponent reply that lands while the
+      // user — or an in-flight blunder rewind — is viewing a historical
+      // position must keep that historical viewIndex: appending to liveFen /
+      // moveHistory below does not shift existing indices, so the same index
+      // still resolves to the same board. Forcing viewIndex to null here would
+      // overwrite the rewind while leaving blunderAlert active, wedging the
+      // board with arrows shown and no legal move entry (g-i9v8). Return-to-live
+      // happens only through explicit handleNavigate(null).
+      const preCommitViewIndex = store.viewIndex;
+
       store.setLiveFen(newFen);
       store.setMoveHistory(nextMoveHistory);
-      store.setViewIndex(null);
+      if (preCommitViewIndex === null) {
+        store.setViewIndex(null);
+      }
 
       const scheduledId = analyzeMove(
         fenBeforeMove,

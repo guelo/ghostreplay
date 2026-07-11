@@ -4474,6 +4474,161 @@ describe("ChessGame blunder board rewind", () => {
     );
     expect(screen.getByTestId("chessboard")).toHaveAttribute("data-arrow-count", "2");
   });
+
+  // g-i9v8: the failing ordering the other tests never exercise — analysis
+  // resolves the blunder BEFORE the opponent reply lands. Same line as
+  // reachDelayedPlayerBlunder, but the second opponent reply (Nc6) is held
+  // unresolved so the rewind runs first and the reply commits late.
+  const reachDelayedPlayerBlunderDeferredReply = async () => {
+    const line = new Chess();
+    line.move("e4");
+    line.move("d5");
+    const sourceFenBeforeBlunder = line.fen();
+    line.move("Nf3");
+    const fenAfterBlunder = line.fen();
+    line.move("Nc6");
+    const liveFenAfterReply = line.fen();
+
+    startGameMock.mockResolvedValueOnce({
+      session_id: "session-rewind",
+      engine_elo: 1500,
+      player_color: "white",
+    });
+    getNextOpponentMoveMock.mockReset();
+
+    let resolveSecondReply!: (value: {
+      mode: "engine";
+      move: { uci: string; san: string };
+      target_blunder_id: null;
+      decision_source: "backend_engine";
+    }) => void;
+
+    getNextOpponentMoveMock
+      .mockResolvedValueOnce({
+        mode: "engine",
+        move: { uci: "d7d5", san: "d5" },
+        target_blunder_id: null,
+        decision_source: "backend_engine",
+      })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveSecondReply = resolve;
+        }),
+      );
+
+    render(<ChessGame />);
+
+    fireEvent.click(screen.getByRole("button", { name: /new game/i }));
+    fireEvent.click(screen.getByRole("button", { name: /play white/i }));
+
+    await waitFor(() => {
+      expect(startGameMock).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "e2", targetSquare: "e4" });
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /d5/i })).toBeInTheDocument();
+    });
+
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "g1", targetSquare: "f3" });
+    });
+    // The second opponent reply stays in flight; assert it was requested but do
+    // not resolve it yet so analysis can win the race.
+    await waitFor(() => {
+      expect(getNextOpponentMoveMock).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByRole("button", { name: /nc6/i })).not.toBeInTheDocument();
+
+    return {
+      sourceFenBeforeBlunder,
+      fenAfterBlunder,
+      liveFenAfterReply,
+      resolveSecondReply: () =>
+        resolveSecondReply({
+          mode: "engine",
+          move: { uci: "b8c6", san: "Nc6" },
+          target_blunder_id: null,
+          decision_source: "backend_engine",
+        }),
+    };
+  };
+
+  it("keeps the blunder rewind when the opponent reply lands late, returning to live only on navigation (g-i9v8)", async () => {
+    const { sourceFenBeforeBlunder, liveFenAfterReply, resolveSecondReply } =
+      await reachDelayedPlayerBlunderDeferredReply();
+
+    vi.useFakeTimers();
+    await resolveMoveTwoAsBlunder();
+
+    // Rewind settles on the pre-blunder position (one ply before Nf3).
+    act(() => {
+      vi.advanceTimersByTime(365);
+    });
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+
+    // The late opponent reply commits. It must be absorbed into
+    // liveFen/moveHistory WITHOUT snapping the board off the rewound position —
+    // the regression: previously commitAppliedMove forced viewIndex null,
+    // washing the board to live while leaving the alert (and its arrows) active
+    // with move entry blocked.
+    await act(async () => {
+      resolveSecondReply();
+    });
+
+    expect(useGameStore.getState().viewIndex).toBe(1);
+    expect(useGameStore.getState().liveFen).toBe(liveFenAfterReply);
+    expect(useGameStore.getState().moveHistory.map((m) => m.san)).toEqual([
+      "e4",
+      "d5",
+      "Nf3",
+      "Nc6",
+    ]);
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      sourceFenBeforeBlunder,
+    );
+    // Arrows stay up during review, and the reply is now navigable in the list.
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "2",
+    );
+    expect(
+      screen.getByRole("button", { name: /nc6/i }),
+    ).toBeInTheDocument();
+
+    // Navigating to the latest ply returns to live and clears the alert.
+    fireEvent.click(screen.getByRole("button", { name: /nc6/i }));
+    expect(useGameStore.getState().viewIndex).toBeNull();
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-position",
+      liveFenAfterReply,
+    );
+    expect(screen.getByTestId("chessboard")).toHaveAttribute(
+      "data-arrow-count",
+      "0",
+    );
+
+    // The board is playable again: a legal player move now lands.
+    vi.useRealTimers();
+    getNextOpponentMoveMock.mockReturnValueOnce(new Promise(() => undefined));
+    await act(async () => {
+      capturedPieceDrop?.({ sourceSquare: "d2", targetSquare: "d4" });
+    });
+    expect(useGameStore.getState().moveHistory.map((m) => m.san)).toEqual([
+      "e4",
+      "d5",
+      "Nf3",
+      "Nc6",
+      "d4",
+    ]);
+  });
 });
 
 describe("ChessGame mobile auto-scroll on graph appearance", () => {
