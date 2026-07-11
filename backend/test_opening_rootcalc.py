@@ -1510,3 +1510,179 @@ def test_report_fold_named_root_and_position_row_agree():
         root, "white", graph, overlay, roots, RootCalcConfig(), now=FOLD_NOW
     )
     assert named.opening_score < unfolded.opening_score
+
+
+# ---------------------------------------------------------------------------
+# B1 report_self_term="drop_user" pre-fold quality (g-drop-user-score).
+#
+# For a reported user-turn row with a nonempty prepared-child weight set and a
+# positive child perfect denominator, _direct_metrics scores the row by the
+# CHILD-ONLY ratio 100 * sum(w * child_natural) / sum(w * child_perfect) instead
+# of the ordinary aggregate node ratio — the node's own mastery self-term is
+# dropped. It changes ONLY opening_score; confidence/coverage/weighted_depth and
+# _calc's recursion are untouched. Opponent turns, user leaves, empty prepared-
+# child sets, and non-positive child denominators all keep the ordinary ratio.
+# Orthogonal to, and composed exactly once with, the report_fold_p coverage fold.
+#
+# _fold_fixture (above) gives root a single prepared child (opp) with a positive
+# perfect denominator — the qualifying user-turn shape — while opp is an opponent
+# turn and `covered` is a user-turn leaf, so one fixture exercises the arm and two
+# of its fallbacks at once.
+# ---------------------------------------------------------------------------
+
+
+def test_drop_user_moves_only_score_vs_keep():
+    # keep vs drop_user on identical evidence: confidence, displayed coverage, and
+    # weighted_depth are byte-identical on EVERY row; only opening_score may move, and
+    # only for the qualifying user-turn row.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    keep = _fold_calc(graph, overlay, roots, RootCalcConfig())  # report_self_term="keep"
+    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+
+    assert active_color(root) == "white"  # user turn, prepared child → arm applies
+    assert active_color(opp) == "black"  # opponent turn → ordinary ratio
+    for fen in (root, opp, covered):
+        k = keep._direct_metrics(fen)
+        d = drop._direct_metrics(fen)
+        # Non-score channels never move.
+        assert (d[1], d[2], d[3]) == (k[1], k[2], k[3])
+
+    # The user-turn row with prepared children and a positive child denominator is the
+    # only score that changes; it drops the mastery self-term so it reads differently.
+    assert drop._direct_metrics(root)[0] != keep._direct_metrics(root)[0]
+    # Opponent turn and the user leaf keep the ordinary ratio exactly.
+    assert drop._direct_metrics(opp)[0] == keep._direct_metrics(opp)[0]
+    assert drop._direct_metrics(covered)[0] == keep._direct_metrics(covered)[0]
+
+
+def test_drop_user_selects_child_only_ratio():
+    # The qualifying user-turn score equals the child-only ratio computed independently
+    # from _get_weights + memoized _calc — NOT algebraically recovered from the node
+    # score, and NOT the ordinary node ratio.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    key = _normalized(root)
+
+    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    weights = base._get_weights(key)
+    assert weights  # nonempty prepared-child set
+    child_natural = sum(w * base._calc(c, False)[0] for c, w in weights.items())
+    child_perfect = sum(w * base._calc(c, True)[0] for c, w in weights.items())
+    assert child_perfect > 0.0
+    child_only = 100.0 * child_natural / child_perfect
+
+    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+    dropped_q = drop._direct_metrics(root)[0]
+    assert dropped_q == pytest.approx(child_only)
+    # It is genuinely the child-only ratio, not the ordinary aggregate node ratio.
+    ordinary_q = base._direct_metrics(root)[0]
+    assert dropped_q != pytest.approx(ordinary_q)
+
+
+def test_drop_user_opponent_turn_keeps_ordinary_ratio():
+    # Opponent-turn rows always retain the ordinary ratio, even though opp HAS a
+    # nonempty weight set (so the user-turn arm would have fired on the same shape).
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    assert active_color(opp) == "black"
+    keep = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+    assert drop._get_weights(_normalized(opp))  # not vacuously empty
+    assert drop._direct_metrics(opp) == keep._direct_metrics(opp)
+
+
+def test_drop_user_user_leaf_falls_back_to_ordinary():
+    # Fallback shape 1: a user-turn LEAF has an empty weight set, so drop_user falls
+    # back to the ordinary node ratio (== keep).
+    fen = _positions([])[0]
+    assert active_color(fen) == "white"  # user turn
+    graph = _graph([[]])  # no children → leaf
+    roots = _roots(_root(fen))
+    overlay = EvidenceOverlay(1, "white")
+    overlay.nodes[fen] = _quality(fen, 1.5, count=3, at=FOLD_NOW)
+
+    keep = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+    assert not drop._get_weights(_normalized(fen))  # empty because leaf
+    assert drop._direct_metrics(fen) == keep._direct_metrics(fen)
+
+
+def test_drop_user_no_prepared_children_falls_back_to_ordinary():
+    # Fallback shape 2: a user-turn row with a STRUCTURAL child but no prepared edge has
+    # an empty weight set (distinct from a leaf), so drop_user falls back to ordinary.
+    root, opp = _positions(["e2e4"])
+    assert active_color(root) == "white"  # user turn
+    graph = _graph([["e2e4", "e7e5"]])  # root has a structural child (opp)...
+    roots = _roots(_root(root))
+    overlay = EvidenceOverlay(1, "white")
+    # ...but NO _prepared() call and no ghost target → the edge is not prepared.
+    overlay.nodes[root] = _quality(root, 1.0, count=1, at=FOLD_NOW)
+
+    keep = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+    key = _normalized(root)
+    assert drop._structural_children(key)  # NOT a leaf — it has a structural child
+    assert not drop._get_weights(key)  # ...yet the prepared-child weight set is empty
+    assert drop._direct_metrics(root) == keep._direct_metrics(root)
+
+
+def test_drop_user_nonpositive_child_denominator_falls_back():
+    # Fallback shape 3: nonempty prepared-child weights but child_perfect_sum == 0. A
+    # narrow perfect-child _calc stub (poisoned memo) forces the zero denominator; the
+    # row must fall back to the ordinary node ratio rather than dividing by zero.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    drop = _fold_calc(graph, overlay, roots, RootCalcConfig(report_self_term="drop_user"))
+    key = _normalized(root)
+
+    weights = drop._get_weights(key)
+    assert weights  # nonempty prepared-child set (so we reach the denominator guard)
+    # Stub _calc via the shared memo: node ratio 100 * 0.42 / 1.4 = 30.0, and every
+    # prepared child returns a POSITIVE natural score but a ZERO perfect score, so
+    # child_perfect_sum collapses to 0 while child_natural_sum stays positive.
+    drop._metrics[(key, False)] = (0.42, 0.0, 1.0, 0.7)
+    drop._metrics[(key, True)] = (1.4, 0.0, 1.0, 0.7)
+    for child in weights:
+        drop._metrics[(child, False)] = (0.9, 0.0, 1.0, 0.0)
+        drop._metrics[(child, True)] = (0.0, 0.0, 1.0, 0.0)
+
+    q, _, _, _ = drop._direct_metrics(root)
+    assert q == pytest.approx(100.0 * 0.42 / 1.4)  # ordinary node ratio, not 0/0
+
+
+def test_drop_user_composes_with_fold_exactly_once():
+    # Combined axis: p > 0, drop_user, 0 < coverage < 1. The reported score equals the
+    # INDEPENDENTLY computed child-only quality * coverage ** p, folded exactly once —
+    # not the ordinary ratio, not folded twice, verified without any debug field.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    p = 1.5
+    key = _normalized(root)
+
+    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    _, base_conf, cov_pct, base_depth = base._direct_metrics(root)
+    frac = cov_pct / 100.0
+    assert 0.0 < frac < 1.0  # a real fractional coverage the fold can bite
+
+    # Child-only quality from primitives (drop_user/fold never touch _calc or weights).
+    weights = base._get_weights(key)
+    child_natural = sum(w * base._calc(c, False)[0] for c, w in weights.items())
+    child_perfect = sum(w * base._calc(c, True)[0] for c, w in weights.items())
+    assert child_perfect > 0.0
+    child_only = 100.0 * child_natural / child_perfect
+
+    active = _fold_calc(
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(
+            report_fold_p=p, report_fold_scope="all", report_self_term="drop_user"
+        ),
+    )
+    folded_q, folded_conf, folded_cov, folded_depth = active._direct_metrics(root)
+
+    # Folded exactly once over the child-only quality.
+    assert folded_q == pytest.approx(child_only * frac**p)
+    # Not folded twice (would be child_only * frac ** (2p), strictly smaller here).
+    assert folded_q != pytest.approx(child_only * frac ** (2 * p))
+    # Not the keep-ratio folded: the self-term arm genuinely moved the numerator.
+    ordinary_folded = base._direct_metrics(root)[0] * frac**p
+    assert folded_q != pytest.approx(ordinary_folded)
+    # The fold + self-term still touch only opening_score.
+    assert (folded_conf, folded_cov, folded_depth) == (base_conf, cov_pct, base_depth)

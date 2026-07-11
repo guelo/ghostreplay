@@ -881,6 +881,56 @@ class _SharedCalculator:
         ]
         return sample_size, game_count, (max(touches) if touches else None)
 
+    def _prefold_quality(
+        self, key: str, node_score: float, node_perfect_score: float
+    ) -> float:
+        """Pre-fold 0..100 quality ratio for a reported row, honoring report_self_term.
+
+        Orthogonal to the coverage fold: this selects the numerator/denominator the
+        fold will then multiply by ``coverage ** report_fold_p`` exactly once. It never
+        touches confidence, coverage, weighted_depth, or ``_calc``'s recursion.
+
+        ``"keep"`` (default): the ordinary aggregate node ratio
+        ``100 * node_score / node_perfect_score`` (0 when the perfect denominator is
+        not positive) — byte-identical to the pre-B1 scorer.
+
+        ``"drop_user"`` (B1, g-drop-user-score): for a user-turn row whose prepared-
+        child weight set is nonempty AND whose child perfect denominator is positive,
+        the CHILD-ONLY ratio ``100 * sum(w * child_natural) / sum(w * child_perfect)``.
+        The node's own mastery self-term is dropped, scoring the row purely by the
+        quality its prepared replies lead to. The child sums are recomputed directly
+        from ``_get_weights`` and the memoized ``_calc`` passes — never algebraically
+        recovered from the aggregate node score, since that recovery divides by the
+        node's mastery and ``gamma`` and collapses at their zeros. Every ``_calc``
+        call here is already memoized by the two node-level passes in
+        :meth:`_direct_metrics`, so this adds no recursion or misses and is idempotent.
+
+        Every other shape keeps the ordinary ratio: opponent-turn rows (their self-
+        term is the opponent's, not the user's), user-turn leaves and empty prepared-
+        child sets (no child ratio exists), and a non-positive child perfect
+        denominator (guarded exactly like the node ratio's own zero denominator).
+        """
+        ordinary = (
+            100.0 * node_score / node_perfect_score
+            if node_perfect_score > 0
+            else 0.0
+        )
+        if self.config.report_self_term != "drop_user" or not self._is_user_turn(key):
+            return ordinary
+        weights = self._get_weights(key)
+        if not weights:
+            # User leaf or a user row whose children are all unprepared/cut: no
+            # child ratio to compute, so fall back to the ordinary node ratio.
+            return ordinary
+        child_natural_sum = 0.0
+        child_perfect_sum = 0.0
+        for child, weight in weights.items():
+            child_natural_sum += weight * self._calc(child, False)[0]
+            child_perfect_sum += weight * self._calc(child, True)[0]
+        if child_perfect_sum <= 0.0:
+            return ordinary
+        return 100.0 * child_natural_sum / child_perfect_sum
+
     def _direct_metrics(
         self, fen: str
     ) -> tuple[float, float, float, float]:
@@ -891,10 +941,15 @@ class _SharedCalculator:
         metric records per reachable FEN (natural + perfect), never one root walk
         per position.
 
+        Report-time pre-fold quality (g-drop-user-score): the pre-fold opening_score
+        is selected by ``report_self_term`` in :meth:`_prefold_quality` — the ordinary
+        node ratio for ``"keep"``, the child-only ratio for a qualifying user-turn row
+        under ``"drop_user"``. This is orthogonal to the coverage fold below.
+
         Report-time coverage fold (Option A, g-report-fold-score): when
-        ``report_fold_p`` is active and the row is in scope, the ordinary quality
-        ratio is multiplied by ``coverage_fraction ** report_fold_p``. The fold
-        touches ONLY ``opening_score`` — confidence, displayed coverage, and
+        ``report_fold_p`` is active and the row is in scope, the selected pre-fold
+        quality is multiplied by ``coverage_fraction ** report_fold_p`` exactly once.
+        The fold touches ONLY ``opening_score`` — confidence, displayed coverage, and
         weighted_depth stay byte-identical to the pre-fold scorer, and ``_calc``'s
         coverage channel is untouched. Scope ``"all"`` folds both turns; scope
         ``"user"`` folds only user-turn rows. Rows that are out of scope, or that
@@ -905,8 +960,8 @@ class _SharedCalculator:
         score, confidence, coverage, depth = self._calc(key, False)
         perfect_score, perfect_confidence, _, _ = self._calc(key, True)
 
-        # Ordinary 0..100 quality ratio: the pre-fold opening_score value.
-        opening_score = 100.0 * score / perfect_score if perfect_score > 0 else 0.0
+        # Pre-fold 0..100 quality ratio (keep vs drop_user); the fold multiplies it once.
+        opening_score = self._prefold_quality(key, score, perfect_score)
         p = self.config.report_fold_p
         if p != 0.0 and (
             self.config.report_fold_scope == "all" or self._is_user_turn(key)
