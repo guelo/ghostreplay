@@ -5,7 +5,10 @@ alembic
 uvicorn[standard]
 bcrypt
 PyJWT
-chess
+# Pinned exactly for accuracy v1: the frozen goldens and every stored session
+# accuracy were computed under this python-chess version. See app/accuracy.py
+# (CHESS_VERSION_PIN) and docs/session-accuracy-versioning.md before bumping.
+chess==1.11.2
 # Server-side product/latency analytics (instance API: Posthog(token, host=...);
 # capture(distinct_id=, event=, properties=); shutdown() flushes the sender thread)
 posthog>=3.25,<4

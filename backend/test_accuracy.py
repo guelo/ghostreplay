@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import math
 
+# Public names come from the live surface (app.accuracy); private helpers are not
+# re-exported there and must be imported from the frozen v1 module directly.
 from app.accuracy import (
-    _MATE_CP,
     AccuracyMove,
-    _white_relative_cp,
     accuracy_from_win_percents,
     compute_game_accuracy,
     expected_total_moves_from_pgn,
     win_percent_from_cp,
 )
+from app.accuracy_v1 import _MATE_CP, _white_relative_cp
 
 
 def _moves(cps: list[int | None], start: str = "white") -> list[AccuracyMove]:

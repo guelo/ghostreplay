@@ -1,0 +1,2522 @@
+{
+  "description": "Frozen golden outputs for the Release A accuracy freeze (g-accuracy-freeze). Captured from the pre-refactor app.accuracy (blob faed4614153c72b6a3170a9b37d5580c769f697c, commit 01f6afd) under the production-observed python-chess 1.11.2 on 2026-07-11. accuracy_v1 must reproduce these literals exactly; do NOT regenerate from the moved module. Any semantic or chess-version change is accuracy v2, not a v1 refresh.",
+  "chess_version": "1.11.2",
+  "source_blob": "faed4614153c72b6a3170a9b37d5580c769f697c",
+  "win_percent_from_cp": [
+    {
+      "cp": -10000,
+      "expected": 2.4552563658567763
+    },
+    {
+      "cp": -1001,
+      "expected": 2.4552563658567763
+    },
+    {
+      "cp": -1000,
+      "expected": 2.4552563658567763
+    },
+    {
+      "cp": -500,
+      "expected": 13.692834003181723
+    },
+    {
+      "cp": -200,
+      "expected": 32.378836251494604
+    },
+    {
+      "cp": -100,
+      "expected": 40.89741028083871
+    },
+    {
+      "cp": -15,
+      "expected": 48.619570897068456
+    },
+    {
+      "cp": 0,
+      "expected": 50.0
+    },
+    {
+      "cp": 15,
+      "expected": 51.380429102931544
+    },
+    {
+      "cp": 100,
+      "expected": 59.10258971916128
+    },
+    {
+      "cp": 200,
+      "expected": 67.6211637485054
+    },
+    {
+      "cp": 500,
+      "expected": 86.30716599681827
+    },
+    {
+      "cp": 1000,
+      "expected": 97.54474363414323
+    },
+    {
+      "cp": 1001,
+      "expected": 97.54474363414323
+    },
+    {
+      "cp": 10000,
+      "expected": 97.54474363414323
+    }
+  ],
+  "accuracy_from_win_percents": [
+    {
+      "before": 50.0,
+      "after": 50.0,
+      "expected": 100.0
+    },
+    {
+      "before": 40.0,
+      "after": 55.0,
+      "expected": 100.0
+    },
+    {
+      "before": 60.0,
+      "after": 55.0,
+      "expected": 80.81529992041436
+    },
+    {
+      "before": 60.0,
+      "after": 20.0,
+      "expected": 15.909002002130041
+    },
+    {
+      "before": 99.0,
+      "after": 1.0,
+      "expected": 0.0
+    },
+    {
+      "before": 10.0,
+      "after": 90.0,
+      "expected": 100.0
+    },
+    {
+      "before": 55.5,
+      "after": 55.4,
+      "expected": 100.0
+    },
+    {
+      "before": 100.0,
+      "after": 0.0,
+      "expected": 0.0
+    },
+    {
+      "before": 0.0,
+      "after": 0.0,
+      "expected": 100.0
+    },
+    {
+      "before": 75.25,
+      "after": 60.125,
+      "expected": 51.229397208917625
+    }
+  ],
+  "white_relative_cp": [
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": null,
+        "eval_mate": 0
+      },
+      "expected": 10000
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": null,
+        "eval_mate": 0
+      },
+      "expected": -10000
+    },
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": null,
+        "eval_mate": 3
+      },
+      "expected": 10000
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": null,
+        "eval_mate": 3
+      },
+      "expected": -10000
+    },
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": null,
+        "eval_mate": -3
+      },
+      "expected": -10000
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": null,
+        "eval_mate": -3
+      },
+      "expected": 10000
+    },
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": 50,
+        "eval_mate": null
+      },
+      "expected": 50
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": 50,
+        "eval_mate": null
+      },
+      "expected": -50
+    },
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": -50,
+        "eval_mate": null
+      },
+      "expected": -50
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": -50,
+        "eval_mate": null
+      },
+      "expected": 50
+    },
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": null,
+        "eval_mate": null
+      },
+      "expected": null
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": null,
+        "eval_mate": null
+      },
+      "expected": null
+    },
+    {
+      "move": {
+        "color": "white",
+        "eval_cp": 50,
+        "eval_mate": 2
+      },
+      "expected": 10000
+    },
+    {
+      "move": {
+        "color": "black",
+        "eval_cp": -50,
+        "eval_mate": -2
+      },
+      "expected": 10000
+    }
+  ],
+  "expected_total_moves_from_pgn": [
+    {
+      "name": "none",
+      "pgn": null,
+      "expected": null
+    },
+    {
+      "name": "empty",
+      "pgn": "",
+      "expected": null
+    },
+    {
+      "name": "whitespace",
+      "pgn": "   ",
+      "expected": null
+    },
+    {
+      "name": "short_2ply",
+      "pgn": "1. e4 e5 *",
+      "expected": 2
+    },
+    {
+      "name": "mid_4ply",
+      "pgn": "1. e4 e5 2. Nf3 Nc6 *",
+      "expected": 4
+    },
+    {
+      "name": "long_24ply",
+      "pgn": "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Nb8 10. d4 Nbd7 11. Nbd2 Bb7 12. Bc2 Re8 *",
+      "expected": 24
+    },
+    {
+      "name": "non_pgn_text",
+      "pgn": "not a pgn ;;;",
+      "expected": null
+    },
+    {
+      "name": "illegal_move",
+      "pgn": "1. e4 e5 2. Qxd8 *",
+      "expected": null
+    },
+    {
+      "name": "with_headers",
+      "pgn": "[Event \"Test\"]\n[Result \"*\"]\n\n1. d4 d5 2. c4 e6 *",
+      "expected": 4
+    }
+  ],
+  "compute_game_accuracy": [
+    {
+      "name": "white_steady",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 200,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -150,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 8,
+      "expected": 100
+    },
+    {
+      "name": "black_steady",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 50,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -90,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 200,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -150,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 260,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 8,
+      "expected": 100
+    },
+    {
+      "name": "white_blunder",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 50,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 300,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -280,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -300,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 310,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -320,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 330,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 8,
+      "expected": 44
+    },
+    {
+      "name": "checkmate_win_mate0",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10000,
+          "eval_mate": 0
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 7,
+      "expected": 100
+    },
+    {
+      "name": "black_checkmate_win_mate0",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 40,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 90,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -200,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10000,
+          "eval_mate": 0
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 8,
+      "expected": 97
+    },
+    {
+      "name": "white_mate_short",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": null,
+          "eval_mate": 3
+        },
+        {
+          "color": "black",
+          "eval_cp": -50,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 2,
+      "expected": 100
+    },
+    {
+      "name": "incomplete_short",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 10,
+      "expected": null
+    },
+    {
+      "name": "missing_expected",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": null,
+      "expected": null
+    },
+    {
+      "name": "missing_player_eval",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": null,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 6,
+      "expected": null
+    },
+    {
+      "name": "missing_opponent_before",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": null,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 6,
+      "expected": null
+    },
+    {
+      "name": "no_player_moves_black",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 1,
+      "expected": null
+    },
+    {
+      "name": "two_ply_white",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 30,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 20,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 2,
+      "expected": 100
+    },
+    {
+      "name": "two_ply_black",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 30,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 20,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 2,
+      "expected": 100
+    },
+    {
+      "name": "long_20ply_white",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -30,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -100,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 160,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -130,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 200,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -170,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 240,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -210,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 280,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -250,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 320,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -290,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 360,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -330,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 20,
+      "expected": 100
+    },
+    {
+      "name": "long_20ply_black",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -30,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -100,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 160,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -130,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 200,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -170,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 240,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -210,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 280,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -250,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 320,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -290,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 360,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -330,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 20,
+      "expected": 100
+    },
+    {
+      "name": "non_monotonic_30ply_white",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -400,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 210,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -170,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 160,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 250,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -130,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 290,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -100,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -270,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -140,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -50,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -230,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -180,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 190,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -190,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -220,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 230,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -150,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 340,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 270,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -110,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 30,
+      "expected": 62
+    },
+    {
+      "name": "non_monotonic_30ply_black",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -400,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 210,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -170,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 160,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 250,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -130,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 290,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -100,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -270,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -140,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -50,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -230,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -180,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 190,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -190,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -220,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 230,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -150,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 340,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 270,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -110,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 30,
+      "expected": 62
+    },
+    {
+      "name": "non_monotonic_50ply_white",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -400,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 210,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -170,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 160,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 250,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -130,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 290,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -100,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -90,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -270,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -140,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -50,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -230,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -180,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 190,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -190,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -220,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 230,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -40,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -150,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 340,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 270,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -110,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 300,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 310,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -70,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -250,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -160,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -30,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -210,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -200,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -170,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -240,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 50,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -60,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -130,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 320,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 90,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 50,
+      "expected": 62
+    },
+    {
+      "name": "non_monotonic_100ply_white",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 19,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -168,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -43,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -106,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -105,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -44,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -167,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 18,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 131,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 69,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 57,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 154,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -5,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -144,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -67,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -82,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -129,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 169,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 42,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 107,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 95,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 116,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 33,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 178,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -29,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -91,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -58,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -153,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 4,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 145,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 133,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 78,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 71,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 140,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 9,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -158,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -53,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -96,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -115,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -34,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -177,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 171,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "white",
+      "expected_total_moves": 100,
+      "expected": 80
+    },
+    {
+      "name": "non_monotonic_100ply_black",
+      "moves": [
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 19,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -168,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -43,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -106,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -105,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -44,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -167,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 18,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 131,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 80,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 69,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 57,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 154,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -5,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -144,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -67,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -82,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -129,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -20,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 169,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 42,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 107,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 95,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 116,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 33,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 178,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -29,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -120,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -91,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -58,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -153,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 4,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 145,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 133,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 78,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 71,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 140,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 9,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -158,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -53,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -96,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -115,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -34,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -177,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": -10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 0,
+          "eval_mate": null
+        },
+        {
+          "color": "white",
+          "eval_cp": 10,
+          "eval_mate": null
+        },
+        {
+          "color": "black",
+          "eval_cp": 171,
+          "eval_mate": null
+        }
+      ],
+      "player_color": "black",
+      "expected_total_moves": 100,
+      "expected": 80
+    }
+  ]
+}
