@@ -890,12 +890,38 @@ class _SharedCalculator:
         position. Reuses the one shared memoized ``_calc`` traversal: at most two
         metric records per reachable FEN (natural + perfect), never one root walk
         per position.
+
+        Report-time coverage fold (Option A, g-report-fold-score): when
+        ``report_fold_p`` is active and the row is in scope, the ordinary quality
+        ratio is multiplied by ``coverage_fraction ** report_fold_p``. The fold
+        touches ONLY ``opening_score`` — confidence, displayed coverage, and
+        weighted_depth stay byte-identical to the pre-fold scorer, and ``_calc``'s
+        coverage channel is untouched. Scope ``"all"`` folds both turns; scope
+        ``"user"`` folds only user-turn rows. Rows that are out of scope, or that
+        run at ``report_fold_p == 0``, take an effective multiplier of 1.0 and never
+        evaluate the power or validate coverage.
         """
         key = _normalized(fen)
         score, confidence, coverage, depth = self._calc(key, False)
         perfect_score, perfect_confidence, _, _ = self._calc(key, True)
+
+        # Ordinary 0..100 quality ratio: the pre-fold opening_score value.
+        opening_score = 100.0 * score / perfect_score if perfect_score > 0 else 0.0
+        p = self.config.report_fold_p
+        if p != 0.0 and (
+            self.config.report_fold_scope == "all" or self._is_user_turn(key)
+        ):
+            # Active, in-scope row: fail closed on an out-of-range coverage fraction
+            # rather than returning a complex/NaN opening_score. The multiplier uses
+            # the RAW fraction from _calc, never the displayed percent (100 * cov).
+            if not 0.0 <= coverage <= 1.0:
+                raise ValueError(
+                    "report-fold coverage fraction out of range for "
+                    f"{key!r}: {coverage!r}"
+                )
+            opening_score *= coverage**p
         return (
-            100.0 * score / perfect_score if perfect_score > 0 else 0.0,
+            opening_score,
             (
                 100.0 * confidence / perfect_confidence
                 if perfect_confidence > 0

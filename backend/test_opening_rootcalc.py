@@ -17,6 +17,7 @@ from app.opening_rootcalc import (
     CalcTelemetry,
     PositionCalcTelemetry,
     RootCalcConfig,
+    _normalized,
     _SharedCalculator,
     compute_all_root_scores,
     compute_all_scores,
@@ -1277,3 +1278,235 @@ def test_config_fingerprint_rejects_non_config_with_typeerror(bad):
     # covered in test_calibrate_opening_scores.)
     with pytest.raises(TypeError):
         root_calc_config_fingerprint(bad)
+
+
+# ---------------------------------------------------------------------------
+# Report-time coverage fold (Option A, g-report-fold-score).
+#
+# _direct_metrics multiplies ONLY opening_score by coverage_fraction ** report_fold_p
+# when the row is in scope and p is active. The coverage channel of _calc is
+# unchanged; confidence, displayed coverage, and weighted_depth stay byte-identical.
+# _legacy_direct_metrics preserves the pre-fold body verbatim as the p == 0 oracle.
+# ---------------------------------------------------------------------------
+
+FOLD_NOW = datetime(2026, 1, 3, tzinfo=timezone.utc)
+
+
+def _legacy_direct_metrics(calc, fen):
+    """The pre-fold ``_direct_metrics`` body, preserved verbatim as a p==0 oracle.
+
+    At ``report_fold_p == 0`` the production method must return values byte-identical
+    to this oracle across all four channels. Kept test-only so a future edit to the
+    live scorer cannot silently move the p==0 baseline without a red test.
+    """
+    key = _normalized(fen)
+    score, confidence, coverage, depth = calc._calc(key, False)
+    perfect_score, perfect_confidence, _, _ = calc._calc(key, True)
+    return (
+        100.0 * score / perfect_score if perfect_score > 0 else 0.0,
+        (
+            100.0 * confidence / perfect_confidence
+            if perfect_confidence > 0
+            else 0.0
+        ),
+        100.0 * coverage,
+        depth,
+    )
+
+
+def _fold_calc(graph, overlay, roots, config, *, color="white", now=None, seeds=None):
+    return _SharedCalculator(
+        color, graph, overlay, roots, config, now or FOLD_NOW, seeds=seeds
+    )
+
+
+def _fold_fixture():
+    """Player white; one graph giving BOTH turns a fractional (0.5) coverage.
+
+    ``root`` (white → USER turn) has a single prepared edge to ``opp`` (black →
+    OPPONENT turn). ``opp`` has two book replies: ``covered`` (evidence-bearing, so
+    locally covered) and an unprepared ``c5`` leaf (no evidence, uncovered). The 0/1
+    coverage gate then makes ``opp`` exactly 50% covered, and ``root`` — whose one
+    weighted child IS ``opp`` — inherits that 0.5. Both rows carry positive quality
+    and non-zero confidence (fresh live evidence), so the fold has real channels to
+    isolate. Returns ``(graph, overlay, roots, root, opp, covered)``.
+    """
+    root, opp = _positions(["e2e4"])
+    covered = _positions(["e2e4", "e7e5"])[2]
+    graph = _graph([["e2e4", "e7e5"], ["e2e4", "c7c5"]])
+    roots = _roots(_root(root, "Root"), _root(opp, "Opp"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, root, opp, "e2e4")
+    overlay.nodes[root] = _quality(root, 2.0, count=2, at=FOLD_NOW)
+    overlay.nodes[covered] = _quality(covered, 4.0, count=4, at=FOLD_NOW)
+    return graph, overlay, roots, root, opp, covered
+
+
+@pytest.mark.parametrize(
+    "config",
+    [RootCalcConfig(), RootCalcConfig(lcb_z=0.0, coverage_fold="off")],
+    ids=["default", "historical-baseline"],
+)
+def test_report_fold_p0_matches_legacy_oracle(config):
+    # p == 0 is byte-identical to the pre-fold scorer on ALL four channels, for both
+    # the production default and the historical baseline, across user-turn rows,
+    # opponent-turn rows, AND the shared position-row funnel.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    calc = _fold_calc(graph, overlay, roots, config)
+
+    assert active_color(root) == "white"  # user turn
+    assert active_color(opp) == "black"  # opponent turn
+    for fen in (root, opp, covered):
+        assert calc._direct_metrics(fen) == _legacy_direct_metrics(calc, fen)
+
+    # Position rows run the same _direct_metrics; every scored row matches the oracle.
+    rows = _position_rows(calc)
+    scored = [row for row in rows.values() if row.has_evidence]
+    assert scored  # the fixture yields at least one scored row
+    for fen, row in rows.items():
+        if not row.has_evidence:
+            continue
+        q, c, cov, d = _legacy_direct_metrics(calc, fen)
+        assert (row.opening_score, row.confidence, row.coverage, row.weighted_depth) == (
+            q,
+            c,
+            cov,
+            d,
+        )
+
+
+def test_report_fold_uses_raw_fraction_not_percent():
+    # The multiplier is coverage_fraction ** p (raw 0..1), NOT the displayed percent.
+    # At 50% coverage the raw fold SHRINKS the score; a percent fold (50 ** p) would
+    # blow it up by orders of magnitude.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    quality, _, cov_pct, _ = base._direct_metrics(root)
+    frac = cov_pct / 100.0
+    assert frac == pytest.approx(0.5)  # displayed 50%, raw fraction 0.5
+    assert quality > 0.0
+
+    p = 2.0
+    active = _fold_calc(
+        graph, overlay, roots, RootCalcConfig(report_fold_p=p, report_fold_scope="all")
+    )
+    folded, _, _, _ = active._direct_metrics(root)
+    assert folded == pytest.approx(quality * frac**p)
+    assert folded < quality
+    # The percent reading would give a wildly larger number; pin that we are NOT it.
+    assert folded != pytest.approx(quality * cov_pct**p)
+
+
+@pytest.mark.parametrize("p", [0.5, 1.0, 2.0])
+@pytest.mark.parametrize(
+    "scope,fen_key,in_scope",
+    [
+        ("all", "root", True),
+        ("all", "opp", True),
+        ("user", "root", True),
+        ("user", "opp", False),
+    ],
+)
+def test_report_fold_isolates_opening_score(p, scope, fen_key, in_scope):
+    # Only opening_score moves, and only for in-scope rows. Confidence, displayed
+    # coverage, and weighted_depth are byte-identical to p == 0 regardless of scope.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    fen = {"root": root, "opp": opp}[fen_key]
+
+    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    quality, confidence, cov_pct, depth = base._direct_metrics(fen)
+    frac = cov_pct / 100.0
+    # Every fixture row is genuinely fractional and positive before we assert motion.
+    assert 0.0 < frac < 1.0
+    assert quality > 0.0
+
+    active = _fold_calc(
+        graph, overlay, roots, RootCalcConfig(report_fold_p=p, report_fold_scope=scope)
+    )
+    folded_q, folded_c, folded_cov, folded_d = active._direct_metrics(fen)
+
+    # Non-score channels never move — same non-zero values as the unfolded row.
+    assert (folded_c, folded_cov, folded_d) == (confidence, cov_pct, depth)
+    if in_scope:
+        assert folded_q == pytest.approx(quality * frac**p)
+        assert folded_q < quality
+    else:
+        # Out of scope: effective multiplier 1.0, opening_score untouched.
+        assert folded_q == quality
+
+
+def test_report_fold_out_of_scope_multiplier_is_identity():
+    # Semantic multiplier-1.0 check: a user-scope fold leaves the opponent-turn row
+    # exactly at its p == 0 value even though that row IS fractionally covered.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    base = _fold_calc(graph, overlay, roots, RootCalcConfig())
+    dormant = base._direct_metrics(opp)
+    assert 0.0 < dormant[2] / 100.0 < 1.0  # fractional, so a fold WOULD have moved it
+
+    user_scope = _fold_calc(
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(report_fold_p=1.5, report_fold_scope="user"),
+    )
+    assert user_scope._direct_metrics(opp) == dormant
+
+
+def test_report_fold_invalid_active_coverage_fails_closed():
+    # An active, in-scope row with a coverage fraction outside [0, 1] raises rather
+    # than returning a complex/NaN score. The FEN and the offending value are named.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    key = _normalized(root)
+
+    for bad in (1.0 + 1e-9, 1.5, -0.1):
+        active = _fold_calc(
+            graph,
+            overlay,
+            roots,
+            RootCalcConfig(report_fold_p=0.5, report_fold_scope="all"),
+        )
+        # Poison the shared memo so _calc surfaces an out-of-range coverage fraction.
+        active._metrics[(key, False)] = (0.6, 0.0, bad, 0.5)
+        active._metrics[(key, True)] = (1.0, 0.0, 1.0, 0.5)
+        with pytest.raises(ValueError, match=repr(key)):
+            active._direct_metrics(root)
+
+        # p == 0 never evaluates the power or validates coverage: same poison passes.
+        dormant = _fold_calc(graph, overlay, roots, RootCalcConfig())
+        dormant._metrics[(key, False)] = (0.6, 0.0, bad, 0.5)
+        dormant._metrics[(key, True)] = (1.0, 0.0, 1.0, 0.5)
+        _, _, cov, _ = dormant._direct_metrics(root)
+        assert cov == pytest.approx(100.0 * bad)
+
+    # An out-of-scope active row also skips validation entirely (never powers).
+    opp_key = _normalized(opp)
+    out_of_scope = _fold_calc(
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(report_fold_p=0.5, report_fold_scope="user"),
+    )
+    out_of_scope._metrics[(opp_key, False)] = (0.6, 0.0, 1.5, 0.3)
+    out_of_scope._metrics[(opp_key, True)] = (1.0, 0.0, 1.0, 0.3)
+    _, _, cov, _ = out_of_scope._direct_metrics(opp)
+    assert cov == pytest.approx(150.0)
+
+
+def test_report_fold_named_root_and_position_row_agree():
+    # Named-root and position rows share _direct_metrics, so the fold reaches both
+    # identically — and it genuinely bites (the folded root scores below its p==0 row).
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    config = RootCalcConfig(report_fold_p=0.75, report_fold_scope="all")
+
+    named = compute_root_score(root, "white", graph, overlay, roots, config, now=FOLD_NOW)
+    rows = _position_rows(_fold_calc(graph, overlay, roots, config))
+    row = rows[root]
+    assert row.opening_score == pytest.approx(named.opening_score)
+    assert row.confidence == pytest.approx(named.confidence)
+    assert row.coverage == pytest.approx(named.coverage)
+    assert row.weighted_depth == pytest.approx(named.weighted_depth)
+
+    unfolded = compute_root_score(
+        root, "white", graph, overlay, roots, RootCalcConfig(), now=FOLD_NOW
+    )
+    assert named.opening_score < unfolded.opening_score
