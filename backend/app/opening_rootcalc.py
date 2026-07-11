@@ -5,6 +5,7 @@ import math
 from collections import deque
 from dataclasses import dataclass, fields, replace
 from datetime import datetime, timezone
+from typing import Literal
 
 from app.fen import active_color, normalize_fen
 from app.game_phase import is_middlegame_position
@@ -41,6 +42,23 @@ COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 #     applies even at report_fold_p == 0.
 REPORT_FOLD_SCOPES = frozenset({"all", "user"})
 REPORT_SELF_TERM_MODES = frozenset({"keep", "drop_user"})
+
+# Effective report-time self-term actually applied to a REPORTED row, distinct
+# from the RootCalcConfig.report_self_term *request* vocabulary (the two-value
+# REPORT_SELF_TERM_MODES above). It is the truthful debug/API observation of which
+# arm scored the row, not a config knob:
+#   - "keep":          the ordinary aggregate node ratio scored the row — either
+#                      report_self_term="keep", or a drop_user OPPONENT-turn row
+#                      (whose self-term is the opponent's, not the user's).
+#   - "drop_user":     the child-only ratio actually fired (a qualifying user-turn
+#                      row under drop_user: nonempty prepared children, positive
+#                      child perfect denominator).
+#   - "keep_fallback": a drop_user USER-turn row that could not take the child-only
+#                      ratio — a user leaf, an empty prepared-child set, or a
+#                      non-positive child perfect denominator — so it fell back to
+#                      the ordinary node ratio. Numerically identical to "keep", but
+#                      reported distinctly so the fallback is visible.
+ReportSelfTermEffective = Literal["keep", "drop_user", "keep_fallback"]
 
 # Report-scorer contract id. A report-scorer semantic change that is NOT already
 # captured by a RootCalcConfig field (config changes move
@@ -241,6 +259,24 @@ class NodeDebug:
     raw_coverage: float
     raw_depth: float
     is_leaf: bool
+    # Report-stage observability (g-report-debug-api). NULL until this FEN is
+    # REPORTED as its own row in :meth:`_SharedCalculator._direct_metrics`; a FEN
+    # only ever visited as a descendant during ``_calc`` (never reported) keeps all
+    # four null. Back-filled idempotently on the shared, mutable per-FEN object, so a
+    # descendant later reported as its own row becomes non-null through the earlier
+    # RootScore snapshots that hold the same object (the shared-object contract).
+    #   - pre_fold_quality: the 0..100 base actually selected by
+    #     keep/drop_user/keep_fallback, BEFORE the coverage fold.
+    #   - reported_score: pre_fold_quality * report_fold_multiplier — the final
+    #     opening_score returned for the row.
+    #   - report_fold_multiplier: coverage_fraction ** report_fold_p for an active,
+    #     in-scope row; 1.0 for a dormant fold or an out-of-scope row.
+    #   - report_self_term_effective: which self-term arm scored the row (see
+    #     :data:`ReportSelfTermEffective`).
+    pre_fold_quality: float | None = None
+    reported_score: float | None = None
+    report_fold_multiplier: float | None = None
+    report_self_term_effective: ReportSelfTermEffective | None = None
 
 
 @dataclass(frozen=True)
@@ -883,32 +919,38 @@ class _SharedCalculator:
 
     def _prefold_quality(
         self, key: str, node_score: float, node_perfect_score: float
-    ) -> float:
-        """Pre-fold 0..100 quality ratio for a reported row, honoring report_self_term.
+    ) -> tuple[float, ReportSelfTermEffective]:
+        """Pre-fold 0..100 quality for a reported row, plus the effective self-term.
 
-        Orthogonal to the coverage fold: this selects the numerator/denominator the
-        fold will then multiply by ``coverage ** report_fold_p`` exactly once. It never
-        touches confidence, coverage, weighted_depth, or ``_calc``'s recursion.
+        Returns ``(pre_fold_quality, report_self_term_effective)``: the base the
+        coverage fold will then multiply by ``coverage ** report_fold_p`` exactly once,
+        and the truthful record of which arm produced it (see
+        :data:`ReportSelfTermEffective`). Orthogonal to the fold; never touches
+        confidence, coverage, weighted_depth, or ``_calc``'s recursion.
 
         ``"keep"`` (default): the ordinary aggregate node ratio
         ``100 * node_score / node_perfect_score`` (0 when the perfect denominator is
-        not positive) — byte-identical to the pre-B1 scorer.
+        not positive) — byte-identical to the pre-B1 scorer — reported ``"keep"``.
 
         ``"drop_user"`` (B1, g-drop-user-score): for a user-turn row whose prepared-
         child weight set is nonempty AND whose child perfect denominator is positive,
-        the CHILD-ONLY ratio ``100 * sum(w * child_natural) / sum(w * child_perfect)``.
-        The node's own mastery self-term is dropped, scoring the row purely by the
-        quality its prepared replies lead to. The child sums are recomputed directly
-        from ``_get_weights`` and the memoized ``_calc`` passes — never algebraically
-        recovered from the aggregate node score, since that recovery divides by the
-        node's mastery and ``gamma`` and collapses at their zeros. Every ``_calc``
-        call here is already memoized by the two node-level passes in
-        :meth:`_direct_metrics`, so this adds no recursion or misses and is idempotent.
+        the CHILD-ONLY ratio ``100 * sum(w * child_natural) / sum(w * child_perfect)``,
+        reported ``"drop_user"``. The node's own mastery self-term is dropped, scoring
+        the row purely by the quality its prepared replies lead to. The child sums are
+        recomputed directly from ``_get_weights`` and the memoized ``_calc`` passes —
+        never algebraically recovered from the aggregate node score, since that
+        recovery divides by the node's mastery and ``gamma`` and collapses at their
+        zeros. Every ``_calc`` call here is already memoized by the two node-level
+        passes in :meth:`_direct_metrics`, so this adds no recursion or misses and is
+        idempotent.
 
-        Every other shape keeps the ordinary ratio: opponent-turn rows (their self-
-        term is the opponent's, not the user's), user-turn leaves and empty prepared-
-        child sets (no child ratio exists), and a non-positive child perfect
-        denominator (guarded exactly like the node ratio's own zero denominator).
+        Every other shape keeps the ordinary ratio. An OPPONENT-turn row reports
+        ``"keep"`` (its self-term is the opponent's, not the user's). A drop_user
+        USER-turn row that cannot take the child ratio — a leaf or empty prepared-
+        child set (no child ratio exists), or a non-positive child perfect denominator
+        (guarded exactly like the node ratio's own zero denominator) — reports
+        ``"keep_fallback"``: numerically the ordinary ratio, but flagged so the
+        fallback is visible in the debug/API surface.
         """
         ordinary = (
             100.0 * node_score / node_perfect_score
@@ -916,20 +958,22 @@ class _SharedCalculator:
             else 0.0
         )
         if self.config.report_self_term != "drop_user" or not self._is_user_turn(key):
-            return ordinary
+            # report_self_term="keep", or a drop_user opponent-turn row: the ordinary
+            # node ratio scored the row, so the effective self-term is a plain "keep".
+            return ordinary, "keep"
         weights = self._get_weights(key)
         if not weights:
             # User leaf or a user row whose children are all unprepared/cut: no
             # child ratio to compute, so fall back to the ordinary node ratio.
-            return ordinary
+            return ordinary, "keep_fallback"
         child_natural_sum = 0.0
         child_perfect_sum = 0.0
         for child, weight in weights.items():
             child_natural_sum += weight * self._calc(child, False)[0]
             child_perfect_sum += weight * self._calc(child, True)[0]
         if child_perfect_sum <= 0.0:
-            return ordinary
-        return 100.0 * child_natural_sum / child_perfect_sum
+            return ordinary, "keep_fallback"
+        return 100.0 * child_natural_sum / child_perfect_sum, "drop_user"
 
     def _direct_metrics(
         self, fen: str
@@ -960,8 +1004,13 @@ class _SharedCalculator:
         score, confidence, coverage, depth = self._calc(key, False)
         perfect_score, perfect_confidence, _, _ = self._calc(key, True)
 
-        # Pre-fold 0..100 quality ratio (keep vs drop_user); the fold multiplies it once.
-        opening_score = self._prefold_quality(key, score, perfect_score)
+        # Pre-fold 0..100 quality ratio (keep vs drop_user); the fold multiplies it
+        # once. self_term_effective records which arm actually scored the row.
+        opening_score, self_term_effective = self._prefold_quality(
+            key, score, perfect_score
+        )
+        pre_fold_quality = opening_score
+        multiplier = 1.0
         p = self.config.report_fold_p
         if p != 0.0 and (
             self.config.report_fold_scope == "all" or self._is_user_turn(key)
@@ -974,7 +1023,23 @@ class _SharedCalculator:
                     "report-fold coverage fraction out of range for "
                     f"{key!r}: {coverage!r}"
                 )
-            opening_score *= coverage**p
+            multiplier = coverage**p
+            opening_score *= multiplier
+
+        if self.debug:
+            # This FEN is being REPORTED, so back-fill its report-stage observability.
+            # _calc(key, False) above already created the shared per-FEN NodeDebug (it
+            # calls _record_debug on a miss, or the node exists from a prior miss on a
+            # cache hit), so debug_nodes[key] is present. The same mutable object is
+            # already referenced by any earlier RootScore snapshot, so this write is
+            # visible through those views (the shared-object contract). reported_score
+            # is exactly the opening_score returned below.
+            debug = self.debug_nodes[key]
+            debug.pre_fold_quality = pre_fold_quality
+            debug.reported_score = opening_score
+            debug.report_fold_multiplier = multiplier
+            debug.report_self_term_effective = self_term_effective
+
         return (
             opening_score,
             (

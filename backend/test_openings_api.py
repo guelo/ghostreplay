@@ -6,8 +6,10 @@ from urllib.parse import quote
 from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import event
 
+from app.api.openings import NodeDebugResponse
 from app.models import (
     GameSession,
     OpeningScoreBatch,
@@ -174,6 +176,101 @@ def test_score_debug_flag(client, auth_headers):
     assert "fen" in node
     assert "p_n" in node
     assert "raw_score" in node
+
+
+# ---------------------------------------------------------------------------
+# Report-stage debug fields at the API boundary (g-report-debug-api).
+# ---------------------------------------------------------------------------
+
+_REPORT_STAGE_KEYS = (
+    "pre_fold_quality",
+    "reported_score",
+    "report_fold_multiplier",
+    "report_self_term_effective",
+)
+
+
+def test_score_debug_report_stage_optionality(client, auth_headers):
+    # Reported vs never-reported optionality is truthful at the API boundary: the
+    # requested root is reported, so all four report-stage keys serialize non-null
+    # even at identity config defaults; a descendant that is only ever visited (the
+    # prepared child leaf, never a named-root row) serializes all four as null.
+    with patch(_PATCH_OVERLAY, return_value=_overlay_with_evidence()):
+        resp = client.post(
+            "/api/openings/score?debug=true",
+            json={"opening_key": ROOT_FEN, "player_color": "black"},
+            headers=auth_headers(),
+        )
+    assert resp.status_code == 200
+    nodes = {n["fen"]: n for n in resp.json()["debug_nodes"]}
+
+    root_node = nodes[ROOT_FEN]
+    for key in _REPORT_STAGE_KEYS:
+        assert root_node[key] is not None
+    assert root_node["report_self_term_effective"] == "keep"
+    # reported_score == pre_fold_quality * multiplier survives JSON serialization.
+    assert root_node["reported_score"] == pytest.approx(
+        root_node["pre_fold_quality"] * root_node["report_fold_multiplier"]
+    )
+
+    child_node = nodes[CHILD_FEN]
+    for key in _REPORT_STAGE_KEYS:
+        assert child_node[key] is None
+
+
+def _node_debug_kwargs(**overrides):
+    base = dict(
+        fen=ROOT_FEN,
+        is_user_turn=True,
+        in_book=True,
+        is_extension_node=False,
+        p_n=0.5,
+        c_n=0.5,
+        sample_conf=0.5,
+        freshness=0.5,
+        evidence_total=1.0,
+        days_since_last_touch=0.0,
+        last_touch_at=None,
+        live_attempts=0,
+        live_passes=0,
+        review_attempts=0,
+        prepared_children=[],
+        weights={},
+        subtree_live_attempts=0,
+        subtree_review_attempts=0,
+        covered_locally=False,
+        raw_score=0.0,
+        raw_confidence=0.0,
+        raw_coverage=0.0,
+        raw_depth=0.0,
+        is_leaf=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_node_debug_response_report_stage_fields_default_null():
+    # Omitting the four report-stage fields yields a valid model with all of them
+    # null — the never-reported default the mapping serializes.
+    model = NodeDebugResponse(**_node_debug_kwargs())
+    assert model.pre_fold_quality is None
+    assert model.reported_score is None
+    assert model.report_fold_multiplier is None
+    assert model.report_self_term_effective is None
+
+
+def test_node_debug_response_self_term_vocabulary():
+    # The shared ReportSelfTermEffective Literal accepts exactly the three legal
+    # effective spellings plus None, and rejects an out-of-vocabulary typo.
+    for spelling in ("keep", "drop_user", "keep_fallback", None):
+        model = NodeDebugResponse(
+            **_node_debug_kwargs(report_self_term_effective=spelling)
+        )
+        assert model.report_self_term_effective == spelling
+    with pytest.raises(ValidationError):
+        NodeDebugResponse(
+            **_node_debug_kwargs(report_self_term_effective="drop_opp")
+        )
 
 
 def test_score_invalid_color_returns_422(client, auth_headers):

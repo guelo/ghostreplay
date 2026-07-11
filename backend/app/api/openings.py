@@ -38,6 +38,7 @@ from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import mate_to_cp
 from app.opening_rootcalc import (
     SYNTHETIC_ROOT_FAMILY,
+    ReportSelfTermEffective,
     RootScore,
     compute_root_score,
 )
@@ -136,6 +137,14 @@ class NodeDebugResponse(BaseModel):
     raw_coverage: float
     raw_depth: float
     is_leaf: bool
+    # Report-stage observability (g-report-debug-api). Null for a FEN that was
+    # visited during the DAG traversal but never reported as its own row; non-null
+    # (even at identity defaults) once reported. The shared ReportSelfTermEffective
+    # Literal makes Pydantic reject any out-of-vocabulary self-term spelling.
+    pre_fold_quality: float | None = None
+    reported_score: float | None = None
+    report_fold_multiplier: float | None = None
+    report_self_term_effective: ReportSelfTermEffective | None = None
 
 
 class RootScoreResponse(BaseModel):

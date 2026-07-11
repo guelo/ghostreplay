@@ -1686,3 +1686,212 @@ def test_drop_user_composes_with_fold_exactly_once():
     assert folded_q != pytest.approx(ordinary_folded)
     # The fold + self-term still touch only opening_score.
     assert (folded_conf, folded_cov, folded_depth) == (base_conf, cov_pct, base_depth)
+
+
+# ---------------------------------------------------------------------------
+# Report-stage debug/observability fields (g-report-debug-api).
+#
+# When debug is on, _direct_metrics back-fills four report-stage fields on the
+# shared per-FEN NodeDebug for the REPORTED row only: pre_fold_quality (the base
+# actually selected by keep/drop_user/keep_fallback), reported_score
+# (pre_fold_quality * report_fold_multiplier, i.e. the returned opening_score),
+# report_fold_multiplier (coverage ** p for an active in-scope row, else 1.0), and
+# report_self_term_effective. A FEN only ever visited as a descendant stays null.
+# The NodeDebug objects are shared and mutable, so a later report is visible
+# through an earlier RootScore snapshot. Debug is pure observation: with it off no
+# node is created and scores are byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def _debug_calc(graph, overlay, roots, config, *, color="white", now=None, seeds=None):
+    return _SharedCalculator(
+        color, graph, overlay, roots, config, now or FOLD_NOW, debug=True, seeds=seeds
+    )
+
+
+def _debug_node(calc, fen):
+    return calc.debug_nodes[_normalized(fen)]
+
+
+def test_report_debug_reported_score_identity_on_every_row():
+    # On every reported row the four fields are non-null and internally consistent:
+    # reported_score is EXACTLY the returned opening_score and EXACTLY
+    # pre_fold_quality * report_fold_multiplier. Uses an active fold + drop_user so
+    # neither the multiplier nor the self-term arm is a trivial identity.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    p = 1.5
+    calc = _debug_calc(
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(
+            report_fold_p=p, report_fold_scope="all", report_self_term="drop_user"
+        ),
+    )
+    for fen in (root, opp, covered):
+        returned = calc._direct_metrics(fen)
+        node = _debug_node(calc, fen)
+        assert node.pre_fold_quality is not None
+        assert node.reported_score is not None
+        assert node.report_fold_multiplier is not None
+        assert node.report_self_term_effective is not None
+        # reported_score IS the returned opening_score, and == pre_fold * multiplier.
+        assert node.reported_score == returned[0]
+        assert (
+            node.reported_score
+            == node.pre_fold_quality * node.report_fold_multiplier
+        )
+
+
+def test_report_debug_self_term_effective_mapping():
+    # report_self_term_effective truthfully names which arm scored each reported row,
+    # and pre_fold_quality carries that arm's actual numeric base.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    assert active_color(root) == "white"  # user turn, prepared child → drop_user fires
+    assert active_color(opp) == "black"  # opponent turn → keep
+    assert active_color(covered) == "white"  # user leaf → keep_fallback under drop_user
+
+    # Default keep: every reported row reports "keep".
+    keep = _debug_calc(graph, overlay, roots, RootCalcConfig())
+    for fen in (root, opp, covered):
+        keep._direct_metrics(fen)
+        assert _debug_node(keep, fen).report_self_term_effective == "keep"
+
+    # drop_user: qualifying user-turn row → "drop_user"; opponent row → "keep";
+    # user-turn fallback (leaf, empty prepared set) → "keep_fallback".
+    drop = _debug_calc(
+        graph, overlay, roots, RootCalcConfig(report_self_term="drop_user")
+    )
+    for fen in (root, opp, covered):
+        drop._direct_metrics(fen)
+    assert _debug_node(drop, root).report_self_term_effective == "drop_user"
+    assert _debug_node(drop, opp).report_self_term_effective == "keep"
+    assert _debug_node(drop, covered).report_self_term_effective == "keep_fallback"
+
+    # pre_fold_quality carries the arm's ACTUAL base: the child-only ratio for the
+    # drop_user row (differs from keep), the ordinary ratio for opponent + fallback.
+    assert _debug_node(drop, root).pre_fold_quality != pytest.approx(
+        _debug_node(keep, root).pre_fold_quality
+    )
+    assert _debug_node(drop, opp).pre_fold_quality == pytest.approx(
+        _debug_node(keep, opp).pre_fold_quality
+    )
+    assert _debug_node(drop, covered).pre_fold_quality == pytest.approx(
+        _debug_node(keep, covered).pre_fold_quality
+    )
+
+
+def test_report_debug_multiplier_scope_and_dormant():
+    # report_fold_multiplier is coverage**p for an active in-scope row and EXACTLY
+    # 1.0 for an out-of-scope row or a dormant (p==0) fold; reported_score tracks it.
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    p = 2.0
+
+    # user-scope active fold: root (user turn) is in scope; opp (opponent) is not.
+    active = _debug_calc(
+        graph,
+        overlay,
+        roots,
+        RootCalcConfig(report_fold_p=p, report_fold_scope="user"),
+    )
+    _, _, root_cov_pct, _ = active._direct_metrics(root)
+    active._direct_metrics(opp)
+    root_node = _debug_node(active, root)
+    opp_node = _debug_node(active, opp)
+    frac = root_cov_pct / 100.0
+    assert 0.0 < frac < 1.0  # a real fractional coverage the fold can bite
+    assert root_node.report_fold_multiplier == pytest.approx(frac**p)
+    assert root_node.reported_score == pytest.approx(
+        root_node.pre_fold_quality * frac**p
+    )
+    # opp is OUT of scope → identity multiplier, reported_score == pre_fold_quality.
+    assert opp_node.report_fold_multiplier == 1.0
+    assert opp_node.reported_score == opp_node.pre_fold_quality
+
+    # Dormant fold (p==0): multiplier is exactly 1.0 for every reported row and
+    # reported_score equals the plain pre-fold quality.
+    dormant = _debug_calc(graph, overlay, roots, RootCalcConfig())
+    for fen in (root, opp, covered):
+        dormant._direct_metrics(fen)
+        node = _debug_node(dormant, fen)
+        assert node.report_fold_multiplier == 1.0
+        assert node.reported_score == node.pre_fold_quality
+
+
+def test_report_debug_non_debug_run_records_nothing():
+    # Debug is pure observation: with it off, _direct_metrics scores identically but
+    # creates no NodeDebug and attempts no back-fill (the shared-object write is
+    # guarded by self.debug, so a non-debug run never touches debug_nodes).
+    graph, overlay, roots, root, opp, covered = _fold_fixture()
+    config = RootCalcConfig(
+        report_fold_p=1.5, report_fold_scope="all", report_self_term="drop_user"
+    )
+    quiet = _fold_calc(graph, overlay, roots, config)  # debug defaults to False
+    assert quiet.debug is False
+    for fen in (root, opp, covered):
+        quiet._direct_metrics(fen)  # must not raise despite no debug node
+    assert quiet.debug_nodes == {}
+
+    # Same scores whether or not debug is on.
+    loud = _debug_calc(graph, overlay, roots, config)
+    for fen in (root, opp, covered):
+        assert quiet._direct_metrics(fen) == loud._direct_metrics(fen)
+
+
+def _shared_object_fixture():
+    """Two named roots R and C where C is a scored descendant of R, plus L: an
+    opponent-reply leaf with no evidence that ``_calc`` visits but nothing reports.
+
+    ``R`` (white, user) --e2e4--> ``O`` (black, opponent) with two book replies:
+    ``O`` --e7e5--> ``C`` (white, user leaf, evidence-bearing, a NAMED root) and
+    ``O`` --c7c5--> ``L`` (white, user leaf, NO evidence, NOT a root). Evidence sits
+    at ``R`` and ``C``. ``O`` has mastery below (via ``C``) so it is a scored
+    intermediary reported through the position funnel; ``L`` has none, so it is only
+    ever visited as a descendant and never reported. Named roots: ``R`` and ``C``.
+    Returns ``(graph, overlay, roots, R, O, C, L)``.
+    """
+    R, O = _positions(["e2e4"])
+    C = _positions(["e2e4", "e7e5"])[2]
+    L = _positions(["e2e4", "c7c5"])[2]
+    graph = _graph([["e2e4", "e7e5"], ["e2e4", "c7c5"]])
+    roots = _roots(_root(R, "Root"), _root(C, "Child"))
+    overlay = EvidenceOverlay(1, "white")
+    _prepared(overlay, R, O, "e2e4")
+    overlay.nodes[R] = _quality(R, 2.0, count=2, at=FOLD_NOW)
+    overlay.nodes[C] = _quality(C, 4.0, count=4, at=FOLD_NOW)
+    return graph, overlay, roots, R, O, C, L
+
+
+def test_report_debug_shared_object_across_roots_and_never_reported_stays_null():
+    # Run-scoped shared-object contract over a multi-root compute_all_scores run:
+    # the descendant C, reported as its own row, is non-null in BOTH the root's
+    # earlier snapshot and its own — the SAME mutable NodeDebug object, not a copy —
+    # while L, visited only as a descendant and never reported, stays fully null.
+    graph, overlay, roots, R, O, C, L = _shared_object_fixture()
+    scores, _, _ = compute_all_scores(
+        "white", graph, overlay, roots, RootCalcConfig(), now=FOLD_NOW, debug=True
+    )
+    assert set(scores) == {R, C}
+
+    r_score, c_score = scores[R], scores[C]
+    c_in_r = next(n for n in r_score.debug_nodes if n.fen == C)
+    c_in_c = next(n for n in c_score.debug_nodes if n.fen == C)
+    # One shared mutable object seen through two RootScore snapshots.
+    assert c_in_r is c_in_c
+    # C was reported, so its report-stage fields are non-null in BOTH views. A later
+    # report is visible through the earlier snapshot precisely because it is shared.
+    assert c_in_r.reported_score is not None
+    assert c_in_r.pre_fold_quality is not None
+    assert c_in_r.report_fold_multiplier == 1.0  # dormant fold
+    assert c_in_r.report_self_term_effective == "keep"  # default config
+    # The reported row's score matches its own snapshot's reported_score.
+    assert c_score.opening_score == pytest.approx(c_in_r.reported_score)
+
+    # L is visited during R's walk (opponent O's uncovered reply) but has no evidence
+    # below, so neither a named-root row nor the position funnel ever reports it: all
+    # four report-stage fields stay null even though its structural fields are filled.
+    l_node = next(n for n in r_score.debug_nodes if n.fen == L)
+    assert l_node.pre_fold_quality is None
+    assert l_node.reported_score is None
+    assert l_node.report_fold_multiplier is None
+    assert l_node.report_self_term_effective is None
