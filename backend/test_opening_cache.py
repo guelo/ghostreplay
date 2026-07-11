@@ -45,8 +45,14 @@ from app.opening_cache import (
     recompute_opening_scores,
     recompute_opening_scores_if_needed,
 )
+from app.game_phase import DIVIDER_VERSION
+from app.opening_evidence import (
+    FRESHNESS_CONTRACT_VERSION,
+    OPENING_EVIDENCE_INPUTS_VERSION,
+)
 from app.opening_evidence import overlay_evidence as _real_overlay_evidence
 from app.opening_graph import get_opening_graph
+from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
 from app.opening_rootcalc import RootCalcConfig, root_calc_config_fingerprint
 from app.opening_roots import get_opening_roots
 from app.opening_graph import OpeningGraph, OpeningGraphNode
@@ -1102,6 +1108,102 @@ def test_cache_schema_version_bump_invalidates_edgeless_batch(db_session, monkey
         .count()
         > 0
     )
+
+
+# ---------------------------------------------------------------------------
+# Report-fold config compatibility at the cache boundary (g-report-cfg-fp).
+#
+# Adding the dormant report-fold axes must not disturb the production registry
+# fingerprint: the default runtime embeds the identity GOLDEN config fingerprint, so
+# a pre-Phase-1 batch stays on the fast path, while a batch stamped under an ACTIVE
+# axis (report_fold_p>0 / drop_user) is a genuine registry drift that recomputes once.
+# ---------------------------------------------------------------------------
+
+# root_calc_config_fingerprint(RootCalcConfig()) — the production default config fp,
+# embedded verbatim in the registry fingerprint.
+GOLDEN = "7ca0d6541f2fcf372b7548e0e4caead118547335d424a9359fd5089706fcd262"
+
+
+def test_registry_fingerprint_composes_golden_config():
+    # Pin the EXACT registry composition, with GOLDEN as the config-fp segment. The
+    # default runtime fingerprints the identity config, so the dormant axes leave the
+    # production registry (and therefore every persisted batch's stamp) unchanged.
+    graph = _make_graph()
+    roots = _make_roots()
+    assert root_calc_config_fingerprint() == GOLDEN
+    expected = (
+        f"{graph.fingerprint}:{roots.fingerprint}:{GOLDEN}"
+        f":{oc.SCORE_MODEL_VERSION}:{DIVIDER_VERSION}"
+        f":{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
+        f":{oc.OPENING_SCORE_CACHE_SCHEMA_VERSION}"
+        f":{OPENING_EVIDENCE_INPUTS_VERSION}:{FRESHNESS_CONTRACT_VERSION}"
+    )
+    assert opening_score_inputs_fingerprint(graph, roots) == expected
+    # The GOLDEN config fp is the third colon-delimited segment, not buried elsewhere.
+    assert opening_score_inputs_fingerprint(graph, roots).split(":")[2] == GOLDEN
+
+
+def test_golden_stamped_expired_batch_stays_on_fast_path(db_session):
+    # A batch stamped with the GOLDEN-config registry fingerprint is exactly what a
+    # pre-Phase-1 build produced (identity fp is byte-unchanged). Even aged well past
+    # the decay interval ("expired"), the cheap freshness predicate — which ignores
+    # wall-clock decay — proves it fresh, so the fast path serves it without a rebuild.
+    _seed_black_opening_session(db_session)
+    batch = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert batch is not None
+    assert GOLDEN in batch.registry_fingerprint
+
+    batch.computed_at = (
+        datetime.now(timezone.utc)
+        - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
+        - timedelta(days=3)
+    )
+    db_session.commit()
+
+    _, rows, is_fresh = proven_fresh_opening_scores(db_session, 123, "black")
+    assert rows
+    assert is_fresh is True
+
+
+@pytest.mark.parametrize(
+    "active_config",
+    [
+        RootCalcConfig(report_fold_p=0.5),
+        RootCalcConfig(report_self_term="drop_user"),
+    ],
+    ids=["active_p", "drop_user"],
+)
+def test_active_axis_stamped_batch_recomputes_once(db_session, active_config):
+    # A batch stamped under an active report-fold axis carries a non-GOLDEN config fp
+    # in its registry fingerprint, which the default runtime (GOLDEN) cannot match →
+    # registry drift → exactly ONE recompute, after which the rebuilt GOLDEN-stamped
+    # batch serves the fast path. (The batch is also aged past decay; registry drift
+    # is checked first, so it — not decay — drives the single recompute.)
+    _seed_black_opening_session(db_session)
+    first = recompute_opening_scores_if_needed(db_session, 123, "black")
+    assert first is not None
+    assert GOLDEN in first.registry_fingerprint
+
+    active_fp = root_calc_config_fingerprint(active_config)
+    assert active_fp != GOLDEN
+    first.registry_fingerprint = first.registry_fingerprint.replace(GOLDEN, active_fp)
+    first.computed_at = (
+        datetime.now(timezone.utc)
+        - OPENING_SCORE_DECAY_RECOMPUTE_INTERVAL
+        - timedelta(days=3)
+    )
+    db_session.commit()
+
+    second = recompute_opening_scores_if_needed(db_session, 123, "black")
+    third = recompute_opening_scores_if_needed(db_session, 123, "black")
+
+    assert second is not None and third is not None
+    assert second.id != first.id  # active-axis stamp drifted → rebuilt
+    assert third.id == second.id  # rebuilt batch is GOLDEN-stamped → reused, no 2nd
+    assert second.registry_fingerprint == opening_score_inputs_fingerprint(
+        _make_graph(), _make_roots()
+    )
+    assert GOLDEN in second.registry_fingerprint
 
 
 # ---------------------------------------------------------------------------

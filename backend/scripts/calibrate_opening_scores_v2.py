@@ -55,6 +55,7 @@ from app.opening_rootcalc import (  # noqa: E402
     RootCalcConfig,
     compute_all_root_scores,
     compute_root_score,
+    root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots  # noqa: E402
 
@@ -300,6 +301,24 @@ class GridCell:
 
 # The current-model cell every grid is measured against.
 BASELINE_CELL = GridCell(0.0, "off")
+
+
+def _cfg_fp(cell_or_config: "GridCell | RootCalcConfig") -> str:
+    """Sole sanctioned fingerprint router for the calibration grid.
+
+    ``root_calc_config_fingerprint`` rejects a raw GridCell with TypeError, so a
+    grid cell can never be fingerprinted by accident. This router is the ONE place
+    allowed to bridge the two: a GridCell is routed through its ``.config``, and a
+    RootCalcConfig passes straight through. Every grid/cache fingerprint the
+    calibration path computes must go through here rather than calling
+    ``root_calc_config_fingerprint`` on a cell directly.
+    """
+    config = (
+        cell_or_config.config
+        if isinstance(cell_or_config, GridCell)
+        else cell_or_config
+    )
+    return root_calc_config_fingerprint(config)
 
 
 def parse_lcb_z_grid(raw: str | None) -> list[float]:

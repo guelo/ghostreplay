@@ -18,7 +18,11 @@ from app.db import DATABASE_URL
 from app.fen import active_color, normalize_fen
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence, PhaseSample
 from app.opening_graph import OpeningGraph, OpeningGraphNode
-from app.opening_rootcalc import CalcTelemetry
+from app.opening_rootcalc import (
+    CalcTelemetry,
+    RootCalcConfig,
+    root_calc_config_fingerprint,
+)
 from app.opening_roots import OpeningRoot, OpeningRoots
 
 import scripts.calibrate_opening_scores_v2 as cal
@@ -465,6 +469,34 @@ class TestGridParsing:
         config = cell.config
         assert config.lcb_z == 1.28
         assert config.coverage_fold == "gate_x_cov"
+
+
+class TestCfgFpRouter:
+    """_cfg_fp is the sole sanctioned GridCell/config fingerprint router."""
+
+    # root_calc_config_fingerprint(GridCell(0.0, "off").config), pinned so the
+    # calibration path's baseline cell fingerprint is proven against the same
+    # BASELINE golden the scorer pins.
+    BASELINE_GOLDEN = (
+        "7dd8d067f55f88c26c150c192203bd58de57762aadaf43ab8b6752e3fa6b1bde"
+    )
+
+    def test_gridcell_routes_through_config(self):
+        cell = cal.GridCell(1.0, "gate")
+        assert cal._cfg_fp(cell) == root_calc_config_fingerprint(cell.config)
+
+    def test_rootcalcconfig_passes_through(self):
+        config = RootCalcConfig(lcb_z=1.28, coverage_fold="gate_x_cov")
+        assert cal._cfg_fp(config) == root_calc_config_fingerprint(config)
+
+    def test_raw_gridcell_fingerprint_raises(self):
+        # A GridCell is not a RootCalcConfig: fingerprinting one directly must fail
+        # closed, so _cfg_fp (routing through .config) is the only correct path.
+        with pytest.raises(TypeError):
+            root_calc_config_fingerprint(cal.GridCell(0.0, "off"))
+
+    def test_baseline_cell_hits_baseline_golden(self):
+        assert cal._cfg_fp(cal.BASELINE_CELL) == self.BASELINE_GOLDEN
 
 
 class TestScorePairGrid:

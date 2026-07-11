@@ -26,6 +26,29 @@ SYNTHETIC_ROOT_FAMILY = "__repertoire__"
 # coverage channel (the double-counting arm kept only for the calibration grid).
 COVERAGE_FOLD_MODES = frozenset({"off", "gate", "gate_x_cov"})
 
+# Report-fold configuration surface (g-report-cfg-fp, Phase 1a.1). These axes are
+# DORMANT at their identity defaults (report_fold_p=0.0, report_fold_scope="all",
+# report_self_term="keep"): a default RootCalcConfig() is byte-identical to the
+# pre-Phase-1 model and its fingerprint is unchanged (see
+# root_calc_config_fingerprint). The scorer leaves consume them later; this bead
+# only lands the validated, first-class surface.
+#
+#   - report_fold_scope: which turns the report-time coverage fold applies to.
+#     "all" folds both turns; "user" folds only user-turn rows (g-report-fold-score).
+#     Inert while report_fold_p == 0 (the fold is off, so scope selects nothing).
+#   - report_self_term: the orthogonal pre-fold quality choice. "keep" is today's
+#     behaviour; "drop_user" is the B1 self-term arm (g-drop-user-score), which
+#     applies even at report_fold_p == 0.
+REPORT_FOLD_SCOPES = frozenset({"all", "user"})
+REPORT_SELF_TERM_MODES = frozenset({"keep", "drop_user"})
+
+# Report-scorer contract id. A report-scorer semantic change that is NOT already
+# captured by a RootCalcConfig field (config changes move
+# root_calc_config_fingerprint on their own) MUST bump BOTH this id and
+# SCORE_MODEL_VERSION (app.opening_cache) to force a full recompute. Adding the
+# dormant axes above is config-captured, so this stays at v1.
+REPORT_SCORER_CONTRACT_ID = "report-fold-v1"
+
 
 @dataclass
 class CalcTelemetry:
@@ -78,6 +101,12 @@ class RootCalcConfig:
     #     grid can confirm the double-count empirically (see _calc).
     lcb_z: float = 1.0
     coverage_fold: str = "gate"
+    # Dormant report-fold axes (identity defaults; see REPORT_FOLD_SCOPES /
+    # REPORT_SELF_TERM_MODES). Omitted from the fingerprint at identity so adding
+    # them perturbs no pre-existing config fingerprint or production cache key.
+    report_fold_p: float = 0.0
+    report_fold_scope: str = "all"
+    report_self_term: str = "keep"
 
     def __post_init__(self) -> None:
         # Fail fast on a bad mode rather than letting the _calc opponent branch
@@ -88,15 +117,101 @@ class RootCalcConfig:
                 f"coverage_fold must be one of {sorted(COVERAGE_FOLD_MODES)}; "
                 f"got {self.coverage_fold!r}"
             )
+        # report_fold_p is a non-negative, finite real exponent. bool is a real int
+        # in Python, but never a valid exponent here, so reject it BEFORE the
+        # int→float canonicalization would silently accept True as 1.0.
+        p = self.report_fold_p
+        if isinstance(p, bool):
+            raise TypeError(f"report_fold_p must be a real number, not bool; got {p!r}")
+        if not isinstance(p, (int, float)):
+            raise TypeError(
+                f"report_fold_p must be a real number; got {type(p).__name__}"
+            )
+        if isinstance(p, int):
+            # Canonicalize accepted ints to float so 0 and 0.0 (or 1 and 1.0) share
+            # one fingerprint and one behavioural identity. An int too large to
+            # represent (e.g. ±10**400) overflows the float conversion — surface it
+            # as the promised finiteness ValueError (either sign), not a raw
+            # OverflowError.
+            try:
+                p = float(p)
+            except OverflowError:
+                raise ValueError(
+                    f"report_fold_p must be finite; got out-of-range int {p!r}"
+                ) from None
+            object.__setattr__(self, "report_fold_p", p)
+        if not math.isfinite(p):
+            raise ValueError(f"report_fold_p must be finite; got {p!r}")
+        if p < 0.0:
+            raise ValueError(f"report_fold_p must be >= 0; got {p!r}")
+        if self.report_fold_scope not in REPORT_FOLD_SCOPES:
+            raise ValueError(
+                f"report_fold_scope must be one of {sorted(REPORT_FOLD_SCOPES)}; "
+                f"got {self.report_fold_scope!r}"
+            )
+        if self.report_self_term not in REPORT_SELF_TERM_MODES:
+            raise ValueError(
+                f"report_self_term must be one of {sorted(REPORT_SELF_TERM_MODES)}; "
+                f"got {self.report_self_term!r}"
+            )
+
+
+# The report-fold axes are appended to the fingerprint payload ONLY when active, so
+# a config at their identity defaults hashes byte-identically to the pre-Phase-1
+# payload (the legacy fields alone). See _report_fold_fingerprint_tokens.
+_REPORT_FOLD_FIELD_NAMES = ("report_fold_p", "report_fold_scope", "report_self_term")
+
+
+def _report_fold_fingerprint_tokens(config: RootCalcConfig) -> list[str]:
+    """Behaviourally-canonical fingerprint tokens for the report-fold axes.
+
+    Returns an empty list at the identity (so the payload is byte-unchanged) and
+    only the tokens that actually alter scoring otherwise:
+
+    - ``report_fold_p``: signed zero is canonicalized to +0.0 (a -0.0 exponent folds
+      nothing, exactly like +0.0), so it is omitted; a positive p is emitted.
+    - ``report_fold_scope``: emitted ONLY when p is active. With p == 0 the fold is
+      off, so the scope selects nothing and is inert — two configs differing only in
+      scope at p == 0 must share a fingerprint.
+    - ``report_self_term``: an orthogonal pre-fold quality choice that applies even
+      at p == 0, so it is emitted whenever it is not the ``"keep"`` identity.
+    """
+    tokens: list[str] = []
+    p = config.report_fold_p
+    # p == 0 (including -0.0, since -0.0 == 0.0) leaves the fold off, so BOTH p and
+    # the now-inert scope are omitted — signed/plain zero and any scope collapse to
+    # one fingerprint. A positive p is active: emit it and its scope.
+    if p != 0.0:
+        tokens.append(f"report_fold_p={p!r}")
+        tokens.append(f"report_fold_scope={config.report_fold_scope!r}")
+    if config.report_self_term != "keep":
+        tokens.append(f"report_self_term={config.report_self_term!r}")
+    return tokens
 
 
 def root_calc_config_fingerprint(config: RootCalcConfig | None = None) -> str:
-    """Return a stable fingerprint for the active root scoring configuration."""
-    config = config or RootCalcConfig()
-    payload = "|".join(
+    """Return a stable fingerprint for the active root scoring configuration.
+
+    Rejects every non-RootCalcConfig argument (including falsy values and a raw
+    GridCell) with ``TypeError`` via an explicit ``None`` branch — a GridCell must be
+    routed through its ``.config`` (the calibration script's ``_cfg_fp`` is the sole
+    sanctioned router), never fingerprinted directly. The dormant report-fold axes
+    are canonicalized so an identity config keeps its pre-Phase-1 fingerprint (see
+    :func:`_report_fold_fingerprint_tokens`).
+    """
+    if config is None:
+        config = RootCalcConfig()
+    elif not isinstance(config, RootCalcConfig):
+        raise TypeError(
+            "root_calc_config_fingerprint requires a RootCalcConfig or None; got "
+            f"{type(config).__name__}"
+        )
+    legacy = [
         f"{config_field.name}={getattr(config, config_field.name)!r}"
         for config_field in fields(config)
-    )
+        if config_field.name not in _REPORT_FOLD_FIELD_NAMES
+    ]
+    payload = "|".join(legacy + _report_fold_fingerprint_tokens(config))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

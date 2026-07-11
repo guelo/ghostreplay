@@ -8,6 +8,9 @@ from app.fen import active_color, normalize_fen
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import (
+    REPORT_FOLD_SCOPES,
+    REPORT_SCORER_CONTRACT_ID,
+    REPORT_SELF_TERM_MODES,
     SYNTHETIC_INITIAL_FEN,
     SYNTHETIC_ROOT_FAMILY,
     SYNTHETIC_ROOT_NAME,
@@ -1120,3 +1123,157 @@ def test_position_score_hard_zero_for_all_gate_failing_opponent_turn():
     # The no-data path is untouched: None score, has_evidence False.
     assert rows[off_book].has_evidence is False
     assert rows[off_book].opening_score is None
+
+
+# ---------------------------------------------------------------------------
+# Report-fold config surface + fingerprint compatibility (g-report-cfg-fp).
+#
+# The three dormant axes (report_fold_p / report_fold_scope / report_self_term) are
+# validated and first-class, but MUST NOT perturb any pre-existing config
+# fingerprint at their identity defaults. These GOLDEN hashes are pinned literals:
+# a change here is a cache-invalidating fingerprint change and must be intentional.
+# ---------------------------------------------------------------------------
+
+# root_calc_config_fingerprint(RootCalcConfig()) — the production default config.
+GOLDEN = "7ca0d6541f2fcf372b7548e0e4caead118547335d424a9359fd5089706fcd262"
+# root_calc_config_fingerprint(RootCalcConfig(lcb_z=0.0, coverage_fold="off")) — the
+# historical pre-readiness baseline cell.
+BASELINE_GOLDEN = "7dd8d067f55f88c26c150c192203bd58de57762aadaf43ab8b6752e3fa6b1bde"
+
+
+def test_report_fold_axes_have_identity_defaults():
+    config = RootCalcConfig()
+    assert config.report_fold_p == 0.0
+    assert config.report_fold_scope == "all"
+    assert config.report_self_term == "keep"
+    # The contract id ships at v1 (the dormant axes are config-captured).
+    assert REPORT_SCORER_CONTRACT_ID == "report-fold-v1"
+    assert REPORT_FOLD_SCOPES == frozenset({"all", "user"})
+    assert REPORT_SELF_TERM_MODES == frozenset({"keep", "drop_user"})
+
+
+def test_config_fingerprint_pins_golden_hashes():
+    # Both goldens are byte-stable after adding the dormant axes: the identity
+    # config and the historical baseline cell hash exactly as before Phase 1a.
+    assert root_calc_config_fingerprint() == GOLDEN
+    assert root_calc_config_fingerprint(RootCalcConfig()) == GOLDEN
+    assert (
+        root_calc_config_fingerprint(RootCalcConfig(lcb_z=0.0, coverage_fold="off"))
+        == BASELINE_GOLDEN
+    )
+
+
+def test_config_fingerprint_omits_inert_report_fold_fields():
+    # At p == 0 the fold is off, so report_fold_p and report_fold_scope select
+    # nothing: an identity-config scope/p change stays on GOLDEN. Signed and int zero
+    # canonicalize to the same +0.0.
+    assert root_calc_config_fingerprint(RootCalcConfig(report_fold_scope="user")) == GOLDEN
+    assert root_calc_config_fingerprint(RootCalcConfig(report_fold_p=-0.0)) == GOLDEN
+    assert root_calc_config_fingerprint(RootCalcConfig(report_fold_p=0)) == GOLDEN
+    assert (
+        root_calc_config_fingerprint(
+            RootCalcConfig(report_fold_p=0.0, report_fold_scope="user")
+        )
+        == GOLDEN
+    )
+
+
+def test_config_fingerprint_moves_for_active_axes():
+    # Active p and drop_user each move the fingerprint off GOLDEN; the two active
+    # scopes differ from each other.
+    active_all = root_calc_config_fingerprint(
+        RootCalcConfig(report_fold_p=0.5, report_fold_scope="all")
+    )
+    active_user = root_calc_config_fingerprint(
+        RootCalcConfig(report_fold_p=0.5, report_fold_scope="user")
+    )
+    assert active_all != GOLDEN
+    assert active_user != GOLDEN
+    assert active_all != active_user
+
+    drop_user = root_calc_config_fingerprint(RootCalcConfig(report_self_term="drop_user"))
+    assert drop_user != GOLDEN
+
+
+def test_config_fingerprint_scope_inert_when_only_drop_user_active():
+    # drop_user moves the fingerprint, but with p == 0 the scope is still inert: two
+    # drop_user configs differing only in scope share one fingerprint.
+    drop_all = root_calc_config_fingerprint(
+        RootCalcConfig(report_self_term="drop_user", report_fold_scope="all")
+    )
+    drop_user_scope = root_calc_config_fingerprint(
+        RootCalcConfig(report_self_term="drop_user", report_fold_scope="user")
+    )
+    assert drop_all != GOLDEN
+    assert drop_all == drop_user_scope
+
+
+def test_config_canonicalizes_report_fold_p_int_to_float():
+    # Accepted ints become floats so 0/0.0 and 1/1.0 share identity AND fingerprint.
+    assert isinstance(RootCalcConfig(report_fold_p=1).report_fold_p, float)
+    assert RootCalcConfig(report_fold_p=1).report_fold_p == 1.0
+    assert root_calc_config_fingerprint(
+        RootCalcConfig(report_fold_p=1)
+    ) == root_calc_config_fingerprint(RootCalcConfig(report_fold_p=1.0))
+
+
+@pytest.mark.parametrize("bad_p", [True, False])
+def test_config_rejects_bool_report_fold_p(bad_p):
+    # bool is a real int in Python; reject it before int→float would accept True as 1.
+    with pytest.raises(TypeError):
+        RootCalcConfig(report_fold_p=bad_p)
+
+
+@pytest.mark.parametrize("bad_p", ["0.5", 1j, None, [0.5]])
+def test_config_rejects_non_real_report_fold_p(bad_p):
+    with pytest.raises(TypeError):
+        RootCalcConfig(report_fold_p=bad_p)
+
+
+@pytest.mark.parametrize("bad_p", [float("nan"), float("inf"), float("-inf"), -0.5, -1])
+def test_config_rejects_non_finite_or_negative_report_fold_p(bad_p):
+    with pytest.raises(ValueError):
+        RootCalcConfig(report_fold_p=bad_p)
+
+
+@pytest.mark.parametrize("bad_p", [10**400, -(10**400)])
+def test_config_rejects_out_of_range_int_report_fold_p(bad_p):
+    # An int too large to represent as a float overflows float(p); it must surface as
+    # the promised ValueError (either sign), not a raw OverflowError.
+    with pytest.raises(ValueError):
+        RootCalcConfig(report_fold_p=bad_p)
+
+
+def test_config_rejects_unknown_report_fold_scope_and_self_term():
+    with pytest.raises(ValueError):
+        RootCalcConfig(report_fold_scope="bogus")
+    with pytest.raises(ValueError):
+        RootCalcConfig(report_self_term="bogus")
+    for scope in REPORT_FOLD_SCOPES:
+        assert RootCalcConfig(report_fold_scope=scope).report_fold_scope == scope
+    for mode in REPORT_SELF_TERM_MODES:
+        assert RootCalcConfig(report_self_term=mode).report_self_term == mode
+
+
+def test_config_fingerprint_none_returns_default():
+    assert root_calc_config_fingerprint(None) == root_calc_config_fingerprint(
+        RootCalcConfig()
+    )
+
+
+class _NotAConfig:
+    """A config look-alike that is NOT a RootCalcConfig (has the same fields)."""
+
+    report_fold_p = 0.0
+    report_fold_scope = "all"
+    report_self_term = "keep"
+
+
+@pytest.mark.parametrize("bad", [0, 0.0, "", False, [], {}, _NotAConfig()])
+def test_config_fingerprint_rejects_non_config_with_typeerror(bad):
+    # Falsy values used to slip through the old ``config or RootCalcConfig()`` and be
+    # silently treated as the default; the explicit None branch now rejects every
+    # non-RootCalcConfig (falsy included) with TypeError. (Raw GridCell rejection is
+    # covered in test_calibrate_opening_scores.)
+    with pytest.raises(TypeError):
+        root_calc_config_fingerprint(bad)
