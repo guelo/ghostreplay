@@ -5,7 +5,9 @@ from __future__ import annotations
 import math
 
 from app.accuracy import (
+    _MATE_CP,
     AccuracyMove,
+    _white_relative_cp,
     accuracy_from_win_percents,
     compute_game_accuracy,
     expected_total_moves_from_pgn,
@@ -63,6 +65,32 @@ def test_mate_eval_forced_to_cp():
     ]
     acc = compute_game_accuracy(moves, player_color="white", expected_total_moves=2)
     assert acc is not None
+
+
+def test_white_relative_cp_mate_zero_is_mover_win():
+    # Post-move mate-0 means the mover delivered checkmate (a WIN), so it must
+    # map to +_MATE_CP in the mover's color. A strictly negative mate count
+    # (mover getting mated) stays -_MATE_CP. eval_cp=None isolates the sign test.
+    assert _white_relative_cp(AccuracyMove("white", eval_cp=None, eval_mate=0)) == _MATE_CP
+    assert _white_relative_cp(AccuracyMove("black", eval_cp=None, eval_mate=0)) == -_MATE_CP
+    assert _white_relative_cp(AccuracyMove("white", eval_cp=None, eval_mate=-3)) == -_MATE_CP
+    assert _white_relative_cp(AccuracyMove("black", eval_cp=None, eval_mate=-3)) == _MATE_CP
+
+
+def test_checkmate_win_scores_high():
+    # A cleanly played white win ending in mate must score 100, not collapse to
+    # ~31 via the mate-0 sign flip zeroing the harmonic mean. eval_cp on the mate
+    # ply mirrors the real uploaded row; the mate branch ignores it.
+    moves = [
+        AccuracyMove("white", eval_cp=20, eval_mate=None),     # ply 0
+        AccuracyMove("black", eval_cp=-10, eval_mate=None),    # ply 1
+        AccuracyMove("white", eval_cp=60, eval_mate=None),     # ply 2
+        AccuracyMove("black", eval_cp=-40, eval_mate=None),    # ply 3
+        AccuracyMove("white", eval_cp=120, eval_mate=None),    # ply 4
+        AccuracyMove("black", eval_cp=-90, eval_mate=None),    # ply 5
+        AccuracyMove("white", eval_cp=10000, eval_mate=0),     # ply 6 — mate
+    ]
+    assert compute_game_accuracy(moves, "white", 7) == 100
 
 
 def test_steady_winning_game_high_accuracy():

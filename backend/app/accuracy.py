@@ -104,7 +104,11 @@ class AccuracyMove:
 
 def _white_relative_cp(move: AccuracyMove) -> int | None:
     if move.eval_mate is not None:
-        magnitude = _MATE_CP if move.eval_mate > 0 else -_MATE_CP
+        # Post-move mate-0 means the mover just delivered checkmate (the side to
+        # move is the mated one), so eval_mate == 0 is a mover WIN. Only a
+        # strictly negative mate count means the mover is getting mated. Mirrors
+        # the frontend's moverMateToWhiteCp resolution (analysisUtils.ts:137-143).
+        magnitude = _MATE_CP if move.eval_mate >= 0 else -_MATE_CP
         cp = magnitude
     elif move.eval_cp is not None:
         cp = move.eval_cp
