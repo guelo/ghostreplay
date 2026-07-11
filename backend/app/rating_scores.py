@@ -14,7 +14,19 @@ from app.rating import DEFAULT_RATING, compute_new_rating
 
 
 def latest_rating_order(model=RatingHistory):
-    return (model.recorded_at.desc(), model.games_played.desc(), model.id.desc())
+    """Order columns that select a user's durable rating head.
+
+    ``games_played`` first (g-rating-serial): the serialized games-played chain is
+    strictly monotone because each rated end reads the head under the users-row
+    lock and inserts ``head + 1``. Ordering by it first makes the head immune to
+    application clock skew — a row with a higher ``games_played`` but an earlier
+    ``recorded_at`` still wins. ``recorded_at DESC, id DESC`` only break ties.
+    This matches ``idx_rating_history_user_chain (user_id, games_played DESC,
+    recorded_at DESC, id DESC)`` so a head read is an index-order LIMIT 1 with no
+    Sort node. The chronological history time series keeps its own recorded_at ASC
+    order and does not use this helper.
+    """
+    return (model.games_played.desc(), model.recorded_at.desc(), model.id.desc())
 
 
 def rating_score(rating: int, is_provisional: bool, rd: float | None = None, volatility: float | None = None) -> dict:

@@ -1,4 +1,5 @@
 import os
+import threading
 import uuid
 from unittest.mock import patch
 
@@ -41,6 +42,12 @@ engine = create_engine(
     poolclass=StaticPool,
 )
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# Serializes the ``auth_headers`` users-row seed. The seed runs on the shared
+# in-memory SQLite StaticPool connection, which is a single DBAPI connection; the
+# fixture is called concurrently from Postgres concurrency tests, so the seed must
+# not race on that connection.
+_AUTH_SEED_LOCK = threading.Lock()
 
 
 def _create_test_schema(conn) -> None:
@@ -617,6 +624,28 @@ def db_session(_db_override):
 @pytest.fixture
 def auth_headers():
     def _auth_headers(user_id: int = 123, username: str = "ghost_test", is_anonymous: bool = True) -> dict:
+        # In production a valid token always maps to a real ``users`` row (register
+        # inserts the row, then mints the token off ``user.id``). Rated
+        # /api/game/end now takes a FOR NO KEY UPDATE lock on that row and fails
+        # closed with 500 when it is missing (g-rating-serial), so mirror the
+        # invariant here: idempotently seed the backing row for every token minted.
+        # Seed ``username=None`` (SQLite/PG both allow repeated NULLs under the
+        # unique-username constraint) so a single test can mint tokens for several
+        # distinct user_ids without colliding on the default username.
+        #
+        # The seed touches the shared in-memory SQLite StaticPool connection, so it
+        # must serialize: Postgres concurrency tests call this fixture from several
+        # threads at once (e.g. one token per worker), and unguarded concurrent use
+        # of the single SQLite connection corrupts cursor state. The lock keeps
+        # ``auth_headers`` safe to call concurrently, as it was before it seeded.
+        with _AUTH_SEED_LOCK:
+            seed = TestingSessionLocal()
+            try:
+                if seed.get(User, user_id) is None:
+                    seed.add(User(id=user_id, username=None, is_anonymous=is_anonymous))
+                    seed.commit()
+            finally:
+                seed.close()
         token = create_access_token(user_id=user_id, username=username, is_anonymous=is_anonymous)
         return {"Authorization": f"Bearer {token}"}
 

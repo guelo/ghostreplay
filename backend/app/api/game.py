@@ -18,7 +18,7 @@ from app.accuracy import expected_total_moves_from_pgn
 from app.db import get_db
 from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
-from app.models import GameSession, Position, RatingHistory, decode_uci_line
+from app.models import GameSession, Position, RatingHistory, User, decode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_cache import bump_evidence_seq
 from app.opening_evidence import session_is_evidence_eligible
@@ -726,9 +726,24 @@ def end_game(
     session.pgn = request.pgn
     effective_is_rated = session.is_rated if session.session_mode == DRILL_SESSION_MODE else request.is_rated
     session.is_rated = effective_is_rated
+    # Seam (g-accuracy-hooks): cached-accuracy recompute belongs HERE — after the
+    # terminal mutation above and before the users lock below — so its dirty
+    # accuracy assignment drains in the same pre-cursor flush().
     # Compute rating change for rated results
     rating_change = None
     if effective_is_rated and request.result.value in RESULT_SCORES:
+        # Serialize this user's rated game-end chain (g-rating-serial). Lock the
+        # users row FOR NO KEY UPDATE BEFORE reading the durable rating head so
+        # concurrent rated ends for the same user — even across distinct sessions —
+        # cannot both read the same head and insert the same games_played. The
+        # loser blocks on this lock until the winner commits, then reads the
+        # winner's row and chains games_played += 1 off it. A missing users row is
+        # an invariant violation (a valid token always has a backing users row):
+        # fail closed with 500 and persist no rating rather than orphan a row.
+        if for_no_key_update(
+            db.query(User.id).filter(User.id == user.user_id)
+        ).one_or_none() is None:
+            raise HTTPException(status_code=500, detail="User record not found")
         latest = (
             db.query(RatingHistory)
             .filter(RatingHistory.user_id == user.user_id)
