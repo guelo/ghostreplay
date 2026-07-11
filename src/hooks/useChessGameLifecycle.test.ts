@@ -1823,6 +1823,67 @@ describe("useChessGameLifecycle", () => {
     );
   });
 
+  // g-terminal-draws: the same final-upload path fills an unresolved terminal
+  // DRAW ply through the draw branch of the shared helper — eval_cp=0,
+  // eval_mate=null, eval_delta=null, synthetic_terminal_eval=true — proving the
+  // draw values (not just checkmate) reach the payload end-to-end.
+  it("game-end: fills an unresolved terminal-draw final ply on the final upload", async () => {
+    const chess = new Chess();
+    // Sam Loyd's fastest stalemate: White's final Qe6 stalemates Black.
+    const moveHistory = [
+      "e3", "a5", "Qh5", "Ra6", "Qxa5", "h5", "Qxc7", "Rah6", "h4", "f6",
+      "Qxd7+", "Kf7", "Qxb7", "Qd3", "Qxb8", "Qh7", "Qxc8", "Kg6", "Qe6",
+    ].map((san) => {
+      const move = chess.move(san);
+      return {
+        san: move.san,
+        fen: chess.fen(),
+        uci: move.from + move.to + (move.promotion ?? ""),
+      };
+    });
+    if (!chess.isStalemate()) throw new Error("Unable to construct stalemate test line");
+    const { result, coordinator } = setup({
+      chess,
+      moveHistory,
+      isGameActive: true,
+      isRated: false,
+      playerColor: "white",
+    });
+
+    await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+    endGameMock.mockResolvedValueOnce({
+      session_id: "session-123",
+      result: "draw",
+      ended_at: "2026-04-28T00:00:00Z",
+      rating: null,
+      opening_score_changes: OPENING_CHANGES,
+    });
+
+    await act(async () => {
+      await result.current.handleGameEnd();
+    });
+
+    expect(coordinator.stopSessionUploads).toHaveBeenCalled();
+    expect(uploadSessionMovesMock).toHaveBeenCalled();
+    // stop precedes the final upload (the folded-in invariant), unchanged by draws.
+    expect(
+      vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
+    ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
+    const payload = uploadSessionMovesMock.mock.calls[0][1];
+    expect(payload).toHaveLength(moveHistory.length);
+    expect(payload[payload.length - 1]).toEqual(
+      expect.objectContaining({
+        move_san: "Qe6",
+        eval_cp: 0,
+        eval_mate: null,
+        eval_delta: null,
+        synthetic_terminal_eval: true,
+      }),
+    );
+    // Only the terminal ply is stamped; the penultimate stays unresolved/unmarked.
+    expect(payload[payload.length - 2]).not.toHaveProperty("synthetic_terminal_eval");
+  });
+
   it("resign: stops uploads before the final upload and flags the opportunity recompute", async () => {
     const chess = new Chess();
     chess.move("e4");

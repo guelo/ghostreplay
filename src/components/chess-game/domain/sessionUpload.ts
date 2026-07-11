@@ -76,12 +76,34 @@ export const buildSessionMoveUploads = (
 };
 
 /**
- * Fill the analysis race's one safe residual: an unresolved final move that is
- * provably checkmate. The whole uploaded game is replayed and bound to its FEN
- * chain before anything is changed. Invalid, partial, or nonterminal input is
- * returned untouched and never throws.
+ * Fill the analysis race's one safe residual: an unresolved final move whose
+ * position is provably terminal — checkmate or any draw (stalemate, threefold
+ * repetition, fifty-move, insufficient material). The whole uploaded game is
+ * replayed and bound to its FEN chain from the known opening before anything is
+ * changed, so terminality is read from the RECONSTRUCTED history rather than
+ * the bare final FEN: threefold repetition is undetectable from a lone FEN (the
+ * repetition count is not encoded), and the fifty-move clock is only carried
+ * because the replay recomputes it. That same replay is the completeness guard
+ * — a truncated suffix, an extended history that ended earlier, a skipped ply,
+ * or a mismatched FEN all fail closed.
+ *
+ * Fill values (mover-relative, aligned with the worker's stored convention):
+ *   - checkmate -> eval_cp=+MATE_BASE_CP, eval_mate=0, eval_delta=0 (a mating
+ *     move is provably unbeatable, so delta 0 is exact);
+ *   - terminal draw -> eval_cp=0, eval_mate=null, eval_delta=null. The played
+ *     position is fixed at 0, but a draw does NOT prove the move was best
+ *     (repetition / stalemate / fifty-move can squander a win), so the delta is
+ *     unknown. It is EXPLICITLY nulled — eval_delta is independently nullable
+ *     and the resolved-guard only inspects eval_cp/eval_mate, so an unresolved
+ *     row can still carry a stale non-null delta that must not survive.
+ *
+ * Strictly an unresolved-eval fill: a resolved worker analysis (eval_cp or
+ * eval_mate non-null on the final row) always wins and is never overridden —
+ * including a resolved threefold draw whose worker search produced a nonzero
+ * eval. Invalid, partial, extended, or nonterminal input is returned untouched
+ * and never throws.
  */
-export const fillUnresolvedTerminalMate = (
+export const fillUnresolvedTerminal = (
   uploads: SessionMoveUpload[],
   expectedStartingFen: string,
 ): SessionMoveUpload[] => {
@@ -95,6 +117,15 @@ export const fillUnresolvedTerminalMate = (
 
   try {
     const replay = new Chess(expectedStartingFen);
+    // The opening itself must not already be terminal. chess.js still permits
+    // legal moves from some drawn positions (e.g. a bishop shuffle in K+B vs K),
+    // so a one-ply chain from an already-drawn start would replay cleanly and
+    // stay game-over at the final row — but the move did NOT reach the terminal,
+    // the position was drawn before it. The in-loop early-terminal check only
+    // fires AFTER a move and is skipped for a sole (index 0 == last) row, so this
+    // must be caught up front. Extends completeness guard (c) — "not terminal
+    // before the final row" — back to before the FIRST row (g-terminal-startdraw).
+    if (replay.isGameOver()) return uploads;
 
     for (let index = 0; index < uploads.length; index += 1) {
       const upload = uploads[index];
@@ -113,16 +144,24 @@ export const fillUnresolvedTerminalMate = (
       if (index < uploads.length - 1 && replay.isGameOver()) return uploads;
     }
 
-    if (!replay.isCheckmate()) return uploads;
+    if (!replay.isGameOver()) return uploads;
 
     const filled = uploads.slice();
-    filled[filled.length - 1] = {
-      ...final,
-      eval_cp: MATE_BASE_CP,
-      eval_mate: 0,
-      eval_delta: 0,
-      synthetic_terminal_eval: true,
-    };
+    filled[filled.length - 1] = replay.isCheckmate()
+      ? {
+          ...final,
+          eval_cp: MATE_BASE_CP,
+          eval_mate: 0,
+          eval_delta: 0,
+          synthetic_terminal_eval: true,
+        }
+      : {
+          ...final,
+          eval_cp: 0,
+          eval_mate: null,
+          eval_delta: null,
+          synthetic_terminal_eval: true,
+        };
     return filled;
   } catch {
     return uploads;

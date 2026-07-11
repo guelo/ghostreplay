@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Chess } from "chess.js";
 import {
   buildDrillAnalysisSnapshot,
-  fillUnresolvedTerminalMate,
+  fillUnresolvedTerminal,
 } from "./sessionUpload";
 import type { MoveRecord } from "./movePresentation";
 import type { AnalysisResult } from "../../../hooks/useMoveAnalysis";
@@ -37,8 +37,11 @@ const analysis = (overrides: Partial<AnalysisResult> = {}): AnalysisResult => ({
   ...overrides,
 });
 
-const uploadsFor = (sans: string[]): SessionMoveUpload[] => {
-  const chess = new Chess(STARTING_FEN);
+const uploadsFor = (
+  sans: string[],
+  startingFen: string = STARTING_FEN,
+): SessionMoveUpload[] => {
+  const chess = new Chess(startingFen);
   return sans.map((san, index) => {
     const fenBefore = chess.fen();
     const move = chess.move(san);
@@ -63,13 +66,41 @@ const uploadsFor = (sans: string[]): SessionMoveUpload[] => {
   });
 };
 
-describe("fillUnresolvedTerminalMate", () => {
+// Mark the final ply unresolved — the analysis-race residual the fill exists to
+// patch: null the worker eval so the resolved-guard does not short-circuit.
+const withUnresolvedFinal = (
+  uploads: SessionMoveUpload[],
+): SessionMoveUpload[] => {
+  const last = uploads.length - 1;
+  uploads[last] = { ...uploads[last], eval_cp: null, eval_mate: null };
+  return uploads;
+};
+
+// Fields a terminal DRAW fill must produce: played eval 0, no mate, and — unlike
+// checkmate — an explicitly-null delta (a draw does not prove the move was best).
+const DRAW_FILL = {
+  eval_cp: 0,
+  eval_mate: null,
+  eval_delta: null,
+  synthetic_terminal_eval: true,
+};
+
+// A repeating knight cycle returns to the start each 4 plies; the 3rd occurrence
+// (8 plies) is threefold. Bare-FEN detection would MISS it — the count is not in
+// the FEN — but the chain replay reconstructs the history and detects it.
+const THREEFOLD_LINE = ["Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Ng8"];
+// Custom starts for the two draws that need a tailored position. Both round-trip
+// through chess.js, so uploads[0].fen_before === the expectedStartingFen passed.
+const FIFTY_MOVE_START = "8/8/4k3/8/8/4K3/8/1R6 w - - 99 60"; // one quiet move -> clock 100
+const INSUFFICIENT_START = "k7/8/8/5n2/8/3B4/8/4K3 w - - 0 1"; // Bxf5 -> K+B vs K
+
+describe("fillUnresolvedTerminal", () => {
   it("fills only an unresolved final checkmating ply with terminal provenance", () => {
     const uploads = uploadsFor(["f3", "e5", "g4", "Qh4#"]);
     uploads[2] = { ...uploads[2], eval_cp: null, eval_mate: null };
     uploads[3] = { ...uploads[3], eval_cp: null, eval_mate: null, eval_delta: null };
 
-    const result = fillUnresolvedTerminalMate(uploads, STARTING_FEN);
+    const result = fillUnresolvedTerminal(uploads, STARTING_FEN);
 
     expect(result).not.toBe(uploads);
     expect(result[2]).toBe(uploads[2]);
@@ -84,11 +115,11 @@ describe("fillUnresolvedTerminalMate", () => {
 
   it("never overwrites a resolved final row", () => {
     const uploads = uploadsFor(["f3", "e5", "g4", "Qh4#"]);
-    expect(fillUnresolvedTerminalMate(uploads, STARTING_FEN)).toBe(uploads);
+    expect(fillUnresolvedTerminal(uploads, STARTING_FEN)).toBe(uploads);
 
     const mateOnly = uploads.slice();
     mateOnly[3] = { ...mateOnly[3], eval_cp: null, eval_mate: 1 };
-    expect(fillUnresolvedTerminalMate(mateOnly, STARTING_FEN)).toBe(mateOnly);
+    expect(fillUnresolvedTerminal(mateOnly, STARTING_FEN)).toBe(mateOnly);
   });
 
   it.each([
@@ -97,7 +128,7 @@ describe("fillUnresolvedTerminalMate", () => {
     ["truncated mate line", () => uploadsFor(["f3", "e5", "g4"]).map((u, i, a) => i === a.length - 1 ? { ...u, eval_cp: null } : u)],
   ])("leaves %s input unchanged", (_name, makeUploads) => {
     const uploads = makeUploads();
-    expect(fillUnresolvedTerminalMate(uploads, STARTING_FEN)).toBe(uploads);
+    expect(fillUnresolvedTerminal(uploads, STARTING_FEN)).toBe(uploads);
   });
 
   it.each([
@@ -114,14 +145,14 @@ describe("fillUnresolvedTerminalMate", () => {
     const uploads = uploadsFor(["f3", "e5", "g4", "Qh4#"]);
     uploads[uploads.length - 1] = { ...uploads[uploads.length - 1], eval_cp: null };
     corrupt(uploads);
-    expect(() => fillUnresolvedTerminalMate(uploads, STARTING_FEN)).not.toThrow();
-    expect(fillUnresolvedTerminalMate(uploads, STARTING_FEN)).toBe(uploads);
+    expect(() => fillUnresolvedTerminal(uploads, STARTING_FEN)).not.toThrow();
+    expect(fillUnresolvedTerminal(uploads, STARTING_FEN)).toBe(uploads);
   });
 
   it("rejects a legal truncated suffix that does not start at the known opening", () => {
     const full = uploadsFor(["f3", "e5", "g4", "Qh4#"]);
     const suffix = [{ ...full[3], eval_cp: null, eval_mate: null }];
-    expect(fillUnresolvedTerminalMate(suffix, STARTING_FEN)).toBe(suffix);
+    expect(fillUnresolvedTerminal(suffix, STARTING_FEN)).toBe(suffix);
   });
 
   it("rejects a game that was already terminal before its final row", () => {
@@ -131,15 +162,117 @@ describe("fillUnresolvedTerminalMate", () => {
       "f3", "e5", "g4", "Qh4#",
     ]);
     uploads[uploads.length - 1] = { ...uploads[uploads.length - 1], eval_cp: null };
-    expect(fillUnresolvedTerminalMate(uploads, STARTING_FEN)).toBe(uploads);
+    expect(fillUnresolvedTerminal(uploads, STARTING_FEN)).toBe(uploads);
   });
 
   it("does not throw when the exact expected starting FEN is malformed", () => {
     const uploads = uploadsFor(["f3", "e5", "g4", "Qh4#"]);
     uploads[0] = { ...uploads[0], fen_before: "not a fen" };
     uploads[3] = { ...uploads[3], eval_cp: null };
-    expect(() => fillUnresolvedTerminalMate(uploads, "not a fen")).not.toThrow();
-    expect(fillUnresolvedTerminalMate(uploads, "not a fen")).toBe(uploads);
+    expect(() => fillUnresolvedTerminal(uploads, "not a fen")).not.toThrow();
+    expect(fillUnresolvedTerminal(uploads, "not a fen")).toBe(uploads);
+  });
+
+  it.each([
+    [
+      "stalemate",
+      [
+        "e3", "a5", "Qh5", "Ra6", "Qxa5", "h5", "Qxc7", "Rah6", "h4", "f6",
+        "Qxd7+", "Kf7", "Qxb7", "Qd3", "Qxb8", "Qh7", "Qxc8", "Kg6", "Qe6",
+      ],
+      STARTING_FEN,
+    ],
+    ["threefold repetition", THREEFOLD_LINE, STARTING_FEN],
+    ["the fifty-move rule", ["Rb5"], FIFTY_MOVE_START],
+    ["insufficient material", ["Bxf5"], INSUFFICIENT_START],
+  ])(
+    "fills an unresolved terminal-draw final ply for %s",
+    (_name, sans, start) => {
+      const uploads = withUnresolvedFinal(uploadsFor(sans, start));
+
+      const result = fillUnresolvedTerminal(uploads, start);
+
+      expect(result).not.toBe(uploads);
+      // Earlier plies are never touched — only the terminal ply is synthesized.
+      expect(result.slice(0, -1)).toEqual(uploads.slice(0, -1));
+      expect(result[result.length - 1]).toEqual(
+        expect.objectContaining(DRAW_FILL),
+      );
+    },
+  );
+
+  it("clears a stale non-null eval_delta when filling a terminal draw", () => {
+    const uploads = uploadsFor(THREEFOLD_LINE);
+    const last = uploads.length - 1;
+    // Unresolved eval, but a STALE non-null delta the builder left behind. The
+    // resolved-guard inspects only eval_cp/eval_mate, so this row still fills —
+    // and the draw branch must EXPLICITLY null the delta, not leave the 42.
+    uploads[last] = {
+      ...uploads[last],
+      eval_cp: null,
+      eval_mate: null,
+      eval_delta: 42,
+    };
+
+    const result = fillUnresolvedTerminal(uploads, STARTING_FEN);
+
+    expect(result[last].eval_delta).toBeNull();
+    expect(result[last]).toEqual(expect.objectContaining(DRAW_FILL));
+  });
+
+  it("never overwrites a resolved threefold-drawn final row", () => {
+    // A repetition draw whose worker analysis DID resolve carries a real, nonzero
+    // search eval (the worker runs a full search — no terminal short-circuit for
+    // threefold). The resolved-guard keeps it; the fill does not rewrite it to 0.
+    const uploads = uploadsFor(THREEFOLD_LINE);
+    const last = uploads.length - 1;
+    uploads[last] = { ...uploads[last], eval_cp: 37, eval_mate: null };
+
+    const result = fillUnresolvedTerminal(uploads, STARTING_FEN);
+
+    expect(result).toBe(uploads);
+    expect(result[last].eval_cp).toBe(37);
+    expect(result[last]).not.toHaveProperty("synthetic_terminal_eval");
+  });
+
+  it("distinguishes a threefold repetition from the same placement without the repetition history", () => {
+    const cycle = ["Nf3", "Nf6", "Ng1", "Ng8"];
+    // A: two full cycles reach the 3rd occurrence -> threefold -> drawn.
+    const threefold = withUnresolvedFinal(uploadsFor([...cycle, ...cycle]));
+    const drawn = fillUnresolvedTerminal(threefold, STARTING_FEN);
+    expect(drawn[drawn.length - 1]).toEqual(expect.objectContaining(DRAW_FILL));
+
+    // B: one cycle reaches the SAME board placement, but only the 2nd occurrence
+    // — not yet a draw. Terminality is read from the replayed history, so B is
+    // NOT stamped despite the identical final placement.
+    const notYet = withUnresolvedFinal(uploadsFor(cycle));
+    expect(fillUnresolvedTerminal(notYet, STARTING_FEN)).toBe(notYet);
+  });
+
+  it("fails closed when a fifty-move draw's final halfmove clock is altered", () => {
+    const uploads = withUnresolvedFinal(uploadsFor(["Rb5"], FIFTY_MOVE_START));
+    const last = uploads.length - 1;
+    // The fifty-move rule fires at exactly clock 100; a stale row that reports
+    // clock 99 for the same placement must not be stamped. The replay produces
+    // 100, so the exact fen_after binding rejects the row and the fill no-ops.
+    const fields = uploads[last].fen_after.split(" ");
+    fields[4] = "99";
+    uploads[last] = { ...uploads[last], fen_after: fields.join(" ") };
+
+    expect(fillUnresolvedTerminal(uploads, FIFTY_MOVE_START)).toBe(uploads);
+  });
+
+  it("fails closed for a continuation from an already-terminal starting FEN", () => {
+    // K+B vs K is insufficient material — already game-over — yet chess.js still
+    // allows a bishop shuffle. A one-ply chain from it replays cleanly and stays
+    // game-over at the final row, but the move did not REACH the terminal, so it
+    // must no-op. The in-loop early-terminal check is skipped for the sole row,
+    // so the up-front start-terminal guard is what catches it (g-terminal-startdraw).
+    const TERMINAL_START = "4k3/8/8/8/8/8/8/2B1K3 w - - 0 1";
+    const uploads = withUnresolvedFinal(uploadsFor(["Bd2"], TERMINAL_START));
+
+    expect(fillUnresolvedTerminal(uploads, TERMINAL_START)).toBe(uploads);
+    expect(uploads[uploads.length - 1]).not.toHaveProperty("synthetic_terminal_eval");
   });
 });
 
