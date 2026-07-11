@@ -4405,26 +4405,56 @@
     position: relative;
 }
 
-/* What-if (variation) mode: wash out only the board squares (and the pieces +
-   highlight tints nested inside them) so the position reads as a hypothetical,
-   disabled-looking exploration — while move arrows and the eval-icon badge keep
-   full saturation/contrast for legibility. saturate/brightness/contrast are
-   per-pixel point filters, so filtering each square independently is visually
-   identical to filtering the whole board — no seams. Depends on react-chessboard
-   tagging every square with data-square; if a future upgrade drops it the wash
-   simply stops (squares show full color) rather than breaking layout. */
-.analysis-board__board-frame--variation [data-square] {
-    filter: saturate(0.55) brightness(1.06) contrast(0.95);
-    transition: filter 0.2s ease;
+/* What-if (variation) mode: wash out the board squares + the pieces and highlight
+   tints painted on them, so the position reads as a hypothetical, disabled-looking
+   exploration — while the move arrows and eval-icon badge keep full saturation for
+   legibility.
+
+   Implemented as ONE board-sized backdrop-filter overlay rather than a per-square
+   `filter`. A `filter` on each [data-square] turns every square into its own
+   stacking context, which traps react-chessboard's animated piece (position:relative;
+   z-index:10) inside the source square's context so it paints BEHIND later squares
+   mid-move (g-kepv). The overlay instead sits at z-index 15 — above the animating
+   piece (z-10) but below the arrow SVG (z-20) and the eval badge (z-100) — and its
+   backdrop-filter washes only what paints behind it (squares + pieces), leaving
+   arrows/badges vivid. saturate/brightness/contrast are per-pixel point filters, so
+   the single overlay is visually identical to the old per-square wash. Because the
+   squares are no longer stacking contexts, the animated piece's z-index:10 now lifts
+   it above sibling squares normally, so board animations render correctly while washed.
+
+   `isolation: isolate` on the board grid scopes the overlay's z-index to the board so
+   it can't rise over the return-to-live pill / badges that live outside it. Targets
+   the react-chessboard grid div (id ends in `-board`); if a future upgrade renames it
+   the wash simply stops rather than breaking layout. */
+.analysis-board__board-frame--variation [id$="-board"] {
+    isolation: isolate;
+}
+.analysis-board__board-frame--variation [id$="-board"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    pointer-events: none;
+    -webkit-backdrop-filter: saturate(0.55) brightness(1.06) contrast(0.95);
+    backdrop-filter: saturate(0.55) brightness(1.06) contrast(0.95);
+    transition: -webkit-backdrop-filter 0.2s ease, backdrop-filter 0.2s ease;
 }
 
 /* Reviewing a past move during a LIVE game: a lighter cousin of the what-if wash
-   (.analysis-board__board-frame--variation) — same per-square [data-square] scoping so
-   blunder arrows stay vivid, but noticeably LESS desaturated so the live game still reads
-   as in-progress, not a disabled hypothetical. */
-.chessboard-square-measure--reviewing [data-square] {
-    filter: saturate(0.58) brightness(1.03) contrast(0.97) ;
-    transition: filter 0.2s ease;
+   (same board-sized backdrop-filter overlay), but noticeably LESS desaturated so the
+   live game still reads as in-progress, not a disabled hypothetical. */
+.chessboard-square-measure--reviewing [id$="-board"] {
+    isolation: isolate;
+}
+.chessboard-square-measure--reviewing [id$="-board"]::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 15;
+    pointer-events: none;
+    -webkit-backdrop-filter: saturate(0.58) brightness(1.03) contrast(0.97);
+    backdrop-filter: saturate(0.58) brightness(1.03) contrast(0.97);
+    transition: -webkit-backdrop-filter 0.2s ease, backdrop-filter 0.2s ease;
 }
 
 /* g-1y68 B2 — amber frame while reviewing: reads as "different mode" more

@@ -402,6 +402,20 @@ describe('AnalysisBoard — what-if graph', () => {
     expect(frame?.classList.contains('analysis-board__board-frame--variation')).toBe(false)
   })
 
+  // g-kepv is fixed in CSS (a board-sized backdrop-filter wash that no longer makes
+  // each square a stacking context), so the board must KEEP animating in what-if
+  // mode — showAnimations must not be disabled, animation stays 200ms.
+  it('keeps board animations enabled in what-if/variation mode (g-kepv)', () => {
+    const node = makeNode({})
+    mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
+    mockSelectedVarNodeId = 'var-1'
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(capturedChessboardProps.showAnimations).not.toBe(false)
+    expect(capturedChessboardProps.animationDurationInMs).toBe(200)
+  })
+
   it('builds a variationLine with an anchor at the departure move and a pending tip', () => {
     const node = makeNode({})
     mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }

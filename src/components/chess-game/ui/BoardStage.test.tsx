@@ -37,6 +37,8 @@ vi.mock("react-chessboard", () => ({
         data-instance-id={String(instanceIdRef.current)}
         data-position={options.position as string}
         data-orientation={options.boardOrientation as string}
+        data-show-animations={String(options.showAnimations)}
+        data-animation-ms={String(options.animationDurationInMs)}
       >
         <button
           type="button"
@@ -375,6 +377,17 @@ describe("BoardStage", () => {
     expect(
       container.querySelector(".chessboard-square-measure"),
     ).not.toBeNull();
+  });
+
+  it("keeps board animations enabled while reviewing a past move (g-kepv)", () => {
+    // g-kepv is fixed in CSS (a board-sized backdrop-filter wash that no longer
+    // makes each square a stacking context), so the board must KEEP animating
+    // while reviewing — showAnimations must not be disabled, animation stays 200ms.
+    const props = makeProps();
+    render(<BoardStage {...props} isReviewingPast />);
+    const board = screen.getByTestId("board");
+    expect(board).not.toHaveAttribute("data-show-animations", "false");
+    expect(board).toHaveAttribute("data-animation-ms", "200");
   });
 
   it("shows the return-to-live pill while reviewing and fires onReturnToLive on click", () => {
