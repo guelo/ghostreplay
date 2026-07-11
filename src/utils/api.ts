@@ -601,6 +601,8 @@ export interface SessionMoveUpload {
   best_line_uci?: string[] | null
   decision_source: SessionDecisionSource | null
   target_blunder_id: number | null
+  /** True only for a deterministic terminal score synthesized by the client. */
+  synthetic_terminal_eval?: boolean
 }
 
 interface SessionMovesRequest {

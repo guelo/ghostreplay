@@ -1761,14 +1761,19 @@ describe("useChessGameLifecycle", () => {
   // into uploadFullMoveHistoryBeforeEnd, so every terminal path inherits it) and
   // carries recomputeOpportunity:true so opportunity is recomputed exactly once.
   it("game-end: stops uploads before the final upload and flags the opportunity recompute", async () => {
-    const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
-    const move = chess.move({ from: "g6", to: "g7" });
-    if (!move || !chess.isCheckmate()) {
-      throw new Error("Unable to construct terminal test move");
-    }
+    const chess = new Chess();
+    const moveHistory = ["f3", "e5", "g4", "Qh4#"].map((san) => {
+      const move = chess.move(san);
+      return {
+        san: move.san,
+        fen: chess.fen(),
+        uci: move.from + move.to + (move.promotion ?? ""),
+      };
+    });
+    if (!chess.isCheckmate()) throw new Error("Unable to construct terminal test line");
     const { result, coordinator } = setup({
       chess,
-      moveHistory: [{ san: move.san, fen: chess.fen(), uci: "g6g7" }],
+      moveHistory,
       isGameActive: true,
       isRated: false,
       playerColor: "white",
@@ -1796,6 +1801,25 @@ describe("useChessGameLifecycle", () => {
     // The final upload drives the single opportunity recompute.
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
       expect.objectContaining({ recomputeOpportunity: true }),
+    );
+    expect(uploadSessionMovesMock.mock.calls[0][1]).toHaveLength(4);
+    expect(uploadSessionMovesMock.mock.calls[0][1][2]).toEqual(
+      expect.objectContaining({
+        eval_cp: null,
+        eval_mate: null,
+      }),
+    );
+    expect(uploadSessionMovesMock.mock.calls[0][1][2]).not.toHaveProperty(
+      "synthetic_terminal_eval",
+    );
+    expect(uploadSessionMovesMock.mock.calls[0][1][3]).toEqual(
+      expect.objectContaining({
+        move_san: "Qh4#",
+        eval_cp: 10000,
+        eval_mate: 0,
+        eval_delta: 0,
+        synthetic_terminal_eval: true,
+      }),
     );
   });
 

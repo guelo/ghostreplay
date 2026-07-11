@@ -9,6 +9,7 @@ import { parseUciInfoLine } from './parseInfo'
 // low-level module never imports from the hook layer (which would form a
 // workers -> hooks cycle). MoveClassification is re-exported below so existing
 // consumers that import it from analysisUtils keep working unchanged.
+import { MATE_BASE_CP } from '../types/analysis'
 import type { MoveClassification, AnalysisResult } from '../types/analysis'
 
 export type { MoveClassification }
@@ -29,12 +30,11 @@ export const parseScoreInfo = (line: string): ParsedInfo | null => {
 }
 
 export const mateToCp = (movesToMate: number) => {
-  const mateBase = 10000
   const mateDecay = 10
   // mate 0 means the side to move is checkmated (lost)
-  if (movesToMate === 0) return -mateBase
+  if (movesToMate === 0) return -MATE_BASE_CP
   const sign = movesToMate >= 0 ? 1 : -1
-  return sign * (mateBase - Math.abs(movesToMate) * mateDecay)
+  return sign * (MATE_BASE_CP - Math.abs(movesToMate) * mateDecay)
 }
 
 export const normalizeScore = (score: EngineScore | null, sideToMove: 'w' | 'b') => {

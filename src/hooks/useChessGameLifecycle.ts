@@ -28,7 +28,10 @@ import type { BoardOrientation, OpenHistoryOptions, ResolvedReview } from "../co
 import { useGameStore } from "../stores/useGameStore";
 import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
 import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
-import { buildSessionMoveUploads } from "../components/chess-game/domain/sessionUpload";
+import {
+  buildSessionMoveUploads,
+  fillUnresolvedTerminalMate,
+} from "../components/chess-game/domain/sessionUpload";
 import { STARTING_FEN } from "../components/chess-game/config";
 import type { RatingScores } from "../utils/api";
 
@@ -253,9 +256,12 @@ export const useChessGameLifecycle = ({
       // terminal, so the permanent disable until the next startSession is correct.
       coordinator.stopSessionUploads();
       try {
-        const uploads = buildSessionMoveUploads(
-          useGameStore.getState().moveHistory,
-          new Map(coordinator.store.getState().analysisMap),
+        const uploads = fillUnresolvedTerminalMate(
+          buildSessionMoveUploads(
+            useGameStore.getState().moveHistory,
+            new Map(coordinator.store.getState().analysisMap),
+            STARTING_FEN,
+          ),
           STARTING_FEN,
         );
         if (uploads.length > 0) {

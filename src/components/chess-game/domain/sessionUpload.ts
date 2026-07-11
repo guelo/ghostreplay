@@ -6,6 +6,7 @@ import type {
   SessionMoveUpload,
 } from "../../../utils/api";
 import type { MoveRecord } from "./movePresentation";
+import { MATE_BASE_CP } from "../../../types/analysis";
 
 export const parseUciToSan = (
   fenBeforeMove: string,
@@ -72,6 +73,60 @@ export const buildSessionMoveUploads = (
   return history.map((_, index) =>
     buildUploadForIndex(history, analysesByIndex, index, startingFen)!,
   );
+};
+
+/**
+ * Fill the analysis race's one safe residual: an unresolved final move that is
+ * provably checkmate. The whole uploaded game is replayed and bound to its FEN
+ * chain before anything is changed. Invalid, partial, or nonterminal input is
+ * returned untouched and never throws.
+ */
+export const fillUnresolvedTerminalMate = (
+  uploads: SessionMoveUpload[],
+  expectedStartingFen: string,
+): SessionMoveUpload[] => {
+  if (uploads.length === 0) return uploads;
+
+  const final = uploads[uploads.length - 1];
+  if (final.eval_cp !== null || final.eval_mate !== null) {
+    return uploads;
+  }
+  if (uploads[0].fen_before !== expectedStartingFen) return uploads;
+
+  try {
+    const replay = new Chess(expectedStartingFen);
+
+    for (let index = 0; index < uploads.length; index += 1) {
+      const upload = uploads[index];
+      if (
+        upload.move_number !== Math.floor(index / 2) + 1 ||
+        upload.color !== (index % 2 === 0 ? "white" : "black") ||
+        upload.fen_before !== replay.fen()
+      ) {
+        return uploads;
+      }
+
+      const move = replay.move(upload.move_san);
+      if (!move || move.san !== upload.move_san || replay.fen() !== upload.fen_after) {
+        return uploads;
+      }
+      if (index < uploads.length - 1 && replay.isGameOver()) return uploads;
+    }
+
+    if (!replay.isCheckmate()) return uploads;
+
+    const filled = uploads.slice();
+    filled[filled.length - 1] = {
+      ...final,
+      eval_cp: MATE_BASE_CP,
+      eval_mate: 0,
+      eval_delta: 0,
+      synthetic_terminal_eval: true,
+    };
+    return filled;
+  } catch {
+    return uploads;
+  }
 };
 
 /**

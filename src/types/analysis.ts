@@ -17,6 +17,9 @@ export type MoveClassification =
   | 'mistake'
   | 'blunder'
 
+/** Canonical centipawn magnitude used for terminal mate scores. */
+export const MATE_BASE_CP = 10000
+
 export type AnalysisResult = {
   id: string
   move: string
