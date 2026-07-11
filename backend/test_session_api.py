@@ -6,7 +6,16 @@ import pytest
 from sqlalchemy import text
 
 from app.fen import fen_hash
-from app.models import Blunder, BlunderOpportunityEvent, Position, SessionMove
+from app.models import (
+    AnalysisCache,
+    Blunder,
+    BlunderOpportunityEvent,
+    Position,
+    SessionMove,
+)
+
+
+STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 
 def test_session_moves_bulk_insert_success(client, auth_headers, create_game_session, db_session):
@@ -724,6 +733,185 @@ def test_session_analysis_success(client, auth_headers, create_game_session):
         "accuracy": 100,
     }
     assert [move["move_san"] for move in data["moves"]] == ["e4", "e5", "Nf3", "Nc6"]
+
+
+def test_synthetic_checkmate_eval_persists_repairs_accuracy_and_skips_cache(
+    client, auth_headers, create_game_session, db_session
+):
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="black")
+    final_fen_before = (
+        "rnbqkbnr/pppp1ppp/8/4p3/6P1/5P2/PPPPP2P/RNBQKBNR b KQkq - 0 2"
+    )
+    final_fen_after = (
+        "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3"
+    )
+    moves = [
+        {
+            "move_number": 1,
+            "color": "white",
+            "move_san": "f3",
+            "fen_after": "fen-1w",
+            "eval_cp": 10,
+        },
+        {
+            "move_number": 1,
+            "color": "black",
+            "move_san": "e5",
+            "fen_after": "fen-1b",
+            "eval_cp": 20,
+        },
+        {
+            "move_number": 2,
+            "color": "white",
+            "move_san": "g4",
+            "fen_after": "fen-2w",
+            "eval_cp": -500,
+        },
+        {
+            "move_number": 2,
+            "color": "black",
+            "move_san": "Qh4#",
+            "fen_before": final_fen_before,
+            "fen_after": final_fen_after,
+            "move_uci": "d8h4",
+            "eval_cp": 10000,
+            "eval_mate": 0,
+            "eval_delta": 0,
+            "synthetic_terminal_eval": True,
+        },
+    ]
+
+    upload = client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": moves},
+        headers=auth_headers(user_id=user_id),
+    )
+    assert upload.status_code == 200
+    end = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "checkmate_win",
+            "pgn": "1. f3 e5 2. g4 Qh4#",
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert end.status_code == 200
+
+    analysis = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=user_id),
+    )
+    assert analysis.status_code == 200
+    assert analysis.json()["summary"]["accuracy"] is not None
+    stored = (
+        db_session.query(SessionMove)
+        .filter(
+            SessionMove.session_id == uuid.UUID(session_id),
+            SessionMove.move_number == 2,
+            SessionMove.color == "black",
+        )
+        .one()
+    )
+    assert (stored.eval_cp, stored.eval_mate, stored.eval_delta) == (10000, 0, 0)
+    assert (
+        db_session.query(AnalysisCache)
+        .filter(
+            AnalysisCache.fen_before == final_fen_before,
+            AnalysisCache.move_uci == "d8h4",
+        )
+        .count()
+        == 0
+    )
+
+
+def test_synthetic_threefold_draw_skips_cache_but_unflagged_sparse_eval_caches(
+    client, auth_headers, create_game_session, db_session
+):
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    final_fen_before = (
+        "rnbqkb1r/pppppppp/5n2/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 7 4"
+    )
+    moves = []
+    sans = ["Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Ng8"]
+    for ply, san in enumerate(sans):
+        moves.append(
+            {
+                "move_number": ply // 2 + 1,
+                "color": "white" if ply % 2 == 0 else "black",
+                "move_san": san,
+                "fen_after": f"fen-{ply}",
+                "eval_cp": 0,
+            }
+        )
+    moves[-1].update(
+        {
+            "fen_before": final_fen_before,
+            "move_uci": "f6g8",
+            "synthetic_terminal_eval": True,
+        }
+    )
+    upload = client.post(
+        f"/api/session/{session_id}/moves",
+        json={"moves": moves},
+        headers=auth_headers(user_id=user_id),
+    )
+    assert upload.status_code == 200
+    end = client.post(
+        "/api/game/end",
+        json={
+            "session_id": session_id,
+            "result": "draw",
+            "pgn": "1. Nf3 Nf6 2. Ng1 Ng8 3. Nf3 Nf6 4. Ng1 Ng8",
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert end.status_code == 200
+    analysis = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=user_id),
+    )
+    assert analysis.json()["summary"]["accuracy"] is not None
+    assert (
+        db_session.query(AnalysisCache)
+        .filter(
+            AnalysisCache.fen_before == final_fen_before,
+            AnalysisCache.move_uci == "f6g8",
+        )
+        .count()
+        == 0
+    )
+
+    contrast_session = create_game_session(user_id=user_id, player_color="white")
+    contrast = client.post(
+        f"/api/session/{contrast_session}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_before": STARTING_FEN,
+                    "fen_after": "fen-e4",
+                    "move_uci": "e2e4",
+                    "eval_cp": 20,
+                }
+            ]
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert contrast.status_code == 200
+    cached = (
+        db_session.query(AnalysisCache)
+        .filter(
+            AnalysisCache.fen_before == STARTING_FEN,
+            AnalysisCache.move_uci == "e2e4",
+        )
+        .one()
+    )
+    assert cached.evidence_contract_id == "minimal-played-eval-v1"
 
 
 def test_session_analysis_empty_moves_returns_zero_summary(client, auth_headers, create_game_session):

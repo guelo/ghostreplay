@@ -133,6 +133,11 @@ class SessionMoveInput(BaseModel):
     best_line_uci: list[str] | None = None
     decision_source: SessionDecisionSource | None = None
     target_blunder_id: int | None = Field(None, ge=1)
+    # Transient provenance for deterministic game-end terminal evals. The eval
+    # fields still persist to SessionMove, but this flag intentionally does not:
+    # synthetic rows are too sparse (and draws can be history-dependent) to be
+    # safe global analysis-cache evidence.
+    synthetic_terminal_eval: bool = False
 
 
 class SessionMovesRequest(BaseModel):
@@ -778,6 +783,8 @@ def _upsert_analysis_cache(
     matching no allowed contract are rejected (not stored)."""
     cache_values = []
     for move in moves:
+        if move.synthetic_terminal_eval:
+            continue
         if not move.fen_before or not move.move_uci:
             continue
         if move.eval_cp is None and move.best_move_eval_cp is None:

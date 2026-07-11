@@ -166,6 +166,36 @@ def test_dedup_last_write_wins_per_slot():
     assert by_slot[(5, "white")].eval_cp == 20
 
 
+def test_final_synthetic_provenance_survives_last_write_wins_coalescing():
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(
+        sid,
+        7,
+        "black",
+        [_move(2, "black", eval_cp=None, synthetic_terminal_eval=False)],
+    )
+    clock.advance(0.1)
+    sched.enqueue(
+        sid,
+        7,
+        "black",
+        [_move(2, "black", eval_cp=10000, synthetic_terminal_eval=True)],
+    )
+
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert len(run.calls) == 1
+    moves = run.calls[0]["evidence_moves"]
+    assert len(moves) == 1
+    assert moves[0].eval_cp == 10000
+    assert moves[0].synthetic_terminal_eval is True
+
+
 def test_run_opportunity_default_true_forwarded():
     # A single enqueue with no flag defaults to True and forwards it into the run.
     clock = _FakeClock()

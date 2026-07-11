@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 # Public names come from the live surface (app.accuracy); private helpers are not
 # re-exported there and must be imported from the frozen v1 module directly.
 from app.accuracy import (
@@ -92,6 +94,77 @@ def test_checkmate_win_scores_high():
         AccuracyMove("white", eval_cp=10000, eval_mate=0),     # ply 6 — mate
     ]
     assert compute_game_accuracy(moves, "white", 7) == 100
+
+
+@pytest.mark.parametrize(
+    ("player_color", "moves"),
+    [
+        (
+            "white",
+            [
+                AccuracyMove("white", 20, None),
+                AccuracyMove("black", -10, None),
+                AccuracyMove("white", 10000, 0),
+            ],
+        ),
+        (
+            "black",
+            [
+                AccuracyMove("white", -10, None),
+                AccuracyMove("black", 20, None),
+                AccuracyMove("white", -5, None),
+                AccuracyMove("black", 10000, 0),
+            ],
+        ),
+    ],
+)
+def test_synthesized_final_checkmate_eval_repairs_accuracy(player_color, moves):
+    assert compute_game_accuracy(moves, player_color, len(moves)) is not None
+
+
+@pytest.mark.parametrize(
+    ("player_color", "moves"),
+    [
+        (
+            "white",
+            [
+                AccuracyMove("white", 20, None),
+                AccuracyMove("black", None, None),
+                AccuracyMove("white", 10000, 0),
+            ],
+        ),
+        (
+            "black",
+            [
+                AccuracyMove("white", 10, None),
+                AccuracyMove("black", 5, None),
+                AccuracyMove("white", None, None),
+                AccuracyMove("black", 10000, 0),
+            ],
+        ),
+        (
+            "white",
+            [
+                AccuracyMove("white", 10, None),
+                AccuracyMove("black", 5, None),
+                AccuracyMove("white", None, None),
+                AccuracyMove("black", 10000, 0),
+            ],
+        ),
+        (
+            "black",
+            [
+                AccuracyMove("white", 20, None),
+                AccuracyMove("black", None, None),
+                AccuracyMove("white", 10000, 0),
+            ],
+        ),
+    ],
+)
+def test_synthesized_final_mate_does_not_hide_penultimate_eval_gap(
+    player_color, moves
+):
+    assert compute_game_accuracy(moves, player_color, len(moves)) is None
 
 
 def test_steady_winning_game_high_accuracy():
