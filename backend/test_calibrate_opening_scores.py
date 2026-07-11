@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -20,7 +21,9 @@ from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence, Ph
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import (
     CalcTelemetry,
+    NodeDebug,
     RootCalcConfig,
+    RootScore,
     root_calc_config_fingerprint,
 )
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -423,7 +426,18 @@ class TestMainNoWriteDefault:
             )
 
 
-# --- calibration grid (g-5bcz) ----------------------------------------------
+# --- calibration grid (g-p4ih): arm structure, roles, anchors --------------
+
+_ALT_AS_OF = datetime(2030, 6, 1, tzinfo=timezone.utc)
+
+_SIX_AXES = {
+    "lcb_z",
+    "coverage_fold",
+    "coverage_live_threshold",
+    "report_fold_p",
+    "report_fold_scope",
+    "report_self_term",
+}
 
 
 def _opponent_root_overlay():
@@ -441,44 +455,140 @@ def _opponent_root_overlay():
     return graph, overlay, roots, opp
 
 
-class TestGridParsing:
-    def test_parse_lcb_z_grid_default_and_explicit(self):
-        assert cal.parse_lcb_z_grid(None) == list(cal.DEFAULT_LCB_Z_GRID)
-        assert cal.parse_lcb_z_grid("0, 1.0 ,1.64") == [0.0, 1.0, 1.64]
+def _is_demo_axes(cell_axes: dict) -> bool:
+    return cell_axes == cal._cell_axes(cal.DEMO_GATE_UNIFORM_FOLD_CELL)
 
-    def test_parse_coverage_grid_default_and_explicit(self):
-        assert cal.parse_coverage_grid(None) == list(cal.DEFAULT_COVERAGE_GRID)
-        assert cal.parse_coverage_grid("off,gate") == ["off", "gate"]
 
-    def test_parse_coverage_grid_rejects_unknown_mode(self):
+class TestReportFoldGridParsing:
+    def test_default_only_from_none(self):
+        # None (flag omitted) is the ONLY path to the default.
+        assert cal.parse_report_fold_grid(None) == cal.REPORT_FOLD_P_GRID
+
+    def test_valid_explicit_dedupes_order_preserving(self):
+        assert cal.parse_report_fold_grid("0.5,0.5,0.25") == (0.5, 0.25)
+        assert cal.parse_report_fold_grid("0.25, 0.5 ,0.75") == (0.25, 0.5, 0.75)
+
+    @pytest.mark.parametrize(
+        "raw", ["", "   ", ",", "0", "1.5", "-0.5", "nan", "inf", "bogus"]
+    )
+    def test_present_but_invalid_raises(self, raw):
+        # An explicit "" / whitespace / "," is a HARD ERROR, never the default; each
+        # out-of-domain / non-finite / non-numeric token raises ValueError.
         with pytest.raises(ValueError):
-            cal.parse_coverage_grid("off,bogus")
+            cal.parse_report_fold_grid(raw)
 
-    def test_build_grid_baseline_first_and_deduped(self):
-        grid = cal.build_grid([0.0, 1.0], ["off", "gate"])
-        assert grid[0] == cal.BASELINE_CELL
-        assert grid[0].is_baseline is True
-        # (0.0, "off") appears exactly once despite being in the cartesian product.
-        assert grid.count(cal.BASELINE_CELL) == 1
-        # 2x2 product = 4 distinct cells.
-        assert len(grid) == 4
-        assert cal.GridCell(1.0, "gate") in grid
+    def test_parse_args_default_and_reject(self):
+        # CLI layer: omitted flag -> default tuple; an invalid value -> SystemExit.
+        args = cal._parse_args([])
+        assert args.report_fold_p_grid == cal.REPORT_FOLD_P_GRID
+        with pytest.raises(SystemExit):
+            cal._parse_args(["--report-fold-grid", "0"])
+        with pytest.raises(SystemExit):
+            cal._parse_args(["--report-fold-grid", "1.5"])
 
-    def test_grid_cell_config_maps_fields(self):
-        cell = cal.GridCell(1.28, "gate_x_cov")
-        config = cell.config
-        assert config.lcb_z == 1.28
-        assert config.coverage_fold == "gate_x_cov"
+
+class TestArmGrid:
+    def test_exact_set_anchor_first_deduped_no_demo(self):
+        grid = cal.build_arm_grid()
+        cells = grid.cells
+        expected = {
+            cal.ORIGINAL_CELL,
+            cal.CURRENT_SM_V2_3_CELL,
+            *cal.arm1_cells(),
+            *cal.arm2_cells(),
+            cal.B1_CELL,
+        }
+        assert set(cells) == expected
+        assert cal.DEMO_GATE_UNIFORM_FOLD_CELL not in cells
+        # native identity IS the behavioral key (no dupes)
+        assert len(cells) == len(set(cells))
+        # anchors first
+        assert cells[0] == cal.ORIGINAL_CELL
+        assert cells[1] == cal.CURRENT_SM_V2_3_CELL
+        # required_cells (derived from it) excludes every demo
+        assert all(cell not in cal.DEMO_CELLS for cell in cells)
+
+    def test_inert_axis_dedupe(self):
+        # (a) p=0 scope="all" == p=0 scope="user" and hash-equal -> dedupe to one
+        a = cal.GridCell(1.0, "gate", report_fold_p=0.0, report_fold_scope="all")
+        b = cal.GridCell(1.0, "gate", report_fold_p=0.0, report_fold_scope="user")
+        assert a == b and hash(a) == hash(b)
+        assert len({a, b}) == 1
+        # (b) p>0 scope differs
+        c = cal.GridCell(1.0, "gate", report_fold_p=0.5, report_fold_scope="all")
+        d = cal.GridCell(1.0, "gate", report_fold_p=0.5, report_fold_scope="user")
+        assert c != d
+        # (c) build_arm_grid never emits two cells with equal native identity
+        assert len(cal.build_arm_grid().cells) == len(set(cal.build_arm_grid().cells))
+        # (d) CURRENT built with a different scope literal still equals canonical CURRENT
+        alt = cal.GridCell(
+            1.0,
+            "gate",
+            coverage_live_threshold=1,
+            report_fold_p=0.0,
+            report_fold_scope="user",
+            report_self_term="keep",
+        )
+        assert alt == cal.CURRENT_SM_V2_3_CELL
+
+    def test_role_wrapper_merged_label(self):
+        # builder-only p=0 path (CLI rejects 0): ARM-2 at p=0 canonicalizes onto CURRENT
+        grid = cal.build_arm_grid(p_grid=(0.0, 0.5))
+        assert grid.roles_by_cell[cal.CURRENT_SM_V2_3_CELL] == ("current", "arm2")
+        assert len(grid.cells) == len(set(grid.cells))
+
+    def test_canonical_roles_deterministic(self):
+        assert cal._canonical_roles(["arm2", "current"]) == ("current", "arm2")
+        assert cal._canonical_roles(["current", "arm2"]) == ("current", "arm2")
+        assert cal._canonical_roles(["arm2", "arm2"]) == ("arm2",)
+        with pytest.raises(KeyError):
+            cal._canonical_roles(["bogus"])
+
+    def test_role_serialization_stable_across_builds(self):
+        run1 = cal.run_user14_diagnostic(cal.build_arm_grid())["rows"]
+        run2 = cal.run_user14_diagnostic(cal.build_arm_grid())["rows"]
+        # A set-derived tuple would reorder run-to-run; the canonical order is stable.
+        assert [r["roles"] for r in run1] == [r["roles"] for r in run2]
+
+
+class TestGridCellConfig:
+    def test_all_six_axes_map_through_config(self):
+        cell = cal.GridCell(
+            lcb_z=1.28,
+            coverage_fold="gate_x_cov",
+            coverage_live_threshold=3,
+            report_fold_p=0.5,
+            report_fold_scope="user",
+            report_self_term="drop_user",
+        )
+        cfg = cell.config
+        assert cfg.lcb_z == 1.28
+        assert cfg.coverage_fold == "gate_x_cov"
+        assert cfg.coverage_live_threshold == 3
+        assert cfg.report_fold_p == 0.5
+        assert cfg.report_fold_scope == "user"
+        assert cfg.report_self_term == "drop_user"
+        assert cal._cfg_fp(cell) == root_calc_config_fingerprint(cell.config)
+
+    def test_canonical_scope_reaches_config(self):
+        # p=0 scope="user" canonicalizes to "all"; the canonicalization reaches .config.
+        cell = cal.GridCell(1.0, "gate", report_fold_p=0.0, report_fold_scope="user")
+        assert cell.config.report_fold_scope == "all"
+        assert cal._cfg_fp(cell) == cal._cfg_fp(
+            cal.GridCell(1.0, "gate", report_fold_p=0.0, report_fold_scope="all")
+        )
 
 
 class TestCfgFpRouter:
     """_cfg_fp is the sole sanctioned GridCell/config fingerprint router."""
 
-    # root_calc_config_fingerprint(GridCell(0.0, "off").config), pinned so the
-    # calibration path's baseline cell fingerprint is proven against the same
-    # BASELINE golden the scorer pins.
-    BASELINE_GOLDEN = (
+    # ORIGINAL_CELL keeps the pre-g-zc3p legacy golden (unchanged by the rename).
+    ORIGINAL_GOLDEN = (
         "7dd8d067f55f88c26c150c192203bd58de57762aadaf43ab8b6752e3fa6b1bde"
+    )
+    # CURRENT_SM_V2_3_CELL golden (sm-v2-3, pinned by literal fields).
+    CURRENT_GOLDEN = (
+        "7ca0d6541f2fcf372b7548e0e4caead118547335d424a9359fd5089706fcd262"
     )
 
     def test_gridcell_routes_through_config(self):
@@ -490,31 +600,47 @@ class TestCfgFpRouter:
         assert cal._cfg_fp(config) == root_calc_config_fingerprint(config)
 
     def test_raw_gridcell_fingerprint_raises(self):
-        # A GridCell is not a RootCalcConfig: fingerprinting one directly must fail
-        # closed, so _cfg_fp (routing through .config) is the only correct path.
         with pytest.raises(TypeError):
             root_calc_config_fingerprint(cal.GridCell(0.0, "off"))
 
-    def test_baseline_cell_hits_baseline_golden(self):
-        assert cal._cfg_fp(cal.BASELINE_CELL) == self.BASELINE_GOLDEN
+    def test_original_cell_hits_legacy_golden(self):
+        assert cal._cfg_fp(cal.ORIGINAL_CELL) == self.ORIGINAL_GOLDEN
+
+    def test_current_cell_anti_drift(self):
+        # Pin CURRENT.config field-by-field against an EXPLICIT sm-v2-3 config (NOT a
+        # no-argument RootCalcConfig(), which Phase 3 intentionally flips).
+        explicit = RootCalcConfig(
+            lcb_z=1.0,
+            coverage_fold="gate",
+            coverage_live_threshold=1,
+            report_fold_p=0.0,
+            report_fold_scope="all",
+            report_self_term="keep",
+        )
+        assert cal.CURRENT_SM_V2_3_CELL.config == explicit
+        assert cal._cfg_fp(cal.CURRENT_SM_V2_3_CELL) == root_calc_config_fingerprint(
+            explicit
+        )
+        assert cal._cfg_fp(cal.CURRENT_SM_V2_3_CELL) == self.CURRENT_GOLDEN
 
 
 class TestScorePairGrid:
     def test_overlay_built_once_scored_per_cell(self):
         graph, overlay, roots, opp = _opponent_root_overlay()
-        grid = cal.build_grid([0.0, 1.0], ["off", "gate"])
+        # Isolate the gate effect at a fixed lcb_z=1.0: off vs gate.
+        off_cell = cal.GridCell(1.0, "off")
+        gate_cell = cal.GridCell(1.0, "gate")
+        cells = (off_cell, gate_cell)
         db = MagicMock()
-        with patch.object(
-            cal, "overlay_evidence", return_value=overlay
-        ) as overlay_spy:
-            cell_scores = cal.score_pair_grid(db, 1, "white", graph, roots, grid)
+        with patch.object(cal, "overlay_evidence", return_value=overlay) as spy:
+            cell_scores = cal.score_pair_grid(db, 1, "white", graph, roots, cells)
         # The ~2.6s overlay build happens ONCE, not once per cell.
-        assert overlay_spy.call_count == 1
-        assert set(cell_scores) == set(grid)
-        # The gate lowers the opponent-root score below the ungated baseline.
-        base = cell_scores[cal.GridCell(0.0, "off")].named_score_map[opp]
-        gated = cell_scores[cal.GridCell(0.0, "gate")].named_score_map[opp]
-        assert gated < base
+        assert spy.call_count == 1
+        assert set(cell_scores) == set(cells)
+        # The gate lowers the opponent-root score below the ungated cell.
+        ungated = cell_scores[off_cell].named_score_map[opp]
+        gated = cell_scores[gate_cell].named_score_map[opp]
+        assert gated < ungated
 
     def test_named_score_map_populated(self):
         graph, overlay, roots, opp = _opponent_root_overlay()
@@ -525,12 +651,19 @@ class TestScorePairGrid:
 
 class TestDeltas:
     def test_pair_key_deltas_keep_opening_keys(self):
-        base = cal.PairScore(1, "white", named_score_map={"a": 50.0, "b": 60.0})
-        cell = cal.PairScore(1, "white", named_score_map={"a": 40.0, "b": 66.0, "c": 1.0})
-        records = {r["opening_key"]: r for r in cal.pair_key_deltas(cell, base)}
-        # "c" is not in baseline → skipped; a: -10, b: +6, keyed with both scores.
+        reference = cal.PairScore(1, "white", named_score_map={"a": 50.0, "b": 60.0})
+        cell = cal.PairScore(
+            1, "white", named_score_map={"a": 40.0, "b": 66.0, "c": 1.0}
+        )
+        records = {r["opening_key"]: r for r in cal.pair_key_deltas(cell, reference)}
+        # "c" is not in reference -> skipped; a: -10, b: +6, keyed with both scores.
         assert set(records) == {"a", "b"}
-        assert records["a"] == {"opening_key": "a", "baseline": 50.0, "cell": 40.0, "delta": -10.0}
+        assert records["a"] == {
+            "opening_key": "a",
+            "current_score": 50.0,
+            "cell": 40.0,
+            "delta": -10.0,
+        }
         assert records["b"]["delta"] == pytest.approx(6.0)
 
     def test_summarize_deltas_has_no_histogram(self):
@@ -541,123 +674,560 @@ class TestDeltas:
 
 
 class TestGridReport:
-    def _pair_grid(self, grid):
+    def _pair_grid(self, cells):
         graph, overlay, roots, _opp = _opponent_root_overlay()
         return {
             cell: cal.score_overlay(1, "white", graph, overlay, roots, cell.config)
-            for cell in grid
+            for cell in cells
         }
 
-    def test_cell_report_baseline_has_no_deltas(self):
-        grid = cal.build_grid([0.0], ["off", "gate"])
-        pair_grids = [self._pair_grid(grid)]
-        report = cal.build_grid_report(grid, pair_grids, min_observations=0)
-        cells = report["cells"]
-        assert len(cells) == 2
-        baseline = next(c for c in cells if c["baseline"])
-        assert "deltas_vs_baseline" not in baseline
+    def test_reference_omits_deltas_original_and_arm_carry(self):
+        arm = cal.arm1_cells()[1]  # gate off + fold -> differs from current on opp root
+        cells = (cal.CURRENT_SM_V2_3_CELL, cal.ORIGINAL_CELL, arm)
+        pair_grids = [self._pair_grid(cells)]
+        report = cal.build_grid_report(cells, pair_grids, min_observations=0)
+        rows = report["cells"]
+        reference = next(c for c in rows if c["is_reference"])
+        assert reference["is_reference"] is True and reference["is_original"] is False
+        assert "deltas_vs_current" not in reference
+        # every non-reference cell carries deltas_vs_current + both anchor booleans
+        for c in rows:
+            assert {"is_original", "is_reference"} <= set(c.keys())
+            if not c["is_reference"]:
+                assert "deltas_vs_current" in c
+        original = next(c for c in rows if c["is_original"])
+        keys = original["deltas_vs_current"]["per_pair"][0]["keys"]
+        assert keys and "current_score" in keys[0] and "delta" in keys[0]
 
-    def test_cell_report_non_baseline_carries_deltas(self):
-        grid = cal.build_grid([0.0], ["off", "gate"])
-        pair_grids = [self._pair_grid(grid)]
-        report = cal.build_grid_report(grid, pair_grids, min_observations=0)
-        gate_cell = next(
-            c for c in report["cells"] if c["coverage_fold"] == "gate"
-        )
-        deltas = gate_cell["deltas_vs_baseline"]
-        # The gate lowers the opponent root, so the pooled per-key delta is negative.
-        assert deltas["pooled"]["count"] == 1
-        assert deltas["pooled"]["mean"] < 0.0
-        # Per-pair per-opening-key deltas are retained with keys + both scores.
-        per_pair = deltas["per_pair"]
-        assert len(per_pair) == 1
-        keys = per_pair[0]["keys"]
-        assert len(keys) == 1
-        opp = _positions(["e2e4"])[1]
-        assert keys[0]["opening_key"] == opp
-        assert keys[0]["baseline"] > keys[0]["cell"]  # gate is below baseline
-        assert keys[0]["delta"] == pytest.approx(keys[0]["cell"] - keys[0]["baseline"])
+    def test_cohort_rows_six_axis_identity_unique(self):
+        cells = cal.build_arm_grid().cells
+        pair_grids = [self._pair_grid(cells)]
+        report = cal.build_grid_report(cells, pair_grids, min_observations=0)
+        rows = report["cells"]
+        assert len(rows) == len(cells)
+        for r in rows:
+            assert set(r["cell"].keys()) == _SIX_AXES
+        identities = [
+            tuple(r["cell"][axis] for axis in sorted(_SIX_AXES)) for r in rows
+        ]
+        # The four ARM-1 p-cells and four ARM-2 p-cells each serialize DISTINCTLY,
+        # and B1 is distinguishable from CURRENT/ARM-2 on report_self_term.
+        assert len(set(identities)) == len(rows)
 
-    def test_min_observations_excludes_low_evidence_pairs(self):
-        grid = cal.build_grid([0.0], ["off"])
-        pair_grids = [self._pair_grid(grid)]  # observation_total == 4
-        report = cal.build_grid_report(grid, pair_grids, min_observations=100)
+    def test_min_observations_excludes_low_evidence(self):
+        cells = (cal.CURRENT_SM_V2_3_CELL,)
+        pair_grids = [self._pair_grid(cells)]  # observation_total == 4
+        report = cal.build_grid_report(cells, pair_grids, min_observations=100)
         assert report["cells"][0]["named_score_distribution"]["count"] == 0
 
 
-class TestDiagnostics:
-    def test_specialist_true_positive_passes(self):
-        grid = cal.build_grid(list(cal.DEFAULT_LCB_Z_GRID), list(cal.DEFAULT_COVERAGE_GRID))
-        diag = cal.run_specialist_diagnostic(grid)
-        assert diag["passed"] is True
-        assert diag["baseline_score"] >= cal.GRADE_B  # scores ~B with the fold off
-        fold_on = [c for c in diag["cells"] if c["coverage_fold"] != "off"]
-        assert all(c["score"] < cal.GRADE_C for c in fold_on)  # drops to ~D/F
+# --- grade-decoupling primitives -------------------------------------------
 
-    def test_broad_guard_false_positive_passes(self):
-        grid = cal.build_grid(list(cal.DEFAULT_LCB_Z_GRID), list(cal.DEFAULT_COVERAGE_GRID))
-        diag = cal.run_broad_guard_diagnostic(grid)
-        assert diag["passed"] is True
-        fold_on = [c for c in diag["cells"] if c["coverage_fold"] != "off"]
-        assert all(c["score"] >= cal.GRADE_B for c in fold_on)  # does not crater
 
-    def test_cliff_reproduces_jump_and_threshold_one_softens(self):
-        grid = cal.build_grid([0.0], ["off", "gate"])
-        diag = cal.run_cliff_diagnostic(grid)
-        assert diag["passed"] is True
-        rows = {
-            (r["coverage_fold"], r["coverage_live_threshold"]): r for r in diag["rows"]
+class TestGradeDecoupling:
+    def test_grade_rank_inversion_cases(self):
+        # "grade(parent) <= grade(child)" := rank(parent) >= rank(child).
+        # A vs C: parent A is BETTER than child C -> the "<=" gate FAILS.
+        assert not (cal.grade_rank("A") >= cal.grade_rank("C"))
+        # C vs B: C <= B -> PASSES.
+        assert cal.grade_rank("C") >= cal.grade_rank("B")
+        # D and F are exactly one rank apart (3 vs 4).
+        assert cal.grade_rank("F") - cal.grade_rank("D") == 1
+        # "no more than one letter above": B is one above C -> passes; A two above -> fails.
+        assert cal.grade_rank("B") >= cal.grade_rank("C") - 1
+        assert not (cal.grade_rank("A") >= cal.grade_rank("C") - 1)
+        with pytest.raises((AssertionError, KeyError)):
+            cal.grade_rank("Z")
+
+    def test_fixed_band_boundaries(self):
+        assert cal.fixed_band(50.0) == "A"
+        assert cal.fixed_band(49.9) == "B"
+        assert cal.fixed_band(38.0) == "B"
+        assert cal.fixed_band(27.9) == "D"
+        assert cal.fixed_band(22.0) == "D"
+        assert cal.fixed_band(21.9) == "F"
+
+    def test_provisional_grade(self):
+        cutoffs = cal.Cutoffs(a=44, b=29, c=8, d=2, alert=5, watch=29)
+        assert cal.provisional_grade(44, cutoffs) == "A"
+        assert cal.provisional_grade(43, cutoffs) == "B"
+        assert cal.provisional_grade(8, cutoffs) == "C"
+        assert cal.provisional_grade(2, cutoffs) == "D"
+        assert cal.provisional_grade(1, cutoffs) == "F"
+
+    def test_opp_guard_tolerance_boundary(self):
+        # sm-v2-3 broad-guard reference (55.456, A): 43.5 passes, 43.0 fires (raw cap).
+        assert not cal._opp_guard_fires(43.5, 55.456)
+        assert cal._opp_guard_fires(43.0, 55.456)
+        # A candidate two ranks worse fires on the RANK cap even within the raw cap:
+        # reference 39 (B) vs candidate 27.9 (D) -> rank fires; raw drop 11.1 <= 12.
+        assert cal._opp_guard_fires(27.9, 39.0)
+        assert (39.0 - 27.9) <= cal.OPP_GUARD_MAX_RAW_DROP_PTS
+
+    def test_leak_tolerance_boundary(self):
+        # F-band leak reference: +5 candidate passes, +7 fires (raw cap).
+        assert not cal._leak_fires(18.0 + 5.0, 18.0)
+        assert cal._leak_fires(18.0 + 7.0, 18.0)
+
+    def test_distribution_stats(self):
+        stats = cal.distribution_stats([0.0, 10.0, 20.0, 30.0, 40.0])
+        assert stats.p50 == pytest.approx(20.0)
+        assert stats.p05 == pytest.approx(2.0)
+        assert stats.p95 == pytest.approx(38.0)
+        with pytest.raises(ValueError):
+            cal.distribution_stats([1.0])
+        # all-equal is VALID (spread 0) -- not a collision.
+        equal = cal.distribution_stats([5.0, 5.0, 5.0])
+        assert equal.p05 == equal.p95 == 5.0
+
+
+class TestDeriveCutoffs:
+    def test_fixed_vector_exact_cutoffs(self):
+        scores = [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+        assert cal.derive_cutoffs(scores) == cal.Cutoffs(
+            a=95, b=82, c=40, d=12, alert=25, watch=82
+        )
+
+    def test_round_half_up_not_bankers(self):
+        # q25 of [10..60] interpolates to 22.5 -> round-half-up -> 23 (banker's: 22).
+        cutoffs = cal.derive_cutoffs([10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+        assert cutoffs == cal.Cutoffs(a=58, b=51, c=30, d=16, alert=23, watch=51)
+        assert cal._round_half_up(2.5) == 3
+        assert cal._round_half_up(0.5) == 1
+
+    def test_compressed_collides(self):
+        with pytest.raises(cal.CutoffCollision):
+            cal.derive_cutoffs([10.0, 10.0, 10.0, 10.0])
+
+    def test_p82_watch_shared_accepted(self):
+        # watch and grade-b are BOTH p82 -> the same integer is fine, not a collision.
+        cutoffs = cal.derive_cutoffs(
+            [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+        )
+        assert cutoffs.b == cutoffs.watch == 82
+
+    def test_requires_two_scores(self):
+        with pytest.raises(ValueError):
+            cal.derive_cutoffs([5.0])
+
+    def test_purity(self):
+        vector = [1.0, 5.0, 9.8, 20.8, 43.9, 14.6, 0.4]
+        assert cal.derive_cutoffs(vector) == cal.derive_cutoffs(vector)
+
+    def test_numpy_type7_cross_check(self):
+        numpy = pytest.importorskip("numpy")
+        ordered = sorted([1.0, 5.0, 9.8, 20.8, 43.9, 14.6, 0.4])
+        for q in (12.0, 25.0, 40.0, 82.0, 95.0):
+            assert cal._interp_percentile(ordered, q) == pytest.approx(
+                float(numpy.percentile(ordered, q, method="linear"))
+            )
+
+
+# --- percentile empty/singleton behavior preserved -------------------------
+
+
+class TestPercentilePreserved:
+    def test_percentile_none_and_singleton(self):
+        assert cal.percentile([], 50.0) is None
+        assert cal.percentile([7.0], 50.0) == 7.0
+        assert cal.percentiles([]) == {
+            "p5": None,
+            "p25": None,
+            "p50": None,
+            "p75": None,
+            "p95": None,
         }
-        # Subtree-SUM semantics: a single live attempt fails the gate at threshold 2
-        # (thin ~0) and jumps to full credit after one review.
-        gate2 = rows[("gate", 2)]
-        assert gate2["thin_score"] == pytest.approx(0.0)
-        assert gate2["reviewed_score"] > 0.0
-        # Crediting a single live pass (threshold 1) removes the cliff.
-        gate1 = rows[("gate", 1)]
-        assert gate1["thin_score"] == pytest.approx(gate1["reviewed_score"])
 
-    def test_diagnostics_n_a_without_fold_cells(self):
-        # A grid with only the "off" axis has no fold-on cells, so the true-positive
-        # / guard gates report n/a (None) rather than a spurious pass or fail.
-        grid = cal.build_grid([0.0, 1.0], ["off"])
-        assert cal.run_specialist_diagnostic(grid)["passed"] is None
-        assert cal.run_broad_guard_diagnostic(grid)["passed"] is None
+    def test_percentiles_primitive_requires_two(self):
+        with pytest.raises(ValueError):
+            cal._percentiles([1.0], (50.0,))
 
 
-class TestMainGrid:
-    def test_main_emits_grid_and_diagnostics(self, capsys):
+# --- paired diagnostics -----------------------------------------------------
+
+_USER14_OPERANDS = {
+    "synth_black_root_score",
+    "synth_caro_child_score",
+    "synth_root_coverage_fraction",
+    "synth_user_turn_pre_fold_quality",
+    "synth_user_turn_multiplier",
+    "synth_opp_turn_score",
+    "synth_opp_turn_pre_fold_quality",
+    "synth_opp_turn_multiplier",
+    "user_tp_score",
+}
+
+
+class TestDiagnostics:
+    def test_run_diagnostics_three_keys(self):
+        diag = cal.run_diagnostics(cal.build_arm_grid())
+        assert set(diag) == {"user14", "opponent_guard", "cliff"}
+        # No leftover top-level specialist / broad_guard keys.
+        assert "specialist" not in diag and "broad_guard" not in diag
+
+    def test_user14_operands_aggregate_and_roles(self):
+        grid = cal.build_arm_grid()
+        diag = cal.run_user14_diagnostic(grid)
+        # reference row is CURRENT and grades A; aggregate passes (all arms drop <= C).
+        assert cal.fixed_band(diag["reference"]["user_tp_score"]) == "A"
+        assert diag["passed"] is True
+        # full operand set present on every row
+        for row in diag["rows"]:
+            assert _USER14_OPERANDS <= set(row.keys())
+        # anchors + demo graded_for="none"; arms selection; B1 reference
+        by_roles = {row["roles"]: row for row in diag["rows"]}
+        assert by_roles[("original",)]["graded_for"] == "none"
+        assert by_roles[("current",)]["graded_for"] == "none"
+        arm_rows = [r for r in diag["rows"] if r["graded_for"] == "selection"]
+        assert len(arm_rows) == 8  # 4 arm1 + 4 arm2
+        assert all(
+            cal.grade_rank(cal.fixed_band(r["user_tp_score"])) >= cal.grade_rank("C")
+            for r in arm_rows
+        )
+        b1_row = by_roles[("b1",)]
+        assert b1_row["graded_for"] == "reference"
+        assert 30.0 <= b1_row["synth_black_root_score"] <= 38.0  # ~34 de-inflation ref
+
+    def test_user14_b1_failure_never_flips_passed(self):
+        # B1 is graded_for="reference": even scored, it never enters passed.
+        grid = cal.build_arm_grid()
+        diag = cal.run_user14_diagnostic(grid)
+        selection = [
+            r for r in diag["rows"] if r["graded_for"] == "selection" and r["applicable"]
+        ]
+        assert all(r["roles"] in {("arm1",), ("arm2",)} for r in selection)
+        assert diag["passed"] is True
+
+    def test_opponent_guard_applicability_and_operands(self):
+        diag = cal.run_opponent_guard_diagnostic(cal.build_arm_grid())
+        by_roles_applicable = {}
+        for row in diag["rows"]:
+            by_roles_applicable.setdefault(row["roles"], []).append(row["applicable"])
+            assert {"broad_guard_opp_score", "specialist_pre_fold_quality"} <= set(row)
+        # only ARM-1 (gate off) is applicable on the opponent turn
+        assert all(by_roles_applicable[("arm1",)])
+        assert not any(by_roles_applicable[("arm2",)])
+        assert not any(by_roles_applicable[("b1",)])
+
+    def test_leak_operand_unmasked(self):
+        # ARM-1's ungated pre_fold_quality is STRICTLY GREATER than its reported opp
+        # score (coverage**p masks it); the leak gate reads the ungated channel.
+        diag = cal.run_opponent_guard_diagnostic(cal.build_arm_grid())
+        arm1_row = next(r for r in diag["rows"] if r["roles"] == ("arm1",))
+        pre_fold = arm1_row["specialist_pre_fold_quality"]
+        assert pre_fold is not None
+        graph, overlay, roots, target = cal._specialist_scenario()
+        p = arm1_row["cell"]["report_fold_p"]
+        arm1_cell = cal.GridCell(1.0, "off", report_fold_p=p, report_fold_scope="all")
+        reported = cal._score_target(
+            target, graph, overlay, roots, arm1_cell.config, now=cal.SYNTHETIC_AS_OF
+        )
+        assert pre_fold > reported
+
+    def test_opponent_guard_arm1_leak_fires_aggregate_fails(self):
+        # ARM-1 (fold-instead-of-gate) leaks: its ungated specialist quality exceeds the
+        # current gated quality beyond the raw cap, so the leak gate fires and the
+        # aggregate FAILS. Pin this so a regression that skips/reverses the leak gate
+        # (leaving the operand tests green) cannot slip through.
+        diag = cal.run_opponent_guard_diagnostic(cal.build_arm_grid())
+        assert diag["passed"] is False
+        reference_gated = diag["reference"]["specialist_pre_fold_quality"]
+        reference_opp = diag["reference"]["broad_guard_opp_score"]
+        arm1 = next(r for r in diag["rows"] if r["roles"] == ("arm1",))
+        # the failure is specifically the LEAK: it fires, while the crater guard does not.
+        assert cal._leak_fires(arm1["specialist_pre_fold_quality"], reference_gated) is True
+        assert cal._opp_guard_fires(arm1["broad_guard_opp_score"], reference_opp) is False
+
+    def test_cliff_reproduces_jump_probe_on_current(self):
+        diag = cal.run_cliff_diagnostic(cal.build_arm_grid())
+        assert diag["passed"] is True
+        # the probe rows are the CURRENT (is_reference) gate cell at each threshold
+        ref_rows = {
+            r["coverage_live_threshold"]: r for r in diag["rows"] if r["is_reference"]
+        }
+        assert ref_rows[2]["thin_score"] == pytest.approx(0.0)
+        assert ref_rows[2]["reviewed_score"] > 0.0
+        assert ref_rows[1]["thin_score"] == pytest.approx(ref_rows[1]["reviewed_score"])
+        # cliff rows carry the new six-axis cell identity
+        assert set(diag["rows"][0]["cell"].keys()) == _SIX_AXES
+
+    def test_cliff_rows_cell_axes_match_effective_threshold(self):
+        # The serialized six-axis identity must reflect the threshold actually scored,
+        # not the base cell's threshold (else a threshold-2 row's cell says threshold 1).
+        diag = cal.run_cliff_diagnostic(cal.build_arm_grid())
+        seen_thresholds = set()
+        for row in diag["rows"]:
+            assert (
+                row["cell"]["coverage_live_threshold"]
+                == row["coverage_live_threshold"]
+            )
+            seen_thresholds.add(row["coverage_live_threshold"])
+        assert seen_thresholds == {1, 2}  # both swept thresholds are present
+
+    def test_diagnostics_none_without_applicable_arm(self):
+        anchors_only = cal.ArmGrid(
+            cells=(cal.ORIGINAL_CELL, cal.CURRENT_SM_V2_3_CELL),
+            roles_by_cell={
+                cal.ORIGINAL_CELL: ("original",),
+                cal.CURRENT_SM_V2_3_CELL: ("current",),
+            },
+        )
+        assert cal.run_user14_diagnostic(anchors_only)["passed"] is None
+        assert cal.run_opponent_guard_diagnostic(anchors_only)["passed"] is None
+
+    def test_diagnostic_rows_json_primitive_no_default_str(self):
+        # Every user14/opponent_guard row json.dumps WITHOUT default=str (a stray
+        # dataclass/datetime would raise), row["cell"] is a six-axis dict, and the
+        # NAMED *_pre_fold_quality operands are float-or-None with no generic key.
+        diag = cal.run_diagnostics(cal.build_arm_grid())
+        checks = {
+            "user14": (
+                "synth_user_turn_pre_fold_quality",
+                "synth_opp_turn_pre_fold_quality",
+            ),
+            "opponent_guard": ("specialist_pre_fold_quality",),
+        }
+        for key, named_ops in checks.items():
+            for row in diag[key]["rows"]:
+                json.dumps(row)  # no default=str
+                assert set(row["cell"].keys()) == _SIX_AXES
+                assert "pre_fold_quality" not in row
+                for op in named_ops:
+                    assert row[op] is None or isinstance(row[op], float)
+
+
+class TestClockThreading:
+    def test_explicit_as_of_threads_and_default(self):
+        grid = cal.build_arm_grid()
+        # User-14 operands are clock-invariant, so an explicit as_of matches the default.
+        default = cal.run_user14_diagnostic(grid)
+        explicit = cal.run_user14_diagnostic(grid, as_of=_ALT_AS_OF)
+        assert (
+            default["reference"]["user_tp_score"]
+            == pytest.approx(explicit["reference"]["user_tp_score"])
+        )
+        fx_default = cal.build_user14_fixture(cal.CURRENT_SM_V2_3_CELL, "sm-v2-3")
+        fx_explicit = cal.build_user14_fixture(
+            cal.CURRENT_SM_V2_3_CELL, "sm-v2-3", as_of=_ALT_AS_OF
+        )
+        assert fx_default["black_root_score"] == pytest.approx(
+            fx_explicit["black_root_score"]
+        )
+
+    def test_no_datetime_now_reached(self):
+        # Patch datetime.now to raise; a standalone run must never reach the wall clock.
+        import app.opening_rootcalc as rc
+
+        real_datetime = rc.datetime
+
+        class _NoNow(real_datetime):
+            @classmethod
+            def now(cls, tz=None):  # noqa: D401
+                raise AssertionError("datetime.now reached")
+
+        with patch.object(rc, "datetime", _NoNow):
+            diag = cal.run_diagnostics(cal.build_arm_grid())
+        assert set(diag) == {"user14", "opponent_guard", "cliff"}
+
+
+# --- report-stage FEN lookup (leak gate) -----------------------------------
+
+
+def _node_debug(fen, *, pre_fold_quality=None, reported_score=None, report_fold_multiplier=None):
+    return NodeDebug(
+        fen=fen,
+        is_user_turn=True,
+        in_book=True,
+        is_extension_node=False,
+        p_n=0.0,
+        c_n=0.0,
+        sample_conf=0.0,
+        freshness=0.0,
+        evidence_total=0.0,
+        days_since_last_touch=0.0,
+        last_touch_at=None,
+        live_attempts=0,
+        live_passes=0,
+        review_attempts=0,
+        prepared_children=[],
+        weights={},
+        subtree_live_attempts=0,
+        subtree_review_attempts=0,
+        covered_locally=False,
+        raw_score=0.0,
+        raw_confidence=0.0,
+        raw_coverage=0.0,
+        raw_depth=0.0,
+        is_leaf=True,
+        pre_fold_quality=pre_fold_quality,
+        reported_score=reported_score,
+        report_fold_multiplier=report_fold_multiplier,
+    )
+
+
+def _root_score(nodes):
+    return RootScore(
+        opening_key="k",
+        opening_name="n",
+        opening_family="f",
+        player_color="black",
+        opening_score=0.0,
+        confidence=0.0,
+        coverage=0.0,
+        weighted_depth=0.0,
+        sample_size=0,
+        game_count=0,
+        last_practiced_at=None,
+        strongest_branch=None,
+        weakest_branch=None,
+        underexposed_branch=None,
+        computed_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        debug_nodes=nodes,
+    )
+
+
+class TestReportNodeFor:
+    def _reported_and_descendant(self):
+        # Score the User-14 black root with debug=True: root_fen is REPORTED (its own
+        # root), deep_fen is a DESCENDANT-only node (never reported -> null operands).
+        graph, black, _white, roots, root_fen, _child = cal._user14_scenario()
+        deep_fen = cal._diag_positions(["e2e4", "c7c6", "d2d4", "d7d5"])[4]
+        rs = cal.compute_root_score(
+            root_fen,
+            "black",
+            graph,
+            black,
+            roots,
+            cal.CURRENT_SM_V2_3_CELL.config,
+            now=cal.SYNTHETIC_AS_OF,
+            debug=True,
+        )
+        return rs, root_fen, deep_fen
+
+    def test_absent_fen_raises(self):
+        rs, _root_fen, _deep = self._reported_and_descendant()
+        absent = cal._diag_positions(["d2d4"])[1]  # 1.d4 not reachable in this graph
+        with pytest.raises(ValueError):
+            cal._report_node_for(rs, absent)
+
+    def test_descendant_only_raises(self):
+        rs, _root_fen, deep_fen = self._reported_and_descendant()
+        with pytest.raises(ValueError):
+            cal._report_node_for(rs, deep_fen)
+
+    def test_reported_returns_node(self):
+        rs, root_fen, _deep = self._reported_and_descendant()
+        node = cal._report_node_for(rs, root_fen)
+        assert node.pre_fold_quality is not None
+        assert cal.pre_fold_quality_for(rs, root_fen) == node.pre_fold_quality
+
+    def test_require_narrowing(self):
+        fen = _positions(["e2e4"])[1]
+        # pre_fold_quality set, but reported_score None.
+        rs = _root_score(
+            [_node_debug(fen, pre_fold_quality=50.0, reported_score=None, report_fold_multiplier=1.0)]
+        )
+        # Narrow require succeeds; the default require (all three) raises on the null.
+        assert (
+            cal._report_node_for(rs, fen, require=("pre_fold_quality",)).pre_fold_quality
+            == 50.0
+        )
+        with pytest.raises(ValueError):
+            cal._report_node_for(rs, fen)
+
+
+# --- User-14 fixture builder + writer ---------------------------------------
+
+
+class TestUser14Fixture:
+    def test_build_shape_and_internal_consistency(self):
+        for cell in (cal.CURRENT_SM_V2_3_CELL, cal.arm2_cells()[1]):
+            fixture = cal.build_user14_fixture(cell, "sm-v2-3")
+            assert fixture["schema_version"] == 1
+            assert fixture["model_version"] == "sm-v2-3"
+            assert fixture["config_fingerprint"] == cal._cfg_fp(cell)
+            assert fixture["report_fold_p"] == cell.report_fold_p
+            frac = fixture["root_coverage_fraction"]
+            expected = 100.0 * frac ** cell.report_fold_p
+            assert fixture["coverage_implied_score"] == pytest.approx(expected, abs=1e-9)
+
+    def test_writer_round_trips_to_tmp(self, tmp_path):
+        payload = cal.build_user14_fixture(cal.CURRENT_SM_V2_3_CELL, "sm-v2-3")
+        target = tmp_path / "nested" / "user14.json"
+        written = cal.write_user14_fixture(payload, path=target)
+        assert written == target
+        assert target.exists()
+        text = target.read_text(encoding="utf-8")
+        assert text.endswith("\n")
+        assert json.loads(text) == payload
+        # deterministic: sorted keys, 2-space indent
+        assert json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n" == text
+
+    def test_writer_never_touches_checked_in_default(self, tmp_path):
+        # The Phase-1 tests always write to a tmp path; the settled fixture is untouched.
+        payload = cal.build_user14_fixture(cal.CURRENT_SM_V2_3_CELL, "sm-v2-3")
+        target = tmp_path / "user14.json"
+        cal.write_user14_fixture(payload, path=target)
+        assert cal.DEFAULT_USER14_FIXTURE_PATH != target
+
+
+# --- orchestration end-to-end (default + demo) ------------------------------
+
+
+class TestMainEndToEnd:
+    def _main(self, argv):
         graph, overlay, roots, _opp = _opponent_root_overlay()
         db = MagicMock()
         with patch.object(cal, "overlay_evidence", return_value=overlay), patch(
-            "app.opening_cache.list_opening_score_candidate_pairs",
-            return_value=[(1, "white")],
+            "app.opening_cache.list_opening_score_candidate_pairs", return_value=[]
         ), patch.object(cal, "get_opening_graph", return_value=graph), patch.object(
             cal, "get_opening_roots", return_value=roots
         ):
-            report = cal.main(
-                [
-                    "--min-observations",
-                    "0",
-                    "--lcb-z-grid",
-                    "0,1.0",
-                    "--coverage-grid",
-                    "off,gate",
-                ],
-                session_factory=_fake_factory(db),
+            return cal.main(argv, session_factory=_fake_factory(db))
+
+    def test_diagnostics_keys_and_primitive_rows(self):
+        report = self._main(["--min-observations", "0"])
+        assert set(report["diagnostics"]) == {"user14", "opponent_guard", "cliff"}
+        named = {
+            "user14": (
+                "synth_user_turn_pre_fold_quality",
+                "synth_opp_turn_pre_fold_quality",
+            ),
+            "opponent_guard": ("specialist_pre_fold_quality",),
+        }
+        for key, ops in named.items():
+            for row in report["diagnostics"][key]["rows"]:
+                json.dumps(row)  # NO default=str
+                assert set(row["cell"].keys()) == _SIX_AXES
+                assert "pre_fold_quality" not in row
+                for op in ops:
+                    assert row[op] is None or isinstance(row[op], float)
+        # whole report still round-trips with default=str (production emission)
+        assert json.loads(json.dumps(report, indent=2, default=str))
+        # text renders and names all three diagnostics
+        text = cal.render_text(report)
+        assert "User-14" in text
+        assert "opponent regression guard" in text
+        assert "cliff" in text
+
+    def test_default_excludes_demo(self):
+        report = self._main(["--min-observations", "0"])
+        for diag in ("user14", "opponent_guard"):
+            assert all(
+                row["roles"] != ("demo",)
+                for row in report["diagnostics"][diag]["rows"]
             )
-        assert len(report["grid"]["cells"]) == 4
-        assert set(report["diagnostics"]) == {"specialist", "broad_guard", "cliff"}
-        # Per-pair per-opening-key deltas reach the (JSON-serializable) report.
-        gate_cell = next(
-            c for c in report["grid"]["cells"] if c["coverage_fold"] == "gate"
-        )
-        keys = gate_cell["deltas_vs_baseline"]["per_pair"][0]["keys"]
-        assert keys and "opening_key" in keys[0] and "delta" in keys[0]
-        # Round-trips for --json.
-        assert json.loads(json.dumps(report, default=str))
-        out = capsys.readouterr().out
-        assert "Calibration grid" in out
-        assert "Calibration diagnostics" in out
-        # Text renders the keyed per-pair mover, not just a pooled summary.
-        assert "→" in out and "Δ" in out
+        assert all(not _is_demo_axes(c["cell"]) for c in report["grid"]["cells"])
+
+    def test_include_demo_diagnostics(self):
+        report = self._main(["--min-observations", "0", "--include-demo-diagnostics"])
+        for diag in ("user14", "opponent_guard"):
+            demo_rows = [
+                row
+                for row in report["diagnostics"][diag]["rows"]
+                if row["roles"] == ("demo",)
+            ]
+            assert len(demo_rows) == 1
+            assert demo_rows[0]["graded_for"] == "none"
+        # report["grid"] STILL excludes demos even when the flag is on.
+        assert all(not _is_demo_axes(c["cell"]) for c in report["grid"]["cells"])

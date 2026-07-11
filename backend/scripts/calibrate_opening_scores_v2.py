@@ -29,8 +29,10 @@ import math
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Iterable
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -41,6 +43,7 @@ import chess  # noqa: E402
 from app.db import DATABASE_URL  # noqa: E402
 from app.fen import active_color, normalize_fen  # noqa: E402
 from app.opening_evidence import (  # noqa: E402
+    EdgeEvidence,
     EvidenceOverlay,
     NodeEvidence,
     PhaseSample,
@@ -49,10 +52,11 @@ from app.opening_evidence import (  # noqa: E402
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph  # noqa: E402
 from app.opening_quality import TAU_CP, TAU_WC  # noqa: E402
 from app.opening_rootcalc import (  # noqa: E402
-    COVERAGE_FOLD_MODES,
     SYNTHETIC_INITIAL_FEN,
     CalcTelemetry,
+    NodeDebug,
     RootCalcConfig,
+    RootScore,
     compute_all_root_scores,
     compute_root_score,
     root_calc_config_fingerprint,
@@ -62,12 +66,6 @@ from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots  # no
 DEFAULT_MIN_OBSERVATIONS = 20
 HISTOGRAM_EDGES = (0.0, 20.0, 40.0, 60.0, 80.0, 100.0)
 DEFAULT_PERCENTILES = (5.0, 25.0, 50.0, 75.0, 95.0)
-
-# Calibration-grid sweep defaults (the SET of values measured, NOT a tuning
-# choice — g-5bcz ships no chosen value). Baseline (lcb_z=0.0, coverage_fold="off")
-# is the current model and is always included by ``build_grid``.
-DEFAULT_LCB_Z_GRID = (0.0, 1.0, 1.28)
-DEFAULT_COVERAGE_GRID = ("off", "gate", "gate_x_cov")
 
 # Fixed release-diagnostic gates from the pre-readiness display bands. These are
 # intentionally NOT the current display grades in src/openings/format.ts: they
@@ -81,23 +79,145 @@ CACHE_READ_GATE_MS = 50.0
 
 
 # ---------------------------------------------------------------------------
+# Grade-decoupling pure primitives (g-p4ih.1.2): ordinal grade rank, fixed diagnostic
+# bands, derived-cutoff grading, and the opponent-guard / leak tolerance constants.
+# All grade-free where noted; consumed by the paired diagnostics here and by
+# g-p4ih-selection downstream.
+# ---------------------------------------------------------------------------
+
+# A > B > C > D > F is NOT the lexicographic order of the letters, so grade
+# comparisons MUST go through this single ordinal rank (best -> worst = increasing
+# distance from A) rather than a bare string <=. rank(A)=0 .. rank(F)=4.
+GRADE_RANK = {"A": 0, "B": 1, "C": 2, "D": 3, "F": 4}
+
+
+def grade_rank(letter: str) -> int:
+    """Ordinal rank of an A-F grade (0=A best .. 4=F worst); fail-closed otherwise.
+
+    The "No Data" / null grade never enters the tolerance gates (every gated score is
+    a finite 0..100 number), so this covers A-F only and fails closed on anything
+    else rather than silently ranking it. (The frontend gradeRank mirror returns null
+    + reject-before-compare instead; that is g-p4ih-cutoff-fixture's.)
+    """
+    assert letter in GRADE_RANK, f"grade_rank expects an A-F grade; got {letter!r}"
+    return GRADE_RANK[letter]
+
+
+def fixed_band(score: float) -> str:
+    """Letter grade from the FIXED diagnostic bands (total over every finite score)."""
+    if score >= GRADE_A:
+        return "A"
+    if score >= GRADE_B:
+        return "B"
+    if score >= GRADE_C:
+        return "C"
+    if score >= GRADE_D:
+        return "D"
+    return "F"
+
+
+def provisional_grade(score: float, cutoffs: Cutoffs) -> str:
+    """Letter grade from the DERIVED per-candidate ``Cutoffs`` (A .. F).
+
+    Requires a ``Cutoffs`` — there is no bare ``provisional_grade(score)`` form.
+    Consumed by g-p4ih-selection's User-14 derived-grade gate.
+    """
+    if score >= cutoffs.a:
+        return "A"
+    if score >= cutoffs.b:
+        return "B"
+    if score >= cutoffs.c:
+        return "C"
+    if score >= cutoffs.d:
+        return "D"
+    return "F"
+
+
+# Opponent-drop and leak tolerances (band-anchored rank + raw caps; see g-p4ih
+# "Grade decoupling"). The A band [50, inf) and F band [0, 22) are open-ended and the
+# real reference scores land in exactly those, so "one band width" is undefined —
+# these are pinned as an explicit rank cap plus a raw-point cap, each band-anchored:
+#   - OPP_GUARD: one B-band width (50-38), the widest bounded interior band; lenient.
+#   - LEAK: one D-band width (28-22), the tightest bounded interior band; strict.
+OPP_GUARD_MAX_RANK_DROP = 1
+OPP_GUARD_MAX_RAW_DROP_PTS = 12.0
+LEAK_MAX_RANK_INCREASE = 1
+LEAK_MAX_RAW_INCREASE_PTS = 6.0
+
+
+def _opp_guard_fires(candidate_opp_score: float, reference_opp_score: float) -> bool:
+    """The opponent regression guard FIRES (candidate inadmissible) iff the candidate
+    craters more than one rank below the reference OR drops more than the raw cap."""
+    return (
+        grade_rank(fixed_band(candidate_opp_score))
+        > grade_rank(fixed_band(reference_opp_score)) + OPP_GUARD_MAX_RANK_DROP
+        or (reference_opp_score - candidate_opp_score) > OPP_GUARD_MAX_RAW_DROP_PTS
+    )
+
+
+def _leak_fires(candidate_pre_fold_quality: float, reference_gated_quality: float) -> bool:
+    """The unprepared-branch leak guard FIRES iff the candidate's ungated pre-fold
+    quality is more than one rank BETTER than the reference gated quality OR exceeds
+    it by more than the raw cap (quality leaking up through a dropped coverage gate)."""
+    return (
+        grade_rank(fixed_band(candidate_pre_fold_quality))
+        < grade_rank(fixed_band(reference_gated_quality)) - LEAK_MAX_RANK_INCREASE
+        or (candidate_pre_fold_quality - reference_gated_quality) > LEAK_MAX_RAW_INCREASE_PTS
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pure statistics helpers (DB-free; unit-tested in test_calibrate_opening_scores)
 # ---------------------------------------------------------------------------
 
 
+def _interp_percentile(sorted_scores: list[float], q: float) -> float:
+    """Type-7 (numpy default) linear-interpolated percentile ``q`` (0-100).
+
+    ASSUMES ``len(sorted_scores) >= 2`` and an already-sorted input. The shared
+    interpolation core behind BOTH the public ``percentile`` (which keeps its own
+    empty/singleton guards) and the precondition-checked ``_percentiles`` primitive,
+    so ordinary reporting and the cutoff/distribution path can never disagree on
+    interpolation. Equivalent to ``numpy.percentile(sorted, q, method="linear")``.
+    """
+    rank = (q / 100.0) * (len(sorted_scores) - 1)
+    low = math.floor(rank)
+    high = math.ceil(rank)
+    if low == high:
+        return sorted_scores[low]
+    frac = rank - low
+    return sorted_scores[low] * (1.0 - frac) + sorted_scores[high] * frac
+
+
 def percentile(sorted_values: list[float], q: float) -> float | None:
-    """Linear-interpolated percentile ``q`` (0-100) of an already-sorted list."""
+    """Linear-interpolated percentile ``q`` (0-100) of an already-sorted list.
+
+    INTENTIONALLY returns ``None`` for an empty cohort and the lone value for a
+    singleton (ordinary cohort/telemetry reporting depends on this); it delegates to
+    the shared ``_interp_percentile`` core only on the ``len >= 2`` path, so the
+    refactor cannot regress empty/low-evidence reporting.
+    """
     if not sorted_values:
         return None
     if len(sorted_values) == 1:
         return sorted_values[0]
-    rank = (q / 100.0) * (len(sorted_values) - 1)
-    low = math.floor(rank)
-    high = math.ceil(rank)
-    if low == high:
-        return sorted_values[low]
-    frac = rank - low
-    return sorted_values[low] * (1.0 - frac) + sorted_values[high] * frac
+    return _interp_percentile(sorted_values, q)
+
+
+def _percentiles(scores: list[float], qs: tuple[float, ...]) -> tuple[float, ...]:
+    """Sorted type-7 percentiles at ``qs`` for a cohort of ``len >= 2`` (raises below).
+
+    The single primitive shared by ``derive_cutoffs`` (qs = 12/25/40/82/95) and
+    ``distribution_stats`` (qs = 5/25/50/75/95), so the two can never disagree on
+    interpolation. Deliberately does NOT model the empty/singleton None case (that
+    stays at the ``percentile`` boundary) and never special-cases an all-equal cohort
+    — all-equal rejection belongs ONLY to ``derive_cutoffs`` (via its strict-ordering
+    ``CutoffCollision``).
+    """
+    if len(scores) < 2:
+        raise ValueError(f"_percentiles requires at least 2 scores; got {len(scores)}")
+    ordered = sorted(scores)
+    return tuple(_interp_percentile(ordered, q) for q in qs)
 
 
 def percentiles(
@@ -143,6 +263,102 @@ def summarize(values: list[float]) -> dict[str, object]:
         "percentiles": percentiles(values),
         "histogram": histogram(values),
     }
+
+
+# ---------------------------------------------------------------------------
+# Distribution stats + derived cutoffs (pure; consumed by g-p4ih-selection)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DistributionStats:
+    """Five exact-float quantiles of a candidate's pooled named-root score cohort."""
+
+    p05: float
+    p25: float
+    p50: float
+    p75: float
+    p95: float
+
+
+def distribution_stats(scores: list[float]) -> DistributionStats:
+    """Five quantiles via the shared ``_percentiles`` primitive (requires len >= 2).
+
+    UNLIKE ``derive_cutoffs`` this does NOT reject an all-equal cohort: five equal
+    quantiles (spread 0) are a valid statistic that simply loses the spread ordering.
+    Assumes finite in-range scores; does not re-validate the range (the scorer's
+    contract, asserted upstream at load). g-p4ih.1.2 is the SOLE definer of this type
+    and function; g-p4ih-selection imports them and must not redefine them.
+    """
+    p05, p25, p50, p75, p95 = _percentiles(scores, (5.0, 25.0, 50.0, 75.0, 95.0))
+    return DistributionStats(p05=p05, p25=p25, p50=p50, p75=p75, p95=p95)
+
+
+class CutoffCollision(ValueError):
+    """A compressed/all-equal cohort collapsed a rounded cutoff band to width 0.
+
+    ALWAYS raised (never a sentinel return) so g-p4ih-selection can catch it and
+    record ``rejection_reason="cutoff_collision"``; the candidate is rejected, its
+    boundaries are never nudged apart.
+    """
+
+
+@dataclass(frozen=True)
+class Cutoffs:
+    """Derived grade + tone boundaries for one candidate cell.
+
+    Grade boundaries (F is below ``d``), strictly ``a > b > c > d``; tone boundaries,
+    strictly ``watch > alert``. The ONE shape both the selection gates and the emitted
+    format.ts numbers read; ``provisional_grade`` consumes exactly these six fields.
+    """
+
+    a: int
+    b: int
+    c: int
+    d: int
+    alert: int
+    watch: int
+
+
+def _round_half_up(value: float) -> int:
+    """Round to the nearest integer, halves UP — NOT Python's banker's round."""
+    return int(math.floor(value + 0.5))
+
+
+def derive_cutoffs(scores: list[float]) -> Cutoffs:
+    """Pure, deterministic, validity-checked grade/tone cutoffs for one cell's scores.
+
+    Percentiles by type-7 linear interpolation (the shared ``_percentiles`` primitive),
+    each boundary ROUND-HALF-UP. Grades A/B/C/D := p95/p82/p40/p12 (F below d); tones
+    alert/watch := p25/p82 (watch and grade-b share p82 by intent — one reused
+    boundary, NOT a collision). Requires len(scores) >= 2 (raises ``ValueError`` — a
+    precondition the frozen cohort guarantees). Assumes finite in-range scores; does
+    not re-validate the range. On any non-strict rounded ordering (a band collapsed to
+    width 0, INCLUDING an all-equal cohort, which surfaces through the ordinary
+    strict-ordering check) raises ``CutoffCollision`` — the candidate is rejected,
+    never nudged.
+    """
+    if len(scores) < 2:
+        raise ValueError(f"derive_cutoffs requires at least 2 scores; got {len(scores)}")
+    q12, q25, q40, q82, q95 = _percentiles(scores, (12.0, 25.0, 40.0, 82.0, 95.0))
+    cutoffs = Cutoffs(
+        a=_round_half_up(q95),
+        b=_round_half_up(q82),
+        c=_round_half_up(q40),
+        d=_round_half_up(q12),
+        alert=_round_half_up(q25),
+        watch=_round_half_up(q82),
+    )
+    if not (cutoffs.d < cutoffs.c < cutoffs.b < cutoffs.a):
+        raise CutoffCollision(
+            f"non-strict grade ordering d<c<b<a: {cutoffs.d} < {cutoffs.c} < "
+            f"{cutoffs.b} < {cutoffs.a}"
+        )
+    if not cutoffs.alert < cutoffs.watch:
+        raise CutoffCollision(
+            f"non-strict tone ordering alert<watch: {cutoffs.alert} < {cutoffs.watch}"
+        )
+    return cutoffs
 
 
 # ---------------------------------------------------------------------------
@@ -274,33 +490,111 @@ def score_pair(
 
 
 # ---------------------------------------------------------------------------
-# Calibration grid (g-zc3p / g-5bcz): sweep (lcb_z x coverage_fold) cells
+# Calibration grid (g-zc3p / g-p4ih): anchor-first arm structure over the fold axes
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class GridCell:
-    """One (lcb_z, coverage_fold) point of the calibration grid."""
+    """One point of the readiness-fold calibration grid.
+
+    Six behavioral axes. The two existing positional fields (lcb_z, coverage_fold)
+    stay first so every current 2-arg ``GridCell(lcb_z, coverage_fold)`` call keeps
+    compiling; the four additions default to their identity values, so a bare 2-arg
+    cell is a no-fold cell (threshold=1, p=0, keep). ``__post_init__`` canonicalizes
+    the INERT report_fold_scope axis (inert when report_fold_p == 0) so GridCell's
+    native ``eq``/``hash`` IS the behavioral key — ``set[GridCell]`` dedupe and
+    ``dict[GridCell, PairScore]`` scoring maps collapse behaviorally-equal cells with
+    zero call-site discipline. report_self_term IS a genuine behavioral axis
+    ("drop_user" changes the number) and is NEVER normalized; lcb_z / coverage_fold /
+    coverage_live_threshold are always behavioral and NEVER normalized.
+    """
 
     lcb_z: float
     coverage_fold: str
+    coverage_live_threshold: int = 1
+    report_fold_p: float = 0.0
+    report_fold_scope: str = "all"
+    report_self_term: str = "keep"
+
+    def __post_init__(self) -> None:
+        # Inert-axis canonicalization: with no report fold (p == 0) the scope selects
+        # nothing, so force it to the single canonical sentinel "all". This makes the
+        # native eq/hash the behavioral key AND makes .config reflect the canonical
+        # scope, so no scoring map can key on a raw (behaviorally-inert) scope literal.
+        if self.report_fold_p == 0.0 and self.report_fold_scope != "all":
+            object.__setattr__(self, "report_fold_scope", "all")
 
     @property
     def config(self) -> RootCalcConfig:
-        return RootCalcConfig(lcb_z=self.lcb_z, coverage_fold=self.coverage_fold)
+        return RootCalcConfig(
+            lcb_z=self.lcb_z,
+            coverage_fold=self.coverage_fold,
+            coverage_live_threshold=self.coverage_live_threshold,
+            report_fold_p=self.report_fold_p,
+            report_fold_scope=self.report_fold_scope,
+            report_self_term=self.report_self_term,
+        )
 
     @property
-    def is_baseline(self) -> bool:
-        """The current model: no LCB shrinkage, no coverage gate."""
-        return self.lcb_z == 0.0 and self.coverage_fold == "off"
+    def is_original(self) -> bool:
+        """This cell behaviorally equals ORIGINAL_CELL (the pre-g-zc3p comparator)."""
+        return self == ORIGINAL_CELL
+
+    @property
+    def is_reference(self) -> bool:
+        """This cell behaviorally equals CURRENT_SM_V2_3_CELL (the delta reference)."""
+        return self == CURRENT_SM_V2_3_CELL
 
     @property
     def label(self) -> str:
         return f"lcb_z={self.lcb_z:g},cov={self.coverage_fold}"
 
 
-# The current-model cell every grid is measured against.
-BASELINE_CELL = GridCell(0.0, "off")
+# The two pinned LITERAL anchors (fixed comparators every historical grid report and
+# behavior-diff diagnostic is keyed off). ORIGINAL_CELL is the pre-g-zc3p original
+# comparator (value unchanged from the former BASELINE_CELL). CURRENT_SM_V2_3_CELL is
+# today's deployed sm-v2-3 model (== RootCalcConfig() today) — pinned by literal field
+# values so it keeps meaning "the historical current model" after the phase-3 default
+# flip (g-p4ih-model-flip). Because p == 0 the scope is canonicalized, giving the
+# anti-drift property: each anchor compares equal to any other p=0 cell of the same
+# (lcb_z, coverage_fold, threshold, self_term) regardless of the scope literal passed.
+CURRENT_SM_V2_3_CELL = GridCell(
+    lcb_z=1.0,
+    coverage_fold="gate",
+    coverage_live_threshold=1,
+    report_fold_p=0.0,
+    report_fold_scope="all",
+    report_self_term="keep",
+)
+ORIGINAL_CELL = GridCell(
+    lcb_z=0.0,
+    coverage_fold="off",
+    coverage_live_threshold=1,
+    report_fold_p=0.0,
+    report_fold_scope="all",
+    report_self_term="keep",
+)
+
+
+def _cell_axes(cell: GridCell) -> dict[str, object]:
+    """The SIX behavioral axes as JSON primitives (never a raw GridCell).
+
+    The single module-level helper both the cohort grid report rows and the diagnostic
+    CellRows use, so every serialized row identifies its cell by all six axes and no
+    two swept cells collide. Reports are emitted via ``json.dumps(..., default=str)``,
+    under which a raw GridCell would serialize as its dataclass repr STRING and hide
+    the axes; ``_cell_axes`` makes the axes survive that (``default=str`` becomes only
+    a safety net, never load-bearing).
+    """
+    return {
+        "lcb_z": cell.lcb_z,
+        "coverage_fold": cell.coverage_fold,
+        "coverage_live_threshold": cell.coverage_live_threshold,
+        "report_fold_p": cell.report_fold_p,
+        "report_fold_scope": cell.report_fold_scope,
+        "report_self_term": cell.report_self_term,
+    }
 
 
 def _cfg_fp(cell_or_config: "GridCell | RootCalcConfig") -> str:
@@ -321,36 +615,167 @@ def _cfg_fp(cell_or_config: "GridCell | RootCalcConfig") -> str:
     return root_calc_config_fingerprint(config)
 
 
-def parse_lcb_z_grid(raw: str | None) -> list[float]:
-    if not raw:
-        return list(DEFAULT_LCB_Z_GRID)
-    return [float(token) for token in raw.split(",") if token.strip()]
+# Merged-role tuple canonicalization (DETERMINISTIC — pin the order, never
+# tuple(set(...))). Once role moves OUTSIDE the cell, the merged tuple's element order
+# becomes a serialization surface: a set-derived tuple would reorder run-to-run even
+# though the underlying cells are byte-stable, a real flake against the report
+# round-trip stability. Pin ONE canonical role rank (anchors, then arms, then B1, then
+# demo — matching the anchor-first cells order) and sort + dedupe every merged tuple by
+# it at the ONE point roles_by_cell is built, so every downstream read is already
+# stable. An unknown label raises KeyError (fail-closed, like grade_rank).
+ROLE_ORDER = ("original", "current", "arm1", "arm2", "b1", "demo")
+_ROLE_RANK = {role: i for i, role in enumerate(ROLE_ORDER)}
 
 
-def parse_coverage_grid(raw: str | None) -> list[str]:
-    if not raw:
-        return list(DEFAULT_COVERAGE_GRID)
-    modes = [token.strip() for token in raw.split(",") if token.strip()]
-    unknown = [mode for mode in modes if mode not in COVERAGE_FOLD_MODES]
-    if unknown:
+def _canonical_roles(roles: Iterable[str]) -> tuple[str, ...]:
+    """Sort roles by the pinned ROLE_ORDER and dedupe, so the same SET of roles ALWAYS
+    serializes identically (("current", "arm2"), never ("arm2", "current"))."""
+    return tuple(sorted(set(roles), key=lambda role: _ROLE_RANK[role]))
+
+
+# The report-fold p-grid the arms are swept over (Option A's swept range, subset of
+# (0, 1]). The single value the whole grid is parameterized by.
+REPORT_FOLD_P_GRID = (0.25, 0.5, 0.75, 1.0)
+
+
+def parse_report_fold_grid(raw: str | None) -> tuple[float, ...]:
+    """Parse the ``--report-fold-grid`` argument (a pure ``str | None -> tuple``).
+
+    The ``str | None`` type is load-bearing: ``None`` is the DISTINCT "argument
+    omitted" representation (the CLI flag defaults to None) and is the ONLY path to the
+    default REPORT_FOLD_P_GRID; a present-but-empty argument is never silently
+    defaulted. RAISES ``ValueError`` on any present-but-invalid input — an explicit
+    "" / whitespace-only / "," (a present-but-empty list), a non-numeric token, a
+    NaN/±inf token, ``p <= 0`` (the fold-OFF identity, never a swept candidate), or
+    ``p > 1`` (over-attenuation, outside Option A's range). The domain is 0 < p <= 1,
+    STRICTER than RootCalcConfig (which accepts any finite non-negative p). Order-
+    preserving dedupe (first-seen), returning a nonempty finite tuple — enumeration
+    order is the tie-break substrate downstream. _parse_args converts the ValueError
+    into ``parser.error`` (SystemExit(2)); this function itself never touches argparse.
+    """
+    if raw is None:
+        return REPORT_FOLD_P_GRID
+    tokens = [token.strip() for token in raw.split(",") if token.strip()]
+    if not tokens:
         raise ValueError(
-            f"unknown coverage_fold mode(s) {unknown}; "
-            f"valid modes: {sorted(COVERAGE_FOLD_MODES)}"
+            "--report-fold-grid may not be empty; expected 0 < p <= 1 values"
         )
-    return modes
+    values: list[float] = []
+    for token in tokens:
+        try:
+            p = float(token)
+        except ValueError:
+            raise ValueError(
+                f"invalid report-fold p value {token!r}; domain 0 < p <= 1"
+            ) from None
+        if not math.isfinite(p):
+            raise ValueError(
+                f"report-fold p must be finite, got {token!r}; domain 0 < p <= 1"
+            )
+        if p <= 0.0 or p > 1.0:
+            raise ValueError(f"report-fold p {p!r} out of domain 0 < p <= 1")
+        values.append(p)
+    return tuple(dict.fromkeys(values))
 
 
-def build_grid(lcb_zs: list[float], coverage_folds: list[str]) -> list[GridCell]:
-    """Cartesian product of the two axes, with the baseline cell first & deduped."""
-    cells: list[GridCell] = [BASELINE_CELL]
-    seen: set[GridCell] = {BASELINE_CELL}
-    for coverage_fold in coverage_folds:
-        for lcb_z in lcb_zs:
-            cell = GridCell(lcb_z, coverage_fold)
-            if cell not in seen:
-                seen.add(cell)
-                cells.append(cell)
-    return cells
+# ARM-1 — "fold instead of gate": drop the coverage gate, apply the report fold on BOTH
+# sides. Its ungated pre_fold_quality is the leak channel the opponent-guard reads.
+def arm1_cells(p_grid: tuple[float, ...] = REPORT_FOLD_P_GRID) -> tuple[GridCell, ...]:
+    return tuple(
+        GridCell(
+            lcb_z=1.0,
+            coverage_fold="off",
+            coverage_live_threshold=1,
+            report_fold_p=p,
+            report_fold_scope="all",
+            report_self_term="keep",
+        )
+        for p in p_grid
+    )
+
+
+# ARM-2 — "gate + user-side fold": keep the gate, apply the report fold to USER reports
+# only. Built with p > 0 directly (NOT a p=0.0 base + dataclasses.replace): __post_init__
+# canonicalizes scope to "all" whenever p == 0, so a p=0.0 ARM-2 base would SILENTLY
+# LOSE its scope="user".
+def arm2_cells(p_grid: tuple[float, ...] = REPORT_FOLD_P_GRID) -> tuple[GridCell, ...]:
+    return tuple(
+        GridCell(
+            lcb_z=1.0,
+            coverage_fold="gate",
+            coverage_live_threshold=1,
+            report_fold_p=p,
+            report_fold_scope="user",
+            report_self_term="keep",
+        )
+        for p in p_grid
+    )
+
+
+# B1 — "drop_user self-term": keep the gate, NO fold (fold+drop_user is disqualified),
+# drop the user self-mastery term. A single literal — never swept over the p-grid.
+B1_CELL = GridCell(
+    lcb_z=1.0,
+    coverage_fold="gate",
+    coverage_live_threshold=1,
+    report_fold_p=0.0,
+    report_fold_scope="all",
+    report_self_term="drop_user",
+)
+
+# DEMO — gate + uniform (all-scope) report fold at maximal p=1.0: the opponent-side
+# double-count DEMONSTRATION. Diagnostics-only, NEVER a candidate, NEVER cohort-scored,
+# never swept (a qualitative demonstration). NEVER enters build_arm_grid().cells /
+# required_cells; reaches the STANDALONE diagnostics only via --include-demo-diagnostics.
+DEMO_GATE_UNIFORM_FOLD_CELL = GridCell(
+    lcb_z=1.0,
+    coverage_fold="gate",
+    coverage_live_threshold=1,
+    report_fold_p=1.0,
+    report_fold_scope="all",
+    report_self_term="keep",
+)
+DEMO_CELLS = (DEMO_GATE_UNIFORM_FOLD_CELL,)
+
+
+@dataclass(frozen=True)
+class ArmGrid:
+    """The settled grid return: an anchor-first deduped cell tuple + roles OUTSIDE the
+    cell (a merged, _canonical_roles-sorted role-label tuple per deduped cell)."""
+
+    cells: tuple[GridCell, ...]  # anchor-first, deduped — the required grid
+    roles_by_cell: dict[GridCell, tuple[str, ...]]  # merged role labels per cell
+
+
+def build_arm_grid(p_grid: tuple[float, ...] = REPORT_FOLD_P_GRID) -> ArmGrid:
+    """Build the fixed anchor-first grid, parameterized ONLY by the report-fold p-grid.
+
+    Emits exactly ``{ORIGINAL_CELL, CURRENT_SM_V2_3_CELL, ARM-1×p_grid, ARM-2×p_grid,
+    B1}``, deduped by native identity (inert-axis canonicalization collapses any
+    accidental p=0 / scope overlap onto an anchor), ordered anchors-first. role is
+    carried OUTSIDE the cell in ``roles_by_cell``: when one deduped cell earns more than
+    one role (an anchor value that also lands in an arm's p-sweep — only reachable via a
+    DIRECT builder call with p=0; the CLI parser rejects 0), its label tuple MERGES both
+    via ``_canonical_roles``, and the cell is still scored ONCE. NEVER emits a demo cell.
+    """
+    role_specs: list[tuple[GridCell, str]] = [
+        (ORIGINAL_CELL, "original"),
+        (CURRENT_SM_V2_3_CELL, "current"),
+        *[(cell, "arm1") for cell in arm1_cells(p_grid)],
+        *[(cell, "arm2") for cell in arm2_cells(p_grid)],
+        (B1_CELL, "b1"),
+    ]
+    cells: list[GridCell] = []
+    roles_accum: dict[GridCell, list[str]] = {}
+    for cell, role in role_specs:
+        if cell not in roles_accum:
+            roles_accum[cell] = []
+            cells.append(cell)
+        roles_accum[cell].append(role)
+    roles_by_cell = {
+        cell: _canonical_roles(roles) for cell, roles in roles_accum.items()
+    }
+    return ArmGrid(cells=tuple(cells), roles_by_cell=roles_by_cell)
 
 
 def score_pair_grid(
@@ -359,39 +784,40 @@ def score_pair_grid(
     player_color: str,
     graph: OpeningGraph,
     roots: OpeningRoots,
-    grid: list[GridCell],
+    cells: tuple[GridCell, ...],
 ) -> dict[GridCell, PairScore]:
     """Build a pair's overlay ONCE (the ~2.6s cost), then score it per grid cell.
 
     Naively gridding would rebuild ``overlay_evidence`` O(pairs x cells) times; here
     the (DB-read) overlay is built once and only the cheap in-memory
-    ``score_overlay`` runs per cell.
+    ``score_overlay`` runs per cell. ``cells`` is ``ArmGrid.cells`` — a bare cell tuple,
+    never the ArmGrid wrapper (cohort scoring never reads roles).
     """
     overlay = overlay_evidence(db, user_id, player_color, graph)
     return {
         cell: score_overlay(user_id, player_color, graph, overlay, roots, cell.config)
-        for cell in grid
+        for cell in cells
     }
 
 
 def pair_key_deltas(
-    cell_score: PairScore, baseline_score: PairScore
+    cell_score: PairScore, reference_score: PairScore
 ) -> list[dict[str, object]]:
-    """Per-opening-key delta records vs baseline, for keys present in both.
+    """Per-opening-key delta records vs the current-model reference, for keys in both.
 
-    Each record keeps the opening key, its baseline and cell scores, and the delta,
-    so the report can emit true per-pair per-opening-key deltas (not just a summary).
+    Each record keeps the opening key, its current-model and cell scores, and the
+    delta, so the report can emit true per-pair per-opening-key deltas (not a summary).
     """
-    base = baseline_score.named_score_map
+    reference = reference_score.named_score_map
     return [
         {
             "opening_key": key,
-            "baseline": base[key],
+            "current_score": reference[key],
             "cell": value,
-            "delta": value - base[key],
+            "delta": value - reference[key],
         }
         for key, value in cell_score.named_score_map.items()
-        if key in base
+        if key in reference
     ]
 
 
@@ -572,56 +998,62 @@ def build_report(
 
 
 # ---------------------------------------------------------------------------
-# Grid report: per-cell distributions + per-pair per-key deltas vs baseline
+# Grid report: per-cell distributions + per-pair per-key deltas vs current model
 # ---------------------------------------------------------------------------
 
 
 def build_cell_report(
     cell: GridCell,
     pair_scores: list[PairScore],
-    baseline_scores: list[PairScore],
+    reference_scores: list[PairScore],
     *,
     min_observations: int,
 ) -> dict[str, object]:
-    """One grid cell's distribution + (for non-baseline cells) deltas vs baseline.
+    """One grid cell's distribution + (for non-reference cells) deltas vs current.
 
-    ``pair_scores`` and ``baseline_scores`` are aligned per pair (same order); a
-    pair is included when its observation total clears ``min_observations`` (the
-    total is config-independent, so the baseline row decides membership).
+    ``pair_scores`` and ``reference_scores`` are aligned per pair (same order); a
+    pair is included when its observation total clears ``min_observations`` (the total
+    is config-independent, so any cell's row decides membership identically). The
+    REFERENCE cell (CURRENT_SM_V2_3_CELL) omits deltas — deltas against itself are all
+    zero and carry no signal; ORIGINAL_CELL now EMITS deltas like any non-reference
+    cell, so its continuity column carries a real delta-vs-current. Each row's cell
+    identity is the full SIX-axis ``_cell_axes(cell)`` dict, not a flat two-field pair
+    (which would collide across the arm p-cells and B1), plus explicit ``is_original``
+    / ``is_reference`` booleans so a consumer can identify each anchor unambiguously.
     """
     paired = [
-        (cell_p, base_p)
-        for cell_p, base_p in zip(pair_scores, baseline_scores)
-        if base_p.observation_total >= min_observations
+        (cell_p, ref_p)
+        for cell_p, ref_p in zip(pair_scores, reference_scores)
+        if ref_p.observation_total >= min_observations
     ]
     pooled = [score for cell_p, _ in paired for score in cell_p.named_scores]
     synthetic = [
         cell_p.synthetic_score for cell_p, _ in paired if cell_p.synthetic_score is not None
     ]
     report: dict[str, object] = {
-        "lcb_z": cell.lcb_z,
-        "coverage_fold": cell.coverage_fold,
-        "baseline": cell.is_baseline,
+        "cell": _cell_axes(cell),
+        "is_original": cell.is_original,
+        "is_reference": cell.is_reference,
         "named_score_distribution": summarize(pooled),
         "synthetic_hero_distribution": summarize(synthetic),
     }
-    if not cell.is_baseline:
+    if not cell.is_reference:
         per_pair: list[dict[str, object]] = []
         pooled_deltas: list[float] = []
-        for cell_p, base_p in paired:
-            records = pair_key_deltas(cell_p, base_p)
+        for cell_p, ref_p in paired:
+            records = pair_key_deltas(cell_p, ref_p)
             values = [record["delta"] for record in records]
             pooled_deltas.extend(values)
             per_pair.append(
                 {
                     "user_id": cell_p.user_id,
                     "player_color": cell_p.player_color,
-                    # Full per-opening-key deltas (opening_key/baseline/cell/delta).
+                    # Full per-opening-key deltas (opening_key/current_score/cell/delta).
                     "keys": records,
                     "summary": summarize_deltas(values),
                 }
             )
-        report["deltas_vs_baseline"] = {
+        report["deltas_vs_current"] = {
             "pooled": summarize_deltas(pooled_deltas),
             "per_pair": per_pair,
         }
@@ -629,28 +1061,40 @@ def build_cell_report(
 
 
 def build_grid_report(
-    grid: list[GridCell],
+    cells: tuple[GridCell, ...],
     pair_grids: list[dict[GridCell, PairScore]],
     *,
     min_observations: int,
 ) -> dict[str, object]:
-    """Per-cell distributions + deltas across the whole grid."""
-    baseline_scores = [pg[BASELINE_CELL] for pg in pair_grids]
-    cells = [
+    """Per-cell distributions + deltas across the whole grid (delta ref = current)."""
+    reference_scores = [pg[CURRENT_SM_V2_3_CELL] for pg in pair_grids]
+    cell_reports = [
         build_cell_report(
             cell,
             [pg[cell] for pg in pair_grids],
-            baseline_scores,
+            reference_scores,
             min_observations=min_observations,
         )
-        for cell in grid
+        for cell in cells
     ]
-    return {"cells": cells}
+    return {"cells": cell_reports}
 
 
 # ---------------------------------------------------------------------------
 # PASS/FAIL calibration diagnostics (synthetic overlays scored across the grid)
 # ---------------------------------------------------------------------------
+
+# Deterministic clock for the synthetic scenarios (g-p4ih.1.2 "Deterministic clock").
+# compute_root_score defaults to datetime.now(timezone.utc), so every diagnostic /
+# builder this bead owns threads a keyword-only as_of (defaulting to this) into every
+# compute_root_score(..., now=as_of) so no scorer it calls reaches the wall clock. The
+# STANDALONE path uses this default; g-p4ih-replay-bind threads the artifact-header
+# as_of on the release path. The User-14 scenario carries no last-touch timestamps, so
+# its score/coverage are in fact clock-INVARIANT — but the threading is the
+# architectural guarantee that closes the datetime.now path for EVERY diagnostic
+# (including the broad-guard/specialist producers, whose confidence channel DOES read
+# the clock) and keeps the release run reproducible.
+SYNTHETIC_AS_OF = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
 
 def _diag_fen(board: chess.Board) -> str:
@@ -754,95 +1198,392 @@ def _cliff_scenario(
     return graph, overlay, _diag_roots(opp), opp
 
 
+def _user14_scenario() -> tuple[
+    OpeningGraph, EvidenceOverlay, EvidenceOverlay, OpeningRoots, str, str
+]:
+    """The frozen synthetic User-14 scenario (g-p4ih.1.2 "Synthetic User-14 scenario").
+
+    A TWO-LEVEL opponent fan (Caro breadth 2 x deep breadth 6) with PINNED node + edge
+    evidence, exposing the SAME FEN as a user-turn node under black and an opponent-turn
+    node under white on IDENTICAL evidence. Returns (graph, black_overlay, white_overlay,
+    roots, root_fen, child_fen). The pinned values reproduce (scored under
+    CURRENT_SM_V2_3_CELL at SYNTHETIC_AS_OF) root pre-fold quality 54.32, Caro child
+    34.38, coverage fraction 0.0833 (each inside its self-check tolerance).
+    """
+    root_fen = _diag_positions(["e2e4"])[1]  # 1.e4, black to move (USER / OPP mirror)
+    child_fen = _diag_positions(["e2e4", "c7c6"])[2]  # Caro-Kann, white to move (OPP)
+    mid_fen = _diag_positions(["e2e4", "c7c6", "d2d4"])[3]  # 2.d4, black to move (USER)
+    deep_fen = _diag_positions(["e2e4", "c7c6", "d2d4", "d7d5"])[4]  # 3.*, white to move
+    leaf_fen = _diag_positions(["e2e4", "c7c6", "d2d4", "d7d5", "e4d5"])[5]  # after exd5
+
+    # Exactly SEVEN paths: the prepared mainline plus the unprepared siblings at each of
+    # the two opponent levels. The Caro node gets 2 White replies (d4 + Nc3); the deep
+    # node gets 6 (exd5 + 5 siblings). Their PRODUCT is the coverage denominator
+    # (1 / (2*6) = 0.0833).
+    paths = [
+        ["e2e4", "c7c6", "d2d4", "d7d5", "e4d5"],  # prepared mainline: Caro Exchange
+        ["e2e4", "c7c6", "b1c3"],                    # 1 unprepared Caro reply (2.Nc3)
+        ["e2e4", "c7c6", "d2d4", "d7d5", "b1c3"],    # 5 unprepared deep replies
+        ["e2e4", "c7c6", "d2d4", "d7d5", "g1f3"],
+        ["e2e4", "c7c6", "d2d4", "d7d5", "f1d3"],
+        ["e2e4", "c7c6", "d2d4", "d7d5", "b1d2"],
+        ["e2e4", "c7c6", "d2d4", "d7d5", "g1e2"],
+    ]
+    graph = _diag_graph(paths)
+
+    def _overlay(color: str) -> EvidenceOverlay:
+        overlay = EvidenceOverlay(14, color)
+        # Node quality (mastery) sits on the USER-turn nodes ONLY — root, mid, leaf —
+        # because _mastery is defined for user-turn nodes; quality on the OPPONENT Caro
+        # node would be INERT. Exactly THREE non-zero quality_sum nodes.
+        overlay.nodes[root_fen] = NodeEvidence(
+            fen=root_fen, quality_sum=54.0, quality_count=60, live_attempts=60
+        )
+        overlay.nodes[mid_fen] = NodeEvidence(
+            fen=mid_fen, quality_sum=38.8, quality_count=40, live_attempts=40
+        )
+        overlay.nodes[leaf_fen] = NodeEvidence(
+            fen=leaf_fen, quality_sum=16.0, quality_count=20, live_attempts=20
+        )
+        # Prepared-child status is set by EDGE evidence (_prepared_children reads edges,
+        # not node evidence): the two USER moves c7c6 (root->caro) and d7d5 (mid->deep)
+        # carry edges with live_passes >= 1. NEVER add an edge for a non-move pair — an
+        # overlay edge also registers as an OBSERVED structural child, injecting a
+        # phantom child that would corrupt the topology.
+        overlay.edges[(root_fen, child_fen)] = EdgeEvidence(
+            root_fen, child_fen, "c7c6", live_attempts=60, live_passes=60
+        )
+        overlay.edges[(mid_fen, deep_fen)] = EdgeEvidence(
+            mid_fen, deep_fen, "d7d5", live_attempts=40, live_passes=40
+        )
+        return overlay
+
+    # Both roots are named so compute_root_score can score EACH as its own root (root_fen
+    # for the black/white root operands, child_fen for the "strongest child" operand).
+    return (
+        graph,
+        _overlay("black"),
+        _overlay("white"),
+        _diag_roots(root_fen, child_fen),
+        root_fen,
+        child_fen,
+    )
+
+
 def _score_target(
     target: str,
     graph: OpeningGraph,
     overlay: EvidenceOverlay,
     roots: OpeningRoots,
     config: RootCalcConfig,
+    *,
+    now: datetime = SYNTHETIC_AS_OF,
+    debug: bool = False,
 ) -> float:
     return compute_root_score(
-        target, "white", graph, overlay, roots, config
+        target, "white", graph, overlay, roots, config, now=now, debug=debug
     ).opening_score
 
 
-def run_specialist_diagnostic(grid: list[GridCell]) -> dict[str, object]:
-    """TRUE-POSITIVE gate: a one-variation specialist must drop from ~B to ~D/F
-    once the coverage fold is on."""
-    graph, overlay, roots, target = _specialist_scenario()
-    cells = [
-        {
-            "lcb_z": cell.lcb_z,
-            "coverage_fold": cell.coverage_fold,
-            "baseline": cell.is_baseline,
-            "score": _score_target(target, graph, overlay, roots, cell.config),
+# --- report-stage FEN lookup (leak gate reads pre_fold_quality, not opening_score) ---
+
+
+def _report_node_for(
+    root_score: RootScore,
+    fen: str,
+    *,
+    require: tuple[str, ...] = (
+        "pre_fold_quality",
+        "reported_score",
+        "report_fold_multiplier",
+    ),
+) -> NodeDebug:
+    """The NodeDebug for a REPORTED FEN, scanning debug_nodes (a list, not a FEN map).
+
+    Fails closed (RAISES ValueError) in TWO distinct cases, so a never-reported node can
+    never masquerade as its own reported row: (1) NO node matches the FEN (debug_nodes
+    never visited it); and (2) a node matches but ANY report-stage operand named in
+    ``require`` is None — the FEN was visited only as a DESCENDANT during _calc, never
+    reported as its own row (the report-stage fields stay None until a FEN is reported in
+    _direct_metrics). The None check is the necessary guard the FEN scan alone cannot
+    provide.
+    """
+    target = normalize_fen(fen)
+    for node in root_score.debug_nodes:
+        if normalize_fen(node.fen) == target:
+            missing = [name for name in require if getattr(node, name) is None]
+            if missing:
+                raise ValueError(
+                    f"fen present but not reported: report-stage operand(s) "
+                    f"{missing} are null for {fen!r}"
+                )
+            return node
+    raise ValueError(f"fen not in debug_nodes: {fen!r}")
+
+
+def pre_fold_quality_for(root_score: RootScore, fen: str) -> float:
+    """Ungated pre-fold quality of a reported FEN (fails closed on an unreported FEN)."""
+    return _report_node_for(
+        root_score, fen, require=("pre_fold_quality",)
+    ).pre_fold_quality
+
+
+# --- behavior keys + cell-role taxonomy (grading routed by NATIVE identity, not label) ---
+
+
+def _opp_behavior_key(cell: GridCell) -> tuple[object, ...]:
+    # Axes that determine an OPPONENT node's reported score: LCB + gate (+ threshold)
+    # + the report fold ONLY when it reaches opponent reports (scope="all"). A
+    # scope="user" fold and drop_user never touch opponent reports -> excluded here.
+    opp_fold_p = cell.report_fold_p if cell.report_fold_scope == "all" else 0.0
+    return (cell.lcb_z, cell.coverage_fold, cell.coverage_live_threshold, opp_fold_p)
+
+
+def _user_behavior_key(cell: GridCell) -> tuple[object, ...]:
+    # Axes that determine a USER node's reported score: LCB + gate (+ threshold)
+    # + the report fold (BOTH scopes fold user reports -> scope omitted) + self-term.
+    return (
+        cell.lcb_z,
+        cell.coverage_fold,
+        cell.coverage_live_threshold,
+        cell.report_fold_p,
+        cell.report_self_term,
+    )
+
+
+_ANCHOR_CELLS = (ORIGINAL_CELL, CURRENT_SM_V2_3_CELL)
+
+
+def _is_eligible(cell: GridCell, demo_cells: tuple[GridCell, ...]) -> bool:
+    """Filter 1: NOT behaviorally an anchor and NOT a demo (a native-identity test on
+    the pinned constants, never a mutable role label)."""
+    return cell not in _ANCHOR_CELLS and cell not in demo_cells
+
+
+def _graded_for(cell: GridCell, demo_cells: tuple[GridCell, ...]) -> str:
+    """The cell's grading role: GRADED-FOR-SELECTION (arms — outcome flips the aggregate
+    and gates release), GRADED-FOR-REFERENCE (B1 — scored + reported, never flips the
+    aggregate), or "none" (continuity anchors, demos)."""
+    if not _is_eligible(cell, demo_cells):
+        return "none"
+    return "reference" if cell == B1_CELL else "selection"
+
+
+def _iter_grid_and_demos(
+    grid: ArmGrid, demo_cells: tuple[GridCell, ...]
+):
+    """Yield (cell, roles) for every grid cell (roles from roles_by_cell, already
+    _canonical_roles-sorted) then each demo cell with a synthesized ("demo",)."""
+    for cell in grid.cells:
+        yield cell, grid.roles_by_cell[cell]
+    for cell in demo_cells:
+        yield cell, ("demo",)
+
+
+def _diagnostic_rows(
+    grid: ArmGrid,
+    demo_cells: tuple[GridCell, ...],
+    operands,
+    applicable,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Build one CellRow per grid cell (then demos) plus the CURRENT reference row.
+
+    ``operands(cell)`` returns the per-cell operand fields (mapped 1:1 into
+    DiagnosticCellResult downstream); ``applicable(cell)`` is Filter 2 on the
+    diagnostic's RELEVANT turn. CellRow["cell"] is the six-axis primitive dict (never a
+    raw GridCell), so every operand survives ``json.dumps`` WITHOUT relying on
+    ``default=str``.
+    """
+
+    def _row(cell: GridCell, roles: tuple[str, ...]) -> dict[str, object]:
+        row: dict[str, object] = {
+            "cell": _cell_axes(cell),
+            "cell_label": cell.label,
+            "roles": roles,
+            "eligible": _is_eligible(cell, demo_cells),
+            "graded_for": _graded_for(cell, demo_cells),
+            "applicable": applicable(cell),
         }
-        for cell in grid
-    ]
-    baseline = next(c for c in cells if c["baseline"])
-    fold_on = [c for c in cells if c["coverage_fold"] != "off"]
-    passed: bool | None = None
-    if fold_on:
-        passed = baseline["score"] >= GRADE_B and all(
-            c["score"] < GRADE_C for c in fold_on
+        row.update(operands(cell))
+        return row
+
+    rows = [_row(cell, roles) for cell, roles in _iter_grid_and_demos(grid, demo_cells)]
+    reference = _row(
+        CURRENT_SM_V2_3_CELL,
+        grid.roles_by_cell.get(CURRENT_SM_V2_3_CELL, ("current",)),
+    )
+    return rows, reference
+
+
+def _selection_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    """The GRADED-FOR-SELECTION arm rows applicable on the diagnostic's relevant turn —
+    the ONLY rows that contribute to a diagnostic's AGGREGATE passed."""
+    return [r for r in rows if r["graded_for"] == "selection" and r["applicable"]]
+
+
+def run_user14_diagnostic(
+    grid: ArmGrid, *, demo_cells: tuple[GridCell, ...] = (), as_of: datetime = SYNTHETIC_AS_OF
+) -> dict[str, object]:
+    """User-turn true-positive + fold operands (the ~54 A -> <= C drop under the fold).
+
+    Scores the frozen _user14_scenario under each grid cell on BOTH colors from the
+    identical synthetic evidence, at now=as_of, debug=True. AGGREGATE passed: True iff
+    for EVERY graded-for-selection arm row with user_moves_vs_current the user_tp_score
+    grades <= C, while the reference (CURRENT_SM_V2_3_CELL) row is A. B1 is GRADED-FOR-
+    REFERENCE (its ~34 user-turn drop is reported but NEVER enters passed).
+    """
+    graph, black_overlay, white_overlay, roots, root_fen, child_fen = _user14_scenario()
+
+    def operands(cell: GridCell) -> dict[str, object]:
+        config = cell.config
+        black_root = compute_root_score(
+            root_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+        )
+        caro_child = compute_root_score(
+            child_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+        )
+        white_root = compute_root_score(
+            root_fen, "white", graph, white_overlay, roots, config, now=as_of, debug=True
+        )
+        user_node = _report_node_for(black_root, root_fen)
+        opp_node = _report_node_for(white_root, root_fen)
+        return {
+            "synth_black_root_score": black_root.opening_score,
+            "synth_caro_child_score": caro_child.opening_score,
+            "synth_root_coverage_fraction": black_root.coverage / 100.0,
+            "synth_user_turn_pre_fold_quality": user_node.pre_fold_quality,
+            "synth_user_turn_multiplier": user_node.report_fold_multiplier,
+            "synth_opp_turn_score": white_root.opening_score,
+            "synth_opp_turn_pre_fold_quality": opp_node.pre_fold_quality,
+            "synth_opp_turn_multiplier": opp_node.report_fold_multiplier,
+            "user_tp_score": black_root.opening_score,
+        }
+
+    def applicable(cell: GridCell) -> bool:
+        return _user_behavior_key(cell) != _user_behavior_key(CURRENT_SM_V2_3_CELL)
+
+    rows, reference = _diagnostic_rows(grid, demo_cells, operands, applicable)
+    selection = _selection_rows(rows)
+    passed: bool | None
+    if not selection:
+        passed = None
+    else:
+        passed = fixed_band(reference["user_tp_score"]) == "A" and all(
+            grade_rank(fixed_band(r["user_tp_score"])) >= grade_rank("C")
+            for r in selection
         )
     return {
-        "name": "one-variation specialist (true-positive)",
-        "baseline_score": baseline["score"],
-        "cells": cells,
+        "name": "User-14 user-turn true-positive (A -> <= C fold drop)",
+        "reference": reference,
+        "rows": rows,
         "passed": passed,
     }
 
 
-def run_broad_guard_diagnostic(grid: list[GridCell]) -> dict[str, object]:
-    """FALSE-POSITIVE guard: a genuinely broadly-prepared player must NOT crater
-    (stays ~B+) once the fold is on. Run against every cell so both ``gate`` and
-    ``gate_x_cov`` are covered; if this cannot pass under uniform opponent weights
-    at any acceptable z/mode, that is the trip wire to bring g-idgs forward."""
+def run_broad_guard_diagnostic(
+    cell: GridCell, *, as_of: datetime = SYNTHETIC_AS_OF
+) -> float:
+    """Broad-guard OPERAND producer (opponent-turn score of a broadly-prepared player).
+
+    Demoted from a top-level diagnostic to the opponent-guard's NOT-crater operand
+    producer — the opponent-turn opening_score of a player with real covered prep across
+    ALL opponent replies (must stay ~A+ under the fold)."""
     graph, overlay, roots, target = _broad_guard_scenario()
-    cells = [
-        {
-            "lcb_z": cell.lcb_z,
-            "coverage_fold": cell.coverage_fold,
-            "baseline": cell.is_baseline,
-            "score": _score_target(target, graph, overlay, roots, cell.config),
-        }
-        for cell in grid
-    ]
-    fold_on = [c for c in cells if c["coverage_fold"] != "off"]
-    passed: bool | None = (
-        all(c["score"] >= GRADE_B for c in fold_on) if fold_on else None
+    return _score_target(target, graph, overlay, roots, cell.config, now=as_of)
+
+
+def run_specialist_diagnostic(
+    cell: GridCell, *, as_of: datetime = SYNTHETIC_AS_OF
+) -> float:
+    """Specialist OPERAND producer (opponent-turn UNGATED pre_fold_quality — the leak).
+
+    Demoted from a top-level diagnostic to the opponent-guard's leak operand producer.
+    Reads the UNGATED quality CHANNEL (pre_fold_quality via debug=True), NOT the reported
+    opening_score: the coverage**p multiplier would MASK a leaked quality channel."""
+    graph, overlay, roots, target = _specialist_scenario()
+    root_score = compute_root_score(
+        target, "white", graph, overlay, roots, cell.config, now=as_of, debug=True
     )
+    return pre_fold_quality_for(root_score, target)
+
+
+def run_opponent_guard_diagnostic(
+    grid: ArmGrid, *, demo_cells: tuple[GridCell, ...] = (), as_of: datetime = SYNTHETIC_AS_OF
+) -> dict[str, object]:
+    """Opponent regression guard + unprepared-branch leak.
+
+    Calls the re-wired broad-guard (NOT-crater operand) and specialist (leak operand)
+    producers under debug=True. AGGREGATE passed: True iff for every graded-for-selection
+    arm row with opponent_moves_vs_current BOTH the opponent-drop guard and the leak guard
+    hold. ARM-2 and B1 share CURRENT's _opp_behavior_key, so only the ARM-1 p-cells are
+    applicable here; without this pair the grid could select a p that fixes Black roots
+    while silently making White/opponent cards unusably low.
+    """
+
+    def operands(cell: GridCell) -> dict[str, object]:
+        return {
+            "broad_guard_opp_score": run_broad_guard_diagnostic(cell, as_of=as_of),
+            "specialist_pre_fold_quality": run_specialist_diagnostic(cell, as_of=as_of),
+        }
+
+    def applicable(cell: GridCell) -> bool:
+        return _opp_behavior_key(cell) != _opp_behavior_key(CURRENT_SM_V2_3_CELL)
+
+    rows, reference = _diagnostic_rows(grid, demo_cells, operands, applicable)
+    reference_opp_score = reference["broad_guard_opp_score"]
+    reference_gated_quality = reference["specialist_pre_fold_quality"]
+    selection = _selection_rows(rows)
+    passed: bool | None
+    if not selection:
+        passed = None
+    else:
+        passed = all(
+            not _opp_guard_fires(r["broad_guard_opp_score"], reference_opp_score)
+            and not _leak_fires(
+                r["specialist_pre_fold_quality"], reference_gated_quality
+            )
+            for r in selection
+        )
     return {
-        "name": "broadly-prepared mainlines (false-positive guard)",
-        "cells": cells,
+        "name": "opponent regression guard + unprepared-branch leak",
+        "reference": reference,
+        "rows": rows,
         "passed": passed,
     }
 
 
 def run_cliff_diagnostic(
-    grid: list[GridCell], thresholds: tuple[int, ...] = (1, 2)
+    grid: ArmGrid, thresholds: tuple[int, ...] = (1, 2), *, as_of: datetime = SYNTHETIC_AS_OF
 ) -> dict[str, object]:
-    """Thin-but-earned cliff: score the same branch at live=1/review=0 vs
-    live=1/review=1, sweeping ``coverage_live_threshold`` so the size of the
-    0->full-credit jump (and whether crediting a single live pass softens it) is
-    visible before grades are recalibrated."""
+    """STRUCTURAL thin-but-earned cliff self-check (EXEMPT from the arm-only grading).
+
+    Verifies the SCORER's coverage-gate + threshold MECHANISM: score the same branch at
+    live=1/review=0 vs live=1/review=1, sweeping coverage_live_threshold. Not a candidate
+    grade — it neither runs Filter 1 / Filter 2 nor aggregates over arm rows, and its
+    passed reads the CURRENT_SM_V2_3_CELL (is_reference) probe row (the deployed gate
+    config), NOT the degenerate "lowest-lcb_z gate row" (every gate cell now shares
+    lcb_z=1.0). Uses dataclasses.replace(cell.config, ...) so the new fold/self-term axes
+    are carried into every row, never dropped by a hand-built RootCalcConfig.
+    """
     rows: list[dict[str, object]] = []
-    for cell in grid:
+    for cell in grid.cells:
         for threshold in thresholds:
-            config = RootCalcConfig(
-                lcb_z=cell.lcb_z,
-                coverage_fold=cell.coverage_fold,
-                coverage_live_threshold=threshold,
-            )
+            # Serialize the PROBE cell (the base cell at the swept threshold) so the
+            # six-axis identity matches the config actually scored — otherwise a
+            # threshold-2 row would carry cell.coverage_live_threshold == 1, an identity
+            # that contradicts its own coverage_live_threshold field. is_reference stays
+            # keyed off the BASE cell (a threshold-independent probe tag): the probe is
+            # "CURRENT swept to threshold T", and CURRENT itself is pinned at threshold 1.
+            probe = replace(cell, coverage_live_threshold=threshold)
             g0, o0, r0, t0 = _cliff_scenario(reviewed=False)
             g1, o1, r1, t1 = _cliff_scenario(reviewed=True)
-            thin = _score_target(t0, g0, o0, r0, config)
-            after_review = _score_target(t1, g1, o1, r1, config)
+            thin = _score_target(t0, g0, o0, r0, probe.config, now=as_of)
+            after_review = _score_target(t1, g1, o1, r1, probe.config, now=as_of)
             rows.append(
                 {
-                    "lcb_z": cell.lcb_z,
-                    "coverage_fold": cell.coverage_fold,
+                    "cell": _cell_axes(probe),
+                    "cell_label": probe.label,
+                    "is_reference": cell.is_reference,
                     "coverage_live_threshold": threshold,
                     "thin_score": thin,
                     "reviewed_score": after_review,
@@ -850,22 +1591,15 @@ def run_cliff_diagnostic(
                 }
             )
 
-    # PASS confirms the synthetic actually reproduces the cliff (rather than
-    # silently passing the gate): under the gate at the current threshold=2 the
-    # thin state fails (~0) and jumps up after one review, while crediting a single
-    # live pass (threshold=1) removes the jump. Evaluated at the lowest gate z so
-    # the check is independent of which z values the grid sweeps.
-    def _gate_row(threshold: int) -> dict[str, object] | None:
-        candidates = [
-            row
-            for row in rows
-            if row["coverage_fold"] == "gate"
-            and row["coverage_live_threshold"] == threshold
-        ]
-        return min(candidates, key=lambda row: row["lcb_z"]) if candidates else None
+    # Deterministic structural probe: the CURRENT model's gate cell at each threshold.
+    def _probe_row(threshold: int) -> dict[str, object] | None:
+        for row in rows:
+            if row["is_reference"] and row["coverage_live_threshold"] == threshold:
+                return row
+        return None
 
-    gate2 = _gate_row(2)
-    gate1 = _gate_row(1)
+    gate2 = _probe_row(2)
+    gate1 = _probe_row(1)
     passed: bool | None = None
     if gate2 is not None and gate1 is not None:
         passed = (
@@ -880,12 +1614,88 @@ def run_cliff_diagnostic(
     }
 
 
-def run_diagnostics(grid: list[GridCell]) -> dict[str, object]:
+def run_diagnostics(
+    grid: ArmGrid, *, demo_cells: tuple[GridCell, ...] = (), as_of: datetime = SYNTHETIC_AS_OF
+) -> dict[str, object]:
+    """Exactly three keys: {"user14", "opponent_guard", "cliff"}. The old specialist /
+    broad_guard top-level keys are GONE — they survive only as operand producers."""
     return {
-        "specialist": run_specialist_diagnostic(grid),
-        "broad_guard": run_broad_guard_diagnostic(grid),
-        "cliff": run_cliff_diagnostic(grid),
+        "user14": run_user14_diagnostic(grid, demo_cells=demo_cells, as_of=as_of),
+        "opponent_guard": run_opponent_guard_diagnostic(
+            grid, demo_cells=demo_cells, as_of=as_of
+        ),
+        "cliff": run_cliff_diagnostic(grid, as_of=as_of),
     }
+
+
+# ---------------------------------------------------------------------------
+# User-14 fixture builder + writer (settled path consumed by g-p4ih-cutoff-fixture)
+# ---------------------------------------------------------------------------
+
+# The settled repo-relative fixture path, computed from __file__ (NOT the process CWD,
+# so it is stable regardless of where the CLI is invoked). g-p4ih-cutoff-fixture adds
+# the --emit-user14-fixture CLI mode that binds the builder+writer to SM_V2_4_DEFAULT_CELL
+# and performs the one real emission here; this bead never touches the checked-in file.
+DEFAULT_USER14_FIXTURE_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "src"
+    / "openings"
+    / "__fixtures__"
+    / "user14_synthetic.json"
+)
+
+
+def build_user14_fixture(
+    cell: GridCell, model_version: str, *, as_of: datetime = SYNTHETIC_AS_OF
+) -> dict[str, object]:
+    """Compute the User-14 fixture dict from the synthetic scenario under ``cell``.
+
+    Every field is scored from _user14_scenario under the GIVEN cell at now=as_of.
+    ``coverage_implied_score`` is DERIVED from root_coverage_fraction and report_fold_p
+    (never an independently-typed number). ``config_fingerprint`` routes through the
+    cell's .config via _cfg_fp (g-report-cfg-fp owns the router; this only CALLS it).
+    """
+    graph, black_overlay, white_overlay, roots, root_fen, child_fen = _user14_scenario()
+    config = cell.config
+    black_root = compute_root_score(
+        root_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+    )
+    caro_child = compute_root_score(
+        child_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+    )
+    white_root = compute_root_score(
+        root_fen, "white", graph, white_overlay, roots, config, now=as_of, debug=True
+    )
+    root_coverage_fraction = black_root.coverage / 100.0  # coverage is 0-100 PERCENT
+    coverage_implied_score = 100.0 * root_coverage_fraction ** cell.report_fold_p
+    return {
+        "schema_version": 1,
+        "model_version": model_version,
+        "config_fingerprint": _cfg_fp(cell),
+        "report_fold_p": cell.report_fold_p,
+        "black_root_score": black_root.opening_score,
+        "caro_child_score": caro_child.opening_score,
+        "white_root_score": white_root.opening_score,
+        "root_coverage_fraction": root_coverage_fraction,
+        "coverage_implied_score": coverage_implied_score,
+    }
+
+
+def write_user14_fixture(
+    payload: dict[str, object], path: Path = DEFAULT_USER14_FIXTURE_PATH
+) -> Path:
+    """Write ``payload`` deterministically (sorted keys, 2-space indent, trailing \\n).
+
+    A PURE writer: takes a payload + path, does no scoring, and never hard-codes the
+    default in the body (so a test can redirect it). Creates parent directories; returns
+    the Path actually written.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 def render_text(report: dict[str, object]) -> str:
@@ -976,8 +1786,28 @@ def render_text(report: dict[str, object]) -> str:
 
 
 def _cell_label(entry: dict[str, object]) -> str:
-    base = " [baseline]" if entry.get("baseline") else ""
-    return f"lcb_z={entry['lcb_z']:g},cov={entry['coverage_fold']}{base}"
+    """Compact six-axis label from a report/diagnostic row's nested ``cell`` dict.
+
+    Reads ``entry["cell"]`` (the ``_cell_axes`` primitive dict) so the four arm p-cells
+    that share lcb_z/coverage_fold are distinguishable in text, not only in --json.
+    """
+    cell = entry["cell"]
+    label = f"lcb_z={cell['lcb_z']:g},cov={cell['coverage_fold']}"
+    if cell["coverage_live_threshold"] != 1:
+        label += f",thr={cell['coverage_live_threshold']}"
+    if cell["report_fold_p"]:
+        label += f",p={cell['report_fold_p']:g}/{cell['report_fold_scope']}"
+    if cell["report_self_term"] != "keep":
+        label += f",self={cell['report_self_term']}"
+    return label
+
+
+def _cell_tag(entry: dict[str, object]) -> str:
+    if entry.get("is_reference"):
+        return " [reference]"
+    if entry.get("is_original"):
+        return " [original]"
+    return ""
 
 
 # Text output shows only the N largest-magnitude per-key movers per cell; the
@@ -986,21 +1816,21 @@ DELTA_TEXT_LIMIT = 8
 
 
 def _render_grid(grid: dict[str, object], lines: list[str]) -> None:
-    lines.append("=== Calibration grid (per cell vs baseline) ===")
+    lines.append("=== Calibration grid (per cell vs current model) ===")
     for cell in grid["cells"]:
-        lines.append(f"-- {_cell_label(cell)} --")
+        lines.append(f"-- {_cell_label(cell)}{_cell_tag(cell)} --")
         lines.append(
             "  named:" + _fmt_summary(cell["named_score_distribution"]).rstrip()
         )
         lines.append(
             "  synthetic:" + _fmt_summary(cell["synthetic_hero_distribution"]).rstrip()
         )
-        deltas = cell.get("deltas_vs_baseline")
+        deltas = cell.get("deltas_vs_current")
         if deltas is not None:
             pooled = deltas["pooled"]
             pcts = pooled["percentiles"]
             lines.append(
-                f"  Δ vs baseline (per key): n={pooled['count']} "
+                f"  Δ vs current (per key): n={pooled['count']} "
                 f"mean={_fmt_opt(pooled['mean'])} "
                 f"p5={_fmt_opt(pcts['p5'])} p50={_fmt_opt(pcts['p50'])} "
                 f"p95={_fmt_opt(pcts['p95'])}"
@@ -1021,7 +1851,7 @@ def _render_top_movers(per_pair: list[dict[str, object]], lines: list[str]) -> N
     for user_id, color, record in movers[:DELTA_TEXT_LIMIT]:
         lines.append(
             f"    {user_id}/{color} {record['opening_key']}: "
-            f"{_fmt_opt(record['baseline'])}→{_fmt_opt(record['cell'])} "
+            f"{_fmt_opt(record['current_score'])}→{_fmt_opt(record['cell'])} "
             f"(Δ{record['delta']:+.1f})"
         )
     remaining = len(movers) - DELTA_TEXT_LIMIT
@@ -1031,36 +1861,56 @@ def _render_top_movers(per_pair: list[dict[str, object]], lines: list[str]) -> N
         )
 
 
-def _render_diagnostic_cells(cells: list[dict[str, object]], lines: list[str]) -> None:
-    for cell in cells:
-        lines.append(f"    {_cell_label(cell)}: score={_fmt_opt(cell['score'])}")
+def _fmt_operands(row: dict[str, object], operand_keys: tuple[str, ...]) -> str:
+    return " ".join(f"{key}={_fmt_opt(row.get(key))}" for key in operand_keys)
+
+
+def _render_paired_diagnostic(
+    diag: dict[str, object], lines: list[str], operand_keys: tuple[str, ...]
+) -> None:
+    """Render a paired diagnostic: name + PASS/FAIL, the reference row, then one row per
+    cell reading the operand keys that EXIST on the row it renders (never a generic
+    pre_fold_quality — the NAMED per-turn operands are surfaced), so the leak channel is
+    visible in text. A graded_for="none" anchor/continuity/demo row is a plain column."""
+    lines.append(f"[{_fmt_gate(diag['passed'])}] {diag['name']}")
+    reference = diag["reference"]
+    lines.append(
+        f"    reference {_cell_label(reference)}: "
+        + _fmt_operands(reference, operand_keys)
+    )
+    for row in diag["rows"]:
+        roles = ",".join(row["roles"])
+        na = "" if row["applicable"] else " (no effect)"
+        lines.append(
+            f"    {_cell_label(row)} [{row['graded_for']}|{roles}]{na}: "
+            + _fmt_operands(row, operand_keys)
+        )
 
 
 def _render_diagnostics(diagnostics: dict[str, object], lines: list[str]) -> None:
     lines.append("=== Calibration diagnostics (PASS/FAIL) ===")
 
-    specialist = diagnostics["specialist"]
-    lines.append(
-        f"[{_fmt_gate(specialist['passed'])}] {specialist['name']} "
-        f"(baseline {_fmt_opt(specialist['baseline_score'])} → B; "
-        f"fold-on must drop < {GRADE_C:g} = D/F)"
+    _render_paired_diagnostic(
+        diagnostics["user14"],
+        lines,
+        (
+            "user_tp_score",
+            "synth_user_turn_pre_fold_quality",
+            "synth_opp_turn_pre_fold_quality",
+        ),
     )
-    _render_diagnostic_cells(specialist["cells"], lines)
-
-    guard = diagnostics["broad_guard"]
-    lines.append(
-        f"[{_fmt_gate(guard['passed'])}] {guard['name']} "
-        f"(fold-on must stay ≥ {GRADE_B:g} = B+)"
+    _render_paired_diagnostic(
+        diagnostics["opponent_guard"],
+        lines,
+        ("broad_guard_opp_score", "specialist_pre_fold_quality"),
     )
-    _render_diagnostic_cells(guard["cells"], lines)
 
     cliff = diagnostics["cliff"]
     lines.append(f"[{_fmt_gate(cliff['passed'])}] {cliff['name']}")
     for row in cliff["rows"]:
-        base = " [baseline]" if row["lcb_z"] == 0.0 and row["coverage_fold"] == "off" else ""
         lines.append(
-            f"    lcb_z={row['lcb_z']:g},cov={row['coverage_fold']},"
-            f"live_thr={row['coverage_live_threshold']}{base}: "
+            f"    {_cell_label(row)},live_thr={row['coverage_live_threshold']}"
+            f"{_cell_tag(row)}: "
             f"thin={_fmt_opt(row['thin_score'])} "
             f"reviewed={_fmt_opt(row['reviewed_score'])} "
             f"jump={_fmt_opt(row['jump'])}"
@@ -1113,16 +1963,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, default=None, help="Limit candidate pairs.")
     parser.add_argument(
-        "--lcb-z-grid",
+        "--report-fold-grid",
         default=None,
-        help='Comma-separated lcb_z values to sweep (default "0,1.0,1.28"). The '
-        "baseline lcb_z=0.0 is always included.",
+        help='Comma-separated report-fold p values to sweep the arms over '
+        '(default "0.25,0.5,0.75,1.0"; domain 0 < p <= 1).',
     )
     parser.add_argument(
-        "--coverage-grid",
-        default=None,
-        help='Comma-separated coverage_fold modes to sweep '
-        '(default "off,gate,gate_x_cov"). Baseline "off" is always included.',
+        "--include-demo-diagnostics",
+        action="store_true",
+        help="Add the diagnostics-only demo rows (gate + uniform fold) to a STANDALONE "
+        "run's diagnostics (default off; never enters cohort scoring).",
     )
     parser.add_argument("--json", action="store_true", help="Emit the report as JSON.")
     parser.add_argument(
@@ -1136,7 +1986,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Required alongside --write-bench to acknowledge DB writes.",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    # parse_report_fold_grid is a pure str|None -> tuple that RAISES ValueError on any
+    # invalid input; convert that into a clean fail-fast exit here (the ONLY place the
+    # parser object is in scope). The --report-fold-grid flag keeps default=None (a
+    # str-or-None, NOT a pre-parsed tuple), so argparse never applies a type callable to
+    # a non-string default and the "raw is None -> default" branch stays the sole
+    # default path.
+    try:
+        args.report_fold_p_grid = parse_report_fold_grid(args.report_fold_grid)
+    except ValueError as exc:
+        parser.error(str(exc))  # prints usage + message, raises SystemExit(2)
+    return args
 
 
 def _parse_user_filter(users: str | None) -> set[int] | None:
@@ -1214,9 +2075,8 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
     roots = get_opening_roots()
     named_root_count = _named_root_count(roots)
 
-    grid = build_grid(
-        parse_lcb_z_grid(args.lcb_z_grid), parse_coverage_grid(args.coverage_grid)
-    )
+    arm_grid = build_arm_grid(args.report_fold_p_grid)
+    required_cells = arm_grid.cells  # every ScoredPair.grid / cohort row's cells; NO demos
 
     users = _parse_user_filter(args.users)
     pairs = _parse_pair_filter(args.pairs)
@@ -1225,9 +2085,9 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
         candidate_pairs = list_opening_score_candidate_pairs(db, limit=args.limit)
         selected = select_pairs(candidate_pairs, users=users, pairs=pairs)
 
-        # Build each pair's overlay ONCE and score it for every grid cell.
+        # Build each pair's overlay ONCE and score it for every required cell.
         pair_grids = [
-            score_pair_grid(db, user_id, player_color, graph, roots, grid)
+            score_pair_grid(db, user_id, player_color, graph, roots, required_cells)
             for user_id, player_color in selected
         ]
 
@@ -1236,19 +2096,24 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
             bench_user, bench_color = selected[0]
             write_bench = run_write_bench(db, bench_user, bench_color, args.database_url)
 
-    # The baseline cell (current model) drives the top-level distribution/telemetry;
-    # the grid section adds every other cell plus per-key deltas vs that baseline.
-    baseline_scores = [pg[BASELINE_CELL] for pg in pair_grids]
+    # The CURRENT model cell (today's deployed model) drives the top-level
+    # distribution/telemetry; the grid section adds every other cell plus per-key deltas
+    # vs that current-model reference.
+    reference_scores = [pg[CURRENT_SM_V2_3_CELL] for pg in pair_grids]
     report = build_report(
-        baseline_scores,
+        reference_scores,
         min_observations=args.min_observations,
         named_root_count=named_root_count,
         write_bench=write_bench,
     )
     report["grid"] = build_grid_report(
-        grid, pair_grids, min_observations=args.min_observations
+        required_cells, pair_grids, min_observations=args.min_observations
     )
-    report["diagnostics"] = run_diagnostics(grid)
+    report["diagnostics"] = run_diagnostics(
+        arm_grid,
+        demo_cells=DEMO_CELLS if args.include_demo_diagnostics else (),
+        as_of=SYNTHETIC_AS_OF,
+    )
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))

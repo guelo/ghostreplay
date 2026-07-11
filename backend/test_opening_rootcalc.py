@@ -1895,3 +1895,60 @@ def test_report_debug_shared_object_across_roots_and_never_reported_stays_null()
     assert l_node.reported_score is None
     assert l_node.report_fold_multiplier is None
     assert l_node.report_self_term_effective is None
+
+
+# ---------------------------------------------------------------------------
+# Synthetic User-14 scenario (g-p4ih.1.2) shared fixture + topology self-check
+# ---------------------------------------------------------------------------
+
+import scripts.calibrate_opening_scores_v2 as cal  # noqa: E402
+
+
+@pytest.fixture
+def user14_scenario():
+    """The frozen synthetic User-14 scenario shared across beads (g-p4ih.1.2)."""
+    return cal._user14_scenario()
+
+
+def test_user14_topology_self_check(user14_scenario):
+    """Pin the two-level topology so a graph/overlay/evidence edit that breaks the
+    reproduction fails loudly. Scored under CURRENT_SM_V2_3_CELL (gate on, p=0 -> no
+    fold, so pre_fold_quality == opening_score at the root) at SYNTHETIC_AS_OF."""
+    graph, black_overlay, _white, roots, root_fen, child_fen = user14_scenario
+    config = cal.CURRENT_SM_V2_3_CELL.config
+
+    black_root = compute_root_score(
+        root_fen, "black", graph, black_overlay, roots, config,
+        now=cal.SYNTHETIC_AS_OF, debug=True,
+    )
+    caro_child = compute_root_score(
+        child_fen, "black", graph, black_overlay, roots, config,
+        now=cal.SYNTHETIC_AS_OF, debug=True,
+    )
+    pre_fold = cal.pre_fold_quality_for(black_root, root_fen)
+
+    # Absolute tolerances (a topology drift is caught deterministically). Verified:
+    # root pre-fold quality 54.32, Caro child 34.38, coverage fraction 0.0833.
+    assert 53.0 <= pre_fold <= 55.0
+    assert 33.0 <= caro_child.opening_score <= 35.0
+    assert 8.33 == pytest.approx(black_root.coverage, abs=0.5)  # coverage is 0-100 PERCENT
+    assert 0.077 <= black_root.coverage / 100.0 <= 0.087
+    # p=0 -> no fold, so pre_fold_quality == opening_score at the root.
+    assert pre_fold == pytest.approx(black_root.opening_score)
+
+
+def test_user14_clock_invariant(user14_scenario):
+    """The scenario carries no last-touch timestamps, so its score/coverage are
+    clock-invariant: scoring at two different as_of returns identical numbers."""
+    graph, black_overlay, _white, roots, root_fen, _child = user14_scenario
+    config = cal.CURRENT_SM_V2_3_CELL.config
+    at_synth = compute_root_score(
+        root_fen, "black", graph, black_overlay, roots, config,
+        now=cal.SYNTHETIC_AS_OF, debug=True,
+    )
+    other = datetime(2030, 6, 1, tzinfo=timezone.utc)
+    at_other = compute_root_score(
+        root_fen, "black", graph, black_overlay, roots, config, now=other, debug=True,
+    )
+    assert at_other.opening_score == pytest.approx(at_synth.opening_score)
+    assert at_other.coverage == pytest.approx(at_synth.coverage)

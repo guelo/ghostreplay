@@ -65,8 +65,8 @@ The synthetic `__repertoire__` hero row is reported in its **own** section
 | `recursion` | actual-key count and perfect-key count reported **separately** (`_metrics` is keyed `(fen, perfect)`), vs the named-root count |
 | `throughput` | total scoring wall-time, **per-pair scoring latency** (median / p95 / max), and emitted row count |
 | `gates` | pass/fail vs the documented numeric bars: scoring `< 5s/pair` and cache read `< 50ms` (`n/a` when not measured) |
-| `grid` | per-cell distributions for `lcb_z × coverage_fold`, plus per-key deltas vs the pre-readiness baseline |
-| `diagnostics` | one-variation specialist, broad-prepared false-positive guard, and thin-but-earned cliff gates |
+| `grid` | per-cell distributions over the anchor-first arm grid (each row identified by all six axes), plus per-key deltas vs the current-model reference |
+| `diagnostics` | User-14 user-turn true-positive, opponent regression guard + unprepared-branch leak, and thin-but-earned cliff gates |
 
 The recursion section is the bound proof: actual/perfect key counts scale with
 the number of unique reachable normalized FENs, not the named-root count, and the
@@ -109,8 +109,8 @@ cache.
 | `--users` | all | Comma-separated `user_id`s to restrict to |
 | `--pairs` | all | Comma-separated `user_id:color` pairs to restrict to |
 | `--limit` | none | Limit candidate pairs |
-| `--lcb-z-grid` | `0,1.0,1.28` | Comma-separated LCB strictness values to sweep; `0` is always included |
-| `--coverage-grid` | `off,gate,gate_x_cov` | Comma-separated coverage-fold modes to sweep; `off` is always included |
+| `--report-fold-grid` | `0.25,0.5,0.75,1.0` | Comma-separated report-fold `p` values to sweep the arms over; domain `0 < p <= 1` |
+| `--include-demo-diagnostics` | off | Add the diagnostics-only demo rows (gate + uniform fold) to a standalone run; never enters cohort scoring |
 | `--json` | off | Emit the report as JSON |
 | `--write-bench` | off | Time one isolated recompute + cache read (needs `--allow-writes` + guarded URL) |
 | `--allow-writes` | off | Required acknowledgement alongside `--write-bench` |
