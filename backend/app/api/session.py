@@ -43,6 +43,7 @@ from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain_indexed
 from app.position_analysis_repo import resolve_trusted_positions
 from app.posthog_client import capture
+from app.row_locks import for_no_key_update
 from app.session_evidence_scheduler import enqueue_session_evidence
 from app.models import (
     AnalysisCache,
@@ -1080,7 +1081,11 @@ def upsert_session_moves(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> SessionMovesResponse:
-    game_session = _get_session_or_404(db, session_id)
+    game_session = for_no_key_update(
+        db.query(GameSession).filter(GameSession.id == session_id)
+    ).first()
+    if game_session is None:
+        raise HTTPException(status_code=404, detail="Game session not found")
     _ensure_session_owned_by_user(game_session, user)
     _validate_unique_move_keys(request.moves)
 
@@ -1162,6 +1167,7 @@ def upsert_session_moves(
                 else:
                     db.add(SessionMove(**value))
 
+            db.flush()
             if bump_for_evidence:
                 bump_evidence_seq(db, user.user_id, game_session.player_color)
             db.commit()
@@ -1228,6 +1234,7 @@ def upsert_session_moves(
         move_count=len(values),
     ):
         db.execute(statement)
+        db.flush()
         if bump_for_evidence:
             bump_evidence_seq(db, user.user_id, game_session.player_color)
         db.commit()

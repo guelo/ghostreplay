@@ -9,7 +9,7 @@ cost an unnecessary, still-correct rebuild. False-positives (fresh verdict over
 changed evidence) are forbidden: they would serve stale scores forever.
 
 Per-user mutation scenarios drive the PRODUCTION choke-points (the /end, /fail,
-/continue, /abandon, /moves, SRS-review endpoints and _upsert_blunder_target),
+/continue, /abandon, /moves, SRS-review endpoints and blunder recording),
 so a missed or mis-gated bump site fails here. Shared-table scenarios use raw
 SQL on purpose: the evidence_epoch DB triggers must fire for ANY writer,
 including direct UPDATE/DELETE that bypass every app code path.
@@ -28,9 +28,12 @@ from sqlalchemy import text
 from conftest import TestingSessionLocal
 
 import app.opening_cache as oc
-from app.api.blunder import _upsert_blunder_target
+from app.api.blunder import (
+    _bump_evidence_for_new_blunder,
+    _upsert_blunder_target,
+)
 from app.fen import active_color
-from app.models import GameSession, OpeningScoreBatch, Position, SessionMove
+from app.models import Blunder, GameSession, OpeningScoreBatch, Position, SessionMove
 from app.opening_cache import (
     _is_batch_fresh,
     bump_evidence_seq,
@@ -420,9 +423,14 @@ def test_ghost_target_blunder_bumps_when_source_eligible(db_session):
     digest = raw_evidence_inputs_digest(db_session, USER, "white")
 
     pos_id = _insert_position(db_session, fen_raw=KINGS_PAWN_FULL, color="black")
-    _upsert_blunder_target(
+    blunder_id, _ = _upsert_blunder_target(
         db_session, user_id=USER, position_id=pos_id, user_move="Qh5",
         best_move="Nf3", eval_loss=200, source_session_id=sid,
+    )
+    _bump_evidence_for_new_blunder(
+        db_session,
+        db_session.get(Blunder, blunder_id),
+        require_eligible_source=True,
     )
     db_session.commit()
     _assert_stale(db_session, digest)
@@ -492,9 +500,14 @@ def test_bump_scopes_by_player_color(db_session):
 
     # Ghost-target blunder sourced from the BLACK session.
     pos_id = _insert_position(db_session, fen_raw=KINGS_PAWN_FULL, color="black")
-    _upsert_blunder_target(
+    blunder_id, _ = _upsert_blunder_target(
         db_session, user_id=USER, position_id=pos_id, user_move="Qh5",
         best_move="Nf3", eval_loss=200, source_session_id=black_sid,
+    )
+    _bump_evidence_for_new_blunder(
+        db_session,
+        db_session.get(Blunder, blunder_id),
+        require_eligible_source=True,
     )
     db_session.commit()
 

@@ -6,10 +6,12 @@ Run with: pytest test_blunder_api.py -v
 import concurrent.futures
 import uuid
 
+import pytest
 from sqlalchemy import text
 
 from app.fen import fen_hash
 from app.models import GameSession
+from app.opening_cache import current_evidence_seq
 from conftest import pg_required
 
 
@@ -500,6 +502,47 @@ def test_record_manual_blunder_duplicate_returns_not_new(client, auth_headers, c
     second = client.post("/api/blunder/manual", json=payload, headers=auth_headers(user_id=123))
     assert second.status_code == 201
     assert second.json()["is_new"] is False
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["active", "ended-visible"])
+def test_manual_new_target_bumps_once_and_duplicate_does_not_bump(
+    client, auth_headers, create_game_session, db_session, ended
+):
+    session_id = create_game_session(user_id=123, player_color="white")
+    if ended:
+        response = client.post(
+            "/api/game/end",
+            json={"session_id": session_id, "result": "draw", "pgn": "1. e4 e5"},
+            headers=auth_headers(user_id=123),
+        )
+        assert response.status_code == 200
+
+    payload = {
+        "session_id": session_id,
+        "pgn": "1. e4 e5 2. d4",
+        "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+        "user_move": "d4",
+        "best_move": "Nf3",
+        "eval_before": 20,
+        "eval_after": 15,
+    }
+    seq_before = current_evidence_seq(db_session, 123, "white")
+
+    first = client.post(
+        "/api/blunder/manual", json=payload, headers=auth_headers(user_id=123)
+    )
+    assert first.status_code == 201
+    assert first.json()["is_new"] is True
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
+
+    duplicate = client.post(
+        "/api/blunder/manual", json=payload, headers=auth_headers(user_id=123)
+    )
+    assert duplicate.status_code == 201
+    assert duplicate.json()["is_new"] is False
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
 
 
 def test_record_manual_blunder_allows_ended_session(client, auth_headers, create_game_session):

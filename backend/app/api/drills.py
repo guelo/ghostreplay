@@ -30,6 +30,7 @@ from app.opening_score_delta import (
     compute_opening_score_delta,
 )
 from app.posthog_client import capture
+from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
 from app.session_contracts import (
     DRILL_SESSION_MODE,
@@ -125,6 +126,15 @@ class DrillSessionContract(BaseModel):
 
 def _get_drill_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
     session = db.query(GameSession).filter(GameSession.id == session_id).first()
+    if session is None:
+        raise HTTPException(status_code=404, detail="Drill session not found")
+    return session
+
+
+def _get_drill_for_update(db: Session, session_id: uuid.UUID) -> GameSession:
+    session = for_no_key_update(
+        db.query(GameSession).filter(GameSession.id == session_id)
+    ).first()
     if session is None:
         raise HTTPException(status_code=404, detail="Drill session not found")
     return session
@@ -324,7 +334,7 @@ def fail_drill(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
-    session = _get_drill_or_404(db, session_id)
+    session = _get_drill_for_update(db, session_id)
     _ensure_owner(session, user)
     if session.session_mode != DRILL_SESSION_MODE:
         raise HTTPException(status_code=400, detail="Session is not a drill")
@@ -337,6 +347,7 @@ def fail_drill(
     was_evidence_eligible = session_is_evidence_eligible(session)
     session.drill_state = "failed"
     session.drill_terminal_reason = "accuracy"
+    db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible:
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
@@ -354,7 +365,7 @@ def continue_drill(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
-    session = _get_drill_or_404(db, session_id)
+    session = _get_drill_for_update(db, session_id)
     _ensure_owner(session, user)
     if session.session_mode != DRILL_SESSION_MODE:
         raise HTTPException(status_code=400, detail="Session is not a drill")
@@ -379,9 +390,10 @@ def continue_drill(
     session.normal_started_at = now
     session.converted_at = now
     session.rated_start_ply = request.current_ply
+    resegment_session_moves(db, session)
+    db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible:
         bump_evidence_seq(db, user.user_id, session.player_color)
-    resegment_session_moves(db, session)
     db.commit()
     db.refresh(session)
     capture(str(user.user_id), "drill_continued", {})
@@ -500,7 +512,7 @@ def natural_end_drill(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
-    session = _get_drill_or_404(db, session_id)
+    session = _get_drill_for_update(db, session_id)
     _ensure_owner(session, user)
     if session.session_mode != DRILL_SESSION_MODE:
         raise HTTPException(status_code=400, detail="Session is not a drill")
@@ -517,6 +529,7 @@ def natural_end_drill(
     session.ended_at = utcnow()
     if request.pgn:
         session.pgn = request.pgn
+    db.flush()
     if session_is_evidence_eligible(session) != was_evidence_eligible:
         bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
@@ -531,7 +544,7 @@ def abandon_drill(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> DrillSessionContract:
-    session = _get_drill_or_404(db, session_id)
+    session = _get_drill_for_update(db, session_id)
     _ensure_owner(session, user)
     if session.session_mode != DRILL_SESSION_MODE:
         raise HTTPException(status_code=400, detail="Session is not a drill")
@@ -551,6 +564,7 @@ def abandon_drill(
         session.result = "drill_abandon"
         session.ended_at = utcnow()
         session.is_rated = False
+        db.flush()
         if session_is_evidence_eligible(session) != was_evidence_eligible:
             bump_evidence_seq(db, user.user_id, session.player_color)
         db.commit()

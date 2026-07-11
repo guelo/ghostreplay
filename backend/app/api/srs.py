@@ -14,6 +14,7 @@ from app.models import Blunder, BlunderReview, GameSession, Position
 from app.opening_cache import bump_evidence_seq
 from app.opening_score_scheduler import request_recompute
 from app.posthog_client import capture
+from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
 from app.srs_math import as_utc, calculate_priority, expected_interval_hours
 
@@ -133,12 +134,10 @@ def review_blunder(
 
     # Lock the blunder row BEFORE the duplicate lookup and mutation so two
     # concurrent reviews for the same blunder serialize (no-op on SQLite).
-    blunder = (
+    blunder = for_no_key_update(
         db.query(Blunder)
         .filter(Blunder.id == request.blunder_id, Blunder.user_id == user.user_id)
-        .with_for_update()
-        .first()
-    )
+    ).first()
     if not blunder:
         raise HTTPException(status_code=404, detail="Blunder not found")
 
@@ -174,10 +173,11 @@ def review_blunder(
     # correct, not a gap. The in-place pass_streak/last_reviewed_at writes above
     # need NO bump: the digest reads only the review rows and fen_raw, never the
     # blunder's streak columns.
-    player_color = _get_blunder_player_color(db, blunder)
-    if player_color is not None:
-        bump_evidence_seq(db, blunder.user_id, player_color)
     try:
+        db.flush()
+        player_color = _get_blunder_player_color(db, blunder)
+        if player_color is not None:
+            bump_evidence_seq(db, blunder.user_id, player_color)
         db.commit()
     except IntegrityError:
         db.rollback()

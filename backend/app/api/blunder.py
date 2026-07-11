@@ -25,6 +25,7 @@ from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.opening_cache import bump_evidence_seq
 from app.opening_evidence import session_is_evidence_eligible
 from app.posthog_client import capture
+from app.row_locks import for_no_key_update
 from app.security import TokenPayload, get_current_user
 from app.srs_opportunity import (
     OpportunityCounters,
@@ -257,11 +258,12 @@ def _upsert_blunder_target(
     )
     db.add(blunder)
     db.flush()
-    _bump_evidence_for_new_blunder(db, blunder)
     return blunder.id, True
 
 
-def _bump_evidence_for_new_blunder(db: Session, blunder: Blunder) -> None:
+def _bump_evidence_for_new_blunder(
+    db: Session, blunder: Blunder, *, require_eligible_source: bool
+) -> None:
     """Advance the opening-evidence counter for a NEW ghost-target row (g-jact).
 
     Only a digest-visible blunder bumps: a sessionless (manual) blunder is always
@@ -276,7 +278,9 @@ def _bump_evidence_for_new_blunder(db: Session, blunder: Blunder) -> None:
     """
     if blunder.source_session_id is not None:
         source = db.get(GameSession, blunder.source_session_id)
-        if source is None or not session_is_evidence_eligible(source):
+        if source is None:
+            return
+        if require_eligible_source and not session_is_evidence_eligible(source):
             return
         player_color = source.player_color
     else:
@@ -301,6 +305,7 @@ def _record_target(
     eval_before: int,
     eval_after: int,
     mark_first_blunder_recorded: bool,
+    bump_new_target_unconditionally: bool = False,
     max_full_moves: int | None = None,
     idempotency_key: str | None = None,
 ) -> BlunderResponse:
@@ -355,6 +360,18 @@ def _record_target(
         session.recorded_blunder_id = blunder_id
         session.blunder_idempotency_key = idempotency_key
 
+    # Drain graph, target, and first-blunder bookkeeping before the shared
+    # evidence cursor becomes this transaction's final blocking statement.
+    db.flush()
+    if is_new:
+        blunder = db.get(Blunder, blunder_id)
+        if blunder is None:  # defensive: the just-flushed row must be visible
+            raise RuntimeError("new blunder disappeared before evidence bump")
+        _bump_evidence_for_new_blunder(
+            db,
+            blunder,
+            require_eligible_source=not bump_new_target_unconditionally,
+        )
     db.commit()
     return BlunderResponse(
         blunder_id=blunder_id,
@@ -386,12 +403,10 @@ def record_blunder(
     # Lock the session row BEFORE checking blunder_recorded so two concurrent
     # first requests cannot both observe blunder_recorded=False and both record
     # (no-op locking on SQLite). _get_session_or_404 plus ownership check below.
-    session = (
+    session = for_no_key_update(
         db.query(GameSession)
         .filter(GameSession.id == request.session_id)
-        .with_for_update()
-        .first()
-    )
+    ).first()
     if not session:
         raise HTTPException(status_code=404, detail="Game session not found")
     _ensure_session_owned_by_user(session, user)
@@ -482,6 +497,7 @@ def record_manual_blunder(
         eval_before=eval_before,
         eval_after=eval_after,
         mark_first_blunder_recorded=False,
+        bump_new_target_unconditionally=True,
     )
     if response.blunder_id is not None:
         capture(str(user.user_id), "blunder_added_manual", {})

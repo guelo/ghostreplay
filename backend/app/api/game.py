@@ -28,6 +28,7 @@ from app.opening_score_delta import (
     compute_opening_score_delta,
 )
 from app.posthog_client import capture
+from app.row_locks import for_no_key_update
 from app.glicko import CHESSCOM_INITIAL_RATING, LICHESS_INITIAL_RATING
 from app.rating import DEFAULT_RATING, RESULT_SCORES
 from app.rating_scores import compute_rating_tracks, latest_rating_order, rating_score, scores_for_row
@@ -692,7 +693,9 @@ def end_game(
     Validates that the session exists, belongs to the user, and is currently active.
     """
     # Fetch the session
-    session = db.query(GameSession).filter(GameSession.id == request.session_id).first()
+    session = for_no_key_update(
+        db.query(GameSession).filter(GameSession.id == request.session_id)
+    ).first()
 
     if not session:
         raise HTTPException(status_code=404, detail="Game session not found")
@@ -723,9 +726,6 @@ def end_game(
     session.pgn = request.pgn
     effective_is_rated = session.is_rated if session.session_mode == DRILL_SESSION_MODE else request.is_rated
     session.is_rated = effective_is_rated
-    if session_is_evidence_eligible(session) != was_evidence_eligible:
-        bump_evidence_seq(db, user.user_id, session.player_color)
-
     # Compute rating change for rated results
     rating_change = None
     if effective_is_rated and request.result.value in RESULT_SCORES:
@@ -796,6 +796,9 @@ def end_game(
         scores_after = None
         score_changes = None
 
+    db.flush()
+    if session_is_evidence_eligible(session) != was_evidence_eligible:
+        bump_evidence_seq(db, user.user_id, session.player_color)
     db.commit()
     db.refresh(session)
 
