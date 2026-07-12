@@ -10,7 +10,7 @@ from enum import Enum
 import chess
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import case, func, text, tuple_
+from sqlalchemy import case, func, tuple_
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
@@ -37,6 +37,7 @@ from app.accuracy import (
     expected_total_moves_from_pgn,
 )
 from app.fen import active_color, fen_hash, normalize_fen
+from app.graph_write_lock import acquire_graph_write_lock
 from app.opening_cache import bump_evidence_seq, load_cached_rows
 from app.opening_evidence import session_is_evidence_eligible
 from app.opening_score_scheduler import request_recompute
@@ -70,19 +71,17 @@ from app.srs_math import OPPORTUNITY_ANCESTOR_RADIUS_PLY
 router = APIRouter(prefix="/api/session", tags=["session"])
 logger = logging.getLogger(__name__)
 
-# Per-user graph-write serialization guardrails (g-q0aw, Postgres only).
+# Per-user graph-write serialization guardrails (g-q0aw / g-graph-lock, Postgres
+# only). The advisory-lock acquisition + txn-local lock_timeout/statement_timeout now
+# live in the shared ``acquire_graph_write_lock`` helper so the deferred evidence
+# worker (below) and both blunder-recording paths serialize on the SAME per-user
+# lock instead of racing the (user_id, fen_hash) unique index. See
+# app/graph_write_lock.py for the guardrail rationale and the tunable timeouts.
 #
-# Concurrent same-opening drill replays take pg_advisory_xact_lock(user_id) so
-# they queue deterministically instead of racing the (user_id, fen_hash) unique
-# index. ``lock_timeout`` bounds how long acquisition waits on a stuck queue
-# (advisory locks go through the PG lock manager) and ``statement_timeout``
-# bounds any single pathological query, so a degenerate case fails fast (SQLSTATE
-# 55P03 / 57014) instead of hanging ~166s. Tunable by patching these constants in
-# tests to keep the timeout-path tests fast.
-GRAPH_LOCK_TIMEOUT = "5s"
-GRAPH_STATEMENT_TIMEOUT = "10s"
 # Postgres SQLSTATEs we treat as recoverable graph-write timeouts: lock_not_available
-# (55P03, from lock_timeout) and query_canceled (57014, from statement_timeout).
+# (55P03, from lock_timeout) and query_canceled (57014, from statement_timeout). Only
+# the worker retries on these (below); the blunder paths let the timeout propagate to
+# a 500 with a clean rollback (no partial graph/cursor), so it is a worker-only policy.
 _GRAPH_TIMEOUT_SQLSTATES = frozenset({"55P03", "57014"})
 
 
@@ -945,24 +944,10 @@ def _run_graph_evidence_txn(
         user_id=user_id,
         move_count=move_count,
     ):
-        if dialect_name == "postgresql":
-            # set_config(name, value, is_local=true) is the txn-local form of
-            # `SET LOCAL` and accepts a normal bind param — PG utility statements
-            # like `SET LOCAL x = :v` are awkward/unsupported with server-side
-            # bind params. Both timeouts reset at the evidence_commit below.
-            db.execute(
-                text("SELECT set_config('lock_timeout', :v, true)").bindparams(
-                    v=GRAPH_LOCK_TIMEOUT
-                )
-            )
-            db.execute(
-                text("SELECT set_config('statement_timeout', :v, true)").bindparams(
-                    v=GRAPH_STATEMENT_TIMEOUT
-                )
-            )
-            db.execute(
-                text("SELECT pg_advisory_xact_lock(:uid)").bindparams(uid=user_id)
-            )
+        # First statement of this fresh graph txn: take the per-user advisory lock
+        # (+ txn-local timeouts) shared with the blunder-recording paths. Released,
+        # with the SET LOCALs, at the evidence_commit below. No-op off Postgres.
+        acquire_graph_write_lock(db, user_id=user_id, dialect_name=dialect_name)
     with _timed_side_effect(
         "ghost_graph_upsert",
         session_id=session_id,

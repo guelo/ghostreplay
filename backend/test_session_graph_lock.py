@@ -23,6 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 
 import app.api.session as session_api
+import app.graph_write_lock as graph_write_lock
 from app.fen import fen_hash
 from app.models import (
     AnalysisCache,
@@ -221,7 +222,7 @@ def test_moves_graph_lock_timeout_degrades(
         holder.execute(text("SELECT pg_advisory_lock(:k)"), {"k": user_id})
 
         start = time.perf_counter()
-        with patch.object(session_api, "GRAPH_LOCK_TIMEOUT", "300ms"), patch.object(
+        with patch.object(graph_write_lock, "GRAPH_LOCK_TIMEOUT", "300ms"), patch.object(
             session_api, "request_recompute", recompute_mock
         ), caplog.at_level(logging.WARNING, logger="app.api.session"):
             response = _post_opening(pg_client, auth_headers, session_id, user_id)
@@ -361,7 +362,7 @@ def test_moves_graph_lock_retry_succeeds(
             raise
 
     try:
-        with patch.object(session_api, "GRAPH_LOCK_TIMEOUT", "300ms"), patch.object(
+        with patch.object(graph_write_lock, "GRAPH_LOCK_TIMEOUT", "300ms"), patch.object(
             session_api,
             "_run_graph_evidence_txn",
             side_effect=_release_lock_after_first_timeout,

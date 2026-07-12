@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session, aliased
 
 from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
+from app.graph_write_lock import acquire_graph_write_lock
 from app.models import Blunder, BlunderReview, GameSession, Move, Position
 from app.opening_cache import bump_evidence_seq
 from app.opening_evidence import session_is_evidence_eligible
@@ -329,6 +330,22 @@ def _record_target(
                 f"{replay_data.pre_move_color} to move but player is {session.player_color}"
             ),
         )
+
+    # PGN replay and all validation above are CPU-only/no-op (they write nothing),
+    # so acquire the per-user graph-write lock only now — immediately before the
+    # first shared Position/Move write. This is the SAME advisory lock the deferred
+    # evidence worker takes, so recording (auto + manual) and the worker serialize
+    # for one user instead of deadlocking on the shared unique indexes in opposite
+    # orders (g-graph-lock). Held through the upserts, target insert, first-blunder
+    # bookkeeping and evidence-cursor bump below until this txn's single commit; a
+    # timeout here rolls back with no partial graph/cursor. No-op off Postgres. In
+    # the auto path record_blunder already holds the session NKU lock (session NKU ->
+    # advisory ordering); the manual path has no session lock.
+    acquire_graph_write_lock(
+        db,
+        user_id=user.user_id,
+        dialect_name=db.bind.dialect.name if db.bind else "",
+    )
 
     hash_to_position_id, positions_created = _upsert_positions(
         db,
