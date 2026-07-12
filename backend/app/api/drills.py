@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.openings import MAX_TREE_PLY
 from app.db import get_db
 from app.drill_steering import (
+    DrillRouteMap,
     DrillRouteMove,
     route_map_for_target,
     route_move_for_uci,
@@ -152,6 +153,43 @@ def _suggestion(move: DrillRouteMove) -> DrillRouteSuggestion:
         resulting_fen=move.resulting_fen,
         plies_to_target=move.plies_to_target,
     )
+
+
+def _root_reached_response(
+    current_fen: str, route_map: DrillRouteMap
+) -> DrillRouteCheckResponse:
+    return DrillRouteCheckResponse(
+        status="root_reached",
+        current_fen=current_fen,
+        target_fen=route_map.target_fen,
+        suggestions=[],
+    )
+
+
+def _refreshed_route_guard(
+    session: GameSession, current_fen: str, route_map: DrillRouteMap
+) -> DrillRouteCheckResponse | None:
+    """Re-derive a route-check mutating branch from refreshed, locked state.
+
+    Called only after ``_get_drill_for_update`` re-reads the session under the NKU
+    lock, so ``session`` reflects any transition a concurrent request committed
+    since the unlocked entry snapshot. The FEN geometry the caller already computed
+    is immutable, so re-deriving the branch is purely a re-check of drill state:
+
+    * still active pre-root -> ``None``; the caller performs its intended write;
+    * already root-reached -> the root-reached response, sent WITHOUT writing;
+    * failed/abandoned/converted/non-active -> the existing entry 400.
+    """
+    if session.status != "active":
+        raise HTTPException(status_code=400, detail="Drill session is not active")
+    if session.drill_state in {"failed", "abandoned", "converted"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Drill route cannot be checked from its current state",
+        )
+    if session.drill_state == "root_reached":
+        return _root_reached_response(current_fen, route_map)
+    return None
 
 
 def _contract(
@@ -432,24 +470,24 @@ def check_drill_route(
         raise HTTPException(status_code=400, detail=f"Invalid FEN: {exc}") from exc
 
     if session.drill_state == "root_reached":
-        return DrillRouteCheckResponse(
-            status="root_reached",
-            current_fen=current_fen,
-            target_fen=route_map.target_fen,
-            suggestions=[],
-        )
+        # Entry snapshot: this response writes nothing and may reflect state that
+        # changes concurrently. Do NOT lock — snapshot semantics are intentional.
+        return _root_reached_response(current_fen, route_map)
 
     if route_map.is_target(current_fen):
+        # Mutating branch. The unlocked snapshot told us only the geometry; lock
+        # and refresh the row, then re-derive the branch before writing so a
+        # concurrent terminal transition survives instead of being overwritten.
+        session = _get_drill_for_update(db, session_id)
+        guard = _refreshed_route_guard(session, current_fen, route_map)
+        if guard is not None:
+            return guard
         session.drill_state = "root_reached"
         db.commit()
-        return DrillRouteCheckResponse(
-            status="root_reached",
-            current_fen=current_fen,
-            target_fen=route_map.target_fen,
-            suggestions=[],
-        )
+        return _root_reached_response(current_fen, route_map)
 
     if route_map.is_on_route(current_fen):
+        # Snapshot: writes nothing and may reflect concurrently changing state.
         return DrillRouteCheckResponse(
             status="on_route",
             current_fen=current_fen,
@@ -468,6 +506,12 @@ def check_drill_route(
 
     played_move = route_move_for_uci(graph, route_map, previous_fen, request.played_uci)
     suggestions = route_preserving_moves(graph, route_map, previous_fen)
+    # Mutating branch. Lock, refresh, and re-derive before recording the failure so
+    # a root-reached or terminal transition committed concurrently is not clobbered.
+    session = _get_drill_for_update(db, session_id)
+    guard = _refreshed_route_guard(session, current_fen, route_map)
+    if guard is not None:
+        return guard
     session.drill_state = "failed"
     session.drill_terminal_reason = "off_route"
     db.commit()

@@ -22,7 +22,12 @@ API_MODULES = ("session.py", "game.py", "drills.py", "blunder.py", "srs.py")
 LOCK_MODULES = API_MODULES + ("row_locks.py",)
 REQUIRED_DIRECT_LOCKS = {
     "session.py": {"upsert_session_moves": "for_no_key_update"},
-    "game.py": {"end_game": "for_no_key_update"},
+    # end_game locks at entry; get_next_opponent_move locks only the active
+    # pre-root drill branch it mutates (g-branch-locks).
+    "game.py": {
+        "end_game": "for_no_key_update",
+        "get_next_opponent_move": "for_no_key_update",
+    },
     "blunder.py": {"record_blunder": "for_no_key_update"},
     "srs.py": {"review_blunder": "for_no_key_update"},
     "drills.py": {"_get_drill_for_update": "for_no_key_update"},
@@ -32,6 +37,9 @@ REQUIRED_DRILL_WRITER_LOCKS = {
     "continue_drill",
     "natural_end_drill",
     "abandon_drill",
+    # check_drill_route locks only the two mutating branches (g-branch-locks); its
+    # root-reached and on-route snapshot responses stay unlocked.
+    "check_drill_route",
 }
 
 

@@ -913,6 +913,12 @@ def get_next_opponent_move(
 
     if session.user_id != user.user_id:
         raise HTTPException(status_code=403, detail="Not authorized to access this game")
+    # player_color and engine_elo are fixed at session creation. Copy them now so
+    # the normal ghost/engine path never re-reads the row — a pre-root drill lock
+    # (below) is released via rollback before that path runs, and these copies keep
+    # the fall-through independent of the row's post-rollback expired state.
+    player_color = session.player_color
+    engine_elo = session.engine_elo
     is_active_drill = (
         session.session_mode == DRILL_SESSION_MODE
         and session.drill_state in {"active", "root_reached"}
@@ -933,50 +939,74 @@ def get_next_opponent_move(
     except (IndexError, ValueError) as e:
         raise HTTPException(status_code=400, detail=f"Invalid FEN: {e}")
 
-    if position_color == session.player_color:
+    if position_color == player_color:
         raise HTTPException(
             status_code=400,
             detail="Cannot get opponent move when it's the player's turn",
         )
 
     if is_active_preroot_drill:
-        if not session.drill_opening_key:
-            raise HTTPException(status_code=400, detail="Drill is missing an opening root")
-        graph = get_opening_graph()
-        route_map = route_map_for_target(
-            graph, session.drill_opening_key, decode_uci_line(session.drill_line)
-        )
-        if not route_map.plies_by_fen:
-            raise HTTPException(status_code=400, detail="Drill route is unavailable")
-        if route_map.is_target(request.fen):
-            session.drill_state = "root_reached"
-            db.commit()
-            raise HTTPException(status_code=400, detail="Drill root already reached")
-        suggestions = route_preserving_moves(graph, route_map, request.fen)
-        if not suggestions:
-            raise HTTPException(status_code=400, detail="Current drill position is off route")
+        # The entry snapshot said active pre-root — a branch that mutates drill
+        # state. Lock and refresh the row immediately, then re-derive from current
+        # state: a concurrent request may have converted the drill or reached root
+        # since the unlocked read.
+        session = for_no_key_update(
+            db.query(GameSession).filter(GameSession.id == request.session_id)
+        ).first()
+        if session is None:
+            raise HTTPException(status_code=404, detail="Game session not found")
 
-        move = suggestions[0]
-        if move.resulting_fen == route_map.target_fen:
-            session.drill_state = "root_reached"
+        if session.drill_state in {"failed", "abandoned"}:
+            # A terminal transition raced ahead: the existing entry 400.
+            raise HTTPException(status_code=400, detail="Opponent moves are unavailable for this drill state")
+
+        if session.drill_state != "active":
+            # converted or root_reached: the normal ghost/engine path applies. Its
+            # required immutable values (player_color, engine_elo) were copied at
+            # entry, so release the lock here and fall through WITHOUT returning —
+            # no row lock may survive into ghost or engine computation.
+            db.rollback()
+        else:
+            if not session.drill_opening_key:
+                raise HTTPException(status_code=400, detail="Drill is missing an opening root")
+            graph = get_opening_graph()
+            route_map = route_map_for_target(
+                graph, session.drill_opening_key, decode_uci_line(session.drill_line)
+            )
+            if not route_map.plies_by_fen:
+                raise HTTPException(status_code=400, detail="Drill route is unavailable")
+            if route_map.is_target(request.fen):
+                session.drill_state = "root_reached"
+                db.commit()
+                raise HTTPException(status_code=400, detail="Drill root already reached")
+            suggestions = route_preserving_moves(graph, route_map, request.fen)
+            if not suggestions:
+                raise HTTPException(status_code=400, detail="Current drill position is off route")
+
+            move = suggestions[0]
+            if move.resulting_fen == route_map.target_fen:
+                session.drill_state = "root_reached"
+            # Commit is the transaction sink and lock release: the optional
+            # root_reached write is the only mutation, and the route response below
+            # does no ghost/engine work, so the lock must not outlive this commit.
             db.commit()
 
-        _emit_served(OpponentMoveMode.GHOST, False)
-        _log_slow(OpponentMoveMode.GHOST, DecisionSource.GHOST_PATH, False)
-        return NextOpponentMoveResponse(
-            mode=OpponentMoveMode.GHOST,
-            move=MoveDetails(uci=move.uci, san=move.san),
-            target_blunder_id=None,
-            target_blunder_srs=None,
-            target_fen=route_map.target_fen,
-            decision_source=DecisionSource.GHOST_PATH,
-            drill_route=DrillRouteMetadata(
-                status="root_reached" if move.resulting_fen == route_map.target_fen else "on_route",
+            _emit_served(OpponentMoveMode.GHOST, False)
+            _log_slow(OpponentMoveMode.GHOST, DecisionSource.GHOST_PATH, False)
+            return NextOpponentMoveResponse(
+                mode=OpponentMoveMode.GHOST,
+                move=MoveDetails(uci=move.uci, san=move.san),
+                target_blunder_id=None,
+                target_blunder_srs=None,
                 target_fen=route_map.target_fen,
-                resulting_fen=move.resulting_fen,
-                plies_to_target=move.plies_to_target,
-            ),
-        )
+                decision_source=DecisionSource.GHOST_PATH,
+                drill_route=DrillRouteMetadata(
+                    status="root_reached" if move.resulting_fen == route_map.target_fen else "on_route",
+                    target_fen=route_map.target_fen,
+                    resulting_fen=move.resulting_fen,
+                    plies_to_target=move.plies_to_target,
+                ),
+            )
 
     # Step 1: Ghost-first path traversal
     # Use shared ghost path traversal logic to find moves toward due blunders
@@ -985,7 +1015,7 @@ def get_next_opponent_move(
         db=db,
         user_id=user.user_id,
         fen=request.fen,
-        player_color=session.player_color,
+        player_color=player_color,
         session_id=request.session_id,
     )
     ghost_search_ms = _elapsed_ms(ghost_search_started)
@@ -1065,7 +1095,7 @@ def get_next_opponent_move(
         # The remote Maia call can stall on network/DNS outside the database.
         # Safe: this fallback path has no pending writes. Release the read
         # transaction/connection before waiting on that external dependency.
-        engine_elo = session.engine_elo
+        # engine_elo was copied at entry (immutable), so no row read is needed here.
         db.rollback()
 
         engine_started = time.perf_counter()
