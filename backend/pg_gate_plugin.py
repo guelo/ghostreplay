@@ -103,6 +103,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",
     "test_accuracy_hooks.py::test_pg_moves_first_then_game_end_sees_committed_inputs",
     "test_accuracy_hooks.py::test_pg_moves_lock_serializes_concurrent_game_end",
+    # checkmate final-ply eval backfill: Phase A REPEATABLE READ read-only snapshot,
+    # parent-session FOR NO KEY UPDATE lock, and cached-accuracy recompute on the
+    # migrated schema (g-eh2w data repair for g-hs78)
+    "test_backfill_checkmate_final_ply_evals.py::test_pg_run_recomputes_accuracy_and_bumps_under_real_locks",
     # blunder NKU idempotency (g-writer-locks)
     "test_blunder_api.py::test_record_blunder_concurrent_same_key_records_once",
     # branch-scoped route / next-opponent stale-write locks (g-branch-locks)
