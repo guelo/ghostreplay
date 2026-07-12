@@ -2,7 +2,11 @@
 
 Importable pytest plugin that owns everything PostgreSQL-backed tests need:
 
-- the ``pg_required`` marker and its skip/fail gate,
+- the ``pg_gate`` marker (aliased as ``pg_required``) and its skip/fail gate,
+- the fixed ``REQUIRED_PG_GATE_TESTS`` / ``REQUIRED_PG_GATE_PARAM_CASES``
+  manifests plus the required-mode collection guards and skip-promotion
+  hookwrapper that make the gate fail closed rather than pass with missing
+  coverage,
 - the shared migrated-schema fixtures (``pg_engine`` / ``pg_session_factory`` /
   ``pg_client``) moved out of ``conftest.py``, and
 - ``pg_migration_db``, a disposable-database fixture for migration tests that
@@ -19,7 +23,15 @@ Gate policy (see ``_pg_url`` / ``_require_pg``):
   of skipping, so CI cannot silently drop PostgreSQL coverage.
 
 ``conftest.py`` activates this via ``pytest_plugins`` and re-exports
-``pg_required`` so ``from conftest import pg_required`` keeps working.
+``pg_required`` / ``pg_gate`` so ``from conftest import pg_required`` keeps
+working.
+
+The required PostgreSQL gate command (CI and the release rehearsal) is::
+
+    GHOSTREPLAY_REQUIRE_PG_TESTS=1 \\
+    GHOSTREPLAY_TEST_PG_URL="postgresql://.../ghostreplay_test" \\
+    GHOSTREPLAY_TEST_PG_MAINT_URL="postgresql://.../postgres" \\
+    pytest -m pg_gate --strict-markers -rs
 """
 
 from __future__ import annotations
@@ -62,24 +74,102 @@ def _require_pg() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Marker + gate. `from conftest import pg_required` re-exports this object.
+# Marker + gate.
+#
+# ``pg_gate`` is the Release-A PostgreSQL gate marker: it identifies exactly the
+# migration and concurrency proofs that the required-mode CI command
+# (``GHOSTREPLAY_REQUIRE_PG_TESTS=1 pytest -m pg_gate``) must run against a real
+# PostgreSQL. ``pg_required`` is a backward-compatible alias so the many
+# ``from conftest import pg_required`` / ``@pg_required`` call sites keep applying
+# this same marker object. The pre-existing analysis-cache and position-analysis
+# PostgreSQL suites deliberately do NOT use this marker (they define their own
+# module-local ``skipif``), so they stay out of the Release-A gate and keep their
+# own skip behaviour.
 # ---------------------------------------------------------------------------
 
-pg_required = pytest.mark.pg_required
+pg_gate = pytest.mark.pg_gate
+pg_required = pg_gate  # alias: both apply the pg_gate marker object.
+
+
+# Fixed manifest of every Release-A PostgreSQL gate test, keyed by node identity
+# (``path::function`` with any parametrization stripped). In required mode the
+# collection guard fails hard if any identity here is absent from the gated
+# selection, so a deleted / renamed / accidentally-unmarked invariant cannot
+# silently drop out of CI coverage. Keep in lockstep with the ``@pg_gate``
+# decorations across the Release-A test files.
+REQUIRED_PG_GATE_TESTS = frozenset({
+    # game-end / post-end /moves cached-accuracy write hooks (g-accuracy-hooks)
+    "test_accuracy_hooks.py::test_pg_game_end_first_then_late_moves_heals",
+    "test_accuracy_hooks.py::test_pg_game_end_lock_serializes_concurrent_late_moves",
+    "test_accuracy_hooks.py::test_pg_moves_first_then_game_end_sees_committed_inputs",
+    "test_accuracy_hooks.py::test_pg_moves_lock_serializes_concurrent_game_end",
+    # blunder NKU idempotency (g-writer-locks)
+    "test_blunder_api.py::test_record_blunder_concurrent_same_key_records_once",
+    # branch-scoped route / next-opponent stale-write locks (g-branch-locks)
+    "test_branch_locks.py::test_next_opponent_releases_lock_before_engine_so_moves_commits",
+    "test_branch_locks.py::test_next_opponent_stale_converted_falls_through",
+    "test_branch_locks.py::test_next_opponent_stale_failed_returns_400",
+    "test_branch_locks.py::test_route_check_off_route_yields_to_concurrent_root_reached",
+    "test_branch_locks.py::test_route_check_root_reached_snapshot_preserves_concurrent_failure",
+    "test_branch_locks.py::test_route_check_target_reached_yields_to_concurrent_failure",
+    # per-user graph-write advisory lock (g-graph-lock)
+    "test_graph_write_lock.py::test_recording_times_out_and_persists_nothing_when_lock_held",
+    "test_graph_write_lock.py::test_recording_vs_recording_serialize",
+    "test_graph_write_lock.py::test_reverted_lock_reproduces_opposite_order_deadlock",
+    "test_graph_write_lock.py::test_worker_vs_recording_serialize",
+    # rated game-end users-row lock + games_played-first durable head (g-rating-serial)
+    "test_rating_serialize.py::test_concurrent_double_end_one_session_loser_gets_400",
+    "test_rating_serialize.py::test_cursor_writer_completes_while_end_paused_in_rating",
+    "test_rating_serialize.py::test_same_user_distinct_session_ends_chain_cleanly",
+    "test_rating_serialize.py::test_users_lock_prevents_lost_games_played_update",
+    # session /moves shared-graph advisory serialization (g-graph-lock)
+    "test_session_graph_lock.py::test_moves_concurrent_same_opening_serialize",
+    "test_session_graph_lock.py::test_moves_does_not_block_on_held_lock_production_shape",
+    "test_session_graph_lock.py::test_moves_graph_lock_retry_succeeds",
+    "test_session_graph_lock.py::test_moves_graph_lock_timeout_degrades",
+    # SRS review NKU idempotency (g-writer-locks)
+    "test_srs_api.py::test_srs_review_concurrent_same_key_single_row",
+    # SRS/moves cross-root deadlock matrix (g-writer-locks); param cases pinned below
+    "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix",
+    # Release-A schema migration on a disposable PostgreSQL DB (g-accuracy-schema)
+    "test_release_a_migrations.py::test_pg_disposable_release_a_migration",
+})
+
+# The SRS/moves cross-root lock matrix must run all four session/blunder lock
+# combinations. Pin the exact bracketed case IDs so silently dropping any row of
+# the matrix (e.g. the both-FOR-UPDATE deadlock case) fails the gate rather than
+# quietly shrinking it.
+REQUIRED_PG_GATE_PARAM_CASES = frozenset({
+    "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_for_update]",
+    "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_nku]",
+    "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[session_fu_blunder_nku]",
+    "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[session_nku_blunder_fu]",
+})
 
 
 def pytest_configure(config: pytest.Config) -> None:
     # Registering the marker keeps it valid under --strict-markers.
     config.addinivalue_line(
         "markers",
-        "pg_required: test needs a PostgreSQL URL (GHOSTREPLAY_TEST_PG_URL); "
-        "skips in developer-default mode, fails when GHOSTREPLAY_REQUIRE_PG_TESTS=1",
+        "pg_gate: Release-A PostgreSQL migration/concurrency proof. Needs "
+        "GHOSTREPLAY_TEST_PG_URL; skips in developer-default mode, and under "
+        "GHOSTREPLAY_REQUIRE_PG_TESTS=1 a missing URL (or any residual skip) FAILS.",
     )
 
 
+def _is_gated(item: pytest.Item) -> bool:
+    """True for a ``@pg_gate`` (== ``@pg_required``) test."""
+    return item.get_closest_marker("pg_gate") is not None
+
+
+def _gate_identity(nodeid: str) -> str:
+    """Function identity of a node id, with any ``[param]`` suffix stripped."""
+    return nodeid.split("[", 1)[0]
+
+
 def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Gate ``@pg_required`` tests on the PostgreSQL URL, at setup time."""
-    if item.get_closest_marker("pg_required") is None:
+    """Gate ``@pg_gate`` tests on the PostgreSQL URL, at setup time."""
+    if not _is_gated(item):
         return
     if _pg_url():
         return
@@ -89,6 +179,78 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
             pytrace=False,
         )
     pytest.skip("GHOSTREPLAY_TEST_PG_URL not set; PostgreSQL-backed test skipped")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Required-mode collection guards (no-ops in developer-default mode).
+
+    ``trylast`` so this runs AFTER pytest's own ``-m`` / ``-k`` deselection and
+    therefore validates the tests that will actually run. Together these make it
+    impossible for the required PostgreSQL gate to pass while silently running
+    zero — or an incomplete set of — the Release-A invariants:
+
+    * an empty gated selection is a hard ``UsageError`` (a marker typo or an
+      over-narrow ``-k`` would otherwise report "0 selected" and exit green);
+    * every identity in ``REQUIRED_PG_GATE_TESTS`` must be collected; and
+    * every case in ``REQUIRED_PG_GATE_PARAM_CASES`` must be collected.
+    """
+    if not _require_pg():
+        return
+    gated = [item for item in items if _is_gated(item)]
+    if not gated:
+        raise pytest.UsageError(
+            "GHOSTREPLAY_REQUIRE_PG_TESTS=1 but no @pg_gate tests were selected; "
+            "the PostgreSQL release gate would report success with zero coverage."
+        )
+    collected_ids = {_gate_identity(item.nodeid) for item in gated}
+    missing = sorted(REQUIRED_PG_GATE_TESTS - collected_ids)
+    if missing:
+        raise pytest.UsageError(
+            "@pg_gate manifest incomplete under GHOSTREPLAY_REQUIRE_PG_TESTS=1; "
+            "these required test identities were not collected: " + ", ".join(missing)
+        )
+    collected_cases = {item.nodeid for item in gated if "[" in item.nodeid}
+    missing_cases = sorted(REQUIRED_PG_GATE_PARAM_CASES - collected_cases)
+    if missing_cases:
+        raise pytest.UsageError(
+            "@pg_gate matrix incomplete under GHOSTREPLAY_REQUIRE_PG_TESTS=1; "
+            "these required parametrized cases were not collected: "
+            + ", ".join(missing_cases)
+        )
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    """Promote any residual skip on a ``@pg_gate`` test to a failure in required mode.
+
+    The setup gate already turns a missing URL into a failure, but a test body or
+    fixture could still ``pytest.skip(...)`` (or carry a ``skip``/``xfail`` marker)
+    for some other reason. In required mode that would be an invisible hole in the
+    gate, so convert every such skipped report into a failure — **including an
+    xfailed one** (a failing ``@pytest.mark.xfail`` / ``pytest.xfail()`` is reported
+    as ``outcome="skipped"`` with ``wasxfail``, and an xfailed required proof must
+    not exit green). Developer-default mode is untouched, so ``@pg_gate`` tests
+    still skip cleanly without a URL.
+
+    This wrapper is registered after core (via conftest ``pytest_plugins``), so it
+    is the outermost makereport wrapper and observes the report *after* the core
+    skipping plugin has already converted a failing xfail into a skip.
+    """
+    report = yield
+    if _require_pg() and _is_gated(item) and report.skipped:
+        was_xfail = hasattr(report, "wasxfail")
+        report.outcome = "failed"
+        report.longrepr = (
+            f"@pg_gate test {item.nodeid} was "
+            f"{'XFAILED' if was_xfail else 'SKIPPED'} under "
+            f"GHOSTREPLAY_REQUIRE_PG_TESTS=1 (residual "
+            f"{'xfail' if was_xfail else 'skip'} promoted to failure): "
+            f"{report.longrepr}"
+        )
+    return report
 
 
 # ---------------------------------------------------------------------------

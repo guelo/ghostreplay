@@ -2,9 +2,11 @@
 
 Adds ``game_sessions.player_accuracy`` (INTEGER, 0..100 or NULL) and
 ``game_sessions.player_accuracy_algo_version`` (SMALLINT, NULL) plus the named
-range CHECK ``ck_game_sessions_player_accuracy``. Release A only defines the
-schema — no backfill, no serving write hook; the Release B writers populate the
-columns later.
+range CHECK ``ck_game_sessions_player_accuracy``. This migration defines the
+schema; the Release A serving write hooks (g-accuracy-hooks) then maintain the
+columns forward from every game-end / post-end /moves upload. Release A performs
+no backfill of pre-existing rows and does not switch any read onto the cache —
+CHECK validation, the backfill, and the cache-only reads are Release B.
 
 PostgreSQL path (production):
 

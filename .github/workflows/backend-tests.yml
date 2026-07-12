@@ -60,6 +60,20 @@ jobs:
         run: alembic downgrade -1
       - name: Alembic re-upgrade head
         run: alembic upgrade head
-      # @pg_required tests must NOT skip here — GHOSTREPLAY_TEST_PG_URL is set.
+      # Required PostgreSQL release gate (g-release-integrate). With required mode
+      # ON, a missing URL — or ANY residual skip/xfail on a @pg_gate test — FAILS
+      # instead of quietly passing, the empty-selection guard trips if nothing is
+      # gated, and the fixed REQUIRED_PG_GATE_TESTS / REQUIRED_PG_GATE_PARAM_CASES
+      # manifests fail collection if a required migration/concurrency invariant is
+      # deleted, renamed, or left unmarked. This is the canonical gate command and
+      # is what actually activates the guards the plugin defines; the plain
+      # `pytest -v` below runs with the guards dormant (URL set, required mode off).
+      - name: Run required PostgreSQL gate
+        env:
+          GHOSTREPLAY_REQUIRE_PG_TESTS: '1'
+        run: pytest -m pg_gate --strict-markers -rs
+      # Full suite. @pg_gate tests still run (not skip) here because
+      # GHOSTREPLAY_TEST_PG_URL is set; the dedicated gate step above is what
+      # enforces required-mode fail-closed behaviour.
       - name: Run tests
         run: pytest -v

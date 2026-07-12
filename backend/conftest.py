@@ -28,12 +28,13 @@ from app.models import (
 )
 from app.security import create_access_token, hash_password
 
-# Activate the PostgreSQL gate plugin (fixtures + @pg_required marker + gate).
-# `from conftest import pg_required` stays valid via the re-export below. Request
-# assert-rewriting BEFORE the import so pytest can instrument the plugin.
+# Activate the PostgreSQL gate plugin (fixtures + @pg_gate marker + gate +
+# required-mode manifests/guards). `from conftest import pg_required` stays valid
+# via the re-export below (pg_required is an alias for the pg_gate marker).
+# Request assert-rewriting BEFORE the import so pytest can instrument the plugin.
 pytest.register_assert_rewrite("pg_gate_plugin")
 pytest_plugins = ["pg_gate_plugin"]
-from pg_gate_plugin import pg_required  # noqa: E402,F401
+from pg_gate_plugin import pg_gate, pg_required  # noqa: E402,F401
 
 SQLALCHEMY_TEST_DATABASE_URL = "sqlite:///:memory:"
 engine = create_engine(

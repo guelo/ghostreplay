@@ -182,8 +182,15 @@ def test_sqlite_release_a_upgrade_downgrade(tmp_path, monkeypatch):
     eng.dispose()
 
 
+@pg_gate_plugin.pg_gate
 def test_pg_disposable_release_a_migration(pg_migration_db, monkeypatch):
-    """Disposable-DB PostgreSQL migration: NOT VALID CHECK, concurrent index, no-Sort plan."""
+    """Disposable-DB PostgreSQL migration: NOT VALID CHECK, concurrent index, no-Sort plan.
+
+    Marked ``@pg_gate`` so it joins the required PostgreSQL release gate selection
+    and the ``REQUIRED_PG_GATE_TESTS`` manifest: this is the Release-A migration
+    invariant, and the canonical gate command sets both the test and maintenance
+    URLs. In developer-default mode the setup gate skips it cleanly like the rest.
+    """
     url = pg_migration_db
     monkeypatch.setenv("DATABASE_URL", url)
     cfg = _alembic_config()
