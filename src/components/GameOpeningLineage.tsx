@@ -35,13 +35,21 @@ type LineageBadge = { diff: number; after: number; dir: "up" | "down" };
  * Derive the inline score-diff badge for one opening, or null to render nothing.
  * The badge is computed from the ROUNDED before/after (the cards display rounded
  * scores), so a sub-1.0 float wobble never renders a misleading `+0`/`+1`.
- * Brand-new openings (is_new) show nothing per user choice (g-3gmc).
+ *
+ * Brand-new openings (is_new) have no baseline, so the diff is quantified against
+ * 0 — a new opening ending at 37 reads `+37 → 37` (g-gkkn). Its card itself stays
+ * "—" (there was no prior score); the badge is the sole signal of the new value.
  */
 function badgeFor(change: OpeningScoreDeltaItem | undefined): LineageBadge | null {
-  if (!change || change.is_new) return null;
-  if (change.before == null || change.after == null) return null;
+  if (!change || change.after == null) return null;
   const after = Math.round(change.after);
-  const diff = after - Math.round(change.before);
+  const before = change.is_new
+    ? 0
+    : change.before == null
+      ? null
+      : Math.round(change.before);
+  if (before == null) return null;
+  const diff = after - before;
   if (diff === 0) return null;
   return { diff, after, dir: diff > 0 ? "up" : "down" };
 }
@@ -53,11 +61,13 @@ function badgeFor(change: OpeningScoreDeltaItem | undefined): LineageBadge | nul
  * (name as header, played move list as the secondary line, no Eval tile /
  * move-type chips). `depth` feeds `ply` for completeness only — family mode
  * never reads it. `moveListSan` is the player's actual SAN prefix, numbered from
- * `startPly`.
+ * `startPly`. `score` is the resolved card score — usually `item.score`, but
+ * pinned to the delta's pre-game `before` at game end (g-gkkn).
  */
 function toNodeView(
   item: OpeningLineageItem,
   startPly: number,
+  score: number | null,
 ): OpeningTreeNodeView {
   return {
     ply: item.depth,
@@ -66,7 +76,7 @@ function toNodeView(
     eco: item.eco,
     inBook: true,
     isUserSelected: false,
-    score: item.score,
+    score,
     evalCp: null,
     evalMate: null,
     coverage: item.coverage,
@@ -124,9 +134,20 @@ function GameOpeningLineage({
             playerColor,
             opening: item.opening_key,
           })}`;
-          const badge = badgeFor(changeByKey.get(item.opening_key));
+          const change = changeByKey.get(item.opening_key);
+          const badge = badgeFor(change);
           const badgeSign = badge && badge.diff > 0 ? "+" : "";
-          const view = toNodeView(item, startPly);
+          // Pre-game score pin (g-gkkn): during play `change` is undefined and
+          // item.score is already pre-game-fresh (g-dmd1); at a terminal event the
+          // delta's `before` overrides the refetched post-game item.score so the
+          // card number never changes. is_new keeps "—" (no baseline); a non-new
+          // entry missing `before` (data anomaly) falls back to item.score.
+          const cardScore = !change
+            ? item.score
+            : change.is_new
+              ? null
+              : change.before ?? item.score;
+          const view = toNodeView(item, startPly, cardScore);
 
           return (
             <li

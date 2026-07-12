@@ -351,33 +351,51 @@ describe("GameOpeningLineage", () => {
       expect(screen.queryByText(/→/)).not.toBeInTheDocument();
     });
 
-    it("renders no badge for a brand-new opening, with or without an after-score", () => {
-      const { unmount } = renderLineage([makeItem({ opening_key: "k1" })], {
-        scoreChanges: [
-          makeChange({
-            opening_key: "k1",
-            is_new: true,
-            before: null,
-            delta: null,
-            after: 30,
-          }),
-        ],
-      });
-      expect(screen.queryByText(/→/)).not.toBeInTheDocument();
-      unmount();
+    it("shows a from-zero badge for a brand-new opening while its card stays em-dash (g-gkkn)", () => {
+      // is_new has no pre-game baseline: the badge quantifies the gain against 0
+      // (+30 → 30), but the card itself keeps "—" — never the refetched post-game
+      // score (60 here).
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "New Opening", score: 60 })],
+        {
+          scoreChanges: [
+            makeChange({
+              opening_key: "k1",
+              is_new: true,
+              before: null,
+              delta: null,
+              after: 30,
+            }),
+          ],
+        },
+      );
 
-      renderLineage([makeItem({ opening_key: "k1" })], {
-        scoreChanges: [
-          makeChange({
-            opening_key: "k1",
-            is_new: true,
-            before: null,
-            delta: null,
-            after: null,
-          }),
-        ],
-      });
+      const badge = screen.getByText("+30 → 30");
+      expect(badge).toHaveClass("game-opening-lineage__delta--up");
+
+      const card = screen.getByRole("button", { name: /New Opening/ });
+      expect(card).not.toHaveTextContent("60");
+      expect(within(card).getAllByText("—").length).toBeGreaterThanOrEqual(1);
+    });
+
+    it("renders no badge for a brand-new opening with no after-score, card stays em-dash", () => {
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "New Opening", score: 60 })],
+        {
+          scoreChanges: [
+            makeChange({
+              opening_key: "k1",
+              is_new: true,
+              before: null,
+              delta: null,
+              after: null,
+            }),
+          ],
+        },
+      );
       expect(screen.queryByText(/→/)).not.toBeInTheDocument();
+      const card = screen.getByRole("button", { name: /New Opening/ });
+      expect(card).not.toHaveTextContent("60");
     });
 
     it("shows the badge in both collapsed and expanded states, as a sibling of the card", async () => {
@@ -406,6 +424,55 @@ describe("GameOpeningLineage", () => {
       const badge = screen.getByText("+3 → 44");
       expect(badge).toBeInTheDocument();
       expect(badge.parentElement?.tagName).toBe("LI");
+    });
+  });
+
+  describe("pre-game score pin (g-gkkn)", () => {
+    it("pins the card score to the delta's pre-game `before`, not the refetched post-game score", () => {
+      // At game end the lineage refetch loads the POST-game item.score (44), but
+      // the card must keep showing the PRE-game value (41); the badge alone signals
+      // the change.
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "Italian Game", score: 44 })],
+        {
+          scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
+        },
+      );
+
+      const card = screen.getByRole("button", { name: /Italian Game/ });
+      expect(within(card).getByText("41")).toBeInTheDocument();
+      expect(within(card).queryByText("44")).not.toBeInTheDocument();
+      // The badge (a sibling of the card) still shows the diff and the new value.
+      expect(screen.getByText("+3 → 44")).toBeInTheDocument();
+    });
+
+    it("resign/empty-lineage first paint: changed cards show `before`, unchanged cards keep item.score", () => {
+      // Resign loads the lineage for the first time with POST-game item.scores.
+      // A card with a matching delta renders its pre-game `before`; a card with no
+      // delta entry renders item.score exactly as today.
+      renderLineage(
+        [
+          makeItem({ opening_key: "k1", opening_name: "Open Game", score: 50 }),
+          makeItem({
+            opening_key: "k2",
+            opening_name: "Ruy Lopez",
+            depth: 1,
+            score: 44,
+          }),
+        ],
+        {
+          scoreChanges: [makeChange({ opening_key: "k2", before: 41, after: 44 })],
+        },
+      );
+
+      // k1 has no delta → shows its item.score (50) unchanged.
+      const openGame = screen.getByRole("button", { name: /Open Game/ });
+      expect(within(openGame).getByText("50")).toBeInTheDocument();
+
+      // k2 has a delta → shows pre-game before (41), not post-game 44.
+      const ruyLopez = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(ruyLopez).getByText("41")).toBeInTheDocument();
+      expect(within(ruyLopez).queryByText("44")).not.toBeInTheDocument();
     });
   });
 });
