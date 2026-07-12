@@ -142,6 +142,30 @@ def opening_score_inputs_fingerprint(
     )
 
 
+def evidence_derivation_fingerprint() -> str:
+    """Overlay-derivation compatibility stamp for the frozen-cohort artifact (g-p4ih).
+
+    The frozen overlay's fields are DERIVED, not raw DB rows: ``quality_sum`` embeds
+    per-observation ``exp(-loss/tau)`` under ``TAU_WC`` / ``TAU_CP`` / ``QUALITY_VERSION``;
+    pass/fail counts embed the collector semantics versioned by
+    ``OPENING_EVIDENCE_INPUTS_VERSION``; node/edge membership embeds the phase filter
+    under ``DIVIDER_VERSION``. Each of these can change the overlay WITHOUT changing
+    graph/roots, so a frozen-cohort load guard that checked only graph/roots would
+    happily score an artifact the current pipeline could no longer derive from the same
+    raw rows.
+
+    Composed over EXACTLY these five derivation surfaces — deliberately NOT
+    ``SCORE_MODEL_VERSION`` / root-calc config (scoring-side; the artifact stays reusable
+    across model bumps), NOT graph/roots (separate header fields), and NOT the
+    cache-schema / freshness-contract versions (cache-side; they do not change overlay
+    content). Same composition style as ``opening_score_inputs_fingerprint``.
+    """
+    return (
+        f"{DIVIDER_VERSION}:{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
+        f":{OPENING_EVIDENCE_INPUTS_VERSION}"
+    )
+
+
 def _compose_raw_fingerprint(registry_fp: str, row_digest: str) -> str:
     """Single composition rule for ``inputs_fingerprint`` (build + verify sides).
 

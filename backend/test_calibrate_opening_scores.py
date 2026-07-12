@@ -6,10 +6,12 @@ exercised without a live database.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -17,6 +19,7 @@ import pytest
 
 from app.db import DATABASE_URL
 from app.fen import active_color, normalize_fen
+from app.opening_cache import evidence_derivation_fingerprint
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence, PhaseSample
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_rootcalc import (
@@ -1231,3 +1234,1135 @@ class TestMainEndToEnd:
             assert demo_rows[0]["graded_for"] == "none"
         # report["grid"] STILL excludes demos even when the flag is on.
         assert all(not _is_demo_axes(c["cell"]) for c in report["grid"]["cells"])
+
+
+# ===========================================================================
+# Frozen-cohort artifact (g-p4ih-artifact): schema, canonical encoding, semantic
+# validation, split load guard, release-guard binding. All synthetic — no DB,
+# no private cohort; synthetic overlays + synthetic provenance bytes + a
+# synthetic RuntimeBinding.
+# ===========================================================================
+
+_FZ_AS_OF = datetime(2026, 7, 1, 12, 0, 0, tzinfo=timezone.utc)
+_FZ_GRAPH_FP = "graph-fp-1"
+_FZ_ROOTS_FP = "roots-fp-1"
+_FZ_MIRRORED = (
+    "schema_version", "as_of", "captured_model_version", "graph_fingerprint",
+    "roots_fingerprint", "evidence_derivation_fingerprint", "pair_count",
+    "min_observations", "cohort_rules", "release_guard_opening_key",
+    "release_guard_child_opening_key",
+)
+
+
+def _fz_root() -> str:
+    return normalize_fen(chess.Board().fen())
+
+
+def _fz_e4() -> str:
+    board = chess.Board()
+    board.push_uci("e2e4")
+    return normalize_fen(board.fen())
+
+
+def _fz_overlay(uid: int, color: str, n: int, *, last_days: int = 2) -> EvidenceOverlay:
+    """A consistent single-node/single-edge overlay: node quality_count sum == edge
+    quality_count sum == source_counts sum == n (the cross-field telemetry invariant).
+    White nodes sit at the start position (white to move); black nodes at 1.e4 (black to
+    move), so each node's active color matches player_color."""
+    root, e4 = _fz_root(), _fz_e4()
+    node_fen = root if color == "white" else e4
+    overlay = EvidenceOverlay(uid, color)
+    overlay.nodes[node_fen] = NodeEvidence(
+        fen=node_fen,
+        quality_sum=float(n),
+        quality_count=n,
+        session_ids={f"{uid}-{color}-{i}" for i in range(n)},
+        live_attempts=n,
+        live_passes=n,
+        live_fails=0,
+        last_live_at=_FZ_AS_OF - timedelta(days=last_days),
+    )
+    overlay.edges[(root, e4)] = EdgeEvidence(
+        root, e4, "e2e4",
+        traversal_count=n, live_attempts=n, live_passes=n, live_fails=0,
+        quality_sum=float(n), quality_count=n,
+    )
+    if n:
+        overlay.source_counts["session_eval"] = n
+    overlay.phase_samples.append(PhaseSample(4, None, None))
+    return overlay
+
+
+def _fz_inputs(quantile_obs=(25, 22), guard_obs=(15, 15)):
+    """The canonical cohort shape: two User-14 release-guard records (both colors, one
+    subject) + two quantile pairs (users 2 & 3)."""
+    return [
+        cal.CapturedPairInput(_fz_overlay(14, "white", guard_obs[0]), "release_guard", 5, "fp-14w"),
+        cal.CapturedPairInput(_fz_overlay(14, "black", guard_obs[1]), "release_guard", 5, "fp-14b"),
+        cal.CapturedPairInput(_fz_overlay(2, "black", quantile_obs[0]), "quantile", 3, "fp-2b"),
+        cal.CapturedPairInput(_fz_overlay(3, "white", quantile_obs[1]), "quantile", 3, "fp-3w"),
+    ]
+
+
+def _fz_header_input(**overrides) -> "cal.ArtifactHeaderInput":
+    base = dict(
+        as_of=_FZ_AS_OF,
+        graph_fingerprint=_FZ_GRAPH_FP,
+        roots_fingerprint=_FZ_ROOTS_FP,
+        cache_epoch=7,
+        captured_model_version="sm-v2-3",
+        evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+    )
+    base.update(overrides)
+    return cal.ArtifactHeaderInput(**base)
+
+
+def _fz_freeze(inputs=None, header=None) -> bytes:
+    return cal.freeze_frozen_artifact(inputs or _fz_inputs(), header or _fz_header_input())
+
+
+# The canonical GOOD header dict (used to build schema-valid provenance for artifact
+# semantic tests, so a header semantic error is caught in Phase A before integrity).
+_FZ_REF_HEADER = json.loads(_fz_freeze())["header"]
+
+
+def _fz_prov(artifact_bytes: bytes, header: dict | None = None, **overrides) -> bytes:
+    header = header if header is not None else _FZ_REF_HEADER
+    record = {k: header[k] for k in _FZ_MIRRORED}
+    record["sha256"] = hashlib.sha256(artifact_bytes).hexdigest()
+    record.update(overrides)
+    return cal._canonical_dumps(record)
+
+
+def _fz_rb(**overrides) -> "cal.RuntimeBinding":
+    base = dict(
+        graph_fingerprint=_FZ_GRAPH_FP,
+        roots_fingerprint=_FZ_ROOTS_FP,
+        evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+        min_observations=cal.DEFAULT_MIN_OBSERVATIONS,
+        cohort_rules=cal.COHORT_RULES_ID,
+        release_guard_opening_key=cal.RELEASE_GUARD_OPENING_KEY,
+        release_guard_child_opening_key=cal.RELEASE_GUARD_CHILD_OPENING_KEY,
+    )
+    base.update(overrides)
+    return cal.RuntimeBinding(**base)
+
+
+def _fz_load(artifact_bytes: bytes, provenance_bytes: bytes | None = None, rb=None):
+    return cal.load_frozen_artifact(
+        artifact_bytes,
+        provenance_bytes if provenance_bytes is not None else _fz_prov(artifact_bytes),
+        rb or _fz_rb(),
+    )
+
+
+def _fz_reject(perturb, substring, exc=cal.ArtifactSemanticError):
+    """Perturb a fresh valid payload, re-encode canonically, load with SCHEMA-VALID
+    provenance (from the reference header), and assert the load raises ``exc`` whose
+    message contains ``substring``. Provenance is good so a header malformation is
+    owned by Phase A semantic validation, not integrity."""
+    payload = json.loads(_fz_freeze())
+    perturb(payload)
+    bs = cal._canonical_dumps(payload)
+    with pytest.raises(exc) as ei:
+        cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb())
+    assert substring in str(ei.value), f"expected {substring!r} in {ei.value!r}"
+    return str(ei.value)
+
+
+class TestEvidenceDerivationFingerprint:
+    def test_pins_exactly_five_surfaces(self):
+        from app.game_phase import DIVIDER_VERSION
+        from app.opening_evidence import OPENING_EVIDENCE_INPUTS_VERSION
+        from app.opening_quality import QUALITY_VERSION, TAU_CP, TAU_WC
+
+        fp = evidence_derivation_fingerprint()
+        # The five folded surfaces are present.
+        for surface in (DIVIDER_VERSION, QUALITY_VERSION, repr(TAU_WC), repr(TAU_CP), OPENING_EVIDENCE_INPUTS_VERSION):
+            assert surface in fp
+        # It is exactly their colon join — adding/removing a surface is a schema change.
+        assert fp == (
+            f"{DIVIDER_VERSION}:{QUALITY_VERSION}:{TAU_WC!r}:{TAU_CP!r}"
+            f":{OPENING_EVIDENCE_INPUTS_VERSION}"
+        )
+
+    def test_excludes_scoring_and_graph_surfaces(self):
+        from app.opening_cache import (
+            OPENING_SCORE_CACHE_SCHEMA_VERSION,
+            SCORE_MODEL_VERSION,
+        )
+        from app.opening_rootcalc import root_calc_config_fingerprint
+
+        fp = evidence_derivation_fingerprint()
+        # Scoring-side / cache-side / graph surfaces are DELIBERATELY not folded in
+        # (the artifact stays reusable across model bumps).
+        assert SCORE_MODEL_VERSION not in fp
+        assert root_calc_config_fingerprint() not in fp
+        assert OPENING_SCORE_CACHE_SCHEMA_VERSION not in fp
+        assert _FZ_GRAPH_FP not in fp
+
+
+class TestReleaseGuardKeys:
+    def test_opening_key_is_derived_not_hand_typed(self):
+        board = chess.Board()
+        board.push_uci("e2e4")
+        assert cal.RELEASE_GUARD_OPENING_KEY == normalize_fen(board.fen())
+        assert active_color(cal.RELEASE_GUARD_OPENING_KEY) == "black"
+
+    def test_child_key_is_derived_not_hand_typed(self):
+        board = chess.Board()
+        board.push_uci("e2e4")
+        board.push_uci("c7c6")
+        assert cal.RELEASE_GUARD_CHILD_OPENING_KEY == normalize_fen(board.fen())
+
+    def test_pinned_module_constants(self):
+        assert cal.ARTIFACT_SCHEMA_VERSION == 1
+        assert cal.COHORT_RULES_ID == "opening-cohort-rules-v1"
+        assert cal.DEFAULT_MIN_OBSERVATIONS == 20
+        assert cal.TIMESTAMP_FLOOR == datetime(2000, 1, 1, tzinfo=timezone.utc)
+
+
+class TestFreezeByteStability:
+    def test_freeze_returns_bytes_and_loads_green(self):
+        bs = _fz_freeze()
+        assert isinstance(bs, bytes)
+        cohort = _fz_load(bs)
+        assert cohort.artifact_sha256 == hashlib.sha256(bs).hexdigest()
+        assert [p.pair_id for p in cohort.pairs] == ["pair-00", "pair-01", "pair-02", "pair-03"]
+        assert [p.surrogate_user_id for p in cohort.pairs] == [1, 2, 3, 4]
+        # The two User-14 records share one subject and are the release guards.
+        guards = [p for p in cohort.pairs if p.cohort_role == "release_guard"]
+        assert {g.player_color for g in guards} == {"white", "black"}
+        assert len({g.subject_id for g in guards}) == 1
+
+    def test_byte_identity_across_two_serializations(self):
+        assert _fz_freeze() == _fz_freeze()
+
+    def test_byte_identity_nontrivial_and_integral_floats(self):
+        # A fractional quality_sum keeps its shortest round-trip repr; an integral
+        # quality_sum stays 2.0, never 2.
+        overlay = _fz_overlay(2, "black", 3)
+        node = next(iter(overlay.nodes.values()))
+        node.quality_sum = 0.1 + 0.2  # 0.30000000000000004
+        overlay.edges[(_fz_root(), _fz_e4())].quality_sum = 2.0
+        inputs = _fz_inputs()
+        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        # node qc=3, edge qc=3, source_counts=3 still hold (only quality_sum changed).
+        bs = _fz_freeze(inputs)
+        assert b'"quality_sum":0.30000000000000004' in bs
+        assert b'"quality_sum":2.0' in bs
+        assert b'"quality_sum":2,' not in bs  # never bare int
+        assert bs == _fz_freeze(inputs)  # deterministic
+
+    def test_shuffle_invariance_pair_and_node_order(self):
+        inputs = _fz_inputs()
+        b1 = _fz_freeze(inputs)
+        # Reverse pair order and rebuild each overlay's nodes dict in reversed order —
+        # determinism comes from the sorted-source assignment, not insertion order.
+        shuffled = list(reversed(inputs))
+        for cp in shuffled:
+            items = list(cp.overlay.nodes.items())
+            cp.overlay.nodes = dict(reversed(items))
+        assert _fz_freeze(shuffled) == b1
+
+    def test_timestamp_offsets_reconstruct_bit_for_bit(self):
+        cohort = _fz_load(_fz_freeze())
+        black_guard = next(p for p in cohort.pairs if p.player_color == "black" and p.cohort_role == "release_guard")
+        node = next(iter(black_guard.overlay.nodes.values()))
+        # equality, not epsilon.
+        assert node.last_live_at == _FZ_AS_OF - timedelta(days=2)
+
+    def test_canonical_as_of_roundtrips_byte_identically(self):
+        header = json.loads(_fz_freeze())["header"]
+        assert header["as_of"] == "2026-07-01T12:00:00.000000Z"
+        cohort = _fz_load(_fz_freeze())
+        assert cohort.header.as_of == _FZ_AS_OF
+
+    def test_same_instant_different_offsets_identical_bytes(self):
+        plus_two = datetime(2026, 7, 1, 14, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+        b_utc = _fz_freeze(header=_fz_header_input(as_of=_FZ_AS_OF))
+        b_off = _fz_freeze(header=_fz_header_input(as_of=plus_two))
+        assert b_utc == b_off
+        assert hashlib.sha256(b_utc).hexdigest() == hashlib.sha256(b_off).hexdigest()
+
+    def test_naive_as_of_rejected_at_freeze(self):
+        with pytest.raises(cal.ArtifactSemanticError, match="timezone-aware"):
+            _fz_freeze(header=_fz_header_input(as_of=datetime(2026, 7, 1, 12, 0, 0)))
+
+    def test_naive_evidence_timestamp_rejected_at_freeze(self):
+        overlay = _fz_overlay(2, "black", 25)
+        next(iter(overlay.nodes.values())).last_live_at = datetime(2026, 6, 1, 0, 0, 0)  # naive
+        inputs = _fz_inputs()
+        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        with pytest.raises(cal.ArtifactSemanticError, match="timezone-aware"):
+            _fz_freeze(inputs)
+
+    def test_distinct_source_precondition(self):
+        dup = _fz_inputs() + [cal.CapturedPairInput(_fz_overlay(2, "black", 25), "quantile", 3, "dup")]
+        with pytest.raises(cal.ArtifactSemanticError, match="duplicate source pair"):
+            _fz_freeze(dup)
+
+    def test_duplicate_phase_sample_roundtrip_preserved(self):
+        overlay = _fz_overlay(14, "white", 15)
+        overlay.phase_samples = [PhaseSample(4, 8, None), PhaseSample(4, 8, None)]
+        inputs = _fz_inputs()
+        inputs[0] = cal.CapturedPairInput(overlay, "release_guard", 5, "fp-14w")
+        cohort = _fz_load(_fz_freeze(inputs))
+        white_guard = next(p for p in cohort.pairs if p.player_color == "white" and p.cohort_role == "release_guard")
+        assert len(white_guard.overlay.phase_samples) == 2
+        assert white_guard.overlay.phase_samples == [PhaseSample(4, 8, None), PhaseSample(4, 8, None)]
+
+
+class TestSemanticRejectionTable:
+    """One malformation per rule; each rejects with its OWN distinct message."""
+
+    def _q_node(self, payload):
+        return payload["pairs"][2]["nodes"][0]
+
+    def _q_edge(self, payload):
+        return payload["pairs"][2]["edges"][0]
+
+    def test_bool_as_count(self):
+        def p(pl):
+            self._q_node(pl)["live_attempts"] = True
+        _fz_reject(p, "bool rejected")
+
+    def test_negative_count(self):
+        def p(pl):
+            self._q_node(pl)["live_fails"] = -1
+        _fz_reject(p, "live_fails")
+
+    def test_quality_sum_gt_quality_count(self):
+        def p(pl):
+            node = self._q_node(pl)
+            node["quality_sum"] = float(node["quality_count"]) + 1.0
+        _fz_reject(p, "out of [0, quality_count")
+
+    def test_attempts_ne_passes_plus_fails(self):
+        def p(pl):
+            self._q_node(pl)["live_passes"] += 1
+        _fz_reject(p, "!= live_passes + live_fails")
+
+    def test_review_attempts_ne_passes_plus_fails(self):
+        def p(pl):
+            self._q_node(pl)["review_attempts"] = 1  # passes+fails still 0
+        _fz_reject(p, "review_attempts")
+
+    def test_edge_live_attempts_gt_traversal(self):
+        def p(pl):
+            edge = self._q_edge(pl)
+            edge["live_attempts"] = edge["traversal_count"] + 1
+            edge["live_passes"] = edge["live_attempts"]
+        _fz_reject(p, "> traversal_count")
+
+    def test_edge_quality_count_gt_traversal(self):
+        def p(pl):
+            edge = self._q_edge(pl)
+            edge["quality_count"] = edge["traversal_count"] + 1
+        # cross-field telemetry also shifts, but quality>traversal is checked first.
+        msg = _fz_reject(p, "> traversal_count")
+        assert "quality_count" in msg
+
+    def test_bad_color(self):
+        def p(pl):
+            pl["pairs"][2]["player_color"] = "green"
+        _fz_reject(p, "player_color")
+
+    def test_node_active_color_ne_player_color(self):
+        # pair-02 is white (node at start position, white to move). Swap in a
+        # black-to-move fen → active color mismatches player_color.
+        def p(pl):
+            node = pl["pairs"][2]["nodes"][0]
+            node["fen"] = _fz_e4()  # black to move, but the pair is 'black' already...
+        # pair-02 is actually 'black' after sort? guard against ordering: find a white pair.
+        payload = json.loads(_fz_freeze())
+        white_idx = next(i for i, pr in enumerate(payload["pairs"]) if pr["player_color"] == "white")
+
+        def p2(pl):
+            pl["pairs"][white_idx]["nodes"][0]["fen"] = _fz_e4()
+        _fz_reject(p2, "active-color")
+
+    def test_malformed_fen(self):
+        def p(pl):
+            self._q_node(pl)["fen"] = "not a fen"
+        _fz_reject(p, "parseable FEN")
+
+    def test_non_normalized_fen(self):
+        def p(pl):
+            # A full 6-field FEN (has move clocks) is not in normalized 4-field form.
+            node = self._q_node(pl)
+            node["fen"] = node["fen"] + " 0 1"
+        _fz_reject(p, "normalized 4-field form")
+
+    def test_unknown_key_top(self):
+        _fz_reject(lambda pl: pl.__setitem__("extra", 1), "unknown key")
+
+    def test_unknown_key_header(self):
+        _fz_reject(lambda pl: pl["header"].__setitem__("leak", 1), "unknown key")
+
+    def test_unknown_key_pair(self):
+        _fz_reject(lambda pl: pl["pairs"][2].__setitem__("user_id", 99), "unknown key")
+
+    def test_unknown_key_node(self):
+        _fz_reject(lambda pl: self._q_node(pl).__setitem__("session_ids", []), "unknown key")
+
+    def test_unknown_key_edge(self):
+        _fz_reject(lambda pl: self._q_edge(pl).__setitem__("secret", 1), "unknown key")
+
+    def test_missing_required_key(self):
+        _fz_reject(lambda pl: self._q_node(pl).pop("is_ghost_target"), "missing required key")
+
+    def test_duplicate_json_object_key(self):
+        # Hand-craft raw bytes with a duplicate key — json.loads would silently
+        # last-write-win, so the object_pairs_hook must reject it.
+        bs = _fz_freeze()
+        assert b'"pair_count":4,' in bs
+        raw = bs.replace(b'"pair_count":4,', b'"pair_count":4,"pair_count":4,', 1)
+        with pytest.raises(cal.ArtifactSemanticError, match="duplicate JSON object key"):
+            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+
+    def test_duplicate_node_key(self):
+        def p(pl):
+            nodes = pl["pairs"][2]["nodes"]
+            nodes.append(copy.deepcopy(nodes[0]))
+        _fz_reject(p, "duplicate node key")
+
+    def test_duplicate_edge_key(self):
+        def p(pl):
+            edges = pl["pairs"][2]["edges"]
+            edges.append(copy.deepcopy(edges[0]))
+        _fz_reject(p, "duplicate edge key")
+
+    def test_missing_uci(self):
+        _fz_reject(lambda pl: self._q_edge(pl).pop("uci"), "missing required key")
+
+    def test_unparseable_uci(self):
+        _fz_reject(lambda pl: self._q_edge(pl).__setitem__("uci", "zzzz"), "parseable UCI")
+
+    def test_legal_uci_not_reaching_child(self):
+        # g1f3 is legal from the start position but does not reach the e4 child.
+        def p(pl):
+            self._q_edge(pl)["uci"] = "g1f3"
+        _fz_reject(p, "does not reach child_fen")
+
+    def test_illegal_uci_from_parent(self):
+        def p(pl):
+            self._q_edge(pl)["uci"] = "e2e5"  # not legal from start
+        _fz_reject(p, "not legal from parent_fen")
+
+    def test_negative_offset(self):
+        def p(pl):
+            self._q_node(pl)["last_live_us_before"] = -1
+        _fz_reject(p, "last_live_us_before")
+
+    def test_overflow_offset(self):
+        def p(pl):
+            self._q_node(pl)["last_live_us_before"] = 10 ** 20
+        _fz_reject(p, "exceeds")
+
+    def test_float_offset(self):
+        def p(pl):
+            self._q_node(pl)["last_live_us_before"] = 1.5
+        _fz_reject(p, "last_live_us_before")
+
+    def test_non_canonical_as_of_offset_suffix(self):
+        def p(pl):
+            pl["header"]["as_of"] = "2026-07-01T12:00:00.000000+00:00"
+        _fz_reject(p, "canonical")
+
+    def test_non_canonical_as_of_missing_z(self):
+        def p(pl):
+            pl["header"]["as_of"] = "2026-07-01T12:00:00.000000"
+        _fz_reject(p, "canonical")
+
+    def test_leaky_subject_id(self):
+        def p(pl):
+            for pr in pl["pairs"]:
+                if pr["cohort_role"] == "release_guard":
+                    pr["subject_id"] = "subject-u14"
+        # subject format check fires (before the contiguity structure check).
+        _fz_reject(p, "subject-\\d+")
+
+    def test_cross_pair_session_token(self):
+        def p(pl):
+            self._q_node(pl)["session_tokens"][0] = "pair-99-g0"
+        _fz_reject(p, "token for this pair")
+
+    def test_pair_count_mismatch(self):
+        def p(pl):
+            pl["header"]["pair_count"] = 3
+        _fz_reject(p, "pair_count")
+
+    def test_infinity_literal(self):
+        bs = _fz_freeze()
+        assert b'"quality_sum":25.0' in bs
+        raw = bs.replace(b'"quality_sum":25.0', b'"quality_sum":Infinity', 1)
+        with pytest.raises(cal.ArtifactSemanticError, match="non-finite JSON literal"):
+            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+
+    def test_unknown_source_counts_label(self):
+        def p(pl):
+            pl["pairs"][2]["source_counts"] = {"mystery": 25}
+        _fz_reject(p, "unknown quality-source label")
+
+    def test_zero_source_counts_value(self):
+        def p(pl):
+            pl["pairs"][2]["source_counts"] = {"session_eval": 25, "eval_delta": 0}
+        _fz_reject(p, "must be >= 1")
+
+    def test_source_counts_sum_ne_quality_count(self):
+        def p(pl):
+            pl["pairs"][2]["source_counts"] = {"session_eval": 24}  # node/edge qc still 25
+        _fz_reject(p, "telemetry does not describe overlay")
+
+    def test_malformed_phase_sample_missing_key(self):
+        def p(pl):
+            pl["pairs"][2]["phase_samples"] = [{"opening_interval_len": 4, "middle_ply": None}]
+        _fz_reject(p, "missing required key")
+
+    def test_malformed_phase_sample_negative(self):
+        def p(pl):
+            pl["pairs"][2]["phase_samples"] = [{"opening_interval_len": -1, "middle_ply": None, "end_ply": None}]
+        _fz_reject(p, "opening_interval_len")
+
+    def test_unsupported_schema_version(self):
+        def p(pl):
+            pl["header"]["schema_version"] = 2
+        _fz_reject(p, "unsupported schema", exc=cal.UnsupportedArtifactSchemaError)
+
+    def test_format_malformed_cohort_rules(self):
+        def p(pl):
+            pl["header"]["cohort_rules"] = "free text"
+        _fz_reject(p, "opening-cohort-rules")
+
+    def test_format_malformed_captured_model_version(self):
+        def p(pl):
+            pl["header"]["captured_model_version"] = "leaked-secret-v9"
+        _fz_reject(p, "sm-v")
+
+    def test_as_of_before_timestamp_floor_all_null_offsets(self):
+        # An all-null-timestamp artifact whose as_of predates the floor still rejects.
+        overlay = _fz_overlay(2, "black", 25)
+        next(iter(overlay.nodes.values())).last_live_at = None
+        inputs = _fz_inputs()
+        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        early = datetime(1999, 1, 1, tzinfo=timezone.utc)
+        bs = _fz_freeze(inputs, header=_fz_header_input(as_of=early))
+        with pytest.raises(cal.ArtifactSemanticError, match="TIMESTAMP_FLOOR"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs, header=json.loads(bs)["header"]), _fz_rb())
+
+    def test_shuffled_nodes_sequence(self):
+        # A two-node overlay whose nodes are out of fen order (strict-order owns this,
+        # NOT the non-canonical-bytes check).
+        payload = json.loads(_fz_freeze(_fz_two_node_inputs()))
+        pair = payload["pairs"][_fz_two_node_index(payload)]
+        pair["nodes"] = list(reversed(pair["nodes"]))
+        bs = cal._canonical_dumps(payload)
+        with pytest.raises(cal.ArtifactSemanticError, match="strictly ascending by fen"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+
+    def test_out_of_order_phase_samples(self):
+        def p(pl):
+            pl["pairs"][2]["phase_samples"] = [
+                {"opening_interval_len": 8, "middle_ply": None, "end_ply": None},
+                {"opening_interval_len": 4, "middle_ply": None, "end_ply": None},
+            ]
+        _fz_reject(p, "nondecreasing")
+
+
+def _fz_two_node_inputs():
+    """A cohort where one release-guard pair carries a genuine two-node overlay (both
+    nodes black-to-move), for shuffle / strict-order tests."""
+    root, e4 = _fz_root(), _fz_e4()
+    # second black-to-move node: after 1.e4 e5 2.Nf3.
+    board = chess.Board()
+    board.push_uci("e2e4")
+    board.push_uci("e7e5")
+    e5_fen = normalize_fen(board.fen())
+    board.push_uci("g1f3")
+    nf3_fen = normalize_fen(board.fen())
+    overlay = EvidenceOverlay(14, "black")
+    overlay.nodes[e4] = NodeEvidence(
+        fen=e4, quality_sum=10.0, quality_count=10,
+        session_ids={f"s{i}" for i in range(10)},
+        live_attempts=10, live_passes=10, live_fails=0,
+        last_live_at=_FZ_AS_OF - timedelta(days=1),
+    )
+    overlay.nodes[nf3_fen] = NodeEvidence(
+        fen=nf3_fen, quality_sum=15.0, quality_count=15,
+        session_ids={f"s{i}" for i in range(5, 20)},
+        live_attempts=15, live_passes=15, live_fails=0,
+        last_live_at=_FZ_AS_OF - timedelta(days=1),
+    )
+    overlay.edges[(root, e4)] = EdgeEvidence(
+        root, e4, "e2e4", traversal_count=10, live_attempts=10, live_passes=10, live_fails=0,
+        quality_sum=10.0, quality_count=10,
+    )
+    overlay.edges[(e5_fen, nf3_fen)] = EdgeEvidence(
+        e5_fen, nf3_fen, "g1f3", traversal_count=15, live_attempts=15, live_passes=15, live_fails=0,
+        quality_sum=15.0, quality_count=15,
+    )
+    overlay.source_counts["session_eval"] = 25
+    inputs = _fz_inputs()
+    inputs[1] = cal.CapturedPairInput(overlay, "release_guard", 5, "fp-14b")
+    return inputs
+
+
+def _fz_two_node_index(payload):
+    return next(i for i, pr in enumerate(payload["pairs"]) if len(pr["nodes"]) == 2)
+
+
+def _fz_shared_session_inputs():
+    """A release-guard pair with two nodes SHARING session "a": node 1.e4 has {a},
+    node 1.e4 e5 2.Nf3 has {a, b}. Session "a" touches both nodes (the legit cross-node
+    case → token g0 appears on both), so game_count over the union is 2."""
+    root, e4 = _fz_root(), _fz_e4()
+    board = chess.Board()
+    board.push_uci("e2e4")
+    board.push_uci("e7e5")
+    e5 = normalize_fen(board.fen())
+    board.push_uci("g1f3")
+    nf3 = normalize_fen(board.fen())
+    overlay = EvidenceOverlay(14, "black")
+    overlay.nodes[e4] = NodeEvidence(
+        fen=e4, quality_sum=1.0, quality_count=1, session_ids={"a"},
+        live_attempts=1, live_passes=1, live_fails=0,
+        last_live_at=_FZ_AS_OF - timedelta(days=1),
+    )
+    overlay.nodes[nf3] = NodeEvidence(
+        fen=nf3, quality_sum=2.0, quality_count=2, session_ids={"a", "b"},
+        live_attempts=2, live_passes=2, live_fails=0,
+        last_live_at=_FZ_AS_OF - timedelta(days=1),
+    )
+    overlay.edges[(root, e4)] = EdgeEvidence(
+        root, e4, "e2e4", traversal_count=1, live_attempts=1, live_passes=1, live_fails=0,
+        quality_sum=1.0, quality_count=1,
+    )
+    overlay.edges[(e5, nf3)] = EdgeEvidence(
+        e5, nf3, "g1f3", traversal_count=2, live_attempts=2, live_passes=2, live_fails=0,
+        quality_sum=2.0, quality_count=2,
+    )
+    overlay.source_counts["session_eval"] = 3
+    inputs = _fz_inputs()
+    inputs[1] = cal.CapturedPairInput(overlay, "release_guard", 5, "fp-14b")
+    return inputs
+
+
+class TestCanonicalByteReencode:
+    """Byte-level noncanonicality that survives a full semantic pass: whitespace,
+    unsorted object keys, exponent-form floats, a -0.0. Owned by the re-encode check
+    even with a matching provenance digest."""
+
+    def test_positive_control_loads_green(self):
+        bs = _fz_freeze()
+        assert _fz_load(bs).artifact_sha256 == hashlib.sha256(bs).hexdigest()
+
+    def test_whitespace_rejected(self):
+        payload = json.loads(_fz_freeze())
+        raw = json.dumps(payload, sort_keys=True).encode("ascii")  # default separators add spaces
+        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
+            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+
+    def test_unsorted_keys_rejected(self):
+        payload = json.loads(_fz_freeze())
+        reordered = {"pairs": payload["pairs"], "header": payload["header"]}  # pairs before header
+        raw = json.dumps(reordered, separators=(",", ":")).encode("ascii")
+        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
+            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+
+    def test_exponent_float_rejected(self):
+        bs = _fz_freeze()
+        assert b'"quality_sum":25.0' in bs
+        raw = bs.replace(b'"quality_sum":25.0', b'"quality_sum":25e0', 1)
+        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
+            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+
+    def test_negative_zero_rejected(self):
+        payload = json.loads(_fz_freeze())
+        payload["pairs"][2]["nodes"][0]["quality_sum"] = -0.0
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
+        assert b"-0.0" in raw
+        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
+            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+
+
+class TestProducerCanonicalStructure:
+    """Self-consistent artifacts (valid types + matching digest) the canonical producer
+    could NEVER emit — the loader asserts the producer's structure directly."""
+
+    def test_misaligned_pair_id(self):
+        def p(pl):
+            pl["pairs"][0]["pair_id"] = "pair-05"
+        _fz_reject(p, "array-order-aligned")
+
+    def test_gap_in_pair_ids(self):
+        # Drop pair-01, leaving pair-00, pair-02, pair-03 → index 1 expects pair-01.
+        def p(pl):
+            del pl["pairs"][1]
+            pl["header"]["pair_count"] = 3
+        _fz_reject(p, "array-order-aligned")
+
+    def test_misaligned_surrogate(self):
+        def p(pl):
+            pl["pairs"][0]["surrogate_user_id"] = 99
+        _fz_reject(p, "array-order-aligned")
+
+    def test_noncontiguous_subject_block(self):
+        # Force the two release_guard subject to reappear after a different subject by
+        # relabeling so subjects interleave: subject-00, subject-01, subject-00, subject-01.
+        def p(pl):
+            pl["pairs"][0]["subject_id"] = "subject-00"
+            pl["pairs"][1]["subject_id"] = "subject-01"
+            pl["pairs"][2]["subject_id"] = "subject-00"
+            pl["pairs"][3]["subject_id"] = "subject-01"
+        _fz_reject(p, "non-contiguous")
+
+    def test_duplicate_subject_color(self):
+        # Make the two same-subject release-guard records BOTH white (copying pair-02's
+        # white node into pair-03 so the active-color check passes), leaving a duplicate
+        # (subject-02, white) for the subject-structure check to catch.
+        def perturb(pl):
+            pl["pairs"][3]["player_color"] = "white"
+            pl["pairs"][3]["nodes"] = copy.deepcopy(pl["pairs"][2]["nodes"])
+            for node in pl["pairs"][3]["nodes"]:
+                node["session_tokens"] = [t.replace("pair-02", "pair-03") for t in node["session_tokens"]]
+        _fz_reject(perturb, "duplicate (subject_id, player_color)")
+
+    def test_session_token_union_gap(self):
+        # g0, g2 but no g1 → the pair's node token set has a hole.
+        def p(pl):
+            node = pl["pairs"][2]["nodes"][0]
+            node["session_tokens"] = ["pair-02-g0", "pair-02-g2"]
+            # keep counts consistent so the union check (not a count check) fires.
+        _fz_reject(p, "contiguous zero-based")
+
+    def test_session_tokens_lexical_order(self):
+        # g10 before g2 → not strictly ascending by NUMERIC k.
+        overlay = _fz_overlay(2, "black", 25)
+        inputs = _fz_inputs()
+        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        payload = json.loads(_fz_freeze(inputs))
+        node = payload["pairs"][2]["nodes"][0]
+        node["session_tokens"] = ["pair-02-g10", "pair-02-g2"]
+        bs = cal._canonical_dumps(payload)
+        with pytest.raises(cal.ArtifactSemanticError, match="strictly ascending by numeric token index"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+
+
+class TestSplitLoadGuard:
+    def test_schema_version_before_integrity(self):
+        # A wrong schema_version fails Phase A even if nothing else is wrong.
+        payload = json.loads(_fz_freeze())
+        payload["header"]["schema_version"] = 7
+        bs = cal._canonical_dumps(payload)
+        with pytest.raises(cal.UnsupportedArtifactSchemaError, match="unsupported schema"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb())
+
+    def test_integrity_field_mismatch(self):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs, graph_fingerprint="tampered")
+        with pytest.raises(cal.ArtifactIntegrityError, match="integrity"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_integrity_digest_mismatch(self):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs)
+        prov = prov.replace(hashlib.sha256(bs).hexdigest().encode(), (b"0" * 64), 1)
+        with pytest.raises(cal.ArtifactIntegrityError, match="digest"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_scoring_validity_graph_drift(self):
+        bs = _fz_freeze()
+        with pytest.raises(cal.ArtifactScoringValidityError, match="drifted"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb(graph_fingerprint="drifted"))
+
+    def test_scoring_validity_derivation_drift(self):
+        bs = _fz_freeze()
+        with pytest.raises(cal.ArtifactScoringValidityError, match="drifted"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb(evidence_derivation_fingerprint="old-derivation"))
+
+    def test_scoring_validity_release_key_drift(self):
+        bs = _fz_freeze()
+        with pytest.raises(cal.ArtifactScoringValidityError, match="drifted"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb(release_guard_opening_key="wrong"))
+
+    def test_min_observations_mirrored_passes_ab_fails_c(self):
+        payload = json.loads(_fz_freeze())
+        payload["header"]["min_observations"] = 0
+        bs = cal._canonical_dumps(payload)
+        prov = _fz_prov(bs, header=payload["header"])  # record MIRRORS 0
+        with pytest.raises(cal.ArtifactScoringValidityError, match="min_observations"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_non_current_cohort_rules_mirrored_passes_ab_fails_c(self):
+        payload = json.loads(_fz_freeze())
+        payload["header"]["cohort_rules"] = "opening-cohort-rules-v2"
+        bs = cal._canonical_dumps(payload)
+        prov = _fz_prov(bs, header=payload["header"])  # format-valid, mirrored
+        with pytest.raises(cal.ArtifactScoringValidityError, match="cohort_rules"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_model_version_bump_still_loads(self):
+        # A captured sm-v2-3 artifact loads green after an sm-v2-4 bump: raw overlays
+        # are reusable across model versions (captured_model_version is provenance-only).
+        bs = _fz_freeze(header=_fz_header_input(captured_model_version="sm-v2-3"))
+        cohort = _fz_load(bs)  # runtime binding carries no model version at all
+        assert cohort.header.captured_model_version == "sm-v2-3"
+
+    def test_str_artifact_bytes_rejected(self):
+        bs = _fz_freeze()
+        with pytest.raises(TypeError, match="artifact_bytes must be bytes"):
+            cal.load_frozen_artifact(bs.decode(), _fz_prov(bs), _fz_rb())
+
+    def test_str_provenance_bytes_rejected(self):
+        bs = _fz_freeze()
+        with pytest.raises(TypeError, match="provenance_bytes must be bytes"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs).decode(), _fz_rb())
+
+
+class TestProvenanceRecordSchema:
+    def test_stray_row_bearing_key_rejected(self):
+        bs = _fz_freeze()
+        record = json.loads(_fz_prov(bs))
+        record["pairs"] = []
+        prov = cal._canonical_dumps(record)
+        with pytest.raises(cal.ProvenanceRecordError, match="unknown key"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_duplicate_object_key_rejected(self):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs)
+        raw = prov.replace(b'"pair_count":4', b'"pair_count":4,"pair_count":4', 1)
+        with pytest.raises(cal.ProvenanceRecordError, match="duplicate JSON object key"):
+            cal.load_frozen_artifact(bs, raw, _fz_rb())
+
+    def test_format_malformed_cohort_rules_rejected(self):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs, cohort_rules="free text")
+        with pytest.raises(cal.ProvenanceRecordError, match="opening-cohort-rules"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_format_malformed_captured_model_version_rejected(self):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs, captured_model_version="leaked")
+        with pytest.raises(cal.ProvenanceRecordError, match="sm-v"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_missing_required_key_rejected(self):
+        bs = _fz_freeze()
+        record = json.loads(_fz_prov(bs))
+        del record["roots_fingerprint"]
+        prov = cal._canonical_dumps(record)
+        with pytest.raises(cal.ProvenanceRecordError, match="missing required key"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+    def test_malformed_sha256_rejected(self):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs, sha256="ABC123")
+        with pytest.raises(cal.ProvenanceRecordError, match="sha256"):
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+
+class TestCohortMembership:
+    def test_below_threshold_quantile_pair_rejected(self):
+        bs = _fz_freeze(_fz_inputs(quantile_obs=(5, 22)))
+        with pytest.raises(cal.ArtifactSemanticError, match="below header.min_observations"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs, header=json.loads(bs)["header"]), _fz_rb())
+
+    def test_release_guard_below_threshold_ok(self):
+        # Guards are exempt from the observation threshold (release-gate-only).
+        bs = _fz_freeze(_fz_inputs(guard_obs=(3, 3)))
+        cohort = _fz_load(bs)
+        assert sum(1 for p in cohort.pairs if p.cohort_role == "release_guard") == 2
+
+
+class TestCrossFieldTelemetry:
+    def test_consistent_telemetry_loads_green(self):
+        cohort = _fz_load(_fz_freeze())
+        assert cohort.pairs
+
+    def test_perturbing_source_counts_rejects(self):
+        def p(pl):
+            pl["pairs"][2]["source_counts"] = {"session_eval": 24}
+        _fz_reject(p, "telemetry does not describe overlay")
+
+
+class TestOverlayTelemetryRoundtrip:
+    def test_telemetry_reconstructs_onto_overlay(self):
+        overlay = _fz_overlay(2, "black", 25)
+        overlay.excluded_sessions = 4
+        overlay.phase_samples = [PhaseSample(4, 8, 20), PhaseSample(6, None, None)]
+        overlay.source_counts = Counter({"session_eval": 20, "analysis_cache": 5})
+        inputs = _fz_inputs()
+        inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
+        cohort = _fz_load(_fz_freeze(inputs))
+        loaded = next(p for p in cohort.pairs if p.surrogate_user_id == 1).overlay
+        assert loaded.excluded_sessions == 4
+        assert dict(loaded.source_counts) == {"session_eval": 20, "analysis_cache": 5}
+        assert sorted(loaded.phase_samples, key=lambda s: s.opening_interval_len) == [
+            PhaseSample(4, 8, 20), PhaseSample(6, None, None)
+        ]
+
+
+def _fz_game_count(overlay) -> int:
+    return len({s for node in overlay.nodes.values() for s in node.session_ids})
+
+
+class TestSessionTokenUnion:
+    def test_game_count_union_matches_real_uuids(self):
+        # A two-node overlay where session s5..s9 touch BOTH nodes: the cross-node union
+        # of real ids equals the union of frozen tokens exactly.
+        inputs = _fz_two_node_inputs()
+        original = inputs[1].overlay
+        orig_games = _fz_game_count(original)
+        header, pairs = cal.validate_artifact_bytes(_fz_freeze(inputs))
+        loaded = next(p for p in pairs if len(p.overlay.nodes) == 2).overlay
+        assert _fz_game_count(loaded) == orig_games == 20
+
+    def test_leading_zero_token_string_rejected(self):
+        # `g00` parses to k=0 via int(...) but is NOT the canonical spelling `g0`.
+        with pytest.raises(cal.ArtifactSemanticError, match="canonical spelling"):
+            cal._validate_session_tokens(["pair-00-g00"], "pair-00", "x")
+        with pytest.raises(cal.ArtifactSemanticError, match="canonical spelling"):
+            cal._validate_session_tokens(["pair-00-g0", "pair-00-g015"], "pair-00", "x")
+        # Canonical tokens still pass.
+        assert cal._validate_session_tokens(["pair-00-g0", "pair-00-g1"], "pair-00", "x") == [
+            "pair-00-g0", "pair-00-g1"
+        ]
+
+    def test_alias_token_on_different_node_rejected(self):
+        # The game_count-inflation attack: `pair-XX-g0` on one node and `pair-XX-g00` on
+        # ANOTHER node both parse to k=0, so a NUMERIC-suffix contiguity check would pass,
+        # but reconstruction keeps the two distinct strings as session_ids and inflates
+        # the cross-node game_count union. Canonical bytes + matching provenance.
+        inputs = _fz_shared_session_inputs()
+        payload = json.loads(_fz_freeze(inputs))
+        idx = _fz_two_node_index(payload)
+        pair = payload["pairs"][idx]
+        pid = pair["pair_id"]
+
+        # Baseline: the honest artifact loads with game_count == 2 (session "a" shared).
+        _hdr, base_pairs = cal.validate_artifact_bytes(cal._canonical_dumps(payload))
+        base_overlay = next(p for p in base_pairs if len(p.overlay.nodes) == 2).overlay
+        assert _fz_game_count(base_overlay) == 2
+
+        # Attack: on the node holding two tokens, rewrite its `g0` as the alias `g00`
+        # (a distinct string on a different node from the other `g0`). Numeric union is
+        # unchanged {0, 1}; the string union gains a third member.
+        two_tok_node = max(pair["nodes"], key=lambda n: len(n["session_tokens"]))
+        assert f"{pid}-g0" in two_tok_node["session_tokens"]
+        two_tok_node["session_tokens"] = [
+            f"{pid}-g00" if t == f"{pid}-g0" else t for t in two_tok_node["session_tokens"]
+        ]
+        bs = cal._canonical_dumps(payload)
+        # Provenance mirrors the (canonical, self-consistent) bytes.
+        with pytest.raises(cal.ArtifactSemanticError, match="canonical spelling"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+
+    def test_alias_token_union_string_based(self):
+        # Belt-and-suspenders: even a token that clears the per-token spelling check
+        # (e.g. a genuine gap g0,g2) is caught by the STRING union check, which counts
+        # exactly what _aggregate_metadata unions — not numeric suffixes.
+        payload = json.loads(_fz_freeze())
+        payload["pairs"][2]["nodes"][0]["session_tokens"] = ["pair-02-g0", "pair-02-g2"]
+        bs = cal._canonical_dumps(payload)
+        with pytest.raises(cal.ArtifactSemanticError, match="contiguous zero-based"):
+            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+
+
+class TestArtifactShapeGuard:
+    def test_valid_shape_ok(self):
+        cal.assert_artifact_shape(_fz_load(_fz_freeze()).pairs)
+
+    def _pairs_with(self, roles_colors):
+        pairs = []
+        for i, (role, color) in enumerate(roles_colors):
+            subject = "subject-99" if role == "release_guard" else f"subject-{i:02d}"
+            pairs.append(cal.LoadedPair(
+                pair_id=f"pair-{i:02d}", subject_id=subject, cohort_role=role,
+                surrogate_user_id=i + 1, player_color=color, evidence_seq=0,
+                inputs_fingerprint="fp", overlay=EvidenceOverlay(i + 1, color),
+            ))
+        return pairs
+
+    def test_three_release_guards_rejected(self):
+        pairs = self._pairs_with([
+            ("quantile", "white"), ("quantile", "black"),
+            ("release_guard", "white"), ("release_guard", "black"), ("release_guard", "white"),
+        ])
+        with pytest.raises(cal.ReleaseGuardShapeError, match="exactly two release_guard"):
+            cal.assert_artifact_shape(pairs)
+
+    def test_same_color_guards_rejected(self):
+        pairs = self._pairs_with([
+            ("quantile", "white"), ("quantile", "black"),
+            ("release_guard", "white"), ("release_guard", "white"),
+        ])
+        with pytest.raises(cal.ReleaseGuardShapeError, match="exactly \\{white, black\\}"):
+            cal.assert_artifact_shape(pairs)
+
+    def test_split_guard_subjects_rejected(self):
+        pairs = [
+            cal.LoadedPair("pair-00", "subject-00", "quantile", 1, "white", 0, "fp", EvidenceOverlay(1, "white")),
+            cal.LoadedPair("pair-01", "subject-01", "quantile", 2, "black", 0, "fp", EvidenceOverlay(2, "black")),
+            cal.LoadedPair("pair-02", "subject-02", "release_guard", 3, "white", 0, "fp", EvidenceOverlay(3, "white")),
+            cal.LoadedPair("pair-03", "subject-03", "release_guard", 4, "black", 0, "fp", EvidenceOverlay(4, "black")),
+        ]
+        with pytest.raises(cal.ReleaseGuardShapeError, match="share one subject_id"):
+            cal.assert_artifact_shape(pairs)
+
+    def test_zero_quantile_pairs_rejected(self):
+        pairs = self._pairs_with([("release_guard", "white"), ("release_guard", "black")])
+        with pytest.raises(cal.ReleaseGuardShapeError, match="too-few-quantile-pairs"):
+            cal.assert_artifact_shape(pairs)
+
+    def test_one_quantile_pair_rejected(self):
+        pairs = self._pairs_with([
+            ("quantile", "white"), ("release_guard", "white"), ("release_guard", "black"),
+        ])
+        with pytest.raises(cal.ReleaseGuardShapeError, match="too-few-quantile-pairs"):
+            cal.assert_artifact_shape(pairs)
+
+
+class _FakeScored:
+    def __init__(self, player_color, grid):
+        self.player_color = player_color
+        self.grid = grid
+
+
+class _FakePairScore:
+    def __init__(self, named_score_map=None, named_scores=None):
+        self.named_score_map = named_score_map or {}
+        self.named_scores = named_scores if named_scores is not None else []
+
+
+class TestScoreShapeGuard:
+    def _cell(self):
+        return cal.CURRENT_SM_V2_3_CELL
+
+    def _valid_guards(self):
+        cell = self._cell()
+        white = _FakeScored("white", {cell: _FakePairScore({cal.RELEASE_GUARD_OPENING_KEY: 55.0}, [55.0])})
+        black = _FakeScored("black", {cell: _FakePairScore(
+            {cal.RELEASE_GUARD_OPENING_KEY: 40.0, cal.RELEASE_GUARD_CHILD_OPENING_KEY: 60.0}, [40.0]
+        )})
+        return [white, black]
+
+    def test_valid_shape_ok(self):
+        cal.assert_release_guard_score_shape(self._valid_guards(), [self._cell()], _fz_rb())
+
+    def test_missing_opening_key_rejected(self):
+        cell = self._cell()
+        guards = self._valid_guards()
+        guards[0].grid[cell].named_score_map = {}
+        with pytest.raises(cal.ReleaseGuardShapeError, match="missing named_score_map"):
+            cal.assert_release_guard_score_shape(guards, [cell], _fz_rb())
+
+    def test_missing_child_key_on_black_rejected(self):
+        cell = self._cell()
+        guards = self._valid_guards()
+        del guards[1].grid[cell].named_score_map[cal.RELEASE_GUARD_CHILD_OPENING_KEY]
+        with pytest.raises(cal.ReleaseGuardShapeError, match="missing named_score_map"):
+            cal.assert_release_guard_score_shape(guards, [cell], _fz_rb())
+
+    def test_out_of_range_score_rejected(self):
+        cell = self._cell()
+        guards = self._valid_guards()
+        guards[0].grid[cell].named_score_map[cal.RELEASE_GUARD_OPENING_KEY] = 150.0
+        with pytest.raises(cal.ReleaseGuardShapeError, match="out of \\[0, 100\\]"):
+            cal.assert_release_guard_score_shape(guards, [cell], _fz_rb())
+
+    def test_non_finite_score_rejected(self):
+        cell = self._cell()
+        guards = self._valid_guards()
+        guards[0].grid[cell].named_score_map[cal.RELEASE_GUARD_OPENING_KEY] = float("nan")
+        with pytest.raises(cal.ReleaseGuardShapeError, match="not finite"):
+            cal.assert_release_guard_score_shape(guards, [cell], _fz_rb())
+
+
+class TestMinQuantileScoresPerCell:
+    def _cell(self):
+        return cal.CURRENT_SM_V2_3_CELL
+
+    def test_two_pooled_scores_ok(self):
+        cell = self._cell()
+        pairs = [_FakeScored("white", {cell: _FakePairScore(named_scores=[1.0])}),
+                 _FakeScored("black", {cell: _FakePairScore(named_scores=[2.0])})]
+        cal.assert_min_quantile_scores_per_cell(pairs, [cell])
+
+    def test_zero_pooled_scores_rejected(self):
+        cell = self._cell()
+        pairs = [_FakeScored("white", {cell: _FakePairScore(named_scores=[])}),
+                 _FakeScored("black", {cell: _FakePairScore(named_scores=[])})]
+        with pytest.raises(cal.ReleaseGuardShapeError, match="too-few-pooled-quantile-scores"):
+            cal.assert_min_quantile_scores_per_cell(pairs, [cell])
+
+    def test_one_pooled_score_rejected(self):
+        cell = self._cell()
+        pairs = [_FakeScored("white", {cell: _FakePairScore(named_scores=[1.0])}),
+                 _FakeScored("black", {cell: _FakePairScore(named_scores=[])})]
+        with pytest.raises(cal.ReleaseGuardShapeError, match="too-few-pooled-quantile-scores"):
+            cal.assert_min_quantile_scores_per_cell(pairs, [cell])
+
+
+class TestScoreOverlayPseudonyms:
+    def _fixtures(self):
+        root, e4 = _fz_root(), _fz_e4()
+        graph = OpeningGraph(
+            {root: OpeningGraphNode(root, active_color(root)), e4: OpeningGraphNode(e4, active_color(e4))},
+            root,
+        )
+        roots = OpeningRoots(
+            {e4: OpeningRoot(opening_key=e4, opening_name="KP", opening_family="F", eco=None, depth=0, parent_keys=frozenset(), child_keys=frozenset())},
+            {e4: frozenset([e4])},
+        )
+        overlay = EvidenceOverlay(1, "white")
+        overlay.edges[(root, e4)] = EdgeEvidence(root, e4, "e2e4", live_attempts=2)
+        return graph, overlay, roots
+
+    def test_live_path_leaves_new_fields_none(self):
+        graph, overlay, roots = self._fixtures()
+        # Same user_id for both calls — the only difference is the added pseudonym
+        # kwargs — so every existing field must stay field-for-field equal.
+        with patch("time.perf_counter", return_value=0.0):
+            live = cal.score_overlay(7, "white", graph, overlay, roots)
+            frozen = cal.score_overlay(
+                7, "white", graph, overlay, roots,
+                pair_id="pair-00", subject_id="subject-00", cohort_role="quantile",
+            )
+        assert (live.pair_id, live.subject_id, live.cohort_role) == (None, None, None)
+        # Every existing field is field-for-field equal between the two calls (with the
+        # clock pinned), so the added kwargs do not perturb live scoring.
+        for f in ("named_scores", "named_score_map", "synthetic_score", "observation_total",
+                  "source_counts", "excluded_sessions", "phase_samples", "user_id", "player_color"):
+            assert getattr(live, f) == getattr(frozen, f), f
+
+    def test_frozen_path_carries_pseudonyms(self):
+        graph, overlay, roots = self._fixtures()
+        frozen = cal.score_overlay(
+            7, "white", graph, overlay, roots,
+            pair_id="pair-00", subject_id="subject-00", cohort_role="quantile",
+        )
+        assert frozen.pair_id == "pair-00"
+        assert frozen.subject_id == "subject-00"
+        assert frozen.cohort_role == "quantile"
+        assert frozen.user_id == 7  # surrogate rides the int user_id
+
+
+class TestHandoffContract:
+    def test_loaded_cohort_shape(self):
+        bs = _fz_freeze()
+        cohort = _fz_load(bs)
+        assert isinstance(cohort.header, cal.LoadedHeader)
+        assert cohort.header.as_of == _FZ_AS_OF
+        assert cohort.artifact_sha256 == hashlib.sha256(bs).hexdigest()
+        for lp in cohort.pairs:
+            assert isinstance(lp, cal.LoadedPair)
+            assert isinstance(lp.overlay, EvidenceOverlay)
+        first = cohort.pairs[0]
+        assert first.pair_id == "pair-00"
+        assert first.evidence_seq in (3, 5)
+        assert first.inputs_fingerprint
+
+    def test_freeze_returns_bytes_not_str(self):
+        assert isinstance(_fz_freeze(), bytes)

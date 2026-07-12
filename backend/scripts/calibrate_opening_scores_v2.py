@@ -24,15 +24,17 @@ write-bench safety gate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import re
 import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping, Protocol, Sequence
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -49,8 +51,15 @@ from app.opening_evidence import (  # noqa: E402
     PhaseSample,
     overlay_evidence,
 )
+from app.opening_cache import evidence_derivation_fingerprint  # noqa: E402
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph  # noqa: E402
-from app.opening_quality import TAU_CP, TAU_WC  # noqa: E402
+from app.opening_quality import (  # noqa: E402
+    SOURCE_ANALYSIS_CACHE,
+    SOURCE_EVAL_DELTA,
+    SOURCE_SESSION_EVAL,
+    TAU_CP,
+    TAU_WC,
+)
 from app.opening_rootcalc import (  # noqa: E402
     SYNTHETIC_INITIAL_FEN,
     CalcTelemetry,
@@ -418,6 +427,13 @@ class PairScore:
     phase_samples: list[PhaseSample] = field(default_factory=list)
     telemetry: CalcTelemetry = field(default_factory=CalcTelemetry)
     scoring_seconds: float = 0.0
+    # Frozen-cohort pseudonym metadata (g-p4ih-artifact). All default None so the
+    # live scoring path — which omits them — leaves every existing field unchanged.
+    # ``surrogate_user_id`` rides the EXISTING integer ``user_id`` field; the string
+    # pseudonyms ride here ALONGSIDE, never through the int contract.
+    pair_id: str | None = None
+    subject_id: str | None = None
+    cohort_role: str | None = None
 
     @property
     def emitted_row_count(self) -> int:
@@ -431,12 +447,21 @@ def score_overlay(
     overlay: EvidenceOverlay,
     roots: OpeningRoots,
     config: RootCalcConfig | None = None,
+    *,
+    pair_id: str | None = None,
+    subject_id: str | None = None,
+    cohort_role: str | None = None,
 ) -> PairScore:
     """Score one overlay in memory and separate the synthetic hero row.
 
     Passes ``include_synthetic_root=True`` so the ``__repertoire__`` hero row is
     computed in the same DAG pass, then reports it in its own field rather than
     mixing it into the named-root distribution.
+
+    ``pair_id`` / ``subject_id`` / ``cohort_role`` are the OPTIONAL frozen-cohort
+    pseudonym fields (g-p4ih-artifact); they are forwarded VERBATIM into ``PairScore``
+    and default None, so the live path (which omits them) is unperturbed. The frozen
+    path passes ``user_id=surrogate_user_id`` so no production user_id is reconstructed.
     """
     telemetry = CalcTelemetry()
     started = time.perf_counter()
@@ -473,6 +498,9 @@ def score_overlay(
         phase_samples=list(overlay.phase_samples),
         telemetry=telemetry,
         scoring_seconds=elapsed,
+        pair_id=pair_id,
+        subject_id=subject_id,
+        cohort_role=cohort_role,
     )
 
 
@@ -1078,6 +1106,1278 @@ def build_grid_report(
         for cell in cells
     ]
     return {"cells": cell_reports}
+
+
+# ---------------------------------------------------------------------------
+# Frozen-cohort artifact (g-p4ih-artifact): schema, canonical encoding, semantic
+# validation, split load guard, release-guard binding.
+#
+# The artifact is the pseudonymized, byte-stable serialization of raw opening
+# EvidenceOverlays. The freeze transform (capture-side) turns overlays + as_of into
+# canonical bytes; the split load guard (release-side) refuses a tampered, stale,
+# drifted, or wrong-target artifact rather than mis-scoring or falling back to live
+# selection. Production-derived artifacts stay PRIVATE (governance stance); only the
+# schema/validation/load code lives here, exercised in CI against SYNTHETIC data.
+#
+# BYTE-STABILITY CONTRACT: the SHA-256 reproducibility guarantee is pinned to a
+# CPython runtime (>= 3.1), where the shortest-round-trip float repr is guaranteed
+# (float_repr_style == 'short' / David-Gay). ``quality_sum`` is the only float field;
+# integer microsecond offsets, ints, and ASCII-escaped strings carry no such
+# dependency. A non-CPython interpreter is OUT of the byte-stability contract.
+# ---------------------------------------------------------------------------
+
+ARTIFACT_SCHEMA_VERSION: int = 1
+# The pinned lower instant used only to bound the offset range and keep offset
+# reconstruction (as_of - timedelta(us)) total. A fixed aware-UTC constant, never a
+# per-run value.
+TIMESTAMP_FLOOR: datetime = datetime(2000, 1, 1, tzinfo=timezone.utc)
+# The FIXED, VERSIONED identifier for the membership rule. A membership-rule change is
+# a conscious version bump of this constant, never a free-form edit.
+COHORT_RULES_ID: str = "opening-cohort-rules-v1"
+
+# The single exact canonical as_of spelling — 6 fractional digits + literal Z.
+_AS_OF_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+# Git privacy-boundary format controls: committed values carry a version number and
+# nothing else (a free-text channel would let identifying detail into Git history).
+_COHORT_RULES_RE = re.compile(r"^opening-cohort-rules-v\d+$")
+_CAPTURED_MODEL_VERSION_RE = re.compile(r"^sm-v\d+-\d+$")
+_PAIR_ID_RE = re.compile(r"^pair-\d+$")
+_SUBJECT_ID_RE = re.compile(r"^subject-\d+$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# White-before-black source ordering for deterministic pseudonym assignment (mirrors
+# opening_evidence._COLOR_RANK; defined locally to avoid importing a private symbol).
+_ARTIFACT_COLOR_RANK = {"white": 0, "black": 1}
+_VALID_COLORS = ("white", "black")
+_VALID_COHORT_ROLES = ("quantile", "release_guard")
+_SOURCE_LABELS = frozenset({SOURCE_SESSION_EVAL, SOURCE_ANALYSIS_CACHE, SOURCE_EVAL_DELTA})
+
+
+def _derive_opening_key(*ucis: str) -> str:
+    """Normalized 4-field opening_key reached by playing ``ucis`` from the start.
+
+    Derived from ``chess.Board`` + ``normalize_fen`` so the release-guard keys are
+    NEVER a hand-typed FEN; the derivation-pin tests assert the constants equal this.
+    """
+    board = chess.Board()
+    for uci in ucis:
+        board.push_uci(uci)
+    return normalize_fen(board.fen())
+
+
+# The pinned gate-(ii) root keys. RELEASE_GUARD_OPENING_KEY is the King's Pawn Game
+# root (1.e4); RELEASE_GUARD_CHILD_OPENING_KEY the Caro-Kann Defense node (1.e4 c6).
+RELEASE_GUARD_OPENING_KEY: str = _derive_opening_key("e2e4")
+RELEASE_GUARD_CHILD_OPENING_KEY: str = _derive_opening_key("e2e4", "c7c6")
+
+
+# ---- Fail-closed exception hierarchy (each raises a DISTINCT message string) ----
+
+
+class FrozenArtifactError(ValueError):
+    """Base for every frozen-cohort artifact rejection. ALWAYS fails closed — the
+    caller never falls back to live pair selection (governance stance)."""
+
+
+class UnsupportedArtifactSchemaError(FrozenArtifactError):
+    """schema_version selects the decoder; an unsupported version is refused in the
+    DECODE/SCHEMA phase BEFORE any integrity comparison."""
+
+
+class ArtifactSemanticError(FrozenArtifactError):
+    """Payload-level well-formedness failure (shape, exact types, ranges, cross-field
+    equations, FEN/color/edge legality, duplicate detection, canonical structure) —
+    provenance-independent (Phase A)."""
+
+
+class ArtifactCanonicalBytesError(FrozenArtifactError):
+    """The validated payload does not re-encode byte-for-byte to the raw artifact
+    bytes — a non-canonical serialization that survived a valid semantic pass."""
+
+
+class ProvenanceRecordError(FrozenArtifactError):
+    """The committed provenance record violates its own closed schema (a Git
+    privacy-boundary control), decoded from raw bytes inside the guard."""
+
+
+class ArtifactIntegrityError(FrozenArtifactError):
+    """Phase B: the recomputed digest or a mirrored header field disagrees with the
+    injected provenance record — a tampered, stale, or wrong artifact."""
+
+
+class ArtifactScoringValidityError(FrozenArtifactError):
+    """Phase C: the header drifted from the current runtime (graph/roots/derivation
+    fingerprints or release keys) or violates a release-policy pin (cohort_rules /
+    min_observations) — a matching provenance record cannot vouch for these."""
+
+
+class ReleaseGuardShapeError(FrozenArtifactError):
+    """The release-guard artifact shape, the scored release-guard shape, or the
+    minimum pooled-quantile-score precondition is not met."""
+
+
+# ---- Runtime binding + producer/loader handoff types ----
+
+
+@dataclass(frozen=True)
+class RuntimeBinding:
+    """The current-runtime surfaces the SCORING-VALIDITY (Phase C) checks compare
+    against, PLUS the supported schema version the decoder resolves against.
+
+    Passed IN (not read from module globals inside the guard) so the load guard is
+    testable with SYNTHETIC bindings, with NO dependency on a committed file.
+    """
+
+    graph_fingerprint: str
+    roots_fingerprint: str
+    evidence_derivation_fingerprint: str
+    min_observations: int
+    cohort_rules: str
+    release_guard_opening_key: str
+    release_guard_child_opening_key: str
+    schema_version: int = ARTIFACT_SCHEMA_VERSION
+
+
+@dataclass(frozen=True)
+class CapturedPairInput:
+    """One raw production overlay plus the freeze-side metadata that does NOT ride on
+    the bare ``EvidenceOverlay``. The pseudonyms are assigned INSIDE the freeze."""
+
+    overlay: EvidenceOverlay
+    cohort_role: str  # "quantile" | "release_guard"
+    evidence_seq: int  # per-pair freshness sequence (>= 0)
+    inputs_fingerprint: str  # per-pair freshness fingerprint (non-empty)
+
+
+@dataclass(frozen=True)
+class ArtifactHeaderInput:
+    """The run-specific provenance the freeze stamps into the header. The release-policy
+    pins (min_observations / cohort_rules / release keys / pair_count / schema_version)
+    are NOT here — the freeze stamps those from the pinned module constants."""
+
+    as_of: datetime  # the pinned scoring clock (aware-UTC)
+    graph_fingerprint: str
+    roots_fingerprint: str
+    cache_epoch: int | None
+    captured_model_version: str  # SCORE_MODEL_VERSION at capture, ^sm-v\d+-\d+$
+    evidence_derivation_fingerprint: str
+
+
+@dataclass(frozen=True)
+class LoadedHeader:
+    """The validated, fully-typed header (``as_of`` reconstructed as an aware datetime)."""
+
+    schema_version: int
+    as_of: datetime
+    captured_model_version: str
+    graph_fingerprint: str
+    roots_fingerprint: str
+    evidence_derivation_fingerprint: str
+    min_observations: int
+    pair_count: int
+    cohort_rules: str
+    release_guard_opening_key: str
+    release_guard_child_opening_key: str
+    cache_epoch: int | None
+
+
+@dataclass(frozen=True)
+class LoadedPair:
+    """The three coordinate systems a bare overlay cannot carry, reunited: pseudonym
+    metadata, freshness metadata, and the reconstructed ``EvidenceOverlay``."""
+
+    pair_id: str
+    subject_id: str
+    cohort_role: str
+    surrogate_user_id: int
+    player_color: str
+    evidence_seq: int
+    inputs_fingerprint: str
+    overlay: EvidenceOverlay
+
+
+@dataclass(frozen=True)
+class LoadedCohort:
+    """``load_frozen_artifact``'s return: the validated header, the recomputed artifact
+    digest (the integrity anchor), and the ordered loaded pairs (pair-00 … order)."""
+
+    header: LoadedHeader
+    artifact_sha256: str
+    pairs: tuple[LoadedPair, ...]
+
+
+@dataclass(frozen=True)
+class _ValidatedProvenance:
+    """Internal: the provenance record after closed-schema validation, with ``as_of``
+    reconstructed as an aware datetime so integrity compares datetimes to datetimes."""
+
+    sha256: str
+    schema_version: int
+    as_of: datetime
+    captured_model_version: str
+    graph_fingerprint: str
+    roots_fingerprint: str
+    evidence_derivation_fingerprint: str
+    pair_count: int
+    min_observations: int
+    cohort_rules: str
+    release_guard_opening_key: str
+    release_guard_child_opening_key: str
+
+
+# ---- Canonical encoding primitives ----
+
+
+def _canonical_dumps(payload: object) -> bytes:
+    """The EXACT canonical serializer. Sorted keys, no insignificant whitespace,
+    ASCII-escaped (locale/terminal cannot change bytes), NaN/Infinity forbidden. The
+    ``.encode("ascii")`` is the PINNED total codec — any non-ASCII code point is an
+    ``ensure_ascii`` violation that raises rather than silently widening the stream."""
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("ascii")
+
+
+def _canonical_float(value: float) -> float:
+    """Pin a float field's canonical form: finite, ``-0.0`` normalized to ``0.0``.
+
+    No rounding — the shortest-round-trip repr CPython emits is already exact and
+    lossless (rounding ``quality_sum`` would move the score the scorer divides)."""
+    f = float(value)
+    if not math.isfinite(f):
+        raise ArtifactSemanticError(f"non-finite float not allowed: {f!r}")
+    if f == 0.0:  # True for both 0.0 and -0.0; normalize the sign
+        return 0.0
+    return f
+
+
+def _canonical_as_of(dt: datetime) -> str:
+    """The single canonical as_of spelling (6 fractional digits + literal Z, UTC)."""
+    return dt.astimezone(timezone.utc).strftime(_AS_OF_FORMAT)
+
+
+def _require_aware(dt: datetime, label: str) -> None:
+    """A naive datetime silently breaks byte-stability (astimezone interprets it in the
+    HOST's local zone), so reject it BEFORE any encoding with a DISTINCT message."""
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ArtifactSemanticError(f"{label} must be timezone-aware; got naive {dt!r}")
+
+
+def _us_before(as_of: datetime, ts: datetime | None) -> int | None:
+    """Integer-microsecond as_of-relative offset (null when absent). Exact: Python
+    datetimes are microsecond-resolution, so the round trip reconstructs bit-for-bit."""
+    if ts is None:
+        return None
+    _require_aware(ts, "evidence timestamp")
+    return (as_of - ts) // timedelta(microseconds=1)
+
+
+def _token_suffix(token: str) -> int:
+    """Integer suffix ``k`` of ``{pair_id}-g{k}`` (numeric, so g2 precedes g10)."""
+    return int(token.rsplit("-g", 1)[1])
+
+
+def _phase_sample_sort_key(oil: int, mp: int | None, ep: int | None) -> tuple:
+    """Nondecreasing order over (opening_interval_len, middle_ply, end_ply), null last."""
+    return (oil, (1, 0) if mp is None else (0, mp), (1, 0) if ep is None else (0, ep))
+
+
+# ---- Freeze (capture-side transform; g-p4ih-capture RUNS it) ----
+
+
+def freeze_frozen_artifact(
+    pairs: Sequence[CapturedPairInput], header: ArtifactHeaderInput
+) -> bytes:
+    """Serialize raw overlays + ``as_of`` into canonical, byte-stable artifact bytes.
+
+    Assigns every pseudonym (pair_id / subject_id / surrogate_user_id / session tokens)
+    by the DETERMINISTIC sorted-source procedure, so the emitted bytes are a pure
+    function of the raw overlays, independent of dict/set iteration order. RETURNS the
+    canonical bytes — NOT a provenance record: the caller (g-p4ih-capture) computes
+    ``hashlib.sha256(<those bytes>)`` for the record. Fails on a duplicate source
+    ``(user_id, player_color)`` or any naive datetime BEFORE encoding.
+    """
+    _require_aware(header.as_of, "header.as_of")
+
+    seen: set[tuple[int, str]] = set()
+    for cp in pairs:
+        key = (cp.overlay.user_id, cp.overlay.player_color)
+        if key in seen:
+            raise ArtifactSemanticError(
+                f"freeze: duplicate source pair (user_id, player_color)={key}; the "
+                "pseudonym bijection assumes one overlay per (user_id, color)"
+            )
+        seen.add(key)
+
+    ordered = sorted(
+        pairs,
+        key=lambda cp: (cp.overlay.user_id, _ARTIFACT_COLOR_RANK[cp.overlay.player_color]),
+    )
+
+    # Subjects: per distinct source user_id in that same sorted order.
+    subject_by_user: dict[int, str] = {}
+    for cp in ordered:
+        uid = cp.overlay.user_id
+        if uid not in subject_by_user:
+            subject_by_user[uid] = f"subject-{len(subject_by_user):02d}"
+
+    pair_objs = [
+        _freeze_pair(cp, f"pair-{i:02d}", subject_by_user[cp.overlay.user_id], i + 1, header.as_of)
+        for i, cp in enumerate(ordered)
+    ]
+
+    payload = {
+        "header": {
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "as_of": _canonical_as_of(header.as_of),
+            "captured_model_version": header.captured_model_version,
+            "graph_fingerprint": header.graph_fingerprint,
+            "roots_fingerprint": header.roots_fingerprint,
+            "evidence_derivation_fingerprint": header.evidence_derivation_fingerprint,
+            "min_observations": DEFAULT_MIN_OBSERVATIONS,
+            "pair_count": len(pair_objs),
+            "cohort_rules": COHORT_RULES_ID,
+            "release_guard_opening_key": RELEASE_GUARD_OPENING_KEY,
+            "release_guard_child_opening_key": RELEASE_GUARD_CHILD_OPENING_KEY,
+            "cache_epoch": header.cache_epoch,
+        },
+        "pairs": pair_objs,
+    }
+    return _canonical_dumps(payload)
+
+
+def _freeze_pair(
+    cp: CapturedPairInput, pair_id: str, subject_id: str, surrogate: int, as_of: datetime
+) -> dict:
+    overlay = cp.overlay
+    # Session tokens: g{k} assigned CONTIGUOUSLY from the SORTED distinct raw session_ids
+    # across ALL the pair's nodes (sorting the RAW ids before enumeration fixes which
+    # real session becomes g0). The same real session maps to the same token at every
+    # node, so the cross-node union reconstructs production's exactly.
+    all_sessions = sorted(
+        {sid for node in overlay.nodes.values() for sid in node.session_ids}
+    )
+    token_by_session = {sid: f"{pair_id}-g{k}" for k, sid in enumerate(all_sessions)}
+
+    node_objs = [
+        _freeze_node(node, token_by_session, as_of)
+        for node in sorted(overlay.nodes.values(), key=lambda n: n.fen)
+    ]
+    edge_objs = [
+        _freeze_edge(overlay.edges[key])
+        for key in sorted(overlay.edges)
+    ]
+    phase_samples = [
+        {"opening_interval_len": s.opening_interval_len, "middle_ply": s.middle_ply, "end_ply": s.end_ply}
+        for s in sorted(
+            overlay.phase_samples,
+            key=lambda s: _phase_sample_sort_key(s.opening_interval_len, s.middle_ply, s.end_ply),
+        )
+    ]
+    return {
+        "pair_id": pair_id,
+        "player_color": overlay.player_color,
+        "subject_id": subject_id,
+        "cohort_role": cp.cohort_role,
+        "surrogate_user_id": surrogate,
+        "evidence_seq": cp.evidence_seq,
+        "inputs_fingerprint": cp.inputs_fingerprint,
+        # Zero-valued labels are OMITTED (unary-plus drops non-positive counts) so the
+        # bytes are a pure function of which SOURCE_* labels actually fired.
+        "source_counts": dict(+Counter(overlay.source_counts)),
+        "excluded_sessions": overlay.excluded_sessions,
+        "phase_samples": phase_samples,
+        "nodes": node_objs,
+        "edges": edge_objs,
+    }
+
+
+def _freeze_node(node: NodeEvidence, token_by_session: dict[str, str], as_of: datetime) -> dict:
+    tokens = sorted(
+        (token_by_session[sid] for sid in node.session_ids), key=_token_suffix
+    )
+    return {
+        "fen": node.fen,
+        "quality_sum": _canonical_float(node.quality_sum),
+        "quality_count": node.quality_count,
+        "live_attempts": node.live_attempts,
+        "live_passes": node.live_passes,
+        "live_fails": node.live_fails,
+        "review_attempts": node.review_attempts,
+        "review_passes": node.review_passes,
+        "review_fails": node.review_fails,
+        "is_ghost_target": node.is_ghost_target,
+        "session_tokens": tokens,
+        "last_live_us_before": _us_before(as_of, node.last_live_at),
+        "last_review_us_before": _us_before(as_of, node.last_review_at),
+    }
+
+
+def _freeze_edge(edge: EdgeEvidence) -> dict:
+    return {
+        "parent_fen": edge.parent_fen,
+        "child_fen": edge.child_fen,
+        "uci": edge.uci,
+        "traversal_count": edge.traversal_count,
+        "live_attempts": edge.live_attempts,
+        "live_passes": edge.live_passes,
+        "live_fails": edge.live_fails,
+        "quality_sum": _canonical_float(edge.quality_sum),
+        "quality_count": edge.quality_count,
+    }
+
+
+# ---- Decode hardening + type/shape primitives (bool-is-not-int) ----
+
+
+def _hardened_loads(raw: bytes, err: type[FrozenArtifactError]):
+    """``json.loads`` with a parse_constant raiser (Infinity/NaN refused, symmetric with
+    the encoder's ``allow_nan=False``) and a duplicate-object-key hook (``json.loads``
+    otherwise silently last-write-wins). ``json.loads`` accepts bytes directly."""
+
+    def _raise_constant(value):
+        raise err(f"non-finite JSON literal not allowed: {value!r}")
+
+    def _no_dupes(items):
+        result: dict = {}
+        for key, value in items:
+            if key in result:
+                raise err(f"duplicate JSON object key: {key!r}")
+            result[key] = value
+        return result
+
+    try:
+        return json.loads(raw, parse_constant=_raise_constant, object_pairs_hook=_no_dupes)
+    except json.JSONDecodeError as exc:
+        raise err(f"not valid JSON: {exc}") from exc
+
+
+def _require_keys(obj: object, allowed: frozenset[str], label: str, *, err=ArtifactSemanticError) -> dict:
+    if not isinstance(obj, dict):
+        raise err(f"{label} must be a JSON object; got {type(obj).__name__}")
+    keys = set(obj)
+    missing = allowed - keys
+    if missing:
+        raise err(f"{label} missing required key(s): {sorted(missing)}")
+    unknown = keys - allowed
+    if unknown:
+        raise err(f"{label} has unknown key(s): {sorted(unknown)}")
+    return obj
+
+
+def _check_int(value: object, label: str, *, minimum: int | None = None, err=ArtifactSemanticError) -> int:
+    # bool subclasses int, so isinstance(True, int) passes — reject it explicitly.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise err(f"{label} must be an int (bool rejected); got {value!r}")
+    if minimum is not None and value < minimum:
+        raise err(f"{label} must be >= {minimum}; got {value}")
+    return value
+
+
+def _check_int_or_null(value: object, label: str, *, minimum: int | None = None) -> int | None:
+    if value is None:
+        return None
+    return _check_int(value, label, minimum=minimum)
+
+
+def _check_float(value: object, label: str) -> float:
+    # A bare int is rejected — the canonical encoding pins floats-stay-floats.
+    if isinstance(value, bool) or not isinstance(value, float):
+        raise ArtifactSemanticError(f"{label} must be a float; got {value!r}")
+    if not math.isfinite(value):
+        raise ArtifactSemanticError(f"{label} must be finite; got {value!r}")
+    return value
+
+
+def _check_str(value: object, label: str, *, err=ArtifactSemanticError) -> str:
+    if not isinstance(value, str):
+        raise err(f"{label} must be a string; got {type(value).__name__}")
+    return value
+
+
+def _check_nonempty_str(value: object, label: str, *, err=ArtifactSemanticError) -> str:
+    s = _check_str(value, label, err=err)
+    if not s:
+        raise err(f"{label} must be non-empty")
+    return s
+
+
+def _check_bool(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ArtifactSemanticError(f"{label} must be a bool; got {value!r}")
+    return value
+
+
+def _validate_canonical_as_of(value: object, label: str, *, err=ArtifactSemanticError) -> datetime:
+    """Reconstruct the pinned as_of and REJECT any string not byte-identical to its
+    canonical re-emission (a +00:00, missing-Z, or non-6-fractional-digit variant)."""
+    s = _check_str(value, label, err=err)
+    try:
+        dt = datetime.strptime(s, _AS_OF_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise err(f"{label} not in canonical %Y-%m-%dT%H:%M:%S.%fZ form: {s!r}") from exc
+    if _canonical_as_of(dt) != s:
+        raise err(f"{label} not byte-identical to canonical re-emission: {s!r}")
+    return dt
+
+
+def _validate_fen(fen: str, label: str) -> None:
+    try:
+        chess.Board(fen)
+    except ValueError as exc:
+        raise ArtifactSemanticError(f"{label} is not a parseable FEN: {fen!r}") from exc
+    if normalize_fen(fen) != fen:
+        raise ArtifactSemanticError(f"{label} is not in normalized 4-field form: {fen!r}")
+
+
+# ---- Closed key sets ----
+
+_TOP_KEYS = frozenset({"header", "pairs"})
+_HEADER_KEYS = frozenset({
+    "schema_version", "as_of", "captured_model_version", "graph_fingerprint",
+    "roots_fingerprint", "evidence_derivation_fingerprint", "min_observations",
+    "pair_count", "cohort_rules", "release_guard_opening_key",
+    "release_guard_child_opening_key", "cache_epoch",
+})
+_PAIR_KEYS = frozenset({
+    "pair_id", "player_color", "subject_id", "cohort_role", "surrogate_user_id",
+    "evidence_seq", "inputs_fingerprint", "source_counts", "excluded_sessions",
+    "phase_samples", "nodes", "edges",
+})
+_NODE_KEYS = frozenset({
+    "fen", "quality_sum", "quality_count", "live_attempts", "live_passes",
+    "live_fails", "review_attempts", "review_passes", "review_fails",
+    "is_ghost_target", "session_tokens", "last_live_us_before", "last_review_us_before",
+})
+_EDGE_KEYS = frozenset({
+    "parent_fen", "child_fen", "uci", "traversal_count", "live_attempts",
+    "live_passes", "live_fails", "quality_sum", "quality_count",
+})
+_PHASE_SAMPLE_KEYS = frozenset({"opening_interval_len", "middle_ply", "end_ply"})
+_PROVENANCE_KEYS = frozenset({
+    "sha256", "schema_version", "as_of", "captured_model_version", "graph_fingerprint",
+    "roots_fingerprint", "evidence_derivation_fingerprint", "pair_count",
+    "min_observations", "cohort_rules", "release_guard_opening_key",
+    "release_guard_child_opening_key",
+})
+
+
+# ---- Semantic validation (Phase A; provenance-independent well-formedness) ----
+
+
+def _validate_header(header: object, *, supported_schema_version: int = ARTIFACT_SCHEMA_VERSION) -> LoadedHeader:
+    obj = _require_keys(header, _HEADER_KEYS, "header")
+    schema_version = _check_int(obj["schema_version"], "header.schema_version")
+    if schema_version != supported_schema_version:
+        raise UnsupportedArtifactSchemaError(
+            f"unsupported schema: header.schema_version={schema_version}, "
+            f"only {supported_schema_version} is supported"
+        )
+    as_of = _validate_canonical_as_of(obj["as_of"], "header.as_of")
+    if as_of < TIMESTAMP_FLOOR:
+        raise ArtifactSemanticError(
+            f"header.as_of {as_of.isoformat()} precedes TIMESTAMP_FLOOR "
+            f"{TIMESTAMP_FLOOR.isoformat()}"
+        )
+    captured_model_version = _check_str(obj["captured_model_version"], "header.captured_model_version")
+    if not _CAPTURED_MODEL_VERSION_RE.match(captured_model_version):
+        raise ArtifactSemanticError(
+            f"header.captured_model_version must match ^sm-v\\d+-\\d+$; got "
+            f"{captured_model_version!r}"
+        )
+    cohort_rules = _check_str(obj["cohort_rules"], "header.cohort_rules")
+    if not _COHORT_RULES_RE.match(cohort_rules):
+        raise ArtifactSemanticError(
+            f"header.cohort_rules must match ^opening-cohort-rules-v\\d+$; got "
+            f"{cohort_rules!r}"
+        )
+    cache_epoch = obj["cache_epoch"]
+    if cache_epoch is not None:
+        cache_epoch = _check_int(cache_epoch, "header.cache_epoch", minimum=0)
+    return LoadedHeader(
+        schema_version=schema_version,
+        as_of=as_of,
+        captured_model_version=captured_model_version,
+        graph_fingerprint=_check_nonempty_str(obj["graph_fingerprint"], "header.graph_fingerprint"),
+        roots_fingerprint=_check_nonempty_str(obj["roots_fingerprint"], "header.roots_fingerprint"),
+        evidence_derivation_fingerprint=_check_nonempty_str(
+            obj["evidence_derivation_fingerprint"], "header.evidence_derivation_fingerprint"
+        ),
+        min_observations=_check_int(obj["min_observations"], "header.min_observations", minimum=0),
+        pair_count=_check_int(obj["pair_count"], "header.pair_count", minimum=0),
+        cohort_rules=cohort_rules,
+        release_guard_opening_key=_check_nonempty_str(
+            obj["release_guard_opening_key"], "header.release_guard_opening_key"
+        ),
+        release_guard_child_opening_key=_check_nonempty_str(
+            obj["release_guard_child_opening_key"], "header.release_guard_child_opening_key"
+        ),
+        cache_epoch=cache_epoch,
+    )
+
+
+def _validate_source_counts(obj: object, label: str) -> dict[str, int]:
+    if not isinstance(obj, dict):
+        raise ArtifactSemanticError(f"{label} must be a JSON object; got {type(obj).__name__}")
+    result: dict[str, int] = {}
+    for key, value in obj.items():
+        if key not in _SOURCE_LABELS:
+            raise ArtifactSemanticError(
+                f"{label} has unknown quality-source label: {key!r} "
+                f"(allowed: {sorted(_SOURCE_LABELS)})"
+            )
+        # >= 1: a 0-valued entry is OMITTED in the canonical form, so an explicit 0
+        # (or negative) is non-canonical and REJECTS here (its own diagnostic).
+        result[key] = _check_int(value, f"{label}[{key!r}]", minimum=1)
+    return result
+
+
+def _validate_phase_samples(arr: object, label: str) -> list[PhaseSample]:
+    if not isinstance(arr, list):
+        raise ArtifactSemanticError(f"{label} must be an array; got {type(arr).__name__}")
+    result: list[PhaseSample] = []
+    prev_key = None
+    for j, sample in enumerate(arr):
+        obj = _require_keys(sample, _PHASE_SAMPLE_KEYS, f"{label}[{j}]")
+        oil = _check_int(obj["opening_interval_len"], f"{label}[{j}].opening_interval_len", minimum=0)
+        mp = _check_int_or_null(obj["middle_ply"], f"{label}[{j}].middle_ply", minimum=0)
+        ep = _check_int_or_null(obj["end_ply"], f"{label}[{j}].end_ply", minimum=0)
+        key = _phase_sample_sort_key(oil, mp, ep)
+        # Nondecreasing (duplicates PRESERVED — one sample per non-excluded session);
+        # a strictly-decreasing / out-of-order sample REJECTS.
+        if prev_key is not None and key < prev_key:
+            raise ArtifactSemanticError(
+                f"{label} is not in nondecreasing (opening_interval_len, middle_ply, "
+                f"end_ply) order at index {j}"
+            )
+        prev_key = key
+        result.append(PhaseSample(opening_interval_len=oil, middle_ply=mp, end_ply=ep))
+    return result
+
+
+def _validate_session_tokens(tokens: object, pair_id: str, label: str) -> list[str]:
+    if not isinstance(tokens, list):
+        raise ArtifactSemanticError(f"{label} must be an array; got {type(tokens).__name__}")
+    token_re = re.compile(rf"^{re.escape(pair_id)}-g(\d+)$")
+    result: list[str] = []
+    prev_k = None
+    for t in tokens:
+        if not isinstance(t, str):
+            raise ArtifactSemanticError(f"{label} entries must be strings; got {t!r}")
+        m = token_re.match(t)
+        if m is None:
+            raise ArtifactSemanticError(
+                f"{label} entry {t!r} is not a ^{pair_id}-g\\d+$ token for this pair "
+                "(a cross-pair or leaky label)"
+            )
+        k = int(m.group(1))
+        # EXACT canonical ASCII spelling — `token == f"{pair_id}-g{k}"`. `\d+` alone
+        # accepts a leading-zero alias (`g015`) that `int(...)` collapses to the same
+        # `k` as `g15`, so the string↔k map would NOT be a bijection: two distinct
+        # strings on different nodes would share one numeric suffix, passing the
+        # (numeric) contiguity check while reconstruction keeps BOTH strings as distinct
+        # session_ids and inflates the cross-node game_count union. Pinning the exact
+        # spelling makes each k have one and only one token string.
+        if t != f"{pair_id}-g{k}":
+            raise ArtifactSemanticError(
+                f"{label} entry {t!r} is not the canonical spelling {pair_id}-g{k} "
+                "(leading-zero or non-minimal token index)"
+            )
+        # Strictly ascending by NUMERIC k (g2 before g10) — also enforces uniqueness.
+        if prev_k is not None and not (k > prev_k):
+            raise ArtifactSemanticError(
+                f"{label} is not strictly ascending by numeric token index at {t!r}"
+            )
+        prev_k = k
+        result.append(t)
+    return result
+
+
+def _validate_node(node: object, index: int, pair_id: str, player_color: str, upper_us: int, as_of: datetime, seen_fens: set[str], prev_fen: str | None, label: str):
+    obj = _require_keys(node, _NODE_KEYS, f"{label}.nodes[{index}]")
+    lbl = f"{label}.nodes[{index}]"
+    fen = _check_str(obj["fen"], f"{lbl}.fen")
+    _validate_fen(fen, f"{lbl}.fen")
+    if active_color(fen) != player_color:
+        raise ArtifactSemanticError(
+            f"{lbl}.fen active-color {active_color(fen)!r} != pair player_color "
+            f"{player_color!r} (every overlay node is a position the player moves at)"
+        )
+    if fen in seen_fens:
+        raise ArtifactSemanticError(f"{label} has a duplicate node key (fen): {fen!r}")
+    if prev_fen is not None and not (fen > prev_fen):
+        raise ArtifactSemanticError(f"{label}.nodes is not strictly ascending by fen at {fen!r}")
+
+    quality_count = _check_int(obj["quality_count"], f"{lbl}.quality_count", minimum=0)
+    quality_sum = _check_float(obj["quality_sum"], f"{lbl}.quality_sum")
+    if not (0.0 <= quality_sum <= quality_count):
+        raise ArtifactSemanticError(
+            f"{lbl}.quality_sum {quality_sum} out of [0, quality_count={quality_count}]"
+        )
+    live_attempts = _check_int(obj["live_attempts"], f"{lbl}.live_attempts", minimum=0)
+    live_passes = _check_int(obj["live_passes"], f"{lbl}.live_passes", minimum=0)
+    live_fails = _check_int(obj["live_fails"], f"{lbl}.live_fails", minimum=0)
+    if live_attempts != live_passes + live_fails:
+        raise ArtifactSemanticError(
+            f"{lbl}: live_attempts {live_attempts} != live_passes + live_fails "
+            f"({live_passes} + {live_fails})"
+        )
+    review_attempts = _check_int(obj["review_attempts"], f"{lbl}.review_attempts", minimum=0)
+    review_passes = _check_int(obj["review_passes"], f"{lbl}.review_passes", minimum=0)
+    review_fails = _check_int(obj["review_fails"], f"{lbl}.review_fails", minimum=0)
+    if review_attempts != review_passes + review_fails:
+        raise ArtifactSemanticError(
+            f"{lbl}: review_attempts {review_attempts} != review_passes + review_fails "
+            f"({review_passes} + {review_fails})"
+        )
+    is_ghost_target = _check_bool(obj["is_ghost_target"], f"{lbl}.is_ghost_target")
+    tokens = _validate_session_tokens(obj["session_tokens"], pair_id, f"{lbl}.session_tokens")
+    last_live_us = _validate_offset(obj["last_live_us_before"], upper_us, f"{lbl}.last_live_us_before")
+    last_review_us = _validate_offset(obj["last_review_us_before"], upper_us, f"{lbl}.last_review_us_before")
+
+    node_ev = NodeEvidence(
+        fen=fen,
+        live_attempts=live_attempts,
+        live_passes=live_passes,
+        live_fails=live_fails,
+        quality_sum=quality_sum,
+        quality_count=quality_count,
+        session_ids=set(tokens),
+        last_live_at=None if last_live_us is None else as_of - timedelta(microseconds=last_live_us),
+        review_attempts=review_attempts,
+        review_passes=review_passes,
+        review_fails=review_fails,
+        last_review_at=None if last_review_us is None else as_of - timedelta(microseconds=last_review_us),
+        is_ghost_target=is_ghost_target,
+    )
+    return fen, node_ev, tokens
+
+
+def _validate_offset(value: object, upper_us: int, label: str) -> int | None:
+    if value is None:
+        return None
+    us = _check_int(value, label, minimum=0)
+    if us > upper_us:
+        raise ArtifactSemanticError(
+            f"{label} offset {us} exceeds (as_of - TIMESTAMP_FLOOR)={upper_us}µs"
+        )
+    return us
+
+
+def _validate_edge(edge: object, index: int, prev_key: tuple[str, str] | None, seen: set[tuple[str, str]], label: str):
+    obj = _require_keys(edge, _EDGE_KEYS, f"{label}.edges[{index}]")
+    lbl = f"{label}.edges[{index}]"
+    parent = _check_str(obj["parent_fen"], f"{lbl}.parent_fen")
+    child = _check_str(obj["child_fen"], f"{lbl}.child_fen")
+    _validate_fen(parent, f"{lbl}.parent_fen")
+    _validate_fen(child, f"{lbl}.child_fen")
+    uci = _check_str(obj["uci"], f"{lbl}.uci")
+    try:
+        move = chess.Move.from_uci(uci)
+    except ValueError as exc:
+        raise ArtifactSemanticError(f"{lbl}.uci is not a parseable UCI move: {uci!r}") from exc
+    board = chess.Board(parent)
+    if move not in board.legal_moves:
+        raise ArtifactSemanticError(f"{lbl}.uci {uci!r} is not legal from parent_fen")
+    board.push(move)
+    if normalize_fen(board.fen()) != child:
+        raise ArtifactSemanticError(
+            f"{lbl}.uci {uci!r} pushed onto parent_fen does not reach child_fen"
+        )
+    traversal_count = _check_int(obj["traversal_count"], f"{lbl}.traversal_count", minimum=0)
+    live_attempts = _check_int(obj["live_attempts"], f"{lbl}.live_attempts", minimum=0)
+    live_passes = _check_int(obj["live_passes"], f"{lbl}.live_passes", minimum=0)
+    live_fails = _check_int(obj["live_fails"], f"{lbl}.live_fails", minimum=0)
+    if live_attempts != live_passes + live_fails:
+        raise ArtifactSemanticError(
+            f"{lbl}: live_attempts {live_attempts} != live_passes + live_fails "
+            f"({live_passes} + {live_fails})"
+        )
+    if live_attempts > traversal_count:
+        raise ArtifactSemanticError(
+            f"{lbl}: live_attempts {live_attempts} > traversal_count {traversal_count}"
+        )
+    quality_count = _check_int(obj["quality_count"], f"{lbl}.quality_count", minimum=0)
+    quality_sum = _check_float(obj["quality_sum"], f"{lbl}.quality_sum")
+    if quality_count > traversal_count:
+        raise ArtifactSemanticError(
+            f"{lbl}: quality_count {quality_count} > traversal_count {traversal_count}"
+        )
+    if not (0.0 <= quality_sum <= quality_count):
+        raise ArtifactSemanticError(
+            f"{lbl}.quality_sum {quality_sum} out of [0, quality_count={quality_count}]"
+        )
+    key = (parent, child)
+    if key in seen:
+        raise ArtifactSemanticError(f"{label} has a duplicate edge key (parent_fen, child_fen): {key}")
+    if prev_key is not None and not (key > prev_key):
+        raise ArtifactSemanticError(f"{label}.edges is not strictly ascending by (parent_fen, child_fen) at {key}")
+    edge_ev = EdgeEvidence(
+        parent_fen=parent,
+        child_fen=child,
+        uci=uci,
+        traversal_count=traversal_count,
+        live_attempts=live_attempts,
+        live_passes=live_passes,
+        live_fails=live_fails,
+        quality_sum=quality_sum,
+        quality_count=quality_count,
+    )
+    return key, edge_ev
+
+
+def _validate_pair(pair: object, index: int, header: LoadedHeader) -> LoadedPair:
+    label = f"pairs[{index}]"
+    obj = _require_keys(pair, _PAIR_KEYS, label)
+    pair_id = _check_str(obj["pair_id"], f"{label}.pair_id")
+    if not _PAIR_ID_RE.match(pair_id):
+        raise ArtifactSemanticError(f"{label}.pair_id must match ^pair-\\d+$; got {pair_id!r}")
+    if pair_id != f"pair-{index:02d}":
+        raise ArtifactSemanticError(
+            f"{label}.pair_id {pair_id!r} is not array-order-aligned (expected "
+            f"'pair-{index:02d}')"
+        )
+
+    player_color = _check_str(obj["player_color"], f"{label}.player_color")
+    if player_color not in _VALID_COLORS:
+        raise ArtifactSemanticError(f"{label}.player_color must be white/black; got {player_color!r}")
+    subject_id = _check_str(obj["subject_id"], f"{label}.subject_id")
+    if not _SUBJECT_ID_RE.match(subject_id):
+        raise ArtifactSemanticError(f"{label}.subject_id must match ^subject-\\d+$; got {subject_id!r}")
+    cohort_role = _check_str(obj["cohort_role"], f"{label}.cohort_role")
+    if cohort_role not in _VALID_COHORT_ROLES:
+        raise ArtifactSemanticError(f"{label}.cohort_role must be quantile/release_guard; got {cohort_role!r}")
+    surrogate = _check_int(obj["surrogate_user_id"], f"{label}.surrogate_user_id", minimum=1)
+    if surrogate != index + 1:
+        raise ArtifactSemanticError(
+            f"{label}.surrogate_user_id {surrogate} is not array-order-aligned (expected {index + 1})"
+        )
+    evidence_seq = _check_int(obj["evidence_seq"], f"{label}.evidence_seq", minimum=0)
+    inputs_fingerprint = _check_nonempty_str(obj["inputs_fingerprint"], f"{label}.inputs_fingerprint")
+    source_counts = _validate_source_counts(obj["source_counts"], f"{label}.source_counts")
+    excluded_sessions = _check_int(obj["excluded_sessions"], f"{label}.excluded_sessions", minimum=0)
+    phase_samples = _validate_phase_samples(obj["phase_samples"], f"{label}.phase_samples")
+
+    upper_us = (header.as_of - TIMESTAMP_FLOOR) // timedelta(microseconds=1)
+    nodes_arr = obj["nodes"]
+    if not isinstance(nodes_arr, list):
+        raise ArtifactSemanticError(f"{label}.nodes must be an array; got {type(nodes_arr).__name__}")
+    node_items = []
+    seen_fens: set[str] = set()
+    prev_fen: str | None = None
+    for j, node in enumerate(nodes_arr):
+        fen, node_ev, tokens = _validate_node(node, j, pair_id, player_color, upper_us, header.as_of, seen_fens, prev_fen, label)
+        seen_fens.add(fen)
+        prev_fen = fen
+        node_items.append((fen, node_ev, tokens))
+
+    edges_arr = obj["edges"]
+    if not isinstance(edges_arr, list):
+        raise ArtifactSemanticError(f"{label}.edges must be an array; got {type(edges_arr).__name__}")
+    edge_items = []
+    seen_edges: set[tuple[str, str]] = set()
+    prev_edge: tuple[str, str] | None = None
+    for j, edge in enumerate(edges_arr):
+        key, edge_ev = _validate_edge(edge, j, prev_edge, seen_edges, label)
+        seen_edges.add(key)
+        prev_edge = key
+        edge_items.append((key, edge_ev))
+
+    # Cross-field telemetry invariant: source_counts sum == node quality_count sum ==
+    # edge quality_count sum (all three increment together at each quality observation),
+    # so an inequality means the captured telemetry does NOT describe the frozen overlay.
+    node_qc = sum(ev.quality_count for _, ev, _ in node_items)
+    edge_qc = sum(ev.quality_count for _, ev in edge_items)
+    sc_sum = sum(source_counts.values())
+    if not (sc_sum == node_qc == edge_qc):
+        raise ArtifactSemanticError(
+            f"{label}: telemetry does not describe overlay — source_counts sum "
+            f"{sc_sum}, node quality_count sum {node_qc}, edge quality_count sum {edge_qc} disagree"
+        )
+
+    observation_total = node_qc
+    if cohort_role == "quantile" and observation_total < header.min_observations:
+        raise ArtifactSemanticError(
+            f"{label}: quantile pair observation_total {observation_total} is below "
+            f"header.min_observations {header.min_observations}"
+        )
+
+    # Per-pair session-token union must be EXACTLY the contiguous zero-based set of
+    # STRING tokens {pair_id-g0 … pair_id-g(N-1)} (every assigned token touches >= 1
+    # node). Compared as exact strings, not numeric suffixes: reconstruction keeps the
+    # raw token strings as session_ids and _aggregate_metadata unions those strings, so
+    # the guard must count exactly what game_count counts. (`_validate_session_tokens`
+    # already pins each token to its canonical spelling, so no two strings share a k.)
+    token_union = {t for _, _, tokens in node_items for t in tokens}
+    expected_union = {f"{pair_id}-g{k}" for k in range(len(token_union))}
+    if token_union != expected_union:
+        raise ArtifactSemanticError(
+            f"{label}: session-token union is not the contiguous zero-based set "
+            f"{{{pair_id}-g0 … {pair_id}-g{len(token_union) - 1}}}"
+        )
+
+    overlay = EvidenceOverlay(user_id=surrogate, player_color=player_color)
+    overlay.nodes = {fen: ev for fen, ev, _ in node_items}
+    overlay.edges = {key: ev for key, ev in edge_items}
+    overlay.source_counts = Counter(source_counts)
+    overlay.excluded_sessions = excluded_sessions
+    overlay.phase_samples = phase_samples
+
+    return LoadedPair(
+        pair_id=pair_id,
+        subject_id=subject_id,
+        cohort_role=cohort_role,
+        surrogate_user_id=surrogate,
+        player_color=player_color,
+        evidence_seq=evidence_seq,
+        inputs_fingerprint=inputs_fingerprint,
+        overlay=overlay,
+    )
+
+
+def _validate_subject_structure(pairs: Sequence[LoadedPair]) -> None:
+    """Subjects are the contiguous set subject-00 … subject-(M-1) assigned by first
+    appearance; each subject's pairs are CONTIGUOUS in the array; no (subject_id,
+    player_color) combination appears twice (<= one white + one black per subject)."""
+    order: list[str] = []
+    seen: set[str] = set()
+    for lp in pairs:
+        if lp.subject_id not in seen:
+            seen.add(lp.subject_id)
+            order.append(lp.subject_id)
+    for j, sid in enumerate(order):
+        if sid != f"subject-{j:02d}":
+            raise ArtifactSemanticError(
+                f"subject_ids are not the contiguous first-appearance set subject-00 … "
+                f"(expected 'subject-{j:02d}' at first-appearance position {j}, got {sid!r})"
+            )
+    prev: str | None = None
+    finished: set[str] = set()
+    for lp in pairs:
+        if lp.subject_id != prev:
+            if lp.subject_id in finished:
+                raise ArtifactSemanticError(
+                    f"subject block for {lp.subject_id!r} is non-contiguous (interleaved) "
+                    "in the pairs array"
+                )
+            if prev is not None:
+                finished.add(prev)
+            prev = lp.subject_id
+    seen_sc: set[tuple[str, str]] = set()
+    for lp in pairs:
+        sc = (lp.subject_id, lp.player_color)
+        if sc in seen_sc:
+            raise ArtifactSemanticError(
+                f"duplicate (subject_id, player_color) {sc} — a subject holds at most "
+                "one white and one black record"
+            )
+        seen_sc.add(sc)
+
+
+def _validate_and_reconstruct(
+    payload: object, *, supported_schema_version: int = ARTIFACT_SCHEMA_VERSION
+) -> tuple[LoadedHeader, tuple[LoadedPair, ...]]:
+    obj = _require_keys(payload, _TOP_KEYS, "artifact")
+    header = _validate_header(obj["header"], supported_schema_version=supported_schema_version)
+    pairs_arr = obj["pairs"]
+    if not isinstance(pairs_arr, list) or not pairs_arr:
+        raise ArtifactSemanticError("artifact.pairs must be a non-empty array")
+    loaded = tuple(_validate_pair(pair, i, header) for i, pair in enumerate(pairs_arr))
+    if header.pair_count != len(loaded):
+        raise ArtifactSemanticError(
+            f"header.pair_count {header.pair_count} != len(pairs) {len(loaded)}"
+        )
+    _validate_subject_structure(loaded)
+    return header, loaded
+
+
+def validate_artifact_bytes(
+    artifact_bytes: bytes, *, supported_schema_version: int = ARTIFACT_SCHEMA_VERSION
+) -> tuple[LoadedHeader, tuple[LoadedPair, ...]]:
+    """Full provenance-INDEPENDENT semantic validation of raw artifact bytes: hardened
+    decode → closed-schema + type/range/cross-field/canonical-structure checks →
+    canonical-byte re-encode invariant. The reusable pure validator the capture
+    self-check re-runs AT SOURCE; ``load_frozen_artifact`` calls it inside Phase A."""
+    if not isinstance(artifact_bytes, bytes):
+        raise TypeError(
+            f"artifact_bytes must be bytes (SHA-256 + canonical re-encode anchor on the "
+            f"exact original bytes); got {type(artifact_bytes).__name__}"
+        )
+    payload = _hardened_loads(artifact_bytes, ArtifactSemanticError)
+    header, pairs = _validate_and_reconstruct(payload, supported_schema_version=supported_schema_version)
+    _canonical_reencode_check(payload, artifact_bytes)
+    return header, pairs
+
+
+def _canonicalize_floats(obj):
+    """Re-normalize every float in a decoded payload the way the freeze would (-0.0 →
+    0.0, non-finite refused). The ONLY float fields are node/edge quality_sum, so this
+    is what makes the re-encode check reject a -0.0 that survived semantic validation
+    (json.dumps alone re-emits -0.0 verbatim)."""
+    if isinstance(obj, dict):
+        return {k: _canonicalize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_canonicalize_floats(v) for v in obj]
+    if isinstance(obj, float):
+        return _canonical_float(obj)
+    return obj
+
+
+def _canonical_reencode_check(payload: object, artifact_bytes: bytes) -> None:
+    """Make byte-stability a LOAD invariant: the validated payload re-encoded with the
+    pinned canonical flags must equal artifact_bytes. Owns ONLY the byte-level
+    noncanonicality that survives a full semantic pass (insignificant whitespace,
+    unsorted object KEYS, exponent-form floats, a -0.0) — every structural/value
+    malformation is owned by semantic validation upstream and rejects THERE."""
+    if _canonical_dumps(_canonicalize_floats(payload)) != artifact_bytes:
+        raise ArtifactCanonicalBytesError(
+            "non-canonical bytes: the validated payload does not re-encode byte-for-byte "
+            "to the raw artifact bytes (whitespace, unsorted keys, exponent float, or -0.0)"
+        )
+
+
+# ---- Provenance record (committed to Git — a closed-schema privacy boundary) ----
+
+
+def _validate_provenance_record(provenance_bytes: bytes) -> _ValidatedProvenance:
+    record = _hardened_loads(provenance_bytes, ProvenanceRecordError)
+    obj = _require_keys(record, _PROVENANCE_KEYS, "provenance record", err=ProvenanceRecordError)
+    sha256 = _check_str(obj["sha256"], "provenance.sha256", err=ProvenanceRecordError)
+    if not _SHA256_RE.match(sha256):
+        raise ProvenanceRecordError(
+            f"provenance.sha256 must be 64-char lowercase hex; got {sha256!r}"
+        )
+    schema_version = _check_int(obj["schema_version"], "provenance.schema_version", err=ProvenanceRecordError)
+    if schema_version != ARTIFACT_SCHEMA_VERSION:
+        raise UnsupportedArtifactSchemaError(
+            f"unsupported schema: provenance.schema_version={schema_version}"
+        )
+    captured_model_version = _check_str(obj["captured_model_version"], "provenance.captured_model_version", err=ProvenanceRecordError)
+    if not _CAPTURED_MODEL_VERSION_RE.match(captured_model_version):
+        raise ProvenanceRecordError(
+            f"provenance.captured_model_version must match ^sm-v\\d+-\\d+$; got "
+            f"{captured_model_version!r}"
+        )
+    cohort_rules = _check_str(obj["cohort_rules"], "provenance.cohort_rules", err=ProvenanceRecordError)
+    if not _COHORT_RULES_RE.match(cohort_rules):
+        raise ProvenanceRecordError(
+            f"provenance.cohort_rules must match ^opening-cohort-rules-v\\d+$; got "
+            f"{cohort_rules!r}"
+        )
+    return _ValidatedProvenance(
+        sha256=sha256,
+        schema_version=schema_version,
+        as_of=_validate_canonical_as_of(obj["as_of"], "provenance.as_of", err=ProvenanceRecordError),
+        captured_model_version=captured_model_version,
+        graph_fingerprint=_check_nonempty_str(obj["graph_fingerprint"], "provenance.graph_fingerprint", err=ProvenanceRecordError),
+        roots_fingerprint=_check_nonempty_str(obj["roots_fingerprint"], "provenance.roots_fingerprint", err=ProvenanceRecordError),
+        evidence_derivation_fingerprint=_check_nonempty_str(
+            obj["evidence_derivation_fingerprint"], "provenance.evidence_derivation_fingerprint", err=ProvenanceRecordError
+        ),
+        pair_count=_check_int(obj["pair_count"], "provenance.pair_count", minimum=0, err=ProvenanceRecordError),
+        min_observations=_check_int(obj["min_observations"], "provenance.min_observations", minimum=0, err=ProvenanceRecordError),
+        cohort_rules=cohort_rules,
+        release_guard_opening_key=_check_nonempty_str(
+            obj["release_guard_opening_key"], "provenance.release_guard_opening_key", err=ProvenanceRecordError
+        ),
+        release_guard_child_opening_key=_check_nonempty_str(
+            obj["release_guard_child_opening_key"], "provenance.release_guard_child_opening_key", err=ProvenanceRecordError
+        ),
+    )
+
+
+# ---- Split load guard (one authoritative classification, strict phase order) ----
+
+
+def _check_integrity(header: LoadedHeader, artifact_sha256: str, record: _ValidatedProvenance) -> None:
+    if artifact_sha256 != record.sha256:
+        raise ArtifactIntegrityError(
+            f"integrity: recomputed artifact digest {artifact_sha256} != "
+            f"record.sha256 {record.sha256}"
+        )
+    mismatches = [
+        name
+        for name in (
+            "schema_version", "as_of", "captured_model_version", "graph_fingerprint",
+            "roots_fingerprint", "evidence_derivation_fingerprint", "pair_count",
+            "min_observations", "cohort_rules", "release_guard_opening_key",
+            "release_guard_child_opening_key",
+        )
+        if getattr(header, name) != getattr(record, name)
+    ]
+    if mismatches:
+        raise ArtifactIntegrityError(
+            f"integrity: header fields disagree with the provenance record: {mismatches}"
+        )
+
+
+def _check_scoring_validity(header: LoadedHeader, runtime_binding: RuntimeBinding) -> None:
+    drift = [
+        name
+        for name in (
+            "graph_fingerprint", "roots_fingerprint", "evidence_derivation_fingerprint",
+            "release_guard_opening_key", "release_guard_child_opening_key",
+        )
+        if getattr(header, name) != getattr(runtime_binding, name)
+    ]
+    if drift:
+        raise ArtifactScoringValidityError(
+            f"scoring-validity: header drifted from the current runtime: {drift} "
+            "(remedy is an authorized re-capture, never a silent re-score)"
+        )
+    policy = []
+    if header.cohort_rules != runtime_binding.cohort_rules:
+        policy.append(f"cohort_rules {header.cohort_rules!r} != {runtime_binding.cohort_rules!r}")
+    if header.min_observations != runtime_binding.min_observations:
+        policy.append(f"min_observations {header.min_observations} != {runtime_binding.min_observations}")
+    if policy:
+        raise ArtifactScoringValidityError(
+            f"scoring-validity: release-policy pin failed: {policy}"
+        )
+
+
+def assert_artifact_shape(pairs: Sequence[LoadedPair]) -> None:
+    """The release-guard artifact shape (load guard + capture self-check): EXACTLY two
+    release_guard records, colors EXACTLY {white, black}, one shared subject_id, distinct
+    pair_ids — AND at least two quantile pairs (structural hygiene for derive_cutoffs)."""
+    guards = [p for p in pairs if p.cohort_role == "release_guard"]
+    quantiles = [p for p in pairs if p.cohort_role == "quantile"]
+    if len(guards) != 2:
+        raise ReleaseGuardShapeError(
+            f"artifact-shape: expected exactly two release_guard records, got {len(guards)}"
+        )
+    colors = sorted(g.player_color for g in guards)
+    if colors != ["black", "white"]:
+        raise ReleaseGuardShapeError(
+            f"artifact-shape: release_guard colors must be exactly {{white, black}}, got {colors}"
+        )
+    subjects = {g.subject_id for g in guards}
+    if len(subjects) != 1:
+        raise ReleaseGuardShapeError(
+            f"artifact-shape: the two release_guard records must share one subject_id, "
+            f"got {sorted(subjects)}"
+        )
+    if guards[0].pair_id == guards[1].pair_id:
+        raise ReleaseGuardShapeError(
+            "artifact-shape: the two release_guard records must have distinct pair_ids"
+        )
+    if len(quantiles) < 2:
+        raise ReleaseGuardShapeError(
+            f"too-few-quantile-pairs: need >= 2 quantile pairs for derive_cutoffs, got "
+            f"{len(quantiles)}"
+        )
+
+
+def load_frozen_artifact(
+    artifact_bytes: bytes, provenance_bytes: bytes, runtime_binding: RuntimeBinding
+) -> LoadedCohort:
+    """The split load guard. Decodes BOTH byte strings, runs semantic validation +
+    the canonical-byte re-encode invariant (Phase A), integrity vs the injected
+    provenance record (Phase B), scoring-validity vs the runtime binding (Phase C), then
+    the artifact-shape guard. Reads NO committed file — the caller supplies both byte
+    strings and the runtime binding. Any failure fails CLOSED; never live-selects."""
+    if not isinstance(artifact_bytes, bytes):
+        raise TypeError(
+            f"artifact_bytes must be bytes, not {type(artifact_bytes).__name__} — SHA-256 "
+            "integrity and the canonical-byte re-encode both anchor on the exact original bytes"
+        )
+    if not isinstance(provenance_bytes, bytes):
+        raise TypeError(
+            f"provenance_bytes must be bytes, not {type(provenance_bytes).__name__} — a "
+            "pre-decoded record has already lost duplicate object keys"
+        )
+
+    # Phase A — DECODE/SCHEMA (intrinsic, provenance-independent).
+    record = _validate_provenance_record(provenance_bytes)
+    payload = _hardened_loads(artifact_bytes, ArtifactSemanticError)
+    header, pairs = _validate_and_reconstruct(
+        payload, supported_schema_version=runtime_binding.schema_version
+    )
+    _canonical_reencode_check(payload, artifact_bytes)
+
+    # Phase B — INTEGRITY class (1) (vs the decoded provenance record).
+    artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+    _check_integrity(header, artifact_sha256, record)
+
+    # Phase C — SCORING VALIDITY class (2) (header vs the current runtime).
+    _check_scoring_validity(header, runtime_binding)
+
+    assert_artifact_shape(pairs)
+    return LoadedCohort(header=header, artifact_sha256=artifact_sha256, pairs=pairs)
+
+
+# ---- Release-guard score-shape guards (Protocol-typed; no downstream import) ----
+
+
+class ReleaseGuardScored(Protocol):
+    """Artifact-owned STRUCTURAL view (typing.Protocol) exposing EXACTLY the two members
+    the score guards read. A downstream ScoredPair (carrying .player_color + .grid)
+    satisfies it with no import and no inheritance, so this bead never depends on the
+    type it blocks."""
+
+    player_color: str
+    grid: Mapping["GridCell", PairScore]
+
+
+def _require_finite_named_score(named_score_map: Mapping[str, float], key: str, color: str, cell: "GridCell") -> None:
+    if key not in named_score_map:
+        raise ReleaseGuardShapeError(
+            f"score-shape: {color} release-guard pair missing named_score_map[{key!r}] "
+            f"for cell {cell.label!r}"
+        )
+    value = named_score_map[key]
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)):
+        raise ReleaseGuardShapeError(
+            f"score-shape: {color} release-guard named_score_map[{key!r}] is not finite "
+            f"for cell {cell.label!r}: {value!r}"
+        )
+    if not (0.0 <= float(value) <= 100.0):
+        raise ReleaseGuardShapeError(
+            f"score-shape: {color} release-guard named_score_map[{key!r}] out of [0, 100] "
+            f"for cell {cell.label!r}: {value}"
+        )
+
+
+def assert_release_guard_score_shape(
+    guard_pairs: Sequence[ReleaseGuardScored],
+    required_cells: Sequence["GridCell"],
+    runtime_binding: RuntimeBinding,
+) -> None:
+    """For EVERY required cell, each release-guard scored pair's named_score_map contains
+    RELEASE_GUARD_OPENING_KEY with a finite float in [0, 100]; the BLACK pair's map
+    additionally contains RELEASE_GUARD_CHILD_OPENING_KEY (the Caro is Black's defense).
+    Raises before any gate runs. Consumed by select_candidate binding check 3 and the
+    capture self-check (both pass their scored pairs directly)."""
+    opening_key = runtime_binding.release_guard_opening_key
+    child_key = runtime_binding.release_guard_child_opening_key
+    for gp in guard_pairs:
+        for cell in required_cells:
+            named_score_map = gp.grid[cell].named_score_map
+            _require_finite_named_score(named_score_map, opening_key, gp.player_color, cell)
+            if gp.player_color == "black":
+                _require_finite_named_score(named_score_map, child_key, gp.player_color, cell)
+
+
+def assert_min_quantile_scores_per_cell(
+    quantile_pairs: Sequence[ReleaseGuardScored], required_cells: Sequence["GridCell"]
+) -> None:
+    """The SUFFICIENT half of the derive_cutoffs precondition (post-scoring): for EVERY
+    required cell the pooled quantile distribution — the CONCATENATION of each quantile
+    pair's named_scores — has len >= 2, raising a distinct per-cell diagnostic BEFORE
+    derive_cutoffs (which raises ValueError on < 2). The load-time pair count is
+    necessary but NOT sufficient: a quantile pair the observation threshold admits can
+    still pool ZERO named scores for a cell (off-book-only evidence)."""
+    for cell in required_cells:
+        pooled = [s for qp in quantile_pairs for s in qp.grid[cell].named_scores]
+        if len(pooled) < 2:
+            raise ReleaseGuardShapeError(
+                f"too-few-pooled-quantile-scores for cell {cell.label!r}: pooled "
+                f"quantile named_scores number {len(pooled)} (< 2 required by derive_cutoffs)"
+            )
 
 
 # ---------------------------------------------------------------------------
