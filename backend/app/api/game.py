@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.accuracy import expected_total_moves_from_pgn
+from app.accuracy import expected_total_moves_from_pgn, recompute_session_accuracy
 from app.db import get_db
 from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
@@ -726,9 +726,14 @@ def end_game(
     session.pgn = request.pgn
     effective_is_rated = session.is_rated if session.session_mode == DRILL_SESSION_MODE else request.is_rated
     session.is_rated = effective_is_rated
-    # Seam (g-accuracy-hooks): cached-accuracy recompute belongs HERE — after the
-    # terminal mutation above and before the users lock below — so its dirty
-    # accuracy assignment drains in the same pre-cursor flush().
+    # Cached-accuracy recompute (g-accuracy-hooks) runs HERE — after the terminal
+    # mutation above and before the users lock below — so its dirty accuracy
+    # assignment drains in the same pre-cursor flush() as the terminal/rating
+    # writes, and precedes the users lock to shorten the rating serialization
+    # window. It reads committed moves plus the dirty in-memory status/PGN and
+    # does not depend on ended_at/rating state; the population guard makes it a
+    # no-op for ended failed/abandoned drills (which never reach this handler).
+    recompute_session_accuracy(db, session)
     # Compute rating change for rated results
     rating_change = None
     if effective_is_rated and request.result.value in RESULT_SCORES:

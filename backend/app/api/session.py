@@ -24,7 +24,7 @@ from app.analysis_profiles import (
     stamp_profile_full,
 )
 from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
-from app.centipawn_loss import centipawn_loss, centipawn_loss_expr
+from app.centipawn_loss import centipawn_loss, centipawn_loss_expr, clamp_delta_nonneg
 from app.evidence_contracts import (
     RESOLVER_COMPLETE_V2,
     contract_satisfied,
@@ -35,6 +35,7 @@ from app.accuracy import (
     AccuracyMove,
     compute_game_accuracy,
     expected_total_moves_from_pgn,
+    recompute_session_accuracy,
 )
 from app.fen import active_color, fen_hash, normalize_fen
 from app.graph_write_lock import acquire_graph_write_lock
@@ -812,7 +813,12 @@ def _upsert_analysis_cache(
         # Mate count flips perspective by sign-negation, same as cp.
         played_eval_mate = move.eval_mate * sign if move.eval_mate is not None else None
         best_eval = move.best_move_eval_cp * sign if move.best_move_eval_cp is not None else None
-        eval_delta = centipawn_loss(move.eval_delta)
+        # RAW-evidence clamp (floor at 0, NO upper cap): analysis_cache.eval_delta
+        # must remain the exact contract value (may be mate pseudo-cp ~10000). It
+        # deliberately does NOT inherit the centipawn_loss decisive-mistake cap —
+        # /lookup returns this raw, and capping here would silently violate the
+        # raw-evidence invariant (g-no51). session_moves gets the capped write below.
+        eval_delta = clamp_delta_nonneg(move.eval_delta)
 
         row = {
             "fen_before": move.fen_before,
@@ -1192,6 +1198,12 @@ def upsert_session_moves(
                 else:
                     db.add(SessionMove(**value))
 
+            # Flush the move add/mutates so recompute's scoped SELECT sees them
+            # (backend sessions disable autoflush, so this flush is load-bearing).
+            db.flush()
+            recompute_session_accuracy(db, game_session)
+            # Drain the dirty accuracy assignment before the cursor bump so the
+            # cache write lands ahead of the transaction's final statement.
             db.flush()
             if bump_for_evidence:
                 bump_evidence_seq(db, user.user_id, game_session.player_color)
@@ -1258,7 +1270,12 @@ def upsert_session_moves(
         user_id=user.user_id,
         move_count=len(values),
     ):
+        # The core INSERT ... ON CONFLICT is emitted to the transaction here, so
+        # recompute's scoped SELECT already sees the upserted moves without a
+        # prior flush. recompute then dirties the accuracy columns; the flush
+        # below drains them ahead of the conditional cursor bump.
         db.execute(statement)
+        recompute_session_accuracy(db, game_session)
         db.flush()
         if bump_for_evidence:
             bump_evidence_seq(db, user.user_id, game_session.player_color)

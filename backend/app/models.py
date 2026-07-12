@@ -235,12 +235,15 @@ class GameSession(Base):
     # the delta; "{}" means "captured, user had no scored openings yet" (every
     # crossed opening reads as new). See app/opening_score_delta.py.
     opening_score_baseline: Mapped[str | None] = mapped_column(Text)
-    # Cached session accuracy (Release A schema; writers land in Release B). An
-    # integer 0..100 or NULL for sessions not yet scored, guarded by the named
-    # range CHECK ck_game_sessions_player_accuracy. player_accuracy_algo_version
-    # records which accuracy algorithm produced the cached value so a future
-    # algo bump can invalidate/recompute selectively. Both stay NULL until the
-    # Release B write hooks populate them; nothing reads them yet.
+    # Cached session accuracy. An integer 0..100 or NULL for sessions not yet
+    # scored, guarded by the named range CHECK ck_game_sessions_player_accuracy.
+    # player_accuracy_algo_version records which accuracy algorithm produced the
+    # cached value so a future algo bump can invalidate/recompute selectively.
+    # Release A's serving write hooks (g-accuracy-hooks) populate both on game
+    # end and post-end move uploads for ended, VISIBLE sessions (normal games and
+    # converted drills); active sessions and ended failed/abandoned drills stay
+    # NULL. Nothing READS these yet — stats/history keep computing accuracy live
+    # until the Release B read switch.
     player_accuracy: Mapped[int | None] = mapped_column(Integer)
     player_accuracy_algo_version: Mapped[int | None] = mapped_column(SmallInteger)
 
