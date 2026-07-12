@@ -457,7 +457,15 @@ pg_required = pytest.mark.skipif(
 @pytest.fixture
 def pg_db():
     url = _normalize_postgres_scheme(_pg_url())
-    engine = create_engine(url)
+    # Pin READ COMMITTED explicitly (it is the Postgres default, so this is a
+    # no-op for the existing tests) so the coordinated multi-connection TOCTOU
+    # tests below have a load-bearing, non-drifting isolation contract: the
+    # writer's post-barrier FOR UPDATE must observe the helper's *committed*
+    # delete/recreate, which REPEATABLE READ / SERIALIZABLE would not permit.
+    # The engine binds both the writer's internal sessions and the helper
+    # connections, so both are pinned; the seams additionally assert
+    # ``SHOW transaction_isolation`` so a pool/env default change fails loudly.
+    engine = create_engine(url, isolation_level="READ COMMITTED")
     try:
         conn = engine.connect()
     except Exception as exc:  # noqa: BLE001
@@ -565,23 +573,41 @@ def test_pg_statement_count_overwrite_no_per_row_roundtrip(pg_db):
     assert counts["UPDATE"] <= len(keys), counts    # bounded by changed rows
 
 
-def _run_concurrent_batches(Factory, batches, *, timeout=30.0):
-    """Run one worker per batch, all released into write_analysis_cache_rows at the
-    same instant via a Barrier.
+def _run_concurrent_batches(Factory, batches, monkeypatch, *, timeout=30.0):
+    """Run one worker per batch, all forced INSIDE the INSERT ... ON CONFLICT at the
+    same instant via a barrier seamed immediately before the insert execute.
 
-    Without the barrier a fast local PG can fully serialize one worker's whole
-    write before another thread reaches the insert path, so the deadlock-ordering
-    property under real overlap would never be exercised. The barrier forces every
-    worker to hit the INSERT ... ON CONFLICT concurrently. Joins are bounded so a
-    genuine deadlock/hang surfaces as a failure (a hung thread, or a PG
-    deadlock-detector abort captured in ``errors``) rather than blocking forever.
+    A barrier at the worker *entry* (before ``write_analysis_cache_rows``) let a
+    fast local PG fully serialize one worker's whole write before another thread
+    reached the insert path, so real overlap was never guaranteed. Seaming the
+    barrier into ``_insert_missing`` instead makes every worker block just before
+    its INSERT and release together, so they are genuinely concurrent inside the
+    ``INSERT ... ON CONFLICT``. This asserts the correct FINAL STATE under forced
+    overlap; it is NOT a proof of deadlock-freedom — key ordering only lowers
+    deadlock *probability*, and any transient 40P01/40001 that still occurs is
+    retried by ``_run_batch_with_retry`` (which is left ENABLED here). Joins are
+    bounded so a genuine hang surfaces as a failed assert rather than blocking CI.
     """
+    import app.analysis_cache_repo as repo
+
     errors = []
     barrier = threading.Barrier(len(batches))
+    real_insert = repo._insert_missing
+    _local = threading.local()
+
+    def barriered_insert(session, rows, *, insert):
+        # Gate only the FIRST insert per worker (the deleter-free batches here run
+        # exactly one _insert_missing, but a recovery insert must never re-wait a
+        # barrier already sized to one wait per worker).
+        if not getattr(_local, "passed", False):
+            _local.passed = True
+            barrier.wait(timeout=timeout)  # all workers enter the INSERT together
+        return real_insert(session, rows, insert=insert)
+
+    monkeypatch.setattr(repo, "_insert_missing", barriered_insert)
 
     def worker(batch):
         try:
-            barrier.wait(timeout=timeout)  # release all workers together
             s = Factory()
             try:
                 write_analysis_cache_rows(s, batch)
@@ -603,15 +629,16 @@ def _run_concurrent_batches(Factory, batches, *, timeout=30.0):
 
 
 @pg_required
-def test_pg_concurrent_overlapping_batches_single_row(pg_db, monkeypatch):
-    """Two+ concurrent overlapping multi-key batches, released together: no
-    deadlock, one row per key. Validates the ORDER BY / key-sorted insert lock
-    ordering under genuine contention at batch scale."""
-    import app.analysis_cache_repo as repo
-    # These batches are deleter-free, so the invariant must give ZERO deadlocks.
-    # Disable the retry so a regression that breaks it surfaces as an error here
-    # instead of being silently absorbed by _run_postgresql.
-    monkeypatch.setattr(repo, "_PG_MAX_RETRIES", 0)
+def test_pg_concurrent_overlapping_batches_correct_final_state(pg_db, monkeypatch):
+    """Contention/correctness smoke test: several concurrent overlapping multi-key
+    batches, forced together inside the INSERT ... ON CONFLICT, converge to the
+    correct FINAL STATE — one row per key, no *unretried* exception.
+
+    The retry is left ENABLED (default ``_PG_MAX_RETRIES``): under g-dckw's single
+    contract a deadlock is a retryable transient failure absorbed by
+    ``_run_batch_with_retry``, and key ordering is only a deadlock-*probability*
+    heuristic, not a proof of deadlock-freedom. So this asserts the observable
+    final state under forced overlap, NOT that zero deadlocks occurred."""
     _, Factory = pg_db
     keys = [f"cpos-{i}" for i in range(20)]
     batches = [
@@ -619,24 +646,26 @@ def test_pg_concurrent_overlapping_batches_single_row(pg_db, monkeypatch):
         for val in (10, 20, 30, 40)
     ]
 
-    errors = _run_concurrent_batches(Factory, batches)
+    errors = _run_concurrent_batches(Factory, batches, monkeypatch)
 
-    assert not errors
+    assert not errors  # any 40P01/40001 is retried; only an UNretried error lands here
     s2 = Factory()
-    assert s2.query(AnalysisCache).count() == len(keys)
+    stored = s2.query(AnalysisCache).all()
+    assert {r.fen_before for r in stored} == set(keys)  # every key present, exactly one
+    assert len(stored) == len(keys)
     s2.close()
 
 
 @pg_required
-def test_pg_concurrent_mixed_signature_batches_no_deadlock(pg_db, monkeypatch):
-    """Concurrent overlapping batches, released together, carrying DIFFERENT per-key
-    present-column signatures (so the insert pass splits into multiple statements
-    laid out differently per thread). Because insertion still proceeds in global
-    key order, no speculative-lock deadlock: assert no error and one row per key."""
-    import app.analysis_cache_repo as repo
-    # Deleter-free: the invariant must yield zero deadlocks. Disable the retry so
-    # a broken invariant surfaces as an error rather than being retried away.
-    monkeypatch.setattr(repo, "_PG_MAX_RETRIES", 0)
+def test_pg_concurrent_mixed_signature_batches_correct_final_state(pg_db, monkeypatch):
+    """Contention/correctness smoke test with DIFFERENT per-key present-column
+    signatures per thread (so the insert pass splits into multiple statements laid
+    out differently per thread), forced together inside the INSERT ... ON CONFLICT.
+
+    Insertion still proceeds in global key order, which lowers deadlock probability
+    but does not guarantee deadlock-freedom; the retry is left ENABLED so any
+    transient 40P01/40001 is absorbed by ``_run_batch_with_retry``. Asserts the
+    correct final state (one row per key), NOT that no deadlock occurred."""
     _, Factory = pg_db
     keys = [f"mpos-{i}" for i in range(20)]
 
@@ -651,12 +680,292 @@ def test_pg_concurrent_mixed_signature_batches_no_deadlock(pg_db, monkeypatch):
 
     batches = [batch(sw) for sw in (False, True, False, True)]
 
-    errors = _run_concurrent_batches(Factory, batches)
+    errors = _run_concurrent_batches(Factory, batches, monkeypatch)
 
-    assert not errors
+    assert not errors  # any 40P01/40001 is retried; only an UNretried error lands here
     s2 = Factory()
-    assert s2.query(AnalysisCache).count() == len(keys)
+    stored = s2.query(AnalysisCache).all()
+    assert {r.fen_before for r in stored} == set(keys)  # every key present, exactly one
+    assert len(stored) == len(keys)
     s2.close()
+
+
+# ---------------------------------------------------------------------------
+# g-dckw.1: coordinated two-connection TOCTOU / rollback tests on real Postgres.
+#
+# These drive the vanish/recreate races in _run_batch against GENUINE PG
+# transaction visibility — a real FOR UPDATE, a genuinely separate committed
+# deleter/recreator, the real ON CONFLICT DO NOTHING, and the real transient-error
+# rollback/retry path — coverage the SQLite control-flow tests above (which
+# monkeypatch _lock_existing to FAKE the vanish inline and return a fabricated {})
+# cannot give. Every seam is TIMING ONLY: it controls WHEN the writer's real DB
+# call runs, while the delete/recreate is a real committed transaction on a
+# separate connection observed under READ COMMITTED. All waits are bounded so a
+# genuine hang fails the test instead of blocking CI. Isolation is pinned to READ
+# COMMITTED (see the pg_db fixture) and each seam asserts it, because the writer's
+# post-barrier FOR UPDATE must observe the helper's committed writes.
+# ---------------------------------------------------------------------------
+
+_TOCTOU_WAIT = 15.0  # bounded wait so a genuine lock/hang fails loudly, never hangs CI
+
+
+class _Writer:
+    """Run write_analysis_cache_rows on its own daemon thread; capture result/error.
+
+    The helper opens its OWN engine-bound session internally, so this only needs a
+    clean caller session. The bounded join turns a hang into a failed assert.
+    """
+
+    def __init__(self, Factory, batch):
+        self._Factory = Factory
+        self._batch = batch
+        self.result = None
+        self.error = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        s = self._Factory()
+        try:
+            self.result = write_analysis_cache_rows(s, self._batch)
+        except Exception as e:  # noqa: BLE001
+            self.error = e
+        finally:
+            s.close()
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def join(self):
+        self._thread.join(timeout=_TOCTOU_WAIT)
+        assert not self._thread.is_alive(), "writer thread hung (possible lock/deadlock)"
+
+
+def _assert_read_committed(session):
+    """The writer's post-barrier FOR UPDATE only observes the helper's committed
+    delete/recreate under READ COMMITTED; fail loudly if a pool/env default drifts."""
+    iso = session.execute(text("SHOW transaction_isolation")).scalar()
+    assert iso == "read committed", f"writer isolation drifted to {iso!r}"
+
+
+def _delete_committed(Factory, fen, uci="e2e4"):
+    """Delete one key on a genuinely separate committed connection (helper H)."""
+    h = Factory()
+    try:
+        h.query(AnalysisCache).filter(
+            AnalysisCache.fen_before == fen, AnalysisCache.move_uci == uci
+        ).delete()
+        h.commit()
+    finally:
+        h.close()
+
+
+@pg_required
+def test_pg_toctou_delete_then_recovery_insert_new_key(pg_db, monkeypatch):
+    """g-dckw.1 scenario (a): conflict insert -> a concurrent COMMITTED delete on a
+    separate connection -> the writer's real FOR UPDATE sees the row gone -> the
+    recovery ON CONFLICT DO NOTHING insert (no competitor) lands the incoming row
+    -> NEW_KEY, in a single lock pass, on genuine PG visibility."""
+    import app.analysis_cache_repo as repo
+    from app.analysis_cache_policy import Reason
+
+    _, Factory = pg_db
+    K = "toctou-a"
+    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": K})  # prior committed row
+
+    real_lock = repo._lock_existing
+    writer_at_lock = threading.Event()
+    helper_committed = threading.Event()
+    calls = {"lock": 0, "barrier": 0}
+
+    def seamed_lock(session, conflicted, *, for_update):
+        calls["lock"] += 1
+        if calls["lock"] == 1:  # timing-only barrier on the FIRST lock pass
+            calls["barrier"] += 1
+            _assert_read_committed(session)
+            writer_at_lock.set()
+            assert helper_committed.wait(timeout=_TOCTOU_WAIT), "helper did not commit in time"
+        return real_lock(session, conflicted, for_update=for_update)
+
+    monkeypatch.setattr(repo, "_lock_existing", seamed_lock)
+
+    # W's incoming value (777) differs from the seed (20), so a stored 777 proves
+    # the recovery insert wrote W's incoming row rather than a leftover of the seed.
+    writer = _Writer(Factory, [{**_browser_row(played_eval=777), "fen_before": K}]).start()
+
+    assert writer_at_lock.wait(timeout=_TOCTOU_WAIT), "writer never reached the lock seam"
+    _delete_committed(Factory, K)   # H: real committed delete, now visible to W
+    helper_committed.set()
+    writer.join()
+
+    assert writer.error is None, writer.error
+    assert calls["lock"] == 1      # recovery inserted with no competitor: one lock pass
+    assert calls["barrier"] == 1   # the timing barrier fired exactly once
+    assert writer.result == [((K, "e2e4"), Reason.NEW_KEY)]
+    s2 = Factory()
+    row = s2.query(AnalysisCache).filter(AnalysisCache.fen_before == K).one()  # exactly one
+    assert row.played_eval == 777  # W's incoming values, not the deleted seed's
+    s2.close()
+
+
+@pg_required
+def test_pg_toctou_recreate_before_recovery_keeps_competitor(pg_db, monkeypatch):
+    """g-dckw.1 scenario (b): the writer observes the key vanish (committed delete on
+    H), THEN a competitor RE-CREATES it as the canonical row (a second committed
+    phase on H) before the recovery insert. The recovery ON CONFLICT DO NOTHING
+    loses, so the key is re-locked and re-decided against H's live canonical row ->
+    a deterministic NON_AUTHORITATIVE_KEEP, with H's row never clobbered. This is the
+    real-PG analogue of test_vanished_row_reresolved_against_concurrent_recreate and
+    the only schedule that actually drives the recovery _insert_missing at :509 on
+    genuine PG visibility (a bare session.add would instead raise IntegrityError and
+    abort the whole batch)."""
+    import app.analysis_cache_repo as repo
+    from app.analysis_cache_policy import Reason
+
+    _, Factory = pg_db
+    K = "toctou-b"
+    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": K})  # prior committed row
+
+    real_lock = repo._lock_existing
+    real_insert = repo._insert_missing
+    writer_at_lock = threading.Event()
+    helper_deleted = threading.Event()
+    writer_at_recovery = threading.Event()
+    helper_recreated = threading.Event()
+    calls = {"lock": 0, "insert": 0, "barrier_lock": 0, "barrier_recovery": 0}
+
+    def seamed_lock(session, conflicted, *, for_update):
+        calls["lock"] += 1
+        if calls["lock"] == 1:  # seam 1: timing barrier on the FIRST lock pass
+            calls["barrier_lock"] += 1
+            _assert_read_committed(session)
+            writer_at_lock.set()
+            assert helper_deleted.wait(timeout=_TOCTOU_WAIT), "helper did not delete in time"
+        return real_lock(session, conflicted, for_update=for_update)
+
+    def seamed_insert(session, rows, *, insert):
+        calls["insert"] += 1
+        if calls["insert"] == 2:  # seam 2: timing barrier on the recovery insert (2nd call)
+            calls["barrier_recovery"] += 1
+            writer_at_recovery.set()
+            assert helper_recreated.wait(timeout=_TOCTOU_WAIT), "helper did not recreate in time"
+        return real_insert(session, rows, insert=insert)
+
+    monkeypatch.setattr(repo, "_lock_existing", seamed_lock)
+    monkeypatch.setattr(repo, "_insert_missing", seamed_insert)
+
+    # W's incoming is NON-authoritative (browser); re-decided against H's
+    # authoritative recreated row this is a deterministic NON_AUTHORITATIVE_KEEP.
+    writer = _Writer(Factory, [{**_browser_row(played_eval=999), "fen_before": K}]).start()
+
+    # Phase 1: writer must observe absence -> H commits the DELETE alone.
+    assert writer_at_lock.wait(timeout=_TOCTOU_WAIT), "writer never reached the lock seam"
+    _delete_committed(Factory, K)
+    helper_deleted.set()
+
+    # Phase 2: competitor RE-CREATES K as canonical immediately before the recovery
+    # insert, so the recovery ON CONFLICT DO NOTHING loses.
+    assert writer_at_recovery.wait(timeout=_TOCTOU_WAIT), "writer never reached the recovery seam"
+    _seed(Factory, _canonical_full(K))
+    helper_recreated.set()
+
+    writer.join()
+
+    assert writer.error is None, writer.error
+    assert calls["barrier_lock"] == 1      # seam 1 fired exactly once
+    assert calls["barrier_recovery"] == 1  # seam 2 fired exactly once
+    assert calls["lock"] == 2              # first lock (vanished) + re-lock (decide)
+    assert calls["insert"] == 2            # initial insert + recovery insert
+    assert writer.result == [((K, "e2e4"), Reason.NON_AUTHORITATIVE_KEEP)]
+    s2 = Factory()
+    row = s2.query(AnalysisCache).filter(AnalysisCache.fen_before == K).one()  # exactly one
+    assert row.analysis_profile_id == CANONICAL_PROFILE_ID  # H's canonical row kept
+    assert row.played_eval == 10                            # never clobbered by W's 999
+    s2.close()
+
+
+@pg_required
+@pytest.mark.parametrize("sqlstate", ["40P01", "40001"])
+def test_pg_transient_error_after_partial_write_rolls_back_then_retries(
+    pg_db, monkeypatch, sqlstate
+):
+    """g-dckw.1 scenario (c): attempt 1 does REAL work (a genuinely new key is
+    inserted, uncommitted) and THEN a transient 40P01/40001 is injected before the
+    commit. _run_batch_with_retry must roll the partial row back and re-run the
+    whole batch on a fresh PG transaction, landing correctly. Proves rollback-
+    AFTER-partial-work, not merely error classification: exactly one row for the new
+    key survives (attempt 2's, no leaked attempt-1 duplicate). Parametrized over
+    both classified SQLSTATEs (deadlock 40P01, serialization 40001)."""
+    import app.analysis_cache_repo as repo
+    from app.analysis_cache_policy import Reason
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(repo.time, "sleep", lambda *a, **k: None)  # no backoff delay
+
+    _, Factory = pg_db
+    K = "txn-c-existing"  # pre-existing -> conflicts on insert
+    N = "txn-c-new"       # genuinely new -> attempt 1 really INSERTs it (uncommitted)
+    _seed(Factory, {**_browser_row(played_eval=20), "fen_before": K})
+
+    real_lock = repo._lock_existing
+    calls = {"lock": 0}
+    own = {"count": None}
+    probe = {"count": None}
+
+    def seamed_lock(session, conflicted, *, for_update):
+        calls["lock"] += 1
+        if calls["lock"] == 1:
+            # The pipeline already ran the REAL _insert_missing([K, N]) before this
+            # lock, so N is inserted but UNCOMMITTED inside attempt 1's txn. The
+            # writer's OWN session must see its uncommitted N (genuine partial work
+            # to roll back), while a SELECT on a SEPARATE committed connection must
+            # NOT (rules out an unexpected autocommit). Only THEN inject the
+            # transient error, so the rollback has real partial work to undo.
+            own["count"] = (
+                session.query(AnalysisCache).filter(AnalysisCache.fen_before == N).count()
+            )
+            p = Factory()
+            try:
+                probe["count"] = (
+                    p.query(AnalysisCache).filter(AnalysisCache.fen_before == N).count()
+                )
+            finally:
+                p.close()
+            orig = Exception("deadlock detected")
+            orig.pgcode = sqlstate
+            orig.sqlstate = sqlstate
+            raise OperationalError("deadlock detected", {}, orig)
+        return real_lock(session, conflicted, for_update=for_update)
+
+    monkeypatch.setattr(repo, "_lock_existing", seamed_lock)
+
+    s = Factory()
+    results = write_analysis_cache_rows(
+        s,
+        [
+            {**_browser_row(played_eval=20), "fen_before": K},
+            {**_browser_row(played_eval=20), "fen_before": N},
+        ],
+    )
+    s.close()
+
+    # (a) exactly one retry: the seam fired on attempt 1 (raise) + attempt 2 (delegate).
+    assert calls["lock"] == 2
+    # attempt 1 GENUINELY inserted N (real partial work): its own txn saw the row,
+    # but a separate committed connection did not -> uncommitted, not autocommitted.
+    assert own["count"] == 1
+    assert probe["count"] == 0
+    # (b) the rollback wiped attempt 1's partial write: exactly one N row (attempt 2's,
+    # no leaked attempt-1 duplicate) and the expected K row survive.
+    s2 = Factory()
+    assert s2.query(AnalysisCache).filter(AnalysisCache.fen_before == N).count() == 1
+    assert s2.query(AnalysisCache).filter(AnalysisCache.fen_before == K).count() == 1
+    s2.close()
+    # (c) the final verdicts equal the no-error result exactly (key-sorted order).
+    assert results == [
+        ((K, "e2e4"), Reason.SAME_PROFILE_IDEMPOTENT),
+        ((N, "e2e4"), Reason.NEW_KEY),
+    ]
 
 
 def test_clean_session_precondition(file_db):
