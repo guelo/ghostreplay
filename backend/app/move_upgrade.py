@@ -40,8 +40,9 @@ class MoveUpgrade(BaseModel):
     eval_mate: int | None = None  # MOVER-relative
     best_move_san: str | None = None  # drives the best-move arrow
     best_move_eval_cp: int | None = None  # side-to-move-relative
-    # Side-to-move-relative LOSS, clamped >= 0. Maps 1:1 onto AnalysisMove.eval_delta;
-    # NEVER sign-flipped (it is not white-relative).
+    # Side-to-move-relative LOSS, normalized 0..1000 (display/decision CPL) by
+    # centipawn_loss. Maps 1:1 onto AnalysisMove.eval_delta; NEVER sign-flipped (it
+    # is not white-relative). The stored analysis_cache.eval_delta stays RAW.
     eval_delta: int | None = None
     # Backend-stamped from the producing profile. Drives the source-aware display
     # precedence rule (Part B.3): a non-authoritative (browser-analysis) overlay must
@@ -88,8 +89,10 @@ def build_move_upgrade(row: AnalysisCache, fen_before: str) -> MoveUpgrade:
     Performs the ONE white->mover perspective conversion (the cache stores
     ``played_eval``/``best_eval`` white-relative; the wire is mover-relative) and
     derives ``best_move_san`` from ``best_move_uci`` + ``fen_before`` via
-    python-chess. ``eval_delta`` is a side-to-move-relative loss clamped >= 0 and
-    passes through UNCHANGED — it is NOT white-relative and must never be sign-flipped.
+    python-chess. ``eval_delta`` is the side-to-move-relative loss NORMALIZED to the
+    0..1000 display/decision CPL by :func:`centipawn_loss` (the stored
+    ``analysis_cache.eval_delta`` stays RAW; the cap applies only at this
+    projection) — it is NOT white-relative and must never be sign-flipped.
     """
     is_white = active_color(fen_before) == "white"
     profile = get_profile(row.analysis_profile_id)

@@ -40,6 +40,7 @@ from app.analysis_profiles import (
     get_profile,
 )
 from app.analysis_trust import cache_row_as_move_dict, move_trust_flags
+from app.centipawn_loss import centipawn_loss
 from app.fen import normalize_fen
 from app.game_phase import (
     ContinuityError,
@@ -80,7 +81,12 @@ PASS_THRESHOLD = 50  # eval_delta < this → pass (legacy binary signal, SRS/deb
 # registry fingerprint) instead of the raw fingerprint, so the O(1) registry
 # comparison covers evidence-derivation semantics; this bump also forces every
 # pre-freshness-signal batch to rebuild and stamp the new signal columns.
-OPENING_EVIDENCE_INPUTS_VERSION = "raw-v5"
+# raw-v6 (g-no51): the continuous opening-quality read now normalizes the
+# session_moves eval_delta through ``centipawn_loss`` (0..1000 cap) before feeding
+# ``move_quality``, so a historical raw >1000 row yields a different quality_sum;
+# the raw-row digest is blind to this derivation-code change, so the version bump
+# is required to reject pre-bump batches as stale and recompute under the cap.
+OPENING_EVIDENCE_INPUTS_VERSION = "raw-v6"
 
 # Cheap-freshness-signal contract version (g-jact). Bump whenever the CHEAP
 # signal's semantics change — the shared-scope definition captured on a batch,
@@ -672,7 +678,11 @@ def _build_move_rows(
             quality, source = move_quality(
                 eval_cp=cm.eval_cp,
                 best_move_eval_cp=cm.best_move_eval_cp,
-                eval_delta=cm.eval_delta,
+                # Normalize the continuous-quality eval_delta read through the shared
+                # cap (g-no51): historical raw >1000 rows produce a different
+                # quality_sum than the capped value. The _MoveRow below keeps the raw
+                # eval_delta (its binary PASS_THRESHOLD read is cap-independent).
+                eval_delta=centipawn_loss(cm.eval_delta),
             )
             mr = _MoveRow(
                 session_id=cm.session_id,
@@ -786,7 +796,9 @@ def _apply_cache_fallbacks(
         quality, source = move_quality(
             eval_cp=None,
             best_move_eval_cp=None,
-            eval_delta=mr.eval_delta,
+            # Normalized for defense-in-depth (g-no51); this branch's eval_delta arg
+            # is effectively dead — cache_mover_evals takes precedence in move_quality.
+            eval_delta=centipawn_loss(mr.eval_delta),
             cache_mover_evals=mover_evals,
         )
         mr.quality = quality

@@ -31,7 +31,11 @@ from app.srs_math import (
     compute_p_reach,
     expected_opportunities,
 )
-from app.srs_opportunity import load_opportunity_counters, load_review_counters
+from app.srs_opportunity import (
+    load_opportunity_counters,
+    load_review_counters,
+    practice_priority_score,
+)
 
 
 def _session(
@@ -1108,3 +1112,40 @@ def test_find_ghost_move_prefers_immediate_review_over_deeper_route(db_session):
 
     assert move_san == "review"
     assert target_blunder_id == immediate.id
+
+
+def test_practice_priority_severity_saturates_and_floors_negatives():
+    """g-no51: severity flows through the shared centipawn_loss cap.
+
+    ``practice_priority_score`` computes severity as
+    ``log1p(centipawn_loss(eval_loss_cp) / SEVERITY_NORMALIZER_CP)`` where
+    ``centipawn_loss`` floors negatives to 0 and caps at 1000cp. So a 10000cp
+    (mate pseudo-cp) loss and a 1000cp loss share one severity — mate magnitude
+    cannot push practice priority above the decisive-mistake ceiling — while a
+    negative legacy eval_loss floors to severity 0 (same as 0cp), strictly below
+    the 1000cp case. All non-severity factors are held equal (counters=None ⇒
+    urgency from created_at, reach_weight=1.0), so priority tracks severity alone.
+    """
+    now = datetime.now(timezone.utc)
+    common = dict(
+        counters=None,
+        pass_streak=0,
+        last_reviewed_at=None,
+        created_at=now - timedelta(days=10),
+        now=now,
+    )
+
+    score_mate = practice_priority_score(eval_loss_cp=10000, **common)
+    score_decisive = practice_priority_score(eval_loss_cp=1000, **common)
+    score_negative = practice_priority_score(eval_loss_cp=-30, **common)
+    score_zero = practice_priority_score(eval_loss_cp=0, **common)
+
+    # >=1000cp losses saturate at one severity: mate magnitude does not raise priority.
+    assert score_mate == score_decisive
+    # A positive-severity case must actually score above the floor (guards against
+    # urgency==0 making every branch trivially equal).
+    assert score_decisive > 0.0
+    # Negative legacy eval_loss floors to severity 0, identical to a 0cp loss...
+    assert score_negative == score_zero
+    # ...and strictly below the capped-severity 1000cp case.
+    assert score_negative < score_decisive

@@ -1016,6 +1016,106 @@ def test_find_ghost_move_prefers_higher_severity_when_priority_equal(db_session)
     assert target_blunder_id is not None
 
 
+def test_find_ghost_move_mate_magnitude_does_not_outrank_decisive(db_session):
+    """g-no51: eval_loss_cp is stored RAW (a mate pseudo-cp is ~10000). Ghost
+    selection must normalize severity through the shared decisive-mistake ceiling,
+    so a mate blunder cannot out-rank a normal >=1000cp decisive blunder. With
+    severity equal, the pick is decided by the deterministic later sort keys (here
+    the HIGHER blunder_id), NOT by mate magnitude.
+    """
+    from app.api.game import (
+        GhostMoveCandidate,
+        _candidate_sort_key,
+        find_ghost_move,
+    )
+    from app.centipawn_loss import centipawn_loss
+    from app.fen import fen_hash
+    from app.models import Blunder, Move, Position
+
+    user_id = 123
+    now = datetime.now(timezone.utc)
+    # pass_streak=0, interval 4h, reviewed 5h ago -> priority 1.25 (due) for both.
+    reviewed_at = now - timedelta(hours=5)
+
+    fen_start = "8/8/8/8/K6k/8/8/8 b - - 0 1"       # opponent (black) to move
+    fen_mate = "8/8/8/8/1K5k/8/8/8 w - - 0 2"       # reached by mMate
+    fen_decisive = "8/8/8/8/2K4k/8/8/8 w - - 0 2"   # reached by mDecisive
+
+    pos_start = Position(user_id=user_id, fen_hash=fen_hash(fen_start), fen_raw=fen_start, active_color="black")
+    pos_mate = Position(user_id=user_id, fen_hash=fen_hash(fen_mate), fen_raw=fen_mate, active_color="white")
+    pos_decisive = Position(user_id=user_id, fen_hash=fen_hash(fen_decisive), fen_raw=fen_decisive, active_color="white")
+    db_session.add_all([pos_start, pos_mate, pos_decisive])
+    db_session.flush()
+
+    db_session.add_all([
+        Move(from_position_id=pos_start.id, move_san="mMate", to_position_id=pos_mate.id),
+        Move(from_position_id=pos_start.id, move_san="mDecisive", to_position_id=pos_decisive.id),
+    ])
+
+    # Mate blunder added FIRST -> lower blunder_id; the raw-1000 decisive blunder
+    # added SECOND -> HIGHER blunder_id, so it must win the deterministic
+    # fall-through once severity is equal.
+    mate_blunder = Blunder(
+        user_id=user_id, position_id=pos_mate.id, bad_move_san="bad",
+        best_move_san="good", eval_loss_cp=10000, pass_streak=0,
+        last_reviewed_at=reviewed_at,
+    )
+    db_session.add(mate_blunder)
+    db_session.flush()
+    decisive_blunder = Blunder(
+        user_id=user_id, position_id=pos_decisive.id, bad_move_san="bad",
+        best_move_san="good", eval_loss_cp=1000, pass_streak=0,
+        last_reviewed_at=reviewed_at,
+    )
+    db_session.add(decisive_blunder)
+    db_session.commit()
+
+    # eval_loss_cp is stored RAW (the ceiling is a decision-time normalizer, not a
+    # write-time clamp), and the raw-1000 blunder carries the higher id.
+    assert mate_blunder.eval_loss_cp == 10000
+    assert decisive_blunder.eval_loss_cp == 1000
+    assert decisive_blunder.id > mate_blunder.id
+
+    # Deterministic decision path: build candidates exactly as find_ghost_move
+    # scores them from the stored RAW eval_loss_cp. Mate magnitude neither raises
+    # the score nor the eval sort element above the decisive blunder, so the
+    # higher-id decisive blunder sorts first.
+    def _cand(blunder, first_move):
+        return GhostMoveCandidate(
+            first_move=first_move, blunder_id=blunder.id, depth=1,
+            eval_loss_cp=blunder.eval_loss_cp, pass_streak=0,
+            last_reviewed_at=reviewed_at, created_at=None,
+        )
+
+    c_mate = _cand(mate_blunder, "mMate")
+    c_decisive = _cand(decisive_blunder, "mDecisive")
+    assert c_mate.score(now) == c_decisive.score(now)
+
+    key_mate = _candidate_sort_key((c_mate, c_mate.score(now)))
+    key_decisive = _candidate_sort_key((c_decisive, c_decisive.score(now)))
+    assert key_mate[2] == key_decisive[2] == -centipawn_loss(1000)  # both -> -1000
+    ordered = sorted(
+        [(c_mate, c_mate.score(now)), (c_decisive, c_decisive.score(now))],
+        key=_candidate_sort_key,
+    )
+    assert ordered[0][0].blunder_id == decisive_blunder.id
+
+    # End-to-end smoke through the real selector: with equal severity the mate
+    # blunder does NOT monopolize selection — the decisive (raw-1000) blunder is
+    # reachable and gets picked across seeds.
+    picks = set()
+    for seed in range(20):
+        move_san, target_blunder_id, _, _ = find_ghost_move(
+            db=db_session, user_id=user_id, fen=fen_start,
+            player_color="white", _rng_seed=seed,
+        )
+        assert move_san in {"mMate", "mDecisive"}
+        assert target_blunder_id in {mate_blunder.id, decisive_blunder.id}
+        picks.add(move_san)
+
+    assert "mDecisive" in picks, "mate magnitude wrongly monopolized Ghost selection"
+
+
 def test_find_ghost_move_prefers_more_overdue_when_severity_equal(db_session):
     """With equal severity/distance, higher SRS priority should win."""
     from datetime import datetime, timedelta, timezone

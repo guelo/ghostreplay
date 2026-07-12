@@ -187,15 +187,17 @@ export type MoveGrade = 'pass' | 'fail' | 'unavailable'
 
 /**
  * The authoritative centipawn loss for threshold decisions: the played move's
- * delta clamped to >= 0, or `null` when the delta is missing/non-finite. Every
- * threshold comparator below derives from this single helper so drill accuracy,
- * regular-game recording, and SRS pass/fail read the same eval surface.
+ * delta floored to >= 0 and capped at `EVAL_LOSS_CAP_CP`, or `null` when the delta
+ * is missing/non-finite. Every threshold comparator below derives from this single
+ * helper so drill accuracy, regular-game recording, and SRS pass/fail read the same
+ * eval surface. Mirrors the backend `centipawn_loss` normalizer (0..1000).
  */
 export const evalLoss = (delta: number | null | undefined): number | null => {
   if (delta === null || delta === undefined || !Number.isFinite(delta)) {
     return null
   }
-  return Math.max(delta, 0)
+  // References EVAL_LOSS_CAP_CP (declared below) at call time — safe forward ref.
+  return Math.min(Math.max(delta, 0), EVAL_LOSS_CAP_CP)
 }
 
 /**
@@ -468,6 +470,18 @@ export const reconcileTrustedBest = (
 
 export const WIN_CHANCE_MULTIPLIER = -0.00368208
 export const CP_CEILING = 1000
+
+// The per-move CPL / severity decisive-mistake ceiling (g-no51): the max a single
+// move contributes to Avg CPL and the max severity a single blunder contributes to
+// practice scheduling. Mirrors the backend CENTIPAWN_LOSS_CAP_CP. This is a DISTINCT
+// product control from the win-chance CP_CEILING above; they are currently equal by
+// the shared ±1000 clip convention, but decoupling them is a future explicit product
+// decision — do NOT alias this to CP_CEILING (aliasing would silently re-couple them,
+// so a future change to the win-chance clip would move the CPL cap as an invisible
+// side effect). Their current equality is PINNED by a unit test
+// (EVAL_LOSS_CAP_CP === CP_CEILING), so an intentional divergence is a deliberate,
+// visible edit to that assertion rather than a silent drift.
+export const EVAL_LOSS_CAP_CP = 1000
 
 /**
  * Converts an engine score to a win chance between -1.0 and 1.0,

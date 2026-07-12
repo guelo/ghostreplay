@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session, aliased
 
+from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.fen import active_color, fen_hash, normalize_fen
 from app.graph_write_lock import acquire_graph_write_lock
@@ -655,7 +656,10 @@ def _build_blunder_item(
         fen=row.fen or "",
         bad_move=row.bad_move,
         best_move=row.best_move,
-        eval_loss_cp=row.eval_loss_cp,
+        # Display-only normalization (g-no51): the DB row stays RAW; the Blunder
+        # Library renders this verbatim, so a raw mate 10000 would show as -100.0
+        # pawns without the cap/floor. Matches /stats and the scheduling decisions.
+        eval_loss_cp=centipawn_loss(row.eval_loss_cp),
         opening_family=row.opening_family,
         pass_streak=row.pass_streak,
         last_reviewed_at=row.last_reviewed_at,

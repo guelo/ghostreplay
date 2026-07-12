@@ -458,6 +458,71 @@ def test_record_blunder_eval_loss_calculation(client, auth_headers, create_game_
     assert result[0] == 150
 
 
+def test_eval_loss_cp_stored_raw_uncapped_and_negative(
+    client, auth_headers, create_game_session, db_session
+):
+    """eval_loss_cp is persisted RAW at rest (g-no51): neither capped to the
+    decisive-mistake ceiling (1000) on the auto path nor floored to 0 on the
+    manual path. Normalization is a read/decision concern (centipawn_loss), so
+    we read the DB row directly rather than through any normalizing endpoint.
+    """
+    # --- Auto path: raw diff of 10000 must NOT be capped to 1000 -----------
+    auto_session = create_game_session(user_id=123, player_color="white")
+    auto_response = client.post(
+        "/api/blunder",
+        json={
+            "session_id": auto_session,
+            "pgn": "1. e4 e5 2. Qh5",
+            "fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+            "user_move": "Qh5",
+            "best_move": "Nf3",
+            # eval_before - eval_after = 50 - (-9950) = 10000 (mate pseudo-cp scale)
+            "eval_before": 50,
+            "eval_after": -9950,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert auto_response.status_code == 201
+    auto_blunder_id = auto_response.json()["blunder_id"]
+
+    # --- Manual path: eval_before < eval_after must stay a NEGATIVE raw diff -
+    # Distinct opening so this lands on a different pre-move position (blunders
+    # dedup by (user_id, position_id)) and does not collide with the auto row.
+    manual_session = create_game_session(user_id=123, player_color="white")
+    manual_response = client.post(
+        "/api/blunder/manual",
+        json={
+            "session_id": manual_session,
+            "pgn": "1. d4 d5 2. c4",
+            "fen": "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2",
+            "user_move": "c4",
+            "best_move": None,
+            # eval_before - eval_after = -100 - 50 = -150 (negative raw diff)
+            "eval_before": -100,
+            "eval_after": 50,
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert manual_response.status_code == 201
+    manual_blunder_id = manual_response.json()["blunder_id"]
+
+    # Read the at-rest values directly from the DB (bypassing any normalizer).
+    db_session.expire_all()
+    auto_stored = db_session.execute(
+        text("SELECT eval_loss_cp FROM blunders WHERE id = :id"),
+        {"id": auto_blunder_id},
+    ).fetchone()[0]
+    manual_stored = db_session.execute(
+        text("SELECT eval_loss_cp FROM blunders WHERE id = :id"),
+        {"id": manual_blunder_id},
+    ).fetchone()[0]
+
+    # RAW, uncapped: 10000 (not clipped to the 1000 decisive-mistake ceiling).
+    assert auto_stored == 10000
+    # RAW, not floored to 0: the negative diff is preserved at rest.
+    assert manual_stored == -150
+
+
 def test_record_manual_blunder_success(client, auth_headers, create_game_session):
     """Manual endpoint records a selected move into ghost library."""
     session_id = create_game_session(user_id=123, player_color="white")

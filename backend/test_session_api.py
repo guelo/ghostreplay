@@ -1259,3 +1259,170 @@ def test_analysis_cache_write_logs_true_count_and_error_status_on_writer_failure
     )
     assert "cache_row_count=1" in line  # true filtered count, NOT the seed 0
     assert "status=error" in line  # never flipped to ok -> excluded from the scrape
+
+
+# --- g-no51 RAW evidence vs NORMALIZED display/decision CPL --------------------
+
+
+def test_browser_cache_upload_persists_raw_delta_uncapped_but_capped_everywhere_else(
+    client, auth_headers, create_game_session, db_session
+):
+    """g-no51: a browser-game upload persists RAW evidence (uncapped) into
+    analysis_cache while every display/decision read is NORMALIZED (floored at 0,
+    capped at CENTIPAWN_LOSS_CAP_CP=1000).
+
+    This direct-upload assertion is the only guard on the analysis_cache write path.
+    A browser row classifies as the minimal ``minimal-played-eval-v1`` contract,
+    which validates only that ``played_eval`` is a finite number and does NOT check
+    ``eval_delta`` equality — so an accidental cap on the raw write would satisfy
+    every contract check and slip through unnoticed, surfacing only as a silently
+    capped raw delta on ``/api/analysis/lookup``.
+
+    One white move (best +10000, played -20) yields raw ``eval_delta`` 10020. The
+    cache row keeps 10020 (``clamp_delta_nonneg``: floor 0, no upper cap); the
+    session_moves row and the session-analysis per-move echo both show 1000
+    (``centipawn_loss``: floor 0, cap 1000); and ``/lookup`` returns the RAW 10020
+    unchanged.
+    """
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+    fen_after_e4 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+
+    upload = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_before": STARTING_FEN,
+                    "fen_after": fen_after_e4,
+                    "move_uci": "e2e4",
+                    # White move: eval_cp is already white-relative -> played_eval -20.
+                    "eval_cp": -20,
+                    "best_move_eval_cp": 10000,  # -> best_eval 10000
+                    # RAW delta best - played = 10000 - (-20) = 10020 (> the 1000 cap).
+                    "eval_delta": 10020,
+                    "classification": "blunder",
+                }
+            ]
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert upload.status_code == 200
+    assert upload.json()["moves_inserted"] == 1
+
+    # session_moves: NORMALIZED write via centipawn_loss (capped at 1000).
+    stored = (
+        db_session.query(SessionMove)
+        .filter(
+            SessionMove.session_id == uuid.UUID(session_id),
+            SessionMove.move_number == 1,
+            SessionMove.color == "white",
+        )
+        .one()
+    )
+    assert stored.eval_delta == 1000
+
+    # analysis_cache: RAW evidence via clamp_delta_nonneg (floor 0, NO upper cap).
+    cached = (
+        db_session.query(AnalysisCache)
+        .filter(
+            AnalysisCache.fen_before == STARTING_FEN,
+            AnalysisCache.move_uci == "e2e4",
+        )
+        .one()
+    )
+    assert cached.eval_delta == 10020
+    # The row really is the minimal contract that skips delta-equality validation,
+    # which is exactly why the direct-upload assertion above is load-bearing.
+    assert cached.evidence_contract_id == "minimal-played-eval-v1"
+
+    # Session-analysis per-move echo: NORMALIZED via centipawn_loss (capped 1000).
+    analysis = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=user_id),
+    )
+    assert analysis.status_code == 200
+    echoed = next(m for m in analysis.json()["moves"] if m["move_san"] == "e4")
+    assert echoed["eval_delta"] == 1000
+
+    # /api/analysis/lookup: returns the RAW analysis_cache value unchanged.
+    lookup = client.post(
+        "/api/analysis/lookup",
+        json={"positions": [{"fen": STARTING_FEN, "move_uci": "e2e4"}]},
+        headers=auth_headers(user_id=user_id),
+    )
+    assert lookup.status_code == 200
+    result = lookup.json()["results"][f"{STARTING_FEN}::e2e4"]
+    assert result["eval_delta"] == 10020
+
+
+def test_session_analysis_caps_historical_uncapped_session_move_delta_at_read(
+    client, auth_headers, create_game_session, db_session
+):
+    """g-no51: a genuinely-historical session_moves row (written before write-side
+    normalization existed) can hold a raw uncapped ``eval_delta`` at rest. The read
+    paths must normalize it on the way out: the summary Avg CPL
+    (``centipawn_loss_expr``) and the per-move echo (``centipawn_loss``) both report
+    1000 for a 10000 delta, even though the value stored in the row exceeds the cap.
+    """
+    user_id = 123
+    session_id = create_game_session(user_id=user_id, player_color="white")
+
+    upload = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1,
+                    "color": "white",
+                    "move_san": "e4",
+                    "fen_after": "fen-1w",
+                    "eval_delta": 40,
+                    "classification": "mistake",
+                }
+            ]
+        },
+        headers=auth_headers(user_id=user_id),
+    )
+    assert upload.status_code == 200
+    # In-range value is written through unchanged by write-side normalization.
+    stored = (
+        db_session.query(SessionMove)
+        .filter(
+            SessionMove.session_id == uuid.UUID(session_id),
+            SessionMove.move_number == 1,
+            SessionMove.color == "white",
+        )
+        .one()
+    )
+    assert stored.eval_delta == 40
+
+    # Simulate a genuinely-historical row that predates write-side normalization:
+    # a raw uncapped delta lands directly in session_moves. NB: the UUID(as_uuid)
+    # session_id is stored as dashless hex under SQLite, so bind that form (a plain
+    # dashed string matches zero rows).
+    result = db_session.execute(
+        text("""
+            UPDATE session_moves
+            SET eval_delta = 10000
+            WHERE session_id = :session_id AND move_number = 1 AND color = 'white'
+        """),
+        {"session_id": uuid.UUID(session_id).hex},
+    )
+    assert result.rowcount == 1  # the historical row was actually rewritten
+    db_session.commit()
+
+    analysis = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=user_id),
+    )
+    assert analysis.status_code == 200
+    data = analysis.json()
+    # Summary Avg CPL (centipawn_loss_expr) caps the lone player move at 1000.
+    assert data["summary"]["average_centipawn_loss"] == 1000
+    # Per-move echo (centipawn_loss) also caps at 1000.
+    echoed = next(m for m in data["moves"] if m["move_san"] == "e4")
+    assert echoed["eval_delta"] == 1000

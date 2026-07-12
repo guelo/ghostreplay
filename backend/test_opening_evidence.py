@@ -847,11 +847,12 @@ class TestSessionEligibilityParity:
     inputs, so the two selections must always agree."""
 
     def test_inputs_version_bumped_for_eligibility_narrowing(self):
-        # The eligibility gate changed the digest's row selection (raw-v4), and
-        # g-jact moved the version fold into the registry fingerprint (raw-v5);
+        # The eligibility gate changed the digest's row selection (raw-v4),
+        # g-jact moved the version fold into the registry fingerprint (raw-v5),
+        # and g-no51 normalized the opening-quality eval_delta read (raw-v6);
         # pre-change batches must self-heal via a version mismatch, not serve
         # as fresh.
-        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v5"
+        assert OPENING_EVIDENCE_INPUTS_VERSION == "raw-v6"
 
     def test_in_progress_session_affects_neither_digest_nor_overlay(
         self, db_session, branching_graph
@@ -955,6 +956,39 @@ class TestContinuousQuality:
         assert node.quality_count == 1
         assert node.quality_sum == pytest.approx(quality_from_eval_delta(120))
         assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+
+    def test_historical_eval_delta_capped_before_quality(self, db_session, branching_graph):
+        """A historical uncapped eval_delta (>1000) is normalized through the
+        shared centipawn-loss cap before feeding the EVAL_DELTA quality source
+        (g-no51). An old session_moves row with eval_delta=10000 must therefore
+        yield quality_from_eval_delta(1000) = e^-10, NOT the uncapped
+        quality_from_eval_delta(10000) = e^-100. The raw eval_delta stays
+        uncapped, so its binary PASS_THRESHOLD read is unaffected (a fail)."""
+        from app.opening_quality import SOURCE_EVAL_DELTA, quality_from_eval_delta
+
+        _insert_user(db_session)
+        sid = _insert_session(db_session)
+        # Only eval_delta present (no eval_cp / best_move_eval_cp) and no matching
+        # analysis_cache row for RAW_ROOT, so move_quality falls through to the
+        # EVAL_DELTA branch. Exactly one move at FEN_ROOT keeps quality_sum
+        # unambiguous.
+        _insert_move(db_session, sid, 1, "white", "e4", RAW_ROOT, RAW_E4, eval_delta=10000)
+        # Historical uncapped row, set directly on the stored column.
+        db_session.execute(
+            text("UPDATE session_moves SET eval_delta = 10000 WHERE session_id = :sid"),
+            {"sid": sid},
+        )
+        db_session.commit()
+
+        ov = overlay_evidence(db_session, 1, "white", branching_graph)
+        node = ov.nodes[FEN_ROOT]
+        assert node.quality_count == 1
+        assert ov.source_counts[SOURCE_EVAL_DELTA] == 1
+        # Capped: e^-10 (~4.54e-5), NOT the uncapped e^-100.
+        assert node.quality_sum == pytest.approx(quality_from_eval_delta(1000))
+        assert node.quality_sum != pytest.approx(quality_from_eval_delta(10000))
+        # The stored/raw eval_delta remains uncapped, so its binary read still fails.
+        assert node.live_fails == 1
 
     def test_no_eval_signal_no_quality(self, db_session, branching_graph):
         """A user move with no eval at all yields no quality observation."""

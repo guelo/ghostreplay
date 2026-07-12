@@ -64,7 +64,7 @@ This began as the initial **SPEC** for the "Ghost Replay" Chess Application. It 
 * **Priority Factors:**
   * `pass_streak` — Consecutive correct responses (higher = lower priority)
   * `time_since_last_review` — Time elapsed since last encounter (longer = higher priority)
-  * `eval_loss_cp` — Severity of the original mistake (larger = higher priority)
+  * `eval_loss_cp` — Severity of the original mistake (larger = higher priority). Severity is normalized to a **decisive-mistake ceiling** (0..1000cp): raw values above the ceiling do not increase priority further (a mate pseudo-cp ~10000 and a real −1200 blunder are equally severe), though the other factors still differentiate them. Larger-*below*-cap still means higher priority.
   * `distance` — Moves to reach the blunder from the current position (closer = higher priority)
 * **Steering Radius:** The Ghost only targets blunders reachable within 5 moves of the current position. Anything beyond 5 moves is ignored — the branching factor makes deeper steering unreliable.
 * **Binary Grading:** Pass or fail only. No easy/good/hard ratings — chess moves are unambiguous.
@@ -265,7 +265,7 @@ CREATE TABLE blunders (
     position_id BIGINT NOT NULL REFERENCES positions(id),  -- Pre-move position (decision point)
     bad_move_san VARCHAR(10) NOT NULL,     -- Selected move captured at this decision point
     best_move_san VARCHAR(10) NOT NULL,    -- Engine recommended move at capture time
-    eval_loss_cp INTEGER NOT NULL,         -- Centipawn delta at capture time (0 allowed for manual captures)
+    eval_loss_cp INTEGER NOT NULL,         -- RAW/UNCAPPED centipawn delta at capture time; MAY BE NEGATIVE (manual captures accept independent eval_before/eval_after). Normalized 0..1000 only at read/decision (Ghost/SRS severity, /stats, Blunder Library).
 
     -- SRS Fields
     pass_streak INTEGER NOT NULL DEFAULT 0,
@@ -288,6 +288,7 @@ CREATE INDEX idx_blunders_due ON blunders(user_id, pass_streak, last_reviewed_at
 - Any move within 50cp of the engine's best passes; any move ≥50cp worse fails
 - The unique constraint means duplicate adds at the same position return the existing target (`is_new=false`, shown in UI as "already in library")
 - Targets are only recorded when it is **the user's turn to move**; Ghost selection filters by the session's `player_color` so users can play either side without cross-contamination
+- `eval_loss_cp` is stored **RAW/uncapped** (audit + future severity models) and **may be negative** for manual captures. It is **normalized 0..1000** (`centipawn_loss`: floor 0, cap `CENTIPAWN_LOSS_CAP_CP = 1000`) at every read/decision — Ghost/SRS severity, /stats avg + top-costly, and the Blunder Library list — never in place. No migration corrects legacy rows; read-time normalization is the guarantee.
 
 #### 5.2.1 `blunder_reviews` (Review Events)
 
@@ -301,7 +302,7 @@ CREATE TABLE blunder_reviews (
     reviewed_at TIMESTAMP NOT NULL DEFAULT NOW(),
     passed BOOLEAN NOT NULL,
     move_played_san VARCHAR(10) NOT NULL,
-    eval_delta_cp INTEGER NOT NULL                      -- Positive means worse than best
+    eval_delta_cp INTEGER NOT NULL                      -- Server-normalized to 0..1000 (centipawn_loss) at write; write-only
 );
 
 CREATE INDEX idx_blunder_reviews_blunder ON blunder_reviews(blunder_id, reviewed_at);
@@ -311,6 +312,27 @@ CREATE INDEX idx_blunder_reviews_blunder ON blunder_reviews(blunder_id, reviewed
 - Rows are append-only to preserve the user's study history
 - `reviewed_at` doubles as the timestamp returned in `review_history`
 - The API response nests `{ reviewed_at, passed, move_played }` derived from this table (with `move_played` mapped from `move_played_san`)
+- `eval_delta_cp` is **normalized server-side** (`centipawn_loss`: floor 0, cap 1000) at write, regardless of client — an old/non-browser client that bypasses the frontend cap cannot persist a mate-magnitude or negative value. It is a uniform 0..1000 quantity **after server normalization** across storage and analytics (inbound wire values may still arrive raw). The column is **write-only** — no backend decision or display reads it — so legacy pre-normalization rows are harmless and there is no backfill.
+
+#### 5.2.2 Centipawn-loss contract: raw evidence vs. normalized display/decision CPL (living design)
+
+There are two distinct notions of "centipawn loss" that must never be conflated:
+
+1. **RAW evidence** — the exact, uncapped magnitude, retained at rest for audit, contract validation, and future models. A mate blunder legitimately holds ~10020 (`analysis_cache.eval_delta`) or ~10000 (`blunders.eval_loss_cp`). Raw values are **never** capped in place.
+2. **NORMALIZED display/decision CPL** — the 0..1000 value shown to users and read by decisions (Avg CPL, Ghost/SRS severity, /stats, Blunder Library). Produced by the single normalizer pair `centipawn_loss()` / `centipawn_loss_expr()` (Python) ↔ `evalLoss()` (TS), applied at **read / projection / decision** time.
+
+Per-column contract:
+
+| Column | At rest | Normalized |
+|--------|---------|-----------|
+| `analysis_cache.eval_delta` | **RAW** (contract-bound; `/api/analysis/lookup` returns it raw) | Only at projection (`build_move_upgrade` → `centipawn_loss`); capping in place would fail the resolver-complete-v2 `delta == best − played` equality contract |
+| `blunders.eval_loss_cp` | **RAW/uncapped** (may be negative for manual captures) | At every read/decision: Ghost + SRS severity, Ghost sort tiebreaker, /stats avg + top-costly, Blunder Library list |
+| `session_moves.eval_delta` | **Normalized** on new writes; legacy rows **MIXED** (raw >1000) | Again at every read (Avg CPL, per-move echo, opening-quality curve) — read-time normalization is the actual guarantee |
+| `blunder_reviews.eval_delta_cp` | **Normalized** server-authoritatively at write | Write-only — no read normalizes it because nothing reads it |
+
+The cap constant is `CENTIPAWN_LOSS_CAP_CP = 1000` (backend) / `EVAL_LOSS_CAP_CP = 1000` (frontend) — the **decisive-mistake ceiling**, defined independently per runtime and pinned equal by a cross-runtime golden-vector fixture + a unit test. No migration corrects any legacy row; read-time / decision-time normalization is the correctness guarantee (`analysis_cache` and `blunder_reviews` are the exceptions — the former stays raw by contract, the latter is normalized on write).
+
+*Forward direction:* a bounded **win-chance-loss** severity would be more meaningful than a centipawn delta, but requires retaining before/after evals — a future refinement, out of scope here.
 
 ### 5.3 `moves` (Edges)
 
@@ -368,6 +390,9 @@ CREATE TABLE rating_history (
 
 CREATE INDEX idx_rating_history_user_timestamp ON rating_history(user_id, recorded_at);
 CREATE UNIQUE INDEX uq_rating_history_game_session ON rating_history(game_session_id);
+-- Release A durable-head index (g-accuracy-schema). Built CONCURRENTLY in production.
+CREATE INDEX idx_rating_history_user_chain
+    ON rating_history(user_id, games_played DESC, recorded_at DESC, id DESC);
 ```
 
 **Key semantics:**
@@ -375,6 +400,12 @@ CREATE UNIQUE INDEX uq_rating_history_game_session ON rating_history(game_sessio
 - `is_provisional` tracks whether the rating is still considered provisional (based on games played count)
 - `games_played` enables the frontend to show progress toward a stable rating
 - `chesscom_*` and `lichess_*` fields are nullable; reserved for future cross-platform rating import
+
+**Durable head (Release A, g-rating-serial).** The "current rating for a user" is the row with the greatest `games_played` — not the most recent wall-clock `recorded_at`, which can go backwards under clock skew. The head lookup is `WHERE user_id = ? ORDER BY games_played DESC, recorded_at DESC, id DESC LIMIT 1`; `idx_rating_history_user_chain`'s trailing DESC columns let PostgreSQL answer that ORDER BY straight from the index with **no Sort node**. The older `idx_rating_history_user_timestamp` stays for chronological trend reads.
+
+**Rated game-end serialization (g-rating-serial).** A rated, rating-affecting `POST /api/game/end` takes a `FOR NO KEY UPDATE` lock on the game's `users` row (via `app.row_locks.for_no_key_update`) before computing the rating delta and appending the row, so two concurrent rated ends for the same user cannot both read the same `games_played` and lose an increment. Unrated and non-rating-affecting ends take no users lock. A rated end for a **missing** users row fails closed (500) rather than inventing a rating. The `uq_rating_history_game_session` unique index makes a concurrent double-end of the *same* session idempotent: exactly one insert wins and the loser gets a 400.
+
+**Production build note.** In production `idx_rating_history_user_chain` is created (and, on downgrade, dropped) `CONCURRENTLY` inside an Alembic `autocommit_block` so rated writes stay available during the build. A `CONCURRENTLY` build that fails partway leaves an **INVALID** index that must be `DROP INDEX CONCURRENTLY`-ed and rebuilt — it can never be validated in place (check `SELECT indisvalid FROM pg_index …`). See the release runbook (`docs/release_a_runbook.md`) for the rehearsed durations and recovery drill.
 
 ### 5.6 `analysis_cache` (Move Analysis Cache)
 
@@ -837,12 +868,13 @@ The Ghost Move Library can contain cycles (threefold repetition, transpositions)
    urgency       = 1 + log2(1 + overdue)
                    where overdue = hours_since_review / expected_interval
 
-   severity      = log1p(eval_loss_cp / 50)          -- logarithmic; 200cp ≈ 1.61, 50cp ≈ 0.69
+   severity      = log1p(min(max(eval_loss_cp, 0), 1000) / 50)   -- logarithmic; 200cp ≈ 1.61, 50cp ≈ 0.69
 
    distance_weight = exp(-0.35 * depth)               -- exponential decay; depth=1 → 0.70, depth=5 → 0.17
 
    score = urgency × severity × distance_weight
    ```
+   `eval_loss_cp` is stored uncapped; it is normalized 0..1000 (`centipawn_loss`) at decision (Ghost/SRS severity) and display (/stats, Blunder Library) time — `CENTIPAWN_LOSS_CAP_CP = 1000` (decisive-mistake ceiling). Only the **severity** factor saturates; urgency, distance, reach, and opening-family weight still fully differentiate two equally-severe blunders.
 6. **Selection:** Weighted random from top-5 first-move groups (see §6.1.2).
 7. **Output:** The immediate next move (SAN) on the chosen path.
 
@@ -1031,12 +1063,14 @@ When selecting which blunder to steer toward, the Ghost uses a composite score t
 overdue         = hours_since_review / expected_interval
 urgency         = 1 + log2(1 + overdue)            -- saturating; grows slowly once very overdue
 
-severity        = log1p(eval_loss_cp / 50)          -- 50cp → 0.69, 100cp → 1.10, 200cp → 1.61
+severity        = log1p(min(max(eval_loss_cp, 0), 1000) / 50)   -- 50cp → 0.69, 100cp → 1.10, 200cp → 1.61; saturates at 1000cp → 3.04
 
 distance_weight = exp(-0.35 × depth)                -- depth=1 → 0.70, depth=3 → 0.35, depth=5 → 0.17
 
 score = urgency × severity × distance_weight
 ```
+
+`eval_loss_cp` is stored RAW/uncapped; severity normalizes it 0..1000 (`centipawn_loss`, `CENTIPAWN_LOSS_CAP_CP = 1000`) so a mate pseudo-cp (~10000) and a real −1200 blunder saturate to the same severity. Only severity saturates — urgency, distance, reach, and opening-family weight still differentiate two equally-severe blunders.
 
 **Constants:**
 | Constant | Value | Purpose |
@@ -1046,6 +1080,7 @@ score = urgency × severity × distance_weight
 | `MAX_INTERVAL` | 4320 hours (180 days) | Interval cap |
 | `STEERING_RADIUS` | 5 moves | Max depth for ghost path traversal |
 | `SEVERITY_NORMALIZER_CP` | 50 cp | Denominator in log1p severity formula |
+| `CENTIPAWN_LOSS_CAP_CP` | 1000 cp | Decisive-mistake ceiling: floor 0 + cap on the per-move CPL / severity input (`centipawn_loss`), applied at read/decision |
 | `DISTANCE_DECAY_RATE` | 0.35 | Exponential decay rate for distance weight |
 | `TOP_K` | 5 | Number of first-move groups considered for weighted random selection |
 | `RECORDING_MOVE_CAP` | 10 | Only record blunders in the first 10 moves |
@@ -1068,13 +1103,16 @@ score = urgency × severity × distance_weight
 | 7.0                              | 4.00                             |
 | 15.0                             | 5.00                             |
 
-**Severity examples (log1p scale):**
-| eval_loss_cp | severity = log1p(cp/50) |
-|--------------|-------------------------|
-| 50cp         | 0.69                    |
-| 100cp        | 1.10                    |
-| 200cp        | 1.61                    |
-| 400cp        | 2.20                    |
+**Severity examples (log1p scale, saturating at the 1000cp decisive-mistake ceiling):**
+| eval_loss_cp | severity = log1p(min(max(cp, 0), 1000)/50) |
+|--------------|--------------------------------------------|
+| ≤0cp (floored) | 0.00                                     |
+| 50cp         | 0.69                                       |
+| 100cp        | 1.10                                       |
+| 200cp        | 1.61                                       |
+| 400cp        | 2.20                                       |
+| 1000cp (cap) | 3.04                                       |
+| 10000cp (mate, saturated) | 3.04                          |
 
 Higher composite score = more likely to be selected when Ghost chooses a path.
 
@@ -1313,9 +1351,17 @@ CREATE TABLE game_sessions (
     converted_at TIMESTAMP,       -- Timestamp of the drill→normal conversion
     rated_start_ply INTEGER,      -- Ply number where rated play began (post-conversion)
 
+    -- Cached whole-game accuracy (Release A, g-accuracy-schema). Maintained by the
+    -- serving write hooks; see §7.3.1. NULL means "not (yet) computed / not eligible".
+    player_accuracy SMALLINT,               -- 0..100 or NULL (a computed-None is stored as NULL)
+    player_accuracy_algo_version SMALLINT,  -- ACCURACY_ALGO_VERSION stamped when the session was scored
+
     CONSTRAINT valid_player_color CHECK (player_color IN ('white', 'black')),
     CONSTRAINT valid_session_mode CHECK (session_mode IN ('normal', 'drill')),
-    CONSTRAINT valid_drill_state CHECK (drill_state IS NULL OR drill_state IN ('active', 'root_reached', 'failed', 'abandoned', 'converted'))
+    CONSTRAINT valid_drill_state CHECK (drill_state IS NULL OR drill_state IN ('active', 'root_reached', 'failed', 'abandoned', 'converted')),
+    -- NOT VALID in Release A: enforced for every new/updated row but existing rows
+    -- are NOT scanned (no validation lock). Release B validates it once clean.
+    CONSTRAINT ck_game_sessions_player_accuracy CHECK (player_accuracy IS NULL OR (player_accuracy >= 0 AND player_accuracy <= 100))
 );
 
 CREATE INDEX idx_game_sessions_user ON game_sessions(user_id);
@@ -1325,6 +1371,29 @@ CREATE INDEX idx_game_sessions_drill_state ON game_sessions(drill_state);
 ```
 
 **`is_rated` flag:** Passed by the client in `POST /api/game/end`. When `true` and the result is `checkmate_win`, `checkmate_loss`, `resign`, or `draw`, the server computes a rating change and appends a `rating_history` row. Results of `abandon` never affect rating regardless of `is_rated`. The flag defaults to `true`; clients set it to `false` for practice games.
+
+### 7.3.1 Cached session accuracy (Release A)
+
+Release A adds two `game_sessions` columns — `player_accuracy` (0–100 or NULL) and `player_accuracy_algo_version` — and the serving write hooks that maintain them, **without** any backfill of pre-existing rows and **without** switching any read onto the cache. The `game-review` stats and history surfaces still compute accuracy live from `session_moves`; Release B owns the backfill, the `NOT VALID` CHECK validation, and the cache-only read switch. See §5.5 for the parallel `rating_history` durable-head work shipped alongside.
+
+**Frozen algorithm.** The scoring surface (`expected_total_moves_from_pgn`, `win_percent_from_cp`, `accuracy_from_win_percents`, `AccuracyMove`, `compute_game_accuracy`) is frozen in `app/accuracy_v1.py` and pinned to `python-chess`; `app/accuracy.py` re-exports it and defines `ACCURACY_ALGO_VERSION = 1`. Freezing v1 lets a future v2 coexist and lets a cached value be interpreted against the exact algorithm that produced it.
+
+**Cached population (exact).** A session is scored **iff**
+
+```
+status == "ended" AND (session_mode == "normal" OR drill_state == "converted")
+```
+
+evaluated by the shared `is_visible_game_session` / `visible_session_filter` predicate from `app/session_contracts.py` (never re-spelled). Active sessions and ended **failed/abandoned** drills are left wholly unstamped — both columns stay NULL and invisible to both consumers.
+
+**`recompute_session_accuracy(db, session)`** is the bounded write hook. It reads the **in-memory** session (so it sees the caller's not-yet-committed terminal status/PGN), and:
+
+- returns before touching either column unless the in-memory session is ended-and-visible — an ineligible session costs no move query and no PGN parse;
+- issues exactly one `session_moves` eval query for this session, ordered by move number with white before black (the ply order `compute_game_accuracy` requires);
+- **stamps a computed NULL:** it assigns `player_accuracy` even when the computation legitimately yields `None` (e.g. insufficient resolved evals) and **always** sets `player_accuracy_algo_version` once an eligible computation runs, so an eligible session is never left half-stamped. A NULL `player_accuracy` with a **non-NULL** version means "scored, but no accuracy was derivable"; both NULL means "never scored";
+- never commits or flushes — the caller owns the transaction, so the dirty accuracy assignment drains in the caller's own pre-cursor flush (keeping the cursor bump last, §7.4).
+
+**Dual-hook lifecycle.** The normal terminal flow awaits the full `/moves` upload **before** `POST /api/game/end`, so the game-end hook computes the **first** terminal value. A later `POST /api/session/{id}/moves` can add, change, or clear evaluations after end, so it **recomputes** (self-healing: a game-end value computed before the last evals arrived is corrected on the next post-end upload). Both hooks call `recompute_session_accuracy` while holding that session's `FOR NO KEY UPDATE` lock (§7.4). Non-converted drills remain unstamped and invisible to both consumers.
 
 ### 7.4 Move Analysis Storage
 

@@ -382,6 +382,25 @@ describe('DecisionOwner — SRS FIFO drain', () => {
 })
 
 // ---------------------------------------------------------------------------
+// SRS eval_delta cap (g-no51)
+// ---------------------------------------------------------------------------
+
+describe('DecisionOwner — SRS eval_delta cap', () => {
+  it('caps a mate-magnitude delta at EVAL_LOSS_CAP_CP (1000) in the review send', () => {
+    const { owner } = makeOwner()
+    owner.registerSrsReview('reqA', makeSrsReview(2, { srsDecisionId: 'S1' }))
+    // A mate-magnitude delta of 10000 must reach the SRS API capped, not raw.
+    owner.handleOutcome(
+      resolved(2, 'reqA', makeResult({ moveIndex: 2, delta: 10000 })),
+    )
+
+    expect(reviewSrsBlunderMock).toHaveBeenCalledTimes(1)
+    // Positional call: (session_id, blunder_id, passed, user_move, eval_delta, idempotency_key)
+    expect(reviewSrsBlunderMock.mock.calls[0][4]).toBe(1000)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Registration after termination (Finding 3)
 // ---------------------------------------------------------------------------
 

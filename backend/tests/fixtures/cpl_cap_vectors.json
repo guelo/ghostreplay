@@ -1,0 +1,13 @@
+{
+  "description": "Shared golden vectors for the per-move CPL cap normalizer (g-no51): centipawn_loss (Python) / evalLoss (TS). Pins the 0..1000 cap and the >=0 floor both runtimes must agree on. Consumed by backend/test_centipawn_loss.py and src/workers/analysisUtils.test.ts. Runtime-specific inputs (TS Infinity/NaN; Python None edge) stay in their own suites; the shared null vector covers the null->null contract.",
+  "cases": [
+    { "input": 10000, "expected": 1000 },
+    { "input": 1001, "expected": 1000 },
+    { "input": 1000, "expected": 1000 },
+    { "input": 999, "expected": 999 },
+    { "input": 35, "expected": 35 },
+    { "input": 0, "expected": 0 },
+    { "input": -20, "expected": 0 },
+    { "input": null, "expected": null }
+  ]
+}

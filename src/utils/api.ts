@@ -592,6 +592,9 @@ export interface SessionMoveUpload {
   eval_mate: number | null
   best_move_san: string | null
   best_move_eval_cp: number | null
+  // RAW mover-relative loss (uncapped). Backend projects it two ways: RAW into
+  // analysis_cache (clamp_delta_nonneg, session.py) and NORMALIZED 0..1000 into
+  // session_moves (centipawn_loss, session.py) — must stay raw.
   eval_delta: number | null
   classification: MoveClassification | null
   fen_before: string | null
@@ -923,6 +926,8 @@ export interface CachedAnalysis {
   played_eval: number | null
   /** White-relative mate count for the played move, null when not a mate. */
   played_eval_mate: number | null
+  /** RAW (uncapped, may be mate pseudo-cp) canonical-run cache snapshot; any
+   * blunder/SRS/display consumer normalizes it to 0..1000 via evalLoss before use. */
   eval_delta: number | null
   classification: MoveClassification | null
   /**
@@ -931,8 +936,9 @@ export interface CachedAnalysis {
    * move `played_eval`. Non-null ONLY when both grains are trusted, both pure CP
    * (no mate field on either), and their profiles are search-strength EQUAL.
    * This — NOT `eval_delta` — is the trusted loss the drill grader reads;
-   * `eval_delta` is a canonical-run snapshot for blunder/SRS/display. The
-   * frontend does no eval arithmetic on it.
+   * `eval_delta` is the RAW (uncapped, may be mate pseudo-cp) canonical-run cache
+   * snapshot; any blunder/SRS/display consumer normalizes it to 0..1000 via
+   * evalLoss before use. The frontend does no eval arithmetic on it.
    */
   position_eval_loss_cp: number | null
 
@@ -1036,7 +1042,7 @@ export interface MoveUpgrade {
   eval_mate: number | null // mover-relative
   best_move_san: string | null
   best_move_eval_cp: number | null // side-to-move-relative
-  eval_delta: number | null // side-to-move-relative loss, clamped >= 0
+  eval_delta: number | null // side-to-move-relative loss, normalized 0..1000 (display/decision CPL; raw evidence stays in analysis_cache)
   authoritative: boolean
   analysis_profile_id?: string | null
   depth?: number | null
@@ -1203,6 +1209,8 @@ export interface AnalysisMove {
   eval_mate: number | null
   best_move_san: string | null
   best_move_eval_cp: number | null
+  // normalized 0..1000 (display/decision CPL); backend session-analysis echo
+  // (centipawn_loss). Distinct from the RAW analysis_cache eval_delta.
   eval_delta: number | null
   classification: MoveClassification | null
   /**

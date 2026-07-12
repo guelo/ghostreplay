@@ -228,10 +228,14 @@ const fromCachedAnalysis = (
   const playedEval = toPlayerPerspective(cached.played_eval, playerColor)
   const bestEval = toPlayerPerspective(cached.best_eval, playerColor)
   const playedEvalMate = mateToPlayerPerspective(cached.played_eval_mate, playerColor)
-  // `eval_delta` is the canonical-run snapshot retained for blunder/SRS/display
-  // on the published path; it is NOT the drill threshold loss. The drill grader
-  // reads the backend-derived, same-strength `position_eval_loss_cp` out-of-band
-  // (see `waitForDrillGrade`), never this browser-visible snapshot.
+  // `eval_delta` is the RAW cache evidence (uncapped, may be mate pseudo-cp)
+  // retained for blunder/SRS/display on the published path; the normalized 0..1000
+  // display/decision CPL is derived downstream by evalLoss (e.g. the DecisionOwner
+  // SRS send). It is NOT the drill threshold loss and is left raw here because its
+  // two local consumers — classifyMove (win-chance) and isRecordableFailure (≤150
+  // threshold) — are both cap-independent. The drill grader reads the
+  // backend-derived, same-strength `position_eval_loss_cp` out-of-band (see
+  // `waitForDrillGrade`), never this browser-visible snapshot.
   const delta = cached.eval_delta
   const classification = (cached.classification as MoveClassification | null) ?? classifyMove(delta)
   const forced = legalMoveCount !== undefined && legalMoveCount <= 2

@@ -208,6 +208,45 @@ def test_list_blunders_includes_expected_fields(client, auth_headers, db_session
     assert isinstance(item["srs_priority"], float)
 
 
+def test_list_blunders_normalizes_eval_loss_cp_at_response_time(client, auth_headers, db_session):
+    """Displayed eval_loss_cp is clamped to 0..1000 in the response projection while
+    the DB row keeps the RAW value (response-time normalization only, no migration)."""
+    over_cap = _create_blunder(
+        db_session,
+        user_id=123,
+        fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        bad_move="Qh5",
+        eval_loss_cp=10000,
+        fen_hash_suffix="raw-over-cap",
+    )
+    negative = _create_blunder(
+        db_session,
+        user_id=123,
+        fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        bad_move="d5",
+        eval_loss_cp=-40,
+        fen_hash_suffix="raw-negative",
+    )
+
+    response = client.get("/api/blunder", headers=auth_headers(user_id=123))
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["items"]}
+    assert set(items) == {over_cap.id, negative.id}
+
+    # Displayed value normalized to 0..1000 at response time.
+    assert items[over_cap.id]["eval_loss_cp"] == 1000
+    assert items[negative.id]["eval_loss_cp"] == 0
+    # Match by fen/bad_move as well to confirm the projection is per-row.
+    assert items[over_cap.id]["fen"] == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    assert items[over_cap.id]["bad_move"] == "Qh5"
+    assert items[negative.id]["bad_move"] == "d5"
+
+    # Direct DB read still shows the RAW values — no migration, projection only.
+    db_session.expire_all()
+    assert db_session.get(Blunder, over_cap.id).eval_loss_cp == 10000
+    assert db_session.get(Blunder, negative.id).eval_loss_cp == -40
+
+
 def test_list_blunders_due_filter(client, auth_headers, db_session):
     now = datetime.now(timezone.utc)
     # Overdue: pass_streak=0, last reviewed 8 hours ago (interval=4h, priority=2.0)

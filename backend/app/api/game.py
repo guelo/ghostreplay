@@ -15,6 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.accuracy import expected_total_moves_from_pgn, recompute_session_accuracy
+from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.drill_steering import route_map_for_target, route_preserving_moves
 from app.fen import fen_hash, active_color
@@ -98,7 +99,11 @@ class GhostMoveCandidate:
                 opportunities_since_review=self.opportunities_since_review,
                 pass_streak=self.pass_streak,
             )
-        severity = math.log1p(max(float(self.eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
+        # Severity saturates at the decisive-mistake ceiling (g-no51): every
+        # blunder losing >=1000cp is one "decisive mistake" of severity, so a mate
+        # pseudo-cp (~10000) cannot dominate scheduling. Only the SEVERITY factor is
+        # flattened — urgency, distance, reach, and opening weight still differentiate.
+        severity = math.log1p(float(centipawn_loss(self.eval_loss_cp)) / SEVERITY_NORMALIZER_CP)
         distance_weight = math.exp(-DISTANCE_DECAY_RATE * self.depth)
         reach_weight = 1.0
         if self.has_opportunity_events:
@@ -139,7 +144,9 @@ def _candidate_sort_key(scored_candidate: tuple[GhostMoveCandidate, float]) -> t
     return (
         -score,
         candidate.depth,
-        -candidate.eval_loss_cp,
+        # Normalized (g-no51) so mate encoding magnitude cannot re-order two
+        # equal-severity candidates; falls through to -blunder_id then first_move.
+        -centipawn_loss(candidate.eval_loss_cp),
         -candidate.blunder_id,
         candidate.first_move,
     )

@@ -123,6 +123,42 @@ def test_history_average_cpl_uses_player_moves_and_clamps_negative_delta(
     assert game["summary"]["average_centipawn_loss"] == 20  # black moves: (0+40)/2
 
 
+def test_history_average_cpl_caps_legacy_uncapped_eval_delta(
+    client, auth_headers, create_game_session, db_session
+):
+    # A historical session_moves row can hold a raw, uncapped eval_delta (e.g. a
+    # mate pseudo-cp ~10000). The /history Avg CPL normalizes at read time via
+    # centipawn_loss_expr (cap 1000), so a single such counted move must report 1000.
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id)
+
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 40, "classification": "mistake",
+        },
+    ])
+    # Force a genuinely-historical uncapped row (the write path would have normalized it).
+    # The ORM stores session_id as a dash-less 32-char hex in the SQLite TEXT column,
+    # so bind that form for the raw UPDATE to actually match the row.
+    db_session.execute(
+        text("""
+            UPDATE session_moves
+            SET eval_delta = 10000
+            WHERE session_id = :session_id AND move_number = 1 AND color = 'white'
+        """),
+        {"session_id": uuid.UUID(session_id).hex},
+    )
+    db_session.commit()
+
+    response = client.get("/api/history", headers=auth_headers(user_id=123))
+    game = response.json()["games"][0]
+    assert game["session_id"] == session_id
+    assert game["summary"]["total_moves"] == 1
+    # Read-time cap: 10000 clamps to 1000, so the single-move average is 1000, not 10000.
+    assert game["summary"]["average_centipawn_loss"] == 1000
+
+
 def test_history_empty_when_no_ended_games(client, auth_headers):
     response = client.get("/api/history", headers=auth_headers(user_id=123))
     assert response.status_code == 200

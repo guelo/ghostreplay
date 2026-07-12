@@ -14,6 +14,7 @@ from app.accuracy import (
     compute_game_accuracy,
     expected_total_moves_from_pgn,
 )
+from app.centipawn_loss import centipawn_loss, centipawn_loss_expr
 from app.db import get_db
 from app.models import (
     Blunder,
@@ -539,8 +540,10 @@ def get_stats_summary(
         window_blunders_query = window_blunders_query.filter(Blunder.created_at >= cutoff)
     new_blunders_in_window = int(window_blunders_query.scalar() or 0)
 
+    # Normalize at read (g-no51): floor legacy negatives to 0 and cap >1000, so the
+    # displayed average is over decisive-mistake-capped values, not mate pseudo-cp.
     avg_blunder_eval_loss_cp_raw = (
-        db.query(func.avg(Blunder.eval_loss_cp))
+        db.query(func.avg(centipawn_loss_expr(Blunder.eval_loss_cp)))
         .filter(Blunder.user_id == user.user_id)
         .scalar()
     )
@@ -553,14 +556,14 @@ def get_stats_summary(
     top_costly_blunders_rows = (
         db.query(Blunder)
         .filter(Blunder.user_id == user.user_id)
-        .order_by(Blunder.eval_loss_cp.desc(), Blunder.created_at.desc())
+        .order_by(centipawn_loss_expr(Blunder.eval_loss_cp).desc(), Blunder.created_at.desc())
         .limit(5)
         .all()
     )
     top_costly_blunders = [
         TopCostlyBlunder(
             blunder_id=row.id,
-            eval_loss_cp=row.eval_loss_cp,
+            eval_loss_cp=centipawn_loss(row.eval_loss_cp),
             bad_move_san=row.bad_move_san,
             best_move_san=row.best_move_san,
             created_at=row.created_at,

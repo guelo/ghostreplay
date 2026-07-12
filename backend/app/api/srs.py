@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.centipawn_loss import centipawn_loss
 from app.db import get_db
 from app.models import Blunder, BlunderReview, GameSession, Position
 from app.opening_cache import bump_evidence_seq
@@ -27,7 +28,10 @@ class SrsReviewRequest(BaseModel):
     blunder_id: int = Field(..., ge=1, description="Blunder target ID")
     passed: bool = Field(..., description="Whether the user passed the review")
     user_move: str = Field(..., min_length=1, max_length=10, description="Move the user played")
-    eval_delta: int = Field(..., description="Centipawn loss from best move")
+    eval_delta: int = Field(
+        ...,
+        description="Centipawn loss from best move; the server normalizes it to 0..1000 for storage and analytics",
+    )
     idempotency_key: str | None = Field(
         None,
         max_length=64,
@@ -153,6 +157,12 @@ def review_blunder(
     blunder.pass_streak = blunder.pass_streak + 1 if request.passed else 0
     blunder.last_reviewed_at = reviewed_at
 
+    # Server-authoritative normalization (g-no51): eval_delta_cp is WRITE-ONLY, so
+    # the stored value must be the trust boundary — an old/non-browser client that
+    # bypasses the frontend evalLoss cap cannot persist a mate-magnitude or negative
+    # value. Emitted normalized to analytics too (no raw at-rest counterpart exists).
+    normalized_eval_delta = centipawn_loss(request.eval_delta)
+
     db.add(
         BlunderReview(
             blunder_id=blunder.id,
@@ -160,7 +170,7 @@ def review_blunder(
             reviewed_at=reviewed_at,
             passed=request.passed,
             move_played_san=request.user_move,
-            eval_delta_cp=request.eval_delta,
+            eval_delta_cp=normalized_eval_delta,
             idempotency_key=request.idempotency_key,
             pass_streak_after=blunder.pass_streak,
         )
@@ -206,7 +216,7 @@ def review_blunder(
         {
             "passed": request.passed,
             "pass_streak": blunder.pass_streak,
-            "eval_delta": request.eval_delta,
+            "eval_delta": normalized_eval_delta,
             "recompute_queued": recompute_queued,
         },
     )

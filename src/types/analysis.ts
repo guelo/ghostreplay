@@ -41,6 +41,9 @@ export type AnalysisResult = {
   /** Mover-relative mate count for the current position, null when not a mate. */
   currentPositionEvalMate: number | null
   moveIndex: number | null
+  /** RAW uncapped mover-relative loss (bestEval − playedEval); may be mate pseudo-cp (~10000).
+   * Normalized to the 0..1000 display/decision CPL by evalLoss at the boundary (e.g. the
+   * DecisionOwner SRS send). */
   delta: number | null
   classification: MoveClassification | null
   blunder: boolean

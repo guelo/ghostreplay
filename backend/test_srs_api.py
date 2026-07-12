@@ -118,6 +118,52 @@ def test_srs_review_fail_resets_streak(client, auth_headers, create_game_session
     assert updated_blunder.pass_streak == 0
 
 
+def test_srs_review_clamps_eval_delta_server_side(client, auth_headers, create_game_session, db_session):
+    """The server normalizes eval_delta to 0..1000 before storing, so a client
+    that bypasses the frontend cap cannot persist a mate-magnitude or negative
+    value. blunder_reviews.eval_delta_cp is write-only (g-no51)."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    # Distinct pass_streak values yield distinct fen_hashes (uq_positions_user_fen_hash)
+    # and therefore distinct blunders, so the second review isn't deduped against the first.
+    over_cap_blunder = _create_blunder(db_session, user_id=123, pass_streak=0)
+    negative_blunder = _create_blunder(db_session, user_id=123, pass_streak=1)
+    passthrough_blunder = _create_blunder(db_session, user_id=123, pass_streak=2)
+
+    def _review(blunder_id: int, eval_delta: int, key: str):
+        return client.post(
+            "/api/srs/review",
+            json={
+                "session_id": session_id,
+                "blunder_id": blunder_id,
+                "passed": True,
+                "user_move": "Nf3",
+                "eval_delta": eval_delta,
+                "idempotency_key": key,
+            },
+            headers=auth_headers(user_id=123),
+        )
+
+    def _stored_delta(blunder_id: int) -> int:
+        return db_session.execute(
+            text("SELECT eval_delta_cp FROM blunder_reviews WHERE blunder_id = :b"),
+            {"b": blunder_id},
+        ).scalar_one()
+
+    over_cap = _review(over_cap_blunder.id, 10000, "srs-clamp-over")
+    negative = _review(negative_blunder.id, -30, "srs-clamp-neg")
+    passthrough = _review(passthrough_blunder.id, 20, "srs-clamp-pass")
+
+    assert over_cap.status_code == 200
+    assert negative.status_code == 200
+    assert passthrough.status_code == 200
+
+    # Mate-magnitude delta is capped at 1000, negative is floored to 0, and a
+    # sub-cap value passes through unchanged — regardless of what the client sent.
+    assert _stored_delta(over_cap_blunder.id) == 1000
+    assert _stored_delta(negative_blunder.id) == 0
+    assert _stored_delta(passthrough_blunder.id) == 20
+
+
 def test_srs_review_succeeds_when_opening_cache_refresh_fails(
     client,
     auth_headers,

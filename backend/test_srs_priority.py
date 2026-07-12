@@ -32,7 +32,9 @@ from app.api.game import (
     STEERING_RADIUS,
     TOP_K,
     GhostMoveCandidate,
+    _candidate_sort_key,
 )
+from app.centipawn_loss import centipawn_loss
 
 NOW = datetime(2026, 2, 19, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -368,6 +370,28 @@ def _candidate(
     )
 
 
+def _severity_candidate(
+    *,
+    eval_loss_cp: int,
+    blunder_id: int = 1,
+    first_move: str = "e4",
+    depth: int = 1,
+    pass_streak: int = 0,
+    hours_ago: float = 8.0,
+) -> GhostMoveCandidate:
+    """Like ``_candidate`` but with explicit blunder_id/first_move so the
+    ``_candidate_sort_key`` tiebreakers can be exercised directly."""
+    return GhostMoveCandidate(
+        first_move=first_move,
+        blunder_id=blunder_id,
+        depth=depth,
+        eval_loss_cp=eval_loss_cp,
+        pass_streak=pass_streak,
+        last_reviewed_at=NOW - timedelta(hours=hours_ago),
+        created_at=NOW - timedelta(days=7),
+    )
+
+
 class TestSelectionScore:
     def test_score_formula_manual_check(self):
         # eval_loss_cp=100, pass_streak=0, depth=1, 8h ago
@@ -482,6 +506,61 @@ class TestSelectionScore:
         expected = urgency * severity * distance * reach_weight
 
         assert c.score(NOW) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# g-no51: decisive-mistake severity ceiling in Ghost scheduling
+# ---------------------------------------------------------------------------
+
+class TestSeverityCeilingScheduling:
+    """``eval_loss_cp`` is stored RAW (a mate pseudo-cp is ~10000). Ghost
+    scheduling must normalize severity through the shared decisive-mistake
+    ceiling (``centipawn_loss`` floors 0, caps 1000) so every >=1000cp loss is
+    one "decisive mistake": a mate magnitude must NOT out-rank a normal decisive
+    blunder, neither via ``.score`` nor via the ``_candidate_sort_key`` tiebreak.
+    """
+
+    def test_mate_magnitude_scores_equal_to_decisive_blunder(self):
+        # Everything equal except eval_loss_cp (10000 vs 1000). Both cap to 1000,
+        # so severity — and therefore the whole score — is identical.
+        c_mate = _severity_candidate(eval_loss_cp=10000)
+        c_decisive = _severity_candidate(eval_loss_cp=1000)
+        assert c_mate.score(NOW) == c_decisive.score(NOW)
+
+    def test_sort_key_eval_element_normalized_to_ceiling(self):
+        # Score-equality alone would miss a regression that left the raw eval in
+        # the sort tiebreaker. Assert the eval element (index 2) itself normalizes:
+        # both raw 10000 and raw 1000 collapse to -1000.
+        c_mate = _severity_candidate(eval_loss_cp=10000, blunder_id=1)
+        c_decisive = _severity_candidate(eval_loss_cp=1000, blunder_id=1)
+        key_mate = _candidate_sort_key((c_mate, c_mate.score(NOW)))
+        key_decisive = _candidate_sort_key((c_decisive, c_decisive.score(NOW)))
+        assert key_mate[2] == key_decisive[2]
+        assert key_mate[2] == -centipawn_loss(1000)
+        assert key_mate[2] == -1000
+
+    def test_higher_id_decisive_sorts_ahead_of_lower_id_mate(self):
+        # _candidate_sort_key sorts ASCENDING and the id element is -blunder_id,
+        # so the HIGHER blunder_id wins the fall-through. Give the raw-1000
+        # candidate the higher id: after sorting it must come FIRST, proving raw
+        # 10000 cannot sort ahead of raw 1000.
+        c_mate = _severity_candidate(eval_loss_cp=10000, blunder_id=1)
+        c_decisive = _severity_candidate(eval_loss_cp=1000, blunder_id=2)
+        scored = [
+            (c_mate, c_mate.score(NOW)),
+            (c_decisive, c_decisive.score(NOW)),
+        ]
+        ordered = sorted(scored, key=_candidate_sort_key)
+        assert ordered[0][0] is c_decisive
+        assert ordered[0][0].eval_loss_cp == 1000
+        assert ordered[-1][0] is c_mate
+
+    def test_more_overdue_outranks_equal_severity_mate(self):
+        # With severity flattened, urgency still differentiates: a more-overdue
+        # decisive blunder outscores a recently-reviewed mate-magnitude blunder.
+        c_overdue = _severity_candidate(eval_loss_cp=1000, blunder_id=2, hours_ago=40.0)
+        c_recent = _severity_candidate(eval_loss_cp=10000, blunder_id=1, hours_ago=8.0)
+        assert c_overdue.score(NOW) > c_recent.score(NOW)
 
 
 # ---------------------------------------------------------------------------

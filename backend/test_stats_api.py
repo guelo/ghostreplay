@@ -499,6 +499,63 @@ def test_stats_summary_library_all_time_and_window(
     assert data_all["new_blunders_in_window"] == 2
 
 
+def test_stats_summary_library_eval_loss_normalized_at_read_no_migration(
+    client, auth_headers, db_session
+):
+    # g-no51: blunders.eval_loss_cp is stored RAW (may be negative or a mate
+    # pseudo-cp > 1000). The three /stats library reads (avg, top-costly ORDER BY,
+    # returned eval_loss_cp) normalize at READ — floor negatives to 0, cap at 1000 —
+    # WITHOUT a migration mutating the rows. Seed a mate pseudo-cp (10000), an
+    # exactly-at-cap value (1000), and a legacy negative (-50) for one user.
+    p1 = _add_position(db_session, user_id=123, tag="norm1")
+    p2 = _add_position(db_session, user_id=123, tag="norm2", active_color="black")
+    p3 = _add_position(db_session, user_id=123, tag="norm3")
+
+    b_mate = _add_blunder(db_session, user_id=123, position=p1, eval_loss_cp=10000,
+                          bad_move_san="Qxh7+", best_move_san="Re1")
+    b_cap = _add_blunder(db_session, user_id=123, position=p2, eval_loss_cp=1000,
+                         bad_move_san="Bxf7+", best_move_san="O-O")
+    b_neg = _add_blunder(db_session, user_id=123, position=p3, eval_loss_cp=-50,
+                         bad_move_san="Qh5", best_move_san="Nc3")
+    db_session.commit()
+
+    b_mate_id, b_cap_id, b_neg_id = b_mate.id, b_cap.id, b_neg.id
+
+    data = client.get(
+        "/api/stats/summary", headers=auth_headers(user_id=123)
+    ).json()["library"]
+
+    # Avg is over NORMALIZED values: 10000 caps to 1000, -50 floors to 0, so
+    # round(mean(1000, 1000, 0)) == round(666.67) == 667 (NOT the raw mean).
+    assert data["avg_blunder_eval_loss_cp"] == 667
+
+    top = data["top_costly_blunders"]
+    # All three seeded rows appear; every returned value is in the 0..1000 band.
+    assert len(top) == 3
+    assert all(0 <= b["eval_loss_cp"] <= 1000 for b in top)
+    by_id = {b["blunder_id"]: b["eval_loss_cp"] for b in top}
+    # The mate (10000) and the at-cap (1000) row both normalize to 1000: mate
+    # magnitude does NOT out-rank a genuine 1000-cp blunder. The -50 row floors to 0.
+    assert by_id[b_mate_id] == 1000
+    assert by_id[b_cap_id] == 1000
+    assert by_id[b_neg_id] == 0
+    # Ordering is by the CAPPED value desc: the two 1000s precede the floored 0.
+    assert [b["eval_loss_cp"] for b in top] == [1000, 1000, 0]
+
+    # NO migration ran: the raw rows still hold the pre-normalization values;
+    # correction lives entirely at read. Re-read straight from the DB.
+    db_session.expire_all()
+    raw = {
+        row.id: row.eval_loss_cp
+        for row in db_session.query(Blunder).filter(
+            Blunder.id.in_([b_mate_id, b_cap_id, b_neg_id])
+        )
+    }
+    assert raw[b_mate_id] == 10000
+    assert raw[b_cap_id] == 1000
+    assert raw[b_neg_id] == -50
+
+
 def test_stats_summary_window_filtering(client, auth_headers, create_game_session, db_session):
     now = datetime.now(timezone.utc)
 

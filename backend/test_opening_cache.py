@@ -1587,8 +1587,8 @@ def test_pre_bump_batch_recomputes_once_then_serves_fast_path(db_session):
 
     first = recompute_opening_scores_if_needed(db_session, 123, "black")
     assert first is not None
-    assert "raw-v5" in first.registry_fingerprint
-    first.registry_fingerprint = first.registry_fingerprint.replace("raw-v5", "raw-v4")
+    assert "raw-v6" in first.registry_fingerprint
+    first.registry_fingerprint = first.registry_fingerprint.replace("raw-v6", "raw-v5")
     db_session.commit()
 
     second = recompute_opening_scores_if_needed(db_session, 123, "black")

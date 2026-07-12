@@ -31,6 +31,7 @@ import {
   checkMateEvents,
   WIN_CHANCE_MULTIPLIER,
   CP_CEILING,
+  EVAL_LOSS_CAP_CP,
   RECORDABLE_FAILURE_THRESHOLD_CP,
 } from './analysisUtils'
 import type { EngineScore } from './stockfishMessages'
@@ -469,11 +470,34 @@ describe('evalLoss', () => {
     expect(evalLoss(-20)).toBe(0)
   })
 
+  it('caps the delta at the decisive-mistake ceiling', () => {
+    expect(evalLoss(10000)).toBe(1000)
+    expect(evalLoss(1001)).toBe(1000)
+    expect(evalLoss(1000)).toBe(1000)
+    expect(evalLoss(999)).toBe(999)
+  })
+
+  it('matches every shared cross-runtime vector', () => {
+    // Same fixture drives the Python centipawn_loss suite, so TS and Python are
+    // pinned to one vector set (null -> null on the TS side).
+    for (const c of cplCapVectors.cases as Array<{ input: number | null; expected: number | null }>) {
+      expect(evalLoss(c.input)).toBe(c.expected)
+    }
+  })
+
   it('returns null for missing or non-finite deltas', () => {
     expect(evalLoss(null)).toBe(null)
     expect(evalLoss(undefined)).toBe(null)
     expect(evalLoss(Infinity)).toBe(null)
     expect(evalLoss(NaN)).toBe(null)
+  })
+
+  it('pins EVAL_LOSS_CAP_CP equal to CP_CEILING (distinct controls, currently equal)', () => {
+    // The two constants are defined as independent literals (NOT aliased). This
+    // pins their current equality; an intentional decoupling must update this
+    // assertion deliberately rather than drift silently.
+    expect(EVAL_LOSS_CAP_CP).toBe(CP_CEILING)
+    expect(EVAL_LOSS_CAP_CP).toBe(1000)
   })
 })
 
@@ -1065,6 +1089,9 @@ describe('isTrustedMoveHit', () => {
 // Shared golden vectors — same fixture drives backend test_move_classification.py
 // so the two classifier implementations cannot drift.
 import classificationVectors from '../../backend/tests/fixtures/classification_vectors.json'
+// Shared per-move CPL cap vectors (g-no51) — same fixture drives backend
+// test_centipawn_loss.py so evalLoss and centipawn_loss cannot drift.
+import cplCapVectors from '../../backend/tests/fixtures/cpl_cap_vectors.json'
 
 describe('classifyMoveAdvanced golden vectors (shared with backend)', () => {
   for (const [i, c] of (classificationVectors.cases as Array<{

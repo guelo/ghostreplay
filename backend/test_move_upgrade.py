@@ -16,7 +16,12 @@ from app.analysis_profiles import (
     JEFFML_PROFILE_ID,
     stamp_profile_full,
 )
-from app.evidence_contracts import MOVE_COMPLETE, POSITION_COMPLETE, RESOLVER_COMPLETE_V2
+from app.evidence_contracts import (
+    MOVE_COMPLETE,
+    POSITION_COMPLETE,
+    RESOLVER_COMPLETE_V2,
+    contract_satisfied,
+)
 from app.models import AnalysisCache
 from app.move_upgrade import build_move_upgrade, move_upgrade_for_row
 
@@ -246,6 +251,23 @@ def test_build_null_eval_delta_stays_valid():
     assert up.eval_delta is None
     assert up.classification == "good"
     assert up.best_move_san is None  # no best_move_uci on this row
+
+
+def test_build_mate_magnitude_delta_raw_retained_projection_capped():
+    # A mate-magnitude row: white best +10000 vs played -20 gives a RAW
+    # eval_delta = best - played = 10020 (white to move). The resolver-complete-v2
+    # contract validates that exact equality, so the raw 10020 is retained and
+    # contract-valid AT REST; build_move_upgrade PROJECTS it through centipawn_loss,
+    # capping the displayed CPL at CENTIPAWN_LOSS_CAP_CP (1000). This pins the
+    # raw-retained / projection-capped split (g-no51).
+    overrides = dict(
+        played_eval=-20, best_eval=10000, eval_delta=10020, classification="blunder"
+    )
+    # 1) RAW 10020 stays stored and contract-valid (10000 - (-20) == 10020).
+    assert contract_satisfied(RESOLVER_COMPLETE_V2, _v2_data(BROWSER_ANALYSIS_PROFILE_ID, **overrides)) is True
+    # 2) The projection caps the mover-relative display/decision CPL at 1000.
+    up = build_move_upgrade(_row(BROWSER_ANALYSIS_PROFILE_ID, **overrides), START)
+    assert up.eval_delta == 1000
 
 
 def test_build_authoritative_flag():

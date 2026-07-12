@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, case, func, or_
 from sqlalchemy.orm import Session
 
+from app.centipawn_loss import centipawn_loss
 from app.fen import normalize_fen
 from app.models import Blunder, BlunderOpportunityEvent, BlunderReview
 from app.opening_roots import get_opening_roots
@@ -362,7 +363,10 @@ def practice_priority_score(
             created_at=created_at,
             now=now,
         )
-    severity = math.log1p(max(float(eval_loss_cp), 0.0) / SEVERITY_NORMALIZER_CP)
+    # Severity saturates at the decisive-mistake ceiling (g-no51), mirroring the
+    # Ghost candidate score: >=1000cp losses share one severity so mate pseudo-cp
+    # cannot dominate practice priority. Floors legacy negatives to 0.
+    severity = math.log1p(float(centipawn_loss(eval_loss_cp)) / SEVERITY_NORMALIZER_CP)
     reach_weight = 1.0
     if has_events:
         reach_weight = counters.p_reach ** OPPORTUNITY_POWER
