@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { CLASS_KEYS, type SideStats, type StatSelection, type ClassKey } from '../utils/gameStats';
 import { accuracyColor, acplColor } from '../utils/statColor';
+import { CLASSIFICATION_ICON } from './MoveRow.helpers';
 
 const ACCURACY_INFO =
   'How closely your moves matched the engine\'s best moves across the game.\n\n 100% means perfect play. Lower scores reflect how much each move gave up.'
@@ -50,6 +51,7 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
         {CLASS_KEYS.map((cls: ClassKey) => {
           const label = cls === 'inaccuracy' ? 'Inaccur.' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
           const fullLabel = cls === 'inaccuracy' ? 'Inaccuracies' : cls.charAt(0).toUpperCase() + cls.slice(1) + 's';
+          const iconInfo = CLASSIFICATION_ICON[cls];
           const labelSel = { side: 'player' as const, cls };
           const isLabelActive = activeStat?.cls === cls;
           const isLabelPressed = pinnedStat?.side === 'player' && pinnedStat?.cls === cls;
@@ -64,6 +66,14 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
               onMouseLeave={() => onStatHover(null)}
               onClick={() => onStatClick(labelSel)}
             >
+              {iconInfo && (
+                <span
+                  className={`history-stats-pane__label-icon move-icon move-icon--${cls}`}
+                  aria-hidden="true"
+                >
+                  {iconInfo.icon}
+                </span>
+              )}
               {label}
             </button>,
             ...(['player', 'opponent'] as const).map((side) => {

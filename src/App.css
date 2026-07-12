@@ -3975,11 +3975,22 @@
 .history-stats-pane__label--mistake { color: var(--eval-mistake); }
 .history-stats-pane__label--inaccuracy { color: var(--eval-inaccuracy); }
 
+/* Movelist classification pill (?!/?/??), sized down for the compact stats
+   labels. Reuses `.move-icon` + `.move-icon--{cls}` so the badge stays in sync
+   with the move list; this only trims the padding/scale for the small grid. */
+.history-stats-pane__label-icon.move-icon {
+    font-size: 0.9em;
+    padding: 0.05em 0.4em;
+    margin-right: 0.35em;
+}
+
 .history-stats-pane__label--interactive {
     cursor: pointer;
     border-radius: 4px;
     padding: 0.1rem 0.15rem;
     transition: background 0.15s, outline-color 0.15s;
+    display: inline-flex;
+    align-items: center;
 }
 
 .history-stats-pane__label--interactive:focus-visible {

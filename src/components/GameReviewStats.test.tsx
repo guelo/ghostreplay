@@ -60,6 +60,22 @@ describe('GameReviewStats accuracy row', () => {
   });
 });
 
+describe('GameReviewStats classification icons', () => {
+  it('renders the movelist classification icon next to each label', () => {
+    renderStats(87);
+    // Blunder ??, Mistake ?, Inaccuracy ?! — rendered as decorative pills.
+    const blunder = screen.getByRole('button', { name: /^your blunders$/i });
+    const mistake = screen.getByRole('button', { name: /^your mistakes$/i });
+    const inaccuracy = screen.getByRole('button', { name: /^your inaccuracies$/i });
+    expect(blunder).toHaveTextContent('??');
+    expect(mistake).toHaveTextContent('?');
+    expect(inaccuracy).toHaveTextContent('?!');
+    expect(blunder.querySelector('.move-icon--blunder')).not.toBeNull();
+    expect(mistake.querySelector('.move-icon--mistake')).not.toBeNull();
+    expect(inaccuracy.querySelector('.move-icon--inaccuracy')).not.toBeNull();
+  });
+});
+
 describe('GameReviewStats gradient colors', () => {
   it('colors the accuracy value with accuracyColor', () => {
     renderStats(87);
