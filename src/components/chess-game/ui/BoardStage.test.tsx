@@ -476,6 +476,26 @@ describe("BoardStage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("suppresses the return-to-live pill in the stopped-drill end state (g-pagp)", () => {
+    // A failed drill keeps isGameActive true and parks the user on the
+    // next-to-last move, so isReviewingPast is true — but there's no live game
+    // to return to, so the pill must not show.
+    const props = makeProps();
+    render(
+      <BoardStage
+        {...props}
+        showStartOverlay={false}
+        isGameActive
+        isReviewingPast
+        onReturnToLive={vi.fn()}
+        isStoppedDrill
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /return to live/i }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the end-game fanfare when a trigger is provided", () => {
     const props = makeProps();
     const { container } = render(

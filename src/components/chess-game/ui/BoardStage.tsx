@@ -426,7 +426,13 @@ const BoardStage = ({
               }}
             />
           </div>
-          {isReviewingPast && onReturnToLive && (
+          {/* Only offer Return-to-live when there's actually a live game to
+              return to. A stopped drill keeps isGameActive true and parks you on
+              the next-to-last move (showing what you should have played), so
+              isReviewingPast is true — but the drill is over and the "live" tip
+              is a dead terminal position. Suppress the pill there (g-pagp) while
+              leaving the reviewing wash (line 404) intact. */}
+          {isReviewingPast && !isStoppedDrill && onReturnToLive && (
             <ReturnToLiveButton
               boardRef={boardSquareRef}
               onReturnToLive={onReturnToLive}
