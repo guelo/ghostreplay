@@ -19,6 +19,6 @@ export type BoardNotice =
 
 export type OpenHistoryOptions = {
   select: "latest";
-  source: "post_game_view_analysis" | "post_game_history";
+  source: "post_game_view_analysis";
   sessionId?: string;
 };

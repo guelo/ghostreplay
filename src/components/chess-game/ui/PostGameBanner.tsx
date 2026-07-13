@@ -32,7 +32,6 @@ type PostGameBannerProps = {
   ratingDisplayType?: RatingScoreKey;
   onViewAnalysis: () => void;
   onShowStartOverlay: () => void;
-  onViewHistory: () => void;
 };
 
 const PostGameBanner = ({
@@ -51,7 +50,6 @@ const PostGameBanner = ({
   ratingDisplayType = "elo",
   onViewAnalysis,
   onShowStartOverlay,
-  onViewHistory,
 }: PostGameBannerProps) => {
   const selectedChange = scoreChanges?.[ratingDisplayType] ?? scoreChanges?.elo;
   const selectedLabel = getRatingDisplayLabel(
@@ -141,9 +139,6 @@ const PostGameBanner = ({
             onClick={onShowStartOverlay}
           >
             New Game
-          </button>
-          <button className="chess-button" type="button" onClick={onViewHistory}>
-            History
           </button>
           {drillOpeningKey && onNewDrill && (
             <span className="drill-again-group">

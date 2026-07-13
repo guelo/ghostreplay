@@ -1092,12 +1092,6 @@ export const useChessGameLifecycle = ({
     onOpenHistory?.({ select: "latest", source: "post_game_view_analysis", sessionId: sid });
   }, [onOpenHistory, setShowPostGamePrompt]);
 
-  const handleViewHistory = useCallback(() => {
-    setShowPostGamePrompt(false);
-    const sid = useGameStore.getState().sessionId ?? undefined;
-    onOpenHistory?.({ select: "latest", source: "post_game_history", sessionId: sid });
-  }, [onOpenHistory, setShowPostGamePrompt]);
-
   const handleContinueDrill = useCallback(async (): Promise<
     DrillSessionContract | undefined
   > => {
@@ -1139,7 +1133,6 @@ export const useChessGameLifecycle = ({
     handleReset,
     handleShowStartOverlay,
     handleViewAnalysis,
-    handleViewHistory,
     handleContinueDrill,
     abandonStoppedDrill,
     // Exposed so the drill accuracy-fail path (in ChessGame) can apply the same

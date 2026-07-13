@@ -781,7 +781,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     handleReset,
     handleShowStartOverlay,
     handleViewAnalysis,
-    handleViewHistory,
     abandonStoppedDrill,
     uploadFullMoveHistoryBeforeEnd,
   } = useChessGameLifecycle({
@@ -2146,7 +2145,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 scoreChanges={scoreChanges}
                 onViewAnalysis={handleViewAnalysis}
                 onShowStartOverlay={handleShowStartOverlay}
-                onViewHistory={handleViewHistory}
               />
               <ConnectedAnalysisGraph onSelectMove={handleNavigate} />
             </div>

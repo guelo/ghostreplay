@@ -507,7 +507,7 @@ describe("ChessGame characterization safeguards", () => {
   const startGameAsWhite = async (
     onOpenHistory?: (options: {
       select: "latest";
-      source: "post_game_view_analysis" | "post_game_history";
+      source: "post_game_view_analysis";
     }) => void,
   ) => {
     startGameMock.mockResolvedValueOnce({
@@ -1556,7 +1556,9 @@ describe("ChessGame characterization safeguards", () => {
     );
   });
 
-  it("routes post-game History action to history callback", async () => {
+  // g-e01b: the post-game History button was removed as redundant with View
+  // Analysis — both routed to the latest game's history entry.
+  it("does not offer a post-game History action", async () => {
     const onOpenHistory = vi.fn();
     await startGameAsWhite(onOpenHistory);
 
@@ -1567,17 +1569,14 @@ describe("ChessGame characterization safeguards", () => {
     fireEvent.click(screen.getByText("Resign"));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /^history$/i })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /view analysis/i }),
+      ).toBeInTheDocument();
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /^history$/i }));
-
-    expect(onOpenHistory).toHaveBeenCalledWith(
-      expect.objectContaining({
-        select: "latest",
-        source: "post_game_history",
-      }),
-    );
+    expect(
+      screen.queryByRole("button", { name: /^history$/i }),
+    ).not.toBeInTheDocument();
   });
 
   // ---- Instant "Again" + gear settings on drill end (g-osni) -------------

@@ -7,7 +7,6 @@ import PostGameBanner from "./PostGameBanner";
 const makeProps = () => {
   const onViewAnalysis = vi.fn();
   const onShowStartOverlay = vi.fn();
-  const onViewHistory = vi.fn();
 
   return {
     isGameActive: false,
@@ -24,7 +23,6 @@ const makeProps = () => {
     } as RatingChange,
     onViewAnalysis,
     onShowStartOverlay,
-    onViewHistory,
   };
 };
 
@@ -38,11 +36,22 @@ describe("PostGameBanner", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /view analysis/i }));
     fireEvent.click(screen.getByRole("button", { name: /new game/i }));
-    fireEvent.click(screen.getByRole("button", { name: /history/i }));
 
     expect(props.onViewAnalysis).toHaveBeenCalledTimes(1);
     expect(props.onShowStartOverlay).toHaveBeenCalledTimes(1);
-    expect(props.onViewHistory).toHaveBeenCalledTimes(1);
+  });
+
+  // g-e01b: History was redundant with View Analysis (both open the latest game).
+  it("does not render a History button alongside View Analysis", () => {
+    const props = makeProps();
+    render(<PostGameBanner {...props} />);
+
+    expect(
+      screen.getByRole("button", { name: /view analysis/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^history$/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders idle new-game prompt when not active and no post-game prompt", () => {
@@ -127,10 +136,9 @@ describe("PostGameBanner", () => {
     expect(screen.getByText("Checkmate! You won!")).toBeInTheDocument();
     // No rating delta even though ratingChange is set
     expect(screen.queryByText("+16")).not.toBeInTheDocument();
-    // No View Analysis / New Game / History buttons in stopped-drill branch
+    // No View Analysis / New Game buttons in stopped-drill branch
     expect(screen.queryByRole("button", { name: /view analysis/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /new game/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /history/i })).not.toBeInTheDocument();
 
     const btn = screen.getByRole("button", { name: /another drill/i });
     fireEvent.click(btn);
