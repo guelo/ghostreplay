@@ -108,6 +108,37 @@ describe('MaterialDisplay', () => {
     expect(screen.getByText('♖')).toBeInTheDocument()
   })
 
+  it('renders the label alongside surplus material', () => {
+    render(
+      <MaterialDisplay fen={WHITE_UP_PAWN} perspective="white" label="You:" />,
+    )
+    expect(screen.getByText('You:')).toBeInTheDocument()
+  })
+
+  it('omits the label when the side has no surplus material', () => {
+    // Nothing captured at all, and an even trade: both leave the display empty,
+    // and a label with nothing to name is just noise.
+    for (const fen of [STARTING_FEN, EQUAL_TRADE]) {
+      const { container } = render(
+        <MaterialDisplay fen={fen} perspective="white" label="You:" />,
+      )
+      expect(container.querySelector('.material-label')).toBeNull()
+    }
+  })
+
+  it('keeps the label for a side that is behind but has captures to show', () => {
+    // Black is down material here but still captured a bishop, so it draws icons
+    // — and therefore keeps its label.
+    render(
+      <MaterialDisplay
+        fen={WHITE_UP_QUEEN_DOWN_BISHOP}
+        perspective="black"
+        label="Ghost:"
+      />,
+    )
+    expect(screen.getByText('Ghost:')).toBeInTheDocument()
+  })
+
   it('only the winning side shows score, but both show icons', () => {
     const { container: whiteContainer } = render(
       <MaterialDisplay fen={WHITE_UP_QUEEN_DOWN_BISHOP} perspective="white" />,

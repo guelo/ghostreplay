@@ -42,6 +42,10 @@ const ENGINE_EVALUATION_DEBOUNCE_MS = 120;
 // mainline position (g-cache-stronger-evals). Long enough that scrubbing through
 // moves does not spawn a search per intermediate position.
 const EVIDENCE_DWELL_MS = 700;
+// Narrow viewports sit both material displays on one row, so each needs a label
+// to say whose captures they are; wider layouts hide these (CSS).
+const PLAYER_MATERIAL_LABEL = "You:";
+const OPPONENT_MATERIAL_LABEL = "Ghost:";
 
 type AnalysisBoardProps = {
   moves: AnalysisMove[];
@@ -1463,16 +1467,12 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     setEnginePopup((prev) => (prev && prev.mode === "hover" ? { ...prev, mode: "persist" } : prev));
   }, [clearGraceTimer]);
 
+  const opponentColor = boardOrientation === "white" ? "black" : "white";
+
   const content = (
     <div className="analysis-board" ref={boardRootRef}>
       {isNarrow && mobileToolbar && (
         <div className="analysis-board__mobile-toolbar">
-          <div className="analysis-board__material analysis-board__material--opponent">
-            <MaterialDisplay
-              fen={displayedFen}
-              perspective={boardOrientation === "white" ? "black" : "white"}
-            />
-          </div>
           <div className="analysis-board__mobile-toolbar-content">
             {mobileToolbar}
           </div>
@@ -1564,11 +1564,16 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               />
               Engine lines
             </label>
-            {showEngineArrows && activeEngineDepth > 0 && (
-              <span className="analysis-board__engine-depth">
-                d{activeEngineDepth}
-              </span>
-            )}
+            {/* Always occupies its slot (see .analysis-board__engine-depth's
+                min-width): the depth counts d1 -> d21 during a search, and a
+                slot that appears, then widens at d10, drags the whole panel
+                with it — very visible on narrow layouts, where the panel is
+                right-aligned on the material row. */}
+            <span className="analysis-board__engine-depth">
+              {showEngineArrows && activeEngineDepth > 0
+                ? `d${activeEngineDepth}`
+                : ""}
+            </span>
           </div>
           {showEngineLineList && (
             <div className="analysis-board__engine-lines">
@@ -1623,14 +1628,13 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             </div>
           )}
           </div>
-          {(!isNarrow || !mobileToolbar) && (
-            <div className="analysis-board__material analysis-board__material--opponent">
-              <MaterialDisplay
-                fen={displayedFen}
-                perspective={boardOrientation === "white" ? "black" : "white"}
-              />
-            </div>
-          )}
+          <div className="analysis-board__material analysis-board__material--opponent">
+            <MaterialDisplay
+              fen={displayedFen}
+              perspective={opponentColor}
+              label={OPPONENT_MATERIAL_LABEL}
+            />
+          </div>
           {(() => {
             const Component = isNarrow ? HorizontalMoveList : MoveList;
             return (
@@ -1654,6 +1658,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
             <MaterialDisplay
               fen={displayedFen}
               perspective={boardOrientation}
+              label={PLAYER_MATERIAL_LABEL}
             />
           </div>
         </div>

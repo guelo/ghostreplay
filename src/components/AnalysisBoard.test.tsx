@@ -224,10 +224,14 @@ vi.mock('./HorizontalMoveList', () => ({
   },
 }))
 
-const capturedMaterialDisplays: Array<{ fen: string; perspective: string }> = []
+const capturedMaterialDisplays: Array<{
+  fen: string
+  perspective: string
+  label?: string
+}> = []
 
 vi.mock('./MaterialDisplay', () => ({
-  default: (props: { fen: string; perspective: string }) => {
+  default: (props: { fen: string; perspective: string; label?: string }) => {
     capturedMaterialDisplays.push(props)
     return <div data-testid={`material-display-${props.perspective}`} data-fen={props.fen} />
   },
@@ -288,9 +292,9 @@ describe('AnalysisBoard — MaterialDisplays', () => {
     expect(capturedMaterialDisplays[1].perspective).toBe('white')
   })
 
-  it('moves opponent material into an opt-in mobile toolbar', () => {
+  it('keeps both material displays in the moves column when a mobile toolbar is supplied', () => {
     setMatchMedia('(max-width: 720px)', true)
-    render(
+    const { container } = render(
       <AnalysisBoard
         moves={moves}
         boardOrientation="white"
@@ -300,8 +304,23 @@ describe('AnalysisBoard — MaterialDisplays', () => {
 
     const toolbar = screen.getByTestId('mobile-toolbar-content').parentElement?.parentElement
     expect(toolbar).toHaveClass('analysis-board__mobile-toolbar')
-    expect(toolbar?.querySelector('[data-testid="material-display-black"]')).not.toBeNull()
+    expect(toolbar?.querySelector('[data-testid^="material-display-"]')).toBeNull()
+
+    // Both sit in the moves column, where the narrow layout puts them on the
+    // engine-toggle row.
+    const movesCol = container.querySelector('.analysis-board__moves-col')
+    expect(movesCol?.querySelectorAll('[data-testid^="material-display-"]')).toHaveLength(2)
     expect(screen.getAllByTestId(/material-display-/)).toHaveLength(2)
+  })
+
+  it('labels the displays You / Ghost, following the player rather than the colour', () => {
+    render(<AnalysisBoard moves={moves} boardOrientation="black" />)
+
+    // Playing black: the white-perspective display is the ghost's.
+    expect(capturedMaterialDisplays).toEqual([
+      expect.objectContaining({ perspective: 'white', label: 'Ghost:' }),
+      expect.objectContaining({ perspective: 'black', label: 'You:' }),
+    ])
   })
 
   it('passes displayedFen to both displays for latest move', () => {
@@ -734,6 +753,27 @@ describe('AnalysisBoard MoveList', () => {
 
     progressbar = screen.getByRole('progressbar', { name: 'Engine analysis depth' })
     expect(progressbar.firstElementChild).not.toHaveClass('analysis-board__engine-progress-fill--thinking')
+  })
+
+  it('keeps the depth badge in the DOM at depth 0 so the panel width never changes', async () => {
+    // The badge is width-reserved in CSS; rendering it conditionally would still
+    // let the panel jump the moment the first depth lands.
+    const { container, rerender } = render(
+      <AnalysisBoard moves={moves} boardOrientation="white" />,
+    )
+
+    const badge = container.querySelector('.analysis-board__engine-depth')
+    expect(badge).not.toBeNull()
+    expect(badge).toBeEmptyDOMElement()
+
+    mockEngineInfoRef.current = [
+      { pv: ['g1f3'], score: { type: 'cp', value: 30 }, depth: 12 },
+    ]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    rerender(<AnalysisBoard moves={[...moves]} boardOrientation="white" />)
+
+    await screen.findByText('d12')
+    expect(container.querySelectorAll('.analysis-board__engine-depth')).toHaveLength(1)
   })
 
   it('collapses the engine panel to just the toggle below the 720px breakpoint', () => {

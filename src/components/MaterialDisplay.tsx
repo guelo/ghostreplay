@@ -8,6 +8,11 @@ import {
 type MaterialDisplayProps = {
   fen: string;
   perspective: "white" | "black";
+  /**
+   * Names the side this display belongs to (e.g. "You:"). Rendered only when
+   * there is surplus material to name — a bare label next to nothing is noise.
+   */
+  label?: string;
 };
 
 // Unicode chess pieces: white captures black pieces (shown in black), black captures white pieces (shown in white)
@@ -19,7 +24,7 @@ const PIECE_CHARS: Record<string, { w: string; b: string }> = {
   q: { w: "♕", b: "♛" },
 };
 
-const MaterialDisplay = ({ fen, perspective }: MaterialDisplayProps) => {
+const MaterialDisplay = ({ fen, perspective, label }: MaterialDisplayProps) => {
   const { icons, score } = useMemo(() => {
     const { capturedByWhite, capturedByBlack } = parseMaterial(fen);
     const myCaptured =
@@ -53,6 +58,9 @@ const MaterialDisplay = ({ fen, perspective }: MaterialDisplayProps) => {
 
   return (
     <div className="material-display">
+      {label && icons.length > 0 && (
+        <span className="material-label">{label}</span>
+      )}
       {icons.length > 0 && (
         <span className="material-icons">
           {icons.map((icon, idx) => (

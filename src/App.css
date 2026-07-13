@@ -3618,15 +3618,6 @@
         width: 100%;
         min-width: 0;
     }
-    .history-page .analysis-board__mobile-toolbar .analysis-board__material {
-        flex: 0 0 auto;
-        max-width: 30%;
-        overflow: hidden;
-    }
-    .history-page .analysis-board__mobile-toolbar .material-display {
-        min-height: 0;
-        padding: 0;
-    }
     .history-page .analysis-board__layout {
         gap: 0.35rem;
     }
@@ -3634,34 +3625,73 @@
         width: 100%;
         max-width: 100%;
     }
+    /*
+     * One row for everything below the move list: your captures, the ghost's,
+     * then the collapsed engine toggle pinned to the trailing edge. The two
+     * material columns are minmax(0, max-content) so they clip (overflow:hidden
+     * below) before the 1fr engine column is squeezed — the toggle keeps its full
+     * width even when a side is up a lot of pieces. Either column collapses to
+     * nothing while its side has no surplus material (MaterialDisplay renders
+     * empty, label included).
+     */
     .history-page .analysis-board__moves-col {
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-columns:
+            minmax(0, max-content)
+            minmax(0, max-content)
+            1fr;
         align-items: center;
         gap: 0.25rem 0.4rem;
         min-height: 0;
         max-height: none;
         max-width: 100%;
     }
-    /* Move list on top; the collapsed engine toggle shares the bottom row with
-       the player material display. */
     .history-page .analysis-board__moves-col > .h-move-list {
         grid-column: 1 / -1;
         grid-row: 1;
         gap: 0.25rem;
     }
+    /* Placed by player/opponent, not by colour, so the row always reads You then
+       Ghost regardless of which side the player had. */
     .history-page .analysis-board__material--player {
         grid-column: 1;
         grid-row: 2;
     }
-    .history-page .analysis-board__engine-panel {
+    .history-page .analysis-board__material--opponent {
         grid-column: 2;
         grid-row: 2;
+    }
+    .history-page .analysis-board__material {
+        overflow: hidden;
+    }
+    .history-page .analysis-board__material .material-display {
+        min-height: 0;
+        min-width: 0;
+        padding: 0;
+    }
+    .history-page .analysis-board__material .material-label {
+        display: inline;
+    }
+    .history-page .analysis-board__engine-panel {
+        grid-column: 3;
+        grid-row: 2;
+        justify-self: end;
         min-width: 0;
     }
-    .history-page .analysis-board__material--player .material-display {
-        min-height: 0;
-        padding: 0;
+    /* Shrink the toggle so both labelled material displays fit on the row. */
+    .history-page .analysis-board__engine-header {
+        gap: 0.3rem;
+        padding: 0.15rem 0.35rem;
+    }
+    .history-page .analysis-board__toggle {
+        font-size: 0.7rem;
+        gap: 0.25rem;
+        white-space: nowrap;
+    }
+    .history-page .analysis-board__toggle input[type="checkbox"] {
+        width: 0.8rem;
+        height: 0.8rem;
+        margin: 0;
     }
     .history-page .analysis-board__graph-row .analysis-graph {
         width: 100%;
@@ -4266,6 +4296,13 @@
     gap: 0.25rem;
 }
 
+.analysis-board__material {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
 .analysis-board__engine-header {
     display: flex;
     align-items: center;
@@ -4376,8 +4413,12 @@
     pointer-events: none;
 }
 
+/* Same reason as the depth badge: the eval is rewritten on every depth bump, so
+   reserve the width of a typical score ("+0.2", "-1.5") and keep the PV beside
+   it anchored instead of sliding a character left and right. */
 .analysis-board__engine-eval {
     flex-shrink: 0;
+    min-width: 4ch;
     text-align: right;
     font-weight: 600;
     color: var(--text-primary);
@@ -4475,12 +4516,17 @@
     color: var(--text-primary, #e2e8f0);
 }
 
+/* Width is reserved for the widest value ("d21") and the digits are tabular, so
+   the badge never resizes as the search deepens. */
 .analysis-board__engine-depth {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 0.25rem;
+    min-width: 1.6rem;
     color: var(--text-tertiary, #64748b);
     font-size: 0.65rem;
+    font-variant-numeric: tabular-nums;
 }
 
 .analysis-board__moves-col > .move-list-container {
@@ -5775,6 +5821,18 @@
     gap: 0.25rem;
     min-height: 2rem;
     padding: 0 0.5rem;
+}
+
+/* Only the narrow /game + /history layout, which sits both sides on one row,
+   needs to name them; everywhere else position already says whose captures
+   these are. */
+.material-label {
+    display: none;
+    flex: 0 0 auto;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: var(--text-tertiary);
 }
 
 .material-icons {
