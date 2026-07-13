@@ -3007,7 +3007,10 @@ the saved review with an empty map, since the live analysis session was cleared 
 out). The generic post-game
 "New game" banner is suppressed so no misleading "Drill abandoned" message appears. The board
 stays disabled behind the `isGameActive === false` gate. The on-mount rating fetch does **not**
-resample engine Elo while a drill context is loaded, so "Again" replays the retained Elo. The
+resample engine Elo while a drill context is loaded; "Again" itself resamples it, drawing
+uniformly from every Maia bin rather than from the rating-centred Gaussian used by New Game, so
+repeated drills of one opening face a wide spread of opponents and therefore a wide spread of
+replies (g-acsr). Drills start unrated, so an out-of-band opponent costs the player no rating. The
 "Back to drill" control is an in-flow row; the analysis board's viewport-driven height is
 compensated by that row so the board is not pushed below the fold. The marker is consumed via
 replace

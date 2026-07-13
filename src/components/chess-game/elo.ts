@@ -31,3 +31,19 @@ export function sampleEloBin(
   }
   return MAIA_ELO_BINS[MAIA_ELO_BINS.length - 1];
 }
+
+/**
+ * Uniformly sample any difficulty bin, ignoring the user's Elo (g-acsr).
+ *
+ * Drill restarts use this instead of sampleEloBin: the rating-centred Gaussian
+ * keeps landing on the same two or three bins, so the opponent answers the
+ * drilled opening with the same handful of variations every time. Each bin
+ * plays a visibly different book, and drills start unrated, so the whole
+ * 600-2600 ladder is fair game.
+ */
+export function sampleDrillEloBin(): (typeof MAIA_ELO_BINS)[number] {
+  const index = Math.floor(Math.random() * MAIA_ELO_BINS.length);
+  // Math.random() is [0, 1), so index is in range; clamp anyway so a stubbed
+  // Math.random() returning exactly 1 yields the top bin instead of undefined.
+  return MAIA_ELO_BINS[Math.min(index, MAIA_ELO_BINS.length - 1)];
+}

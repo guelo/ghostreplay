@@ -52,7 +52,7 @@ import {
   MAIA_ELO_BINS,
   STARTING_FEN,
 } from "./chess-game/config";
-import { sampleEloBin } from "./chess-game/elo";
+import { sampleDrillEloBin } from "./chess-game/elo";
 import type { OpenHistoryOptions, ResolvedReview } from "./chess-game/types";
 import BoardStage from "./chess-game/ui/BoardStage";
 import type { StartDrillDraft } from "./chess-game/ui/StartPanel";
@@ -1794,10 +1794,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // Strictness is NOT reseeded from the store (g-09mu force-always): the
       // reopened panel starts with no tier selected, forcing a fresh pick.
       setDrillStrictnessCp(null);
-      // Re-randomize opponent difficulty (g-ncvm), mirroring the New Game
-      // popup; the user can still adjust the slider before Start. Seeds the
+      // Re-randomize opponent difficulty (g-ncvm) across the full bin ladder
+      // (g-acsr); the user can still adjust the slider before Start. Seeds the
       // panel draft only — the store commits on Start, not on open (g-fxrm).
-      setSeedEngineElo(sampleEloBin(s.playerRating));
+      setSeedEngineElo(sampleDrillEloBin());
       setDrillPlayerColor(s.playerColor === "black" ? "black" : "white");
       if (s.drillLine != null) {
         // Ad-hoc drill: restore the synthetic selection + line from the durable
@@ -1829,7 +1829,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   }, []);
 
   // Instantly restart the drill: opening/side/strictness replay exactly, but
-  // opponent difficulty is re-randomized with the New Game algorithm (g-ncvm).
+  // opponent difficulty is re-randomized uniformly over every bin (g-ncvm,
+  // widened by g-acsr).
   const handleAgainDrill = useCallback(async () => {
     if (isStartingGame) return;
     const s = useGameStore.getState();
@@ -1846,9 +1847,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       return;
     }
 
-    // Re-randomize opponent difficulty (g-ncvm) with the New Game algorithm,
-    // sampled around the player's rating; opening/side/strictness stay fixed.
-    const nextEngineElo = sampleEloBin(s.playerRating);
+    // Re-randomize opponent difficulty (g-ncvm) uniformly across the whole bin
+    // ladder rather than around the player's rating (g-acsr), so repeated Agains
+    // draw out a wider spread of replies; opening/side/strictness stay fixed.
+    const nextEngineElo = sampleDrillEloBin();
     captureEvent("drill_again_clicked", {
       opening_key: s.drillOpeningKey,
       player_color: s.playerColor,
