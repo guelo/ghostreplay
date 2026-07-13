@@ -390,6 +390,16 @@ def get_stats_summary(
     score_pct = _score_pct(wins, losses, draws)
 
     # --- Per-move quality + per-session blunder counts (player moves only) ---
+    # MOVE-GRAIN, and deliberately over ALL windowed sessions — in-progress games
+    # included (session_ids, not ended_sessions). Every classified player move is
+    # evidence about how the user is moving now; an open game's moves are not
+    # excluded. The game-grain metrics below (mistake_free_game_rate, accuracy_pct)
+    # are ended-only, because they are not defined until a game is over. Same card,
+    # different populations, on purpose — pinned by test_stats_api.py:243-259. See
+    # SPEC §18.1.
+    #
+    # The blunder counts built here are per-session and feed the game-grain
+    # mistake-free rate, which consults them for ended sessions only.
     player_move_rows: list[tuple[uuid.UUID, str | None]] = []
     if session_ids:
         player_move_rows = (
@@ -458,6 +468,24 @@ def get_stats_summary(
             )
 
     def _mean_accuracy(ids: list[uuid.UUID]) -> float | None:
+        """Unweighted mean of per-game accuracy INTEGERS. See SPEC §18.2-18.3.
+
+        Two deliberate properties, both kept:
+
+        1. Unweighted and double-rounded. compute_game_accuracy already rounds to a
+           0..100 int, so a 10-move game weighs the same as a 60-move game and the
+           mean re-rounds an already-rounded value. That is the honest weighting for
+           "how well do I play in a typical game" — and that per-game int is the same
+           value g-aeq8's cached game_sessions.player_accuracy column will serve, so a
+           move-weighted variant would collide with the Release B read switch.
+        2. Games that did not SCORE drop out. The denominator is "ended games that
+           scored", NOT "ended games" — so this does not share a denominator with
+           mistake_free_game_rate, which counts every ended game. An ended game with
+           no resolved evals (and, once g-22t8.6 lands, one with broken ply
+           coordinates, which fails closed to None rather than a wrong number) is
+           absent here but present there. Do not "fix" this by treating None as 0:
+           that would report an unscored game as 0% accuracy.
+        """
         values = [
             accuracy_by_session[sid]
             for sid in ids

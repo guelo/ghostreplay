@@ -23,6 +23,7 @@ This began as the initial **SPEC** for the "Ghost Replay" Chess Application. It 
 15. Local Fallback
 16. Practice Continuation
 17. Drill Mode
+18. Stats Summary Populations
 
 ---
 
@@ -3079,3 +3080,68 @@ session is **never revived** — any mismatch or missing precondition falls back
 `/play` initialization.
 
 DB reference: §7.3 (`game_sessions` drill columns)
+
+---
+
+## 18. Stats Summary Populations
+
+`GET /api/stats/summary` (`app/api/stats.py`) reports over a `window_days` window: the
+user's sessions that pass `visible_session_filter()` (normal games + converted drills,
+§7.3) and whose normal play started at or after the cutoff. Within that one window, the
+three numbers on the **moves** card are computed over **three different populations**.
+This is deliberate, and each is pinned by a test in `test_stats_api.py`.
+
+| Field | Grain | Population (denominator) |
+|-------|-------|--------------------------|
+| `quality_distribution` | **move** | Classified player moves across **all** windowed sessions — **in-progress games included** |
+| `mistake_free_game_rate` | **game** | **All** ended sessions in the window |
+| `accuracy_pct` | **game** | Ended sessions in the window **that scored** — i.e. whose accuracy is not `None` |
+
+`colors.{white,black}.accuracy_pct` is the same statistic as `accuracy_pct`, scoped to
+that color. All three fields (and the color-scoped ones) are `null`, never `0`, when
+their population is empty — clients must null-check, never truthiness-check.
+
+### 18.1 The grains differ on purpose
+
+**`quality_distribution` is move-grain and counts in-progress games.** Every classified
+player move is evidence about how the user is currently moving, and there is no reason to
+discard the moves of a game that happens to still be open. **The game-grain metrics are
+ended-only** because they are not *defined* until a game is over: a game in progress has
+not yet had the chance to contain a blunder, so counting it would score every young game
+as "mistake-free" and inflate the rate.
+
+This is pinned, with its rationale, at `test_stats_api.py:243-259` — the test asserts that
+an active game's clean player move **does** count toward `quality_distribution` while
+**not** inflating the mistake-free denominator (2 ended games, 1 clean → `50.0`, not the
+`66.7` you would get by counting the active clean game).
+
+Note that a single scan of player moves feeds both grains: the per-session blunder counts
+that decide "is this game clean" are built from the same all-sessions move rows that build
+the distribution, then consulted only for ended sessions.
+
+### 18.2 `accuracy_pct` is an unweighted mean of per-game integers
+
+`compute_game_accuracy` returns a **rounded 0..100 integer** per game (accuracy v1,
+frozen — §7.3.1). `_mean_accuracy` averages those integers and rounds again to one
+decimal. Two consequences, both accepted:
+
+- **It is double-rounded** (per-game round, then round the mean).
+- **It is unweighted:** a 10-move game weighs exactly as much as a 60-move game.
+
+Keep it that way. It answers *"how well do I play in a typical game"*, which is a
+per-game question, so per-game weighting is the honest one. Decisively: that per-game
+integer is **the same value g-aeq8's cached `game_sessions.player_accuracy` column will
+serve** (§7.3.1). A move-weighted variant would need per-move evidence the cache does not
+retain, so it would collide with the Release B read switch on arrival.
+
+### 18.3 The accuracy denominator is "ended games that **scored**"
+
+`_mean_accuracy` **silently drops games whose accuracy is `None`**. So `accuracy_pct` and
+`mistake_free_game_rate` are both game-grain and both ended-only, and *still* do not share
+a denominator: an ended game that fails to score is absent from the accuracy mean but
+present (as clean) in the mistake-free rate.
+
+That drop-arm is not a rare edge. It fires today for an ended game with no resolved evals,
+and the frozen ply-coordinate guard (g-22t8.6) makes it **load-bearing**: a game whose ply
+coordinates are broken scores `None` rather than a silently wrong number, and drops out of
+the mean. The guard's fail-closed contract depends on this arm existing.
