@@ -2224,6 +2224,51 @@ the plies that did resolve. A value of `0` therefore means perfect play, not
 missing data, and clients must not collapse the two (use a null check, never a
 truthiness check).
 
+#### Evidence grain: summary vs. displayed stats
+
+The numbers on a review screen do not all come from the same evidence. Four
+distinct grains, deliberately:
+
+1. **Backend `summary` (blunders/mistakes/inaccuracies/`average_centipawn_loss`)
+   and `accuracy`** — ORIGINAL game-time evidence, computed server-side over the
+   persisted (base) `session_moves` rows. Base, not immutable: a post-end
+   `POST /api/session/{id}/moves` upload can add, change, or clear evaluations,
+   which is why accuracy self-heals on a later upload. Accuracy v1 is frozen.
+2. **Displayed class counts and Avg CPL on BOTH review pages** (`/history` and
+   `/game`, via `GameReviewStats`) — EXACT-BEST-PROJECTED moves: a played move
+   equal to the *trusted* position best counts as `best` with `0` CPL. Each page
+   projects at its own seam and hands the projected array to the stats hook and
+   the board, so for TRUSTED EXACT-BEST PROMOTIONS the pane and the board's gold
+   "best" stars agree. That guarantee is scoped to promotions only — a board star
+   raised by a grain-3 overlay is still board-only and is not counted by the pane.
+3. **Board-only re-annotation overlays** (the `upgraded` field, §Read-time
+   re-annotation) — board display only. They never reach page-level stats: the
+   overlay layer lives inside the board, below the array the page hands it.
+4. **`/history`'s no-analysis fallback panel** (`summary.*` from `/api/history`,
+   shown when a game has no analysis) — ORIGINAL evidence, unprojected. A
+   different surface from `GameReviewStats`, deliberately left alone.
+
+Grain 2 (displayed stats) therefore sits beside grain 1 (accuracy) on the same
+pane. This skew is accepted, not a bug: accuracy v1 is frozen, and projection
+only ever *promotes*, so the skew is bounded and one-directional. Two caveats
+on that bound:
+
+- **It holds on the unrounded mean, not (yet) on the displayed integer.**
+  Projection only ever replaces a nonnegative `eval_delta` with `0` and never
+  raises one, so the unrounded projected player mean cannot exceed the unrounded
+  summary mean, and the projected class counts cannot exceed the summary counts.
+  The displayed integers do not inherit that today, because the frontend rounds
+  half-up while the backend uses Python's banker's rounding: an exact-half mean
+  can display one point HIGHER than the summary (unrounded `2.5` → displayed `3`
+  vs. summary `2`) even though projection lowered nothing. The displayed-integer
+  form of the bound is conditional on both sides being unified on exact half-up
+  rounding.
+- **Null is not comparable, and projection can create a `0` where the summary is
+  `null`.** Promotion writes `eval_delta: 0` unconditionally — including onto a
+  move whose stored delta was `null` — so a game with no resolved player deltas
+  but one promoted move displays `0` against a `null` summary. `≤` is undefined
+  there; the bound is asserted only over games where both sides are non-null.
+
 ### 9.5 Entry Points
 
 The analysis screen (`/game?id=<session_id>`) is accessible from:

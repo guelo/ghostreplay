@@ -2548,9 +2548,10 @@ describe('AnalysisBoard — re-annotation overlay (g-xox0)', () => {
     expect(listEval()).toBe(99) // canonical overlay eval applied
   })
 
-  it('HistoryPage-style RAW moves still get the trusted-best promotion via the seam', () => {
+  it('RAW (unprojected) moves still get the trusted-best promotion via the seam', () => {
     // No `upgraded` at all; the board seam re-runs projectExactBest so a
-    // played==trusted-best move promotes even though HistoryPage feeds raw moves.
+    // played==trusted-best move promotes even for a caller that hands it unprojected
+    // moves (drill-review snapshots, direct tests — both review pages project first).
     render(
       <AnalysisBoard
         moves={[e4Move({ classification: 'good', best_move_san: 'd4' })]}

@@ -1230,10 +1230,12 @@ export interface AnalysisMove {
   /**
    * Read-time re-annotation overlay (g-xox0 Part C): a stronger label joined from
    * analysis_cache for this exact played move, attached ALONGSIDE the base fields
-   * (which stay on original game-time evidence so review stats keep aggregates on
-   * original). Null when no display-upgrade-eligible cache row exists. Optional so
-   * frontend-local snapshots (drill review) may omit it; `projectExactBest` passes
-   * it through untouched.
+   * (which stay on original game-time evidence so the BACKEND summary and accuracy
+   * keep aggregates on original). The review pages' DISPLAYED counts/Avg CPL do not:
+   * both project the base fields through `projectExactBest` before computing stats
+   * (g-22t8.2), while board-only overlays never reach page-level stats. Null when no
+   * display-upgrade-eligible cache row exists. Optional so frontend-local snapshots
+   * (drill review) may omit it; `projectExactBest` passes it through untouched.
    */
   upgraded?: MoveUpgrade | null
 }

@@ -180,8 +180,12 @@ class SessionAnalysisMove(BaseModel):
     segment: str = NORMAL_MOVE_SEGMENT
     # Read-time re-annotation overlay (g-xox0 Part C): a stronger label for this exact
     # played move, joined from analysis_cache. Attached ALONGSIDE the base fields —
-    # the base classification/eval_* stay on the ORIGINAL game-time evidence so the FE
-    # stats path (which reads base fields) keeps aggregates on original. Null when no
+    # the base classification/eval_* stay on the ORIGINAL game-time evidence so the
+    # SUMMARY below and accuracy keep aggregates on original. The FE does NOT display
+    # these base fields verbatim: both review pages run them through projectExactBest
+    # before computing the displayed counts/Avg CPL (g-22t8.2), so a played move equal
+    # to the trusted position best displays as best/0. Mirror of the note on
+    # AnalysisMove.upgraded in src/utils/api.ts — keep the two in step. Null when no
     # display-upgrade-eligible cache row exists for (fen_before, move_uci).
     upgraded: MoveUpgrade | None = None
 
@@ -1464,14 +1468,16 @@ def get_session_analysis(
         expected_total_moves=expected_total_moves,
     )
 
-    # Read-time re-annotation overlay (g-xox0 Part C): join the IMMUTABLE session
-    # moves against analysis_cache by exact (fen_before, move_uci) and attach a
+    # Read-time re-annotation overlay (g-xox0 Part C): join the PERSISTED (base)
+    # session moves against analysis_cache by exact (fen_before, move_uci) and attach a
     # MoveUpgrade for any display-upgrade-eligible stored row (browser-analysis d21
     # or canonical). Exact-key only: byte-identical fen_before, so it covers this
     # session on refetch and other sessions whose stored fen_before is identical, but
     # NOT chess transpositions reached via different move orders / clocks. `move_uci`
-    # is derived once per move here and reused when building the wire moves; the base
-    # classification/eval_* fields stay on ORIGINAL evidence (aggregates read those).
+    # is derived once per move here and reused when building the wire moves. The base
+    # classification/eval_* fields are not rewritten by the overlay, so the summary
+    # aggregates above read ORIGINAL game-time evidence. (Base, not immutable: a
+    # post-end POST /moves upload can still add, change, or clear evaluations.)
     derived_moves = [
         (move, _derive_move_uci(move.fen_before, move.move_san))
         for move in session_moves

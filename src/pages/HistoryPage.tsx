@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   fetchHistory,
@@ -16,6 +16,7 @@ import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
+import { projectExactBest } from "../utils/projectExactBest";
 import { captureEvent } from "../analytics/posthog";
 import "../App.css";
 
@@ -195,10 +196,25 @@ function HistoryPage() {
     [navigate, playerColor],
   );
 
+  // Mirror the exact-best projection GameAnalysisPage applies at the same seam
+  // (g-kfxj, g-22t8.2): a played move equal to the TRUSTED position best is promoted
+  // to 'best' (loss 0). Project once here and feed the result to every consumer so the
+  // review stats agree with the board on THOSE promotions — the board re-projects
+  // internally, so an unprojected stats pane was the only side left disagreeing about
+  // them. Board-only re-annotation overlays (`upgraded`) are a separate grain and can
+  // still star a move the pane does not count; that is by design, not this seam's job.
+  const projectedMoves = useMemo(
+    () =>
+      analysis
+        ? projectExactBest(analysis.moves, analysis.position_analysis)
+        : null,
+    [analysis],
+  );
+
   const { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat } =
     useGameReviewStats({
       selectedId,
-      moves: analysis?.moves ?? null,
+      moves: projectedMoves,
       playerColor,
       onJumpToMove: useCallback((index: number) => {
         boardRef.current?.jumpToMove(index);
@@ -249,11 +265,11 @@ function HistoryPage() {
                   </p>
                 )}
 
-                {!analysisLoading && analysis && sideStats && (
+                {!analysisLoading && analysis && sideStats && projectedMoves && (
                   <AnalysisBoard
                     ref={boardRef}
                     key={selectedGame.session_id}
-                    moves={analysis.moves}
+                    moves={projectedMoves}
                     boardOrientation={playerColor}
                     sessionId={selectedGame.session_id}
                     initialMoveIndex={analysis.moves.length > 0 ? 0 : undefined}

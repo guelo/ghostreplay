@@ -4,6 +4,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import HistoryPage from './HistoryPage';
+import type { AnalysisMove } from '../utils/api';
 
 const setMatchMedia = (matches: boolean) => {
   Object.defineProperty(window, 'matchMedia', {
@@ -49,7 +50,10 @@ vi.mock('../utils/api', async () => {
 
 // Mock AnalysisBoard to avoid pulling in chess rendering. Render the footer so
 // the opening lineage block (passed via footer) is exercised. Use forwardRef +
-// useImperativeHandle so the HistoryPage ref's jumpToMove is observable.
+// useImperativeHandle so the HistoryPage ref's jumpToMove is observable. The
+// `moves` prop is rendered as data attributes (read back by `boardMoves()`) so a
+// projection test cannot pass on the stats pane while the board is still handed
+// unprojected moves.
 const mockJumpToMove = vi.fn();
 vi.mock('../components/AnalysisBoard', () => ({
   default: forwardRef(
@@ -60,12 +64,14 @@ vi.mock('../components/AnalysisBoard', () => ({
         footer,
         mobileToolbar,
         sessionId,
+        moves,
       }: {
         boardOrientation: string;
         initialMoveIndex?: number;
         footer?: React.ReactNode;
         mobileToolbar?: React.ReactNode;
         sessionId?: string;
+        moves: AnalysisMove[];
       },
       ref: React.Ref<{ jumpToMove: (index: number) => void }>,
     ) => {
@@ -77,6 +83,14 @@ vi.mock('../components/AnalysisBoard', () => ({
           data-initial-move={initialMoveIndex}
           data-session-id={sessionId}
         >
+          {moves?.map((move, index) => (
+            <span
+              key={index}
+              data-testid="board-move"
+              data-classification={move.classification}
+              data-delta={String(move.eval_delta)}
+            />
+          ))}
           {mobileToolbar}
           {footer}
         </div>
@@ -101,6 +115,9 @@ vi.mock('react-chessboard', () => ({
     <div data-testid="card-board" data-position={options.position as string} />
   ),
 }));
+
+/** Matches projectExactBest's own default — the fen_before of ply 0. */
+const STARTING_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
 
 const HISTORY_RESPONSE = [
   {
@@ -566,6 +583,115 @@ describe('HistoryPage', () => {
       });
       // A truthiness fallback (|| '—') would wrongly render an em-dash here.
       expect(summaryStat('Avg CPL')).toHaveTextContent('0');
+    });
+  });
+
+  // g-22t8.2: the stats pane must read the SAME exact-best-projected moves the board
+  // renders (and that GameAnalysisPage already feeds its own pane), or a promoted move
+  // shows its gold "best" star while the pane beside it still counts it an inaccuracy.
+  describe('exact-best projection before stats', () => {
+    /** Player is white: a 40-CPL inaccuracy that IS the position best, plus a 20-CPL good. */
+    const PROJECTION_ANALYSIS = (positionTrusted: boolean) => ({
+      ...ANALYSIS_RESPONSE,
+      moves: [
+        {
+          move_san: 'e4',
+          move_uci: 'e2e4',
+          fen_before: STARTING_FEN,
+          fen_after: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1',
+          color: 'white',
+          classification: 'inaccuracy',
+          eval_delta: 40,
+        },
+        {
+          move_san: 'e5',
+          move_uci: 'e7e5',
+          fen_after: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2',
+          color: 'black',
+          classification: 'good',
+          eval_delta: 10,
+        },
+        {
+          move_san: 'Nf3',
+          move_uci: 'g1f3',
+          fen_after: 'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2',
+          color: 'white',
+          classification: 'good',
+          eval_delta: 20,
+        },
+      ],
+      position_analysis: {
+        [STARTING_FEN]: {
+          best_move_uci: 'e2e4',
+          best_move_san: 'e4',
+          best_move_eval_cp: 30,
+          best_move_eval_mate: null,
+          best_line_uci: ['e2e4', 'e7e5'],
+          position_trusted: positionTrusted,
+        },
+      },
+    });
+
+    /** Player Avg CPL is the first of the two Avg CPL cells (player, then opponent). */
+    const playerAvgCpl = (): Element =>
+      document.querySelectorAll('.history-stats-pane__value--acpl')[0];
+
+    /** The `moves` prop the board actually received, read back off the mock's rows. */
+    const boardMoves = (): { classification: string | null; delta: string | null }[] =>
+      screen.getAllByTestId('board-move').map((el) => ({
+        classification: el.getAttribute('data-classification'),
+        delta: el.getAttribute('data-delta'),
+      }));
+
+    it('promotes a played move equal to the TRUSTED position best before computing stats', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockResolvedValue(PROJECTION_ANALYSIS(true));
+
+      render(
+        <MemoryRouter>
+          <HistoryPage />
+        </MemoryRouter>
+      );
+
+      await screen.findByTestId('analysis-board');
+
+      // Promotion sets eval_delta to 0, NOT null — the move stays in the Avg CPL
+      // denominator with a 0 numerator: (0 + 20) / 2 = 10, not 20.
+      expect(screen.getByLabelText('Your Inaccuracies: 0')).toBeInTheDocument();
+      expect(playerAvgCpl()).toHaveTextContent('10');
+
+      // The board gets the same projected array, not raw analysis.moves: e4 promoted,
+      // the other two untouched.
+      expect(boardMoves()).toEqual([
+        { classification: 'best', delta: '0' },
+        { classification: 'good', delta: '10' },
+        { classification: 'good', delta: '20' },
+      ]);
+    });
+
+    it('leaves the move alone when the position is UNTRUSTED — and the stats say so', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockResolvedValue(PROJECTION_ANALYSIS(false));
+
+      render(
+        <MemoryRouter>
+          <HistoryPage />
+        </MemoryRouter>
+      );
+
+      await screen.findByTestId('analysis-board');
+
+      // Assert the VALUES, not merely "no promotion": the trust gate holding only
+      // proves the untrusted best didn't drive the result, not that what we fell back
+      // to is right. (40 + 20) / 2 = 30.
+      expect(screen.getByLabelText('Your Inaccuracies: 1')).toBeInTheDocument();
+      expect(playerAvgCpl()).toHaveTextContent('30');
+
+      expect(boardMoves()).toEqual([
+        { classification: 'inaccuracy', delta: '40' },
+        { classification: 'good', delta: '10' },
+        { classification: 'good', delta: '20' },
+      ]);
     });
   });
 });

@@ -23,15 +23,23 @@ const sanToUci = (fenBefore: string, san: string): string | null => {
 }
 
 /**
- * Game-review exact-best mirror (g-kfxj). The finished-game review screen
- * (`GameAnalysisPage` → `AnalysisBoard`) renders `m.classification` verbatim from
- * the backend session export, so a played move that equals the TRUSTED position
- * best can show the on-board best-arrow yet miss its own gold "best" star when the
- * stored row came from a weaker/earlier run than the position best the backend now
- * serves. The live (`GameAnalysisCoordinator`) and interactive (`useMoveAnalysis`)
- * paths already self-correct through `reconcileTrustedBest`; this projects the same
- * PROMOTION outcome onto the static export so the one remaining consumer agrees
- * with itself.
+ * Game-review exact-best mirror (g-kfxj). The finished-game review screens render
+ * `m.classification` verbatim from the backend session export, so a played move that
+ * equals the TRUSTED position best can show the on-board best-arrow yet miss its own
+ * gold "best" star when the stored row came from a weaker/earlier run than the
+ * position best the backend now serves. The live (`GameAnalysisCoordinator`) and
+ * interactive (`useMoveAnalysis`) paths already self-correct through
+ * `reconcileTrustedBest`; this projects the same PROMOTION outcome onto the static
+ * export so the review path agrees with itself.
+ *
+ * BOTH review pages (`GameAnalysisPage` and `HistoryPage`, g-22t8.2) project at their
+ * own page seam and feed the result to every consumer — `useGameReviewStats` and
+ * `AnalysisBoard` alike — so the displayed counts/Avg CPL agree with the board on the
+ * promotions THIS helper makes. It says nothing about the board's other best stars:
+ * `AnalysisBoard`'s re-annotation overlay (`upgraded`) sits above this layer and can
+ * still star a move the page stats count as played, which is intended (board-only
+ * grain). `AnalysisBoard` re-projects below that overlay (idempotent, so a no-op for
+ * the two review pages) to cover callers that hand it unprojected moves.
  *
  * Gating mirrors `isTrustedExactBestHit` (`position_trusted === true` AND
  * `best_move_uci != null`) so untrusted legacy-seed bests cannot define exact-best

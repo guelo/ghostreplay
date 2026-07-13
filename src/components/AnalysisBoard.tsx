@@ -460,11 +460,13 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   // projectExactBest cannot repair. An AUTHORITATIVE/canonical overlay ALWAYS applies
   // (authority comes from the backend-stamped flag, never re-derived here). Then
   // projectExactBest (pure, promotion-only, idempotent) promotes any played==trusted-
-  // best move — belt-and-suspenders after a skip AND the correction for HistoryPage,
-  // which feeds RAW `analysis.moves`. GameAnalysisPage is already projected, so the
-  // second pass is a no-op there. EVERY display derivation below reads this array;
-  // navigation and the evidence driver keep raw `moves` (immutable wire keys, stable
-  // index — the overlay changes labels/evals only, never array identity or length).
+  // best move — belt-and-suspenders after a skip, and the sole correction for any
+  // UNPROJECTED caller (drill-review snapshots, direct tests). Both review pages now
+  // project at their own page seam before feeding stats (g-22t8.2), so the second pass
+  // is a no-op for them. EVERY display derivation below reads this array; navigation
+  // and the evidence driver keep the INPUT (pre-overlay) `moves` — they read the prop
+  // as received, below the overlay (stable wire keys and index; the overlay changes
+  // labels/evals only, never array identity or length).
   const effectiveMoves = useMemo(() => {
     const overlaid = moves.map((move, index) => {
       const key =
