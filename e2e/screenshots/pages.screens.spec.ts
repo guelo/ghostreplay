@@ -20,6 +20,28 @@ import {
  */
 test.describe.configure({ mode: "serial", timeout: 180_000 });
 
+/**
+ * Scrub an analysis board to its final ply so both material displays are filled.
+ *
+ * /game and /history open the board at the game's FIRST move (initialMoveIndex=0),
+ * where nothing has been captured. The seeded stable game ends with White up a
+ * knight + pawn and Black up a bishop (see backend/scripts/seed_e2e_data.py) —
+ * MaterialDisplay renders per-type NET surpluses, so both sides only draw icons
+ * once they are ahead in different piece types. The selector covers both list
+ * layouts (MoveList's `.move-button`, narrow HorizontalMoveList's `.h-move`);
+ * the chosen index then survives the capture loop's resizes because the
+ * AnalysisBoard instance (and its currentIndex state) outlives the list swap.
+ */
+const showCapturedMaterial = async (page: Page): Promise<void> => {
+  await page.locator(".move-list-grid .move-button, .h-move").last().click();
+  await expect(
+    page.locator(".analysis-board__material--player .material-icons"),
+  ).toBeVisible();
+  await expect(
+    page.locator(".analysis-board__material--opponent .material-icons"),
+  ).toBeVisible();
+};
+
 /** Capture one state across every viewport that page cares about. */
 const captureAcrossViewports = async (
   page: Page,
@@ -142,9 +164,12 @@ test.describe("history", () => {
     });
 
     // Populated + selected analysis: the stable user has games and the page
-    // auto-selects the first one, so wait for the analysis board to render.
+    // auto-selects the first one, so wait for the analysis board to render, then
+    // scrub to the final ply so the captured-material rows are populated.
     await loginAs(page, "stable");
     await page.goto("/history");
+    await expect(page.locator(".analysis-board")).toBeVisible();
+    await showCapturedMaterial(page);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "history",
       state: "populated",
@@ -393,8 +418,11 @@ test.describe("game", () => {
     });
     await page.unrouteAll();
 
-    // Populated: real analysis renders the board.
+    // Populated: real analysis renders the board. Scrub to the final ply so the
+    // captured-material rows are populated for both sides.
     await page.goto(`/game?id=${id}`);
+    await expect(page.locator(".analysis-board")).toBeVisible();
+    await showCapturedMaterial(page);
     await captureAcrossViewports(page, test.info(), {
       pageKey: "game",
       state: "populated",
@@ -594,22 +622,79 @@ test.describe("play", () => {
     // (which ends ghost steering) can't interfere with the review-toast flow.
     await prepareDeterministicPage(page);
     await loginAs(page, "due");
+
+    // Script the opponent so the mid-game board has captured pieces on BOTH
+    // sides. The due user's REAL ghost line (e4 e5 Nf3 Nc6 Bc4 Bc5 Nxe5) reaches
+    // its first capture only at the seeded blunder, which arms the SRS review
+    // warning and then the fail spotlight — toasts this state must not have. So
+    // deviate into the Ruy Lopez Exchange (3.Bb5 a6 4.Bxc6 dxc6 5.Nxe5), where
+    // White nets a knight + pawn and Black nets a bishop: MaterialDisplay draws
+    // per-type NET surpluses, so each side needs a lead in a DIFFERENT piece to
+    // render an icon (an even swap of the same piece cancels out and draws
+    // nothing). mode "ghost" keeps the opponent badge the state had before;
+    // target_fen null means no review is ever armed off this line.
+    const ghostReplies = [
+      { uci: "e7e5", san: "e5" }, // reply to e4
+      { uci: "b8c6", san: "Nc6" }, // reply to Nf3
+      { uci: "a7a6", san: "a6" }, // reply to Bb5
+      { uci: "d7c6", san: "dxc6" }, // recaptures the bishop on c6
+      { uci: "d8d4", san: "Qd4" }, // reply to Nxe5 (no capture back)
+    ];
+    let ghostReplyIndex = 0;
+    await page.route("**/api/game/next-opponent-move", (route) => {
+      const reply =
+        ghostReplies[Math.min(ghostReplyIndex, ghostReplies.length - 1)];
+      ghostReplyIndex += 1;
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          mode: "ghost",
+          move: reply,
+          target_blunder_id: null,
+          target_blunder_srs: null,
+          target_fen: null,
+          decision_source: "ghost_path",
+          drill_route: null,
+        }),
+      });
+    });
+
     await page.goto("/play");
     await startGameAsWhite(page);
 
     await page.setViewportSize({ width: 390, height: 844 });
     await playMove(page, "e2", "e4");
     await waitForMoveCountAtLeast(page, 2);
+    await playMove(page, "g1", "f3");
+    await waitForMoveCountAtLeast(page, 4);
+    await playMove(page, "f1", "b5");
+    await waitForMoveCountAtLeast(page, 6);
+    await playMove(page, "b5", "c6"); // Bxc6 — White wins the knight
+    await waitForMoveCountAtLeast(page, 8);
+    await playMove(page, "f3", "e5"); // Nxe5 — and the e5 pawn
+    await waitForMoveCountAtLeast(page, 10);
+
     // The rehook board notice auto-dismisses after 3s (useBoardNotice) but the
     // frozen clock blocks that timer — advance it so the board is notice-free.
     await page.clock.runFor(3500);
     await expect(page.locator(".board-notice:visible")).toHaveCount(0);
+
+    // Both sides show captures: exactly two material rows are visible in either
+    // layout (portrait relocates them into the info panel + controls row and
+    // hides the moves-column originals), and MaterialDisplay only renders
+    // .material-icons for a side that is actually ahead in some piece type.
+    await expect(
+      page.locator(".material-display .material-icons:visible"),
+    ).toHaveCount(2);
+
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "mid-game",
       waitFor: (p) =>
         p.locator(".move-list-grid .move-button, .h-move").first(),
     });
+    await page.unrouteAll();
   });
 
   // --- Game-end banner (resign path) ------------------------------------

@@ -319,10 +319,22 @@ def seed_database(database_url: str, *, reset: bool) -> dict[str, SeedUser]:
             review_passed=False,
             result="checkmate_loss",
         )
+        # Queen's Gambit Declined, kept on the d4 prefix (play-2col-graph and
+        # mobile-game-layout rely on this user having NO ghost line for e4, so
+        # their mid-game moves raise no review/rehook notices). The trade on f6
+        # plus the c5 pawn grab give BOTH sides a net material surplus in a
+        # DIFFERENT piece type, which is what MaterialDisplay needs to render an
+        # icon for each: it shows per-type net surpluses, so an even swap of the
+        # same piece cancels out and draws nothing. Here White nets a knight +
+        # pawn and Black nets a bishop, so /game and /history populated shots
+        # show captured pieces on both sides.
         _seed_blunder_user(
             db,
             user=stable_user,
-            moves_san=["d4", "d5", "c4", "e6", "Nc3", "Nf6", "Bg5", "Be7", "e3"],
+            moves_san=[
+                "d4", "d5", "c4", "e6", "Nc3", "Nf6", "Bg5", "Be7",
+                "Bxf6", "Bxf6", "e3", "c5", "dxc5", "O-O", "Nf3",
+            ],
             blunder_index=6,
             best_move_san="Nf3",
             eval_loss_cp=70,
