@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
+  ApiError,
   fetchHistory,
   fetchAnalysis,
   type HistoryGame,
@@ -32,10 +33,18 @@ function HistoryPage() {
   const [games, setGames] = useState<HistoryGame[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // Page-level: the history LIST failed. Hides the whole selected-game area, so nothing
+  // in the analysis path may ever write to it — an analysis failure would take the game
+  // selector down with it (on narrow screens the selector lives inside the board).
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<SessionAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisProcessing, setAnalysisProcessing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  // Terminal outcome of polling: the payload never completed ('incomplete'), or a poll
+  // failed for good after a payload was already in hand ('stale'). Null while polling.
+  const [pollOutcome, setPollOutcome] = useState<null | 'incomplete' | 'stale'>(null);
+  const hasPayloadRef = useRef(false);
   const pollCountRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -77,21 +86,27 @@ function HistoryPage() {
 
     let cancelled = false;
     pollCountRef.current = 0;
+    hasPayloadRef.current = false;
+    setPollOutcome(null);
     setAnalysisProcessing(false);
+    setAnalysisError(null);
 
-    const doFetch = (isInitial: boolean) => {
+    const doFetch = () => {
       const fetchPromise = fetchAnalysis(selectedId);
       fetchPromise
         .then((data) => {
           if (cancelled) return;
+          hasPayloadRef.current = true;
           setAnalysis(data);
-          if (isInitial) setAnalysisLoading(false);
+          // Unconditional: a retry after a failed initial fetch would otherwise leave
+          // the pane on "Loading analysis..." forever with a payload in hand.
+          setAnalysisLoading(false);
 
           if (!data.is_complete && pollCountRef.current < POLL_MAX_ATTEMPTS) {
             setAnalysisProcessing(true);
             pollCountRef.current++;
             pollTimerRef.current = setTimeout(() => {
-              if (!cancelled) doFetch(false);
+              if (!cancelled) doFetch();
             }, POLL_INTERVAL_MS);
           } else if (data.is_complete) {
             setAnalysisProcessing(false);
@@ -99,22 +114,42 @@ function HistoryPage() {
               .then((fresh) => { if (!cancelled) setGames(fresh); })
               .catch(() => {});
           } else {
-            setAnalysisProcessing(true);
+            // Out of attempts on a payload that never completed. Nothing server-side
+            // will finish it, so stop claiming it is still processing.
+            setAnalysisProcessing(false);
+            setPollOutcome('incomplete');
           }
         })
-        .catch(() => {
+        .catch((err) => {
           if (cancelled) return;
-          if (isInitial) setAnalysisLoading(false);
-          if (pollCountRef.current < POLL_MAX_ATTEMPTS) {
+
+          const isPermanent = err instanceof ApiError && !err.retryable;
+          const retriesLeft = pollCountRef.current < POLL_MAX_ATTEMPTS;
+
+          if (!isPermanent && retriesLeft) {
+            // Retry window. `analysisProcessing` describes the PAYLOAD, not the request,
+            // so it is never set here. With no payload we simply stay in `analysisLoading`;
+            // with one, a failed refresh is silent until the retries run out.
             pollCountRef.current++;
             pollTimerRef.current = setTimeout(() => {
-              if (!cancelled) doFetch(false);
+              if (!cancelled) doFetch();
             }, POLL_INTERVAL_MS);
+            return;
           }
+
+          // Terminal: a permanent ApiError, or transient retries exhausted.
+          setAnalysisProcessing(false);
+          if (hasPayloadRef.current) {
+            // Keep the board up — the last loaded payload is still the best answer.
+            setPollOutcome('stale');
+            return;
+          }
+          setAnalysisLoading(false);
+          setAnalysisError(isPermanent ? err.message : "Failed to load analysis");
         });
     };
 
-    doFetch(true);
+    doFetch();
 
     return () => {
       cancelled = true;
@@ -221,6 +256,11 @@ function HistoryPage() {
       }, []),
     });
 
+  // The board's own gate, named once. On narrow screens the game selector is rendered
+  // INSIDE the board (as its mobileToolbar), so whenever this is false the pane has to
+  // supply the selector itself or there is no way out of a failed game.
+  const boardVisible = !analysisLoading && !!analysis && !!sideStats && !!projectedMoves;
+
   return (
     <main className="app-shell history-page">
       <AppNav />
@@ -253,6 +293,8 @@ function HistoryPage() {
           {!loading && !error && games.length > 0 && selectedGame && (
             <div className="analysis-pane">
               <div className="analysis-pane__shell">
+                {isNarrow && !boardVisible && gameSelector}
+
                 {analysisLoading && (
                   <p className="analysis-pane__placeholder">
                     Loading analysis...
@@ -265,7 +307,23 @@ function HistoryPage() {
                   </p>
                 )}
 
-                {!analysisLoading && analysis && sideStats && projectedMoves && (
+                {!analysisProcessing && pollOutcome === 'incomplete' && (
+                  <p className="analysis-pane__notice">
+                    Analysis incomplete {"\u2014"} some moves were never evaluated
+                  </p>
+                )}
+
+                {!analysisProcessing && pollOutcome === 'stale' && (
+                  <p className="analysis-pane__notice">
+                    Couldn{"\u2019"}t refresh {"\u2014"} showing the last loaded result
+                  </p>
+                )}
+
+                {analysisError && (
+                  <p className="analysis-pane__error">{analysisError}</p>
+                )}
+
+                {boardVisible && (
                   <AnalysisBoard
                     ref={boardRef}
                     key={selectedGame.session_id}

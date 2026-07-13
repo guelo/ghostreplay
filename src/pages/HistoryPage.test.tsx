@@ -1,10 +1,10 @@
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
 import { forwardRef, useImperativeHandle } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import HistoryPage from './HistoryPage';
-import type { AnalysisMove } from '../utils/api';
+import { ApiError, type AnalysisMove } from '../utils/api';
 
 const setMatchMedia = (matches: boolean) => {
   Object.defineProperty(window, 'matchMedia', {
@@ -541,10 +541,14 @@ describe('HistoryPage', () => {
   // The no-analysis fallback panel is the only place the /api/history
   // average_centipawn_loss field is rendered — and the surface where an unanalyzed
   // game used to read as "0", i.e. perfect play.
+  //
+  // It is reached by a TERMINAL analysis failure (g-22t8.3): a transient rejection now
+  // keeps the pane in its loading state while the retries run, so the fallback can no
+  // longer flicker in mid-poll as though it were the final answer.
   describe('no-analysis summary panel', () => {
     it('renders an em-dash for Avg CPL when no player move was evaluated', async () => {
       mockFetchHistory.mockResolvedValue(UNANALYZED_HISTORY_RESPONSE);
-      mockFetchAnalysis.mockRejectedValue(new Error('no analysis'));
+      mockFetchAnalysis.mockRejectedValue(new ApiError('no analysis', { status: 404 }));
 
       render(
         <MemoryRouter>
@@ -570,7 +574,7 @@ describe('HistoryPage', () => {
           },
         },
       ]);
-      mockFetchAnalysis.mockRejectedValue(new Error('no analysis'));
+      mockFetchAnalysis.mockRejectedValue(new ApiError('no analysis', { status: 404 }));
 
       render(
         <MemoryRouter>
@@ -692,6 +696,302 @@ describe('HistoryPage', () => {
         { classification: 'good', delta: '10' },
         { classification: 'good', delta: '20' },
       ]);
+    });
+  });
+
+  // g-22t8.3: the four poll outcomes must stay distinct — still-processing (active),
+  // incomplete (terminal), stale (terminal, board survives) and analysis load failure
+  // (which is NOT the page-level history error and must not blank the page).
+  describe('poll outcomes', () => {
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_MAX_ATTEMPTS = 60;
+
+    /** An analysis the backend has not finished evaluating: no accuracy yet. */
+    const INCOMPLETE = {
+      ...ANALYSIS_RESPONSE,
+      is_complete: false,
+      summary: { ...ANALYSIS_RESPONSE.summary, accuracy: null },
+    };
+
+    const TWO_GAMES = [
+      HISTORY_RESPONSE[0],
+      {
+        ...HISTORY_RESPONSE[0],
+        session_id: 'def-456',
+        result: 'resign',
+        opening_name: 'French Defense',
+      },
+    ];
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Flush the pending fetches' microtasks without advancing the poll clock. */
+    const settle = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+    /** Advance past every scheduled poll. The async variant flushes the microtasks
+     *  between polls, so each poll's own timer is picked up in the same call. */
+    const exhaustPolls = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * (POLL_MAX_ATTEMPTS + 1));
+      });
+
+    /** The accuracy cell — the only stat that renders the pending state. */
+    const accuracyCell = () => document.querySelector('.history-stats-pane__value--you');
+
+    /** Pick the second game from the dropdown. fireEvent, not userEvent: userEvent's
+     *  internal delay does not cooperate with the fake clock these tests depend on, and
+     *  the selector's trigger and options are plain onClick handlers. */
+    const selectSecondGame = async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Win vs 1500/ }));
+      fireEvent.click(screen.getAllByRole('option')[1]);
+      await settle();
+    };
+
+    const renderPage = () =>
+      render(
+        <MemoryRouter>
+          <HistoryPage />
+        </MemoryRouter>,
+      );
+
+    it('keeps the active processing notice while polls are still running', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockResolvedValue(INCOMPLETE);
+
+      renderPage();
+      await settle();
+
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.getByText(/Analysis still processing/)).toBeInTheDocument();
+      expect(accuracyCell()).toHaveTextContent('computing');
+      // Neither terminal notice may render while polling continues.
+      expect(screen.queryByText(/Analysis incomplete/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/showing the last loaded result/)).not.toBeInTheDocument();
+    });
+
+    it('stays in the loading state through the retry window, claiming nothing about a payload it never got', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockRejectedValue(new Error('Network error'));
+
+      renderPage();
+      await settle();
+
+      expect(screen.getByText('Loading analysis...')).toBeInTheDocument();
+      // "still processing" describes the PAYLOAD; there is no payload.
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+      // ...and the history-row summary is not the final answer yet either.
+      expect(screen.queryByText('Avg CPL')).not.toBeInTheDocument();
+
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(2);
+    });
+
+    it('renders the board when a retry succeeds after a failed initial fetch', async () => {
+      // Guards the unconditional setAnalysisLoading(false): the retry is not the initial
+      // attempt, so an isInitial-guarded clear would leave the pane on "Loading
+      // analysis..." forever with a good payload in hand.
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValue(ANALYSIS_RESPONSE);
+
+      renderPage();
+      await settle();
+      expect(screen.getByText('Loading analysis...')).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+
+      expect(screen.queryByText('Loading analysis...')).not.toBeInTheDocument();
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Analysis incomplete/)).not.toBeInTheDocument();
+    });
+
+    it('goes terminal-incomplete when the payload never completes', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockResolvedValue(INCOMPLETE);
+
+      renderPage();
+      await settle();
+      await exhaustPolls();
+
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+      expect(screen.getByText(/Analysis incomplete/)).toBeInTheDocument();
+      // Accuracy stops pretending it is coming.
+      expect(accuracyCell()).toHaveTextContent('—');
+      expect(accuracyCell()).not.toHaveTextContent('computing');
+
+      // Polling has stopped.
+      const calls = mockFetchAnalysis.mock.calls.length;
+      await exhaustPolls();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(calls);
+    });
+
+    it('keeps the board and goes stale when refresh polls fail transiently to exhaustion', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis
+        .mockResolvedValueOnce(INCOMPLETE)
+        .mockRejectedValue(new Error('Network error'));
+
+      renderPage();
+      await settle();
+      await exhaustPolls();
+
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.getByText(/showing the last loaded result/)).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+    });
+
+    it('keeps the board and goes stale when a refresh poll fails permanently', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis
+        .mockResolvedValueOnce(INCOMPLETE)
+        .mockRejectedValue(new ApiError('Game session not found', { status: 404 }));
+
+      renderPage();
+      await settle();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+
+      // Terminal at the first failing refresh — no need to spend the 60 attempts.
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.getByText(/showing the last loaded result/)).toBeInTheDocument();
+      expect(screen.queryByText('Game session not found')).not.toBeInTheDocument();
+
+      const calls = mockFetchAnalysis.mock.calls.length;
+      await exhaustPolls();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(calls);
+    });
+
+    it('surfaces an analysis load failure when no payload ever arrives', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockRejectedValue(new Error('Network error'));
+
+      renderPage();
+      await settle();
+      await exhaustPolls();
+
+      expect(screen.getByText('Failed to load analysis')).toBeInTheDocument();
+      expect(screen.queryByTestId('analysis-board')).not.toBeInTheDocument();
+      expect(screen.queryByText(/showing the last loaded result/)).not.toBeInTheDocument();
+    });
+
+    it('stops polling immediately on a permanent error on the initial fetch', async () => {
+      mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+      mockFetchAnalysis.mockRejectedValue(
+        new ApiError('Game session not found', { status: 404 }),
+      );
+
+      renderPage();
+      await settle();
+
+      expect(screen.getByText('Game session not found')).toBeInTheDocument();
+      expect(screen.queryByTestId('analysis-board')).not.toBeInTheDocument();
+
+      await exhaustPolls();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears a terminal notice when a different game is selected', async () => {
+      mockFetchHistory.mockResolvedValue(TWO_GAMES);
+      mockFetchAnalysis.mockImplementation((id: string) =>
+        id === 'def-456' ? Promise.resolve(ANALYSIS_RESPONSE) : Promise.resolve(INCOMPLETE),
+      );
+
+      renderPage();
+      await settle();
+      await exhaustPolls();
+      expect(screen.getByText(/Analysis incomplete/)).toBeInTheDocument();
+
+      await selectSecondGame();
+
+      expect(screen.queryByText(/Analysis incomplete/)).not.toBeInTheDocument();
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+    });
+
+    // B2: the analysis error is NOT the history-list error. Writing it into the page-level
+    // `error` hides the whole selected-game area — including, on a phone, the only game
+    // selector — and selecting another game does not clear it. That is a dead end.
+    describe('analysis failure does not blank the page', () => {
+      it('keeps the list, the selector and the summary fallback, and reports in-pane', async () => {
+        mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+        mockFetchAnalysis.mockRejectedValue(
+          new ApiError('Game session not found', { status: 404 }),
+        );
+
+        renderPage();
+        await settle();
+
+        expect(screen.getByRole('button', { name: /Win vs 1500/ })).toBeInTheDocument();
+        expect(screen.getByText('Avg CPL')).toBeInTheDocument();
+        expect(document.querySelector('.history-shell__error')).toBeNull();
+
+        const inPane = document.querySelector('.analysis-pane__error');
+        expect(inPane).toHaveTextContent('Game session not found');
+      });
+
+      it('recovers when another game is selected', async () => {
+        mockFetchHistory.mockResolvedValue(TWO_GAMES);
+        mockFetchAnalysis.mockImplementation((id: string) =>
+          id === 'def-456'
+            ? Promise.resolve(ANALYSIS_RESPONSE)
+            : Promise.reject(new ApiError('Game session not found', { status: 404 })),
+        );
+
+        renderPage();
+        await settle();
+        expect(screen.getByText('Game session not found')).toBeInTheDocument();
+
+        await selectSecondGame();
+
+        expect(screen.queryByText('Game session not found')).not.toBeInTheDocument();
+        expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      });
+
+      it('leaves a working selector in the pane on narrow screens, where the board carries it', async () => {
+        setMatchMedia(true);
+        mockFetchHistory.mockResolvedValue(TWO_GAMES);
+        mockFetchAnalysis.mockImplementation((id: string) =>
+          id === 'def-456'
+            ? Promise.resolve(ANALYSIS_RESPONSE)
+            : Promise.reject(new ApiError('Game session not found', { status: 404 })),
+        );
+
+        renderPage();
+        await settle();
+
+        // No board, so no mobileToolbar — the pane has to supply the selector itself.
+        expect(screen.queryByTestId('analysis-board')).not.toBeInTheDocument();
+        expect(
+          document.querySelector('.analysis-pane__shell > .game-selector-row'),
+        ).toBeInTheDocument();
+        expect(screen.getAllByRole('button', { name: /Win vs 1500/ })).toHaveLength(1);
+
+        await selectSecondGame();
+
+        expect(screen.queryByText('Game session not found')).not.toBeInTheDocument();
+        expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      });
     });
   });
 });

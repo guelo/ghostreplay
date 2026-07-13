@@ -4117,6 +4117,33 @@
     opacity: 0.8;
 }
 
+/* Terminal poll outcomes. Same metrics as the processing notice above so swapping one
+   for another does not shift the board. */
+.analysis-pane__notice {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-tertiary);
+    padding: 0.25rem 0 0.5rem;
+    opacity: 0.8;
+}
+
+.analysis-pane__error {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--danger, #c0392b);
+    padding: 0.25rem 0 0.5rem;
+}
+
+/* The pane-level game selector (rendered only when the board — and with it the mobile
+   toolbar that normally holds the selector — is absent) is outside
+   .analysis-board__mobile-toolbar, so it keeps .custom-dropdown's default 360px and
+   would overflow a phone. Give it the same width behaviour the toolbar copy gets. */
+.history-page .analysis-pane__shell > .game-selector-row,
+.history-page .analysis-pane__shell > .game-selector-row .custom-dropdown {
+    width: 100%;
+    min-width: 0;
+}
+
 .drill-stop-error {
     margin: 0 0 0.5rem;
     font-size: 0.85rem;

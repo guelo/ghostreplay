@@ -19,6 +19,10 @@ function GameAnalysisPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [processing, setProcessing] = useState(false);
+  // Terminal outcome of polling: the payload never completed ('incomplete'), or a poll
+  // failed for good after a payload was already in hand ('stale'). Null while polling.
+  const [pollOutcome, setPollOutcome] = useState<null | 'incomplete' | 'stale'>(null);
+  const hasPayloadRef = useRef(false);
   const pollCountRef = useRef(0);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialAnalysisRequestRef = useRef<{
@@ -31,8 +35,10 @@ function GameAnalysisPage() {
 
     let cancelled = false;
     pollCountRef.current = 0;
+    hasPayloadRef.current = false;
     // Reset request state when the polled id changes, before kicking off the fetch.
     /* eslint-disable react-hooks/set-state-in-effect */
+    setPollOutcome(null);
     setProcessing(false);
     setLoading(true);
     setError(null);
@@ -65,8 +71,11 @@ function GameAnalysisPage() {
       request
         .then((data) => {
           if (cancelled) return;
+          hasPayloadRef.current = true;
           setAnalysis(data);
-          if (isInitial) setLoading(false);
+          // Unconditional: a retry runs with isInitial === false, and under an
+          // isInitial guard a successful retry would never clear `loading`.
+          setLoading(false);
 
           if (!data.is_complete && pollCountRef.current < POLL_MAX_ATTEMPTS) {
             setProcessing(true);
@@ -77,33 +86,38 @@ function GameAnalysisPage() {
           } else if (data.is_complete) {
             setProcessing(false);
           } else {
-            setProcessing(true);
+            // Out of attempts on a payload that never completed. Nothing server-side
+            // will finish it, so stop claiming it is still processing.
+            setProcessing(false);
+            setPollOutcome('incomplete');
           }
         })
         .catch((err) => {
           if (cancelled) return;
 
-          // Permanent errors (4xx non-retryable) — stop immediately
           const isPermanent = err instanceof ApiError && !err.retryable;
-          if (isPermanent) {
-            setLoading(false);
-            setProcessing(false);
-            setError(err.message);
-            return;
-          }
+          const retriesLeft = pollCountRef.current < POLL_MAX_ATTEMPTS;
 
-          // Transient errors — keep polling
-          if (isInitial) setLoading(false);
-          if (pollCountRef.current < POLL_MAX_ATTEMPTS) {
-            setProcessing(true);
+          if (!isPermanent && retriesLeft) {
+            // Retry window. `processing` describes the PAYLOAD, not the request, so it
+            // is never set here. With no payload we simply stay in `loading`; with one,
+            // a failed refresh is silent until the retries run out.
             pollCountRef.current++;
             pollTimerRef.current = setTimeout(() => {
               if (!cancelled) doFetch(false);
             }, POLL_INTERVAL_MS);
-          } else {
-            setProcessing(false);
-            setError("Failed to load analysis");
+            return;
           }
+
+          // Terminal: a permanent ApiError, or transient retries exhausted.
+          setProcessing(false);
+          if (hasPayloadRef.current) {
+            // Keep the board up — setting `error` here is what would blank it.
+            setPollOutcome('stale');
+            return;
+          }
+          setLoading(false);
+          setError(isPermanent ? err.message : "Failed to load analysis");
         });
     };
 
@@ -168,15 +182,27 @@ function GameAnalysisPage() {
             </p>
           )}
 
-          {processing && (
-            <p className="analysis-pane__processing">
-              Analysis still processing{"\u2026"}
-            </p>
-          )}
-
           {!loading && !error && analysis && playerColor && sideStats && projectedMoves && (
             <div className="analysis-pane">
               <div className="analysis-pane__shell">
+                {processing && (
+                  <p className="analysis-pane__processing">
+                    Analysis still processing{"\u2026"}
+                  </p>
+                )}
+
+                {!processing && pollOutcome === 'incomplete' && (
+                  <p className="analysis-pane__notice">
+                    Analysis incomplete {"\u2014"} some moves were never evaluated
+                  </p>
+                )}
+
+                {!processing && pollOutcome === 'stale' && (
+                  <p className="analysis-pane__notice">
+                    Couldn{"\u2019"}t refresh {"\u2014"} showing the last loaded result
+                  </p>
+                )}
+
                 <AnalysisBoard
                   key={id}
                   ref={boardRef}

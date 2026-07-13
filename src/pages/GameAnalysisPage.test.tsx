@@ -1,8 +1,8 @@
 import { StrictMode, forwardRef, useImperativeHandle } from 'react';
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import GameAnalysisPage from './GameAnalysisPage';
 
 // jsdom doesn't have matchMedia — stub it for useTouchOnly
@@ -237,21 +237,6 @@ describe('GameAnalysisPage', () => {
     expect(screen.getByText('Loading analysis...')).toBeInTheDocument();
   });
 
-  it('shows processing UI and polls through transient errors', async () => {
-    mockFetchAnalysis.mockRejectedValue(new Error('Network error'));
-
-    renderPage('/game?id=abc-123');
-
-    await waitFor(() => {
-      expect(screen.queryByText('Loading analysis...')).not.toBeInTheDocument();
-    });
-
-    // No terminal error — shows processing indicator while retrying
-    expect(screen.queryByText('Network error')).not.toBeInTheDocument();
-    expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
-    expect(screen.getByText(/Analysis still processing/)).toBeInTheDocument();
-  });
-
   it('shows backend error immediately for permanent 4xx failures', async () => {
     mockFetchAnalysis.mockRejectedValue(
       new ApiError('Game session not found', { status: 404 }),
@@ -293,5 +278,221 @@ describe('GameAnalysisPage', () => {
 
     // Board should NOT render
     expect(screen.queryByTestId('analysis-board')).not.toBeInTheDocument();
+  });
+
+  // The four poll outcomes must stay distinct: still-processing (active), incomplete
+  // (terminal), stale (terminal, board survives), and load failure (no payload ever).
+  // These need the poll clock, so they run on fake timers; the cases above do not.
+  describe('poll outcomes', () => {
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_MAX_ATTEMPTS = 60;
+
+    /** An analysis the backend has not finished evaluating: no accuracy yet. */
+    const INCOMPLETE = {
+      ...ANALYSIS_RESPONSE,
+      is_complete: false,
+      analyzed_moves: 1,
+      summary: { ...ANALYSIS_RESPONSE.summary, accuracy: null },
+    };
+
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    /** Flush the pending fetch's microtasks without advancing the poll clock. */
+    const settle = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+    /** Advance past every scheduled poll. The async variant flushes the microtasks
+     *  between polls, so each poll's own timer is picked up in the same call. */
+    const exhaustPolls = () =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * (POLL_MAX_ATTEMPTS + 1));
+      });
+
+    /** The accuracy cell — the only stat that renders the pending state. */
+    const accuracyCell = () => document.querySelector('.history-stats-pane__value--you');
+
+    it('keeps the active processing notice while polls are still running', async () => {
+      mockFetchAnalysis.mockResolvedValue(INCOMPLETE);
+
+      renderPage('/game?id=abc-123');
+      await settle();
+
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.getByText(/Analysis still processing/)).toBeInTheDocument();
+      expect(accuracyCell()).toHaveTextContent('computing');
+      // Neither terminal notice may render while polling continues.
+      expect(screen.queryByText(/Analysis incomplete/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/showing the last loaded result/)).not.toBeInTheDocument();
+    });
+
+    it('stays in the loading state through the retry window, claiming nothing about a payload it never got', async () => {
+      mockFetchAnalysis.mockRejectedValue(new Error('Network error'));
+
+      renderPage('/game?id=abc-123');
+      await settle();
+
+      expect(screen.getByText('Loading analysis...')).toBeInTheDocument();
+      // "still processing" describes the PAYLOAD; there is no payload.
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+      expect(screen.queryByText('Network error')).not.toBeInTheDocument();
+
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(2);
+    });
+
+    it('renders the board when a retry succeeds after a failed initial fetch', async () => {
+      // Guards the unconditional setLoading(false): the retry runs with isInitial ===
+      // false, so an isInitial-guarded clear would leave the page on "Loading analysis..."
+      // forever with a good payload in hand.
+      mockFetchAnalysis
+        .mockRejectedValueOnce(new Error('Network error'))
+        .mockResolvedValue(ANALYSIS_RESPONSE);
+
+      renderPage('/game?id=abc-123');
+      await settle();
+      expect(screen.getByText('Loading analysis...')).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+
+      expect(screen.queryByText('Loading analysis...')).not.toBeInTheDocument();
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Analysis incomplete/)).not.toBeInTheDocument();
+    });
+
+    it('goes terminal-incomplete when the payload never completes', async () => {
+      mockFetchAnalysis.mockResolvedValue(INCOMPLETE);
+
+      renderPage('/game?id=abc-123');
+      await settle();
+      await exhaustPolls();
+
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+      expect(screen.getByText(/Analysis incomplete/)).toBeInTheDocument();
+      // Accuracy stops pretending it is coming.
+      expect(accuracyCell()).toHaveTextContent('—');
+      expect(accuracyCell()).not.toHaveTextContent('computing');
+
+      // Polling has stopped.
+      const calls = mockFetchAnalysis.mock.calls.length;
+      await exhaustPolls();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(calls);
+    });
+
+    it('keeps the board and goes stale when refresh polls fail transiently to exhaustion', async () => {
+      // Regression: the old catch set `error`, and the board gate is `!error`, so a page
+      // that had loaded a good payload went BLANK after 60 failed refreshes.
+      mockFetchAnalysis
+        .mockResolvedValueOnce(INCOMPLETE)
+        .mockRejectedValue(new Error('Network error'));
+
+      renderPage('/game?id=abc-123');
+      await settle();
+      await exhaustPolls();
+
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.getByText(/showing the last loaded result/)).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Analysis still processing/)).not.toBeInTheDocument();
+    });
+
+    it('keeps the board and goes stale when a refresh poll fails permanently', async () => {
+      mockFetchAnalysis
+        .mockResolvedValueOnce(INCOMPLETE)
+        .mockRejectedValue(new ApiError('Game session not found', { status: 404 }));
+
+      renderPage('/game?id=abc-123');
+      await settle();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+      });
+
+      // Terminal at the first failing refresh — no need to spend the 60 attempts.
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.getByText(/showing the last loaded result/)).toBeInTheDocument();
+      expect(screen.queryByText('Game session not found')).not.toBeInTheDocument();
+
+      const calls = mockFetchAnalysis.mock.calls.length;
+      await exhaustPolls();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(calls);
+    });
+
+    it('surfaces a load failure when no payload ever arrives', async () => {
+      mockFetchAnalysis.mockRejectedValue(new Error('Network error'));
+
+      renderPage('/game?id=abc-123');
+      await settle();
+      await exhaustPolls();
+
+      expect(screen.getByText('Failed to load analysis')).toBeInTheDocument();
+      expect(screen.queryByTestId('analysis-board')).not.toBeInTheDocument();
+      expect(screen.queryByText(/showing the last loaded result/)).not.toBeInTheDocument();
+    });
+
+    it('stops immediately on a permanent error on the initial fetch', async () => {
+      mockFetchAnalysis.mockRejectedValue(
+        new ApiError('Game session not found', { status: 404 }),
+      );
+
+      renderPage('/game?id=bad-id');
+      await settle();
+
+      expect(screen.getByText('Game session not found')).toBeInTheDocument();
+      expect(screen.queryByTestId('analysis-board')).not.toBeInTheDocument();
+
+      await exhaustPolls();
+      expect(mockFetchAnalysis).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears a terminal notice when the polled id changes', async () => {
+      // The effect's reset is the thing under test, so the switch must happen on a LIVE
+      // component — a second render() would remount and pass even with the reset missing.
+      function NavHarness() {
+        const navigate = useNavigate();
+        return (
+          <>
+            <button onClick={() => navigate('/game?id=s2')}>go-s2</button>
+            <GameAnalysisPage />
+          </>
+        );
+      }
+      mockFetchAnalysis.mockImplementation((id: string) =>
+        id === 's2' ? Promise.resolve(ANALYSIS_RESPONSE) : Promise.resolve(INCOMPLETE),
+      );
+
+      render(
+        <MemoryRouter initialEntries={['/game?id=s1']}>
+          <NavHarness />
+        </MemoryRouter>,
+      );
+      await settle();
+      await exhaustPolls();
+      expect(screen.getByText(/Analysis incomplete/)).toBeInTheDocument();
+
+      // fireEvent, not userEvent: userEvent's internal delay does not cooperate with the
+      // fake clock these poll tests depend on, and the harness button is a plain onClick.
+      fireEvent.click(screen.getByRole('button', { name: 'go-s2' }));
+      await settle();
+
+      expect(screen.queryByText(/Analysis incomplete/)).not.toBeInTheDocument();
+      expect(screen.getByTestId('analysis-board')).toBeInTheDocument();
+      expect(screen.queryByText(/Failed to load analysis/)).not.toBeInTheDocument();
+    });
   });
 });
