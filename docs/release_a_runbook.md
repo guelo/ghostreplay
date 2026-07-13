@@ -116,11 +116,23 @@ SPEC.md). Do **not** `VALIDATE`.
 
 | # | Fact | Value |
 |---|------|-------|
-| 1 | Release A activation identifier + timestamp (deploy id / commit + UTC) | _pending_ |
-| 2 | `20260709_01` duration (accuracy cols + `NOT VALID` CHECK) | _pending_ |
-| 3 | `20260709_02` `CONCURRENTLY` index duration + `indisvalid` after build | _pending_ |
-| 4 | Timestamp the last pre-A deployment is **removed** (not merely inactive/draining) | _pending_ |
+| 1 | Release A activation identifier + timestamp (deploy id / commit + UTC) | Railway deployment `a436eca7-5899-440d-9601-f198ed9f31c3`, commit `8c3cedeb36dd86e381e3eb7de1c98f2e75f5d6c1`; first successful health response at `2026-07-12T17:23:16.325883206Z` |
+| 2 | `20260709_01` duration (accuracy cols + `NOT VALID` CHECK) | Applied by deployment `0377a0e3-b425-4585-9916-e53a8d692228`, commit `8b49bed5653349a09ee980e81a9eac65ba25aa40`. Exact duration is not recoverable: Railway assigned the `20260709_01` and following `20260709_02` transition records the same buffered-log timestamp, `2026-07-11T10:33:43.599Z`, and PostgreSQL retained no statement-duration telemetry. Do not interpret this as a zero-duration migration. |
+| 3 | `20260709_02` `CONCURRENTLY` index duration + `indisvalid` after build | Same deployment and duration-observability limitation as Fact 2. A timestamped production check at `2026-07-12T21:17:04.276118Z` returned `indisvalid = true` and `CREATE INDEX idx_rating_history_user_chain ON public.rating_history USING btree (user_id, games_played DESC, recorded_at DESC, id DESC)`. |
+| 4 | Timestamp the last pre-A deployment is **removed** (not merely inactive/draining) | Deployment `081289e0-75a7-4f11-8500-43e59b2be747` logged `Stopping Container` at `2026-07-12T17:23:31.248016623Z`; Railway subsequently reported the deployment status as `REMOVED`. |
 
-Also record, at build time, the production `rating_history` row count (sizes the
-`CONCURRENTLY` build) and confirm `SELECT indisvalid` is `true` before considering
-the migration complete.
+The production `rating_history` count was not captured contemporaneously when
+deployment `0377a0e3-b425-4585-9916-e53a8d692228` built the index. A post-hoc
+query at `2026-07-12T21:17:04.265865Z` found **1,529** current rows and **1,523**
+extant rows with `recorded_at` at or before the migration transition timestamp.
+Treat 1,523 only as a reconstructed logical build-time count (subject to any
+later deletion), not as a contemporaneous measurement. The separately observed
+pre-activation count was **1,528** rows and the total relation size was **784 kB**;
+that observation preceded the schema-no-op activation deployment, not the
+original concurrent index build.
+
+The absent per-revision timings are an explicit Release-A observability gap, not
+an input to Release B sizing. Release B independently times CHECK validation plus
+the real accuracy backfill on a production snapshot and uses the last pre-A
+removal timestamp above as its activation cutoff. Never downgrade or rebuild the
+production index merely to manufacture the missing timings.
