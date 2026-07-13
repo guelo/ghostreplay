@@ -187,20 +187,116 @@ def test_history_scoped_to_user(client, auth_headers, create_game_session):
     assert s_other not in ids
 
 
-def test_history_game_without_moves_has_zero_summary(client, auth_headers, create_game_session):
+def test_history_game_without_moves_has_null_avg_cpl(client, auth_headers, create_game_session):
     session_id = create_game_session(user_id=123)
     _end_game(client, auth_headers, session_id)
 
     response = client.get("/api/history", headers=auth_headers(user_id=123))
     game = response.json()["games"][0]
+    # A game with no move rows has no player CPL: null, not 0. Zero is reserved for
+    # perfect play (see test_history_avg_cpl_zero_is_perfect_play_not_missing_data).
     assert game["summary"] == {
         "total_moves": 0,
         "blunders": 0,
         "mistakes": 0,
         "inaccuracies": 0,
-        "average_centipawn_loss": 0,
+        "average_centipawn_loss": None,
         "accuracy": None,
     }
+
+
+def test_history_avg_cpl_null_when_no_player_move_evaluated(
+    client, auth_headers, create_game_session
+):
+    """Move rows exist, but no PLAYER move has an eval_delta -> null.
+
+    The opponent's moves ARE evaluated, so a non-null result here would prove the
+    average leaked across the player-only restriction in player_loss_expr.
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id)
+
+    _upload_moves(client, auth_headers, session_id, [
+        # Player (white): unanalyzed — no eval_delta.
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w",
+        },
+        {
+            "move_number": 2, "color": "white", "move_san": "Nf3",
+            "fen_after": "fen-2w",
+        },
+        # Opponent (black): evaluated.
+        {
+            "move_number": 1, "color": "black", "move_san": "e5",
+            "fen_after": "fen-1b", "eval_delta": 60, "classification": "blunder",
+        },
+        {
+            "move_number": 2, "color": "black", "move_san": "Nc6",
+            "fen_after": "fen-2b", "eval_delta": 40, "classification": "mistake",
+        },
+    ])
+
+    response = client.get("/api/history", headers=auth_headers(user_id=123))
+    game = response.json()["games"][0]
+    assert game["summary"]["total_moves"] == 4
+    assert game["summary"]["average_centipawn_loss"] is None
+
+
+def test_history_avg_cpl_averages_evaluated_subset_when_partially_analyzed(
+    client, auth_headers, create_game_session
+):
+    """Partial analysis is NOT gated: average over the plies that resolved.
+
+    Unlike accuracy (a whole-game construct, undefined with gaps), a subset mean is
+    a real number. Here only one of the two player moves is evaluated, so the result
+    is that move's loss (40) — not None, and not 20 (which would average in the gap).
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id)
+
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 40, "classification": "mistake",
+        },
+        # Player's second move never got analyzed.
+        {
+            "move_number": 2, "color": "white", "move_san": "Nf3",
+            "fen_after": "fen-2w",
+        },
+        {
+            "move_number": 1, "color": "black", "move_san": "e5",
+            "fen_after": "fen-1b", "eval_delta": 200, "classification": "blunder",
+        },
+    ])
+
+    response = client.get("/api/history", headers=auth_headers(user_id=123))
+    game = response.json()["games"][0]
+    assert game["summary"]["average_centipawn_loss"] == 40
+
+
+def test_history_avg_cpl_zero_is_perfect_play_not_missing_data(
+    client, auth_headers, create_game_session
+):
+    """0 is a terminal value distinct from null; a truthiness gate would conflate them."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    _end_game(client, auth_headers, session_id)
+
+    _upload_moves(client, auth_headers, session_id, [
+        {
+            "move_number": 1, "color": "white", "move_san": "e4",
+            "fen_after": "fen-1w", "eval_delta": 0, "classification": "best",
+        },
+        {
+            "move_number": 2, "color": "white", "move_san": "Nf3",
+            "fen_after": "fen-2w", "eval_delta": 0, "classification": "best",
+        },
+    ])
+
+    response = client.get("/api/history", headers=auth_headers(user_id=123))
+    game = response.json()["games"][0]
+    assert game["summary"]["average_centipawn_loss"] == 0
 
 
 def test_history_limit_validation(client, auth_headers):

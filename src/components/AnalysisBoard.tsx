@@ -5,6 +5,7 @@ import type { Square } from "chess.js";
 import { Chessboard, defaultArrowOptions } from "react-chessboard";
 import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, MoveUpgrade, PositionAnalysis } from "../utils/api";
+import type { HighlightedMoves } from "../utils/gameStats";
 import type { EngineInfo } from "../workers/stockfishMessages";
 import type { VariationNodeId, VarNode } from "../types/variationTree";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
@@ -50,7 +51,7 @@ type AnalysisBoardProps = {
   footer?: React.ReactNode;
   mobileToolbar?: React.ReactNode;
   positionAnalysis?: Record<string, PositionAnalysis>;
-  highlightedMoves?: { indices: number[]; classification: 'blunder' | 'mistake' | 'inaccuracy' } | null;
+  highlightedMoves?: HighlightedMoves | null;
   onGraphMoveClick?: () => void;
   /**
    * Saved-game session id (g-cache-stronger-evals). When present, the analysis-board

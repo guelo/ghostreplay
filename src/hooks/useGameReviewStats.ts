@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { AnalysisMove } from '../utils/api';
-import { computeSideStats, type ClassKey, type SideStats, type StatSelection } from '../utils/gameStats';
+import { computeSideStats, selectionDots, type HighlightedMoves, type SideStats, type StatSelection } from '../utils/gameStats';
 import { useTouchOnly } from './useTouchOnly';
 
 interface UseGameReviewStatsArgs {
@@ -12,7 +12,7 @@ interface UseGameReviewStatsArgs {
 
 interface UseGameReviewStatsReturn {
   sideStats: { player: SideStats; opponent: SideStats } | null;
-  highlightedMoves: { indices: number[]; classification: ClassKey } | null;
+  highlightedMoves: HighlightedMoves | null;
   handleStatHover: (sel: StatSelection) => void;
   handleStatClick: (sel: StatSelection) => void;
   handleGraphMoveClick: () => void;
@@ -46,9 +46,8 @@ export function useGameReviewStats({ selectedId, moves, playerColor, onJumpToMov
   const activeStat = hoveredStat ?? pinnedStat;
 
   const highlightedMoves = useMemo(() => {
-    if (!activeStat || !sideStats) return null;
-    const stats = activeStat.side === 'player' ? sideStats.player : sideStats.opponent;
-    return { indices: stats[activeStat.cls].indices, classification: activeStat.cls };
+    const dots = sideStats ? selectionDots(sideStats, activeStat) : [];
+    return dots.length ? { dots } : null;
   }, [activeStat, sideStats]);
 
   const handleStatHover = useCallback((sel: StatSelection) => {
@@ -58,8 +57,7 @@ export function useGameReviewStats({ selectedId, moves, playerColor, onJumpToMov
 
   const handleStatClick = useCallback((sel: StatSelection) => {
     const isSameCategory = pinnedStat?.side === sel?.side && pinnedStat?.cls === sel?.cls;
-    const targetStats = sel?.side === 'player' ? sideStats?.player : sideStats?.opponent;
-    const targetMoves = sel && targetStats ? targetStats[sel.cls].indices : [];
+    const targetMoves = sideStats ? selectionDots(sideStats, sel).map((d) => d.index) : [];
     let newCycleIndex = 0;
 
     if (isSameCategory && targetMoves.length > 0) {

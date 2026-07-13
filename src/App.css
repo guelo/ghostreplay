@@ -3890,6 +3890,36 @@
     padding-bottom: 0.2rem;
 }
 
+/* Interactive You/Ghost headers (g-9xjd). Fully reset the native button box so
+   grid sizing stays identical to the plain <div> header; the base block above
+   still supplies font-size/weight/color/uppercase. */
+.history-stats-pane__header--interactive {
+    appearance: none;
+    -webkit-appearance: none;
+    background: transparent;
+    border: 0;
+    margin: 0;
+    padding: 0 0 0.2rem; /* replaces UA button padding; matches base padding-bottom */
+    font-family: inherit;
+    line-height: inherit;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.15s, outline-color 0.15s;
+}
+
+.history-stats-pane__header--interactive:hover {
+    background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+
+.history-stats-pane__header--interactive:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 1px;
+}
+
+.history-stats-pane__header--active {
+    background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+}
+
 .history-stats-pane__label {
     all: unset;
     font-size: 0.65rem;

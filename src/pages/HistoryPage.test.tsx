@@ -124,7 +124,35 @@ const ANALYSIS_RESPONSE = {
   ],
   position_analysis: {},
   is_complete: true,
-  summary: { total_moves: 3, blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 0, accuracy: 88 },
+  // No total_moves: /session/{id}/analysis does not send one (the move list carries it).
+  summary: { blunders: 0, mistakes: 0, inaccuracies: 0, average_centipawn_loss: 0, accuracy: 88 },
+};
+
+/** An ended game that was never analyzed: no player move has an eval_delta. */
+const UNANALYZED_HISTORY_RESPONSE = [
+  {
+    session_id: 'abc-123',
+    player_color: 'white',
+    result: 'checkmate_win',
+    engine_elo: 1500,
+    ended_at: '2026-04-20T12:00:00Z',
+    opening_name: 'Sicilian Defense',
+    summary: {
+      total_moves: 0,
+      blunders: 0,
+      mistakes: 0,
+      inaccuracies: 0,
+      average_centipawn_loss: null,
+      accuracy: null,
+    },
+  },
+];
+
+/** The value cell sitting next to a given label in the no-analysis summary panel. */
+const summaryStat = (label: string): Element => {
+  const value = screen.getByText(label).previousElementSibling;
+  if (!value) throw new Error(`no value cell for ${label}`);
+  return value;
 };
 
 describe('HistoryPage', () => {
@@ -153,6 +181,39 @@ describe('HistoryPage', () => {
     expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-initial-move', '0');
     // Passes the selected game's session id to the evidence driver.
     expect(screen.getByTestId('analysis-board')).toHaveAttribute('data-session-id', 'abc-123');
+  });
+
+  it('cycles the board through the player union when the You header is clicked', async () => {
+    const user = userEvent.setup();
+    mockFetchHistory.mockResolvedValue(HISTORY_RESPONSE);
+    // playerColor = white → player moves at even indices: blunder@0, mistake@2,
+    // inaccuracy@4. Union sorted by index = [0, 2, 4].
+    mockFetchAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      moves: [
+        { move_san: 'e4', fen_after: 'fen0', color: 'white', classification: 'blunder' },
+        { move_san: 'c5', fen_after: 'fen1', color: 'black', classification: 'mistake' },
+        { move_san: 'Nf3', fen_after: 'fen2', color: 'white', classification: 'mistake' },
+        { move_san: 'd6', fen_after: 'fen3', color: 'black', classification: null },
+        { move_san: 'd4', fen_after: 'fen4', color: 'white', classification: 'inaccuracy' },
+      ],
+    });
+
+    render(
+      <MemoryRouter>
+        <HistoryPage />
+      </MemoryRouter>
+    );
+
+    await screen.findByTestId('analysis-board');
+
+    const you = screen.getByRole('button', {
+      name: /all of your blunders, mistakes, and inaccuracies/i,
+    });
+    await user.click(you);
+    expect(mockJumpToMove).toHaveBeenLastCalledWith(0);
+    await user.click(you);
+    expect(mockJumpToMove).toHaveBeenLastCalledWith(2);
   });
 
   it('captures history_game_selected when a different game is chosen', async () => {
@@ -457,6 +518,54 @@ describe('HistoryPage', () => {
 
     await waitFor(() => {
       expect(screen.getByText('No games played yet')).toBeInTheDocument();
+    });
+  });
+
+  // The no-analysis fallback panel is the only place the /api/history
+  // average_centipawn_loss field is rendered — and the surface where an unanalyzed
+  // game used to read as "0", i.e. perfect play.
+  describe('no-analysis summary panel', () => {
+    it('renders an em-dash for Avg CPL when no player move was evaluated', async () => {
+      mockFetchHistory.mockResolvedValue(UNANALYZED_HISTORY_RESPONSE);
+      mockFetchAnalysis.mockRejectedValue(new Error('no analysis'));
+
+      render(
+        <MemoryRouter>
+          <HistoryPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Avg CPL')).toBeInTheDocument();
+      });
+      expect(summaryStat('Avg CPL')).toHaveTextContent('—');
+      expect(summaryStat('Avg CPL')).not.toHaveTextContent('0');
+    });
+
+    it('renders a genuine Avg CPL of 0 as "0" — perfect play, not missing data', async () => {
+      mockFetchHistory.mockResolvedValue([
+        {
+          ...UNANALYZED_HISTORY_RESPONSE[0],
+          summary: {
+            ...UNANALYZED_HISTORY_RESPONSE[0].summary,
+            total_moves: 24,
+            average_centipawn_loss: 0,
+          },
+        },
+      ]);
+      mockFetchAnalysis.mockRejectedValue(new Error('no analysis'));
+
+      render(
+        <MemoryRouter>
+          <HistoryPage />
+        </MemoryRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText('Avg CPL')).toBeInTheDocument();
+      });
+      // A truthiness fallback (|| '—') would wrongly render an em-dash here.
+      expect(summaryStat('Avg CPL')).toHaveTextContent('0');
     });
   });
 });

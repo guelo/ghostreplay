@@ -1147,12 +1147,26 @@ export const recordManualBlunder = async (
 /**
  * History types
  */
-export interface GameSummary {
+/**
+ * `average_centipawn_loss` is null IFF no player move has an eval_delta. A partially
+ * analyzed game reports the average over the plies that resolved; 0 means perfect
+ * play, not missing data — never gate it on truthiness.
+ */
+export interface HistoryGameSummary {
   total_moves: number
   blunders: number
   mistakes: number
   inaccuracies: number
-  average_centipawn_loss: number
+  average_centipawn_loss: number | null
+  accuracy: number | null
+}
+
+/** /session/{id}/analysis sends no `total_moves` — the move list carries it. */
+export interface SessionAnalysisSummary {
+  blunders: number
+  mistakes: number
+  inaccuracies: number
+  average_centipawn_loss: number | null
   accuracy: number | null
 }
 
@@ -1164,7 +1178,7 @@ export interface HistoryGame {
   engine_elo: number
   player_color: string
   opening_name: string | null
-  summary: GameSummary
+  summary: HistoryGameSummary
 }
 
 interface HistoryResponse {
@@ -1246,7 +1260,7 @@ export interface SessionAnalysis {
   pgn: string | null
   result: string | null
   moves: AnalysisMove[]
-  summary: GameSummary
+  summary: SessionAnalysisSummary
   position_analysis?: Record<string, PositionAnalysis>
   expected_total_moves: number | null
   analyzed_moves: number

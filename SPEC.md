@@ -2193,7 +2193,7 @@ Returns full analysis for a completed game session.
     "blunders": 2,
     "mistakes": 3,
     "inaccuracies": 5,
-    "average_centipawn_loss": 24,
+    "average_centipawn_loss": "integer | null",
     "accuracy": "integer | null"
   },
   "position_analysis": {
@@ -2216,6 +2216,13 @@ The summary's blunder/mistake/inaccuracy counts and `average_centipawn_loss`
 are player-only: only moves whose `color` matches `player_color` contribute.
 Average centipawn loss is nonnegative; negative `eval_delta` values are treated
 as `0` for display/summary purposes.
+
+`average_centipawn_loss` is `null` if and only if no player move has an
+`eval_delta` — an unanalyzed game reports `null`, not `0`. It is deliberately
+not gated on completeness: a partially analyzed game reports the average over
+the plies that did resolve. A value of `0` therefore means perfect play, not
+missing data, and clients must not collapse the two (use a null check, never a
+truthiness check).
 
 ### 9.5 Entry Points
 
@@ -2380,7 +2387,7 @@ Returns list of user's completed games (newest first).
         "blunders": 1,
         "mistakes": 2,
         "inaccuracies": 4,
-        "average_centipawn_loss": 18
+        "average_centipawn_loss": "integer | null"
       }
     }
   ]
@@ -2390,6 +2397,12 @@ Returns list of user's completed games (newest first).
 History summaries follow the same player-only rule as session analysis for
 blunder/mistake/inaccuracy counts and `average_centipawn_loss`. ACPL also clamps
 negative eval deltas to zero, including legacy stored rows.
+
+`average_centipawn_loss` carries the same null semantics as session analysis: it
+is `null` if and only if no player move has an `eval_delta` (an unanalyzed game,
+or a game with no moves at all), a partially analyzed game reports the average
+over the plies that resolved, and `0` means perfect play rather than missing
+data.
 
 ### 10.6 Empty State
 

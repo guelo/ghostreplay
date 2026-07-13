@@ -28,7 +28,10 @@ class GameSummary(BaseModel):
     blunders: int
     mistakes: int
     inaccuracies: int
-    average_centipawn_loss: int
+    # None IFF no player move has an eval_delta. 0 means perfect play, not missing
+    # data. A partially analyzed game reports the average over the plies that
+    # resolved (no completeness gate — unlike accuracy).
+    average_centipawn_loss: int | None
     accuracy: int | None = None
 
 
@@ -135,7 +138,7 @@ def get_history(
 
     stats_by_session: dict[uuid.UUID, GameSummary] = {}
     for row in stats_rows:
-        avg_cpl = int(round(row.avg_cpl)) if row.avg_cpl is not None else 0
+        avg_cpl = int(round(row.avg_cpl)) if row.avg_cpl is not None else None
         accuracy = compute_game_accuracy(
             moves_by_session.get(row.session_id, []),
             player_color=player_color_by_session.get(row.session_id, "white"),
@@ -155,7 +158,7 @@ def get_history(
         blunders=0,
         mistakes=0,
         inaccuracies=0,
-        average_centipawn_loss=0,
+        average_centipawn_loss=None,
     )
 
     return HistoryResponse(

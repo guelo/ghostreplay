@@ -3,11 +3,7 @@ import { mateToCp } from "../workers/analysisUtils";
 import { formatWhiteEval } from "./MoveRow.helpers";
 import { cpToWinningChances } from "./AnalysisGraph.helpers";
 import InfoHelpButton from "./InfoHelpButton";
-
-type HighlightedMoves = {
-  indices: number[];
-  classification: 'blunder' | 'mistake' | 'inaccuracy';
-};
+import type { HighlightedMoves } from "../utils/gameStats";
 
 type AnalysisGraphProps = {
   evals: (number | null)[];
@@ -465,17 +461,17 @@ const AnalysisGraph = ({
           />
         ))}
 
-        {/* Classification highlight dots */}
-        {highlightedMoves && highlightedMoves.indices.map((i) => {
-          const pt = points[i];
+        {/* Classification highlight dots — each keeps its own class color */}
+        {highlightedMoves && highlightedMoves.dots.map(({ index, classification }) => {
+          const pt = points[index];
           if (!pt) return null;
           return (
             <circle
-              key={i}
+              key={index}
               cx={pt[0]}
               cy={pt[1]}
               r={6}
-              className={`analysis-graph__highlight-dot analysis-graph__highlight-dot--${highlightedMoves.classification}`}
+              className={`analysis-graph__highlight-dot analysis-graph__highlight-dot--${classification}`}
             />
           );
         })}

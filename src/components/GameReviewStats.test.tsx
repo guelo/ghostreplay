@@ -2,17 +2,41 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import GameReviewStats from './GameReviewStats';
-import type { SideStats } from '../utils/gameStats';
+import type { SideStats, StatSelection } from '../utils/gameStats';
 import { accuracyColor, acplColor } from '../utils/statColor';
 
+/** A side with no evaluated moves: avgCpl is null (no data), NOT 0 (perfect play). */
 const emptySide = (over: Partial<SideStats> = {}): SideStats => ({
   blunder: { count: 0, indices: [] },
   mistake: { count: 0, indices: [] },
   inaccuracy: { count: 0, indices: [] },
-  avgCpl: 0,
+  avgCpl: null,
   avgCplCount: 0,
   ...over,
 });
+
+/**
+ * The accuracy cell, which is the only value cell carrying the --you modifier.
+ * Scoping to it matters: with a null-CPL side, both Avg CPL cells legitimately
+ * render an em-dash too, so a bare getByText('—') would no longer identify the
+ * accuracy arm (and getAllByText would pass even if that arm regressed).
+ */
+const accuracyCell = (container: HTMLElement): HTMLElement => {
+  const cell = container.querySelector<HTMLElement>('.history-stats-pane__value--you');
+  if (!cell) throw new Error('accuracy cell not found');
+  return cell;
+};
+
+/**
+ * The two Avg CPL cells (player, opponent). Scoped by class because a bare
+ * getAllByText('0') would also match the six classification-count buttons, and a
+ * bare getAllByText('—') would also match the accuracy cell.
+ */
+const acplCells = (container: HTMLElement): HTMLElement[] => {
+  const cells = [...container.querySelectorAll<HTMLElement>('.history-stats-pane__value--acpl')];
+  expect(cells).toHaveLength(2);
+  return cells;
+};
 
 function renderStats(
   accuracy: number | null,
@@ -41,16 +65,16 @@ describe('GameReviewStats accuracy row', () => {
   });
 
   it('renders a placeholder when accuracy is null', () => {
-    renderStats(null);
+    const { container } = renderStats(null);
     expect(screen.getByText('Accuracy')).toBeInTheDocument();
-    expect(screen.getByText('—')).toBeInTheDocument();
+    expect(accuracyCell(container)).toHaveTextContent('—');
   });
 
   it('renders "computing…" when accuracy is null but still processing', () => {
-    renderStats(null, true);
+    const { container } = renderStats(null, true);
     expect(screen.getByText('Accuracy')).toBeInTheDocument();
     expect(screen.getByText('computing…')).toBeInTheDocument();
-    expect(screen.queryByText('—')).not.toBeInTheDocument();
+    expect(accuracyCell(container)).not.toHaveTextContent('—');
   });
 
   it('prefers the accuracy value over the pending state when both are set', () => {
@@ -83,8 +107,8 @@ describe('GameReviewStats gradient colors', () => {
   });
 
   it('does not color accuracy when null', () => {
-    renderStats(null);
-    expect(screen.getByText('—')).not.toHaveStyle({ color: accuracyColor(80) });
+    const { container } = renderStats(null);
+    expect(accuracyCell(container)).not.toHaveStyle({ color: accuracyColor(80) });
   });
 
   it('colors the Avg CPL value with acplColor when analysis is complete', () => {
@@ -96,13 +120,29 @@ describe('GameReviewStats gradient colors', () => {
     expect(screen.getByText('70')).toHaveStyle({ color: acplColor(70) });
   });
 
-  it('leaves Avg CPL uncolored when no evaluated moves', () => {
-    renderStats(null, false, {
-      player: emptySide({ avgCpl: 0, avgCplCount: 0 }),
-      opponent: emptySide({ avgCpl: 0, avgCplCount: 0 }),
+  it('renders Avg CPL as an em-dash, uncolored, when no evaluated moves', () => {
+    const { container } = renderStats(null, false, {
+      player: emptySide({ avgCpl: null, avgCplCount: 0 }),
+      opponent: emptySide({ avgCpl: null, avgCplCount: 0 }),
     });
-    const zeros = screen.getAllByText('0');
-    for (const el of zeros) expect(el).not.toHaveStyle({ color: acplColor(0) });
+    // An unanalyzed side must not read as perfect play: em-dash, never '0'.
+    for (const cell of acplCells(container)) {
+      expect(cell).toHaveTextContent('—');
+      expect(cell).not.toHaveTextContent('0');
+      expect(cell).not.toHaveStyle({ color: acplColor(0) });
+    }
+  });
+
+  it('renders a genuine Avg CPL of 0 as "0", colored — perfect play, not missing data', () => {
+    const { container } = renderStats(null, false, {
+      player: emptySide({ avgCpl: 0, avgCplCount: 12 }),
+      opponent: emptySide({ avgCpl: 0, avgCplCount: 12 }),
+    });
+    // The case a truthiness fallback (|| '—') would silently turn into an em-dash.
+    for (const cell of acplCells(container)) {
+      expect(cell).toHaveTextContent('0');
+      expect(cell).toHaveStyle({ color: acplColor(0) });
+    }
   });
 
   it('colors Avg CPL immediately while accuracy is still computing', () => {
@@ -112,6 +152,77 @@ describe('GameReviewStats gradient colors', () => {
     });
     expect(screen.getByText('30')).toHaveStyle({ color: acplColor(30) });
     expect(screen.getByText('70')).toHaveStyle({ color: acplColor(70) });
+  });
+});
+
+describe('GameReviewStats side headers', () => {
+  const sides = { player: emptySide(), opponent: emptySide() };
+
+  function renderHeaders(
+    props: { activeStat?: StatSelection; pinnedStat?: StatSelection } = {},
+  ) {
+    const onStatHover = vi.fn();
+    const onStatClick = vi.fn();
+    render(
+      <GameReviewStats
+        sideStats={sides}
+        activeStat={props.activeStat ?? null}
+        pinnedStat={props.pinnedStat ?? null}
+        totalMoves={10}
+        accuracy={80}
+        onStatHover={onStatHover}
+        onStatClick={onStatClick}
+      />,
+    );
+    return { onStatHover, onStatClick };
+  }
+
+  it('renders You/Ghost as buttons with descriptive aria-labels', () => {
+    renderHeaders();
+    const you = screen.getByRole('button', {
+      name: /all of your blunders, mistakes, and inaccuracies/i,
+    });
+    const ghost = screen.getByRole('button', {
+      name: /all of ghost's blunders, mistakes, and inaccuracies/i,
+    });
+    expect(you).toHaveTextContent('You');
+    expect(ghost).toHaveTextContent('Ghost');
+  });
+
+  it('reports an all-class selection on hover and clears it on leave', async () => {
+    const user = userEvent.setup();
+    const { onStatHover } = renderHeaders();
+
+    const you = screen.getByRole('button', { name: /all of your/i });
+    await user.hover(you);
+    expect(onStatHover).toHaveBeenCalledWith({ side: 'player', cls: 'all' });
+    await user.unhover(you);
+    expect(onStatHover).toHaveBeenLastCalledWith(null);
+
+    const ghost = screen.getByRole('button', { name: /all of ghost's/i });
+    await user.hover(ghost);
+    expect(onStatHover).toHaveBeenCalledWith({ side: 'opponent', cls: 'all' });
+  });
+
+  it('reports an all-class player selection when the You header is clicked', async () => {
+    const user = userEvent.setup();
+    const { onStatClick } = renderHeaders();
+    await user.click(screen.getByRole('button', { name: /all of your/i }));
+    expect(onStatClick).toHaveBeenCalledWith({ side: 'player', cls: 'all' });
+  });
+
+  it('reflects active and pressed state from activeStat/pinnedStat', () => {
+    renderHeaders({
+      activeStat: { side: 'player', cls: 'all' },
+      pinnedStat: { side: 'opponent', cls: 'all' },
+    });
+    expect(screen.getByRole('button', { name: /all of your/i })).toHaveClass(
+      'history-stats-pane__header--active',
+    );
+    expect(screen.getByRole('button', { name: /all of ghost's/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
   });
 });
 

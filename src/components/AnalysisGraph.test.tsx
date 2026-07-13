@@ -627,6 +627,34 @@ describe('AnalysisGraph — variation (what-if) overlay', () => {
   })
 })
 
+describe('AnalysisGraph — classification highlight dots', () => {
+  it('renders one colored dot per classified move, skipping null-eval holes', () => {
+    const { container } = render(
+      <AnalysisGraph
+        evals={[0, null, 50, -30]}
+        currentIndex={3}
+        onSelectMove={onSelectMove}
+        playerColor="white"
+        highlightedMoves={{
+          dots: [
+            { index: 0, classification: 'blunder' },
+            { index: 1, classification: 'mistake' },
+            { index: 2, classification: 'inaccuracy' },
+          ],
+        }}
+      />,
+    )
+
+    // index 1 has a null eval (points[1] === null) so its dot is skipped.
+    const dots = container.querySelectorAll('.analysis-graph__highlight-dot')
+    expect(dots).toHaveLength(2)
+    expect(container.querySelector('.analysis-graph__highlight-dot--blunder')).toBeTruthy()
+    expect(container.querySelector('.analysis-graph__highlight-dot--inaccuracy')).toBeTruthy()
+    // The skipped null-eval dot was the only mistake — no mistake dot renders.
+    expect(container.querySelector('.analysis-graph__highlight-dot--mistake')).toBeNull()
+  })
+})
+
 describe('AnalysisGraph — info button', () => {
   it('toggles an explanatory popup when the info button is clicked', async () => {
     const user = userEvent.setup()

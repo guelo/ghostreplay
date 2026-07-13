@@ -1,6 +1,7 @@
-import { StrictMode } from 'react';
+import { StrictMode, forwardRef, useImperativeHandle } from 'react';
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import GameAnalysisPage from './GameAnalysisPage';
 
@@ -29,15 +30,39 @@ vi.mock('../utils/api', async () => {
   return { ...actual, fetchAnalysis: (...args: unknown[]) => mockFetchAnalysis(...args) };
 });
 
-// Mock AnalysisBoard to avoid pulling in chess rendering
+// Mock AnalysisBoard to avoid pulling in chess rendering. Render the footer so
+// the stats pane is exercised, and use forwardRef + useImperativeHandle so the
+// page ref's jumpToMove (board cycling) is observable — this is the guard for the
+// onJumpToMove/ref wiring the page needs for header/cell cycling to move the board.
+const mockJumpToMove = vi.fn();
 vi.mock('../components/AnalysisBoard', () => ({
-  default: ({ boardOrientation, initialMoveIndex, sessionId }: { boardOrientation: string; initialMoveIndex?: number; sessionId?: string }) => (
-    <div
-      data-testid="analysis-board"
-      data-orientation={boardOrientation}
-      data-initial-move={initialMoveIndex}
-      data-session-id={sessionId}
-    />
+  default: forwardRef(
+    (
+      {
+        boardOrientation,
+        initialMoveIndex,
+        sessionId,
+        footer,
+      }: {
+        boardOrientation: string;
+        initialMoveIndex?: number;
+        sessionId?: string;
+        footer?: React.ReactNode;
+      },
+      ref: React.Ref<{ jumpToMove: (index: number) => void }>,
+    ) => {
+      useImperativeHandle(ref, () => ({ jumpToMove: mockJumpToMove }), []);
+      return (
+        <div
+          data-testid="analysis-board"
+          data-orientation={boardOrientation}
+          data-initial-move={initialMoveIndex}
+          data-session-id={sessionId}
+        >
+          {footer}
+        </div>
+      );
+    },
   ),
 }));
 
@@ -149,6 +174,36 @@ describe('GameAnalysisPage', () => {
       'data-session-id',
       'abc-123',
     );
+  });
+
+  it('cycles the board through the player union when the You header is clicked', async () => {
+    const user = userEvent.setup();
+    // player_color = black → player moves at odd indices: blunder@1, mistake@3,
+    // inaccuracy@5. Union sorted by index = [1, 3, 5]. Empty position_analysis
+    // means projectExactBest leaves these classifications untouched.
+    mockFetchAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      moves: [
+        { move_number: 1, color: 'white', move_san: 'e4', fen_after: 'fen0', classification: null },
+        { move_number: 1, color: 'black', move_san: 'e5', fen_after: 'fen1', classification: 'blunder' },
+        { move_number: 2, color: 'white', move_san: 'Nf3', fen_after: 'fen2', classification: null },
+        { move_number: 2, color: 'black', move_san: 'Nc6', fen_after: 'fen3', classification: 'mistake' },
+        { move_number: 3, color: 'white', move_san: 'Bb5', fen_after: 'fen4', classification: null },
+        { move_number: 3, color: 'black', move_san: 'a6', fen_after: 'fen5', classification: 'inaccuracy' },
+      ],
+    });
+
+    renderPage('/game?id=abc-123');
+
+    await screen.findByTestId('analysis-board');
+
+    const you = screen.getByRole('button', {
+      name: /all of your blunders, mistakes, and inaccuracies/i,
+    });
+    await user.click(you);
+    expect(mockJumpToMove).toHaveBeenLastCalledWith(1);
+    await user.click(you);
+    expect(mockJumpToMove).toHaveBeenLastCalledWith(3);
   });
 
   it('reuses the initial analysis request during StrictMode effect replay', async () => {

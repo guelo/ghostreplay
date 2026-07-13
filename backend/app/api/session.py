@@ -190,7 +190,10 @@ class SessionAnalysisSummary(BaseModel):
     blunders: int
     mistakes: int
     inaccuracies: int
-    average_centipawn_loss: int
+    # None IFF no player move has an eval_delta. 0 means perfect play, not missing
+    # data. A partially analyzed game reports the average over the plies that
+    # resolved (no completeness gate — unlike accuracy).
+    average_centipawn_loss: int | None
     accuracy: int | None = None
 
 
@@ -1387,7 +1390,7 @@ def get_session_analysis(
     average_centipawn_loss = (
         int(round(summary_row.average_centipawn_loss))
         if summary_row.average_centipawn_loss is not None
-        else 0
+        else None
     )
 
     # Position-analysis export bridges two grains. Storage rows are keyed by

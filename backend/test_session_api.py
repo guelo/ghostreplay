@@ -727,6 +727,8 @@ def test_session_analysis_success(client, auth_headers, create_game_session):
     assert data["player_color"] == "white"
     assert data["result"] == "checkmate_win"
     assert data["pgn"] == "1. e4 e5 2. Nf3"
+    # Both white (player) moves were evaluated with eval_delta 0: a genuine
+    # perfect-play average of 0, NOT the "no data" null. Keep these apart.
     assert data["summary"] == {
         "blunders": 0,
         "mistakes": 0,
@@ -916,7 +918,7 @@ def test_synthetic_threefold_draw_skips_cache_but_unflagged_sparse_eval_caches(
     assert cached.evidence_contract_id == "minimal-played-eval-v1"
 
 
-def test_session_analysis_empty_moves_returns_zero_summary(client, auth_headers, create_game_session):
+def test_session_analysis_empty_moves_returns_null_avg_cpl(client, auth_headers, create_game_session):
     session_id = create_game_session(user_id=123, player_color="white")
 
     response = client.get(
@@ -925,13 +927,101 @@ def test_session_analysis_empty_moves_returns_zero_summary(client, auth_headers,
     )
     assert response.status_code == 200
     assert response.json()["moves"] == []
+    # No move rows -> no player CPL: null, not 0.
     assert response.json()["summary"] == {
         "blunders": 0,
         "mistakes": 0,
         "inaccuracies": 0,
-        "average_centipawn_loss": 0,
+        "average_centipawn_loss": None,
         "accuracy": None,
     }
+
+
+def test_session_analysis_avg_cpl_null_when_no_player_move_evaluated(
+    client, auth_headers, create_game_session
+):
+    """Move rows exist, but no PLAYER move has an eval_delta -> null.
+
+    The opponent's moves ARE evaluated, so a non-null result would prove the average
+    leaked past the player-only restriction in player_loss_expr.
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    upload_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                # Player (white): unanalyzed — no eval_delta.
+                {
+                    "move_number": 1, "color": "white", "move_san": "e4",
+                    "fen_after": "fen-1w",
+                },
+                {
+                    "move_number": 2, "color": "white", "move_san": "Nf3",
+                    "fen_after": "fen-2w",
+                },
+                # Opponent (black): evaluated.
+                {
+                    "move_number": 1, "color": "black", "move_san": "e5",
+                    "fen_after": "fen-1b", "eval_delta": 60, "classification": "blunder",
+                },
+                {
+                    "move_number": 2, "color": "black", "move_san": "Nc6",
+                    "fen_after": "fen-2b", "eval_delta": 40, "classification": "mistake",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert upload_response.status_code == 200
+
+    response = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 200
+    assert response.json()["summary"]["average_centipawn_loss"] is None
+
+
+def test_session_analysis_avg_cpl_averages_evaluated_subset_when_partially_analyzed(
+    client, auth_headers, create_game_session
+):
+    """Partial analysis is NOT gated: average over the plies that resolved.
+
+    Only one of the two player moves is evaluated, so the result is that move's loss
+    (40) — not None, and not 20 (which would average in the unevaluated ply).
+    """
+    session_id = create_game_session(user_id=123, player_color="white")
+
+    upload_response = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {
+                    "move_number": 1, "color": "white", "move_san": "e4",
+                    "fen_after": "fen-1w", "eval_delta": 40, "classification": "mistake",
+                },
+                # Player's second move never got analyzed.
+                {
+                    "move_number": 2, "color": "white", "move_san": "Nf3",
+                    "fen_after": "fen-2w",
+                },
+                {
+                    "move_number": 1, "color": "black", "move_san": "e5",
+                    "fen_after": "fen-1b", "eval_delta": 200, "classification": "blunder",
+                },
+            ]
+        },
+        headers=auth_headers(user_id=123),
+    )
+    assert upload_response.status_code == 200
+
+    response = client.get(
+        f"/api/session/{session_id}/analysis",
+        headers=auth_headers(user_id=123),
+    )
+    assert response.status_code == 200
+    assert response.json()["summary"]["average_centipawn_loss"] == 40
 
 
 def test_session_analysis_average_cpl_uses_player_moves_and_clamps_negative_delta(

@@ -304,7 +304,7 @@ function HistoryPage() {
                       <span className="analysis-stat__label">Inaccuracies</span>
                     </div>
                     <div className="analysis-stat">
-                      <span className="analysis-stat__value">{selectedGame.summary.average_centipawn_loss}</span>
+                      <span className="analysis-stat__value">{selectedGame.summary.average_centipawn_loss ?? '—'}</span>
                       <span className="analysis-stat__label">Avg CPL</span>
                     </div>
                   </div>

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useSearchParams } from "react-router-dom";
 import { ApiError, fetchAnalysis, type SessionAnalysis } from "../utils/api";
 import { projectExactBest } from "../utils/projectExactBest";
-import AnalysisBoard from "../components/AnalysisBoard";
+import AnalysisBoard, { type AnalysisBoardRef } from "../components/AnalysisBoard";
 import GameReviewStats from "../components/GameReviewStats";
 import AppNav from "../components/AppNav";
 import { useGameReviewStats } from "../hooks/useGameReviewStats";
@@ -134,11 +134,16 @@ function GameAnalysisPage() {
     [analysis],
   );
 
+  const boardRef = useRef<AnalysisBoardRef>(null);
+
   const { sideStats, highlightedMoves, handleStatHover, handleStatClick, handleGraphMoveClick, pinnedStat, activeStat } =
     useGameReviewStats({
       selectedId: id,
       moves: missingColor ? null : projectedMoves,
       playerColor: playerColor ?? 'white',
+      onJumpToMove: useCallback((index: number) => {
+        boardRef.current?.jumpToMove(index);
+      }, []),
     });
 
   if (!id) {
@@ -174,6 +179,7 @@ function GameAnalysisPage() {
               <div className="analysis-pane__shell">
                 <AnalysisBoard
                   key={id}
+                  ref={boardRef}
                   moves={projectedMoves}
                   boardOrientation={playerColor}
                   sessionId={id ?? undefined}

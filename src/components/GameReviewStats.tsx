@@ -42,10 +42,32 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
   return (
     <div className="history-stats-pane">
       <div className="history-stats-pane__grid">
-        {/* Header row */}
+        {/* Header row — You/Ghost headers highlight all of that side's dots */}
         <div className="history-stats-pane__header" />
-        <div className="history-stats-pane__header">You</div>
-        <div className="history-stats-pane__header">Ghost</div>
+        {(['player', 'opponent'] as const).map((side) => {
+          const headerSel = { side, cls: 'all' as const };
+          const isActive = activeStat?.side === side && activeStat?.cls === 'all';
+          const isPressed = pinnedStat?.side === side && pinnedStat?.cls === 'all';
+          const text = side === 'player' ? 'You' : 'Ghost';
+          const ariaLabel =
+            side === 'player'
+              ? 'All of your blunders, mistakes, and inaccuracies'
+              : "All of Ghost's blunders, mistakes, and inaccuracies";
+          return (
+            <button
+              key={`header-${side}`}
+              type="button"
+              aria-label={ariaLabel}
+              aria-pressed={isPressed}
+              className={`history-stats-pane__header history-stats-pane__header--interactive${isActive ? ' history-stats-pane__header--active' : ''}`}
+              onMouseEnter={() => onStatHover(headerSel)}
+              onMouseLeave={() => onStatHover(null)}
+              onClick={() => onStatClick(headerSel)}
+            >
+              {text}
+            </button>
+          );
+        })}
 
         {/* Classification rows */}
         {CLASS_KEYS.map((cls: ClassKey) => {
@@ -102,15 +124,16 @@ function GameReviewStats({ sideStats, activeStat, pinnedStat, totalMoves, accura
         {/* Avg CPL row */}
         <div className="history-stats-pane__label">Avg CPL</div>
         {(['player', 'opponent'] as const).map((side) => {
-          const s = sideStats[side];
-          const colored = s.avgCplCount > 0;
+          // Gate colour and value on the same null check: a genuine 0 is perfect play
+          // and must stay coloured and printed as 0.
+          const avgCpl = sideStats[side].avgCpl;
           return (
             <div
               key={`avgcpl-${side}`}
-              className="history-stats-pane__value"
-              style={colored ? { color: acplColor(s.avgCpl) } : undefined}
+              className="history-stats-pane__value history-stats-pane__value--acpl"
+              style={avgCpl !== null ? { color: acplColor(avgCpl) } : undefined}
             >
-              {s.avgCpl}
+              {avgCpl ?? '—'}
             </div>
           );
         })}
