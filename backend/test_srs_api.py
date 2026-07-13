@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -8,7 +9,9 @@ import pytest
 from sqlalchemy import text
 
 from app.models import Blunder, Position
+from app.opening_cache import current_evidence_seq
 from conftest import pg_required
+from sql_capture import capture_statements, cursor_last_before_commit
 
 
 def _create_blunder(
@@ -17,12 +20,24 @@ def _create_blunder(
     user_id: int,
     pass_streak: int = 0,
     last_reviewed_at: datetime | None = None,
+    source_session_id: uuid.UUID | None = None,
+    active_color: str = "white",
 ) -> Blunder:
+    """Build a review target.
+
+    ``source_session_id`` defaults to None, which is what every other test in this
+    file wants: the review's evidence colour then resolves through the
+    ``Position.active_color`` fallback of ``_get_blunder_player_color``. Pass a real
+    ``uuid.UUID`` (never the ``str`` ``create_game_session`` returns —
+    ``Blunder.source_session_id`` is ``UUID(as_uuid=True)`` and a raw string can fail
+    at bind time) to exercise the production shape, where the source session's
+    ``player_color`` takes precedence.
+    """
     position = Position(
         user_id=user_id,
         fen_hash=f"fen-hash-{user_id}-{pass_streak}",
         fen_raw="8/8/8/8/8/8/8/8 w - - 0 1",
-        active_color="white",
+        active_color=active_color,
     )
     db_session.add(position)
     db_session.flush()
@@ -35,6 +50,7 @@ def _create_blunder(
         eval_loss_cp=120,
         pass_streak=pass_streak,
         last_reviewed_at=last_reviewed_at,
+        source_session_id=source_session_id,
     )
     db_session.add(blunder)
     db_session.commit()
@@ -439,3 +455,66 @@ def test_srs_review_concurrent_same_key_single_row(
         verify.close()
     assert count == 1
     assert streak == 1
+
+
+# ===========================================================================
+# Evidence-cursor statement ordering (g-n6c2).
+# ===========================================================================
+def test_srs_review_row_writes_precede_cursor_which_is_last_and_bump_follows_source_color(
+    client, auth_headers, create_game_session, db_session
+):
+    """SRS review: the blunder UPDATE and the blunder_reviews INSERT flush before the
+    evidence-cursor bump, which is the transaction's final statement and commits —
+    and the bump lands on the SOURCE SESSION's colour, not the position's.
+
+    The source-session branch is the production shape (real SRS blunders always carry
+    one) and it issues an EXTRA ``select game_sessions.player_color`` between the
+    flush and the bump — precisely the intervening statement a cursor-is-last test
+    exists to order. The position colour deliberately DISAGREES with the source
+    session, so the two branches of ``_get_blunder_player_color`` predict different
+    cursors and the delta assertions below can tell them apart. Bumping the wrong
+    colour would leave the right colour's batch falsely fresh, and the statement log
+    cannot catch that: the colour travels in the bound parameters, not the SQL text.
+    """
+    headers = auth_headers(user_id=123)  # seeds the users row OUTSIDE the capture
+    source_session_id = create_game_session(user_id=123, player_color="black")
+    review_session_id = create_game_session(user_id=123, player_color="white")
+    blunder = _create_blunder(
+        db_session,
+        user_id=123,
+        source_session_id=uuid.UUID(source_session_id),
+        active_color="white",
+    )
+    black_before = current_evidence_seq(db_session, 123, "black")
+    white_before = current_evidence_seq(db_session, 123, "white")
+
+    # SrsReviewRequest requires session_id, blunder_id, passed, user_move and
+    # eval_delta; an abbreviated body 422s, writes nothing, and would surface as the
+    # confusing "expected exactly 1 cursor write, got 0". session_id is the REVIEW
+    # session (owner-checked and stored on the BlunderReview row) — the source session
+    # is reached only via blunder.source_session_id, and passing it here would make the
+    # two indistinguishable.
+    with capture_statements() as log:
+        response = client.post(
+            "/api/srs/review",
+            json={
+                "session_id": review_session_id,
+                "blunder_id": blunder.id,
+                "passed": True,
+                "user_move": "Nf3",
+                "eval_delta": 5,
+                "idempotency_key": "n6c2-ordering",
+            },
+            headers=headers,
+        )
+    assert response.status_code == 200, response.text
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    streak_idx = next(i for i, s in enumerate(pre) if s.startswith("update blunders"))
+    review_idx = next(i for i, s in enumerate(pre) if s.startswith("insert into blunder_reviews"))
+    assert streak_idx < cursor_idx, pre
+    assert review_idx < cursor_idx, pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == black_before + 1
+    assert current_evidence_seq(db_session, 123, "white") == white_before

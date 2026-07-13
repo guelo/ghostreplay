@@ -22,76 +22,27 @@ The SQLite tests run everywhere; the row-lock/interleaving proofs are
 from __future__ import annotations
 
 import concurrent.futures
-import contextlib
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from sqlalchemy import event, text
+from sqlalchemy import text
 from sqlalchemy.dialects import postgresql
 
 import app.api.game as game_api
 from app.models import GameSession, RatingHistory, User
-from app.opening_cache import bump_evidence_seq
+from app.opening_cache import bump_evidence_seq, current_evidence_seq
 from app.rating_scores import latest_rating_order
 from app.row_locks import for_no_key_update
 from conftest import engine, pg_required
-
-
-# ---------------------------------------------------------------------------
-# SQL capture: record statement verbs and COMMIT boundaries in execution order.
-# ---------------------------------------------------------------------------
-class _StatementLog:
-    """Ordered log of ``(kind, sql)`` where kind is ``"sql"`` or ``"commit"``.
-
-    ``before_cursor_execute`` records every statement; the engine ``commit``
-    event records the transaction boundary. Together they let a test assert what
-    the FINAL write before a commit was — which ``before_cursor_execute`` alone
-    cannot, because it never sees the commit itself.
-    """
-
-    def __init__(self) -> None:
-        self.events: list[tuple[str, str]] = []
-
-    def _on_cursor(self, conn, cursor, statement, parameters, context, executemany) -> None:
-        self.events.append(("sql", statement.lower()))
-
-    def _on_commit(self, conn) -> None:
-        self.events.append(("commit", ""))
-
-    def statements(self) -> list[str]:
-        return [sql for kind, sql in self.events if kind == "sql"]
-
-    def statements_before_first_commit(self) -> list[str]:
-        pre: list[str] = []
-        for kind, sql in self.events:
-            if kind == "commit":
-                break
-            pre.append(sql)
-        return pre
-
-
-@contextlib.contextmanager
-def _capture_statements():
-    log = _StatementLog()
-    event.listen(engine, "before_cursor_execute", log._on_cursor)
-    event.listen(engine, "commit", log._on_commit)
-    try:
-        yield log
-    finally:
-        event.remove(engine, "before_cursor_execute", log._on_cursor)
-        event.remove(engine, "commit", log._on_commit)
+from sql_capture import capture_statements, cursor_last_before_commit
 
 
 def _count_users_selects(statements: list[str]) -> int:
     """Statements that SELECT from the users table (the sanctioned users lock)."""
     return sum(1 for s in statements if s.lstrip().startswith("select") and "from users" in s)
-
-
-def _is_write(statement: str) -> bool:
-    return statement.lstrip().startswith(("insert", "update", "delete"))
 
 
 def _start(client, auth_headers, user_id: int = 123) -> str:
@@ -114,7 +65,7 @@ def test_rated_scoring_end_takes_exactly_one_users_lock(client, auth_headers, db
     headers = auth_headers(user_id=user_id)  # seeds the backing users row OUTSIDE the capture
     session_id = _start(client, auth_headers, user_id)
 
-    with _capture_statements() as log:
+    with capture_statements() as log:
         resp = client.post(
             "/api/game/end",
             json={"session_id": session_id, "result": "checkmate_win", "pgn": "1. e4 e5", "is_rated": True},
@@ -132,7 +83,7 @@ def test_unrated_end_takes_no_users_lock(client, auth_headers, db_session):
     headers = auth_headers(user_id=user_id)
     session_id = _start(client, auth_headers, user_id)
 
-    with _capture_statements() as log:
+    with capture_statements() as log:
         resp = client.post(
             "/api/game/end",
             json={"session_id": session_id, "result": "checkmate_win", "pgn": "1. e4 e5", "is_rated": False},
@@ -152,7 +103,7 @@ def test_rated_nonscoring_end_takes_no_users_lock(client, auth_headers, db_sessi
     headers = auth_headers(user_id=user_id)
     session_id = _start(client, auth_headers, user_id)
 
-    with _capture_statements() as log:
+    with capture_statements() as log:
         resp = client.post(
             "/api/game/end",
             json={"session_id": session_id, "result": "abandon", "pgn": "1. e4 e5", "is_rated": True},
@@ -199,14 +150,21 @@ def test_missing_users_row_fails_closed_with_500_and_no_rating(client, auth_head
     assert session.status == "active"  # fail-closed: no partial terminal write survived
 
 
-def test_rating_and_terminal_writes_flush_before_cursor_which_is_last(client, auth_headers):
+def test_rating_and_terminal_writes_flush_before_cursor_which_is_last(client, auth_headers, db_session):
     """Statement ordering: the rating insert and terminal game_sessions update flush
-    before the evidence-cursor bump, and that bump is the FINAL write before commit."""
+    before the evidence-cursor bump, that bump is the transaction's FINAL statement,
+    and it commits."""
     user_id = 4105
     headers = auth_headers(user_id=user_id)
     session_id = _start(client, auth_headers, user_id)
+    seq_before = current_evidence_seq(db_session, user_id, "white")
 
-    with _capture_statements() as log:
+    # A scoring end computes the opening-score delta post-commit, which lazily imports
+    # request_recompute from its source module — past the autouse fixture's bound-alias
+    # patches — so the real scheduler would start a worker thread against the
+    # CONFIGURED (non-test) database.
+    with patch("app.opening_score_scheduler.request_recompute"), \
+         capture_statements() as log:
         resp = client.post(
             "/api/game/end",
             json={"session_id": session_id, "result": "checkmate_win", "pgn": "1. e4 e5", "is_rated": True},
@@ -214,18 +172,15 @@ def test_rating_and_terminal_writes_flush_before_cursor_which_is_last(client, au
         )
 
     assert resp.status_code == 200, resp.text
-    pre = log.statements_before_first_commit()
-    writes = [s for s in pre if _is_write(s)]
-    assert writes, pre
-
+    pre, cursor_idx = cursor_last_before_commit(log)
     rating_idx = next(i for i, s in enumerate(pre) if s.lstrip().startswith("insert into rating_history"))
     terminal_idx = next(i for i, s in enumerate(pre) if s.lstrip().startswith("update game_sessions"))
-    cursor_idx = next(i for i, s in enumerate(pre) if _is_write(s) and "opening_score_cursors" in s)
 
     assert rating_idx < cursor_idx, pre
     assert terminal_idx < cursor_idx, pre
-    # The cursor bump is the last write of the transaction — nothing writes after it.
-    assert "opening_score_cursors" in writes[-1], writes
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, user_id, "white") == seq_before + 1
 
 
 def test_clock_skew_durable_head_is_games_played_first(client, auth_headers, db_session):

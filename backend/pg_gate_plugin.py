@@ -109,6 +109,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_backfill_checkmate_final_ply_evals.py::test_pg_run_recomputes_accuracy_and_bumps_under_real_locks",
     # blunder NKU idempotency (g-writer-locks)
     "test_blunder_api.py::test_record_blunder_concurrent_same_key_records_once",
+    # advisory lock before the first graph write + cursor-is-last on the
+    # first-blunder path (g-n6c2). Postgres-only by necessity: the lock is a no-op
+    # off Postgres, so the SQLite suite is blind to its position.
+    "test_blunder_api.py::test_pg_blunder_advisory_lock_precedes_writes_and_cursor_is_last",
     # Avg CPL aggregates reach round_half_up_cpl as a Decimal, un-cast (g-22t8.5).
     # SQLite's AVG already returns a float, so this cast guard only bites on the real
     # dialect — it is the one check a float() regression cannot pass.

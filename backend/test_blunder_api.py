@@ -5,6 +5,7 @@ Run with: pytest test_blunder_api.py -v
 """
 import concurrent.futures
 import uuid
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
@@ -13,6 +14,7 @@ from app.fen import fen_hash
 from app.models import GameSession
 from app.opening_cache import current_evidence_seq
 from conftest import pg_required
+from sql_capture import capture_statements, cursor_last_before_commit, no_cursor_bump
 
 
 def test_record_blunder_success(client, auth_headers, create_game_session):
@@ -797,6 +799,211 @@ def test_record_blunder_concurrent_same_key_records_once(pg_client, pg_session_f
     finally:
         verify.close()
     assert count == 1
+
+
+# ===========================================================================
+# Evidence-cursor statement ordering (g-n6c2).
+#
+# ``bump_evidence_seq`` upserts the shared per-(user,color) opening_score_cursors
+# row and holds its row lock until COMMIT, so the bump must be the transaction's
+# LAST statement — a trailing read holds that lock exactly as long as a trailing
+# write would — and must fire exactly ONCE.
+#
+# None of these setups uploads moves: the autouse _sync_session_evidence shim runs
+# the /moves evidence side effects inline, which pre-creates the Position/Move
+# rows. _upsert_positions reuses an existing row by (user_id, fen_hash) and only
+# INSERTs when absent, so an upload would consume the very graph inserts these
+# tests assert on. /api/game/end needs no uploaded moves.
+# ===========================================================================
+def test_first_blunder_bookkeeping_and_target_precede_cursor_which_is_last(
+    client, auth_headers, create_game_session, db_session
+):
+    """First-blunder recording on an ENDED (evidence-eligible) session: the graph
+    upserts, the target insert, and the first-blunder bookkeeping on game_sessions
+    all flush before the evidence-cursor bump, which is the transaction's final
+    statement — and it commits."""
+    headers = auth_headers(user_id=123)  # seeds the users row OUTSIDE the capture
+    session_id = create_game_session(user_id=123, player_color="white")
+    # An ACTIVE source session is not evidence-eligible, and the auto path bumps only
+    # for an eligible source — so end the session first. The end computes the
+    # opening-score delta post-commit, which lazily imports request_recompute from its
+    # source module, past the autouse fixture's bound-alias patches.
+    with patch("app.opening_score_scheduler.request_recompute"):
+        end = client.post(
+            "/api/game/end",
+            json={"session_id": session_id, "result": "draw", "pgn": "1. e4 e5"},
+            headers=headers,
+        )
+    assert end.status_code == 200, end.text
+    seq_before = current_evidence_seq(db_session, 123, "white")
+
+    with capture_statements() as log:
+        response = client.post("/api/blunder", json=_blunder_body(session_id), headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["is_new"] is True  # no early-return path was taken
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    positions_idx = next(i for i, s in enumerate(pre) if s.startswith("insert into positions"))
+    moves_idx = next(i for i, s in enumerate(pre) if s.startswith("insert into moves"))
+    blunder_idx = next(i for i, s in enumerate(pre) if s.startswith("insert into blunders"))
+    # blunder_recorded / recorded_blunder_id / blunder_idempotency_key — the write a
+    # naive refactor would slip past the bump.
+    bookkeeping_idx = next(i for i, s in enumerate(pre) if s.startswith("update game_sessions"))
+
+    assert positions_idx < cursor_idx, pre
+    assert moves_idx < cursor_idx, pre
+    assert blunder_idx < cursor_idx, pre
+    assert bookkeeping_idx < cursor_idx, pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
+
+
+def test_manual_blunder_target_precedes_cursor_which_is_last(
+    client, auth_headers, create_game_session, db_session
+):
+    """Manual recording bumps unconditionally (a sessionless-style ghost target is
+    always digest-visible), so an ACTIVE session is fine. The target insert flushes
+    before the evidence-cursor bump, which is the transaction's final statement, and
+    the manual path writes NO first-blunder bookkeeping."""
+    headers = auth_headers(user_id=123)
+    session_id = create_game_session(user_id=123, player_color="white")
+    seq_before = current_evidence_seq(db_session, 123, "white")
+
+    # The body must replay >= 2 plies: _record_target returns EARLY with no writes and
+    # no bump when the replay yields a single move (the first move of the game can
+    # never be steered back to).
+    with capture_statements() as log:
+        response = client.post(
+            "/api/blunder/manual", json=_blunder_body(session_id), headers=headers
+        )
+    assert response.status_code == 201, response.text
+    assert response.json()["is_new"] is True
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    blunder_idx = next(i for i, s in enumerate(pre) if s.startswith("insert into blunders"))
+    assert blunder_idx < cursor_idx, pre
+    # mark_first_blunder_recorded=False on this path — no session bookkeeping at all.
+    assert not [s for s in pre if s.startswith("update game_sessions")], pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
+
+
+def test_first_blunder_on_active_session_does_not_bump_cursor(
+    client, auth_headers, create_game_session, db_session
+):
+    """The auto path bumps only for an evidence-ELIGIBLE source session: a live-game
+    blunder waits for the session's own eligibility transition, which folds it in with
+    that bump (no per-move churn). The target and bookkeeping still commit."""
+    headers = auth_headers(user_id=123)
+    session_id = create_game_session(user_id=123, player_color="white")  # stays active
+    seq_before = current_evidence_seq(db_session, 123, "white")
+
+    with capture_statements() as log:
+        response = client.post("/api/blunder", json=_blunder_body(session_id), headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["is_new"] is True
+
+    pre = no_cursor_bump(log)
+    # Both writes DID run — otherwise "no cursor write" would hold vacuously.
+    assert any(s.startswith("insert into blunders") for s in pre), pre
+    assert any(s.startswith("update game_sessions") for s in pre), pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.blunder_recorded is True
+
+
+@pg_required
+def test_pg_blunder_advisory_lock_precedes_writes_and_cursor_is_last(
+    pg_client, pg_engine, pg_session_factory, auth_headers
+):
+    """The per-user graph-write advisory lock is taken BEFORE the first shared
+    Position/Move write and held (uncommitted) through the graph upserts, with the
+    evidence cursor still the transaction's final statement.
+
+    Postgres-only by necessity: ``acquire_graph_write_lock`` returns immediately on
+    any other dialect and emits nothing at all, so moving it to AFTER the cursor bump
+    would leave every SQLite blunder test green. Its statements are also SELECTs, so
+    a last-WRITE check could not see them either — they are the concrete reason the
+    ordering window is "last STATEMENT".
+
+    Everything is built through pg_client: create_game_session writes to the SQLite
+    db_session, and that row would not exist in the PostgreSQL database this request
+    reads.
+    """
+    user_id = 123
+    headers = auth_headers(user_id=user_id)
+    start = pg_client.post(
+        "/api/game/start",
+        json={"engine_elo": 1500, "player_color": "white"},
+        headers=headers,
+    )
+    assert start.status_code == 201, start.text
+    session_id = start.json()["session_id"]
+
+    # The auto path requires an evidence-eligible source; an active session would
+    # record the blunder but not bump, and this test would fail on "got 0 cursor
+    # writes". The end itself bumps, so the baseline is read AFTER it.
+    #
+    # is_rated=False because auth_headers seeds the backing users row into the SQLite
+    # engine, not this Postgres one: a rated scoring end takes the users FOR NO KEY
+    # UPDATE lock and fails closed with 500 when the row is missing. Rating is not
+    # what this test is about, and an UNRATED end still flips status->'ended', which
+    # is all SESSION_EVIDENCE_ELIGIBLE_SQL asks for.
+    with patch("app.opening_score_scheduler.request_recompute"):
+        end = pg_client.post(
+            "/api/game/end",
+            json={"session_id": session_id, "result": "draw", "pgn": "1. e4 e5", "is_rated": False},
+            headers=headers,
+        )
+    assert end.status_code == 200, end.text
+
+    verify = pg_session_factory()
+    try:
+        seq_before = current_evidence_seq(verify, user_id, "white")
+    finally:
+        verify.close()
+
+    with capture_statements(target_engine=pg_engine) as log:
+        response = pg_client.post("/api/blunder", json=_blunder_body(session_id), headers=headers)
+    assert response.status_code == 201, response.text
+    assert response.json()["is_new"] is True
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    lock_timeout_idx = next(i for i, s in enumerate(pre) if "set_config('lock_timeout'" in s)
+    stmt_timeout_idx = next(i for i, s in enumerate(pre) if "set_config('statement_timeout'" in s)
+    advisory_idx = next(i for i, s in enumerate(pre) if "pg_advisory_xact_lock" in s)
+    assert lock_timeout_idx < stmt_timeout_idx < advisory_idx, pre
+
+    first_entity_write = min(
+        next(i for i, s in enumerate(pre) if s.startswith("insert into positions")),
+        next(i for i, s in enumerate(pre) if s.startswith("insert into moves")),
+        next(i for i, s in enumerate(pre) if s.startswith("insert into blunders")),
+    )
+    assert advisory_idx < first_entity_write, pre
+    assert advisory_idx < cursor_idx, pre
+
+    # Durability — which cursor_last_before_commit explicitly does not prove. A FRESH
+    # session is what makes this real on Postgres: unlike the SQLite StaticPool, the
+    # request and this verify session are different connections, so a rolled-back txn
+    # cannot leak through.
+    verify = pg_session_factory()
+    try:
+        assert current_evidence_seq(verify, user_id, "white") == seq_before + 1
+        blunder_count = verify.execute(
+            text("SELECT COUNT(*) FROM blunders WHERE user_id = :u"), {"u": user_id}
+        ).scalar_one()
+        assert blunder_count == 1
+        recorded = verify.execute(
+            text("SELECT blunder_recorded FROM game_sessions WHERE id = :s"),
+            {"s": uuid.UUID(session_id)},
+        ).scalar_one()
+        assert recorded is True
+    finally:
+        verify.close()
 
 
 if __name__ == "__main__":

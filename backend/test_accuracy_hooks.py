@@ -29,14 +29,11 @@ skip cleanly without a Postgres URL.
 
 from __future__ import annotations
 
-import contextlib
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 from unittest.mock import patch
-
-from sqlalchemy import event
 
 import app.accuracy as accuracy_mod
 from app.accuracy import (
@@ -47,7 +44,9 @@ from app.accuracy import (
     recompute_session_accuracy,
 )
 from app.models import GameSession, SessionMove
+from app.opening_cache import current_evidence_seq
 from conftest import engine, pg_required
+from sql_capture import capture_statements, cursor_last_before_commit
 
 
 PGN_TWO_PLY = "1. e4 e5"
@@ -71,62 +70,27 @@ MOVES_CLEAR_WHITE = [
 
 
 # ---------------------------------------------------------------------------
-# SQL capture (mirrors test_rating_serialize): ordered statement + COMMIT log.
-# ---------------------------------------------------------------------------
-class _StatementLog:
-    def __init__(self) -> None:
-        self.events: list[tuple[str, str]] = []
-
-    def _on_cursor(self, conn, cursor, statement, parameters, context, executemany) -> None:
-        self.events.append(("sql", statement.lower()))
-
-    def _on_commit(self, conn) -> None:
-        self.events.append(("commit", ""))
-
-    def statements(self) -> list[str]:
-        return [sql for kind, sql in self.events if kind == "sql"]
-
-    def statements_before_first_commit(self) -> list[str]:
-        pre: list[str] = []
-        for kind, sql in self.events:
-            if kind == "commit":
-                break
-            pre.append(sql)
-        return pre
-
-
-@contextlib.contextmanager
-def _capture_statements(target_engine=engine):
-    log = _StatementLog()
-    event.listen(target_engine, "before_cursor_execute", log._on_cursor)
-    event.listen(target_engine, "commit", log._on_commit)
-    try:
-        yield log
-    finally:
-        event.remove(target_engine, "before_cursor_execute", log._on_cursor)
-        event.remove(target_engine, "commit", log._on_commit)
-
-
-def _is_write(statement: str) -> bool:
-    return statement.lstrip().startswith(("insert", "update", "delete"))
-
-
-# ---------------------------------------------------------------------------
 # HTTP + DB helpers.
+#
+# ``headers=`` lets a caller build the auth headers OUTSIDE a capture block: the
+# fixture idempotently seeds the backing users row, whose SQL (and possible
+# commit) would otherwise land in the log and make the commit-count assertions
+# rest on fixture state.
 # ---------------------------------------------------------------------------
-def _upload(client, auth_headers, session_id, moves, user_id=123):
+def _upload(client, auth_headers, session_id, moves, user_id=123, headers=None):
     return client.post(
         f"/api/session/{session_id}/moves",
         json={"moves": moves},
-        headers=auth_headers(user_id=user_id),
+        headers=headers if headers is not None else auth_headers(user_id=user_id),
     )
 
 
-def _end(client, auth_headers, session_id, user_id=123, result="checkmate_win", pgn=PGN_TWO_PLY, is_rated=False):
+def _end(client, auth_headers, session_id, user_id=123, result="checkmate_win", pgn=PGN_TWO_PLY,
+         is_rated=False, headers=None):
     return client.post(
         "/api/game/end",
         json={"session_id": str(session_id), "result": result, "pgn": pgn, "is_rated": is_rated},
-        headers=auth_headers(user_id=user_id),
+        headers=headers if headers is not None else auth_headers(user_id=user_id),
     )
 
 
@@ -448,7 +412,7 @@ def test_live_upload_does_no_move_query_or_pgn_parse(
     sid = create_game_session(user_id=123)
     with patch.object(accuracy_mod, "compute_game_accuracy", wraps=accuracy_mod.compute_game_accuracy) as spy_compute, \
          patch.object(accuracy_mod, "expected_total_moves_from_pgn", wraps=accuracy_mod.expected_total_moves_from_pgn) as spy_pgn, \
-         _capture_statements() as log:
+         capture_statements() as log:
         assert _upload(client, auth_headers, sid, MOVES_HIGH).status_code == 200
 
     assert spy_compute.call_count == 0
@@ -471,7 +435,7 @@ def test_ended_visible_upload_does_one_move_query_and_one_pgn_parse(
 
     with patch.object(accuracy_mod, "compute_game_accuracy", wraps=accuracy_mod.compute_game_accuracy) as spy_compute, \
          patch.object(accuracy_mod, "expected_total_moves_from_pgn", wraps=accuracy_mod.expected_total_moves_from_pgn) as spy_pgn, \
-         _capture_statements() as log:
+         capture_statements() as log:
         assert _upload(client, auth_headers, sid, MOVES_LOW).status_code == 200
 
     assert spy_compute.call_count == 1
@@ -488,75 +452,97 @@ def test_ended_visible_upload_does_one_move_query_and_one_pgn_parse(
 # 5. Statement ordering: cache write lands before the evidence cursor.
 # ===========================================================================
 def test_moves_core_path_accuracy_write_precedes_cursor_which_is_last(
-    client, auth_headers, create_game_session
+    client, auth_headers, create_game_session, db_session
 ):
     """Core-upsert path: the game_sessions accuracy UPDATE flushes before the
-    evidence-cursor bump, and that bump is the final write before commit."""
+    evidence-cursor bump, which is the transaction's final statement — and the
+    bump commits."""
+    headers = auth_headers(user_id=123)  # seeds the users row OUTSIDE the capture
     sid = create_game_session(user_id=123)
-    _upload(client, auth_headers, sid, MOVES_HIGH)
-    _end(client, auth_headers, sid)
+    _upload(client, auth_headers, sid, MOVES_HIGH, headers=headers)
+    _end(client, auth_headers, sid, headers=headers)
+    seq_before = current_evidence_seq(db_session, 123, "white")
 
-    with _capture_statements() as log:
-        assert _upload(client, auth_headers, sid, MOVES_LOW).status_code == 200
+    # The autouse _sync_session_evidence shim folds the deferred graph work — which
+    # commits on its own (session.py ``_run_graph_evidence_txn``) — into the request,
+    # adding a SECOND commit that production never has (there it runs on another
+    # thread, outside this transaction). No-op it so the capture sees the endpoint's
+    # own transaction, exactly as the generic-ORM test below already does.
+    with patch("app.api.session.enqueue_session_evidence", lambda *a, **k: None), \
+         capture_statements() as log:
+        assert _upload(client, auth_headers, sid, MOVES_LOW, headers=headers).status_code == 200
 
-    pre = log.statements_before_first_commit()
-    writes = [s for s in pre if _is_write(s)]
+    pre, cursor_idx = cursor_last_before_commit(log)
     accuracy_idx = next(i for i, s in enumerate(pre)
                         if s.startswith("update game_sessions") and "player_accuracy" in s)
-    cursor_idx = next(i for i, s in enumerate(pre) if _is_write(s) and "opening_score_cursors" in s)
     assert accuracy_idx < cursor_idx, pre
-    assert "opening_score_cursors" in writes[-1], writes
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
 
 
 def test_game_end_accuracy_write_precedes_cursor_which_is_last(
-    client, auth_headers, create_game_session
+    client, auth_headers, create_game_session, db_session
 ):
     """Game end: the terminal+accuracy game_sessions UPDATE flushes before the
-    evidence-cursor bump, which is the final write before commit."""
+    evidence-cursor bump, which is the transaction's final statement — and the
+    bump commits."""
+    headers = auth_headers(user_id=123)
     sid = create_game_session(user_id=123)
-    _upload(client, auth_headers, sid, MOVES_HIGH)
+    _upload(client, auth_headers, sid, MOVES_HIGH, headers=headers)
+    seq_before = current_evidence_seq(db_session, 123, "white")
 
-    with _capture_statements() as log:
-        assert _end(client, auth_headers, sid).status_code == 200
+    # A non-abandon end computes the opening-score delta post-commit, which lazily
+    # imports request_recompute from its source module — past the autouse fixture's
+    # bound-alias patches. Unpatched, the real scheduler singleton would start a
+    # worker thread against the CONFIGURED (non-test) database.
+    with patch("app.opening_score_scheduler.request_recompute"), \
+         capture_statements() as log:
+        assert _end(client, auth_headers, sid, headers=headers).status_code == 200
 
-    pre = log.statements_before_first_commit()
-    writes = [s for s in pre if _is_write(s)]
+    pre, cursor_idx = cursor_last_before_commit(log)
     accuracy_idx = next(i for i, s in enumerate(pre)
                         if s.startswith("update game_sessions") and "player_accuracy" in s)
-    cursor_idx = next(i for i, s in enumerate(pre) if _is_write(s) and "opening_score_cursors" in s)
     assert accuracy_idx < cursor_idx, pre
-    assert "opening_score_cursors" in writes[-1], writes
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
 
 
 def test_generic_orm_path_flushes_moves_then_recompute_then_accuracy_then_cursor(
-    client, auth_headers, create_game_session, monkeypatch
+    client, auth_headers, create_game_session, db_session, monkeypatch
 ):
     """Generic (non-sqlite/postgres) ORM path: the move add/mutate flushes for
     visibility BEFORE the recompute query, and the accuracy UPDATE drains BEFORE the
-    cursor. Forcing a foreign dialect name routes through the generic branch while
-    still executing against SQLite."""
+    cursor, which is the transaction's final statement. Forcing a foreign dialect
+    name routes through the generic ``bump_evidence_seq`` branch — the one a new
+    dialect would run — while still executing against SQLite."""
+    headers = auth_headers(user_id=123)
     sid = create_game_session(user_id=123)
-    _upload(client, auth_headers, sid, MOVES_HIGH)
-    _end(client, auth_headers, sid)
+    _upload(client, auth_headers, sid, MOVES_HIGH, headers=headers)
+    _end(client, auth_headers, sid, headers=headers)
+    seq_before = current_evidence_seq(db_session, 123, "white")
 
     monkeypatch.setattr(engine.dialect, "name", "genericdb")
     with patch("app.api.session.enqueue_session_evidence", lambda *a, **k: None), \
-         _capture_statements() as log:
-        assert _upload(client, auth_headers, sid, MOVES_LOW).status_code == 200
+         capture_statements() as log:
+        assert _upload(client, auth_headers, sid, MOVES_LOW, headers=headers).status_code == 200
 
-    pre = log.statements_before_first_commit()
+    pre, cursor_idx = cursor_last_before_commit(log)
     move_write_idxs = [i for i, s in enumerate(pre)
                        if s.startswith(("insert into session_moves", "update session_moves"))]
     recompute_idx = next(i for i, s in enumerate(pre)
                          if s.startswith("select") and "from session_moves" in s and "order by" in s)
     accuracy_idx = next(i for i, s in enumerate(pre)
                         if s.startswith("update game_sessions") and "player_accuracy" in s)
-    cursor_idx = next(i for i, s in enumerate(pre) if _is_write(s) and "opening_score_cursors" in s)
 
     assert move_write_idxs, pre
     assert max(move_write_idxs) < recompute_idx, pre  # move visibility before recompute
     assert recompute_idx < accuracy_idx, pre          # recompute before accuracy drain
     assert accuracy_idx < cursor_idx, pre             # accuracy drain before cursor
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "white") == seq_before + 1
 
 
 # ===========================================================================

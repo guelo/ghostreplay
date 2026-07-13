@@ -21,10 +21,12 @@ from app.models import (
 from app.opening_baseline_scheduler import OpeningBaselineScheduler
 from app.opening_cache import (
     capture_freshness_snapshot,
+    current_evidence_seq,
     opening_score_inputs_fingerprint,
 )
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph
 from app.opening_roots import OpeningRoot, OpeningRoots, get_opening_roots
+from sql_capture import capture_statements, cursor_last_before_commit, no_cursor_bump
 
 ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
 START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
@@ -1724,3 +1726,243 @@ def test_drill_start_does_not_run_digest_on_request_path(client, auth_headers, d
     session = db_session.get(GameSession, sid)
     import json
     assert json.loads(session.opening_score_baseline) == {"opening-x": 55.0}
+
+
+# ===========================================================================
+# Evidence-cursor statement ordering (g-n6c2).
+#
+# ``bump_evidence_seq`` upserts the shared per-(user,color) opening_score_cursors
+# row — the most contended row in the transaction — and its row lock is held from
+# the bump until COMMIT. So the bump must be the transaction's LAST statement (a
+# trailing read holds that lock exactly as long as a trailing write would) and
+# must fire exactly ONCE. These drills sessions are started with
+# player_color="black", so the cursor under test is (123, "black").
+#
+# Each test proves BOTH halves: the statement log proves the bump ran last, and a
+# re-read from the DB proves it committed. Neither implies the other — every path
+# here flushes before bumping, so a deleted db.commit() would leave the ordering
+# assertions passing on a transaction that rolled back entirely.
+# ===========================================================================
+def test_fail_drill_terminal_write_precedes_cursor_which_is_last(
+    client, auth_headers, db_session
+):
+    """Accuracy-fail: the terminal game_sessions UPDATE flushes before the
+    evidence-cursor bump, which is the transaction's final statement — and it
+    commits."""
+    headers = auth_headers(user_id=123)  # seeds the users row OUTSIDE the capture
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    # /fail computes the opening-score delta post-commit, which lazily imports
+    # request_recompute from its source module — past the autouse fixture's
+    # bound-alias patches — so the real scheduler singleton would start a worker
+    # thread against the CONFIGURED (non-test) database.
+    with patch("app.opening_score_scheduler.request_recompute"), capture_statements() as log:
+        response = client.post(
+            f"/api/drills/{session_id}/fail",
+            json={"terminal_reason": "accuracy"},
+            headers=headers,
+        )
+    assert response.status_code == 200, response.text
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    terminal_idx = next(i for i, s in enumerate(pre) if s.startswith("update game_sessions"))
+    assert terminal_idx < cursor_idx, pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
+
+
+def test_continue_drill_resegment_writes_precede_cursor_which_is_last(
+    client, auth_headers, db_session
+):
+    """Continuing an accuracy-failed (evidence-eligible) drill removes its moves from
+    the evidence set — a true->false flip that bumps. The resegment UPDATEs and the
+    terminal game_sessions UPDATE all flush before the bump, which is the
+    transaction's final statement, and it commits."""
+    headers = auth_headers(user_id=123)
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session_uuid = uuid.UUID(session_id)
+    session = db_session.query(GameSession).filter(GameSession.id == session_uuid).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+
+    upload = client.post(
+        f"/api/session/{session_id}/moves",
+        json={
+            "moves": [
+                {"move_number": 1, "color": "white", "move_san": "e4", "fen_after": "fen-after-e4"},
+                {"move_number": 1, "color": "black", "move_san": "e5", "fen_after": "fen-after-e5"},
+            ]
+        },
+        headers=headers,
+    )
+    assert upload.status_code == 200, upload.text
+
+    # /continue accepts root_reached or failed; only the accuracy-FAILED source state
+    # is evidence-eligible, so only it produces the true->false flip that bumps.
+    with patch("app.opening_score_scheduler.request_recompute"):
+        failed = client.post(
+            f"/api/drills/{session_id}/fail",
+            json={"terminal_reason": "accuracy"},
+            headers=headers,
+        )
+    assert failed.status_code == 200, failed.text
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    # current_ply MUST be 1: resegment_session_moves only assigns row.segment, and the
+    # ORM emits an UPDATE only when the value CHANGES. Both plies start 'drill'; at
+    # ply 1 white stays 'drill' and black flips to 'normal' (one real UPDATE), while at
+    # ply 2 both stay 'drill' and the resegment assertion below would be vacuous.
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()), capture_statements() as log:
+        response = client.post(
+            f"/api/drills/{session_id}/continue",
+            json={"current_ply": 1},
+            headers=headers,
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["drill_state"] == "converted"
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    move_writes = [i for i, s in enumerate(pre) if s.startswith("update session_moves")]
+    terminal_idx = next(i for i, s in enumerate(pre) if s.startswith("update game_sessions"))
+    # How MANY resegment UPDATEs the ORM emits is emission detail (batching); the
+    # contract is only that every one of them precedes the cursor bump.
+    assert move_writes, pre
+    assert all(i < cursor_idx for i in move_writes), pre
+    assert terminal_idx < cursor_idx, pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
+    # Behavioural proof that the resegmentation actually ran (a statement count could
+    # not show which rows moved).
+    rows = (
+        db_session.query(SessionMove)
+        .filter(SessionMove.session_id == session_uuid)
+        .order_by(SessionMove.move_number, SessionMove.color)
+        .all()
+    )
+    assert [(row.color, row.segment) for row in rows] == [("black", "normal"), ("white", "drill")]
+
+
+def test_natural_end_drill_terminal_write_precedes_cursor_which_is_last(
+    client, auth_headers, db_session
+):
+    """Natural end: status->'ended' flips eligibility false->true. The terminal
+    game_sessions UPDATE flushes before the evidence-cursor bump, which is the
+    transaction's final statement — and it commits."""
+    headers = auth_headers(user_id=123)
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()), \
+         patch("app.opening_score_scheduler.request_recompute"), \
+         capture_statements() as log:
+        response = client.post(
+            f"/api/drills/{session_id}/natural-end",
+            json={"result": "checkmate_win", "pgn": "1. e4 e5"},
+            headers=headers,
+        )
+    assert response.status_code == 200, response.text
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    terminal_idx = next(i for i, s in enumerate(pre) if s.startswith("update game_sessions"))
+    assert terminal_idx < cursor_idx, pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
+
+
+def test_abandon_drill_terminal_write_precedes_cursor_which_is_last(
+    client, auth_headers, db_session
+):
+    """Abandoning an active drill flips eligibility false->true. The terminal
+    game_sessions UPDATE flushes before the evidence-cursor bump, which is the
+    transaction's final statement — and it commits. Abandon computes no
+    opening-score delta, so it needs no scheduler patch."""
+    headers = auth_headers(user_id=123)
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    with capture_statements() as log:
+        response = client.post(f"/api/drills/{session_id}/abandon", headers=headers)
+    assert response.status_code == 200, response.text
+    # DrillSessionContract carries no status field, so read drill_state from the
+    # response and re-query game_sessions.status for the terminal check.
+    assert response.json()["drill_state"] == "abandoned"
+
+    pre, cursor_idx = cursor_last_before_commit(log)
+    terminal_idx = next(i for i, s in enumerate(pre) if s.startswith("update game_sessions"))
+    assert terminal_idx < cursor_idx, pre
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == seq_before + 1
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.status == "ended"
+
+
+# ---------------------------------------------------------------------------
+# Negative: the bump is CONDITIONAL on the eligibility TRUTH VALUE flipping.
+#
+# Without these, a future "fix" to a failing cursor assertion could make a bump
+# unconditional — reintroducing exactly the per-move recompute churn
+# SESSION_EVIDENCE_ELIGIBLE_SQL exists to prevent (the g-dmd1 CPU loop). Each also
+# asserts its domain write persisted: both endpoints have a successful, write-free
+# early return that would satisfy "no cursor write" vacuously.
+# ---------------------------------------------------------------------------
+def test_continue_from_root_reached_does_not_bump_cursor(client, auth_headers, db_session):
+    """A root_reached drill is NOT evidence-eligible, and neither is the converted
+    one: false->false, so converting it writes the session but bumps nothing."""
+    headers = auth_headers(user_id=123)
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.drill_state = "root_reached"
+    db_session.commit()
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    with patch("app.api.drills.get_opening_roots", return_value=_roots()), capture_statements() as log:
+        response = client.post(
+            f"/api/drills/{session_id}/continue",
+            json={"current_ply": 1},
+            headers=headers,
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["drill_state"] == "converted"
+
+    pre = no_cursor_bump(log)
+    assert any(s.startswith("update game_sessions") for s in pre), pre  # the write DID run
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == seq_before
+
+
+def test_abandon_accuracy_failed_drill_does_not_bump_cursor(client, auth_headers, db_session):
+    """An accuracy-failed drill is ALREADY evidence-eligible, so ending it is
+    true->true: the terminal write lands, eligibility does not flip, nothing bumps.
+    This is the case drills.py documents inline."""
+    headers = auth_headers(user_id=123)
+    session_id = _start_drill(client, auth_headers).json()["session_id"]
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    # Set the accuracy-failed state directly (status stays 'active', which abandon's
+    # guard admits) rather than routing through POST /fail: the precondition is all
+    # this test needs, and the direct form drags in no scheduler patch.
+    session.drill_state = "failed"
+    session.drill_terminal_reason = "accuracy"
+    db_session.commit()
+    seq_before = current_evidence_seq(db_session, 123, "black")
+
+    with capture_statements() as log:
+        response = client.post(f"/api/drills/{session_id}/abandon", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["drill_state"] == "abandoned"
+
+    pre = no_cursor_bump(log)
+    assert any(s.startswith("update game_sessions") for s in pre), pre  # the write DID run
+
+    db_session.expire_all()
+    assert current_evidence_seq(db_session, 123, "black") == seq_before
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.status == "ended"
