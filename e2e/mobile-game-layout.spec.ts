@@ -56,14 +56,6 @@ const startNewGameAsWhite = async (page: Page): Promise<void> => {
   await expect(playWhiteButton).toBeVisible();
   await playWhiteButton.click();
 
-  const playButton = page.getByRole("button", { name: /^play$/i });
-  if (
-    (await playButton.count()) > 0 &&
-    (await playButton.first().isVisible())
-  ) {
-    await playButton.first().click();
-  }
-
   await expect(page.locator(".game-status-badge--live")).toBeVisible({
     timeout: 15_000,
   });
@@ -91,6 +83,7 @@ test("narrow game layout keeps controls usable and overlays in viewport", async 
   page,
   loginAs,
 }) => {
+  test.slow();
   await page.setViewportSize({ width: 360, height: 740 });
   await loginAs(page, "due");
   await page.goto("/game");

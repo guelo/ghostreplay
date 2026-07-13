@@ -596,6 +596,20 @@ describe("BoardStage return-to-live control", () => {
     ).toBe(tucked);
   });
 
+  it("classifies the mounted board before its first observer notification", () => {
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockReturnValue({ width: 360 } as DOMRect);
+
+    render(<BoardStage {...reviewingProps()} />);
+    act(() => vi.advanceTimersByTime(2_000));
+
+    expect(
+      screen.getByRole("button", { name: "Return to live" }),
+    ).toHaveClass("board-return-live--tucked");
+    rectSpy.mockRestore();
+  });
+
   it.each([
     { reducedMotion: false, advanceMs: 1_999, tucked: false },
     { reducedMotion: false, advanceMs: 2_000, tucked: true },

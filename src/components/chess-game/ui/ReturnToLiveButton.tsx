@@ -29,9 +29,8 @@ const ReturnToLiveButton = ({
     const board = boardRef.current;
     if (!board) return;
 
-    const observer = new ResizeObserver(([entry]) => {
-      if (!entry) return;
-      const boardWidth = entry.contentRect.width;
+    const syncBoardWidth = (boardWidth: number) => {
+      if (boardWidth <= 0) return;
       const nextCompact = boardWidth < COMPACT_BOARD_WIDTH_PX;
 
       setCompact(nextCompact);
@@ -45,6 +44,16 @@ const ReturnToLiveButton = ({
       ) {
         setTucked(true);
       }
+    };
+
+    // ResizeObserver reports changes, but an already-sized element is not
+    // guaranteed to notify before the tuck timer needs to start. Seed the
+    // classifier from the mounted board, then use the observer for resizes.
+    syncBoardWidth(board.getBoundingClientRect().width);
+
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      syncBoardWidth(entry.contentRect.width);
     });
 
     observer.observe(board);

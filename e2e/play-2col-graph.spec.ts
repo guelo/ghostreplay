@@ -31,21 +31,16 @@ const playMove = async (
 };
 
 const startNewGameAsWhite = async (page: Page): Promise<void> => {
-  await page
-    .locator(".game-end-banner")
-    .getByRole("button", { name: /new game/i })
-    .click();
+  await expect(page.locator(".chessboard-board-area")).toBeVisible();
   const playWhiteButton = page.getByRole("button", { name: /play white/i });
+  if (!(await playWhiteButton.isVisible())) {
+    await page
+      .locator(".game-end-banner")
+      .getByRole("button", { name: /new game/i })
+      .click();
+  }
   await expect(playWhiteButton).toBeVisible();
   await playWhiteButton.click();
-
-  const playButton = page.getByRole("button", { name: /^play$/i });
-  if (
-    (await playButton.count()) > 0 &&
-    (await playButton.first().isVisible())
-  ) {
-    await playButton.first().click();
-  }
 
   await expect(page.locator(".game-status-badge--live")).toBeVisible({
     timeout: 15_000,
