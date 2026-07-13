@@ -3643,23 +3643,25 @@
         max-height: none;
         max-width: 100%;
     }
-    .history-page .analysis-board__engine-panel {
-        grid-column: 2;
+    /* Move list on top; the collapsed engine toggle shares the bottom row with
+       the player material display. */
+    .history-page .analysis-board__moves-col > .h-move-list {
+        grid-column: 1 / -1;
         grid-row: 1;
-        min-width: 0;
+        gap: 0.25rem;
     }
     .history-page .analysis-board__material--player {
         grid-column: 1;
-        grid-row: 1;
+        grid-row: 2;
+    }
+    .history-page .analysis-board__engine-panel {
+        grid-column: 2;
+        grid-row: 2;
+        min-width: 0;
     }
     .history-page .analysis-board__material--player .material-display {
         min-height: 0;
         padding: 0;
-    }
-    .history-page .analysis-board__moves-col > .h-move-list {
-        grid-column: 1 / -1;
-        grid-row: 2;
-        gap: 0.25rem;
     }
     .history-page .analysis-board__graph-row .analysis-graph {
         width: 100%;

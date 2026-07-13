@@ -280,6 +280,9 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     (s) => s.variationStreamingEval,
   );
   const [showEngineArrows, setShowEngineArrows] = useState(true);
+  // On narrow viewports the panel collapses to just the toggle row: the PV list
+  // (and with it the hover/click popup) costs vertical space the board needs.
+  const showEngineLineList = showEngineArrows && !isNarrow;
   // Single source of truth for the engine-line popup: which line and whether it
   // is a transient hover preview or a click-persisted popup. Deriving the index
   // from this object avoids an "index set but mode stale" race.
@@ -832,12 +835,13 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
   }, [displayedFen, closeEnginePopup, clearMoveHints]);
 
   useEffect(() => {
-    if (!showEngineArrows) {
-      // Close the popup when engine arrows are hidden.
+    if (!showEngineLineList) {
+      // Close the popup when the lines that anchor it are gone (engine arrows
+      // toggled off, or a resize into the narrow layout).
       /* eslint-disable-next-line react-hooks/set-state-in-effect */
       closeEnginePopup();
     }
-  }, [showEngineArrows, closeEnginePopup]);
+  }, [showEngineLineList, closeEnginePopup]);
 
   useEffect(() => {
     const root = boardRootRef.current;
@@ -1563,7 +1567,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
               </span>
             )}
           </div>
-          {showEngineArrows && (
+          {showEngineLineList && (
             <div className="analysis-board__engine-lines">
               {[0, 1, 2].map((i) => {
                 const line = engineLinesDisplay[i];

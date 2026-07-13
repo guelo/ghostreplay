@@ -736,6 +736,17 @@ describe('AnalysisBoard MoveList', () => {
     expect(progressbar.firstElementChild).not.toHaveClass('analysis-board__engine-progress-fill--thinking')
   })
 
+  it('collapses the engine panel to just the toggle below the 720px breakpoint', () => {
+    mockEngineInfoRef.current = [{ pv: ['g1f3'], score: { type: 'cp', value: 30 }, depth: 18 }]
+    mockEngineInfoFenRef.current = moves[1].fen_after
+    setMatchMedia('(max-width: 720px)', true)
+
+    render(<AnalysisBoard moves={moves} boardOrientation="white" />)
+
+    expect(screen.getByLabelText('Engine lines')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show engine line 1' })).toBeNull()
+  })
+
   it('opens an engine-line popup with the full SAN PV and preview after the first move', async () => {
     const pv = ['g1f3', 'd7d6', 'd2d4']
     mockEngineInfoRef.current = [{ pv, score: { type: 'cp', value: 42 }, depth: 18 }]
