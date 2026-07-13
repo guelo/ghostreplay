@@ -264,13 +264,15 @@ test.describe("openings", () => {
     // Crucially, the root state ALREADY has an expanded card (the "Starting
     // position" root card), no append loading, and ≥1 connector — so first wait
     // for SELECTION-specific evidence (URL gains move=, and the expanded card
-    // becomes a numbered move like "1. e4" rather than the root card), then for
-    // the deeper column to settle (append loading gone + a connector drawn).
+    // gains the non-root move-list line that the starting-position card lacks),
+    // then for the deeper column to settle (append loading gone + a connector
+    // drawn). The card header is the opening name, so its copy does not identify
+    // whether the selected node has replaced the root.
     await page.locator("button.tree-node-card--compact").first().click();
     await page.waitForURL(/[?&]move=/);
     await expect(
-      page.locator(".tree-node-card--expanded .tree-node-card__move-label"),
-    ).toHaveText(/^\d/);
+      page.locator(".tree-node-card--expanded .tree-node-card__move-list"),
+    ).toBeVisible();
     await expect(page.locator(".openings-tree-append--loading")).toHaveCount(0);
     await expect
       .poll(() => page.locator("path.openings-tree-connector").count())
@@ -776,11 +778,14 @@ test.describe("play", () => {
       timeout: 30_000,
     });
 
-    // Gate on the opening lookup resolving before failing — otherwise a stale
-    // label bleeds into the capture before the C50 Giuoco Piano lookup completes.
-    await expect(
-      page.getByText(/C50 Italian Game: Giuoco Piano/).first(),
-    ).toBeVisible({ timeout: 15_000 });
+    // The spotlight is the state under test. Require the live opening-lineage
+    // panel to have loaded, but do not couple this visual test to the deepest
+    // family returned by the eventually consistent move-upload path: gameplay
+    // intentionally uses a bounded re-poll and this scripted six-ply sequence
+    // runs much faster than a human game.
+    await expect(page.locator(".game-opening-lineage")).toBeVisible({
+      timeout: 15_000,
+    });
 
     // The first ghost reply (engine->ghost) raised the "The haunting resumes"
     // rehook notice; reaching the review position then preempted it with the
