@@ -24,7 +24,12 @@ from app.analysis_profiles import (
     stamp_profile_full,
 )
 from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
-from app.centipawn_loss import centipawn_loss, centipawn_loss_expr, clamp_delta_nonneg
+from app.centipawn_loss import (
+    centipawn_loss,
+    centipawn_loss_expr,
+    clamp_delta_nonneg,
+    round_half_up_cpl,
+)
 from app.evidence_contracts import (
     RESOLVER_COMPLETE_V2,
     contract_satisfied,
@@ -1392,7 +1397,7 @@ def get_session_analysis(
     )
 
     average_centipawn_loss = (
-        int(round(summary_row.average_centipawn_loss))
+        round_half_up_cpl(summary_row.average_centipawn_loss)
         if summary_row.average_centipawn_loss is not None
         else None
     )

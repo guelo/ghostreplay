@@ -333,6 +333,8 @@ Per-column contract:
 
 The cap constant is `CENTIPAWN_LOSS_CAP_CP = 1000` (backend) / `EVAL_LOSS_CAP_CP = 1000` (frontend) — the **decisive-mistake ceiling**, defined independently per runtime and pinned equal by a cross-runtime golden-vector fixture + a unit test. No migration corrects any legacy row; read-time / decision-time normalization is the correctness guarantee (`analysis_cache` and `blunder_reviews` are the exceptions — the former stays raw by contract, the latter is normalized on write).
 
+**Aggregate rounding.** Normalized CPL aggregates are averaged in the database and rounded to an integer with **Decimal-preserving half-up** rounding (`round_half_up_cpl`, `backend/app/centipawn_loss.py`), matching the frontend's `Math.round` (`gameStats.ts`) and the convention `accuracy_v1.py` already set for accuracy. Half-up, not banker's: an exact `.5` rounds **up** (2.5 → 3). The value is rounded through `Decimal`, never a float round-trip — PostgreSQL `AVG(NUMERIC)` returns `Decimal` while SQLite returns `float`, and casting a near-half `Decimal` to float corrupts it (`float(Decimal("2.4999999999999999")) == 2.5`, which would round up to 3 instead of down to 2). The three aggregate sites — `average_centipawn_loss` in session analysis and in history summaries, and `library.avg_blunder_eval_loss_cp` in `/stats` — pass the database aggregate to the helper directly, with no intervening `float()`. The helper is nonnegative-only by contract (`centipawn_loss_expr` floors at 0): half-up and away-from-zero coincide only for nonnegatives, so it is not a general-purpose rounder.
+
 *Forward direction:* a bounded **win-chance-loss** severity would be more meaningful than a centipawn delta, but requires retaining before/after evals — a future refinement, out of scope here.
 
 ### 5.3 `moves` (Edges)
@@ -2216,7 +2218,9 @@ Returns full analysis for a completed game session.
 The summary's blunder/mistake/inaccuracy counts and `average_centipawn_loss`
 are player-only: only moves whose `color` matches `player_color` contribute.
 Average centipawn loss is nonnegative; negative `eval_delta` values are treated
-as `0` for display/summary purposes.
+as `0` for display/summary purposes. `average_centipawn_loss` is rounded
+**half-up** to an integer (an exact `.5` rounds up), matching the frontend's
+`Math.round` — see §5.2.2.
 
 `average_centipawn_loss` is `null` if and only if no player move has an
 `eval_delta` — an unanalyzed game reports `null`, not `0`. It is deliberately
@@ -2442,7 +2446,8 @@ Returns list of user's completed games (newest first).
 
 History summaries follow the same player-only rule as session analysis for
 blunder/mistake/inaccuracy counts and `average_centipawn_loss`. ACPL also clamps
-negative eval deltas to zero, including legacy stored rows.
+negative eval deltas to zero, including legacy stored rows, and uses the same
+half-up rounding rule as session analysis — see §5.2.2.
 
 `average_centipawn_loss` carries the same null semantics as session analysis: it
 is `null` if and only if no player move has an `eval_delta` (an unanalyzed game,

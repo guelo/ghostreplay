@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import case
@@ -43,6 +44,25 @@ def centipawn_loss_expr(eval_delta_column: Any) -> Any:
         (eval_delta_column > CENTIPAWN_LOSS_CAP_CP, CENTIPAWN_LOSS_CAP_CP),
         else_=eval_delta_column,
     )
+
+
+def round_half_up_cpl(value: float | Decimal) -> int:
+    """Round a NONNEGATIVE centipawn-loss average to an int, half-up.
+
+    Matches the frontend's ``Math.round`` (src/utils/gameStats.ts) and the convention
+    ``accuracy_v1`` already set for accuracy: an exact ``.5`` rounds UP (2.5 -> 3), not
+    to even. Nonnegative-only by contract — CPL is floored at 0 by
+    :func:`centipawn_loss_expr`, and for negatives ROUND_HALF_UP means away-from-zero,
+    which is NOT ``Math.round``'s toward-+inf.
+
+    Decimal-exact on purpose. PostgreSQL ``AVG(NUMERIC)`` returns ``Decimal`` while
+    SQLite returns ``float``, and a float round-trip corrupts near-halves
+    (``float(Decimal("2.4999999999999999"))`` is exactly ``2.5``, which would round up
+    to 3 instead of down to 2). Callers MUST pass the database aggregate straight
+    through — never ``float(raw)``, and never via a local that was itself float()-cast.
+    """
+    d = value if isinstance(value, Decimal) else Decimal(str(value))
+    return int(d.quantize(Decimal(1), rounding=ROUND_HALF_UP))
 
 
 def clamp_delta_nonneg(eval_delta: int | None) -> int | None:

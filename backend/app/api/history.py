@@ -13,7 +13,7 @@ from app.accuracy import (
     compute_game_accuracy,
     expected_total_moves_from_pgn,
 )
-from app.centipawn_loss import centipawn_loss_expr
+from app.centipawn_loss import centipawn_loss_expr, round_half_up_cpl
 from app.db import get_db
 from app.models import GameSession, SessionMove
 from app.opening_roots import deepest_opening_name, get_opening_roots
@@ -138,7 +138,7 @@ def get_history(
 
     stats_by_session: dict[uuid.UUID, GameSummary] = {}
     for row in stats_rows:
-        avg_cpl = int(round(row.avg_cpl)) if row.avg_cpl is not None else None
+        avg_cpl = round_half_up_cpl(row.avg_cpl) if row.avg_cpl is not None else None
         accuracy = compute_game_accuracy(
             moves_by_session.get(row.session_id, []),
             player_color=player_color_by_session.get(row.session_id, "white"),

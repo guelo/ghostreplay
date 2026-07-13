@@ -14,7 +14,7 @@ from app.accuracy import (
     compute_game_accuracy,
     expected_total_moves_from_pgn,
 )
-from app.centipawn_loss import centipawn_loss, centipawn_loss_expr
+from app.centipawn_loss import centipawn_loss, centipawn_loss_expr, round_half_up_cpl
 from app.db import get_db
 from app.models import (
     Blunder,
@@ -576,7 +576,7 @@ def get_stats_summary(
         .scalar()
     )
     avg_blunder_eval_loss_cp = (
-        int(round(float(avg_blunder_eval_loss_cp_raw)))
+        round_half_up_cpl(avg_blunder_eval_loss_cp_raw)
         if avg_blunder_eval_loss_cp_raw is not None
         else 0
     )

@@ -51,6 +51,21 @@ describe('computeSideStats', () => {
     expect(result.opponent.avgCplCount).toBe(2);
   });
 
+  it('rounds an exact-half avgCpl up (2, 3 -> 3), matching the backend', () => {
+    // Cross-runtime contract: the backend rounds the same average half-up via
+    // round_half_up_cpl (backend/app/centipawn_loss.py, SPEC §5.2.2). The deltas
+    // above are exact integers, so they would still pass under trunc/floor.
+    const moves = makeMoves([
+      { color: 'white', eval_delta: 2 },
+      { color: 'black', eval_delta: 0 },
+      { color: 'white', eval_delta: 3 },
+      { color: 'black', eval_delta: 0 },
+    ]);
+
+    const result = computeSideStats(moves, 'white');
+    expect(result.player.avgCpl).toBe(3);
+  });
+
   it('reports a null avgCpl and count of 0 when no moves carry eval_delta', () => {
     const moves = makeMoves([
       { color: 'white' },

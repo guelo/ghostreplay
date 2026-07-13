@@ -109,6 +109,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_backfill_checkmate_final_ply_evals.py::test_pg_run_recomputes_accuracy_and_bumps_under_real_locks",
     # blunder NKU idempotency (g-writer-locks)
     "test_blunder_api.py::test_record_blunder_concurrent_same_key_records_once",
+    # Avg CPL aggregates reach round_half_up_cpl as a Decimal, un-cast (g-22t8.5).
+    # SQLite's AVG already returns a float, so this cast guard only bites on the real
+    # dialect — it is the one check a float() regression cannot pass.
+    "test_centipawn_loss.py::test_pg_cpl_aggregates_reach_helper_as_decimal",
     # branch-scoped route / next-opponent stale-write locks (g-branch-locks)
     "test_branch_locks.py::test_next_opponent_releases_lock_before_engine_so_moves_commits",
     "test_branch_locks.py::test_next_opponent_stale_converted_falls_through",
