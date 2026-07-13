@@ -7,11 +7,18 @@ exercised without a live database.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
+import importlib.util
 import json
+import os
+import py_compile
+import subprocess
+import sys
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -163,7 +170,7 @@ class TestScoreOverlay:
         roots = _roots(_root(_positions(["e2e4"])[1]), _root(_MIDGAME_FEN))
         overlay = EvidenceOverlay(1, "white")  # no quality observations
 
-        result = cal.score_overlay(1, "white", graph, overlay, roots)
+        result = cal.score_overlay(1, "white", graph, overlay, roots, as_of=cal.SYNTHETIC_AS_OF)
 
         assert result.named_scores == []
         assert result.synthetic_score is None
@@ -177,7 +184,7 @@ class TestScoreOverlay:
     def test_synthetic_row_separated_from_named(self):
         graph, overlay, roots, _e4 = _scored_overlay()
 
-        result = cal.score_overlay(1, "white", graph, overlay, roots)
+        result = cal.score_overlay(1, "white", graph, overlay, roots, as_of=cal.SYNTHETIC_AS_OF)
 
         # The synthetic hero row is reported in its own field, not the named list.
         assert result.synthetic_score is not None
@@ -194,7 +201,7 @@ class TestScoreOverlay:
         with patch.object(
             cal, "compute_all_root_scores", wraps=cal.compute_all_root_scores
         ) as spy:
-            cal.score_overlay(1, "white", graph, overlay, roots)
+            cal.score_overlay(1, "white", graph, overlay, roots, as_of=cal.SYNTHETIC_AS_OF)
         _args, kwargs = spy.call_args
         assert kwargs["include_synthetic_root"] is True
         assert isinstance(kwargs["telemetry"], CalcTelemetry)
@@ -636,7 +643,9 @@ class TestScorePairGrid:
         cells = (off_cell, gate_cell)
         db = MagicMock()
         with patch.object(cal, "overlay_evidence", return_value=overlay) as spy:
-            cell_scores = cal.score_pair_grid(db, 1, "white", graph, roots, cells)
+            cell_scores = cal.score_pair_grid(
+                db, 1, "white", graph, roots, cells, as_of=cal.SYNTHETIC_AS_OF
+            )
         # The ~2.6s overlay build happens ONCE, not once per cell.
         assert spy.call_count == 1
         assert set(cell_scores) == set(cells)
@@ -647,7 +656,7 @@ class TestScorePairGrid:
 
     def test_named_score_map_populated(self):
         graph, overlay, roots, opp = _opponent_root_overlay()
-        result = cal.score_overlay(1, "white", graph, overlay, roots)
+        result = cal.score_overlay(1, "white", graph, overlay, roots, as_of=cal.SYNTHETIC_AS_OF)
         assert opp in result.named_score_map
         assert result.named_score_map[opp] == pytest.approx(result.named_scores[0])
 
@@ -680,7 +689,9 @@ class TestGridReport:
     def _pair_grid(self, cells):
         graph, overlay, roots, _opp = _opponent_root_overlay()
         return {
-            cell: cal.score_overlay(1, "white", graph, overlay, roots, cell.config)
+            cell: cal.score_overlay(
+                1, "white", graph, overlay, roots, cell.config, as_of=cal.SYNTHETIC_AS_OF
+            )
             for cell in cells
         }
 
@@ -2325,9 +2336,12 @@ class TestScoreOverlayPseudonyms:
         # Same user_id for both calls — the only difference is the added pseudonym
         # kwargs — so every existing field must stay field-for-field equal.
         with patch("time.perf_counter", return_value=0.0):
-            live = cal.score_overlay(7, "white", graph, overlay, roots)
+            live = cal.score_overlay(
+                7, "white", graph, overlay, roots, as_of=cal.SYNTHETIC_AS_OF
+            )
             frozen = cal.score_overlay(
                 7, "white", graph, overlay, roots,
+                as_of=cal.SYNTHETIC_AS_OF,
                 pair_id="pair-00", subject_id="subject-00", cohort_role="quantile",
             )
         assert (live.pair_id, live.subject_id, live.cohort_role) == (None, None, None)
@@ -2341,6 +2355,7 @@ class TestScoreOverlayPseudonyms:
         graph, overlay, roots = self._fixtures()
         frozen = cal.score_overlay(
             7, "white", graph, overlay, roots,
+            as_of=cal.SYNTHETIC_AS_OF,
             pair_id="pair-00", subject_id="subject-00", cohort_role="quantile",
         )
         assert frozen.pair_id == "pair-00"
@@ -2366,3 +2381,933 @@ class TestHandoffContract:
 
     def test_freeze_returns_bytes_not_str(self):
         assert isinstance(_fz_freeze(), bytes)
+
+
+# ---------------------------------------------------------------------------
+# g-p4ih-replay-bind: as_of threading, source/runtime binding, build_selection_inputs
+# ---------------------------------------------------------------------------
+
+
+def _bsi_graph() -> OpeningGraph:
+    """A minimal graph containing the two positions the _fz overlays touch (start + 1.e4)."""
+    return _graph([["e2e4"]])
+
+
+def _bsi_roots() -> OpeningRoots:
+    """Roots with the King's-Pawn release-guard key so cohort scoring produces named
+    scores. (The Caro child key need not be a root here — the release-guard SCORE-shape
+    check is downstream in g-p4ih-selection, not in build_selection_inputs.)"""
+    return _roots(_root(cal.RELEASE_GUARD_OPENING_KEY, "KP"))
+
+
+def _bsi_inputs(quantile_colors=("black", "black")):
+    """A cohort shaped for SCORING, not merely for freeze/load. Both quantile pairs are
+    BLACK by default, so each pools a named score at the only root in _bsi_roots() and
+    derive_cutoffs' ">= 2 pooled scores" precondition is satisfiable.
+
+    _fz_inputs' white quantile pair does NOT: _fz_overlay puts a white pair's evidence at
+    the start position, which sits ABOVE the release-guard root, so it legitimately scores
+    zero named roots. That is the real shape the builder must reject — see
+    TestPooledQuantilePrecondition, which uses exactly those inputs."""
+    return [
+        cal.CapturedPairInput(_fz_overlay(14, "white", 15), "release_guard", 5, "fp-14w"),
+        cal.CapturedPairInput(_fz_overlay(14, "black", 15), "release_guard", 5, "fp-14b"),
+        cal.CapturedPairInput(_fz_overlay(2, quantile_colors[0], 25), "quantile", 3, "fp-2"),
+        cal.CapturedPairInput(_fz_overlay(3, quantile_colors[1], 22), "quantile", 3, "fp-3"),
+    ]
+
+
+def _bsi_artifact(tmp_path, *, as_of=_FZ_AS_OF, graph=None, roots=None, inputs=None):
+    """Freeze a synthetic artifact + a schema-valid provenance record BOUND to the given
+    graph/roots (their real fingerprints), written under tmp_path. Returns
+    (graph, roots, artifact_path, provenance_path, as_of, provenance_bytes)."""
+    graph = graph if graph is not None else _bsi_graph()
+    roots = roots if roots is not None else _bsi_roots()
+    inputs = inputs if inputs is not None else _bsi_inputs()
+    header = cal.ArtifactHeaderInput(
+        as_of=as_of,
+        graph_fingerprint=graph.fingerprint,
+        roots_fingerprint=roots.fingerprint,
+        cache_epoch=7,
+        captured_model_version="sm-v2-3",
+        evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+    )
+    art = cal.freeze_frozen_artifact(inputs, header)
+    hdr = json.loads(art)["header"]
+    rec = {k: hdr[k] for k in _FZ_MIRRORED}
+    rec["sha256"] = hashlib.sha256(art).hexdigest()
+    prov = cal._canonical_dumps(rec)
+    art_path = tmp_path / "artifact.json"
+    prov_path = tmp_path / "cohort_provenance.json"
+    art_path.write_bytes(art)
+    prov_path.write_bytes(prov)
+    return graph, roots, art_path, prov_path, as_of, prov
+
+
+_BACKEND_ROOT = Path(cal.__file__).resolve().parents[1]
+
+_CHILD_BUILD = """
+import json, sys
+import test_calibrate_opening_scores as t
+import scripts.calibrate_opening_scores_v2 as cal
+try:
+    si = cal._build_selection_inputs(
+        sys.argv[1], provenance_path=sys.argv[2],
+        graph=t._bsi_graph(), roots=t._bsi_roots(),
+    )
+    out = {"preexec": si.cohort.scorer_source_verified_preexec}
+except cal.ScorerSourceUnstableError as e:
+    out = {"error": type(e).__name__}
+print(json.dumps(out))
+"""
+
+# A module whose two revisions are the SAME SIZE, so a timestamp-validated .pyc compiled
+# from the first stays "valid" for the second once the mtime is restored.
+_STALE_V1 = 'VALUE = "AAA"\n'
+_STALE_V2 = 'VALUE = "BBB"\n'
+
+
+def _write_preserving_mtime(path: Path, text: str) -> None:
+    stat = path.stat()
+    path.write_text(text)
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+
+
+# Bytecode-cache policy is INHERITED through the environment, so any child that a bytecode
+# test depends on must have it stripped. Otherwise running the suite under
+# PYTHONDONTWRITEBYTECODE=1 (or with a PYTHONPYCACHEPREFIX) silently changes what the child
+# does — no .pyc is written, or it lands somewhere the parent is not looking, and the
+# stale-cache tests stop testing a stale cache.
+_BYTECODE_ENV_VARS = ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX")
+
+
+def _bytecode_fixture_env(**overrides) -> dict[str, str]:
+    """os.environ with the inherited bytecode-cache policy removed, plus explicit overrides."""
+    env = {k: v for k, v in os.environ.items() if k not in _BYTECODE_ENV_VARS}
+    env.update(overrides)
+    return env
+
+
+def _run_child_build(artifact_path, provenance_path, *, env_digest,
+                     pycache_prefix=None, write_bytecode=False):
+    """Build selection inputs in a FRESH interpreter launched with (or without)
+    SCORER_SOURCE_DIGEST_ENV already in its environment. The flag only means anything for
+    an INHERITED digest, so it cannot be exercised by setenv inside this process — that is
+    the very promotion the flag must refuse (see test_late_setenv_cannot_upgrade_the_flag).
+
+    ``pycache_prefix`` / ``write_bytecode`` model what a launcher controls: a verified run
+    needs an empty/fresh bytecode cache and no .pyc writing, or CPython can serve the
+    scorer from bytecode it never checked against the source the digest hashes."""
+    env = _bytecode_fixture_env()
+    env.pop(cal.SCORER_SOURCE_DIGEST_ENV, None)
+    if env_digest is not None:
+        env[cal.SCORER_SOURCE_DIGEST_ENV] = env_digest
+    if pycache_prefix is not None:
+        env["PYTHONPYCACHEPREFIX"] = str(pycache_prefix)
+    if not write_bytecode:
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        [sys.executable, "-c", _CHILD_BUILD, str(artifact_path), str(provenance_path)],
+        capture_output=True, text=True, cwd=str(_BACKEND_ROOT), env=env, timeout=180,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _clock_class(now_value=None, *, raise_on_now=False):
+    """A ``datetime`` subclass whose ``.now`` is pinned/raising, so patching it over
+    opening_rootcalc's ``datetime`` fakes the WALL clock without breaking datetime
+    arithmetic/construction (as_of is a real datetime instance)."""
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if raise_on_now:
+                raise AssertionError("scoring path read the wall clock")
+            return now_value
+    return _Clock
+
+
+class TestAsOfRequiredGuard:
+    def test_score_overlay_requires_as_of(self):
+        graph, overlay, roots, _e4 = _scored_overlay()
+        with pytest.raises(TypeError):
+            cal.score_overlay(1, "white", graph, overlay, roots)  # no as_of
+
+    def test_score_pair_requires_as_of(self):
+        graph, overlay, roots, _e4 = _scored_overlay()
+        with patch.object(cal, "overlay_evidence", return_value=overlay):
+            with pytest.raises(TypeError):
+                cal.score_pair(MagicMock(), 1, "white", graph, roots)  # no as_of
+
+    def test_score_pair_grid_requires_as_of(self):
+        graph, overlay, roots, _e4 = _scored_overlay()
+        with patch.object(cal, "overlay_evidence", return_value=overlay):
+            with pytest.raises(TypeError):
+                cal.score_pair_grid(MagicMock(), 1, "white", graph, roots,
+                                    (cal.CURRENT_SM_V2_3_CELL,))  # no as_of
+
+
+class TestLiveClockSingleSampling:
+    def test_one_run_as_of_across_two_pairs(self, capsys):
+        graph = _graph([["e2e4"]])
+        overlay = EvidenceOverlay(7, "white")  # empty -> fast early return
+        db = MagicMock()
+        # datetime.now ADVANCES on every sample; a single-sampling main takes only the
+        # first, so both pairs' grids must carry t0 even though the clock moved.
+        t0 = datetime(2026, 7, 1, 8, 0, 0, tzinfo=timezone.utc)
+        clock = MagicMock(side_effect=[t0 + timedelta(minutes=i) for i in range(10)])
+        with patch.object(cal, "overlay_evidence", return_value=overlay), patch(
+            "app.opening_cache.list_opening_score_candidate_pairs",
+            return_value=[(7, "white"), (8, "black")],
+        ), patch.object(cal, "get_opening_graph", return_value=graph), patch.object(
+            cal, "get_opening_roots", return_value=_roots(_root(_positions(["e2e4"])[1]))
+        ), patch.object(cal, "_utcnow", clock), patch.object(
+            cal, "score_pair_grid", wraps=cal.score_pair_grid
+        ) as spy:
+            report = cal.main(["--min-observations", "0"], session_factory=_fake_factory(db))
+
+        assert clock.call_count == 1  # sampled EXACTLY once
+        seen = {call.kwargs["as_of"] for call in spy.call_args_list}
+        assert spy.call_count == 2 and seen == {t0}  # both pairs under the one clock
+        assert report["run_as_of"] == t0.isoformat()
+        assert "Run clock (as_of): " in capsys.readouterr().out
+
+
+class TestScorerSourceDigest:
+    def test_exact_ten_file_pin(self):
+        assert cal.SCORER_SOURCE_FILES == (
+            "backend/app/fen.py",
+            "backend/app/game_phase.py",
+            "backend/app/opening_cache.py",
+            "backend/app/opening_evidence.py",
+            "backend/app/opening_graph.py",
+            "backend/app/opening_quality.py",
+            "backend/app/opening_rootcalc.py",
+            "backend/app/opening_roots.py",
+            "backend/requirements.txt",
+            "backend/scripts/calibrate_opening_scores_v2.py",
+        )
+        assert list(cal.SCORER_SOURCE_FILES) == sorted(cal.SCORER_SOURCE_FILES)
+
+    def test_import_completeness_guard_passes_on_real_tree(self):
+        cal.check_scorer_source_manifest()  # no raise
+
+    def test_import_completeness_guard_fails_when_import_missing(self):
+        # opening_rootcalc imports app.opening_evidence; dropping it must be caught.
+        reduced = tuple(p for p in cal.SCORER_SOURCE_FILES
+                        if p != "backend/app/opening_evidence.py")
+        with pytest.raises(cal.ScorerSourceManifestError):
+            cal.check_scorer_source_manifest(reduced)
+
+    def test_digest_stable_and_changes_with_bytes(self, tmp_path, monkeypatch):
+        for rel in cal.SCORER_SOURCE_FILES:
+            p = tmp_path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"orig:" + rel.encode())
+        monkeypatch.setattr(cal, "_REPO_ROOT", tmp_path)
+        d1 = cal.scorer_source_digest()
+        assert d1 == cal.scorer_source_digest()  # stable across two runs, identical bytes
+        target = tmp_path / cal.SCORER_SOURCE_FILES[0]
+        target.write_bytes(target.read_bytes() + b"x")
+        d2 = cal.scorer_source_digest()
+        assert d1 != d2 and d2 == cal.scorer_source_digest()  # changed, then stable
+
+    def test_requirements_pins_chess_with_exact_equals(self):
+        text = (cal._REPO_ROOT / "backend" / "requirements.txt").read_text()
+        import re
+        assert re.search(r"(?m)^chess==\d+\.\d+(\.\d+)?\s*$", text), \
+            "chess must be pinned with an exact == in requirements.txt"
+
+
+class TestSourceStabilityFence:
+    """The digest must describe the code that ACTUALLY produced the scores. Python keeps
+    running the modules it imported even after their files change, so a digest read at
+    stamp time can name code that never ran. Every run is fenced: import snapshot ==
+    open read == close read, or nothing is stamped."""
+
+    def test_import_snapshot_matches_the_bytes_on_disk(self):
+        assert cal._SCORER_SOURCE_DIGEST_AT_IMPORT == cal.scorer_source_digest()
+
+    def test_fails_closed_when_source_moved_since_import(self, tmp_path, monkeypatch):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        ap.unlink()  # the fence must reject BEFORE anything is loaded or scored
+        monkeypatch.setattr(cal, "_SCORER_SOURCE_DIGEST_AT_IMPORT", "0" * 64)
+        with pytest.raises(cal.ScorerSourceUnstableError):  # not FileNotFoundError
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+    def test_fails_closed_when_source_changes_mid_run(self, tmp_path, monkeypatch):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        snap = cal._SCORER_SOURCE_DIGEST_AT_IMPORT
+        # Open read matches the import snapshot; a manifest file is edited while the run
+        # scores, so the close read differs -> the whole run is discarded.
+        digest = MagicMock(side_effect=[snap, "f" * 64])
+        monkeypatch.setattr(cal, "scorer_source_digest", digest)
+        with pytest.raises(cal.ScorerSourceUnstableError):
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert digest.call_count == 2  # fence opened and closed
+
+    def test_stamps_the_fenced_digest_and_reads_it_exactly_twice(self, tmp_path, monkeypatch):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        snap = cal._SCORER_SOURCE_DIGEST_AT_IMPORT
+        digest = MagicMock(side_effect=[snap, snap])  # a 3rd read would raise StopIteration
+        monkeypatch.setattr(cal, "scorer_source_digest", digest)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert si.cohort.scorer_source_digest == snap
+        assert digest.call_count == 2  # the stamp reuses the fenced read, never a fresh one
+
+    def test_late_setenv_cannot_upgrade_the_flag(self, tmp_path, monkeypatch):
+        """THE regression test. scorer_source_verified_preexec means "a digest computed
+        before this interpreter existed agreed with mine". If the env were read at scoring
+        time, code running in THIS process — after the scorer was already compiled — could
+        set the matching digest and mint that proof for itself. It must not be able to."""
+        monkeypatch.setenv(cal.SCORER_SOURCE_DIGEST_ENV, cal.scorer_source_digest())
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert si.cohort.scorer_source_verified_preexec is False  # NOT promoted
+        assert cal.build_winner_binding(
+            si.cohort, cal.CURRENT_SM_V2_3_CELL
+        ).scorer_source_verified_preexec is False
+
+    # The env var is only meaningful when INHERITED, so the three cases below have to be
+    # exercised in a fresh interpreter that was launched with it already set.
+
+    def test_no_launcher_digest_stamps_unverified(self, tmp_path):
+        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        assert _run_child_build(ap, pp, env_digest=None) == {"preexec": False}
+
+    def test_inherited_matching_digest_stamps_verified(self, tmp_path):
+        # A digest computed BEFORE the interpreter started predates the compilation of every
+        # manifest file, so agreeing with it is what closes the compile window. The child
+        # also gets a fresh, write-disabled bytecode cache, so every scorer module is
+        # compiled from the source that digest hashes.
+        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        digest = cal.scorer_source_digest()
+        assert _run_child_build(
+            ap, pp, env_digest=digest.upper() + " ", pycache_prefix=tmp_path / "pyc",
+        ) == {"preexec": True}
+
+    def test_inherited_disagreeing_digest_fails_closed(self, tmp_path):
+        # The scorer moved while Python was compiling it: old code runs, new bytes hash,
+        # and BOTH in-process fence reads agree. Only the inherited digest catches this.
+        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        assert _run_child_build(ap, pp, env_digest="a" * 64) == {
+            "error": "ScorerSourceUnstableError"
+        }
+
+    def test_verified_run_needs_a_fresh_bytecode_cache(self, tmp_path):
+        # Same inherited digest as the passing case above, but the child is allowed to write
+        # .pyc files. CPython caches the scorer module before its body runs, after which a
+        # stale .pyc and a freshly compiled one are indistinguishable — so the run must
+        # refuse to certify rather than stamp a flag it cannot back.
+        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        assert _run_child_build(
+            ap, pp, env_digest=cal.scorer_source_digest(),
+            pycache_prefix=tmp_path / "pyc", write_bytecode=True,
+        ) == {"error": "StaleBytecodeError"}
+
+    def test_verified_run_refuses_a_populated_bytecode_cache(self, tmp_path):
+        # Populate the cache (this child fails, but not before CPython writes the .pyc
+        # files), then run verified against that now-populated cache: the timestamp .pyc
+        # files are exactly what a same-size, mtime-preserving edit exploits.
+        _g, _r, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        prefix = tmp_path / "pyc"
+        digest = cal.scorer_source_digest()
+        _run_child_build(ap, pp, env_digest=digest, pycache_prefix=prefix,
+                         write_bytecode=True)
+        assert any(prefix.rglob("*.pyc"))  # the cache is now populated
+        assert _run_child_build(
+            ap, pp, env_digest=digest, pycache_prefix=prefix, write_bytecode=False,
+        ) == {"error": "StaleBytecodeError"}
+
+    def test_manifest_completeness_gates_the_release_path(self, tmp_path, monkeypatch):
+        # An unbound scoring import makes the digest incomplete, so the fence checks
+        # manifest coverage before it trusts a digest at all.
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        monkeypatch.setattr(cal, "check_scorer_source_manifest", MagicMock(
+            side_effect=cal.ScorerSourceManifestError("uncovered import")))
+        with pytest.raises(cal.ScorerSourceManifestError):
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+
+class TestBytecodeFreshness:
+    """A source digest binds .py bytes; the interpreter runs .pyc. Under CPython's default
+    timestamp invalidation a cached .pyc is accepted whenever the source's (mtime, size)
+    match its header — so a same-size edit with a preserved mtime executes the OLD bytecode
+    while every source digest hashes the NEW file. scorer_source_verified_preexec would
+    then certify code that never ran."""
+
+    def _stale_tree(self, tmp_path, monkeypatch):
+        """A package whose .pyc is compiled from v1, then a same-size v2 written over the
+        source with the mtime restored — CPython still considers the v1 .pyc valid.
+
+        The cache is compiled EXPLICITLY (py_compile, TIMESTAMP invalidation) rather than as
+        a side effect of importing in a child, because a child inherits the ambient bytecode
+        policy: run the suite under PYTHONDONTWRITEBYTECODE=1 and no .pyc is written, so the
+        "stale" tree is not stale and the test silently stops testing anything. For the same
+        reason the parent's pycache_prefix is pinned to None here, so the path py_compile
+        writes to is the one _bytecode_cache_state (and the child below) will look in."""
+        monkeypatch.setattr(sys, "pycache_prefix", None)
+        pkg = tmp_path / "app"
+        pkg.mkdir()
+        mod = pkg / "opening_rootcalc.py"
+        mod.write_text(_STALE_V1)
+        pyc = Path(importlib.util.cache_from_source(str(mod)))
+        py_compile.compile(
+            str(mod), cfile=str(pyc), doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP,
+        )
+        assert pyc.exists()  # the fixture is only meaningful if the cache really exists
+        _write_preserving_mtime(mod, _STALE_V2)
+        return tmp_path, mod
+
+    def test_cpython_executes_stale_bytecode_on_a_same_size_mtime_preserving_edit(
+        self, tmp_path, monkeypatch
+    ):
+        """The hazard itself, on THIS interpreter. Not hypothetical: the source says BBB
+        and the code that runs says AAA."""
+        root, mod = self._stale_tree(tmp_path, monkeypatch)
+        assert mod.read_text() == _STALE_V2  # the bytes any source digest would hash
+        out = subprocess.run(
+            [sys.executable, "-c", "import app.opening_rootcalc as m; print(m.VALUE)"],
+            cwd=str(root), check=True, capture_output=True, text=True,
+            env=_bytecode_fixture_env(),  # must not inherit the suite's cache policy
+        )
+        assert out.stdout.strip() == "AAA"  # ... but THIS is what executed
+
+    def test_snapshot_flags_that_exact_tree_as_timestamp_cached(self, tmp_path, monkeypatch):
+        root, _mod = self._stale_tree(tmp_path, monkeypatch)
+        monkeypatch.setattr(cal, "_REPO_ROOT", root)
+        monkeypatch.setattr(cal, "SCORER_SOURCE_FILES", ("app/opening_rootcalc.py",))
+        assert cal._bytecode_cache_state() == {"app/opening_rootcalc.py": "timestamp"}
+
+    def test_snapshot_reports_absent_when_there_is_no_cache(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "pycache_prefix", None)
+        (tmp_path / "app").mkdir()
+        (tmp_path / "app" / "opening_rootcalc.py").write_text(_STALE_V1)
+        monkeypatch.setattr(cal, "_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(cal, "SCORER_SOURCE_FILES", ("app/opening_rootcalc.py",))
+        assert cal._bytecode_cache_state() == {"app/opening_rootcalc.py": "absent"}
+
+    def test_snapshot_accepts_a_checked_hash_cache(self, tmp_path, monkeypatch):
+        # PEP 552 checked-hash: CPython validates the .pyc against the source CONTENT, so
+        # the mtime/size forgery has nothing to bite on and the cache is trustworthy.
+        monkeypatch.setattr(sys, "pycache_prefix", None)
+        (tmp_path / "app").mkdir()
+        mod = tmp_path / "app" / "opening_rootcalc.py"
+        mod.write_text(_STALE_V1)
+        py_compile.compile(
+            str(mod), doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+        )
+        monkeypatch.setattr(cal, "_REPO_ROOT", tmp_path)
+        monkeypatch.setattr(cal, "SCORER_SOURCE_FILES", ("app/opening_rootcalc.py",))
+        assert cal._bytecode_cache_state() == {"app/opening_rootcalc.py": "checked-hash"}
+        # ... and once the source changes, that same .pyc is no longer usable at all.
+        _write_preserving_mtime(mod, _STALE_V2)
+        assert cal._bytecode_cache_state() == {"app/opening_rootcalc.py": "unusable"}
+
+    def test_snapshot_skips_non_python_manifest_entries(self, monkeypatch):
+        monkeypatch.setattr(cal, "SCORER_SOURCE_FILES", ("backend/requirements.txt",))
+        assert cal._bytecode_cache_state() == {}  # never compiled, so never cached
+
+    @pytest.mark.parametrize("verdict", ["timestamp", "unchecked-hash"])
+    def test_check_refuses_unverified_bytecode(self, verdict, monkeypatch):
+        monkeypatch.setattr(sys, "dont_write_bytecode", True)
+        with pytest.raises(cal.StaleBytecodeError, match="unverified bytecode"):
+            cal.check_scorer_bytecode({"backend/app/opening_rootcalc.py": verdict})
+
+    @pytest.mark.parametrize("verdict", ["absent", "unusable", "checked-hash"])
+    def test_check_accepts_bytecode_cpython_had_to_verify(self, verdict, monkeypatch):
+        # absent: nothing to load. unusable: CPython rejects it and recompiles. checked-hash:
+        # CPython validates the .pyc against the source CONTENT — exactly our guarantee.
+        monkeypatch.setattr(sys, "dont_write_bytecode", True)
+        cal.check_scorer_bytecode({"backend/app/opening_rootcalc.py": verdict})  # no raise
+
+    def test_check_refuses_when_bytecode_writing_is_enabled(self, monkeypatch):
+        monkeypatch.setattr(sys, "dont_write_bytecode", False)
+        with pytest.raises(cal.StaleBytecodeError, match="disable bytecode writing"):
+            cal.check_scorer_bytecode({})  # even with a clean cache
+
+    def test_stale_bytecode_error_is_a_source_unstable_error(self):
+        # So every fail-closed handler that already catches the source fence catches this.
+        assert issubclass(cal.StaleBytecodeError, cal.ScorerSourceUnstableError)
+
+
+class TestPublicEntryPointTrustBoundary:
+    """build_selection_inputs is single-argument on purpose: the provenance record and the
+    graph/roots registries are trust boundaries, and a caller who can move them can select
+    against an artifact nobody approved."""
+
+    def test_signature_takes_only_the_artifact_path(self):
+        import inspect
+        params = inspect.signature(cal.build_selection_inputs).parameters
+        assert list(params) == ["artifact_path"]
+
+    @pytest.mark.parametrize("kwargs", [
+        {"provenance_path": "x.json"},
+        {"graph": None},
+        {"roots": None},
+    ])
+    def test_rejects_injected_inputs(self, tmp_path, kwargs):
+        _g, _r, ap, _pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        with pytest.raises(TypeError):
+            cal.build_selection_inputs(ap, **kwargs)
+
+    def test_uses_the_committed_record_and_the_live_registries(self, tmp_path, monkeypatch):
+        graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path)
+        monkeypatch.setattr(cal, "COHORT_PROVENANCE_PATH", pp)
+        monkeypatch.setattr(cal, "get_opening_graph", lambda: graph)
+        monkeypatch.setattr(cal, "get_opening_roots", lambda: roots)
+        si = cal.build_selection_inputs(ap)  # nothing but the artifact path
+        assert si.cohort.provenance_record_sha256 == hashlib.sha256(prov).hexdigest()
+        assert si.cohort.provenance.graph_fingerprint == graph.fingerprint
+
+    def test_ignores_a_matching_record_shipped_beside_the_artifact(self, tmp_path, monkeypatch):
+        # The attack the single-argument contract closes: an UNAPPROVED artifact handed
+        # over with a freshly generated record that matches it. The split guard accepts any
+        # self-consistent (artifact, record) pair, so the record must come from the
+        # committed path — never from the caller, and never from beside the artifact.
+        approved, forged = tmp_path / "approved", tmp_path / "forged"
+        approved.mkdir()
+        forged.mkdir()
+        graph, roots, _ap, committed_pp, _a1, _p1 = _bsi_artifact(approved)
+        # Same overlays, later clock -> different bytes -> a different artifact sha256.
+        _g, _r, forged_ap, forged_pp, _a2, _p2 = _bsi_artifact(
+            forged, as_of=datetime(2026, 8, 2, 9, 30, tzinfo=timezone.utc),
+            graph=graph, roots=roots,
+        )
+        monkeypatch.setattr(cal, "COHORT_PROVENANCE_PATH", committed_pp)
+        monkeypatch.setattr(cal, "get_opening_graph", lambda: graph)
+        monkeypatch.setattr(cal, "get_opening_roots", lambda: roots)
+        with pytest.raises(cal.ArtifactIntegrityError):
+            cal.build_selection_inputs(forged_ap)
+        # The forged record matches the forged artifact — it is simply never consulted.
+        assert json.loads(forged_pp.read_bytes())["sha256"] == \
+            hashlib.sha256(forged_ap.read_bytes()).hexdigest()
+
+
+class TestBuildSelectionInputs:
+    """Exercised through the private injected helper — the public entry point pins the
+    record and the registries (see TestPublicEntryPointTrustBoundary)."""
+
+    def test_stamps_header_clock_everywhere(self, tmp_path):
+        # After the _fz overlay timestamps (~2026-06-29) so as_of-relative offsets stay >= 0.
+        as_of = datetime(2026, 8, 2, 9, 30, tzinfo=timezone.utc)
+        graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path, as_of=as_of)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        c = si.cohort
+        assert c.as_of == as_of
+        assert si.diagnostics.as_of == as_of
+        assert c.provenance.artifact_as_of == as_of
+        assert c.model_version == si.diagnostics.model_version == cal.SCORE_MODEL_VERSION
+        assert (c.scorer_contract_id == si.diagnostics.scorer_contract_id
+                == cal.REPORT_SCORER_CONTRACT_ID)
+
+    def test_scores_required_cells_and_diagnostics_over_required_plus_demo(self, tmp_path):
+        graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        required = set(cal.build_arm_grid().cells)
+        assert si.cohort.required_cells == frozenset(required)
+        assert set(si.cohort.config_fingerprints) == required
+        for p in si.cohort.pairs:
+            assert set(p.grid) == required  # NO demo cells in cohort grids
+        assert set(si.diagnostics.cells) == required | set(cal.DEMO_CELLS)
+        assert set(si.diagnostics.config_fingerprints) == required | set(cal.DEMO_CELLS)
+        # config fingerprints agree cell-for-cell on the shared required cells.
+        for cell in required:
+            assert (si.cohort.config_fingerprints[cell]
+                    == si.diagnostics.config_fingerprints[cell] == cal._cfg_fp(cell))
+
+    def test_stamps_runtime_and_provenance_record_binding(self, tmp_path):
+        import platform
+        graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        c = si.cohort
+        assert c.runtime_python == platform.python_version()
+        assert c.runtime_chess_version == chess.__version__
+        assert c.provenance_record_sha256 == hashlib.sha256(prov).hexdigest()
+        assert c.scorer_source_digest == cal.scorer_source_digest()
+        assert isinstance(c.source_dirty_paths, tuple)
+
+    def test_provenance_echoes_header_verbatim(self, tmp_path):
+        graph, roots, ap, pp, as_of, prov = _bsi_artifact(tmp_path)
+        loaded = cal.load_frozen_artifact(ap.read_bytes(), prov, cal._current_runtime_binding(graph, roots))
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        pv = si.cohort.provenance
+        h = loaded.header
+        assert pv.artifact_sha256 == loaded.artifact_sha256
+        assert pv.graph_fingerprint == h.graph_fingerprint
+        assert pv.roots_fingerprint == h.roots_fingerprint
+        assert pv.captured_model_version == h.captured_model_version
+        assert pv.schema_version == h.schema_version
+        assert pv.pair_count == h.pair_count
+        assert pv.min_observations == h.min_observations
+        assert pv.cohort_rules == h.cohort_rules
+        assert pv.evidence_derivation_fingerprint == h.evidence_derivation_fingerprint
+        assert pv.release_guard_opening_key == h.release_guard_opening_key
+        assert pv.release_guard_child_opening_key == h.release_guard_child_opening_key
+        # manifest = every loaded pair, no dups.
+        assert si.cohort.manifest_pair_ids == frozenset(p.pair_id for p in loaded.pairs)
+        assert len(si.cohort.pairs) == len(loaded.pairs)
+
+    def test_fails_closed_when_artifact_missing(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        ap.unlink()
+        with pytest.raises(FileNotFoundError):
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+    def test_fails_closed_when_provenance_missing(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        pp.unlink()
+        with pytest.raises(FileNotFoundError):
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+    def test_fails_closed_on_graph_fingerprint_drift(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        drifted = _graph([["e2e4"], ["d2d4"]])  # different fingerprint than the header
+        with pytest.raises(cal.ArtifactScoringValidityError):
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=drifted, roots=roots)
+
+    def test_succeeds_with_dirty_worktree_no_cleanliness_gate(self, tmp_path):
+        # An uncommitted provenance record + an unrelated dirty file are the EXPECTED
+        # state; build must succeed and record source_* as AUDIT fields only.
+        (tmp_path / "unrelated_dirty.txt").write_text("scratch")
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert isinstance(si, cal.SelectionInputs)
+        assert isinstance(si.cohort.source_dirty_paths, tuple)
+        assert si.cohort.source_revision is None or isinstance(si.cohort.source_revision, str)
+
+
+class TestPooledQuantilePrecondition:
+    """A valid artifact with the required quantile pair count can still pool < 2 named
+    scores for a cell: the load-time observation threshold counts EVIDENCE, not scored
+    roots, so a pair whose evidence sits off the roots' subtrees is admitted and scores
+    nothing. The builder must reject that with a per-cell diagnostic instead of handing
+    Phase 2 a cohort that detonates inside derive_cutoffs as a bare ValueError."""
+
+    def _build(self, tmp_path, quantile_colors):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(
+            tmp_path, inputs=_bsi_inputs(quantile_colors=quantile_colors)
+        )
+        return cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+    def test_fails_closed_on_zero_pooled_quantile_scores(self, tmp_path):
+        with pytest.raises(cal.ReleaseGuardShapeError) as e:
+            self._build(tmp_path, ("white", "white"))  # neither pair scores a named root
+        assert "too-few-pooled-quantile-scores" in str(e.value) and "number 0" in str(e.value)
+
+    def test_fails_closed_on_one_pooled_quantile_score(self, tmp_path):
+        # The boundary case, and the shape _fz_inputs actually has: two quantile pairs,
+        # one of which pools nothing. derive_cutoffs needs >= 2.
+        with pytest.raises(cal.ReleaseGuardShapeError) as e:
+            self._build(tmp_path, ("black", "white"))
+        assert "number 1" in str(e.value)
+
+    def test_names_the_offending_cell(self, tmp_path):
+        with pytest.raises(cal.ReleaseGuardShapeError) as e:
+            self._build(tmp_path, ("white", "white"))
+        assert any(c.label in str(e.value) for c in cal.build_arm_grid().cells)
+
+    def test_two_pooled_scores_is_enough_and_cutoffs_derive(self, tmp_path):
+        si = self._build(tmp_path, ("black", "black"))
+        for cell in si.cohort.required_cells:
+            pooled = sorted(s for p in si.cohort.pairs if p.cohort_role == "quantile"
+                            for s in p.grid[cell].named_scores)
+            assert len(pooled) >= 2  # the precondition the builder now guarantees
+
+
+class TestSurrogateUserIdBinding:
+    """The scored surrogate id must survive the CellScore snapshot: PairScore.user_id is
+    dropped there, so without hoisting it g-p4ih-selection's uniqueness binding check has
+    nothing to read."""
+
+    def test_cohort_carries_the_scored_surrogate_ids_uniquely(self, tmp_path):
+        graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        loaded = cal.load_frozen_artifact(
+            ap.read_bytes(), prov, cal._current_runtime_binding(graph, roots)
+        )
+        by_id = {p.pair_id: p.surrogate_user_id for p in si.cohort.pairs}
+        assert by_id == {lp.pair_id: lp.surrogate_user_id for lp in loaded.pairs}
+        # The uniqueness check g-p4ih-selection must be able to run:
+        surrogates = [p.surrogate_user_id for p in si.cohort.pairs]
+        assert len(set(surrogates)) == len(si.cohort.pairs)
+
+    def test_rejects_a_pair_scored_under_a_different_surrogate(self):
+        # The failure this guards: the overlay was scored as user 9 but the wrapper claims
+        # user 1, so every score in the grid belongs to a different subject than the label.
+        cell = cal.CURRENT_SM_V2_3_CELL
+        ps = cal.PairScore(9, "white", pair_id="pair-00", subject_id="s",
+                           cohort_role="quantile")
+        with pytest.raises(ValueError, match="surrogate_user_id mismatch"):
+            cal.ScoredPair.from_pair_scores("pair-00", "s", 1, "quantile", "white", {cell: ps})
+
+
+class TestGridCellKeying:
+    """GridCell.label is a HUMAN label, not an identity. It folds 2 of the 6 behavioral
+    axes, so keying per-cell results by it silently merges distinct cells — which is how
+    the two-clock determinism proof came to cover 3 of 11 required cells. Anything keyed
+    per cell must use the GridCell itself or _cfg_fp(cell)."""
+
+    def test_label_collides_across_behaviorally_distinct_cells(self):
+        cells = cal.build_arm_grid().cells
+        assert len({c.label for c in cells}) < len(cells)  # lossy: 3 labels, 11 cells
+
+    def test_cell_and_config_fingerprint_are_lossless(self):
+        cells = cal.build_arm_grid().cells
+        assert len(set(cells)) == len(cells)                      # GridCell: hashable identity
+        assert len({cal._cfg_fp(c) for c in cells}) == len(cells)  # _cfg_fp: 1:1 with the cell
+
+    def test_the_release_wrappers_key_by_cell_not_label(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        n = len(cal.build_arm_grid().cells)
+        assert len(si.cohort.config_fingerprints) == n
+        assert all(len(p.grid) == n for p in si.cohort.pairs)
+        assert len(si.diagnostics.cells) == n + len(cal.DEMO_CELLS)
+
+
+class TestClockDeterminism:
+    def test_release_path_never_reads_wall_clock(self, tmp_path, monkeypatch):
+        import app.opening_rootcalc as orc
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        monkeypatch.setattr(orc, "datetime", _clock_class(raise_on_now=True))
+        # Succeeds despite .now() raising -> the release scoring path threads as_of and
+        # never falls through to the wall clock.
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert isinstance(si, cal.SelectionInputs)
+
+    def test_two_fake_clocks_same_as_of_identical(self, tmp_path, monkeypatch):
+        import app.opening_rootcalc as orc
+        # Two quantile pairs BOTH black so >= 2 named scores pool per cell for cutoffs.
+        inputs = [
+            cal.CapturedPairInput(_fz_overlay(14, "white", 22), "release_guard", 5, "fp-14w"),
+            cal.CapturedPairInput(_fz_overlay(14, "black", 21), "release_guard", 5, "fp-14b"),
+            cal.CapturedPairInput(_fz_overlay(2, "black", 25), "quantile", 3, "fp-2b"),
+            cal.CapturedPairInput(_fz_overlay(3, "black", 22), "quantile", 3, "fp-3b"),
+        ]
+        graph, roots, ap, pp, as_of, _prov = _bsi_artifact(tmp_path, inputs=inputs)
+
+        def _run():
+            return cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+        monkeypatch.setattr(orc, "datetime", _clock_class(datetime(1999, 1, 1, tzinfo=timezone.utc)))
+        a = _run()
+        monkeypatch.setattr(orc, "datetime", _clock_class(datetime(2099, 12, 31, tzinfo=timezone.utc)))
+        b = _run()
+
+        # EVERY per-cell result below is keyed by _cfg_fp(cell), NOT cell.label. The label
+        # folds only 2 of the 6 behavioral axes, so it collapses the 11 required cells into
+        # 3 keys — label-keyed dicts silently overwrote 8 of them, and the "all cells agree
+        # under two clocks" claim actually covered a quarter of the grid. Each assertion
+        # below therefore also checks its dict is the FULL size, which is what makes a
+        # regression to lossy keying fail loudly instead of passing quietly.
+        n_required = len(a.cohort.required_cells)
+        assert n_required == len(cal.build_arm_grid().cells)
+
+        def _pair_maps(si):
+            # Scores AND confidences: confidence is the clock-sensitive surface (see
+            # test_confidence_moves_with_the_clock_while_the_score_does_not), so comparing
+            # opening_scores alone would let a clock leak through untested.
+            return [{cal._cfg_fp(cell): (dict(p.grid[cell].named_score_map),
+                                         dict(p.grid[cell].named_confidence_map),
+                                         p.grid[cell].synthetic_score,
+                                         p.grid[cell].synthetic_confidence)
+                     for cell in si.cohort.required_cells}
+                    for p in si.cohort.pairs]
+
+        maps_a = _pair_maps(a)
+        assert maps_a == _pair_maps(b)  # identical opening_scores AND confidences
+        assert maps_a and all(len(m) == n_required for m in maps_a)  # all 11 cells compared
+        # ... and the confidences compared are non-trivial, so the equality is not vacuous.
+        conf = [c for cell_map in maps_a for (_s, cs, _ss, _sc) in cell_map.values()
+                for c in cs.values()]
+        assert conf and all(0.0 < c < 100.0 for c in conf)
+
+        def _cutoffs(si):
+            # Capture BOTH the derived Cutoffs and a CutoffCollision deterministically —
+            # the derivation is a pure function of the pooled scores, so a fixed as_of
+            # must reproduce the same outcome (Cutoffs OR collision) regardless of the
+            # wall clock.
+            out = {}
+            for cell in si.cohort.required_cells:
+                pooled = sorted(
+                    s for p in si.cohort.pairs if p.cohort_role == "quantile"
+                    for s in p.grid[cell].named_scores
+                )
+                assert len(pooled) >= 2  # the builder's precondition, per cell
+                try:
+                    out[cal._cfg_fp(cell)] = cal.derive_cutoffs(pooled)
+                except cal.CutoffCollision as e:
+                    out[cal._cfg_fp(cell)] = ("collision", str(e))
+            return out
+
+        cut_a, cut_b = _cutoffs(a), _cutoffs(b)
+        assert cut_a == cut_b and len(cut_a) == n_required  # every cell, identical outcome
+
+        # Diagnostics identical too — over required ∪ DEMO, again keyed losslessly.
+        diag_a = {cal._cfg_fp(c): r for c, r in a.diagnostics.cells.items()}
+        diag_b = {cal._cfg_fp(c): r for c, r in b.diagnostics.cells.items()}
+        assert diag_a == diag_b and len(diag_a) == len(a.diagnostics.cells)
+        assert len(diag_a) == n_required + len(cal.DEMO_CELLS)
+        del cut_a, cut_b
+
+    def test_confidence_moves_with_the_clock_while_the_score_does_not(self):
+        """The positive control the determinism assertions rest on. Confidence folds
+        freshness = exp(-days_since_last_touch / half_life), so timestamped evidence scored
+        under a LATER as_of must lose confidence — while opening_score here does not budge.
+        That is precisely the leak an opening_score-only comparison cannot see: this test
+        is what makes 'confidences match under two wall clocks' mean something."""
+        graph, roots = _bsi_graph(), _bsi_roots()
+        overlay = _fz_overlay(2, "black", 25)  # last_live_at = _FZ_AS_OF - 2 days
+        key = cal.RELEASE_GUARD_OPENING_KEY
+        fresh = cal.score_overlay(2, "black", graph, overlay, roots, as_of=_FZ_AS_OF)
+        stale = cal.score_overlay(
+            2, "black", graph, overlay, roots,
+            as_of=_FZ_AS_OF.replace(year=_FZ_AS_OF.year + 1),
+        )
+        assert fresh.named_score_map[key] == stale.named_score_map[key]  # score: unmoved
+        assert stale.named_confidence_map[key] < fresh.named_confidence_map[key] / 10
+        assert 0.0 < stale.named_confidence_map[key]
+        assert stale.synthetic_confidence < fresh.synthetic_confidence
+
+    def test_timestamp_free_synthetic_scores_identically_under_two_clocks(self):
+        scenario = cal._user14_scenario()
+        cell = cal.CURRENT_SM_V2_3_CELL
+        a = cal._user14_cell_operands(scenario, cell, as_of=cal.SYNTHETIC_AS_OF)
+        b = cal._user14_cell_operands(
+            scenario, cell, as_of=datetime(2026, 7, 1, 12, tzinfo=timezone.utc)
+        )
+        assert a == b  # timestamp-free scenario is clock-invariant
+
+    def test_release_diagnostics_use_header_clock_not_synthetic(self, tmp_path):
+        as_of = datetime(2027, 1, 1, tzinfo=timezone.utc)  # != SYNTHETIC_AS_OF
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path, as_of=as_of)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert si.diagnostics.as_of == as_of != cal.SYNTHETIC_AS_OF
+
+
+class TestScoredPairConsistency:
+    def test_rejects_pseudonym_mismatch(self):
+        cell = cal.CURRENT_SM_V2_3_CELL
+        ps = cal.PairScore(1, "white", pair_id="pair-01", subject_id="s", cohort_role="quantile")
+        with pytest.raises(ValueError):
+            cal.ScoredPair.from_pair_scores("pair-00", "s", 1, "quantile", "white", {cell: ps})
+
+    def test_rejects_color_mismatch(self):
+        cell = cal.CURRENT_SM_V2_3_CELL
+        ps = cal.PairScore(1, "black", pair_id="pair-00", subject_id="s", cohort_role="quantile")
+        with pytest.raises(ValueError):
+            cal.ScoredPair.from_pair_scores("pair-00", "s", 1, "quantile", "white", {cell: ps})
+
+    def test_rejects_a_mutable_pair_score_in_the_grid(self):
+        # The whole point of CellScore: a PairScore smuggled into the grid would be a live
+        # mutable handle on a release-gate score.
+        cell = cal.CURRENT_SM_V2_3_CELL
+        ps = cal.PairScore(1, "white", pair_id="pair-00", subject_id="s", cohort_role="quantile")
+        with pytest.raises(TypeError):
+            cal.ScoredPair("pair-00", "s", 1, "quantile", "white", {cell: ps})
+
+
+class TestSelectionInputsDeeplyImmutable:
+    """`frozen=True` only blocks rebinding the attribute. Without a deep snapshot, a score
+    reachable from the cohort can be rewritten AFTER every binding is stamped — moving
+    cutoffs, gates or the winner while the artifact hash, source digest and runtime stamps
+    all still verify. These are the mutation attempts that must not work."""
+
+    @pytest.fixture
+    def si(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        return cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+    def test_cohort_scores_cannot_be_rewritten(self, si):
+        cell = next(iter(si.cohort.required_cells))
+        cs = si.cohort.pairs[0].grid[cell]
+        key = next(iter(cs.named_score_map))
+        with pytest.raises(TypeError):
+            cs.named_score_map[key] = 99.0        # mappingproxy
+        with pytest.raises(TypeError):
+            cs.named_scores[0] = 99.0             # tuple
+        with pytest.raises(TypeError):
+            cs.named_confidence_map[key] = 0.0    # mappingproxy
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            cs.synthetic_score = 99.0
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            cs.observation_total = 0
+
+    def test_cohort_grids_and_pair_set_cannot_be_rewritten(self, si):
+        cell = next(iter(si.cohort.required_cells))
+        with pytest.raises(TypeError):
+            si.cohort.pairs[0].grid[cell] = None      # mappingproxy
+        with pytest.raises(TypeError):
+            si.cohort.config_fingerprints[cell] = "x"  # mappingproxy
+        with pytest.raises(TypeError):
+            si.cohort.pairs[0] = None                 # tuple
+
+    def test_diagnostic_operands_cannot_be_rewritten(self, si):
+        cell = next(iter(si.diagnostics.cells))
+        with pytest.raises(TypeError):
+            si.diagnostics.cells[cell] = None  # mappingproxy
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            si.diagnostics.cells[cell].user_tp_score = 0.0
+
+    def test_constructor_copies_so_the_callers_dict_is_not_a_live_handle(self):
+        # Passing a dict in and mutating it afterwards must not reach the stamped value.
+        cell = cal.CURRENT_SM_V2_3_CELL
+        scores = {"a": 50.0}
+        cs = cal.CellScore(
+            named_scores=(50.0,), named_score_map=scores, named_confidence_map={},
+            synthetic_score=None, synthetic_confidence=None, observation_total=1,
+        )
+        scores["a"] = 99.0  # mutating the ORIGINAL dict
+        assert cs.named_score_map["a"] == 50.0
+
+        grid = {cell: cs}
+        sp = cal.ScoredPair("p", "s", 1, "quantile", "white", grid)
+        grid[cell] = None
+        assert sp.grid[cell] is cs
+
+
+class TestWinnerBinding:
+    _EXPECTED_FIELDS = {
+        "config_fingerprint", "scorer_contract_id", "scorer_source_digest",
+        "scorer_source_verified_preexec",
+        "provenance_record_sha256", "runtime_python", "runtime_chess_version",
+        "source_revision", "source_dirty_paths", "model_version", "artifact_sha256",
+        "graph_fingerprint", "roots_fingerprint", "evidence_derivation_fingerprint",
+        "release_guard_opening_key", "release_guard_child_opening_key",
+    }
+
+    def test_field_set_is_complete(self):
+        import dataclasses
+        assert {f.name for f in dataclasses.fields(cal.WinnerBinding)} == self._EXPECTED_FIELDS
+
+    def test_assembled_from_cohort(self, tmp_path):
+        graph, roots, ap, pp, _as_of, prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        c = si.cohort
+        cell = cal.CURRENT_SM_V2_3_CELL
+        wb = cal.build_winner_binding(c, cell)
+        assert wb.config_fingerprint == c.config_fingerprints[cell]
+        assert wb.scorer_contract_id == c.scorer_contract_id
+        assert wb.scorer_source_digest == c.scorer_source_digest
+        assert wb.scorer_source_verified_preexec == c.scorer_source_verified_preexec
+        assert wb.provenance_record_sha256 == c.provenance_record_sha256
+        assert wb.runtime_python == c.runtime_python
+        assert wb.runtime_chess_version == c.runtime_chess_version
+        assert wb.source_revision == c.source_revision
+        assert wb.source_dirty_paths == c.source_dirty_paths
+        assert wb.model_version == c.model_version
+        assert wb.artifact_sha256 == c.provenance.artifact_sha256
+        assert wb.graph_fingerprint == c.provenance.graph_fingerprint
+        assert wb.roots_fingerprint == c.provenance.roots_fingerprint
+        assert wb.evidence_derivation_fingerprint == c.provenance.evidence_derivation_fingerprint
+        assert wb.release_guard_opening_key == c.provenance.release_guard_opening_key
+        assert wb.release_guard_child_opening_key == c.provenance.release_guard_child_opening_key
+
+    def test_unknown_winner_cell_fails_closed(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        with pytest.raises(KeyError):
+            cal.build_winner_binding(si.cohort, cal.GridCell(0.5, "off"))  # not a required cell

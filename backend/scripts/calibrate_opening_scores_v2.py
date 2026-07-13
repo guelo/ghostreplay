@@ -24,17 +24,126 @@ write-bench safety gate.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
+import importlib.util
 import json
 import math
+import os
+import platform
 import re
+import subprocess
 import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterable, Mapping, Protocol, Sequence
+
+# ---------------------------------------------------------------------------
+# Source binding — ALL OF IT CAPTURED HERE, ABOVE EVERY SCORER IMPORT.
+# ---------------------------------------------------------------------------
+# Each value below is a statement about code this interpreter has NOT COMPILED YET. Read
+# any of them after the `from app...` imports and they describe a tree that may already
+# have diverged from what is running.
+
+# Repo root, from __file__ (backend/scripts/<this>.py -> parents[2]), so it is stable
+# regardless of the process CWD.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The COMPLETE, sorted manifest of repo-relative POSIX source paths whose EXACT on-disk
+# bytes the scores are bound to. This is the CODE surface the content fingerprints
+# (graph/roots/evidence-derivation) cannot see: a graph-walk or normalization change moves
+# scores under an unchanged content fingerprint. The scorer's direct scoring imports are
+# part of the binding, not just the scorer entry point; requirements.txt is the DECLARED
+# dependency set (the chess pin lives inside the digest through it).
+SCORER_SOURCE_FILES: tuple[str, ...] = (
+    "backend/app/fen.py",
+    "backend/app/game_phase.py",
+    "backend/app/opening_cache.py",
+    "backend/app/opening_evidence.py",
+    "backend/app/opening_graph.py",
+    "backend/app/opening_quality.py",
+    "backend/app/opening_rootcalc.py",
+    "backend/app/opening_roots.py",
+    "backend/requirements.txt",
+    "backend/scripts/calibrate_opening_scores_v2.py",
+)
+
+# The env var through which a launcher hands this process the manifest digest it computed
+# BEFORE exec'ing the interpreter. See _SCORER_SOURCE_DIGEST_AT_IMPORT for what it buys.
+SCORER_SOURCE_DIGEST_ENV = "GHOSTREPLAY_SCORER_SOURCE_DIGEST"
+
+# Read at the TOP of the module — above `import chess` and every `from app...` below —
+# and never re-read. The value's ONLY meaning is "a digest my launcher computed before I
+# existed", so it has to be an INHERITED value. Reading os.environ later (at scoring time)
+# would let code inside this process set the matching digest AFTER the scorer was compiled
+# and so promote scorer_source_verified_preexec to True — manufacturing precisely the
+# compile-window proof the flag is supposed to represent. Captured once, immutable
+# thereafter: a late os.environ write cannot upgrade the flag.
+#
+# Residual (g-p4ih-srcfence): if something in the SAME process imported app.* before this
+# module and wrote the var, the capture still follows that compile. Only launching from an
+# exclusive checkout closes that; this is the strongest an in-process read can be.
+_LAUNCHER_SCORER_DIGEST: str | None = (
+    os.environ.get(SCORER_SOURCE_DIGEST_ENV, "").strip().lower() or None
+)
+
+
+def _bytecode_cache_state() -> dict[str, str]:
+    """For each manifest .py, classify the bytecode cache CPython is about to consult —
+    specifically, whether it could hand the interpreter code that does NOT come from the
+    source bytes the digest hashes.
+
+    A source digest binds .py bytes; the interpreter runs .pyc. Under CPython's DEFAULT
+    timestamp invalidation a cached .pyc is accepted whenever the source's (mtime, size)
+    match the pair recorded in its header — so an edit of the SAME SIZE with the mtime
+    preserved executes the OLD bytecode while every source digest hashes the NEW file.
+    Verified, on this interpreter, in TestBytecodeFreshness.
+
+    Verdicts:
+      "absent"       — no cached .pyc: CPython must compile the source we hashed.
+      "unusable"     — magic mismatch, or a checked-hash .pyc whose hash does not match the
+                       source: CPython rejects it and recompiles from the source we hashed.
+      "checked-hash" — PEP 552 hash-based WITH check_source: CPython verifies the .pyc
+                       against the source CONTENT, which is exactly our guarantee.
+      "timestamp"    — forgeable (mtime, size) validation. UNSAFE.
+      "unchecked-hash" — hash-based without check_source: trusted blindly. UNSAFE.
+    """
+    state: dict[str, str] = {}
+    for rel in SCORER_SOURCE_FILES:
+        if not rel.endswith(".py"):
+            continue  # requirements.txt is never compiled
+        source = _REPO_ROOT / rel
+        try:
+            head = Path(importlib.util.cache_from_source(str(source))).read_bytes()[:16]
+        except OSError:
+            state[rel] = "absent"
+            continue
+        if len(head) < 16 or head[:4] != importlib.util.MAGIC_NUMBER:
+            state[rel] = "unusable"
+            continue
+        flags = int.from_bytes(head[4:8], "little")
+        if not flags & 0b1:
+            state[rel] = "timestamp"
+        elif not flags & 0b10:
+            state[rel] = "unchecked-hash"
+        else:
+            try:
+                expected = importlib.util.source_hash(source.read_bytes())
+            except OSError:
+                state[rel] = "unusable"
+                continue
+            state[rel] = "checked-hash" if head[8:16] == expected else "unusable"
+    return state
+
+
+# Snapshot BEFORE the imports below. Importing app.* compiles those modules and — unless
+# bytecode writing is off — CPython then WRITES the .pyc, destroying the evidence of what
+# the cache looked like when the decision to use it was taken.
+_BYTECODE_CACHE_AT_IMPORT: dict[str, str] = _bytecode_cache_state()
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -51,7 +160,10 @@ from app.opening_evidence import (  # noqa: E402
     PhaseSample,
     overlay_evidence,
 )
-from app.opening_cache import evidence_derivation_fingerprint  # noqa: E402
+from app.opening_cache import (  # noqa: E402
+    SCORE_MODEL_VERSION,
+    evidence_derivation_fingerprint,
+)
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph  # noqa: E402
 from app.opening_quality import (  # noqa: E402
     SOURCE_ANALYSIS_CACHE,
@@ -61,6 +173,7 @@ from app.opening_quality import (  # noqa: E402
     TAU_WC,
 )
 from app.opening_rootcalc import (  # noqa: E402
+    REPORT_SCORER_CONTRACT_ID,
     SYNTHETIC_INITIAL_FEN,
     CalcTelemetry,
     NodeDebug,
@@ -420,7 +533,13 @@ class PairScore:
     # opening-to-opening ACROSS grid cells (the plain list above keeps distributions
     # cheap; the map is what the delta reporting needs).
     named_score_map: dict[str, float] = field(default_factory=dict)
+    # RootScore.confidence per named root. Carried, not discarded: confidence is
+    # sample_conf * freshness, and freshness reads the clock — so it is the surface where a
+    # clock leak shows up EVEN IF the opening_score happens to be unmoved (a non-user-turn
+    # node folds c_n=1.0). Determinism tests compare it; see CellScore.
+    named_confidence_map: dict[str, float] = field(default_factory=dict)
     synthetic_score: float | None = None
+    synthetic_confidence: float | None = None
     observation_total: int = 0
     source_counts: Counter[str] = field(default_factory=Counter)
     excluded_sessions: int = 0
@@ -448,6 +567,7 @@ def score_overlay(
     roots: OpeningRoots,
     config: RootCalcConfig | None = None,
     *,
+    as_of: datetime,
     pair_id: str | None = None,
     subject_id: str | None = None,
     cohort_role: str | None = None,
@@ -457,6 +577,13 @@ def score_overlay(
     Passes ``include_synthetic_root=True`` so the ``__repertoire__`` hero row is
     computed in the same DAG pass, then reports it in its own field rather than
     mixing it into the named-root distribution.
+
+    ``as_of`` is REQUIRED keyword-only with NO default (g-p4ih-replay-bind): it is
+    threaded straight into ``compute_all_root_scores(..., now=as_of)`` so no caller can
+    fall through to a silent ``datetime.now``. Every caller is exactly one of the three
+    clock paths — the frozen-artifact header (release), ``SYNTHETIC_AS_OF`` (standalone
+    synthetics), or a once-sampled ``run_as_of`` (the live report). Cutoff
+    reproducibility is thereby a CONTRACT, not an undocumented invariant.
 
     ``pair_id`` / ``subject_id`` / ``cohort_role`` are the OPTIONAL frozen-cohort
     pseudonym fields (g-p4ih-artifact); they are forwarded VERBATIM into ``PairScore``
@@ -471,6 +598,7 @@ def score_overlay(
         overlay,
         roots,
         config or RootCalcConfig(),
+        now=as_of,
         include_branch_summaries=False,
         include_synthetic_root=True,
         telemetry=telemetry,
@@ -478,11 +606,9 @@ def score_overlay(
     elapsed = time.perf_counter() - started
 
     synthetic = scores.get(SYNTHETIC_INITIAL_FEN)
-    named_score_map = {
-        key: score.opening_score
-        for key, score in scores.items()
-        if key != SYNTHETIC_INITIAL_FEN
-    }
+    named = {key: score for key, score in scores.items() if key != SYNTHETIC_INITIAL_FEN}
+    named_score_map = {key: score.opening_score for key, score in named.items()}
+    named_confidence_map = {key: score.confidence for key, score in named.items()}
     named_scores = list(named_score_map.values())
     observation_total = sum(node.quality_count for node in overlay.nodes.values())
 
@@ -491,7 +617,9 @@ def score_overlay(
         player_color=player_color,
         named_scores=named_scores,
         named_score_map=named_score_map,
+        named_confidence_map=named_confidence_map,
         synthetic_score=synthetic.opening_score if synthetic is not None else None,
+        synthetic_confidence=synthetic.confidence if synthetic is not None else None,
         observation_total=observation_total,
         source_counts=Counter(overlay.source_counts),
         excluded_sessions=overlay.excluded_sessions,
@@ -511,10 +639,16 @@ def score_pair(
     graph: OpeningGraph,
     roots: OpeningRoots,
     config: RootCalcConfig | None = None,
+    *,
+    as_of: datetime,
 ) -> PairScore:
-    """Build the overlay for a pair (DB read only) and score it in memory."""
+    """Build the overlay for a pair (DB read only) and score it in memory.
+
+    ``as_of`` is REQUIRED keyword-only (g-p4ih-replay-bind) and forwarded to
+    ``score_overlay`` so the scoring clock can never fall through to ``datetime.now``.
+    """
     overlay = overlay_evidence(db, user_id, player_color, graph)
-    return score_overlay(user_id, player_color, graph, overlay, roots, config)
+    return score_overlay(user_id, player_color, graph, overlay, roots, config, as_of=as_of)
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +947,8 @@ def score_pair_grid(
     graph: OpeningGraph,
     roots: OpeningRoots,
     cells: tuple[GridCell, ...],
+    *,
+    as_of: datetime,
 ) -> dict[GridCell, PairScore]:
     """Build a pair's overlay ONCE (the ~2.6s cost), then score it per grid cell.
 
@@ -820,10 +956,15 @@ def score_pair_grid(
     the (DB-read) overlay is built once and only the cheap in-memory
     ``score_overlay`` runs per cell. ``cells`` is ``ArmGrid.cells`` — a bare cell tuple,
     never the ArmGrid wrapper (cohort scoring never reads roles).
+
+    ``as_of`` is REQUIRED keyword-only (g-p4ih-replay-bind): the SAME clock scores every
+    cell of every pair, so a two-pair run scored minutes apart cannot see two clocks.
     """
     overlay = overlay_evidence(db, user_id, player_color, graph)
     return {
-        cell: score_overlay(user_id, player_color, graph, overlay, roots, cell.config)
+        cell: score_overlay(
+            user_id, player_color, graph, overlay, roots, cell.config, as_of=as_of
+        )
         for cell in cells
     }
 
@@ -2313,6 +2454,14 @@ def load_frozen_artifact(
 # ---- Release-guard score-shape guards (Protocol-typed; no downstream import) ----
 
 
+class CellScored(Protocol):
+    """The only members the score guards read off ONE cell's result: satisfied by the
+    mutable PairScore (capture side) and by the immutable CellScore (release side)."""
+
+    named_scores: Sequence[float]
+    named_score_map: Mapping[str, float]
+
+
 class ReleaseGuardScored(Protocol):
     """Artifact-owned STRUCTURAL view (typing.Protocol) exposing EXACTLY the two members
     the score guards read. A downstream ScoredPair (carrying .player_color + .grid)
@@ -2320,7 +2469,7 @@ class ReleaseGuardScored(Protocol):
     type it blocks."""
 
     player_color: str
-    grid: Mapping["GridCell", PairScore]
+    grid: Mapping["GridCell", CellScored]
 
 
 def _require_finite_named_score(named_score_map: Mapping[str, float], key: str, color: str, cell: "GridCell") -> None:
@@ -2721,6 +2870,48 @@ def _selection_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
     return [r for r in rows if r["graded_for"] == "selection" and r["applicable"]]
 
 
+# The frozen User-14 scenario tuple: (graph, black_overlay, white_overlay, roots,
+# root_fen, child_fen). Built ONCE per diagnostic run and passed to every cell.
+User14Scenario = tuple[
+    OpeningGraph, EvidenceOverlay, EvidenceOverlay, OpeningRoots, str, str
+]
+
+
+def _user14_cell_operands(
+    scenario: User14Scenario, cell: GridCell, *, as_of: datetime
+) -> dict[str, object]:
+    """The nine User-14 synthetic operands for ONE grid cell, at now=as_of, debug=True.
+
+    Extracted so the User-14 diagnostic rows and the release-path DiagnosticCellResult
+    (g-p4ih-replay-bind) compute the SAME operands from ONE code path — a divergence
+    between the reported diagnostic and the binding-time operand set is impossible.
+    """
+    graph, black_overlay, white_overlay, roots, root_fen, child_fen = scenario
+    config = cell.config
+    black_root = compute_root_score(
+        root_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+    )
+    caro_child = compute_root_score(
+        child_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
+    )
+    white_root = compute_root_score(
+        root_fen, "white", graph, white_overlay, roots, config, now=as_of, debug=True
+    )
+    user_node = _report_node_for(black_root, root_fen)
+    opp_node = _report_node_for(white_root, root_fen)
+    return {
+        "synth_black_root_score": black_root.opening_score,
+        "synth_caro_child_score": caro_child.opening_score,
+        "synth_root_coverage_fraction": black_root.coverage / 100.0,
+        "synth_user_turn_pre_fold_quality": user_node.pre_fold_quality,
+        "synth_user_turn_multiplier": user_node.report_fold_multiplier,
+        "synth_opp_turn_score": white_root.opening_score,
+        "synth_opp_turn_pre_fold_quality": opp_node.pre_fold_quality,
+        "synth_opp_turn_multiplier": opp_node.report_fold_multiplier,
+        "user_tp_score": black_root.opening_score,
+    }
+
+
 def run_user14_diagnostic(
     grid: ArmGrid, *, demo_cells: tuple[GridCell, ...] = (), as_of: datetime = SYNTHETIC_AS_OF
 ) -> dict[str, object]:
@@ -2732,32 +2923,10 @@ def run_user14_diagnostic(
     grades <= C, while the reference (CURRENT_SM_V2_3_CELL) row is A. B1 is GRADED-FOR-
     REFERENCE (its ~34 user-turn drop is reported but NEVER enters passed).
     """
-    graph, black_overlay, white_overlay, roots, root_fen, child_fen = _user14_scenario()
+    scenario = _user14_scenario()
 
     def operands(cell: GridCell) -> dict[str, object]:
-        config = cell.config
-        black_root = compute_root_score(
-            root_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
-        )
-        caro_child = compute_root_score(
-            child_fen, "black", graph, black_overlay, roots, config, now=as_of, debug=True
-        )
-        white_root = compute_root_score(
-            root_fen, "white", graph, white_overlay, roots, config, now=as_of, debug=True
-        )
-        user_node = _report_node_for(black_root, root_fen)
-        opp_node = _report_node_for(white_root, root_fen)
-        return {
-            "synth_black_root_score": black_root.opening_score,
-            "synth_caro_child_score": caro_child.opening_score,
-            "synth_root_coverage_fraction": black_root.coverage / 100.0,
-            "synth_user_turn_pre_fold_quality": user_node.pre_fold_quality,
-            "synth_user_turn_multiplier": user_node.report_fold_multiplier,
-            "synth_opp_turn_score": white_root.opening_score,
-            "synth_opp_turn_pre_fold_quality": opp_node.pre_fold_quality,
-            "synth_opp_turn_multiplier": opp_node.report_fold_multiplier,
-            "user_tp_score": black_root.opening_score,
-        }
+        return _user14_cell_operands(scenario, cell, as_of=as_of)
 
     def applicable(cell: GridCell) -> bool:
         return _user_behavior_key(cell) != _user_behavior_key(CURRENT_SM_V2_3_CELL)
@@ -2929,6 +3098,722 @@ def run_diagnostics(
 
 
 # ---------------------------------------------------------------------------
+# Replay inputs + approval/source binding (g-p4ih-replay-bind)
+#
+# The ONE impure step (build_selection_inputs) turns a validated frozen-cohort artifact
+# into typed, provenance-bound scoring inputs a pure selector (g-p4ih-selection) can
+# trust. It closes two contract gaps: the gates cannot be evaluated from cohort scores
+# alone (they also need the synthetic diagnostics), and free-floating scores are not
+# provably bound to the artifact, its clock, the scoring code, or the runtime.
+# ---------------------------------------------------------------------------
+
+# _REPO_ROOT and SCORER_SOURCE_FILES are defined at the TOP of this module, above the
+# scorer imports — see the source-binding block there for why they cannot live here.
+
+# The committed provenance record the release-side load guard validates against. It is
+# NOT checked in by this bead (an authorized --capture-cohort run publishes it, like the
+# User-14 fixture); build_selection_inputs fails CLOSED if it is absent.
+COHORT_PROVENANCE_PATH = Path(__file__).resolve().parent / "fixtures" / "cohort_provenance.json"
+
+class ScorerSourceManifestError(Exception):
+    """A scoring import of opening_rootcalc.py is not covered by SCORER_SOURCE_FILES —
+    a future import would otherwise silently escape the source binding."""
+
+
+class ScorerSourceUnstableError(Exception):
+    """The scorer bytes on disk moved between this interpreter importing them and the end
+    of the run, so no digest can honestly describe the code that produced the scores."""
+
+
+class StaleBytecodeError(ScorerSourceUnstableError):
+    """A scorer module could have been imported from a bytecode cache CPython never proved
+    against the source the digest hashes — so the digest would certify code that did not
+    run. Same family as ScorerSourceUnstableError: the running code is not the named code."""
+
+
+# Cache verdicts under which CPython was FORCED to compile the source we hashed.
+_SAFE_BYTECODE_VERDICTS = frozenset({"absent", "unusable", "checked-hash"})
+
+
+def check_scorer_bytecode(state: Mapping[str, str] | None = None) -> None:
+    """Fail closed unless every scorer module was compiled from the verified SOURCE.
+
+    Only meaningful on the verified path (an inherited launcher digest), and only called
+    there — an unverified dev/test run claims nothing about its bytecode and is left alone.
+
+    Two conditions, both necessary:
+
+    1. Bytecode writing must be OFF. If CPython may write .pyc files, it writes THIS
+       module's before executing its body, so the cache state observed at import can no
+       longer distinguish "just compiled from the source I hashed" from "loaded from a
+       stale .pyc" — both look like a timestamp .pyc whose (mtime, size) match.
+    2. Every manifest module's pre-import cache verdict must be one CPython could not have
+       served stale bytecode from (see _bytecode_cache_state).
+
+    Both are satisfied by launching the release run with an empty or fresh bytecode cache,
+    which is g-p4ih-srcfence's job: PYTHONDONTWRITEBYTECODE=1 plus either a purged
+    __pycache__ or PYTHONPYCACHEPREFIX pointing at a fresh directory.
+    """
+    if not sys.dont_write_bytecode:
+        raise StaleBytecodeError(
+            "a verified run must disable bytecode writing (PYTHONDONTWRITEBYTECODE=1 / -B): "
+            "with writing enabled CPython caches this module before its body runs, so a "
+            "stale .pyc and a freshly compiled one are indistinguishable afterwards"
+        )
+    state = _BYTECODE_CACHE_AT_IMPORT if state is None else state
+    unsafe = {rel: v for rel, v in state.items() if v not in _SAFE_BYTECODE_VERDICTS}
+    if unsafe:
+        detail = ", ".join(f"{rel} ({verdict})" for rel, verdict in sorted(unsafe.items()))
+        raise StaleBytecodeError(
+            f"scorer modules were importable from unverified bytecode: {detail}. CPython "
+            "accepts a timestamp .pyc whenever the source's (mtime, size) match, so a "
+            "same-size edit with a preserved mtime runs the OLD bytecode while the source "
+            "digest hashes the NEW file — the digest would certify code that never ran. "
+            "Run the release with an empty/fresh bytecode cache (purge __pycache__ or set "
+            "PYTHONPYCACHEPREFIX to a fresh directory)"
+        )
+
+
+def scorer_source_digest() -> str:
+    """SHA-256 over, for each path in SCORER_SOURCE_FILES order, ``path`` + NUL +
+    on-disk bytes + NUL. Deterministic, independent of git state, and HONEST under dirt:
+    a locally-edited scorer binds to the EDITED bytes, so Phase 3 (running from the
+    committed tree) fails the digest match unless exactly those bytes were committed."""
+    h = hashlib.sha256()
+    for rel in SCORER_SOURCE_FILES:
+        h.update(rel.encode("utf-8"))
+        h.update(b"\0")
+        h.update((_REPO_ROOT / rel).read_bytes())
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+# The manifest digest read at import: after this module's top-level `from app...` imports,
+# and before any scoring can run.
+#
+# It is NOT proof of what this interpreter compiled, and must not be described as such.
+# Python compiles this module — and everything imported ahead of it — BEFORE this line
+# executes, and top-level dependency init is not instantaneous. An edit landing in that
+# window leaves old compiled code running while this reads the new bytes: matching open and
+# close reads, a stamped digest, and code that never ran. Only a hash taken before the
+# process existed can rule that out, which is what SCORER_SOURCE_DIGEST_ENV is for.
+#
+# What the snapshot DOES buy, paired with the re-read after the last score, is a fence: the
+# scorer bytes did not move from here through the end of the run, so an edit landing
+# mid-run cannot be stamped. Neither read detects a change-and-revert; nothing short of an
+# exclusive checkout does. See g-p4ih-srcfence.
+_SCORER_SOURCE_DIGEST_AT_IMPORT = scorer_source_digest()
+
+# The digest a LAUNCHER computed BEFORE exec'ing this interpreter, handed in through the
+# environment. That hash necessarily precedes the compilation of every manifest file, so a
+# match closes the compile window an in-process snapshot cannot reach: it is the only way
+# this process can know the bytes it read at import are the bytes it ran. The release
+# launcher sets it (g-p4ih-srcfence, consumed by g-p4ih-release-cli). It is ABSENT on dev
+# and test runs, and that absence is recorded on the cohort as
+# scorer_source_verified_preexec=False rather than quietly assumed away — a release gate
+# can then require the stronger guarantee without this module pretending to provide it.
+#
+# The value itself is _LAUNCHER_SCORER_DIGEST, captured at the TOP of this module before
+# any scorer import. There is deliberately NO accessor that re-reads os.environ: a live
+# read would let this process promote its own flag after the scorer was compiled.
+
+
+def scorer_imported_app_modules() -> set[str]:
+    """The set of ``app.*`` modules opening_rootcalc.py imports (parsed statically). The
+    scorer's DIRECT scoring imports; a completeness guard asserts each is bound."""
+    src = (_REPO_ROOT / "backend/app/opening_rootcalc.py").read_text(encoding="utf-8")
+    modules: set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module and node.module.split(".")[0] == "app":
+                modules.add(node.module)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[0] == "app":
+                    modules.add(alias.name)
+    return modules
+
+
+def check_scorer_source_manifest(manifest: tuple[str, ...] = SCORER_SOURCE_FILES) -> None:
+    """Fail closed if any ``app.*`` module opening_rootcalc.py imports is missing from
+    ``manifest``, so a future scoring import cannot silently escape scorer_source_digest.
+    Parametrized on ``manifest`` so a test can prove a reduced manifest is rejected."""
+    covered = set(manifest)
+    for module in sorted(scorer_imported_app_modules()):
+        rel = "backend/" + module.replace(".", "/") + ".py"
+        if rel not in covered:
+            raise ScorerSourceManifestError(
+                f"scoring import {module!r} ({rel}) is not in SCORER_SOURCE_FILES — a new "
+                "app.* import must be added to the source binding manifest"
+            )
+
+
+def _git_head_revision() -> str | None:
+    """``git rev-parse HEAD`` (AUDIT only, never a gate). None if git is unavailable —
+    the release path never blocks on git, so a missing revision is recorded, not fatal."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _scorer_dirty_paths() -> tuple[str, ...]:
+    """The SCORER_SOURCE_FILES that differ from HEAD (sorted). AUDIT companion to
+    scorer_source_digest, never a gate: the digest binds the actual bytes, so a dirty
+    worktree (the uncommitted provenance diff + unrelated multi-agent files) is expected
+    and NEVER blocks selection. Empty on a committed-scorer run; ``()`` if git fails."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(_REPO_ROOT), "diff", "--name-only", "HEAD", "--",
+             *SCORER_SOURCE_FILES],
+            capture_output=True, text=True, timeout=10,
+        )
+        if out.returncode != 0:
+            return ()
+        changed = {line.strip() for line in out.stdout.splitlines() if line.strip()}
+        return tuple(sorted(p for p in SCORER_SOURCE_FILES if p in changed))
+    except Exception:
+        return ()
+
+
+# ---- Typed wrappers (all frozen dataclasses) ----
+#
+# DEEPLY immutable, not merely frozen. A frozen wrapper around a mutable PairScore is
+# security theatre: `frozen=True` only blocks rebinding the attribute, so
+# `cohort.pairs[0].grid[cell].named_score_map[key] = 99.0` would still rewrite a
+# release-gate score after every binding was stamped — changing cutoffs, gates or the
+# winner while the artifact hash, source digest and runtime stamps all still verify. So
+# every decision-bearing value below is a scalar, a tuple, or a mappingproxy over a dict
+# this module owns and never hands out.
+
+
+def _freeze_map(mapping: Mapping) -> Mapping:
+    """A read-only view over a PRIVATE copy: copying defends against the caller mutating
+    the dict it passed in, the proxy against mutation through our own reference."""
+    return MappingProxyType(dict(mapping))
+
+
+@dataclass(frozen=True)
+class CellScore:
+    """The decision-bearing scoring result for one (pair, cell), snapshotted OUT of the
+    mutable PairScore. Everything the selector reads — cutoff pools, gate operands, the
+    winner comparison — comes from here, so it holds no list, dict, Counter or other
+    mutable container.
+
+    ``named_confidence_map`` is carried alongside the scores because confidence folds
+    freshness, which reads the clock: it is the surface that exposes a scoring-clock leak
+    even when opening_score is unmoved."""
+
+    named_scores: tuple[float, ...]
+    named_score_map: Mapping[str, float]
+    named_confidence_map: Mapping[str, float]
+    synthetic_score: float | None
+    synthetic_confidence: float | None
+    observation_total: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "named_scores", tuple(self.named_scores))
+        object.__setattr__(self, "named_score_map", _freeze_map(self.named_score_map))
+        object.__setattr__(
+            self, "named_confidence_map", _freeze_map(self.named_confidence_map)
+        )
+
+    @classmethod
+    def from_pair_score(cls, ps: PairScore) -> CellScore:
+        return cls(
+            named_scores=tuple(ps.named_scores),
+            named_score_map=ps.named_score_map,
+            named_confidence_map=ps.named_confidence_map,
+            synthetic_score=ps.synthetic_score,
+            synthetic_confidence=ps.synthetic_confidence,
+            observation_total=ps.observation_total,
+        )
+
+
+@dataclass(frozen=True)
+class ScoredPair:
+    """One cohort pair scored over EXACTLY required_cells at now=as_of. pair_id /
+    subject_id / cohort_role are HOISTED here (pair-invariant across cells).
+
+    The grid holds CellScore, never PairScore: a mutable PairScore reachable from the
+    cohort would leave every score rewritable after the bindings were stamped."""
+
+    pair_id: str
+    subject_id: str
+    # The artifact's array-order-aligned pseudonymous user id — the one the overlay was
+    # ACTUALLY scored under (it rides PairScore.user_id, which is otherwise dropped by the
+    # CellScore snapshot). Hoisted so the cohort still carries it: g-p4ih-selection's
+    # uniqueness binding check reads {p.surrogate_user_id for p in cohort.pairs}, and it
+    # cannot be reconstructed from anything else on the wrapper. NEVER a production user_id.
+    surrogate_user_id: int
+    cohort_role: str  # "quantile" | "release_guard"
+    player_color: str
+    grid: Mapping[GridCell, CellScore]
+
+    def __post_init__(self) -> None:
+        for cell, cs in self.grid.items():
+            if not isinstance(cs, CellScore):
+                raise TypeError(
+                    f"ScoredPair grid at cell {cell.label!r} holds {type(cs).__name__}, "
+                    "not CellScore — build it with ScoredPair.from_pair_scores so the "
+                    "scores are snapshotted immutably"
+                )
+        object.__setattr__(self, "grid", _freeze_map(self.grid))
+
+    @classmethod
+    def from_pair_scores(
+        cls,
+        pair_id: str,
+        subject_id: str,
+        surrogate_user_id: int,
+        cohort_role: str,
+        player_color: str,
+        grid: Mapping[GridCell, PairScore],
+    ) -> ScoredPair:
+        """Check the identity the PairScores were scored under against the hoisted wrapper
+        values, THEN snapshot each into an immutable CellScore. The checks live here because
+        this is the last point at which the PairScore identity fields exist — after the
+        snapshot, ``user_id`` in particular is gone."""
+        for cell, ps in grid.items():
+            if (ps.pair_id, ps.subject_id, ps.cohort_role) != (
+                pair_id, subject_id, cohort_role
+            ):
+                raise ValueError(
+                    f"ScoredPair pseudonym mismatch at cell {cell.label!r}: wrapper "
+                    f"{(pair_id, subject_id, cohort_role)!r} vs PairScore "
+                    f"{(ps.pair_id, ps.subject_id, ps.cohort_role)!r}"
+                )
+            if ps.player_color != player_color:
+                raise ValueError(
+                    f"ScoredPair player_color mismatch at cell {cell.label!r}: "
+                    f"{player_color!r} vs PairScore {ps.player_color!r}"
+                )
+            if ps.user_id != surrogate_user_id:
+                raise ValueError(
+                    f"ScoredPair surrogate_user_id mismatch at cell {cell.label!r}: wrapper "
+                    f"{surrogate_user_id!r} vs the id the overlay was scored under "
+                    f"{ps.user_id!r}"
+                )
+        return cls(
+            pair_id=pair_id,
+            subject_id=subject_id,
+            surrogate_user_id=surrogate_user_id,
+            cohort_role=cohort_role,
+            player_color=player_color,
+            grid={cell: CellScore.from_pair_score(ps) for cell, ps in grid.items()},
+        )
+
+
+@dataclass(frozen=True)
+class ArtifactProvenance:
+    """The IMMUTABLE input-side provenance, populated VERBATIM from the validated header
+    + the load-time SHA-256. This lives on the INPUT and is the structure the selector's
+    binding checks compare AGAINST; the SelectionResult echo is produced only AFTER the
+    checks pass. ``captured_model_version`` is the CAPTURE model — provenance only, never
+    compared to the scoring-time model."""
+
+    artifact_sha256: str
+    artifact_as_of: datetime
+    graph_fingerprint: str
+    roots_fingerprint: str
+    captured_model_version: str
+    schema_version: int
+    pair_count: int
+    min_observations: int
+    cohort_rules: str
+    evidence_derivation_fingerprint: str
+    release_guard_opening_key: str
+    release_guard_child_opening_key: str
+
+
+@dataclass(frozen=True)
+class ScoredCalibrationCohort:
+    """Produced ONLY by the scoring pass — the ONLY code touching the private artifact
+    and the wall clock. Every binding fact is stamped here from the header + the runtime,
+    never caller-provided."""
+
+    provenance: ArtifactProvenance
+    as_of: datetime  # the pinned clock ACTUALLY threaded as now=, stamped from the header
+    model_version: str  # SCORE_MODEL_VERSION at scoring time (NOT captured_model_version)
+    scorer_contract_id: str  # REPORT_SCORER_CONTRACT_ID — fold-scorer SEMANTICS identity
+    source_revision: str | None  # git rev-parse HEAD — AUDIT only, never a gate
+    source_dirty_paths: tuple[str, ...]  # SCORER_SOURCE_FILES differing from HEAD — audit
+    scorer_source_digest: str  # the deterministic source binding
+    # True iff BOTH: a launcher handed in a pre-exec digest that matched
+    # (SCORER_SOURCE_DIGEST_ENV), AND every scorer module was compiled from that verified
+    # source rather than served from a bytecode cache CPython never checked against it
+    # (check_scorer_bytecode). False means the digest above was only fenced from import
+    # onward over SOURCE bytes, so it is not proven to name the code that RAN. Carried, not
+    # hidden: a release gate requires True.
+    scorer_source_verified_preexec: bool
+    provenance_record_sha256: str  # SHA-256 over the on-disk provenance-record bytes
+    runtime_python: str  # platform.python_version()
+    runtime_chess_version: str  # chess.__version__
+    config_fingerprints: Mapping[GridCell, str]  # _cfg_fp(cell) per required cell
+    required_cells: frozenset[GridCell]
+    manifest_pair_ids: frozenset[str]
+    pairs: tuple[ScoredPair, ...]  # one per manifest pair, no dups
+
+    def __post_init__(self) -> None:
+        # Normalize every container to an immutable one, so a caller's dict/list cannot
+        # stay a live handle into a stamped cohort.
+        object.__setattr__(self, "config_fingerprints", _freeze_map(self.config_fingerprints))
+        object.__setattr__(self, "required_cells", frozenset(self.required_cells))
+        object.__setattr__(self, "manifest_pair_ids", frozenset(self.manifest_pair_ids))
+        object.__setattr__(self, "pairs", tuple(self.pairs))
+        object.__setattr__(self, "source_dirty_paths", tuple(self.source_dirty_paths))
+
+
+@dataclass(frozen=True)
+class DiagnosticCellResult:
+    """Per-cell synthetic diagnostic operands the raw gates read — scored under the SAME
+    required_cells + as_of + model/config as the cohort."""
+
+    synth_black_root_score: float
+    synth_caro_child_score: float
+    synth_root_coverage_fraction: float
+    synth_user_turn_multiplier: float
+    synth_opp_turn_multiplier: float
+    synth_user_turn_pre_fold_quality: float
+    synth_opp_turn_score: float
+    synth_opp_turn_pre_fold_quality: float
+    broad_guard_opp_score: float
+    specialist_pre_fold_quality: float
+    user_tp_score: float
+
+
+@dataclass(frozen=True)
+class DiagnosticSuite:
+    """The synthetic diagnostics scored alongside the cohort. as_of / model_version /
+    scorer_contract_id equal the cohort's (binding check 4). ``cells`` is keyed over
+    EXACTLY required_cells ∪ DEMO_CELLS — demo cells appear ONLY here, never in
+    ScoredPair.grid."""
+
+    as_of: datetime
+    model_version: str
+    scorer_contract_id: str
+    config_fingerprints: Mapping[GridCell, str]  # every cell in cells (demo included)
+    cells: Mapping[GridCell, DiagnosticCellResult]
+
+    def __post_init__(self) -> None:
+        # The gates read these operands; a mutable dict here is as exploitable as a mutable
+        # cohort score (DiagnosticCellResult itself is all scalars).
+        object.__setattr__(self, "config_fingerprints", _freeze_map(self.config_fingerprints))
+        object.__setattr__(self, "cells", _freeze_map(self.cells))
+
+
+@dataclass(frozen=True)
+class SelectionInputs:
+    """What build_selection_inputs returns and select_candidate consumes."""
+
+    cohort: ScoredCalibrationCohort
+    diagnostics: DiagnosticSuite
+
+
+def _diagnostic_cell_result(
+    scenario: User14Scenario, cell: GridCell, *, as_of: datetime
+) -> DiagnosticCellResult:
+    """The full raw-gate operand set for ONE cell: the nine User-14 operands plus the
+    broad-guard NOT-crater operand and the specialist leak operand, all under now=as_of."""
+    ops = _user14_cell_operands(scenario, cell, as_of=as_of)
+    return DiagnosticCellResult(
+        synth_black_root_score=float(ops["synth_black_root_score"]),
+        synth_caro_child_score=float(ops["synth_caro_child_score"]),
+        synth_root_coverage_fraction=float(ops["synth_root_coverage_fraction"]),
+        synth_user_turn_multiplier=float(ops["synth_user_turn_multiplier"]),
+        synth_opp_turn_multiplier=float(ops["synth_opp_turn_multiplier"]),
+        synth_user_turn_pre_fold_quality=float(ops["synth_user_turn_pre_fold_quality"]),
+        synth_opp_turn_score=float(ops["synth_opp_turn_score"]),
+        synth_opp_turn_pre_fold_quality=float(ops["synth_opp_turn_pre_fold_quality"]),
+        broad_guard_opp_score=float(run_broad_guard_diagnostic(cell, as_of=as_of)),
+        specialist_pre_fold_quality=float(run_specialist_diagnostic(cell, as_of=as_of)),
+        user_tp_score=float(ops["user_tp_score"]),
+    )
+
+
+def _current_runtime_binding(
+    graph: OpeningGraph, roots: OpeningRoots
+) -> RuntimeBinding:
+    """The current-runtime surfaces the split load guard's scoring-validity phase (Phase
+    C) compares the header against. Built from the LIVE graph/roots the scores are
+    computed with, so a header fingerprint mismatch means the scores would have been
+    computed under a different graph/roots than the artifact was frozen against."""
+    return RuntimeBinding(
+        graph_fingerprint=graph.fingerprint,
+        roots_fingerprint=roots.fingerprint,
+        evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+        min_observations=DEFAULT_MIN_OBSERVATIONS,
+        cohort_rules=COHORT_RULES_ID,
+        release_guard_opening_key=RELEASE_GUARD_OPENING_KEY,
+        release_guard_child_opening_key=RELEASE_GUARD_CHILD_OPENING_KEY,
+    )
+
+
+def build_selection_inputs(artifact_path: str | Path) -> SelectionInputs:
+    """The ONE impure step, and the ONLY supported entry point: load + validate a
+    frozen-cohort artifact, reconstruct its overlays, score the cohort and the synthetic
+    diagnostics under the artifact header clock, and STAMP every binding fact onto typed
+    wrappers.
+
+    SINGLE-ARGUMENT by contract. Every other input is a TRUST BOUNDARY the caller must not
+    be able to move:
+      * ``as_of`` (blocking): a caller-provided clock would let the caller score under a
+        clock other than the header's while the wrappers store only the one as_of they
+        were handed. The clock comes ONLY from the validated header.
+      * the provenance record: it is the COMMITTED, reviewed approval of an artifact. A
+        caller-supplied path lets a caller pass an unapproved artifact plus a freshly
+        generated record that matches it — the split guard would accept the pair and stamp
+        its digest, so Phase 2 would select against an artifact nobody approved.
+      * graph / roots: the guard can only compare the fingerprints these registries
+        REPORT, and OpeningGraph.fingerprint is cached while its nodes stay mutable, so an
+        injected registry can keep a matching fingerprint while scoring altered topology.
+        Production always takes them from the live registry.
+
+    Fails CLOSED if the artifact or the committed provenance record is unavailable, if the
+    split load guard rejects (integrity or scoring-validity), or if the scorer source moves
+    during the run. Governance stance: never fall back to live cohort selection.
+    """
+    return _build_selection_inputs(
+        artifact_path,
+        provenance_path=COHORT_PROVENANCE_PATH,
+        graph=get_opening_graph(),
+        roots=get_opening_roots(),
+    )
+
+
+def _build_selection_inputs(
+    artifact_path: str | Path,
+    *,
+    provenance_path: str | Path,
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+) -> SelectionInputs:
+    """Implementation behind build_selection_inputs, with the three trust-boundary inputs
+    injectable. TEST-ONLY: never call this from the release path or from any caller that
+    takes them from user input — build_selection_inputs is the entry point, and it is the
+    thing that pins them to the committed record and the live registry. Kwargs are
+    REQUIRED (no defaults) so this cannot be mistaken for the public API.
+
+    The clock is NOT injectable even here: it still comes only from the validated header.
+    """
+    # --- source-stability fence (open) ---------------------------------------------
+    # The digest only binds what the manifest covers, so prove the manifest is complete
+    # before trusting it, then prove the bytes on disk have not moved since import.
+    check_scorer_source_manifest()
+    fenced_digest = scorer_source_digest()
+    if fenced_digest != _SCORER_SOURCE_DIGEST_AT_IMPORT:
+        raise ScorerSourceUnstableError(
+            "scorer source changed after this process imported it "
+            f"({_SCORER_SOURCE_DIGEST_AT_IMPORT[:12]} at import, {fenced_digest[:12]} on "
+            "disk): the running code is no longer the code on disk, so no digest can "
+            "honestly describe it — restart from a stable tree"
+        )
+    # A launcher digest predates this interpreter, so agreeing with it is what rules out an
+    # edit during compilation. Its ABSENCE is not an error (dev/test runs have no launcher)
+    # — it is stamped, so a release gate can demand the guarantee this module cannot fake.
+    # Read from the import-time capture, NOT os.environ: see _LAUNCHER_SCORER_DIGEST.
+    launcher_digest = _LAUNCHER_SCORER_DIGEST
+    if launcher_digest is not None and launcher_digest != fenced_digest:
+        raise ScorerSourceUnstableError(
+            f"{SCORER_SOURCE_DIGEST_ENV} was computed before this interpreter started "
+            f"({launcher_digest[:12]}) but the tree now hashes {fenced_digest[:12]}: the "
+            "scorer moved while Python was compiling it — the code that would score is not "
+            "the code that was approved"
+        )
+    if launcher_digest is not None:
+        # The digest binds SOURCE bytes, but the interpreter runs BYTECODE. Matching source
+        # is not enough: a stale .pyc CPython still considers valid would execute other code
+        # entirely. Only claim the flag once that gap is closed too.
+        check_scorer_bytecode()
+    preexec_verified = launcher_digest is not None
+
+    # Load BOTH byte strings from disk (unavailable -> fail closed, never live-select) and
+    # run the split load guard. The load guard reads as_of FROM the validated header.
+    artifact_bytes = Path(artifact_path).read_bytes()
+    provenance_bytes = Path(provenance_path).read_bytes()
+    runtime_binding = _current_runtime_binding(graph, roots)
+    loaded = load_frozen_artifact(artifact_bytes, provenance_bytes, runtime_binding)
+
+    header = loaded.header
+    as_of = header.as_of  # the ONLY clock source on this path
+
+    # Score cohort pairs over EXACTLY required_cells at now=as_of. required_cells is the
+    # default arm grid (both anchors, ARM-1×P_GRID, ARM-2×P_GRID, B1); NO demos.
+    required_cells = build_arm_grid().cells
+    scored_pairs: list[ScoredPair] = []
+    for lp in loaded.pairs:
+        cell_grid = {
+            cell: score_overlay(
+                lp.surrogate_user_id,
+                lp.player_color,
+                graph,
+                lp.overlay,
+                roots,
+                cell.config,
+                as_of=as_of,
+                pair_id=lp.pair_id,
+                subject_id=lp.subject_id,
+                cohort_role=lp.cohort_role,
+            )
+            for cell in required_cells
+        }
+        scored_pairs.append(
+            # Snapshots each PairScore into an immutable CellScore; the mutable PairScores
+            # are dropped here and never reachable from the returned SelectionInputs.
+            ScoredPair.from_pair_scores(
+                pair_id=lp.pair_id,
+                subject_id=lp.subject_id,
+                surrogate_user_id=lp.surrogate_user_id,
+                cohort_role=lp.cohort_role,
+                player_color=lp.player_color,
+                grid=cell_grid,
+            )
+        )
+    manifest_pair_ids = frozenset(lp.pair_id for lp in loaded.pairs)
+    if len(manifest_pair_ids) != len(loaded.pairs):
+        raise ArtifactIntegrityError(
+            f"duplicate pair_id in the loaded manifest: {len(loaded.pairs)} pairs, "
+            f"{len(manifest_pair_ids)} distinct ids"
+        )
+
+    # A quantile pair the load-time observation threshold ADMITS can still pool zero named
+    # scores for a cell (its evidence sits off the roots' subtrees), so a valid artifact
+    # with the required pair count does not imply a derivable cutoff distribution. Assert
+    # the sufficient post-scoring precondition HERE, per cell, or Phase 2 gets a cohort
+    # that only blows up later inside derive_cutoffs as a bare ValueError.
+    assert_min_quantile_scores_per_cell(
+        [p for p in scored_pairs if p.cohort_role == "quantile"], required_cells
+    )
+
+    provenance = ArtifactProvenance(
+        artifact_sha256=loaded.artifact_sha256,
+        artifact_as_of=as_of,
+        graph_fingerprint=header.graph_fingerprint,
+        roots_fingerprint=header.roots_fingerprint,
+        captured_model_version=header.captured_model_version,
+        schema_version=header.schema_version,
+        pair_count=header.pair_count,
+        min_observations=header.min_observations,
+        cohort_rules=header.cohort_rules,
+        evidence_derivation_fingerprint=header.evidence_derivation_fingerprint,
+        release_guard_opening_key=header.release_guard_opening_key,
+        release_guard_child_opening_key=header.release_guard_child_opening_key,
+    )
+    cohort = ScoredCalibrationCohort(
+        provenance=provenance,
+        as_of=as_of,
+        model_version=SCORE_MODEL_VERSION,
+        scorer_contract_id=REPORT_SCORER_CONTRACT_ID,
+        source_revision=_git_head_revision(),
+        source_dirty_paths=_scorer_dirty_paths(),
+        scorer_source_digest=fenced_digest,  # the FENCED digest, not a fresh read
+        scorer_source_verified_preexec=preexec_verified,
+        provenance_record_sha256=hashlib.sha256(provenance_bytes).hexdigest(),
+        runtime_python=platform.python_version(),
+        runtime_chess_version=chess.__version__,
+        config_fingerprints={cell: _cfg_fp(cell) for cell in required_cells},
+        required_cells=frozenset(required_cells),
+        manifest_pair_ids=manifest_pair_ids,
+        pairs=tuple(scored_pairs),
+    )
+
+    # Synthetic diagnostics over required_cells ∪ DEMO_CELLS, scored under the HEADER
+    # clock (binding check 4 requires cohort.as_of == diagnostics.as_of). The scenario is
+    # timestamp-free, so the header clock and SYNTHETIC_AS_OF score it identically.
+    diag_cells = tuple(required_cells) + DEMO_CELLS
+    scenario = _user14_scenario()
+    diagnostics = DiagnosticSuite(
+        as_of=as_of,
+        model_version=SCORE_MODEL_VERSION,
+        scorer_contract_id=REPORT_SCORER_CONTRACT_ID,
+        config_fingerprints={cell: _cfg_fp(cell) for cell in diag_cells},
+        cells={
+            cell: _diagnostic_cell_result(scenario, cell, as_of=as_of)
+            for cell in diag_cells
+        },
+    )
+
+    # --- source-stability fence (close) --------------------------------------------
+    # Re-read AFTER the last score (cohort AND diagnostics). Identical at import, at the
+    # open fence, and now => the scorer bytes did not move across the scoring window, so an
+    # edit landing mid-run fails CLOSED: nothing is returned, and no half-stamped
+    # SelectionInputs can reach Phase 2/3. This does NOT by itself prove the digest names
+    # the compiled code (see _SCORER_SOURCE_DIGEST_AT_IMPORT); that needs the launcher
+    # digest, whose presence is stamped as scorer_source_verified_preexec.
+    final_digest = scorer_source_digest()
+    if final_digest != fenced_digest:
+        raise ScorerSourceUnstableError(
+            "scorer source changed DURING the run "
+            f"({fenced_digest[:12]} -> {final_digest[:12]}): these scores were produced by "
+            "code that no longer matches the tree — nothing is stamped, re-run"
+        )
+
+    return SelectionInputs(cohort=cohort, diagnostics=diagnostics)
+
+
+@dataclass(frozen=True)
+class WinnerBinding:
+    """The DURABLE Phase-2 -> Phase-3 binding, assembled onto SelectionResult AFTER a
+    winner is chosen (None iff no_ship). EVERY scoring surface Phase 3 must revalidate
+    against the tree before any edit — binding to the config fingerprint alone would
+    leave every other surface unproven at apply time. These are exactly the surfaces
+    opening_score_inputs_fingerprint folds, plus the runtime + release-guard keys."""
+
+    config_fingerprint: str
+    scorer_contract_id: str
+    scorer_source_digest: str
+    # Travels WITH the digest so Phase 3 can see what the digest is worth: False means the
+    # winner was scored without a pre-exec source check or without verified bytecode, i.e.
+    # the digest is fenced over source bytes but not proven to name the code that RAN.
+    # Phase 3 must not apply a winner carrying False.
+    scorer_source_verified_preexec: bool
+    provenance_record_sha256: str
+    runtime_python: str
+    runtime_chess_version: str
+    source_revision: str | None
+    source_dirty_paths: tuple[str, ...]
+    model_version: str
+    artifact_sha256: str
+    graph_fingerprint: str
+    roots_fingerprint: str
+    evidence_derivation_fingerprint: str
+    release_guard_opening_key: str
+    release_guard_child_opening_key: str
+
+
+def build_winner_binding(
+    cohort: ScoredCalibrationCohort, winner_cell: GridCell
+) -> WinnerBinding:
+    """Assemble the winner_binding for the chosen ``winner_cell`` from the stamped cohort.
+    Consumed by g-p4ih-selection AFTER a winner is chosen (it passes None on no_ship).
+    ``config_fingerprint`` is the winner cell's fingerprint (KeyError — fail closed — if
+    the winner is not a scored required cell)."""
+    prov = cohort.provenance
+    return WinnerBinding(
+        config_fingerprint=cohort.config_fingerprints[winner_cell],
+        scorer_contract_id=cohort.scorer_contract_id,
+        scorer_source_digest=cohort.scorer_source_digest,
+        scorer_source_verified_preexec=cohort.scorer_source_verified_preexec,
+        provenance_record_sha256=cohort.provenance_record_sha256,
+        runtime_python=cohort.runtime_python,
+        runtime_chess_version=cohort.runtime_chess_version,
+        source_revision=cohort.source_revision,
+        source_dirty_paths=cohort.source_dirty_paths,
+        model_version=cohort.model_version,
+        artifact_sha256=prov.artifact_sha256,
+        graph_fingerprint=prov.graph_fingerprint,
+        roots_fingerprint=prov.roots_fingerprint,
+        evidence_derivation_fingerprint=prov.evidence_derivation_fingerprint,
+        release_guard_opening_key=prov.release_guard_opening_key,
+        release_guard_child_opening_key=prov.release_guard_child_opening_key,
+    )
+
+
+# ---------------------------------------------------------------------------
 # User-14 fixture builder + writer (settled path consumed by g-p4ih-cutoff-fixture)
 # ---------------------------------------------------------------------------
 
@@ -3004,6 +3889,9 @@ def render_text(report: dict[str, object]) -> str:
     named = report["named_score_distribution"]
     lines: list[str] = []
     lines.append("=== Opening score v2 calibration ===")
+    run_as_of = report.get("run_as_of")
+    if run_as_of is not None:
+        lines.append(f"Run clock (as_of): {run_as_of}")
     lines.append(
         f"Candidate pairs: {cohort['candidate_pairs']} | "
         f"included (>= {cohort['min_observations']} obs): {cohort['included_pairs']} | "
@@ -3352,6 +4240,13 @@ def run_write_bench(db, user_id: int, player_color: str, database_url: str) -> d
     }
 
 
+def _utcnow() -> datetime:
+    """The ONE live wall-clock sample point for the report path (clock path 3). Isolated
+    so ``main`` samples it exactly once and a test can pin/advance it to prove
+    single-sampling (one ``run_as_of`` across a multi-pair run)."""
+    return datetime.now(timezone.utc)
+
+
 def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, object]:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
@@ -3381,13 +4276,21 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
     users = _parse_user_filter(args.users)
     pairs = _parse_pair_filter(args.pairs)
 
+    # Clock path 3 (g-p4ih-replay-bind): sample the live report clock EXACTLY ONCE at
+    # command start and thread it through every pair's grid, so pairs scored minutes
+    # apart cannot see different wall clocks. (Paths 1/2 — release header / synthetic —
+    # never reach here.) Printed in the report header below.
+    run_as_of = _utcnow()
+
     with session_factory() as db:
         candidate_pairs = list_opening_score_candidate_pairs(db, limit=args.limit)
         selected = select_pairs(candidate_pairs, users=users, pairs=pairs)
 
         # Build each pair's overlay ONCE and score it for every required cell.
         pair_grids = [
-            score_pair_grid(db, user_id, player_color, graph, roots, required_cells)
+            score_pair_grid(
+                db, user_id, player_color, graph, roots, required_cells, as_of=run_as_of
+            )
             for user_id, player_color in selected
         ]
 
@@ -3414,6 +4317,7 @@ def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, ob
         demo_cells=DEMO_CELLS if args.include_demo_diagnostics else (),
         as_of=SYNTHETIC_AS_OF,
     )
+    report["run_as_of"] = run_as_of.astimezone(timezone.utc).isoformat()
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
