@@ -46,7 +46,6 @@ This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full 
 
 ```bash
 bd ready              # Find available work
-bd create --id=g-<slug> --title="..." --type task --priority 2` # Create issue
 bd show <id>          # View issue details
 bd update <id> --claim  # Claim work
 bd close <id>         # Complete work

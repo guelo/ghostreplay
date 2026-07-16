@@ -55,3 +55,6 @@ backend/.opening_graph_cache/
 .beads-credential-key
 /work
 /work.md
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/
