@@ -23,7 +23,7 @@ from pathlib import Path
 import chess
 
 from app import accuracy as live
-from app import accuracy_v1
+from app import accuracy_rows_v1, accuracy_v1
 from app.accuracy import (
     ACCURACY_ALGO_VERSION,
     CHESS_VERSION_PIN,
@@ -115,6 +115,22 @@ def test_private_symbols_not_reexported_but_live_on_v1():
 def test_live_surface_all_is_public_only():
     for private in ("_white_relative_cp", "_MATE_CP", "_clamp", "_stddev"):
         assert private not in live.__all__
+
+
+def test_public_row_guard_names_are_the_frozen_objects():
+    # The v1 INPUT contract is frozen for the same reason the algorithm is: a
+    # persisted player_accuracy depends on whether this validation passed, and the
+    # Release B migration imports app.accuracy_rows_v1 DIRECTLY. The live surface
+    # must re-export the identical callables, or the guard the migration runs and
+    # the guard the write hook runs could drift apart (g-22t8.6).
+    assert live.ply_coordinates_intact is accuracy_rows_v1.ply_coordinates_intact
+    assert live.ply_color is accuracy_rows_v1.ply_color
+
+
+def test_row_guard_names_on_live_surface_all():
+    # The live surface stays the documented import point for the guard.
+    for name in ("ply_color", "ply_coordinates_intact", "game_accuracy_for_rows"):
+        assert name in live.__all__, f"{name} missing from app.accuracy.__all__"
 
 
 def _load_golden_generator():

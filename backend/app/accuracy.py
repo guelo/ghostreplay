@@ -18,9 +18,12 @@ part of this surface; tests that need them import from :mod:`app.accuracy_v1`.
 
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import case
 from sqlalchemy.orm import Session
 
+from app.accuracy_rows_v1 import ply_color, ply_coordinates_intact
 from app.accuracy_v1 import (
     AccuracyMove,
     accuracy_from_win_percents,
@@ -30,6 +33,8 @@ from app.accuracy_v1 import (
 )
 from app.models import GameSession, SessionMove
 from app.session_contracts import is_visible_game_session
+
+logger = logging.getLogger(__name__)
 
 # Algorithm version stamped onto session rows Release A writes. Bump ONLY when a
 # new frozen module (accuracy_v2) becomes the live surface.
@@ -48,9 +53,61 @@ __all__ = [
     "accuracy_from_win_percents",
     "compute_game_accuracy",
     "expected_total_moves_from_pgn",
+    "game_accuracy_for_rows",
+    "ply_color",
+    "ply_coordinates_intact",
     "recompute_session_accuracy",
     "win_percent_from_cp",
 ]
+
+
+def game_accuracy_for_rows(
+    rows,
+    player_color: str,
+    expected_total_moves: int | None,
+    *,
+    session_id=None,
+) -> int | None:
+    """Guarded entry point. Every live caller uses THIS, never
+    :func:`compute_game_accuracy`.
+
+    ``rows`` are ``SessionMove`` rows (ORM instances or query tuples carrying
+    ``move_number``, ``color``, ``eval_cp``, ``eval_mate``) already ordered by
+    move_number ASC, white before black.
+
+    Fails **closed** — returns None — on any non-mainline coordinate grid, which
+    is the invariant that makes the algorithm's parity attribution and its
+    ``move.color`` eval sign name the same side.
+
+    It does NOT fail closed on ``n > expected_total_moves``: a
+    *coordinate-contiguous* surplus row (the grid simply continues past the PGN's
+    last ply) validates as intact, and frozen v1 accepts it because
+    ``accuracy_v1.py:152-153`` rejects only ``n < expected``. Tightening that to
+    ``==`` is an accuracy-v2 decision requiring a data check against real
+    sessions, not a live-surface tweak, so this only logs (g-i6st).
+    """
+    if not ply_coordinates_intact(rows):
+        logger.warning("accuracy: non-mainline ply coordinates, session=%s", session_id)
+        return None
+    if expected_total_moves is not None and len(rows) > expected_total_moves:
+        # Observe only — see the scope boundary above.
+        logger.warning(
+            "accuracy: %d rows exceed %d PGN plies, session=%s",
+            len(rows),
+            expected_total_moves,
+            session_id,
+        )
+    return compute_game_accuracy(
+        # ply_color, not a local re-implementation: the row set the guard
+        # validated and the move list the algorithm scores must read colour by
+        # the SAME rule.
+        [
+            AccuracyMove(color=ply_color(row), eval_cp=row.eval_cp, eval_mate=row.eval_mate)
+            for row in rows
+        ],
+        player_color=player_color,
+        expected_total_moves=expected_total_moves,
+    )
 
 
 def recompute_session_accuracy(db: Session, session: GameSession) -> None:
@@ -67,8 +124,9 @@ def recompute_session_accuracy(db: Session, session: GameSession) -> None:
     * issues exactly one ``SessionMove`` evaluation query scoped to this
       session, ordered by move number with white before black — the ply order
       :func:`compute_game_accuracy` requires;
-    * builds :class:`AccuracyMove` values, parses the expected ply count from the
-      session PGN, and calls frozen v1;
+    * parses the expected ply count from the session PGN and calls
+      :func:`game_accuracy_for_rows`, so a non-mainline ply grid fails closed to
+      None here rather than being scored wrong and then cached forever;
     * assigns ``player_accuracy`` (including a legitimate computed ``None``) and
       always stamps ``player_accuracy_algo_version`` once an eligible
       computation runs.
@@ -87,18 +145,21 @@ def recompute_session_accuracy(db: Session, session: GameSession) -> None:
 
     color_order = case((SessionMove.color == "white", 0), else_=1)
     move_rows = (
-        db.query(SessionMove.color, SessionMove.eval_cp, SessionMove.eval_mate)
+        db.query(
+            SessionMove.move_number,
+            SessionMove.color,
+            SessionMove.eval_cp,
+            SessionMove.eval_mate,
+        )
         .filter(SessionMove.session_id == session.id)
         .order_by(SessionMove.move_number.asc(), color_order.asc())
         .all()
     )
-    accuracy = compute_game_accuracy(
-        [
-            AccuracyMove(color=row.color, eval_cp=row.eval_cp, eval_mate=row.eval_mate)
-            for row in move_rows
-        ],
+    accuracy = game_accuracy_for_rows(
+        move_rows,
         player_color=session.player_color,
         expected_total_moves=expected_total_moves_from_pgn(session.pgn),
+        session_id=session.id,
     )
     # Assign even a legitimate None, and always stamp the algorithm version so an
     # eligible session is never left half-stamped.

@@ -9,11 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.accuracy import (
-    AccuracyMove,
-    compute_game_accuracy,
-    expected_total_moves_from_pgn,
-)
+from app.accuracy import expected_total_moves_from_pgn, game_accuracy_for_rows
 from app.centipawn_loss import centipawn_loss, centipawn_loss_expr, round_half_up_cpl
 from app.db import get_db
 from app.models import (
@@ -447,6 +443,7 @@ def get_stats_summary(
         move_rows = (
             db.query(
                 SessionMove.session_id,
+                SessionMove.move_number,
                 SessionMove.color,
                 SessionMove.eval_cp,
                 SessionMove.eval_mate,
@@ -455,16 +452,15 @@ def get_stats_summary(
             .order_by(SessionMove.move_number.asc(), color_order.asc())
             .all()
         )
-        moves_by_session: dict[uuid.UUID, list[AccuracyMove]] = {}
+        rows_by_session: dict[uuid.UUID, list] = {}
         for row in move_rows:
-            moves_by_session.setdefault(row.session_id, []).append(
-                AccuracyMove(color=row.color, eval_cp=row.eval_cp, eval_mate=row.eval_mate)
-            )
+            rows_by_session.setdefault(row.session_id, []).append(row)
         for session in ended_sessions:
-            accuracy_by_session[session.id] = compute_game_accuracy(
-                moves_by_session.get(session.id, []),
+            accuracy_by_session[session.id] = game_accuracy_for_rows(
+                rows_by_session.get(session.id, []),
                 player_color=session.player_color,
                 expected_total_moves=expected_total_moves_from_pgn(session.pgn),
+                session_id=session.id,
             )
 
     def _mean_accuracy(ids: list[uuid.UUID]) -> float | None:

@@ -35,10 +35,34 @@ never the mutable `app/accuracy.py` re-export.
 - `ACCURACY_ALGO_VERSION`;
 - `CHESS_VERSION_PIN`;
 - public re-exports for the current frozen module;
-- `accuracy_for_sessions(db, sessions)`, the live-versus-cache read seam.
+- `accuracy_for_sessions(db, sessions)`, the live-versus-cache read seam;
+- `game_accuracy_for_rows(...)`, the guarded entry point every live caller uses
+  instead of `compute_game_accuracy` (see below).
 
 Do not edit a frozen module in place after its values have been persisted.
 Create the next module and advance the version instead.
+
+### The input contract is frozen too
+
+`app/accuracy_rows_v1.py` is a frozen module on this same contract. It is not an
+algorithm — it is the *input-shape* contract in front of one:
+`compute_game_accuracy` attributes each ply to a mover by index PARITY but takes
+the eval's sign from `move.color`. Those are independent axes, so a row list that
+is not the contiguous mainline ply-coordinate grid makes them disagree and the
+returned accuracy is silently WRONG rather than `NULL`.
+
+It is frozen for the same reason the algorithm is: a persisted `player_accuracy`
+depends on whether this validation passed. Migrations therefore import
+`app.accuracy_rows_v1` **directly**, never the `app.accuracy` re-export — a guard
+that only wrapped the live surface would be skipped by exactly the code that
+writes most of the rows.
+
+A validation failure stores `NULL` and still stamps the version: v1 *attempted*
+the computation and its input contract rejected the inputs, which is what a
+stamped `NULL` means in the stored contract above. Do not bump
+`ACCURACY_ALGO_VERSION` for a change to the input contract — the algorithm did
+not change. Supersede with an `accuracy_rows_v2.py` if the contract itself must
+change.
 
 ## Python-chess policy
 

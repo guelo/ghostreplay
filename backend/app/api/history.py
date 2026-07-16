@@ -8,11 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.accuracy import (
-    AccuracyMove,
-    compute_game_accuracy,
-    expected_total_moves_from_pgn,
-)
+from app.accuracy import expected_total_moves_from_pgn, game_accuracy_for_rows
 from app.centipawn_loss import centipawn_loss_expr, round_half_up_cpl
 from app.db import get_db
 from app.models import GameSession, SessionMove
@@ -108,6 +104,7 @@ def get_history(
     move_rows = (
         db.query(
             SessionMove.session_id,
+            SessionMove.move_number,
             SessionMove.color,
             SessionMove.eval_cp,
             SessionMove.eval_mate,
@@ -117,12 +114,10 @@ def get_history(
         .order_by(SessionMove.move_number.asc(), color_order.asc())
         .all()
     )
-    moves_by_session: dict[uuid.UUID, list[AccuracyMove]] = {}
+    rows_by_session: dict[uuid.UUID, list] = {}
     fens_by_session: dict[uuid.UUID, list[str | None]] = {}
     for row in move_rows:
-        moves_by_session.setdefault(row.session_id, []).append(
-            AccuracyMove(color=row.color, eval_cp=row.eval_cp, eval_mate=row.eval_mate)
-        )
+        rows_by_session.setdefault(row.session_id, []).append(row)
         fens_by_session.setdefault(row.session_id, []).append(row.fen_after)
 
     deepest_by_session: dict[uuid.UUID, str | None] = {}
@@ -139,10 +134,11 @@ def get_history(
     stats_by_session: dict[uuid.UUID, GameSummary] = {}
     for row in stats_rows:
         avg_cpl = round_half_up_cpl(row.avg_cpl) if row.avg_cpl is not None else None
-        accuracy = compute_game_accuracy(
-            moves_by_session.get(row.session_id, []),
+        accuracy = game_accuracy_for_rows(
+            rows_by_session.get(row.session_id, []),
             player_color=player_color_by_session.get(row.session_id, "white"),
             expected_total_moves=expected_by_session.get(row.session_id),
+            session_id=row.session_id,
         )
         stats_by_session[row.session_id] = GameSummary(
             total_moves=int(row.total_moves),

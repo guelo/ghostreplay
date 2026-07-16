@@ -37,9 +37,8 @@ from app.evidence_contracts import (
 )
 from app.db import get_db
 from app.accuracy import (
-    AccuracyMove,
-    compute_game_accuracy,
     expected_total_moves_from_pgn,
+    game_accuracy_for_rows,
     recompute_session_accuracy,
 )
 from app.fen import active_color, fen_hash, normalize_fen
@@ -1460,17 +1459,11 @@ def get_session_analysis(
         and analyzed_moves >= expected_total_moves
     )
 
-    accuracy = compute_game_accuracy(
-        [
-            AccuracyMove(
-                color=move.color.value if hasattr(move.color, "value") else str(move.color),
-                eval_cp=move.eval_cp,
-                eval_mate=move.eval_mate,
-            )
-            for move in session_moves
-        ],
+    accuracy = game_accuracy_for_rows(
+        session_moves,
         player_color=game_session.player_color,
         expected_total_moves=expected_total_moves,
+        session_id=session_id,
     )
 
     # Read-time re-annotation overlay (g-xox0 Part C): join the PERSISTED (base)
