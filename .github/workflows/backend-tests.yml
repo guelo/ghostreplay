@@ -1,6 +1,7 @@
 name: backend-tests
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - 'backend/**'
@@ -72,6 +73,18 @@ jobs:
         env:
           GHOSTREPLAY_REQUIRE_PG_TESTS: '1'
         run: pytest -m pg_gate --strict-markers -rs
+      # Staleness guard for the drill-routing transposition overlay
+      # (public/data/openings/eco.transpositions.json). Recomputes the canonical
+      # edge set from the current graph and diffs it EXACTLY against the
+      # checked-in artifact. This is the real guard: the artifact's
+      # graph_topology_fingerprint proves which graph it came from, NOT that it
+      # holds every edge that graph generates — a truncated or hand-edited
+      # artifact keeps a valid fingerprint and passes every per-edge check. Only
+      # set equality catches that, and only before deploy: at runtime a bad
+      # artifact degrades silently to no densification rather than taking the
+      # app down over a routing feature.
+      - name: Check transposition overlay is current
+        run: python scripts/densify_opening_graph.py --check
       # Full suite. @pg_gate tests still run (not skip) here because
       # GHOSTREPLAY_TEST_PG_URL is set; the dedicated gate step above is what
       # enforces required-mode fail-closed behaviour.
