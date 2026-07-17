@@ -1,7 +1,56 @@
+import { Chess } from "chess.js";
+import type { AnalysisMove } from "../utils/api";
 import { mateToCp } from "../workers/analysisUtils";
 import type { MoveClassification } from "../workers/analysisUtils";
 import type { EngineInfo } from "../workers/stockfishMessages";
 import { CLASSIFICATION_ICON } from "./MoveRow.helpers";
+
+type MoveSquares = { from: string; to: string };
+
+export type MainLineMoveDetails = {
+  fenBefore: string;
+  playedSquares: MoveSquares | null;
+  bestSquares: MoveSquares | null;
+};
+
+/** Convert a SAN move to its start/end squares using the supplied position. */
+export const sanToSquares = (
+  fen: string,
+  san: string,
+): MoveSquares | null => {
+  try {
+    const tempChess = new Chess(fen);
+    const result = tempChess.move(san);
+    if (!result) return null;
+    return { from: result.from, to: result.to };
+  } catch {
+    return null;
+  }
+};
+
+export const buildMainLineMoveDetails = (
+  moves: AnalysisMove[],
+  startingFen: string,
+): MainLineMoveDetails[] => {
+  return moves.map((move, index) => {
+    // Prefer the exact wire `fen_before`; reconstruct only for legacy sessions
+    // whose wire field is null.
+    const fenBefore =
+      move.fen_before ??
+      (index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen);
+    const playedSquares = sanToSquares(fenBefore, move.move_san);
+    const bestSquares =
+      move.best_move_san && move.best_move_san !== move.move_san
+        ? sanToSquares(fenBefore, move.best_move_san)
+        : null;
+
+    return {
+      fenBefore,
+      playedSquares,
+      bestSquares,
+    };
+  });
+};
 
 const uciToSquares = (uci: string) => ({
   startSquare: uci.slice(0, 2),

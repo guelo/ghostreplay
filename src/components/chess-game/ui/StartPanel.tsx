@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react";
+import { memo, useState } from "react";
 import { defaultPieces } from "react-chessboard";
 import type { OpeningRootItem } from "../../../utils/api";
 import { MAIA_BOT_NAMES } from "../config";
@@ -85,24 +85,34 @@ const StartPanel = ({
   // again-settings, openingFamilies-match). A live drag leaves the seed prop
   // untouched, so it never fights the resync. Opening + line resync together,
   // keyed on the opening identity (a registered opening carries no ad-hoc line).
-  const prevElo = useRef(seedEngineElo);
-  if (prevElo.current !== seedEngineElo) {
-    prevElo.current = seedEngineElo;
+  const [previousSeeds, setPreviousSeeds] = useState(() => ({
+    engineElo: seedEngineElo,
+    strictnessCp: seedStrictnessCp,
+    color: seedColor,
+    opening: seedOpening,
+  }));
+  const eloChanged = previousSeeds.engineElo !== seedEngineElo;
+  const strictnessChanged = previousSeeds.strictnessCp !== seedStrictnessCp;
+  const colorChanged = previousSeeds.color !== seedColor;
+  const openingChanged = previousSeeds.opening !== seedOpening;
+  if (eloChanged || strictnessChanged || colorChanged || openingChanged) {
+    setPreviousSeeds({
+      engineElo: seedEngineElo,
+      strictnessCp: seedStrictnessCp,
+      color: seedColor,
+      opening: seedOpening,
+    });
+  }
+  if (eloChanged) {
     setDraftElo(seedEngineElo);
   }
-  const prevStrictness = useRef(seedStrictnessCp);
-  if (prevStrictness.current !== seedStrictnessCp) {
-    prevStrictness.current = seedStrictnessCp;
+  if (strictnessChanged) {
     setDraftStrictnessCp(seedStrictnessCp);
   }
-  const prevColor = useRef(seedColor);
-  if (prevColor.current !== seedColor) {
-    prevColor.current = seedColor;
+  if (colorChanged) {
     setDraftColor(seedColor);
   }
-  const prevOpening = useRef(seedOpening);
-  if (prevOpening.current !== seedOpening) {
-    prevOpening.current = seedOpening;
+  if (openingChanged) {
     setDraftOpening(seedOpening);
     setDraftLine(seedLine);
   }

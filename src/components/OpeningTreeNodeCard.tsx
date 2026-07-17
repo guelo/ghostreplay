@@ -131,11 +131,6 @@ function PopoverChip({
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number; visibility: "hidden" | "visible" }>({
-    top: 0,
-    left: 0,
-    visibility: "hidden",
-  });
   const wrapRef = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLSpanElement>(null);
   const popupRef = useRef<HTMLSpanElement>(null);
@@ -167,7 +162,9 @@ function PopoverChip({
       top = t.top - 6 - p.height; // flip above when there is no room below
     }
     if (top < margin) top = margin;
-    setPos({ top, left, visibility: "visible" });
+    popup.style.top = `${top}px`;
+    popup.style.left = `${left}px`;
+    popup.style.visibility = "visible";
   }, [open]);
 
   // Dismiss on outside click, Escape, or any scroll/resize (the fixed popover
@@ -218,7 +215,7 @@ function PopoverChip({
           ref={popupRef}
           className="tree-node-card__off-book-popup"
           role="tooltip"
-          style={pos}
+          style={{ top: 0, left: 0, visibility: "hidden" }}
           onClick={(e) => e.stopPropagation()}
         >
           <strong>{title}</strong>

@@ -25,8 +25,10 @@ import { useMediaQuery } from "../hooks/useMediaQuery";
 import MaterialDisplay from "./MaterialDisplay";
 import { formatWhiteEval } from "./MoveRow.helpers";
 import {
+  buildMainLineMoveDetails,
   buildEngineArrows,
   computeBoardEvalIcon,
+  sanToSquares,
   scoreToNum,
   type BoardEvalIcon,
 } from "./AnalysisBoard.helpers";
@@ -65,21 +67,6 @@ type AnalysisBoardProps = {
   sessionId?: string;
 };
 
-// Convert SAN move to start/end squares using chess.js
-const sanToSquares = (
-  fen: string,
-  san: string,
-): { from: string; to: string } | null => {
-  try {
-    const tempChess = new Chess(fen);
-    const result = tempChess.move(san);
-    if (!result) return null;
-    return { from: result.from, to: result.to };
-  } catch {
-    return null;
-  }
-};
-
 const isSquare = (value: string): value is Square => /^[a-h][1-8]$/.test(value);
 
 /** Extract side-to-move from a FEN string without constructing a Chess instance. */
@@ -88,12 +75,6 @@ const fenSideToMove = (fen: string): "w" | "b" => {
   return (idx >= 0 ? fen[idx + 1] : "w") as "w" | "b";
 };
 
-type MoveSquares = { from: string; to: string };
-type MainLineMoveDetails = {
-  fenBefore: string;
-  playedSquares: MoveSquares | null;
-  bestSquares: MoveSquares | null;
-};
 type NavigationTrace = {
   id: number;
   startMs: number;
@@ -207,31 +188,6 @@ const buildEngineLinePreview = (
     depth: line.depth ?? 0,
     source: canonical ? "canonical" : "live",
   };
-};
-
-export const buildMainLineMoveDetails = (
-  moves: AnalysisMove[],
-  startingFen: string,
-): MainLineMoveDetails[] => {
-  return moves.map((move, index) => {
-    // Prefer the exact wire `fen_before` (g-cache-stronger-evals); fall back to the
-    // previous move's `fen_after` chain only for legacy sessions whose wire field is
-    // null, so existing games still render.
-    const fenBefore =
-      move.fen_before ??
-      (index === 0 ? startingFen : moves[index - 1]?.fen_after ?? startingFen);
-    const playedSquares = sanToSquares(fenBefore, move.move_san);
-    const bestSquares =
-      move.best_move_san && move.best_move_san !== move.move_san
-        ? sanToSquares(fenBefore, move.best_move_san)
-        : null;
-
-    return {
-      fenBefore,
-      playedSquares,
-      bestSquares,
-    };
-  });
 };
 
 /** Check whether a FEN already has a pending analysis request in flight. */
