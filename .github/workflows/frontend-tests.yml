@@ -1,0 +1,56 @@
+name: frontend-tests
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'vite.config.ts'
+      - 'vitest.config.ts'
+      - 'eslint.config.js'
+      - '.github/workflows/frontend-tests.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'index.html'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'vite.config.ts'
+      - 'vitest.config.ts'
+      - 'eslint.config.js'
+      - '.github/workflows/frontend-tests.yml'
+
+jobs:
+  frontend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Vite 7 requires Node 20.19+/22.12+; pin the current LTS for CI.
+          node-version: '22'
+          cache: 'npm'
+      # npm ci installs from package-lock.json exactly, failing on drift — the
+      # deterministic counterpart to the backend's pinned pip install.
+      - name: Install dependencies
+        run: npm ci
+      # Lint gate. eslint.config.js escalates react-hooks / react-refresh
+      # correctness rules to errors, so a real regression fails the build.
+      - name: Lint
+        run: npm run lint
+      # Typecheck gate. Both tsconfigs set noEmit, so `tsc -b` is a pure
+      # project-references typecheck (no build output) — the same command the
+      # `build` script runs before `vite build`.
+      - name: Typecheck
+        run: npx tsc -b
+      # Full Vitest suite (src/**/*.{test,spec}) under jsdom. maxWorkers is
+      # capped in vitest.config.ts to keep the Web Worker / fake-timer tests
+      # deterministic on CI.
+      - name: Run tests
+        run: npm run test:run
