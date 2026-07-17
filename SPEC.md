@@ -2255,19 +2255,20 @@ distinct grains, deliberately:
 
 Grain 2 (displayed stats) therefore sits beside grain 1 (accuracy) on the same
 pane. This skew is accepted, not a bug: accuracy v1 is frozen, and projection
-only ever *promotes*, so the skew is bounded and one-directional. Two caveats
+only ever *promotes*, so the skew is bounded and one-directional. Two notes
 on that bound:
 
-- **It holds on the unrounded mean, not (yet) on the displayed integer.**
+- **It holds on the displayed integer, not only on the unrounded mean.**
   Projection only ever replaces a nonnegative `eval_delta` with `0` and never
   raises one, so the unrounded projected player mean cannot exceed the unrounded
   summary mean, and the projected class counts cannot exceed the summary counts.
-  The displayed integers do not inherit that today, because the frontend rounds
-  half-up while the backend uses Python's banker's rounding: an exact-half mean
-  can display one point HIGHER than the summary (unrounded `2.5` → displayed `3`
-  vs. summary `2`) even though projection lowered nothing. The displayed-integer
-  form of the bound is conditional on both sides being unified on exact half-up
-  rounding.
+  The displayed integers now inherit that bound: both sides round half-up — the
+  frontend's `Math.round` (`gameStats.ts`) and the backend's `round_half_up_cpl`
+  (§5.2.2) — and half-up rounding is monotone, so it cannot reorder two means
+  that are already ordered. This was previously conditional: while the backend
+  still used Python's banker's rounding, an exact-half mean could display one
+  point HIGHER than the summary (unrounded `2.5` → displayed `3` vs. summary
+  `2`) even though projection lowered nothing.
 - **Null is not comparable, and projection can create a `0` where the summary is
   `null`.** Promotion writes `eval_delta: 0` unconditionally — including onto a
   move whose stored delta was `null` — so a game with no resolved player deltas
