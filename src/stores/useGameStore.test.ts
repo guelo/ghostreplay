@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "./useGameStore";
 
 describe("useGameStore sound settings", () => {
@@ -7,24 +7,18 @@ describe("useGameStore sound settings", () => {
     useGameStore.setState({ soundMuted: false, soundVolume: 1 });
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("setSoundMuted persists and updates state", () => {
-    const setItem = vi.spyOn(window.localStorage, "setItem");
     useGameStore.getState().setSoundMuted(true);
 
     expect(useGameStore.getState().soundMuted).toBe(true);
-    expect(setItem).toHaveBeenCalledWith("ghostreplay_sound_muted", "true");
+    expect(window.localStorage.getItem("ghostreplay_sound_muted")).toBe("true");
   });
 
   it("setSoundVolume persists and updates state", () => {
-    const setItem = vi.spyOn(window.localStorage, "setItem");
     useGameStore.getState().setSoundVolume(0.5);
 
     expect(useGameStore.getState().soundVolume).toBe(0.5);
-    expect(setItem).toHaveBeenCalledWith("ghostreplay_sound_volume", "0.5");
+    expect(window.localStorage.getItem("ghostreplay_sound_volume")).toBe("0.5");
   });
 
   it("stores the canonical clamped value for out-of-range input", () => {
