@@ -205,7 +205,7 @@ def _verify_checkmate(fen_before: str | None, move_san: str, fen_after: str) -> 
 # ---------------------------------------------------------------------------
 # Phase A — read: sizing measurement + candidate selection.
 # ---------------------------------------------------------------------------
-def _begin_readonly_snapshot(session: Session) -> None:
+def begin_readonly_snapshot(session: Session) -> None:
     """On PostgreSQL, start Phase A as a REPEATABLE READ read-only transaction so the
     multi-statement sizing forecast reflects ONE consistent snapshot.
 
@@ -217,6 +217,9 @@ def _begin_readonly_snapshot(session: Session) -> None:
     the isolation level mid-transaction raises). A no-op on SQLite, whose single
     StaticPool connection already reads consistently within the transaction and which
     does not support the REPEATABLE READ isolation level.
+
+    Public because the sibling draw backfill (:mod:`app.draw_final_ply_backfill`, g-c60b)
+    needs the identical Phase A snapshot semantics.
     """
     bind = session.get_bind()
     if bind is not None and bind.dialect.name == "postgresql":
@@ -228,10 +231,26 @@ def _begin_readonly_snapshot(session: Session) -> None:
         )
 
 
-def _final_ply_rows(session: Session, *, session_id: UUID | None):
-    """Portable ``row_number()`` selection of the final ply of every checkmate-ended
-    session (no ``DISTINCT ON``). The final ply per session is the highest move_number,
-    black after white within the same move_number.
+# Retained so this module's own Phase A call site and its committed tests keep the
+# name they were written against; the public name is the shared seam.
+_begin_readonly_snapshot = begin_readonly_snapshot
+
+
+def final_ply_rows(
+    session: Session,
+    *,
+    results: tuple[str, ...],
+    session_id: UUID | None,
+    visibility_filter=None,
+):
+    """Portable ``row_number()`` selection of the final ply of every ended session whose
+    ``result`` is in ``results`` (no ``DISTINCT ON``). The final ply per session is the
+    highest move_number, black after white within the same move_number.
+
+    Parameterized by ``results`` (and an optional ``visibility_filter`` SQL clause) so the
+    draw backfill shares this exact selection path — the one the SQLite tests exercise —
+    rather than re-deriving "the last ply of a session" a second time. The checkmate
+    cohort passes no visibility filter, preserving its committed behavior.
     """
     ply_rank = func.row_number().over(
         partition_by=SessionMove.session_id,
@@ -258,9 +277,11 @@ def _final_ply_rows(session: Session, *, session_id: UUID | None):
         .join(GameSession, GameSession.id == SessionMove.session_id)
         .filter(
             GameSession.status == "ended",
-            GameSession.result.in_(_CHECKMATE_RESULTS),
+            GameSession.result.in_(results),
         )
     )
+    if visibility_filter is not None:
+        inner = inner.filter(visibility_filter)
     if session_id is not None:
         inner = inner.filter(SessionMove.session_id == session_id)
     subq = inner.subquery()
@@ -280,6 +301,11 @@ def _final_ply_rows(session: Session, *, session_id: UUID | None):
         .filter(subq.c.ply_rank == 1)
         .all()
     )
+
+
+def _final_ply_rows(session: Session, *, session_id: UUID | None):
+    """This module's checkmate cohort: no visibility filter (unchanged behavior)."""
+    return final_ply_rows(session, results=_CHECKMATE_RESULTS, session_id=session_id)
 
 
 def _measure_sizing(session: Session, candidates: list, report: SizingReport) -> None:
