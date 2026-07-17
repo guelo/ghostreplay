@@ -23,6 +23,7 @@ from app.fen import normalize_fen
 from app.models import GameSession, decode_uci_line, encode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_cache import bump_evidence_seq
+from app.opening_densify import routing_view
 from app.opening_evidence import session_is_evidence_eligible
 from app.opening_graph import get_opening_graph
 from app.opening_roots import derive_family, get_opening_roots
@@ -456,9 +457,9 @@ def check_drill_route(
     if (request.previous_fen is None) != (request.played_uci is None):
         raise HTTPException(status_code=400, detail="previous_fen and played_uci must be provided together")
 
-    graph = get_opening_graph()
+    routing = routing_view(get_opening_graph())
     route_map = route_map_for_target(
-        graph, session.drill_opening_key, decode_uci_line(session.drill_line)
+        routing, session.drill_opening_key, decode_uci_line(session.drill_line)
     )
     if not route_map.plies_by_fen:
         raise HTTPException(status_code=400, detail="Drill route is unavailable")
@@ -494,7 +495,7 @@ def check_drill_route(
             target_fen=route_map.target_fen,
             suggestions=[
                 _suggestion(move)
-                for move in route_preserving_moves(graph, route_map, current_fen)
+                for move in route_preserving_moves(routing, route_map, current_fen)
             ],
         )
 
@@ -504,8 +505,8 @@ def check_drill_route(
             detail="previous_fen and played_uci are required when the current position is off route",
         )
 
-    played_move = route_move_for_uci(graph, route_map, previous_fen, request.played_uci)
-    suggestions = route_preserving_moves(graph, route_map, previous_fen)
+    played_move = route_move_for_uci(routing, route_map, previous_fen, request.played_uci)
+    suggestions = route_preserving_moves(routing, route_map, previous_fen)
     # Mutating branch. Lock, refresh, and re-derive before recording the failure so
     # a root-reached or terminal transition committed concurrently is not clobbered.
     session = _get_drill_for_update(db, session_id)

@@ -57,8 +57,8 @@ def test_route_helpers_use_line_map_without_a_graph_node():
     positions = _positions(line)
     rmap = build_line_route_map(line)
 
-    # graph=None proves the strict line map never touches the opening graph
-    # (off-book positions have no graph node).
+    # routing=None proves the strict line map never touches the routing view
+    # (off-book positions have no graph node, and no overlay can reach them).
     moves = route_preserving_moves(None, rmap, positions[1])
     assert [m.uci for m in moves] == ["e7e5"]
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -1278,6 +1280,311 @@ def test_transposition_into_target_root_is_on_route_and_reaches_root(
     assert reached.json()["status"] == "root_reached"
     session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
     assert session.drill_state == "root_reached"
+
+
+# -- Transposition overlay (g-m6ug) --
+#
+# `_transposition_graph` above hand-builds BOTH move orders into the graph, so it
+# exercises the backward BFS and would pass even if the overlay were never wired
+# up. The graph below deliberately LACKS the transposing edge — exactly like the
+# real book, where ECO recorded 1.d4 d5 2.Nf3 but never 1.Nf3 d5 2.d4 — so the
+# overlay is the only thing that can supply it. These tests write a real artifact
+# and let `routing_view` load it, rather than injecting a view, so a break in the
+# resolve → load → route chain shows up here.
+
+
+def _book_only_transposition_graph() -> OpeningGraph:
+    """Order A (1.d4 d5 2.Nf3) in full; order B's prefix (1.Nf3 d5) with NO d2d4
+    edge into the target."""
+    nodes = {
+        START_FEN: OpeningGraphNode(START_FEN, "white"),
+        _D4_FEN: OpeningGraphNode(_D4_FEN, "black"),
+        _D4_D5_FEN: OpeningGraphNode(_D4_D5_FEN, "white"),
+        _NF3_FEN: OpeningGraphNode(_NF3_FEN, "black"),
+        _NF3_D5_FEN: OpeningGraphNode(_NF3_D5_FEN, "white"),
+        TRANSPOSE_TARGET_FEN: OpeningGraphNode(TRANSPOSE_TARGET_FEN, "black"),
+    }
+    for parent, uci, child in (
+        (START_FEN, "d2d4", _D4_FEN),
+        (_D4_FEN, "d7d5", _D4_D5_FEN),
+        (_D4_D5_FEN, "g1f3", TRANSPOSE_TARGET_FEN),
+        (START_FEN, "g1f3", _NF3_FEN),
+        (_NF3_FEN, "d7d5", _NF3_D5_FEN),
+    ):
+        nodes[parent].children[uci] = child
+        nodes[child].parents.add((parent, uci))
+
+    graph = OpeningGraph(nodes, START_FEN)
+    graph.freeze()
+    return graph
+
+
+def _install_overlay(graph: OpeningGraph, tmp_path, edges=None):
+    """Write a real artifact for `graph` and point resolution at it. Returns the
+    patch context; the caller enters it around the requests under test."""
+    from app.opening_densify import (
+        _reset_routing_views_for_testing,
+        compute_densified_edges,
+        serialize_edges,
+    )
+    from app.drill_steering import _reset_drill_route_cache_for_testing
+
+    _reset_routing_views_for_testing()
+    _reset_drill_route_cache_for_testing()
+    if edges is None:
+        edges = compute_densified_edges(graph)
+    path = tmp_path / "eco.transpositions.json"
+    path.write_text(json.dumps(serialize_edges(graph, edges, "2026-07-17T00:00:00+00:00")))
+    return patch("app.opening_densify.resolve_artifact_path", return_value=path)
+
+
+def test_transposed_order_is_off_route_without_the_overlay(
+    client, auth_headers, tmp_path
+):
+    """The bug, pinned. With no artifact the book's missing edge is simply
+    missing, and the transposing order reports off route — today's behaviour, and
+    the fallback the runtime degrades to."""
+    graph = _book_only_transposition_graph()
+    with (
+        _install_overlay(graph, tmp_path, edges=()),
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(TRANSPOSE_TARGET_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": TRANSPOSE_TARGET_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+        session_id = start.json()["session_id"]
+        resp = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={
+                "current_fen": _NF3_D5_FEN,
+                "previous_fen": _NF3_FEN,
+                "played_uci": "d7d5",
+            },
+            headers=auth_headers(),
+        )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
+    assert resp.json()["failure"]["reason"] == "off_route"
+
+
+def test_overlay_supplies_the_missing_edge_and_routes_the_transposed_order(
+    client, auth_headers, db_session, tmp_path
+):
+    """The fix. The same base graph, now with the artifact in place: the
+    transposed position reads on-route, the overlay's edge is offered as a
+    suggestion, and playing it reaches the root."""
+    graph = _book_only_transposition_graph()
+    with (
+        _install_overlay(graph, tmp_path),
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(TRANSPOSE_TARGET_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": TRANSPOSE_TARGET_FEN,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+        assert start.status_code == 201
+        session_id = start.json()["session_id"]
+
+        on_route = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={"current_fen": _NF3_D5_FEN},
+            headers=auth_headers(),
+        )
+        assert on_route.status_code == 200
+        assert on_route.json()["status"] == "on_route"
+        # d2d4 exists ONLY in the overlay — the graph node has no such child.
+        assert "d2d4" not in graph.get_node(_NF3_D5_FEN).children
+        assert "d2d4" in [s["uci"] for s in on_route.json()["suggestions"]]
+
+        reached = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={
+                "current_fen": TRANSPOSE_TARGET_FEN,
+                "previous_fen": _NF3_D5_FEN,
+                "played_uci": "d2d4",
+            },
+            headers=auth_headers(),
+        )
+
+    assert reached.status_code == 200
+    assert reached.json()["status"] == "root_reached"
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    assert session.drill_state == "root_reached"
+
+
+def test_next_opponent_move_steers_through_a_densified_edge(
+    client, auth_headers, db_session, tmp_path
+):
+    """Opponent steering shares the route map, so the ghost must be willing to
+    play the transposing move — otherwise it would steer the player off a route
+    the route-check calls valid."""
+    graph = _book_only_transposition_graph()
+    with (
+        _install_overlay(graph, tmp_path),
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(TRANSPOSE_TARGET_FEN)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+        patch("app.api.game.get_opening_graph", return_value=graph),
+    ):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": TRANSPOSE_TARGET_FEN,
+                "player_color": "black",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+        session_id = start.json()["session_id"]
+        resp = client.post(
+            "/api/game/next-opponent-move",
+            json={"session_id": session_id, "fen": _NF3_D5_FEN},
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mode"] == "ghost"
+    assert body["move"]["uci"] == "d2d4"
+    # The transposing move IS the move that reaches the root.
+    assert body["drill_route"]["status"] == "root_reached"
+
+
+def test_route_cache_is_keyed_by_overlay_fingerprint(client, auth_headers, tmp_path):
+    """The artifact can change without graph.fingerprint changing, so the route
+    cache must not hand back a map built over a different edge set."""
+    from app.drill_steering import get_drill_route_map
+    from app.opening_densify import RoutingView, DensifiedEdges
+
+    graph = _book_only_transposition_graph()
+    empty = RoutingView(graph)
+    dense = RoutingView(
+        graph, DensifiedEdges(((_NF3_D5_FEN, "d2d4", TRANSPOSE_TARGET_FEN),))
+    )
+    assert empty.graph_fingerprint == dense.graph_fingerprint
+    assert empty.overlay_fingerprint != dense.overlay_fingerprint
+
+    empty_map = get_drill_route_map(empty, TRANSPOSE_TARGET_FEN)
+    dense_map = get_drill_route_map(dense, TRANSPOSE_TARGET_FEN)
+    assert not empty_map.is_on_route(_NF3_D5_FEN)
+    assert dense_map.is_on_route(_NF3_D5_FEN)
+
+
+def test_provenance_mismatch_degrades_once_and_logs_once(
+    client, auth_headers, tmp_path, caplog
+):
+    """A stale artifact must not take the app down over a routing feature, and
+    must not re-log per move: the fallback is decided once, at load."""
+    from app.opening_densify import (
+        _reset_routing_views_for_testing,
+        routing_view,
+        serialize_edges,
+    )
+
+    graph = _book_only_transposition_graph()
+    _reset_routing_views_for_testing()
+
+    # An artifact generated against a DIFFERENT graph: valid JSON, valid schema,
+    # but its provenance does not match the graph being routed.
+    stale = serialize_edges(_steering_graph(), (), "2026-07-17T00:00:00+00:00")
+    path = tmp_path / "stale.json"
+    path.write_text(json.dumps(stale))
+
+    with (
+        patch("app.opening_densify.resolve_artifact_path", return_value=path),
+        caplog.at_level(logging.ERROR, logger="app.opening_densify"),
+    ):
+        first = routing_view(graph)
+        second = routing_view(graph)
+
+    assert first is second  # built once, not per call
+    assert len(first.overlay) == 0  # degraded to today's behaviour
+    mismatch_logs = [
+        r for r in caplog.records if "unusable" in r.getMessage()
+    ]
+    assert len(mismatch_logs) == 1
+
+
+def test_densification_never_routes_a_move_that_would_close_a_cycle(
+    client, auth_headers, tmp_path
+):
+    """Endpoint-level cycle exclusion. Route-check treats ANY on-route position
+    as valid, so a back edge would let a player shuffle a knight out and back
+    forever and never go off route. 1.Nf3 Nf6 2.Ng1 leaves a position from which
+    2...Ng8 lands back on the start position; the forward-progress filter drops
+    that edge, so the shuffle is still off route."""
+    from app.opening_densify import compute_densified_edges
+
+    nf3 = "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq -"
+    nf3_nf6 = "rnbqkb1r/pppppppp/5n2/8/8/5N2/PPPPPPPP/RNBQKB1R w KQkq -"
+    ng1 = "rnbqkb1r/pppppppp/5n2/8/8/8/PPPPPPPP/RNBQKBNR b KQkq -"
+
+    nodes = {
+        START_FEN: OpeningGraphNode(START_FEN, "white"),
+        nf3: OpeningGraphNode(nf3, "black"),
+        nf3_nf6: OpeningGraphNode(nf3_nf6, "white"),
+        ng1: OpeningGraphNode(ng1, "black"),
+    }
+    for parent, uci, child in (
+        (START_FEN, "g1f3", nf3),
+        (nf3, "g8f6", nf3_nf6),
+        (nf3_nf6, "f3g1", ng1),
+    ):
+        nodes[parent].children[uci] = child
+        nodes[child].parents.add((parent, uci))
+    graph = OpeningGraph(nodes, START_FEN)
+    graph.freeze()
+
+    # 2...Ng8 is legal and lands exactly on the start position, which is in the
+    # graph — so the scan finds it and only the filter keeps it out.
+    edges = compute_densified_edges(graph)
+    assert (ng1, "f6g8", START_FEN) not in edges
+
+    with (
+        _install_overlay(graph, tmp_path, edges=edges),
+        patch("app.api.drills.get_opening_roots", return_value=_roots_for(nf3_nf6)),
+        patch("app.api.drills.get_opening_graph", return_value=graph),
+    ):
+        start = client.post(
+            "/api/drills/start",
+            json={
+                "opening_key": nf3_nf6,
+                "player_color": "white",
+                "engine_elo": 1500,
+                "strictness": "standard",
+            },
+            headers=auth_headers(),
+        )
+        session_id = start.json()["session_id"]
+        # Shuffling back toward the start is off route, not an endless loop.
+        resp = client.post(
+            f"/api/drills/{session_id}/route-check",
+            json={
+                "current_fen": ng1,
+                "previous_fen": nf3_nf6,
+                "played_uci": "f3g1",
+            },
+            headers=auth_headers(),
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "failed"
+    assert resp.json()["failure"]["reason"] == "off_route"
 
 
 def test_unconverted_drill_blunder_feeds_srs_review_queue(client, auth_headers, db_session):

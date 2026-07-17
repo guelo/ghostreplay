@@ -22,6 +22,7 @@ from app.fen import fen_hash, active_color
 from app.models import GameSession, Position, RatingHistory, User, decode_uci_line
 from app.opening_baseline_scheduler import enqueue_baseline_snapshot
 from app.opening_cache import bump_evidence_seq
+from app.opening_densify import routing_view
 from app.opening_evidence import session_is_evidence_eligible
 from app.opening_graph import get_opening_graph
 from app.opening_score_delta import (
@@ -981,9 +982,9 @@ def get_next_opponent_move(
         else:
             if not session.drill_opening_key:
                 raise HTTPException(status_code=400, detail="Drill is missing an opening root")
-            graph = get_opening_graph()
+            routing = routing_view(get_opening_graph())
             route_map = route_map_for_target(
-                graph, session.drill_opening_key, decode_uci_line(session.drill_line)
+                routing, session.drill_opening_key, decode_uci_line(session.drill_line)
             )
             if not route_map.plies_by_fen:
                 raise HTTPException(status_code=400, detail="Drill route is unavailable")
@@ -991,7 +992,7 @@ def get_next_opponent_move(
                 session.drill_state = "root_reached"
                 db.commit()
                 raise HTTPException(status_code=400, detail="Drill root already reached")
-            suggestions = route_preserving_moves(graph, route_map, request.fen)
+            suggestions = route_preserving_moves(routing, route_map, request.fen)
             if not suggestions:
                 raise HTTPException(status_code=400, detail="Current drill position is off route")
 

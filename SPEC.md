@@ -2987,6 +2987,35 @@ derived from the chosen cp.
 - **In-book target** (registered roots and named cards): a **BFS-derived** map from the opening graph — transposition-tolerant, so any move order reaching an on-route position counts.
 - **Off-book target** (a card's exact played line is the only route): a **strict played-line map** (`build_line_route_map`) where on-route = following the exact line, the single route-preserving suggestion is the next line move, and success = reaching the line's final position.
 
+#### Transposition overlay (routing-only)
+
+Positions are keyed by normalized FEN, so the BFS map is transposition-tolerant by
+construction — but only across edges the book actually records. The graph is built by
+replaying ECO move sequences and is nearly a tree, so a position recorded under one move
+order carries no edges for the other orders reaching it. Queen's Gambit Declined: Normal
+Defense is in book via 1.d4 d5 2.c4 e6 3.Nc3 Nf6; the English order 1.c4 e6 2.Nc3 Nf6
+3.d4 d5 reaches the identical FEN but is missing the `g8f6` and `d2d4` edges.
+
+`app/opening_densify.py` closes those gaps with a **routing-only overlay**, precomputed
+offline into `public/data/openings/eco.transpositions.json` (2,141 edges) and regenerated
+by `scripts/densify_opening_graph.py`. Drill routing and opponent steering read a
+`RoutingView` (graph + overlay) instead of the graph; nothing else changes.
+
+- **Not merged into the graph.** `graph.fingerprint` is derived from node children and
+  gates the opening score cache and the frozen release-calibration cohort, which fails
+  closed on mismatch. The overlay leaves it byte-identical.
+- **Forward-progress filter.** An edge is retained only if it strictly increases
+  longest-path depth over the base DAG. Every base edge does so by construction, so no
+  cycle can close in the combined graph — necessary because route-check treats any
+  on-route position as valid, and a cycle would let a player shuffle indefinitely without
+  going off route. (Minimum root depth is *not* a valid potential: the base graph contains
+  one edge, `d2f4`, running from min-depth 16 to 15.)
+- **Staleness is caught in CI**, by `--check` diffing the artifact against a fresh
+  recomputation — provenance proves origin, not completeness. At runtime a missing or
+  stale artifact logs once and degrades to no densification.
+- Off-book targets are not in the graph, so densification cannot reach them; they keep the
+  strict single-line map.
+
 The same `route_map_for_target` selector drives opponent steering (`/api/game/next-opponent-move`) so route-check and the opponent's reply never diverge. Status classification:
 
 | Status | Meaning |

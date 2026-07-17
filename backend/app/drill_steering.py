@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import chess
 
 from app.fen import normalize_fen
-from app.opening_graph import OpeningGraph
+from app.opening_densify import RoutingView
 
 
 @dataclass(frozen=True)
@@ -20,9 +20,9 @@ class DrillRouteMove:
 class DrillRouteMap:
     target_fen: str
     plies_by_fen: dict[str, int]
-    # None  → book BFS map (transposition-tolerant; routing reads `graph`).
+    # None  → book BFS map (transposition-tolerant; routing reads the view).
     # dict  → strict played-line map (off-book target). Keyed by normalized FEN
-    #         to the single on-route next move; routing ignores `graph` entirely.
+    #         to the single on-route next move; routing ignores the view entirely.
     forward_moves: dict[str, list[DrillRouteMove]] | None = None
 
     def plies_to_target(self, fen: str) -> int | None:
@@ -35,7 +35,10 @@ class DrillRouteMap:
         return normalize_fen(fen) == self.target_fen
 
 
-_ROUTE_CACHE: dict[tuple[str, str], DrillRouteMap] = {}
+# Keyed by (graph fingerprint, overlay fingerprint, target). The overlay
+# fingerprint is not redundant: the transposition artifact can change without
+# graph.fingerprint changing, and a stale map would then route over dead edges.
+_ROUTE_CACHE: dict[tuple[str, str, str], DrillRouteMap] = {}
 
 
 def _board_for_fen(fen: str) -> chess.Board:
@@ -61,14 +64,18 @@ def _resulting_fen(fen: str, uci: str) -> str:
     return normalize_fen(board.fen())
 
 
-def get_drill_route_map(graph: OpeningGraph, target_fen: str) -> DrillRouteMap:
+def get_drill_route_map(routing: RoutingView, target_fen: str) -> DrillRouteMap:
     normalized_target = normalize_fen(target_fen)
-    cache_key = (graph.fingerprint, normalized_target)
+    cache_key = (
+        routing.graph_fingerprint,
+        routing.overlay_fingerprint,
+        normalized_target,
+    )
     cached = _ROUTE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    if not graph.has_position(normalized_target):
+    if not routing.has_position(normalized_target):
         route_map = DrillRouteMap(target_fen=normalized_target, plies_by_fen={})
         _ROUTE_CACHE[cache_key] = route_map
         return route_map
@@ -77,7 +84,9 @@ def get_drill_route_map(graph: OpeningGraph, target_fen: str) -> DrillRouteMap:
     queue = [normalized_target]
     for fen in queue:
         current_distance = plies_by_fen[fen]
-        for parent_node, _uci in graph.get_parents(fen):
+        # Routing parents, not graph parents: a densified edge is exactly how a
+        # position only reachable by a transposed move order reads as on-route.
+        for parent_node, _uci in routing.routing_parents(fen):
             if parent_node.fen in plies_by_fen:
                 continue
             plies_by_fen[parent_node.fen] = current_distance + 1
@@ -141,16 +150,19 @@ def build_line_route_map(line_ucis: list[str]) -> DrillRouteMap:
 
 
 def route_map_for_target(
-    graph: OpeningGraph,
+    routing: RoutingView,
     target_fen: str,
     drill_line: list[str] | None,
 ) -> DrillRouteMap:
     """Pick the route strategy for a target. Shared by route-check + opponent
     steering so the two never diverge. In-book targets keep the transposition-
-    tolerant book BFS; off-book targets use the strict played line."""
+    tolerant book BFS; off-book targets use the strict played line.
+
+    Off-book targets are NOT in the graph, so densification cannot reach them —
+    they stay on the strict single-line map by design."""
     normalized_target = normalize_fen(target_fen)
-    if graph.has_position(normalized_target):
-        return get_drill_route_map(graph, normalized_target)
+    if routing.has_position(normalized_target):
+        return get_drill_route_map(routing, normalized_target)
     if not drill_line:
         # Caller raises 400 on the resulting empty plies_by_fen.
         return DrillRouteMap(target_fen=normalized_target, plies_by_fen={})
@@ -158,7 +170,7 @@ def route_map_for_target(
 
 
 def route_preserving_moves(
-    graph: OpeningGraph,
+    routing: RoutingView,
     route_map: DrillRouteMap,
     fen: str,
 ) -> list[DrillRouteMove]:
@@ -167,12 +179,11 @@ def route_preserving_moves(
         return list(route_map.forward_moves.get(normalize_fen(fen), []))
     normalized_fen = normalize_fen(fen)
     current_distance = route_map.plies_by_fen.get(normalized_fen)
-    node = graph.get_node(normalized_fen)
-    if current_distance is None or node is None:
+    if current_distance is None or not routing.has_position(normalized_fen):
         return []
 
     moves: list[DrillRouteMove] = []
-    for uci, child_fen in node.children.items():
+    for uci, child_fen in routing.routing_children(normalized_fen).items():
         child_distance = route_map.plies_by_fen.get(child_fen)
         if child_distance is None:
             continue
@@ -193,11 +204,18 @@ def route_preserving_moves(
 
 
 def route_move_for_uci(
-    graph: OpeningGraph,
+    routing: RoutingView,
     route_map: DrillRouteMap,
     fen: str,
     uci: str,
 ) -> DrillRouteMove | None:
+    """Describe `uci` as a route move, or None if it does not preserve the route.
+
+    This never accepts or rejects a move: the off-route branch in drills.py has
+    already decided the session failed by the time it calls here, and only uses
+    the result to label played_move_san. It reads routing children purely so it
+    cannot disagree with route_preserving_moves about which edges exist.
+    """
     if route_map.forward_moves is not None:
         # Strict line map: only the exact next line move matches (no graph node).
         for move in route_map.forward_moves.get(normalize_fen(fen), []):
@@ -205,10 +223,9 @@ def route_move_for_uci(
                 return move
         return None
     normalized_fen = normalize_fen(fen)
-    node = graph.get_node(normalized_fen)
-    if node is None:
+    if not routing.has_position(normalized_fen):
         return None
-    child_fen = node.children.get(uci)
+    child_fen = routing.routing_children(normalized_fen).get(uci)
     if child_fen is None:
         return None
     plies = route_map.plies_by_fen.get(child_fen)
