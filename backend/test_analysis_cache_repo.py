@@ -6,7 +6,7 @@ import threading
 from contextlib import contextmanager
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 
 from app.analysis_cache_repo import (
@@ -466,6 +466,28 @@ def pg_db():
     # connections, so both are pinned; the seams additionally assert
     # ``SHOW transaction_isolation`` so a pool/env default change fails loudly.
     engine = create_engine(url, isolation_level="READ COMMITTED")
+
+    # Neutralize the analysis_cache -> evidence_epoch bump trigger for this
+    # dedicated test engine. On the alembic-migrated schema (what CI runs, and
+    # what a shared migrated DB leaves behind for this fixture's checkfirst
+    # create) every INSERT/DELETE/UPDATE on analysis_cache fires an AFTER
+    # STATEMENT trigger that does `UPDATE evidence_epoch SET value=value+1 WHERE
+    # id=1`, taking a row lock on the singleton epoch row held until commit. That
+    # turns the epoch row into a global serializer for ALL analysis_cache writes:
+    # the writer parked at the TOCTOU lock seam (mid-transaction) holds it, so the
+    # helper's *committed* concurrent delete/recreate deadlocks against it and the
+    # coordinated seams time out. `session_replication_role = replica` disables
+    # user triggers per-connection (the epoch bump is orthogonal to the
+    # analysis_cache ON CONFLICT / FOR UPDATE row semantics these tests assert),
+    # so the writer and helper no longer contend on the epoch row. It is scoped to
+    # this engine and vanishes on dispose(); it is a no-op on the model-`create()`
+    # schema, which has no such trigger.
+    @event.listens_for(engine, "connect")
+    def _disable_user_triggers(dbapi_conn, _record):  # pragma: no cover - thin
+        cur = dbapi_conn.cursor()
+        cur.execute("SET session_replication_role = replica")
+        cur.close()
+
     try:
         conn = engine.connect()
     except Exception as exc:  # noqa: BLE001

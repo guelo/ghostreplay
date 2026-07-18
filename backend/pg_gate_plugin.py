@@ -107,6 +107,10 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     # parent-session FOR NO KEY UPDATE lock, and cached-accuracy recompute on the
     # migrated schema (g-eh2w data repair for g-hs78)
     "test_backfill_checkmate_final_ply_evals.py::test_pg_run_recomputes_accuracy_and_bumps_under_real_locks",
+    # draw final-ply eval backfill: same Phase A REPEATABLE READ read-only snapshot,
+    # parent-session FOR NO KEY UPDATE lock, and cached-accuracy recompute on the
+    # migrated schema (g-c60b data repair, sibling of the checkmate backfill above)
+    "test_backfill_draw_final_ply_evals.py::test_pg_run_recomputes_accuracy_and_bumps_under_real_locks",
     # blunder NKU idempotency (g-writer-locks)
     "test_blunder_api.py::test_record_blunder_concurrent_same_key_records_once",
     # advisory lock before the first graph write + cursor-is-last on the
