@@ -84,9 +84,10 @@ SCORER_SOURCE_DIGEST_ENV = "GHOSTREPLAY_SCORER_SOURCE_DIGEST"
 # compile-window proof the flag is supposed to represent. Captured once, immutable
 # thereafter: a late os.environ write cannot upgrade the flag.
 #
-# Residual (g-p4ih-srcfence): if something in the SAME process imported app.* before this
-# module and wrote the var, the capture still follows that compile. Only launching from an
-# exclusive checkout closes that; this is the strongest an in-process read can be.
+# Residual: if something in the SAME process imported app.* before this module and wrote the
+# var, the capture still follows that compile. Only launching from an exclusive checkout
+# closes that — release_calibration_launcher.py does, by exec'ing a fresh interpreter on a
+# private worktree. This is the strongest an in-process read can be.
 _LAUNCHER_SCORER_DIGEST: str | None = (
     os.environ.get(SCORER_SOURCE_DIGEST_ENV, "").strip().lower() or None
 )
@@ -3131,6 +3132,125 @@ class StaleBytecodeError(ScorerSourceUnstableError):
     run. Same family as ScorerSourceUnstableError: the running code is not the named code."""
 
 
+class ScorerImportOriginError(ScorerSourceUnstableError):
+    """A scorer module was imported from somewhere other than the tree the digest hashes —
+    so the digest describes files that module object never came from. Same family as
+    ScorerSourceUnstableError: the running code is not the named code."""
+
+
+def check_scorer_import_origins(modules: Mapping[str, object] | None = None) -> None:
+    """Fail closed unless every bound manifest app.* module came from _REPO_ROOT.
+
+    THE GAP THIS CLOSES. An import binds a module OBJECT, not a file: if anything put app.*
+    into sys.modules before this module ran — an interpreter wrapper, an outer harness, a
+    stray sys.path entry — the `from app...` imports above silently reuse those objects. The
+    scorer then executes code from wherever they came from while every source read here
+    describes the tree we were pointed at, and the flag gets minted for code that never ran.
+
+    WHAT IS AND IS NOT CHECKED. The rule is ORIGIN, not order. A preload from the hashed tree
+    is harmless — same bytes, and the launcher's digest predates the whole process, including
+    the preload's own compile — so preloading is not itself an error, and the test suite
+    legitimately imports app.* before the scorer. What must never happen is a manifest module
+    resolving to a file outside the tree the digest binds, however it got there: a preload
+    from another checkout, a shadowed sys.path entry, an egg-link.
+
+    WHAT THIS CANNOT SEE, stated plainly because the flag this feeds is a release gate:
+
+    * REBINDING. `__file__` describes where a module was LOADED FROM, not what its attributes
+      hold now. A startup hook that imports app.fen from the correct tree and then rebinds
+      app.fen.normalize_fen passes this check untouched, with the digest green — the source
+      bytes on disk were never edited. This is demonstrated, not hypothetical.
+    * A LYING LOADER. `__file__` is set by whatever imported the module. A meta_path finder
+      can serve arbitrary code under the origin we expect, and this check reads that origin.
+
+    Both need the startup hook to run at all, which is what the launcher's `-S` denies (see
+    child_command); neither is defended by anything in THIS process, because in-process code
+    cannot audit the runtime it is already running inside. So read this as a check against
+    MISCONFIGURATION — the wrong checkout, a shadowed path — and not as a defence against a
+    hostile runtime. That boundary is g-release-os-boundary's, not this function's.
+
+    Only meaningful on the verified path, and only called there: an unverified dev run claims
+    nothing about where its code came from.
+
+    The third leg, alongside the pre-exec digest (what the bytes WERE) and the bytecode check
+    (that source, not a stale .pyc, was compiled): the modules we bound declare an origin
+    inside the tree we hashed.
+    """
+    modules = sys.modules if modules is None else modules
+    for rel in SCORER_SOURCE_FILES:
+        if not rel.startswith("backend/app/") or not rel.endswith(".py"):
+            continue  # requirements.txt, and the scorer itself (run as __main__, not app.*)
+        name = rel[len("backend/"):-len(".py")].replace("/", ".")
+        module = modules.get(name)
+        if module is None:
+            continue  # not every manifest module is imported on every path
+        origin = getattr(module, "__file__", None)
+        expected = (_REPO_ROOT / rel).resolve()
+        if origin is None or Path(origin).resolve() != expected:
+            raise ScorerImportOriginError(
+                f"module {name!r} was imported from {origin!r}, not from the tree the digest "
+                f"binds ({expected}): the scorer is running code the digest never hashed"
+            )
+
+
+class UnverifiedScorerSourceError(Exception):
+    """A release path was handed scores whose source digest is not proven to name the code
+    that RAN. Deliberately NOT a ScorerSourceUnstableError: nothing is known to be wrong
+    here — the run simply never established the guarantee, which is the normal, correct
+    outcome for every dev and test run."""
+
+
+def require_preexec_verified_source(bound: object) -> None:
+    """THE RELEASE GATE (g-p4ih-srcfence). Refuse anything carrying
+    ``scorer_source_verified_preexec=False``.
+
+    Callers: ``--select-release`` (g-p4ih-release-cli) and the Phase-3 preflight
+    (g-p4ih-preflight), before applying an approved winner. Accepts anything stamped with
+    the flag — ScoredCalibrationCohort or WinnerBinding — and reads it by attribute, so an
+    unstamped object raises rather than sliding through as falsy.
+
+    WHY THE GATE LIVES HERE AND NOT IN build_selection_inputs. A dev run legitimately has no
+    launcher, so build_selection_inputs cannot refuse False without making the script
+    unusable outside a release. That is exactly why the flag is CARRIED on the cohort rather
+    than assumed: the run records what it can honestly claim, and the release boundary —
+    where the digest actually gets spent — demands the stronger guarantee.
+
+    False means the digest is fenced over source bytes but not proven to describe the
+    compiled code: no pre-exec hash, or bytecode CPython could have served stale. Applying a
+    winner on that basis would revalidate a tree against a digest that may name code which
+    never scored. Re-run under backend/scripts/release_calibration.sh.
+
+    WHAT True DOES AND DOES NOT ATTEST — read this before treating the flag as an assurance
+    of anything broader, and do not let its scope creep. True means exactly:
+
+        the bytes named by SCORER_SOURCE_FILES were hashed before this interpreter existed,
+        they still hash the same from inside the run, and the modules bound from them declare
+        an origin inside that tree.
+
+    That is MANIFEST-SOURCE PROVENANCE. It is NOT an attestation of the complete code that
+    produced the result, and it never has been. Outside its scope, all unhashed: the
+    interpreter, the standard library, and every installed dependency — a `pip install` into
+    a shared venv changes what runs without touching the tree or the digest. Also outside it:
+    anything that rebinds an attribute after import (the launcher's -I -S denies the routine
+    way in, it does not make the runtime honest), and a same-uid write to the checkout, which
+    only an OS boundary can prevent.
+
+    Those residuals are g-release-os-boundary's. If that bead ever makes the boundary
+    mandatory for release gating, this docstring is where the widened claim gets earned —
+    by pointing at the mechanism that earns it, not by quietly dropping this paragraph.
+    """
+    verified = bound.scorer_source_verified_preexec  # AttributeError = fail closed
+    if verified is not True:
+        raise UnverifiedScorerSourceError(
+            f"{type(bound).__name__}.scorer_source_verified_preexec is {verified!r}: these "
+            "scores were produced without a digest computed before the interpreter started "
+            "(or without verified bytecode), so scorer_source_digest is not proven to name "
+            "the code that ran and must not be spent on a release. Re-run under "
+            "backend/scripts/release_calibration_launcher.py, which hashes the manifest "
+            "pre-exec and runs from an exclusive worktree"
+        )
+
+
 # Cache verdicts under which CPython was FORCED to compile the source we hashed.
 _SAFE_BYTECODE_VERDICTS = frozenset({"absent", "unusable", "checked-hash"})
 
@@ -3150,9 +3270,9 @@ def check_scorer_bytecode(state: Mapping[str, str] | None = None) -> None:
     2. Every manifest module's pre-import cache verdict must be one CPython could not have
        served stale bytecode from (see _bytecode_cache_state).
 
-    Both are satisfied by launching the release run with an empty or fresh bytecode cache,
-    which is g-p4ih-srcfence's job: PYTHONDONTWRITEBYTECODE=1 plus either a purged
-    __pycache__ or PYTHONPYCACHEPREFIX pointing at a fresh directory.
+    Both are satisfied by release_calibration_launcher.py, which sets
+    PYTHONDONTWRITEBYTECODE=1 and points PYTHONPYCACHEPREFIX at a fresh empty directory
+    inside the throwaway worktree's temp parent.
     """
     if not sys.dont_write_bytecode:
         raise StaleBytecodeError(
@@ -3201,17 +3321,18 @@ def scorer_source_digest() -> str:
 # What the snapshot DOES buy, paired with the re-read after the last score, is a fence: the
 # scorer bytes did not move from here through the end of the run, so an edit landing
 # mid-run cannot be stamped. Neither read detects a change-and-revert; nothing short of an
-# exclusive checkout does. See g-p4ih-srcfence.
+# exclusive checkout does — release_calibration_launcher.py runs from a throwaway worktree
+# at a private path for exactly that reason.
 _SCORER_SOURCE_DIGEST_AT_IMPORT = scorer_source_digest()
 
 # The digest a LAUNCHER computed BEFORE exec'ing this interpreter, handed in through the
 # environment. That hash necessarily precedes the compilation of every manifest file, so a
 # match closes the compile window an in-process snapshot cannot reach: it is the only way
-# this process can know the bytes it read at import are the bytes it ran. The release
-# launcher sets it (g-p4ih-srcfence, consumed by g-p4ih-release-cli). It is ABSENT on dev
-# and test runs, and that absence is recorded on the cohort as
-# scorer_source_verified_preexec=False rather than quietly assumed away — a release gate
-# can then require the stronger guarantee without this module pretending to provide it.
+# this process can know the bytes it read at import are the bytes it ran.
+# release_calibration_launcher.py sets it. It is ABSENT on dev and test runs, and that
+# absence is recorded on the cohort as scorer_source_verified_preexec=False rather than
+# quietly assumed away — require_preexec_verified_source() then demands the stronger
+# guarantee at the release boundary without this module pretending to provide it.
 #
 # The value itself is _LAUNCHER_SCORER_DIGEST, captured at the TOP of this module before
 # any scorer import. There is deliberately NO accessor that re-reads os.environ: a live
@@ -3629,6 +3750,10 @@ def _build_selection_inputs(
         # is not enough: a stale .pyc CPython still considers valid would execute other code
         # entirely. Only claim the flag once that gap is closed too.
         check_scorer_bytecode()
+        # ...and bytecode freshness only speaks for the files we IMPORTED. A module preloaded
+        # from another checkout is fresh, matches its own source, and is still not the code
+        # this digest names.
+        check_scorer_import_origins()
     preexec_verified = launcher_digest is not None
 
     # Load BOTH byte strings from disk (unavailable -> fail closed, never live-select) and
@@ -3769,7 +3894,7 @@ class WinnerBinding:
     # Travels WITH the digest so Phase 3 can see what the digest is worth: False means the
     # winner was scored without a pre-exec source check or without verified bytecode, i.e.
     # the digest is fenced over source bytes but not proven to name the code that RAN.
-    # Phase 3 must not apply a winner carrying False.
+    # Phase 3 must not apply a winner carrying False: call require_preexec_verified_source.
     scorer_source_verified_preexec: bool
     provenance_record_sha256: str
     runtime_python: str

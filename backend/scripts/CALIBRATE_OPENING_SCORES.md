@@ -115,6 +115,98 @@ cache.
 | `--write-bench` | off | Time one isolated recompute + cache read (needs `--allow-writes` + guarded URL) |
 | `--allow-writes` | off | Required acknowledgement alongside `--write-bench` |
 
+## Release runs: use the launcher
+
+A **release** calibration — one whose winner Phase 3 will apply — must be started
+through `release_calibration_launcher.py`, never by invoking the scorer directly:
+
+```bash
+# --select-release lands with g-p4ih-release-cli; the launcher forwards any args.
+backend/scripts/release_calibration.sh -- --select-release
+```
+
+Use the wrapper. It is not sugar: it starts the launcher itself under **`-I -S`**, and the
+launcher **refuses to run** otherwise. It defaults to `backend/.venv/bin/python` and fails if
+that is missing rather than falling back to `PATH` — an unactivated shell resolves `python3`
+to the system interpreter (3.10 here, against the venv's 3.12), and since a non-venv
+interpreter is legitimate in a CI image, nothing downstream would have objected to a release
+scored against whatever versions the system happened to carry. Set `GHOSTREPLAY_PYTHON` to
+override explicitly. The child inherits that interpreter, and its dependency paths are
+derived from that interpreter's venv.
+
+The launcher checks out `--rev` (default `HEAD`) into a throwaway `git worktree`
+under a private temp dir, marks the files named by `SCORER_SOURCE_FILES` read-only
+(`0444`), hashes them from *that* tree, and only then execs the interpreter with the
+digest in `GHOSTREPLAY_SCORER_SOURCE_DIGEST` plus an empty, write-disabled bytecode
+cache. The rest of the checkout stays writable — the run legitimately writes there
+(`app.opening_graph` caches its ~30s build under `backend/.opening_graph_cache`), and
+those bytes are not what the digest binds.
+
+Both interpreters run without site initialisation, and both halves are required:
+
+* **The child runs under `-S`**, with its dependency directories passed explicitly on
+  `PYTHONPATH`. Otherwise `site.py` executes every `.pth` import line in site-packages and
+  imports `sitecustomize` before the scorer's first byte — and such a hook can import a
+  manifest module from the correct tree and then rebind a function on it. The source bytes
+  are never touched, so the digest still matches and the import-origin check still passes,
+  while the code that actually runs is not the code the digest names.
+* **The launcher runs under `-I -S`**, or it refuses. The child's `-S` is one interpreter
+  too late on its own: whatever starts the launcher runs first, and a `.pth` there executes
+  before the launcher imports `hashlib` — early enough to replace `sha256` in the very
+  process that computes the digest, making it whatever the hook wants. The launcher cannot
+  fix this itself (by the time its code runs, the hook has already run), so it fails closed
+  and the entrypoint carries the flags.
+
+`PYTHONNOUSERSITE` does not cover either case: it disables the *user* site directory, while
+the live vector is the interpreter's own site-packages. If a future dependency needs a `.pth`
+to be importable — an editable or namespace install — the run fails loudly at import rather
+than silently degrading, which is the intended behaviour for a release path.
+
+The child's environment is also scrubbed of **every** inherited `PYTHON*` variable, with only
+the four the launcher chooses added back. This is an allowlist because the denylist was wrong:
+`PYTHONWARNINGS` names its filter category as `module.Class` and the interpreter *imports that
+module* to install the filter — before the script body, under `-S`. Measured against the real
+venv, `PYTHONWARNINGS=default::sqlalchemy.exc.SAWarning` had SQLAlchemy imported before the
+child's first line, through a variable that reads like a logging preference. Non-`PYTHON*`
+variables (`DATABASE_URL` and friends) are inherited: they are the run's configuration.
+
+All three halves matter and none can be replaced by in-process code:
+
+* **The hash precedes the interpreter.** CPython compiles the scorer and its
+  imports before any of its statements run, so an edit landing in that window
+  leaves old code executing while every in-process read agrees on the new bytes.
+  Only a hash taken before the process existed catches it.
+* **The checkout is isolated from the shared tree.** A private-path worktree with its
+  hashed files marked `0444` is what defends against change-and-revert, and what makes
+  the digest a claim about a *tree* rather than a *moment*. The working tree — written
+  continuously by editors, builds, and other agents — cannot give you this.
+* **Nothing auto-executes before the scorer.** The two points above are about bytes on
+  disk; `-S` is about code that never touches the tree at all.
+
+Be precise about what this is worth. `0700` excludes other *users*, not other processes
+running as you; `0444` stops an accidental write, not a deliberate one, since this uid can
+chmod it back; and `git worktree list` publishes the path for the duration of the run. The
+interpreter, the standard library, and every installed dependency are **unhashed** — the
+digest binds `SCORER_SOURCE_FILES` and nothing else, and no check inside the run can audit
+the runtime it is already executing inside. `check_scorer_import_origins()` reads
+`__file__`, which reports where a module was *loaded from*, not what its attributes hold
+now, so it catches a misconfigured path or the wrong checkout — not a hostile loader.
+
+Taken together: this removes the ambient hazard, which is the realistic one on a machine
+that also runs editors, agents, and instrumentation. It is not an airtight boundary, and it
+is no defence at all against a hostile operator, who can simply commit the change. A literal
+"no other writer" guarantee needs an OS boundary (container, sandbox, separate uid) around
+the whole run, which the launcher does not provide — see bead `g-release-os-boundary`.
+
+A run under the launcher stamps `scorer_source_verified_preexec=True` on its
+cohort and winner binding. A bare `python backend/scripts/calibrate_opening_scores_v2.py`
+run stamps `False` — that is normal and correct for dev and test, and the script
+stays fully usable that way. The refusal lives at the release boundary:
+`require_preexec_verified_source()` rejects anything carrying `False`, because
+`scorer_source_digest` is then fenced over source bytes but not proven to name the
+code that actually ran. Because the worktree comes from a commit, uncommitted edits
+can never reach a release run.
+
 ## g-xnv7 calibration decision
 
 The 2026-07-09 g-xnv7 final run chose `lcb_z=1.0`,

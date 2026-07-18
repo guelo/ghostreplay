@@ -2729,6 +2729,109 @@ class TestSourceStabilityFence:
             cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
 
 
+class TestScorerImportOrigins:
+    """The digest says what the bytes WERE; the bytecode check says source (not a stale
+    .pyc) was compiled. Neither says the module OBJECTS the scorer runs came from that tree.
+    An import binds whatever is already in sys.modules, so a preload from another checkout
+    executes while every source read describes this one."""
+
+    def test_the_live_run_imported_its_app_modules_from_this_tree(self):
+        cal.check_scorer_import_origins()  # this suite's own app.* imports resolve here
+
+    def test_an_app_module_loaded_from_another_checkout_fails_closed(self):
+        # THE case. No environment scrubbing reaches it: a .pth or sitecustomize runs at
+        # interpreter startup, before the launcher's arguments are read, and the resulting
+        # module object is what the scorer's own import silently reuses.
+        impostor = MagicMock()
+        impostor.__file__ = "/somewhere/else/backend/app/fen.py"
+        with pytest.raises(cal.ScorerImportOriginError, match="not from the tree"):
+            cal.check_scorer_import_origins(modules={"app.fen": impostor})
+
+    def test_a_preload_from_the_hashed_tree_is_allowed(self):
+        # The rule is ORIGIN, not order: these are the same bytes the digest binds, and the
+        # launcher's hash predates the whole process including this compile. Being stricter
+        # would buy nothing and would fail every run that imports app.* before the scorer.
+        same_tree = MagicMock()
+        same_tree.__file__ = str(_BACKEND_ROOT / "app" / "fen.py")
+        cal.check_scorer_import_origins(modules={"app.fen": same_tree})
+
+    def test_a_module_without_a_file_fails_closed(self):
+        # A namespace package or an exec'd-in module has no __file__ to check, so it cannot
+        # be proven to come from the hashed tree and must not be assumed to.
+        impostor = MagicMock(spec=[])  # no __file__ attribute at all
+        with pytest.raises(cal.ScorerImportOriginError):
+            cal.check_scorer_import_origins(modules={"app.fen": impostor})
+
+    def test_unimported_manifest_modules_are_not_required(self):
+        # Not every manifest module is imported on every path; absence is not substitution.
+        cal.check_scorer_import_origins(modules={})
+
+    def test_is_a_source_instability_error(self):
+        # Same family as StaleBytecodeError: the running code is not the named code — unlike
+        # UnverifiedScorerSourceError, which means nothing was claimed in the first place.
+        assert issubclass(cal.ScorerImportOriginError, cal.ScorerSourceUnstableError)
+
+    def test_the_verified_path_checks_import_origins(self, tmp_path, monkeypatch):
+        # The check must be WIRED to the verified path, not merely defined. Dev/test runs
+        # legitimately run with app.* imported, so it fires only when a launcher digest is
+        # present — which is exactly when the flag would otherwise be minted.
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        monkeypatch.setattr(cal, "_LAUNCHER_SCORER_DIGEST", cal.scorer_source_digest())
+        monkeypatch.setattr(cal, "check_scorer_bytecode", MagicMock())
+        monkeypatch.setattr(cal, "check_scorer_import_origins", MagicMock(
+            side_effect=cal.ScorerImportOriginError("preloaded")))
+        with pytest.raises(cal.ScorerImportOriginError):
+            cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+
+
+class TestReleaseSourceGate:
+    """The gate that spends the flag (g-p4ih-srcfence). build_selection_inputs deliberately
+    does NOT refuse an unverified run — dev runs have no launcher and must still work — so
+    the refusal has to happen where the digest is actually relied on: --select-release and
+    the Phase-3 preflight, before an approved winner is applied."""
+
+    def test_refuses_an_unverified_cohort_and_winner(self, tmp_path):
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        assert si.cohort.scorer_source_verified_preexec is False  # no launcher: the test path
+        for bound in (si.cohort, cal.build_winner_binding(si.cohort, cal.CURRENT_SM_V2_3_CELL)):
+            with pytest.raises(cal.UnverifiedScorerSourceError, match="not proven to name"):
+                cal.require_preexec_verified_source(bound)
+
+    def test_admits_a_verified_cohort(self, tmp_path):
+        # The launcher path is exercised for real in test_release_calibration_launcher.py;
+        # here the flag is set directly, so the gate is tested rather than the launcher.
+        graph, roots, ap, pp, _as_of, _prov = _bsi_artifact(tmp_path)
+        si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
+        verified = dataclasses.replace(si.cohort, scorer_source_verified_preexec=True)
+        cal.require_preexec_verified_source(verified)  # does not raise
+        cal.require_preexec_verified_source(
+            cal.build_winner_binding(verified, cal.CURRENT_SM_V2_3_CELL)
+        )
+
+    def test_an_unstamped_object_fails_closed(self):
+        # Reading the flag by attribute, not .get()/getattr-with-default: a shape that was
+        # never stamped must raise, not read as falsy-and-therefore-refused for the wrong
+        # reason — or, worse, be duck-typed into passing.
+        with pytest.raises(AttributeError):
+            cal.require_preexec_verified_source(object())
+
+    def test_a_truthy_non_true_flag_is_refused(self):
+        # `is not True`, not `if not flag`: the gate certifies a specific proof, so anything
+        # that merely looks true (a "false" string, a 1 from a JSON round-trip) is refused.
+        class _Fake:
+            scorer_source_verified_preexec = "yes"
+
+        with pytest.raises(cal.UnverifiedScorerSourceError):
+            cal.require_preexec_verified_source(_Fake())
+
+    def test_is_not_a_source_instability_error(self):
+        # An unverified run is not a BROKEN run — nothing is known to be wrong, the proof
+        # was simply never established. A caller catching ScorerSourceUnstableError (a tree
+        # that moved) must not silently swallow "this run never claimed anything".
+        assert not issubclass(cal.UnverifiedScorerSourceError, cal.ScorerSourceUnstableError)
+
+
 class TestBytecodeFreshness:
     """A source digest binds .py bytes; the interpreter runs .pyc. Under CPython's default
     timestamp invalidation a cached .pyc is accepted whenever the source's (mtime, size)
