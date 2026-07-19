@@ -514,13 +514,19 @@ def _no_op_recompute_scheduler():
     The scheduler runs recomputes on its own thread against its own
     ``SessionLocal`` session, which would bypass ``TestingSessionLocal`` and
     never coalesce in tests. Patch the bound aliases imported into the API
-    modules so ``/moves`` and SRS review enqueue into a no-op recorder. Tests
-    that need to assert recompute behaviour drive the scheduler directly or
-    patch these aliases themselves.
+    modules so ``/moves`` and SRS review enqueue into a no-op recorder. Also
+    patch the source-module facade: game/drill end and cache-reader helpers
+    lazy-import it at call time, so bound-alias patches cannot intercept those
+    paths. If left live under CI's PostgreSQL ``DATABASE_URL``, the singleton
+    daemon outlives the mocked lifespan getter and can deadlock a later
+    ``pg_client`` all-table TRUNCATE.
+
+    Tests that need to assert recompute behaviour drive an injected scheduler
+    directly or patch the relevant alias/facade themselves.
     """
     with patch("app.api.session.request_recompute") as session_stub, patch(
         "app.api.srs.request_recompute"
-    ) as srs_stub:
+    ) as srs_stub, patch("app.opening_score_scheduler.request_recompute"):
         yield session_stub, srs_stub
 
 

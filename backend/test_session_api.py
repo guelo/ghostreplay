@@ -15,6 +15,9 @@ from app.models import (
     Position,
     SessionMove,
 )
+from app.opening_score_scheduler import (
+    request_recompute as real_request_recompute_facade,
+)
 
 
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
@@ -410,9 +413,9 @@ def test_session_moves_succeeds_when_opening_cache_refresh_fails(
 
     # Exercise the real best-effort facade (not a stub) and force the underlying
     # scheduler enqueue to raise. The facade must swallow it so /moves stays 200.
-    from app.opening_score_scheduler import request_recompute as real_request_recompute
-
-    with patch("app.api.session.request_recompute", real_request_recompute), patch(
+    with patch(
+        "app.api.session.request_recompute", real_request_recompute_facade
+    ), patch(
         "app.opening_score_scheduler.OpeningScoreScheduler.request_recompute",
         side_effect=RuntimeError("boom"),
     ):

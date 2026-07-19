@@ -10,6 +10,9 @@ from sqlalchemy import text
 
 from app.models import Blunder, Position
 from app.opening_cache import current_evidence_seq
+from app.opening_score_scheduler import (
+    request_recompute as real_request_recompute_facade,
+)
 from conftest import pg_required
 from sql_capture import capture_statements, cursor_last_before_commit
 
@@ -189,9 +192,9 @@ def test_srs_review_succeeds_when_opening_cache_refresh_fails(
     session_id = create_game_session(user_id=123, player_color="white")
     blunder = _create_blunder(db_session, user_id=123)
 
-    from app.opening_score_scheduler import request_recompute as real_request_recompute
-
-    with patch("app.api.srs.request_recompute", real_request_recompute), patch(
+    with patch(
+        "app.api.srs.request_recompute", real_request_recompute_facade
+    ), patch(
         "app.opening_score_scheduler.OpeningScoreScheduler.request_recompute",
         side_effect=RuntimeError("boom"),
     ):

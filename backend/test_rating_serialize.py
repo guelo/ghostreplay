@@ -473,7 +473,15 @@ def test_cursor_writer_completes_while_end_paused_in_rating(
         finally:
             db.close()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    # pg_client must also suppress the lazy source-module enqueue performed by
+    # compute_opening_score_delta after commit. Otherwise it starts the real
+    # singleton against DATABASE_URL, which outlives the mocked lifespan getter
+    # and can deadlock the next test's TRUNCATE during fixture setup.
+    with patch(
+        "app.opening_score_scheduler.OpeningScoreScheduler.request_recompute"
+    ) as real_scheduler_enqueue, concurrent.futures.ThreadPoolExecutor(
+        max_workers=2
+    ) as pool:
         end_future = pool.submit(_do_end)
         assert paused.wait(timeout=10), "game end never reached its rating work"
         # The external cursor writer completes while the end is stalled: proof the
@@ -481,6 +489,8 @@ def test_cursor_writer_completes_while_end_paused_in_rating(
         pool.submit(_external_bump).result(timeout=8)
         release.set()
         end_future.result(timeout=10)
+
+    real_scheduler_enqueue.assert_not_called()
 
     assert end_response["resp"].status_code == 200, end_response["resp"].text
     verify = pg_session_factory()
