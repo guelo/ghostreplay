@@ -123,7 +123,11 @@ class BlunderOpportunityEvent(Base):
 class BlunderReview(Base):
     __tablename__ = "blunder_reviews"
     __table_args__ = (
-        Index("idx_blunder_reviews_blunder", "blunder_id", "reviewed_at"),
+        # reviewed_at is DESC to match the DDL in 20260208_01 (latest-review-first
+        # lookup per blunder). Declared as an expression rather than a plain column
+        # so autogenerate compares equal against the live index instead of emitting
+        # a permanent spurious drop/create pair.
+        Index("idx_blunder_reviews_blunder", "blunder_id", text("reviewed_at DESC")),
         # Partial unique index: the WHERE clause excludes NULL keys from
         # uniqueness, so two keyless reviews of the same blunder are both
         # permitted while a supplied key dedupes retries.
