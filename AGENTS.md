@@ -68,7 +68,7 @@ bd close <id>         # Complete work
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **living design document** - Update SPEC.md if the change is noteworthy or conflicts with existing descriptions.
+2. **living design document** - Update SPEC.md if the change is a large noteworthy architectural or feature change, or if it conflicts with existing descriptions.
 3. **Run quality gates** (if code changed) - Tests, linters, builds
 4. **Update issue status** - Close finished work, update in-progress items
 5. **PUSH TO REMOTE** - This is MANDATORY:
