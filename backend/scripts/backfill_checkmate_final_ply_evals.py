@@ -18,6 +18,7 @@ the target env first. All business logic lives in
 from __future__ import annotations
 
 import argparse
+import logging
 import uuid
 from pathlib import Path
 import sys
@@ -59,6 +60,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     session_id = uuid.UUID(args.session_id) if args.session_id else None
+
+    # Required, not cosmetic: the module logs every rejected session/move id and each
+    # group's outcome at INFO. A fresh CLI process has no handler configured, so the root
+    # logger's default WARNING level would silently drop exactly the per-session detail an
+    # operator needs to act on a run — leaving only the totals printed below. basicConfig
+    # rather than app.logging_config.configure_logging(), which is the API server's setup
+    # (uvicorn loggers) and has no business in a one-off ops script.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
     print(f"DATABASE_URL={_safe_database_url(DATABASE_URL)}", flush=True)
 
     # SessionLocal is a sessionmaker bound to the engine built from DATABASE_URL, i.e.
@@ -70,7 +83,8 @@ def main() -> int:
     o = report.outcome
     mode = "DRY RUN (rolled back)" if report.dry_run else "committed"
 
-    # Phase A snapshot forecast (measured via compute_game_accuracy before/after).
+    # Phase A snapshot forecast (measured via the guarded game_accuracy_for_rows
+    # before/after the verified in-memory fill).
     print(
         "Phase A forecast (snapshot): "
         f"total_checkmate_sessions={s.total_checkmate_sessions} "

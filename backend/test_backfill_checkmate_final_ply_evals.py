@@ -312,7 +312,72 @@ def test_clock_only_fen_difference_accepted(db_session):
 
 
 # ---------------------------------------------------------------------------
-# Sizing buckets, measured via compute_game_accuracy before/after.
+# Sizing goes through the GUARDED accuracy path, both variants.
+# ---------------------------------------------------------------------------
+def test_sizing_uses_the_guarded_accuracy_path(db_session, monkeypatch):
+    """The Phase A forecast must measure through app.accuracy.game_accuracy_for_rows — the
+    same guarded path Phase B's recompute_session_accuracy persists — for BOTH the before
+    and after variants. Raw compute_game_accuracy can score a malformed coordinate grid 95
+    where the persisted path returns None, which would let the forecast diverge from the
+    outcome it forecasts.
+    """
+    import app.checkmate_final_ply_backfill as mod
+
+    real = mod.game_accuracy_for_rows
+    calls: list[list] = []
+
+    def spy(rows, player_color, expected_total_moves, *, session_id=None):
+        calls.append(list(rows))
+        return real(rows, player_color, expected_total_moves, session_id=session_id)
+
+    monkeypatch.setattr(mod, "game_accuracy_for_rows", spy)
+    # The raw entry point is not even reachable from this module's namespace, so sizing
+    # cannot drift onto it later without this failing.
+    assert not hasattr(mod, "compute_game_accuracy")
+
+    plies, pgn = _play(SCHOLAR)   # white delivers mate; scored as the white player
+    sid = _insert_game(db_session, plies=plies, pgn=pgn, player_color="white")
+
+    reader = TestingSessionLocal()
+    try:
+        plan = plan_backfill(reader)
+    finally:
+        reader.rollback()
+        reader.close()
+
+    assert plan.report.moved_off_none == 1
+    # Exactly two guarded measurements for the one candidate: before, then after.
+    assert len(calls) == 2
+    before_rows, after_rows = calls
+    assert before_rows[-1].eval_cp is None          # the candidate, unfilled
+    assert before_rows[-1].eval_mate is None
+    assert after_rows[-1].eval_cp == MATE_EVAL_CP   # the candidate, filled in memory only
+    assert after_rows[-1].eval_mate == 0
+    # The in-memory "after" fill never touched the DB.
+    check = TestingSessionLocal()
+    try:
+        assert _final_move(check, sid).eval_cp is None
+    finally:
+        check.close()
+
+
+def test_shifted_ply_coordinates_forecast_no_repair(db_session):
+    """A shifted move_number grid fails the guarded coordinate check, so BOTH sizing
+    variants return None and the candidate lands in residual_remains_none — never in
+    moved_off_none, which raw compute_game_accuracy would have produced."""
+    plies, pgn = _play(SCHOLAR)
+    shifted = [dict(p, move_number=p["move_number"] + 1) for p in plies]
+    _insert_game(db_session, plies=shifted, pgn=pgn, player_color="white")
+
+    s = run_backfill(_factory).sizing
+
+    assert s.moved_off_none == 0
+    assert s.residual_remains_none == 1
+    assert s.reconciles()
+
+
+# ---------------------------------------------------------------------------
+# Sizing buckets, measured via the guarded accuracy path before/after.
 # ---------------------------------------------------------------------------
 def test_bucket_repaired_white_delivers_mate_loss(db_session):
     """Scholar's mate as the BLACK player: a checkmate LOSS whose null final ply is

@@ -70,9 +70,8 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.accuracy import (
-    AccuracyMove,
-    compute_game_accuracy,
     expected_total_moves_from_pgn,
+    game_accuracy_for_rows,
     recompute_session_accuracy,
 )
 from app.fen import normalize_fen
@@ -95,8 +94,8 @@ SessionFactory = Callable[[], Session]
 
 @dataclass
 class SizingReport:
-    """Phase A snapshot forecast — MEASURED via ``compute_game_accuracy`` before/after
-    the verified in-memory fill, never inferred from raw null counts.
+    """Phase A snapshot forecast — MEASURED via the guarded ``game_accuracy_for_rows``
+    before/after the verified in-memory fill, never inferred from raw null counts.
 
     The four candidate buckets (:attr:`moved_off_none`,
     :attr:`repaired_accuracy_already_non_null`, :attr:`residual_remains_none`,
@@ -308,9 +307,25 @@ def _final_ply_rows(session: Session, *, session_id: UUID | None):
     return final_ply_rows(session, results=_CHECKMATE_RESULTS, session_id=session_id)
 
 
+@dataclass
+class _SizingRow:
+    """Lightweight stand-in carrying exactly the four fields
+    :func:`~app.accuracy.game_accuracy_for_rows` reads, so the "after" sizing variant can
+    be built with the candidate's filled mate eval without touching a live ORM row."""
+
+    move_number: int
+    color: str
+    eval_cp: int | None
+    eval_mate: int | None
+
+
 def _measure_sizing(session: Session, candidates: list, report: SizingReport) -> None:
-    """Bucket each candidate by ``compute_game_accuracy`` before/after the VERIFIED
-    in-memory fill, using the same shared accuracy path the API uses.
+    """Bucket each candidate by GUARDED accuracy before/after the VERIFIED in-memory fill.
+
+    The guarded :func:`~app.accuracy.game_accuracy_for_rows` — never raw
+    ``compute_game_accuracy`` — is what Phase B's ``recompute_session_accuracy`` persists,
+    so measuring through it makes this forecast structurally unable to disagree with the
+    outcome it forecasts (a malformed ply-coordinate grid fails closed to None in BOTH).
     """
     session_ids = [c.session_id for c in candidates]
     if not session_ids:
@@ -327,6 +342,7 @@ def _measure_sizing(session: Session, candidates: list, report: SizingReport) ->
         session.query(
             SessionMove.id,
             SessionMove.session_id,
+            SessionMove.move_number,
             SessionMove.color,
             SessionMove.eval_cp,
             SessionMove.eval_mate,
@@ -351,14 +367,16 @@ def _measure_sizing(session: Session, candidates: list, report: SizingReport) ->
         session_moves = moves_by_session.get(c.session_id, [])
         expected = expected_total_moves_from_pgn(pgn_by_session.get(c.session_id))
 
-        before = compute_game_accuracy(
-            [AccuracyMove(color=m.color, eval_cp=m.eval_cp, eval_mate=m.eval_mate) for m in session_moves],
+        before = game_accuracy_for_rows(
+            session_moves,
             player_color=c.player_color,
             expected_total_moves=expected,
+            session_id=c.session_id,
         )
-        after = compute_game_accuracy(
+        after = game_accuracy_for_rows(
             [
-                AccuracyMove(
+                _SizingRow(
+                    move_number=m.move_number,
                     color=m.color,
                     eval_cp=MATE_EVAL_CP if m.id == c.move_id else m.eval_cp,
                     eval_mate=0 if m.id == c.move_id else m.eval_mate,
@@ -367,6 +385,7 @@ def _measure_sizing(session: Session, candidates: list, report: SizingReport) ->
             ],
             player_color=c.player_color,
             expected_total_moves=expected,
+            session_id=c.session_id,
         )
 
         # Filling the final ply only ADDS an eval, so a game computable before stays
