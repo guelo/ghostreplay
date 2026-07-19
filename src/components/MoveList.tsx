@@ -485,12 +485,6 @@ const MoveList = ({
               const whiteBubbles = messages.get(whiteIdx) ?? EMPTY_BUBBLES;
               const blackBubbles = (pair.black ? messages.get(blackIdx) : undefined) ?? EMPTY_BUBBLES;
 
-              // Pre-compute previous evals to avoid cross-row dependency in MoveRow
-              const prevWhiteEval = whiteIdx > 0 ? moves[whiteIdx - 1].eval : 0;
-              const prevBlackEval = pair.black && whiteIdx >= 0 ? moves[whiteIdx].eval : undefined;
-              const prevWhiteEvalMate = whiteIdx > 0 ? moves[whiteIdx - 1].evalMate : null;
-              const prevBlackEvalMate = pair.black && whiteIdx >= 0 ? moves[whiteIdx].evalMate : undefined;
-
               // Is this row the target for message auto-scroll?
               const isLastBubbleRow =
                 lastBubbleMsgIndex === whiteIdx ||
@@ -505,10 +499,6 @@ const MoveList = ({
                   black={pair.black}
                   whiteIdx={whiteIdx}
                   blackIdx={blackIdx}
-                  prevWhiteEval={prevWhiteEval}
-                  prevBlackEval={prevBlackEval}
-                  prevWhiteEvalMate={prevWhiteEvalMate}
-                  prevBlackEvalMate={prevBlackEvalMate}
                   isWhiteSelected={!isVariationActive && whiteIdx === effectiveIndex}
                   isBlackSelected={!isVariationActive && blackIdx === effectiveIndex}
                   whiteBubbles={whiteBubbles}
@@ -519,7 +509,6 @@ const MoveList = ({
                   freshWhite={freshlyResolvedIndices?.has(whiteIdx) ?? false}
                   freshBlack={freshlyResolvedIndices?.has(blackIdx) ?? false}
                   onFreshAnimationDone={onFreshAnimationDone}
-                  playerColor={playerColor}
                   tappedIconIndex={tappedIconIndex}
                   revealedSrsFailIndex={revealedSrsFailIndex}
                   isInteractionDisabled={isInteractionDisabled}

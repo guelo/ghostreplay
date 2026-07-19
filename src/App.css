@@ -6455,14 +6455,6 @@
     display: none;
 }
 
-.eval-delta--pos {
-    color: #4caf50;
-}
-
-.eval-delta--neg {
-    color: #e53935;
-}
-
 /* Move classification colors */
 .move-button.move-blunder {
     color: var(--eval-blunder);
