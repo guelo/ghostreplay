@@ -448,3 +448,186 @@ def test_openings_lineage_warm_serves_cached_and_schedules_background(client, au
     lineage = {item["opening_key"]: item for item in resp.json()["lineage"]}
     # Score reflects the cached batch.
     assert lineage[MORPHY_KEY]["score"] == pytest.approx(90.0)
+
+
+# ---------------------------------------------------------------------------
+# score_status — cold cache must not block the lineage (g-a5v3)
+# ---------------------------------------------------------------------------
+
+def _get_openings_with_cache(
+    client, auth_headers, session_id, roots, cache_result, has_evidence=True
+):
+    """Drive the endpoint with `list_cached_opening_scores` stubbed, returning
+    (response, refresh_now mock, request_recompute mock).
+
+    `has_evidence` controls the cold branch: only a user with eligible evidence
+    can ever get a batch, so it decides pending vs. genuinely-unscored."""
+    with (
+        patch(PATCH_ROOTS, return_value=roots),
+        patch("app.opening_cache.has_opening_evidence", return_value=has_evidence),
+        patch("app.opening_score_scheduler.refresh_now") as mock_refresh,
+        patch("app.opening_score_scheduler.is_recompute_scheduled", return_value=False),
+        patch("app.opening_score_scheduler.request_recompute") as mock_recompute,
+        patch("app.opening_cache.list_cached_opening_scores", return_value=cache_result),
+    ):
+        resp = client.get(
+            f"/api/session/{session_id}/openings", headers=auth_headers(user_id=123)
+        )
+    return resp, mock_refresh, mock_recompute
+
+
+def test_openings_cold_cache_serves_lineage_pending_without_blocking(
+    client, auth_headers, create_game_session, db_session
+):
+    """Cold cache: the full lineage is returned immediately with null scores and
+    score_status="pending" — refresh_now is never called, so the response is not
+    delayed by the initial compute."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    resp, mock_refresh, mock_recompute = _get_openings_with_cache(
+        client, auth_headers, session_id, _ruy_roots(), (None, [])
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["score_status"] == "pending"
+    # Lineage is complete — immediacy is the whole point.
+    assert [item["opening_key"] for item in body["lineage"]] == [KP_KEY, RUY_KEY, MORPHY_KEY]
+    # ...but every score field is null rather than blocked on.
+    for item in body["lineage"]:
+        assert item["score"] is None
+        assert item["confidence"] is None
+        assert item["coverage"] is None
+        assert item["sample_size"] is None
+        assert item["game_count"] is None
+    mock_refresh.assert_not_called()
+    mock_recompute.assert_called_once_with(123, "white")
+
+
+def test_openings_warm_cache_reports_ready(
+    client, auth_headers, create_game_session, db_session
+):
+    """Warm cache: scores are stamped and score_status is "ready" — even though a
+    background recompute was scheduled (a warm batch is displayable)."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    batch = OpeningScoreBatch(
+        user_id=123, player_color="white", generation=1,
+        registry_fingerprint="whatever",
+        computed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    db_session.add(batch)
+    db_session.flush()
+    db_session.commit()
+    rows = [
+        UserOpeningScore(
+            batch_id=batch.id, user_id=123, player_color="white",
+            opening_key=MORPHY_KEY, opening_name="Ruy Lopez: Morphy Defense",
+            opening_family="Ruy Lopez", opening_score=90.0, confidence=0.6,
+            coverage=0.5, weighted_depth=1.0, sample_size=8,
+            computed_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+    ]
+
+    resp, mock_refresh, mock_recompute = _get_openings_with_cache(
+        client, auth_headers, session_id, _ruy_roots(), (batch, rows)
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["score_status"] == "ready"
+    lineage = {item["opening_key"]: item for item in body["lineage"]}
+    assert lineage[MORPHY_KEY]["score"] == pytest.approx(90.0)
+    mock_refresh.assert_not_called()
+    mock_recompute.assert_called_once_with(123, "white")
+
+
+@pytest.mark.parametrize("cache_result,expected", [((None, []), "pending"), ("warm", "ready")])
+def test_openings_active_drill_reports_score_status(
+    client, auth_headers, create_game_session, db_session, cache_result, expected
+):
+    """An in-progress drill is served live (g-8nke) and must carry the same
+    cold/warm score_status contract as a normal game — the drill is exactly the
+    surface where a cold cache would otherwise stall the cards."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    session = db_session.query(GameSession).filter(GameSession.id == uuid.UUID(session_id)).one()
+    session.session_mode = "drill"
+    session.drill_state = "active"
+    session.is_rated = False
+    session.rated_start_ply = None
+    db_session.commit()
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    if cache_result == "warm":
+        batch = OpeningScoreBatch(
+            user_id=123, player_color="white", generation=1,
+            registry_fingerprint="whatever",
+            computed_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        db_session.add(batch)
+        db_session.flush()
+        db_session.commit()
+        cache_result = (batch, [])
+
+    resp, mock_refresh, _ = _get_openings_with_cache(
+        client, auth_headers, session_id, _ruy_roots(), cache_result
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["score_status"] == expected
+    assert [i["opening_key"] for i in resp.json()["lineage"]] == [KP_KEY, RUY_KEY, MORPHY_KEY]
+    mock_refresh.assert_not_called()
+
+
+def test_openings_cold_cache_without_evidence_reports_ready_not_pending(
+    client, auth_headers, create_game_session, db_session
+):
+    """A first-time user, mid-first-game: no batch AND no eligible evidence.
+
+    The worker bails out without creating a batch in this state, so pending
+    would be a permanent lie — the cards must render as unscored ("—") and the
+    client must not start a reconciliation loop that can never converge."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    _insert_moves(db_session, session_id, RUY_SANS)
+
+    resp, mock_refresh, mock_recompute = _get_openings_with_cache(
+        client, auth_headers, session_id, _ruy_roots(), (None, []), has_evidence=False
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["score_status"] == "ready"
+    # The lineage is still fully served — only the scores are absent.
+    assert [i["opening_key"] for i in body["lineage"]] == [KP_KEY, RUY_KEY, MORPHY_KEY]
+    assert all(item["score"] is None for item in body["lineage"])
+    # No point scheduling work the worker will decline to do.
+    mock_recompute.assert_not_called()
+    mock_refresh.assert_not_called()
+
+
+def test_openings_empty_chain_still_reports_score_status(
+    client, auth_headers, create_game_session, db_session
+):
+    """A game with no roots crossed server-side must STILL carry score_status.
+
+    The client derives its own lineage from local move history, so it can be
+    showing a card while this (upload-lagged) chain is empty. Returning a bare
+    "ready" would leave that card stuck on "—": nothing enqueued, and no pending
+    status for reconciliation to start from."""
+    session_id = create_game_session(user_id=123, player_color="white")
+    # Moves that cross none of the seeded roots.
+    _insert_moves(db_session, session_id, ["a3", "h6", "a4", "h5"])
+
+    resp, mock_refresh, mock_recompute = _get_openings_with_cache(
+        client, auth_headers, session_id, _ruy_roots(), (None, []), has_evidence=True
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["lineage"] == []
+    assert body["score_status"] == "pending"
+    # The recompute is enqueued even though this game contributed no chain.
+    mock_recompute.assert_called_once_with(123, "white")
+    mock_refresh.assert_not_called()

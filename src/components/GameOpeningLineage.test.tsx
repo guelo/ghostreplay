@@ -3,7 +3,11 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import GameOpeningLineage from "./GameOpeningLineage";
-import type { OpeningLineageItem, OpeningScoreDeltaItem } from "../utils/api";
+import type {
+  OpeningLineageItem,
+  OpeningScoreDeltaItem,
+  OpeningScoreStatus,
+} from "../utils/api";
 
 function makeItem(overrides: Partial<OpeningLineageItem>): OpeningLineageItem {
   return {
@@ -47,6 +51,7 @@ function renderLineage(
     onStartDrill?: (item: OpeningLineageItem) => void;
     scoreChanges?: OpeningScoreDeltaItem[] | null;
     startPly?: number;
+    scoreStatus?: OpeningScoreStatus;
   } = {},
 ) {
   const onSelectRoot = handlers.onSelectRoot ?? vi.fn();
@@ -58,6 +63,7 @@ function renderLineage(
         lineage={lineage}
         startPly={handlers.startPly ?? 1}
         scoreChanges={handlers.scoreChanges}
+        scoreStatus={handlers.scoreStatus}
         onSelectRoot={onSelectRoot}
         onStartDrill={onStartDrill}
       />
@@ -473,6 +479,71 @@ describe("GameOpeningLineage", () => {
       const ruyLopez = screen.getByRole("button", { name: /Ruy Lopez/ });
       expect(within(ruyLopez).getByText("41")).toBeInTheDocument();
       expect(within(ruyLopez).queryByText("44")).not.toBeInTheDocument();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Score-loading affordance for a cold score cache (g-a5v3)
+  // -------------------------------------------------------------------------
+
+  describe("pending scores", () => {
+    it("shows a loading affordance instead of a score when pending", () => {
+      renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: null })], {
+        scoreStatus: "pending",
+      });
+
+      const card = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(card).getByText(/score loading/i)).toBeInTheDocument();
+      // The "no score" dash must NOT be showing — that state means something
+      // different (genuinely unscored) and would be a lie while loading.
+      expect(within(card).queryByText("\u2014")).not.toBeInTheDocument();
+    });
+
+    it("still renders a dash for a null score once scores are ready", () => {
+      renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: null })], {
+        scoreStatus: "ready",
+      });
+
+      const card = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
+      // A null score renders the dash twice: the score slot and the grade tag.
+      expect(within(card).getAllByText("\u2014")).toHaveLength(2);
+    });
+
+    it("defaults to ready when scoreStatus is omitted", () => {
+      renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 72 })]);
+
+      const card = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
+      expect(within(card).getByText("72")).toBeInTheDocument();
+    });
+
+    it("keeps the pinned pre-game number when a delta badge is present", () => {
+      // The terminal pin wins over the shimmer: the badge quotes a diff against
+      // this number, so replacing it with a placeholder would leave the badge
+      // referring to a value that is no longer on screen.
+      renderLineage(
+        [makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: 44 })],
+        {
+          scoreStatus: "pending",
+          scoreChanges: [makeChange({ opening_key: "k1", before: 41, after: 44 })],
+        },
+      );
+
+      const card = screen.getByRole("button", { name: /Ruy Lopez/ });
+      expect(within(card).getByText("41")).toBeInTheDocument();
+      expect(within(card).queryByText(/score loading/i)).not.toBeInTheDocument();
+    });
+
+    it("shows the loading affordance in the expanded card too", async () => {
+      const user = userEvent.setup();
+      renderLineage([makeItem({ opening_key: "k1", opening_name: "Ruy Lopez", score: null })], {
+        scoreStatus: "pending",
+      });
+
+      await user.click(screen.getByRole("button", { name: /Ruy Lopez/ }));
+
+      expect(screen.getByText(/score loading/i)).toBeInTheDocument();
     });
   });
 });

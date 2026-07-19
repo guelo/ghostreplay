@@ -166,8 +166,11 @@ function HistoryPage() {
   // yet) disables the hook entirely, preserving the zero-move fetch skip. The
   // game is finished here, so no polling.
   const analysisMoveCount = analysis?.moves.length ?? 0;
-  const { lineage: openingLineage, startPly: openingStartPly } =
-    useSessionOpenings(analysisMoveCount > 0 ? selectedId : null, {
+  const {
+    lineage: openingLineage,
+    startPly: openingStartPly,
+    scoreStatus: openingScoreStatus,
+  } = useSessionOpenings(analysisMoveCount > 0 ? selectedId : null, {
       refetchKey: analysisMoveCount,
     });
 
@@ -351,6 +354,7 @@ function HistoryPage() {
                           playerColor={playerColor}
                           lineage={openingLineage}
                           startPly={openingStartPly}
+                          scoreStatus={openingScoreStatus}
                           onSelectRoot={handleSelectRoot}
                           onStartDrill={handleStartDrill}
                         />

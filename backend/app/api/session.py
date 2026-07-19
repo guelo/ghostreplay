@@ -6,6 +6,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 import chess
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,7 +44,7 @@ from app.accuracy import (
 )
 from app.fen import active_color, fen_hash, normalize_fen
 from app.graph_write_lock import acquire_graph_write_lock
-from app.opening_cache import bump_evidence_seq, load_cached_rows
+from app.opening_cache import bump_evidence_seq, load_cached_rows_nonblocking
 from app.opening_evidence import session_is_evidence_eligible
 from app.opening_score_scheduler import request_recompute
 from app.opening_roots import get_opening_roots, played_opening_chain_indexed
@@ -306,6 +307,13 @@ class SessionOpeningsResponse(BaseModel):
     # computed authoritatively from move_number/color so drill lineages whose
     # stored moves don't start at ply 1 still number correctly.
     start_ply: int = 1
+    # "pending" when no score batch exists yet and a background recompute is
+    # in flight — the lineage is complete but every score field is null and the
+    # client should show a loading affordance rather than "unscored". A warm
+    # batch is always "ready", even with a background refresh running: it is
+    # displayable, and calling stale-warm "pending" would pin a permanent
+    # spinner on the common path.
+    score_status: Literal["ready", "pending"] = "ready"
 
 
 def _get_session_or_404(db: Session, session_id: uuid.UUID) -> GameSession:
@@ -1853,9 +1861,28 @@ def get_session_openings(
         [move.fen_after for move in session_moves], roots_registry
     )
 
+    # Direct-row lineage scores (matching the /openings card). NON-BLOCKING
+    # reader: warm reads serve the cached batch and schedule a background
+    # recompute; a cold cache returns immediately with no batch rather than
+    # blocking on the initial compute, so the lineage renders during live play
+    # and the client re-polls for scores (g-a5v3).
+    #
+    # Resolved BEFORE the empty-chain return, and independently of it. The client
+    # derives its own lineage from local move history, so it can be showing a
+    # card while this (upload-lagged) chain is still empty. Returning a bare
+    # "ready" here would leave that card stuck on "—": no recompute enqueued and
+    # no pending status to start reconciliation from.
+    _, cached_rows, scores_pending = load_cached_rows_nonblocking(
+        db, user.user_id, player_color
+    )
+    score_status: Literal["ready", "pending"] = "pending" if scores_pending else "ready"
+
     if not chain:
         return SessionOpeningsResponse(
-            player_color=player_color, lineage=[], start_ply=1
+            player_color=player_color,
+            lineage=[],
+            start_ply=1,
+            score_status=score_status,
         )
 
     # Ply of the game's first stored move, computed authoritatively from
@@ -1867,10 +1894,6 @@ def get_session_openings(
         1 if first_move.color == MoveColor.WHITE.value else 2
     )
 
-    # Direct-row lineage scores (matching the /openings card). Stale-while-
-    # revalidate reader: warm reads serve the cached batch and schedule a
-    # background recompute; only a cold cache blocks on the initial compute.
-    _, cached_rows = load_cached_rows(db, user.user_id, player_color)
     rows_by_key = {row.opening_key: row for row in cached_rows}  # already snapshotted
 
     lineage: list[OpeningLineageItem] = []
@@ -1896,5 +1919,8 @@ def get_session_openings(
         )
 
     return SessionOpeningsResponse(
-        player_color=player_color, lineage=lineage, start_ply=start_ply
+        player_color=player_color,
+        lineage=lineage,
+        start_ply=start_ply,
+        score_status=score_status,
     )

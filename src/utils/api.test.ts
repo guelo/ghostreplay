@@ -16,6 +16,7 @@ import {
   getStatsSummary,
   getStatsAchievements,
   submitAnalysisEvidence,
+  fetchSessionOpenings,
 } from './api'
 
 const fetchMock = vi.fn()
@@ -1141,5 +1142,53 @@ describe('submitAnalysisEvidence', () => {
     const results = await submitAnalysisEvidence('sess-1', [])
     expect(fetchMock).not.toHaveBeenCalled()
     expect(results).toEqual([])
+  })
+})
+
+describe('fetchSessionOpenings', () => {
+  beforeEach(() => {
+    fetchMock.mockReset()
+    mockStore = {}
+  })
+
+  const payload = (extra: Record<string, unknown> = {}) => ({
+    player_color: 'white',
+    lineage: [],
+    start_ply: 1,
+    ...extra,
+  })
+
+  it('passes through an explicit score_status', async () => {
+    mockResponse(payload({ score_status: 'pending' }))
+
+    const result = await fetchSessionOpenings('s1')
+
+    expect(result.score_status).toBe('pending')
+  })
+
+  it('defaults an ABSENT score_status to "ready"', async () => {
+    // requestJson only CASTS the payload — it does not fill in missing fields —
+    // so an older backend would otherwise leave score_status undefined and the
+    // cards would compare against a value that is neither 'ready' nor
+    // 'pending'. Asserted here, at the normalization boundary, rather than
+    // only through the hook.
+    mockResponse(payload())
+
+    const result = await fetchSessionOpenings('s1')
+
+    expect(result.score_status).toBe('ready')
+  })
+
+  it('preserves the rest of the response while normalizing', async () => {
+    mockResponse(payload({ player_color: 'black', start_ply: 9 }))
+
+    const result = await fetchSessionOpenings('s1')
+
+    expect(result.player_color).toBe('black')
+    expect(result.start_ply).toBe(9)
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/api/session/s1/openings'),
+      expect.objectContaining({ method: 'GET' }),
+    )
   })
 })

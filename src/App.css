@@ -10616,6 +10616,60 @@ button.tree-node-card--compact {
     font-size: 0.78rem;
 }
 
+/* Score loading placeholder (g-a5v3): occupies the score + grade slot while a
+   cold score cache is recomputing. Width is fixed to roughly the widest real
+   content ("100" + grade tag) so hydrating a score does not reflow the card. */
+.tree-node-card__score-loading {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    min-width: 3.1rem;
+    height: 0.95rem;
+}
+
+.tree-node-card__score-shimmer {
+    flex: 1 1 auto;
+    height: 0.6rem;
+    border-radius: 0.3rem;
+    background: linear-gradient(
+        90deg,
+        color-mix(in srgb, currentColor 10%, transparent) 25%,
+        color-mix(in srgb, currentColor 22%, transparent) 50%,
+        color-mix(in srgb, currentColor 10%, transparent) 75%
+    );
+    background-size: 200% 100%;
+    animation: tree-node-score-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes tree-node-score-shimmer {
+    from {
+        background-position: 200% 0;
+    }
+    to {
+        background-position: -200% 0;
+    }
+}
+
+/* Respect reduced-motion: keep the placeholder, drop the sweep. */
+@media (prefers-reduced-motion: reduce) {
+    .tree-node-card__score-shimmer {
+        animation: none;
+    }
+}
+
+/* Screen-reader-only loading label — the shimmer alone is invisible to AT. */
+.tree-node-card__score-loading-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
 .tree-node-card__grade {
     flex: 0 0 auto;
     padding: 0.05rem 0.3rem;

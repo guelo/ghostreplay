@@ -124,6 +124,7 @@ import {
 } from "../services/DecisionOwner";
 import type { AnalysisOutcome } from "../services/GameAnalysisCoordinator";
 import { gradeDrillMove } from "../workers/analysisUtils";
+import { __resetOpeningRootIndexCache } from "../hooks/useLiveOpeningLineage";
 
 // Fresh coordinator-lifetime DecisionOwner per test (g-2m0p). The controller
 // registers blunder-context/SRS on this owner; AnalysisEffects leases its UI
@@ -377,6 +378,12 @@ describe("ChessGame start flow", () => {
     });
     startDrillMock.mockReset();
     getOpeningRootsMock.mockReset();
+    // The live opening-lineage derivation (g-a5v3) loads the root registry on
+    // every mount, so it needs a well-behaved default; tests that care about
+    // specific roots override it. The module-level registry cache is dropped
+    // too, or the first test's roots would leak into every later test.
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    __resetOpeningRootIndexCache();
     pollFreshOpeningDeltaMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
@@ -486,6 +493,12 @@ describe("ChessGame characterization safeguards", () => {
     useDrillAnalysisStore.getState().clear();
     startDrillMock.mockReset();
     getOpeningRootsMock.mockReset();
+    // The live opening-lineage derivation (g-a5v3) loads the root registry on
+    // every mount, so it needs a well-behaved default; tests that care about
+    // specific roots override it. The module-level registry cache is dropped
+    // too, or the first test's roots would leak into every later test.
+    getOpeningRootsMock.mockResolvedValue({ families: [] });
+    __resetOpeningRootIndexCache();
     recordBlunderMock.mockReset();
     recordManualBlunderMock.mockReset();
     reviewSrsBlunderMock.mockReset();
@@ -1993,10 +2006,13 @@ describe("ChessGame characterization safeguards", () => {
         },
       ],
     };
-    // First overlay open succeeds; the reopen's fetch fails.
+    // Order-dependent: the live-lineage registry preload (g-a5v3) fires on
+    // mount and consumes the FIRST call, before the overlay opens at all.
+    // Then: first overlay open succeeds; the reopen's fetch fails.
     getOpeningRootsMock
-      .mockResolvedValueOnce(targetFamily)
-      .mockRejectedValueOnce(new Error("boom"));
+      .mockResolvedValueOnce({ families: [] }) // registry preload (on mount)
+      .mockResolvedValueOnce(targetFamily) // first overlay open
+      .mockRejectedValueOnce(new Error("boom")); // reopen
 
     await driveOffRouteFail();
     useGameStore.setState({ playerColor: "white", drillStrictnessCp: 20 });

@@ -32,6 +32,7 @@ from app.opening_cache import (
     list_position_scores,
     OBSERVED_EDGE_PARENT_CHUNK_SIZE,
     load_cached_rows,
+    load_cached_rows_nonblocking,
     lookup_observed_edges_for_parent,
     lookup_observed_edges_for_parents,
     lookup_position_scores,
@@ -2219,3 +2220,141 @@ def test_lookup_position_scores_for_batch_resolves_by_batch(db_session):
     assert found[KINGS_PAWN_FEN].opening_score is not None
     # Empty input short-circuits.
     assert lookup_position_scores_for_batch(db_session, batch.id, []) == {}
+
+
+# ---------------------------------------------------------------------------
+# load_cached_rows_nonblocking — never blocks on a cold cache (g-a5v3)
+#
+# Same patch targets as the load_cached_rows block above: the scheduler funcs
+# are lazy-imported inside the function, so they are patched at the source
+# module (app.opening_score_scheduler).
+# ---------------------------------------------------------------------------
+
+def test_load_cached_rows_nonblocking_warm_serves_cache_and_schedules_background():
+    """Warm: identical to load_cached_rows — serve the batch and enqueue
+    UNCONDITIONALLY (the only trigger catching evidence changes with no
+    write-path enqueue)."""
+    sentinel_batch = object()
+    sentinel_rows = object()
+    snapshotted = object()
+    with patch(
+        "app.opening_cache.list_cached_opening_scores",
+        return_value=(sentinel_batch, sentinel_rows),
+    ), patch(
+        "app.opening_cache._snapshot_cached_rows", return_value=snapshotted
+    ) as snapshot, patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.is_recompute_scheduled", return_value=True
+    ) as is_scheduled, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows, pending = load_cached_rows_nonblocking("db", 123, "black")
+
+    assert batch is sentinel_batch
+    assert rows is snapshotted
+    assert pending is False
+    snapshot.assert_called_once_with(sentinel_rows)
+    # Unconditional on the warm path — the scheduled-guard must NOT suppress it.
+    request_recompute.assert_called_once_with(123, "black")
+    is_scheduled.assert_not_called()
+    refresh_now.assert_not_called()
+
+
+def test_load_cached_rows_nonblocking_cold_returns_empty_without_blocking():
+    """Cold WITH evidence, nothing scheduled: report pending immediately, never
+    call refresh_now, and enqueue the recompute."""
+    with patch(
+        "app.opening_cache.list_cached_opening_scores", return_value=(None, [])
+    ) as list_cached, patch(
+        "app.opening_cache.has_opening_evidence", return_value=True
+    ), patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.is_recompute_scheduled", return_value=False
+    ), patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows, pending = load_cached_rows_nonblocking("db", 123, "black")
+
+    assert batch is None
+    assert rows == []
+    assert pending is True
+    refresh_now.assert_not_called()
+    request_recompute.assert_called_once_with(123, "black")
+    # Cold path must NOT re-list: there is nothing to wait for.
+    list_cached.assert_called_once()
+
+
+def test_load_cached_rows_nonblocking_cold_already_scheduled_does_not_reenqueue():
+    """Cold, recompute ALREADY scheduled: skip request_recompute. It sets
+    deadline = now + quiet_window, so an unguarded enqueue from a polling
+    reader would repeatedly postpone the very compute it is waiting on."""
+    with patch(
+        "app.opening_cache.list_cached_opening_scores", return_value=(None, [])
+    ), patch(
+        "app.opening_cache.has_opening_evidence", return_value=True
+    ), patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.is_recompute_scheduled", return_value=True
+    ), patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows, pending = load_cached_rows_nonblocking("db", 123, "black")
+
+    assert batch is None
+    assert rows == []
+    assert pending is True
+    request_recompute.assert_not_called()
+    refresh_now.assert_not_called()
+
+
+def test_load_cached_rows_nonblocking_cold_reenqueues_after_work_lost():
+    """Cold and nothing scheduled after a prior enqueue (worker fault/restart
+    dropped the work): the next read re-enqueues rather than waiting forever."""
+    with patch(
+        "app.opening_cache.list_cached_opening_scores", return_value=(None, [])
+    ), patch(
+        "app.opening_cache.has_opening_evidence", return_value=True
+    ), patch(
+        "app.opening_score_scheduler.refresh_now"
+    ), patch(
+        "app.opening_score_scheduler.is_recompute_scheduled", side_effect=[True, False]
+    ), patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        load_cached_rows_nonblocking("db", 123, "black")  # scheduled -> skip
+        load_cached_rows_nonblocking("db", 123, "black")  # work lost -> retry
+
+    request_recompute.assert_called_once_with(123, "black")
+
+
+def test_load_cached_rows_nonblocking_cold_without_evidence_is_not_pending():
+    """Cold with NO eligible evidence: NOT pending, and no enqueue.
+
+    ``recompute_opening_scores_if_needed`` bails out without creating a batch
+    when ``has_opening_evidence`` is false, so waiting can never produce one.
+    Reporting pending here would pin a first-time user (whose only game is still
+    in progress, and so is not yet eligible evidence) behind a permanent loading
+    state while their client re-scheduled no-op recomputes.
+    """
+    with patch(
+        "app.opening_cache.list_cached_opening_scores", return_value=(None, [])
+    ), patch(
+        "app.opening_cache.has_opening_evidence", return_value=False
+    ), patch(
+        "app.opening_score_scheduler.refresh_now"
+    ) as refresh_now, patch(
+        "app.opening_score_scheduler.is_recompute_scheduled"
+    ) as is_scheduled, patch(
+        "app.opening_score_scheduler.request_recompute"
+    ) as request_recompute:
+        batch, rows, pending = load_cached_rows_nonblocking("db", 123, "black")
+
+    assert batch is None
+    assert rows == []
+    assert pending is False
+    request_recompute.assert_not_called()
+    is_scheduled.assert_not_called()
+    refresh_now.assert_not_called()

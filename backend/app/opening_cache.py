@@ -697,6 +697,56 @@ def load_cached_rows(
     return batch, _snapshot_cached_rows(rows)
 
 
+def load_cached_rows_nonblocking(
+    db: Session,
+    user_id: int,
+    player_color: PlayerColor,
+) -> tuple[OpeningScoreBatch | None, list[CachedOpeningScoreRow], bool]:
+    """Non-blocking sibling of ``load_cached_rows`` for latency-sensitive readers.
+
+    Returns ``(batch, rows, scores_pending)``. ``scores_pending`` is True ONLY
+    when a batch is genuinely still coming; callers surface it as a loading
+    state, so a False here must mean "this is the final answer".
+
+    WARM: identical to ``load_cached_rows`` — serve the cached batch and call
+    ``request_recompute`` UNCONDITIONALLY. That unconditional warm enqueue is
+    load-bearing for the same reason documented there (it is the only trigger
+    catching evidence changes with no write-path enqueue). Not pending.
+
+    COLD **with evidence**: never calls ``refresh_now``; returns no batch
+    immediately so the caller can respond with unscored data instead of blocking
+    up to the ``refresh_now`` timeout. The enqueue is guarded on
+    ``is_recompute_scheduled`` first, mirroring ``ensure_opening_scores``:
+    ``request_recompute`` pushes the debounced deadline out to
+    ``now + quiet_window``, so an UNGUARDED enqueue from a polling reader would
+    repeatedly postpone the very compute it is waiting on (bounded only by
+    ``first_seen + max_wait``). Re-enqueueing when nothing is scheduled also
+    retries work lost to a worker fault/restart. Pending.
+
+    COLD **with NO evidence**: NOT pending, and no enqueue. The worker itself
+    bails out without creating a batch when ``has_opening_evidence`` is false
+    (see ``recompute_opening_scores_if_needed``), so no amount of waiting or
+    re-scheduling can ever produce one. Reporting this as pending would pin a
+    first-time user — whose only games are still in progress, and so are not yet
+    eligible evidence — behind a permanent loading state while their client
+    re-scheduled no-op recomputes. Mirrors ``ensure_opening_scores``, which
+    likewise reports this case as settled ("warm") rather than building.
+    """
+    # Lazy import: opening_score_scheduler imports opening_cache at module load,
+    # so a module-level import here would create a cycle.
+    from app.opening_score_scheduler import is_recompute_scheduled, request_recompute
+
+    batch, rows = list_cached_opening_scores(db, user_id, player_color)
+    if batch is None:
+        if not has_opening_evidence(db, user_id, player_color):
+            return None, [], False
+        if not is_recompute_scheduled(user_id, player_color):
+            request_recompute(user_id, player_color)
+        return None, [], True
+    request_recompute(user_id, player_color)
+    return batch, _snapshot_cached_rows(rows), False
+
+
 def _is_batch_fresh(
     db: Session,
     batch: OpeningScoreBatch,

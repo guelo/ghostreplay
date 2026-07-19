@@ -1300,12 +1300,25 @@ export interface OpeningLineageItem {
   moves: string[]
 }
 
+/** Whether the server's opening scores are available yet. `pending` means the
+ *  score cache was cold: the lineage is complete but every score field is null
+ *  and a background recompute is running, so the client should show a loading
+ *  affordance and re-poll rather than render the cards as unscored. */
+export type OpeningScoreStatus = 'ready' | 'pending'
+
 export interface SessionOpeningsResponse {
   player_color: OpeningPlayerColor
   lineage: OpeningLineageItem[]
   /** Ply of `moves[0]` (1 = White's move 1). Constant across all lineage items;
    *  anchors move numbering so a drill starting mid-game still numbers right. */
   start_ply: number
+  score_status: OpeningScoreStatus
+}
+
+/** Wire shape: `score_status` is optional so a client running against an older
+ *  backend still type-checks; it is defaulted at the boundary below. */
+interface SessionOpeningsWire extends Omit<SessionOpeningsResponse, 'score_status'> {
+  score_status?: OpeningScoreStatus
 }
 
 /**
@@ -1315,11 +1328,16 @@ export const fetchSessionOpenings = async (
   sessionId: string,
   options?: { signal?: AbortSignal },
 ): Promise<SessionOpeningsResponse> => {
-  return requestJson<SessionOpeningsResponse>(
+  const raw = await requestJson<SessionOpeningsWire>(
     `${API_BASE_URL}/api/session/${sessionId}/openings`,
     { method: 'GET', headers: getAuthHeaders(), signal: options?.signal },
     { fallbackMessage: 'Failed to load session openings' },
   )
+  // requestJson only CASTS the payload — it does not default absent fields, so
+  // normalize explicitly. An older backend omitting the field degrades to
+  // 'ready', i.e. exactly the pre-g-a5v3 behavior (render whatever scores came
+  // back, never show a spinner).
+  return { ...raw, score_status: raw.score_status ?? 'ready' }
 }
 
 /**

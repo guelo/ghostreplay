@@ -3,6 +3,7 @@ import {
   fetchSessionOpenings,
   type OpeningLineageItem,
   type OpeningPlayerColor,
+  type OpeningScoreStatus,
 } from "../utils/api";
 
 interface UseSessionOpeningsOptions {
@@ -21,6 +22,7 @@ interface SessionOpeningsState {
   lineage: OpeningLineageItem[];
   playerColor: OpeningPlayerColor;
   startPly: number;
+  scoreStatus: OpeningScoreStatus;
 }
 
 // Stable empty reference so a session change / disabled hook does not churn
@@ -31,6 +33,24 @@ const EMPTY_LINEAGE: OpeningLineageItem[] = [];
 // ticks cover a ply whose server-side upload/analysis lands after the local
 // move event; when the position is stable there is no further traffic.
 const LAG_REPOLL_MAX_TICKS = 2;
+
+// Score reconciliation (g-a5v3): a cold score cache answers immediately with
+// `score_status: "pending"` instead of blocking, so the client must come back
+// for the scores.
+//
+// The interval MUST exceed the scheduler's 1.5s quiet_window. A 1500ms cadence
+// equals the debounce window and keeps the key maximally hot; the backend's
+// is-already-scheduled guard stops the deadline from being pushed out, but
+// there is still no point polling faster than the work can land.
+const PENDING_REPOLL_MS = 3000;
+// ~8 attempts at 3s ≈ 24s. On exhaustion the hook reports the scores as
+// resolved-but-absent so consumers can clear their loading affordance — the
+// status alone never changes, so without this a spinner would run forever.
+const PENDING_REPOLL_MAX_ATTEMPTS = 8;
+// How many consecutive NON-pending (request-free) ticks the reconciliation
+// cycle waits through before going quiet. Covers a first fetch that resolves
+// after the first tick; see the effect for why stopping immediately is wrong.
+const PENDING_REPOLL_IDLE_TICKS = 3;
 
 /**
  * Fetch a session's opening lineage (broadest -> deepest) for live + history
@@ -65,13 +85,28 @@ export function useSessionOpenings(
   lineage: OpeningLineageItem[];
   playerColor: OpeningPlayerColor;
   startPly: number;
+  /** Effective status for display: "pending" only while scores are genuinely
+   *  still coming. Flips to "ready" once the bounded reconciliation gives up,
+   *  so a permanently-cold cache renders as unscored rather than loading. */
+  scoreStatus: OpeningScoreStatus;
 } {
   const [state, setState] = useState<SessionOpeningsState>({
     sessionId: null,
     lineage: EMPTY_LINEAGE,
     playerColor: "white",
     startPly: 1,
+    scoreStatus: "ready",
   });
+  // Which reconciliation WINDOW ran out of attempts, as `sessionId::refetchKey`.
+  //
+  // Keyed by the window rather than a boolean (or the session alone) so it is
+  // DERIVED as cleared whenever a new budget arms — no reset effect, no
+  // cascading render. Including refetchKey matters: the re-poll effect re-arms a
+  // fresh attempt budget on every refetchKey change, so keying on the session
+  // alone would leave a session permanently "ready" after one exhausted window,
+  // and later moves in that game could never show the loading affordance again.
+  const [exhaustedWindow, setExhaustedWindow] = useState<string | null>(null);
+  const reconcileWindow = `${sessionId ?? ""}::${refetchKey}`;
 
   // Monotonic across ALL fetches (data-change + poll) so only the latest issued
   // request may commit; a slower OLDER response is dropped.
@@ -104,6 +139,7 @@ export function useSessionOpenings(
           lineage: data.lineage,
           playerColor: data.player_color,
           startPly: data.start_ply,
+          scoreStatus: data.score_status,
         });
       })
       .catch(() => {
@@ -118,6 +154,7 @@ export function useSessionOpenings(
                 lineage: EMPTY_LINEAGE,
                 playerColor: "white",
                 startPly: 1,
+                scoreStatus: "ready",
               },
         );
       });
@@ -156,12 +193,84 @@ export function useSessionOpenings(
     };
   }, [sessionId, refetchKey, active, lagRepollMs, doFetch]);
 
+  // Score reconciliation for a cold cache (g-a5v3). Deliberately gated ONLY on
+  // the pending status — NOT on `active` or `lagRepollMs`:
+  //   - HistoryPage passes neither, and would otherwise never reconcile.
+  //   - ChessGame passes `active: isGameActive`, which goes false at exactly
+  //     the terminal moment the score badges need their numbers.
+  // The re-poll for upload lag above stays as-is; these are separate concerns.
+  //
+  // `scoreStatus` is read through a ref and kept OUT of the dep array (finding
+  // C): a status flip must not re-arm the cycle, and this effect — like the lag
+  // re-poll — may only fetch on a TIMER TICK, never synchronously on a dep
+  // change. The tick closes over its own counter for the same reason.
+  // Synced in an effect, not during render: a render-phase ref write is unsafe
+  // under concurrent rendering. The only reader is the timer tick below, which
+  // runs long after commit, so the one-commit lag is not observable.
+  const scoreStatusRef = useRef<OpeningScoreStatus>("ready");
+  useEffect(() => {
+    scoreStatusRef.current = state.scoreStatus;
+  }, [state.scoreStatus]);
+
+  useEffect(() => {
+    if (sessionId == null) return;
+    const sid = sessionId;
+    let cancelled = false;
+    let attemptsLeft = PENDING_REPOLL_MAX_ATTEMPTS;
+    // A tick that finds the status NOT pending must not stop the cycle
+    // outright: the very first fetch may still be in flight (it resolves after
+    // this tick whenever the request outruns PENDING_REPOLL_MS), so the ref
+    // would still read the initial "ready" and reconciliation would never
+    // start. Idle ticks are cheap — they issue no request — but they are
+    // bounded so a session whose scores are simply ready goes quiet.
+    let idleTicksLeft = PENDING_REPOLL_IDLE_TICKS;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = () => {
+      if (cancelled) return;
+      if (scoreStatusRef.current !== "pending") {
+        if (idleTicksLeft <= 0) return;
+        idleTicksLeft -= 1;
+        timer = setTimeout(tick, PENDING_REPOLL_MS);
+        return;
+      }
+      if (attemptsLeft <= 0) {
+        // Bounded give-up: surface it so consumers stop showing a spinner.
+        setExhaustedWindow(`${sid}::${refetchKey}`);
+        return;
+      }
+      attemptsLeft -= 1;
+      // A real attempt refreshes the idle budget, so a pending->ready->pending
+      // sequence within one session still gets a full watch window.
+      idleTicksLeft = PENDING_REPOLL_IDLE_TICKS;
+      void doFetch(sid).finally(() => {
+        if (cancelled) return;
+        timer = setTimeout(tick, PENDING_REPOLL_MS);
+      });
+    };
+    timer = setTimeout(tick, PENDING_REPOLL_MS);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // Re-arms on refetchKey (like the lag re-poll) so each new move opens a
+    // fresh reconciliation window. NOT on scoreStatus — that is read through a
+    // ref precisely so a status flip cannot re-arm the effect (finding C).
+  }, [sessionId, refetchKey, doFetch]);
+
   // Prior data is shown ONLY for the same session: a session change yields []
-  // synchronously, held until the new session's fetch commits.
+  // synchronously, held until the new session's fetch commits. `scoreStatus` is
+  // behind the SAME guard, so one game's pending state can never leak into the
+  // next game's cards.
   const matches = state.sessionId === sessionId;
   return {
     lineage: matches ? state.lineage : EMPTY_LINEAGE,
     playerColor: matches ? state.playerColor : "white",
     startPly: matches ? state.startPly : 1,
+    scoreStatus:
+      matches &&
+      state.scoreStatus === "pending" &&
+      exhaustedWindow !== reconcileWindow
+        ? "pending"
+        : "ready",
   };
 }

@@ -12,6 +12,7 @@ import { useOpponentMove } from "../hooks/useOpponentMove";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useBoardNotice } from "../hooks/useBoardNotice";
 import { useSessionOpenings } from "../hooks/useSessionOpenings";
+import { useLiveOpeningLineage } from "../hooks/useLiveOpeningLineage";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
 import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
@@ -421,9 +422,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   // server-side after the local move event. Expand-only: no board-jump, no
   // Start Drill.
   const {
-    lineage: openingLineage,
+    lineage: openingLineageFromServer,
     playerColor: openingLineagePlayerColor,
-    startPly: openingLineageStartPly,
+    startPly: openingLineageServerStartPly,
+    scoreStatus: openingScoreStatus,
   } = useSessionOpenings(sessionId, {
       // Force one extra refetch at a terminal event (g-3gmc): a resign/fast-stop
       // sets openingScoreChanges WITHOUT adding a move and with polling already
@@ -435,6 +437,23 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       lagRepollMs: 1500,
       active: isGameActive,
     });
+
+  // Display lineage: derived from LOCAL move history so a card renders on the
+  // same tick as the move that crossed its root, with the server response
+  // merged in for scores only (g-a5v3). Gating display on the server response
+  // made cards appear seconds late — it is not causally ordered with the move.
+  const {
+    lineage: openingLineage,
+    startPly: openingLineageLocalStartPly,
+  } = useLiveOpeningLineage(moveHistory, openingLineageFromServer);
+
+  // Prefer the server's authoritative start ply once it has answered; the local
+  // derivation covers the window before that (and matches it in every case we
+  // can construct — see useLiveOpeningLineage.test.ts).
+  const openingLineageStartPly =
+    openingLineageFromServer.length > 0
+      ? openingLineageServerStartPly
+      : openingLineageLocalStartPly;
 
   // Whether the user can make moves (must be viewing live position)
   const isViewingLive = viewIndex === null;
@@ -2049,6 +2068,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                     lineage={openingLineage}
                     startPly={openingLineageStartPly}
                     scoreChanges={openingScoreChanges}
+                    scoreStatus={openingScoreStatus}
                     // Board navigation works during play AND post-game (history
                     // parity): selecting a card only REVIEWS the opening's past
                     // position (viewIndex) — it never disturbs the live game.

@@ -8,6 +8,7 @@ import type {
   OpeningLineageItem,
   OpeningPlayerColor,
   OpeningScoreDeltaItem,
+  OpeningScoreStatus,
 } from "../utils/api";
 
 interface GameOpeningLineageProps {
@@ -27,6 +28,11 @@ interface GameOpeningLineageProps {
   /** When provided, the expanded card shows a Start Drill button. Omit to hide
    *  it (live game panel). */
   onStartDrill?: (item: OpeningLineageItem) => void;
+  /** Whether the server's opening scores are still being computed (g-a5v3).
+   *  "pending" makes each card render a loading placeholder in place of its
+   *  score, so a cold cache reads as "loading" rather than "unscored".
+   *  Defaults to "ready" — callers that never see a cold cache can omit it. */
+  scoreStatus?: OpeningScoreStatus;
 }
 
 type LineageBadge = { diff: number; after: number; dir: "up" | "down" };
@@ -106,6 +112,7 @@ function GameOpeningLineage({
   scoreChanges,
   onSelectRoot,
   onStartDrill,
+  scoreStatus = "ready",
 }: GameOpeningLineageProps) {
   // Track expansion by a per-occurrence key (opening_key + index), not the bare
   // opening_key: a lineage can (defensively) repeat the same root as separate
@@ -147,6 +154,11 @@ function GameOpeningLineage({
             : change.is_new
               ? null
               : change.before ?? item.score;
+          // The terminal pin wins over the pending shimmer: once `change` is
+          // present the card shows the pinned pre-game number beside the diff
+          // badge, and swapping that number for a shimmer mid-pin would make
+          // the badge reference a value that is no longer on screen.
+          const scorePending = scoreStatus === "pending" && !change;
           const view = toNodeView(item, startPly, cardScore);
 
           return (
@@ -167,6 +179,7 @@ function GameOpeningLineage({
                     variant="expanded"
                     kind="family"
                     node={view}
+                    scorePending={scorePending}
                     onStartDrill={
                       onStartDrill ? () => onStartDrill(item) : undefined
                     }
@@ -186,6 +199,7 @@ function GameOpeningLineage({
                   variant="compact"
                   kind="family"
                   node={view}
+                  scorePending={scorePending}
                   // Wording reflects the action: history selects a root + toggles
                   // details; the live panel only expands the card in place.
                   ariaLabel={

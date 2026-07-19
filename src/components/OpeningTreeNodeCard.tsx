@@ -91,6 +91,29 @@ interface OpeningTreeNodeCardProps {
    *  clickable. Its clicks are stopped from bubbling so a tap never collapses the
    *  card. Kept as an injected node so the card stays router-free. */
   footerAction?: ReactNode;
+
+  /** When true, this card's score is still being computed server-side, so the
+   *  score + grade slot renders a loading placeholder instead of "—" (g-a5v3).
+   *
+   *  Carried explicitly rather than inferred from `score == null`, because a
+   *  null score already has a distinct, legitimate meaning ("no score for this
+   *  opening") that must stay visually different from "still loading". */
+  scorePending?: boolean;
+}
+
+/**
+ * Placeholder occupying the score + grade slot while scores load (g-a5v3).
+ * Reserves the slot's width so hydrating a score does not reflow the card, and
+ * exposes an accessible loading label — a bare visual shimmer would leave the
+ * state unannounced to assistive tech.
+ */
+function ScorePlaceholder() {
+  return (
+    <span className="tree-node-card__score-loading" aria-busy="true">
+      <span className="tree-node-card__score-shimmer" aria-hidden="true" />
+      <span className="tree-node-card__score-loading-label">Score loading</span>
+    </span>
+  );
 }
 
 /**
@@ -320,9 +343,11 @@ function MoveListLine({
 function CompactBody({
   node,
   kind,
+  scorePending,
 }: {
   node: OpeningTreeNodeView;
   kind: "move" | "family";
+  scorePending?: boolean;
 }) {
   const isRoot = isSynthesizedRoot(node, kind);
   const isMove = kind === "move";
@@ -341,8 +366,14 @@ function CompactBody({
           {name}
         </span>
         <span className="tree-node-card__primary-right">
-          <span className="tree-node-card__score">{formatScore(node.score)}</span>
-          <GradeTag score={node.score} />
+          {scorePending ? (
+            <ScorePlaceholder />
+          ) : (
+            <>
+              <span className="tree-node-card__score">{formatScore(node.score)}</span>
+              <GradeTag score={node.score} />
+            </>
+          )}
         </span>
       </span>
       {!isRoot && (isMove || node.moveListSan.length > 0) && (
@@ -370,10 +401,12 @@ function ExpandedBody({
   node,
   kind,
   onStartDrill,
+  scorePending,
 }: {
   node: OpeningTreeNodeView;
   kind: "move" | "family";
   onStartDrill?: () => void;
+  scorePending?: boolean;
 }) {
   // Every expanded card is drillable; the page decides drillability by passing
   // onStartDrill (wired for move/family cards, omitted for the synthesized root
@@ -412,8 +445,14 @@ function ExpandedBody({
         <div className="tree-node-card__score-metric">
           <dt>Score</dt>
           <dd className="tree-node-card__score-value">
-            {formatScore(node.score)}
-            <GradeTag score={node.score} />
+            {scorePending ? (
+              <ScorePlaceholder />
+            ) : (
+              <>
+                {formatScore(node.score)}
+                <GradeTag score={node.score} />
+              </>
+            )}
           </dd>
         </div>
         {isMove && (
@@ -473,6 +512,7 @@ function OpeningTreeNodeCard({
   onStartDrill,
   onCollapse,
   footerAction,
+  scorePending,
 }: OpeningTreeNodeCardProps) {
   const className = [
     "tree-node-card",
@@ -496,14 +536,14 @@ function OpeningTreeNodeCard({
           aria-expanded={isExpanded === undefined ? undefined : isExpanded}
           aria-controls={controlsId}
         >
-          <CompactBody node={node} kind={kind} />
+          <CompactBody node={node} kind={kind} scorePending={scorePending} />
         </button>
       );
     }
 
     return (
       <div className={className}>
-        <CompactBody node={node} kind={kind} />
+        <CompactBody node={node} kind={kind} scorePending={scorePending} />
       </div>
     );
   }
@@ -520,7 +560,12 @@ function OpeningTreeNodeCard({
           onClick={onCollapse}
         />
       )}
-      <ExpandedBody node={node} kind={kind} onStartDrill={onStartDrill} />
+      <ExpandedBody
+        node={node}
+        kind={kind}
+        onStartDrill={onStartDrill}
+        scorePending={scorePending}
+      />
       {footerAction && (
         // Raised above the collapse overlay (z-index) so it stays clickable; its
         // clicks are stopped so tapping it never collapses the card.

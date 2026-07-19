@@ -5,6 +5,7 @@ import { useSessionOpenings } from "./useSessionOpenings";
 import type {
   OpeningLineageItem,
   OpeningPlayerColor,
+  OpeningScoreStatus,
   SessionOpeningsResponse,
 } from "../utils/api";
 
@@ -59,6 +60,7 @@ function response(
   keys: string[],
   playerColor: OpeningPlayerColor = "white",
   startPly = 1,
+  scoreStatus: OpeningScoreStatus = "ready",
 ): SessionOpeningsResponse {
   return {
     player_color: playerColor,
@@ -66,6 +68,7 @@ function response(
       makeItem({ opening_key, opening_name: opening_key, depth }),
     ),
     start_ply: startPly,
+    score_status: scoreStatus,
   };
 }
 
@@ -376,5 +379,171 @@ describe("useSessionOpenings", () => {
 
     // A response after unmount must not throw / commit.
     await resolveFetch(0, response(["k1"]));
+  });
+
+  // -------------------------------------------------------------------------
+  // Score reconciliation for a cold score cache (g-a5v3)
+  // -------------------------------------------------------------------------
+
+  const pendingResponse = (keys: string[]) =>
+    response(keys, "white", 1, "pending");
+
+  it("surfaces scoreStatus and defaults to ready", async () => {
+    const { result } = renderHook(() =>
+      useSessionOpenings("a", { refetchKey: 1 }),
+    );
+    await resolveFetch(0, response(["k1"]));
+    expect(result.current.scoreStatus).toBe("ready");
+  });
+
+  it("re-polls a pending status with NO active flag and NO lagRepollMs", async () => {
+    // History and the post-game board pass neither option; reconciliation must
+    // still run there, or a cold cache never resolves its scores.
+    const { result } = renderHook(() =>
+      useSessionOpenings("a", { refetchKey: 1 }),
+    );
+    await resolveFetch(0, pendingResponse(["k1"]));
+    expect(result.current.scoreStatus).toBe("pending");
+
+    await advance(3000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
+
+    // Scores land -> status clears and the cycle goes quiet.
+    await resolveFetch(1, response(["k1"]));
+    expect(result.current.scoreStatus).toBe("ready");
+
+    await advance(60000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reconciles when the first response resolves AFTER the first tick", async () => {
+    // Regression guard: the status ref still reads the initial "ready" at the
+    // first tick, so a cycle that stopped on a non-pending tick would never
+    // start reconciling a slow cold response.
+    const { result } = renderHook(() =>
+      useSessionOpenings("a", { refetchKey: 1 }),
+    );
+    // Tick fires while the initial request is still in flight.
+    await advance(3000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
+
+    await resolveFetch(0, pendingResponse(["k1"]));
+    expect(result.current.scoreStatus).toBe("pending");
+
+    // The cycle is still alive and now sees the pending status.
+    await advance(3000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops after the attempt cap and clears the pending status", async () => {
+    const { result } = renderHook(() =>
+      useSessionOpenings("a", { refetchKey: 1 }),
+    );
+    await resolveFetch(0, pendingResponse(["k1"]));
+
+    // Eight bounded attempts, each staying pending.
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      await advance(3000);
+      expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(attempt + 1);
+      await resolveFetch(attempt, pendingResponse(["k1"]));
+      expect(result.current.scoreStatus).toBe("pending");
+    }
+
+    // Cap reached: the next tick gives up rather than polling forever...
+    await advance(3000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(9);
+    // ...and reports "ready" so consumers drop the loading affordance and
+    // render the cards as unscored instead of spinning indefinitely.
+    expect(result.current.scoreStatus).toBe("ready");
+
+    await advance(60000);
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(9);
+  });
+
+  it("does not leak a pending status across a session change", async () => {
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionOpenings(id, { refetchKey: 1 }),
+      { initialProps: { id: "a" } },
+    );
+    await resolveFetch(0, pendingResponse(["k1"]));
+    expect(result.current.scoreStatus).toBe("pending");
+
+    // Session change: the guard must report the NEW session's default, not the
+    // previous game's pending state.
+    rerender({ id: "b" });
+    expect(result.current.scoreStatus).toBe("ready");
+    expect(result.current.lineage).toEqual([]);
+  });
+
+  it("restores the loading affordance on a later move in the SAME session", async () => {
+    // Exhaustion is keyed by the reconciliation WINDOW (session + refetchKey),
+    // not the session: a later move arms a fresh budget, so the cards must be
+    // able to show the loading state again rather than being permanently
+    // "ready" for the rest of the game.
+    const { result, rerender } = renderHook(
+      ({ key }: { key: number }) =>
+        useSessionOpenings("a", { refetchKey: key }),
+      { initialProps: { key: 1 } },
+    );
+    await resolveFetch(0, pendingResponse(["k1"]));
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      await advance(3000);
+      await resolveFetch(attempt, pendingResponse(["k1"]));
+    }
+    await advance(3000);
+    expect(result.current.scoreStatus).toBe("ready"); // window exhausted
+
+    // A new move -> new refetchKey -> new window.
+    rerender({ key: 2 });
+    const calls = fetchSessionOpeningsMock.mock.calls.length;
+    await resolveFetch(calls - 1, pendingResponse(["k1", "k2"]));
+
+    expect(result.current.scoreStatus).toBe("pending");
+    await advance(3000);
+    expect(fetchSessionOpeningsMock.mock.calls.length).toBe(calls + 1);
+  });
+
+  it("restores a fresh reconciliation budget on a session change", async () => {
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionOpenings(id, { refetchKey: 1 }),
+      { initialProps: { id: "a" } },
+    );
+    await resolveFetch(0, pendingResponse(["k1"]));
+    // Burn session a's whole budget.
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      await advance(3000);
+      await resolveFetch(attempt, pendingResponse(["k1"]));
+    }
+    await advance(3000);
+    expect(result.current.scoreStatus).toBe("ready"); // exhausted
+
+    rerender({ id: "b" });
+    const callsAfterSwitch = fetchSessionOpeningsMock.mock.calls.length;
+    await resolveFetch(callsAfterSwitch - 1, pendingResponse(["k9"]));
+    // The new session is pending, not stuck behind the old session's exhaustion.
+    expect(result.current.scoreStatus).toBe("pending");
+    await advance(3000);
+    expect(fetchSessionOpeningsMock.mock.calls.length).toBe(callsAfterSwitch + 1);
+  });
+
+  it("never fetches synchronously when only `active` toggles", async () => {
+    // Finding C, re-asserted for the reconciliation effect: a pending status
+    // must not turn an `active` flip into a data fetch.
+    const { rerender } = renderHook(
+      ({ isActive }: { isActive: boolean }) =>
+        useSessionOpenings("a", {
+          refetchKey: 1,
+          lagRepollMs: 1500,
+          active: isActive,
+        }),
+      { initialProps: { isActive: false } },
+    );
+    await resolveFetch(0, pendingResponse(["k1"]));
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
+
+    rerender({ isActive: true });
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
+    rerender({ isActive: false });
+    expect(fetchSessionOpeningsMock).toHaveBeenCalledTimes(1);
   });
 });
