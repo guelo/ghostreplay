@@ -149,6 +149,26 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix",
     # Release-A schema migration on a disposable PostgreSQL DB (g-accuracy-schema)
     "test_release_a_migrations.py::test_pg_disposable_release_a_migration",
+    # Release-B backfill/repair correctness core (g-b-backfill-core). The
+    # NOT VALID -> validated CHECK transition, the frozen visibility predicate's
+    # parity with app/session_contracts.py, and the ply-coordinate detectors'
+    # parity with the frozen validator. None of the three is observable from the
+    # SQLite migration suite: the CHECK has no NOT VALID state there, the ORM
+    # predicate is never exercised against the frozen SQL copy, and
+    # PLY_DETECTOR_ONE_PG differs from its SQLite twin by exactly the
+    # CAST(:sid AS uuid) that fails when the bind arrives as text.
+    "test_release_b_pg_matrix.py::test_pg_release_b_validates_the_not_valid_check",
+    "test_release_b_pg_matrix.py::test_pg_population_parity_matrix",
+    # The guarded update's typed arrays across an all-NULL / mixed / all-scored
+    # batch, plus the one-server-statement property. SQLite's guarded update is a
+    # per-row statement with no arrays, so it cannot express any of this.
+    "test_release_b_pg_matrix.py::"
+    "test_pg_guarded_update_typed_arrays_all_null_mixed_and_all_scored",
+    # The nil UUID is a schema-valid session ID; a sentinel-cursor keyset sweep
+    # would skip it and then fail to converge.
+    "test_release_b_pg_matrix.py::test_pg_nil_uuid_session_is_backfilled",
+    "test_release_b_pg_matrix.py::test_pg_detector_parity",
+    "test_release_b_pg_matrix.py::test_pg_integer_division_floors_like_the_validator",
 })
 
 # The SRS/moves cross-root lock matrix must run all four session/blunder lock
@@ -160,6 +180,16 @@ REQUIRED_PG_GATE_PARAM_CASES = frozenset({
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[both_nku]",
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[session_fu_blunder_nku]",
     "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix[session_nku_blunder_fu]",
+    # Release B's three-way ply-coordinate detector parity. All five row sets are
+    # pinned individually so a case that stops being collected fails the manifest
+    # check instead of silently reducing coverage to whatever still runs. The
+    # empty set is the case most likely to diverge — count(*) over an empty CTE
+    # versus the validator's early return on [].
+    "test_release_b_pg_matrix.py::test_pg_detector_parity[well_formed]",
+    "test_release_b_pg_matrix.py::test_pg_detector_parity[gap]",
+    "test_release_b_pg_matrix.py::test_pg_detector_parity[white_white_adjacency]",
+    "test_release_b_pg_matrix.py::test_pg_detector_parity[contiguous_surplus]",
+    "test_release_b_pg_matrix.py::test_pg_detector_parity[empty]",
 })
 
 

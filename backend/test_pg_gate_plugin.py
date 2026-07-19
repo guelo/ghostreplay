@@ -386,11 +386,20 @@ def test_plugin_imports_and_manifests_are_populated():
     assert isinstance(mod.REQUIRED_PG_GATE_PARAM_CASES, frozenset)
     # pg_required is an alias for the pg_gate marker (same object).
     assert mod.pg_required is mod.pg_gate
-    # The matrix function identity and its four pinned cases agree.
+    # Every pinned matrix function identity and its cases agree. Stated as an
+    # invariant over the manifests rather than as a hardcoded case count, so a
+    # new gated matrix (Release B added the ply-coordinate detector's five row
+    # sets) extends the manifest without editing this assertion — while a case
+    # whose FUNCTION is missing from REQUIRED_PG_GATE_TESTS still fails here.
     matrix_fn = "test_writer_locks.py::test_srs_moves_cross_root_lock_matrix"
     assert matrix_fn in mod.REQUIRED_PG_GATE_TESTS
-    assert len(mod.REQUIRED_PG_GATE_PARAM_CASES) == 4
-    assert all(c.startswith(matrix_fn + "[") for c in mod.REQUIRED_PG_GATE_PARAM_CASES)
+    assert (
+        sum(1 for c in mod.REQUIRED_PG_GATE_PARAM_CASES if c.startswith(matrix_fn + "[")) == 4
+    )
+    assert mod.REQUIRED_PG_GATE_PARAM_CASES
+    for case in mod.REQUIRED_PG_GATE_PARAM_CASES:
+        assert case.endswith("]"), case
+        assert case.split("[", 1)[0] in mod.REQUIRED_PG_GATE_TESTS, case
 
 
 def test_manifest_matches_real_pg_gate_collection():

@@ -24,6 +24,14 @@ DRILL_STRICTNESS_TIER_THRESHOLDS: dict[str, int] = {
 }
 
 
+# SECOND DEFINITION EXISTS. Alembic revision 20260719_01
+# (backfill_session_player_accuracy) freezes a SQL copy of this predicate —
+# `session_mode = 'normal' OR drill_state = 'converted'` — because a migration
+# must not depend on live ORM code that can change under it. If you edit the
+# visibility rule here, that frozen copy does NOT follow. The population-parity
+# matrix in test_release_b_pg_matrix.py is what holds the two together: it
+# asserts the migration's SQL predicate, its coverage assertion, and these two
+# functions agree over 8 session shapes x 3 seeded versions.
 def visible_session_filter():
     return or_(
         GameSession.session_mode == NORMAL_SESSION_MODE,
