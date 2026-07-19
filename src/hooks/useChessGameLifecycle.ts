@@ -40,6 +40,24 @@ import type { RatingScores } from "../utils/api";
 // supplementary, so on timeout we proceed and let it degrade.
 const FINAL_UPLOAD_TIMEOUT_MS = 4000;
 
+// Slice of FINAL_UPLOAD_TIMEOUT_MS (not additive to it) spent waiting for an
+// still-pending PENULTIMATE-ply analysis before the final upload (g-2nrn). A
+// null penultimate eval nulls whole-game accuracy in both color configurations,
+// and unlike the terminal ply it cannot be filled deterministically — it needs
+// a real engine result.
+//
+// Sized from measurement, not intuition. Depth-17 settle time is bimodal: a
+// penultimate ply inside a forced mating sequence settles in ~3ms (tiny tree),
+// while a quiet one (resign/draw endings) takes ~1.7s median and ~3.0s p90 on
+// mid-tier desktop hardware. Covering the quiet arm would need most of the 4s
+// budget, and the final upload ALREADY times out at ~18.5% of terminal actions
+// — taking that time would convert "null accuracy" into "tail never persisted",
+// which is strictly worse. So this buys the forced-mate arm plus analyses that
+// are nearly done (the wait only needs the RESIDUAL settle time, since the
+// analysis has been running since the penultimate move was played), and leaves
+// the upload budget essentially intact.
+const TAIL_SETTLE_BUDGET_MS = 300;
+
 const applyRatingScores = (scores: RatingScores | null | undefined) => {
   if (!scores) return;
   const s = useGameStore.getState();
@@ -254,11 +272,57 @@ export const useChessGameLifecycle = ({
       // aborts the in-flight fetch); the full-history upload below reads
       // moveHistory + analysisMap directly, so it is unaffected. All callers are
       // terminal, so the permanent disable until the next startSession is correct.
+      // VALIDATE before stopping anything (g-2nrn). An already-stale invocation
+      // that merely captured its session id would otherwise disable a NEWLY
+      // started session's uploads before ever reaching the post-wait revalidation.
+      // Both the store and the coordinator must agree we are still finalizing
+      // the requested session.
+      const epochBefore = coordinator.getEpoch();
+      if (
+        useGameStore.getState().sessionId !== sessionId ||
+        epochBefore.sessionId !== sessionId
+      ) {
+        return;
+      }
+      const deadlineStartedAt = performance.now();
+
       coordinator.stopSessionUploads();
+
+      // Freeze the history BEFORE the wait so the payload can never mix this
+      // session's plies with a later session's. Stopping uploads does not stop
+      // analysis RESOLUTION — resolveAnalysis writes to analysisMap before the
+      // uploadsEnabled gate — so a tail ply that settles during the wait still
+      // reaches the payload below, while g-y90g's "final upload is the last
+      // /moves" invariant is preserved.
+      const frozenHistory = useGameStore.getState().moveHistory;
+
+      // Wait only on the PENULTIMATE ply. The terminal ply is filled
+      // deterministically by fillUnresolvedTerminal, so waiting on it would add
+      // latency for a result we synthesize anyway; earlier plies are long
+      // settled and are not the race this fixes.
+      if (frozenHistory.length >= 2) {
+        await coordinator.settleWithin(
+          [frozenHistory.length - 2],
+          TAIL_SETTLE_BUDGET_MS,
+        );
+      }
+
+      // REVALIDATE after the await. If startSession() ran during the wait it
+      // bumped the generation, replaced uploadState and cleared analysisMap —
+      // uploading now would persist the NEW session's data under the OLD
+      // session id.
+      const epochAfter = coordinator.getEpoch();
+      if (
+        useGameStore.getState().sessionId !== sessionId ||
+        epochAfter.generation !== epochBefore.generation
+      ) {
+        return;
+      }
+
       try {
         const uploads = fillUnresolvedTerminal(
           buildSessionMoveUploads(
-            useGameStore.getState().moveHistory,
+            frozenHistory,
             new Map(coordinator.store.getState().analysisMap),
             STARTING_FEN,
           ),
@@ -271,8 +335,22 @@ export const useChessGameLifecycle = ({
           // in-flight incremental that races to the server is harmless: the
           // evidence enqueue coalesces by session_id and only this true-flagged
           // entry drives the single recompute.
+          // ONE ABSOLUTE DEADLINE, not additive: the upload inherits whatever
+          // is left of FINAL_UPLOAD_TIMEOUT_MS after the tail wait, so the
+          // terminal-action bound stays 4s rather than drifting to 4.3s.
+          // Subtract ACTUAL elapsed, not the nominal budget — a tail that
+          // settles in 5ms hands the upload back its remaining ~3995ms.
+          // FLOOR, and floor rather than round: AbortSignal.timeout() rejects a
+          // fractional delay (performance.now() is sub-millisecond), and
+          // rounding up could push past the absolute deadline.
+          const remainingBudgetMs = Math.max(
+            0,
+            Math.floor(
+              FINAL_UPLOAD_TIMEOUT_MS - (performance.now() - deadlineStartedAt),
+            ),
+          );
           await uploadSessionMoves(sessionId, uploads, {
-            signal: AbortSignal.timeout(FINAL_UPLOAD_TIMEOUT_MS),
+            signal: AbortSignal.timeout(remainingBudgetMs),
             recomputeOpportunity: true,
           });
         }

@@ -186,13 +186,20 @@ const mockCoordinator = {
   ),
   flushPendingUploads: vi.fn().mockResolvedValue(undefined),
   stopSessionUploads: vi.fn(),
+  settleWithin: vi.fn().mockResolvedValue(undefined),
   sessionId: null,
   store: gameAnalysisStore,
   markSkipped: vi.fn(),
   pruneFromMoveIndex: vi.fn((k: number) =>
     mockCoordinator.decisionOwner.handleReset({ generation: 0, sessionId: null, fromMoveIndex: k }),
   ),
-  getEpoch: vi.fn(() => ({ generation: 0, sessionId: null })),
+  // Tracks the live store session id: the g-2nrn final-upload guard requires the
+  // coordinator epoch and the store to agree before it stops uploads, so a
+  // hardcoded null here would make every terminal path bail out.
+  getEpoch: vi.fn(() => ({
+    generation: 0,
+    sessionId: useGameStore.getState().sessionId,
+  })),
   addAnalysisResetListener: vi.fn(() => () => {}),
   addAnalysisOutcomeListener: vi.fn(() => () => {}),
   decisionOwner: createTestDecisionOwner(),

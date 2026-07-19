@@ -59,6 +59,15 @@ const createMockCoordinator = (): GameAnalysisCoordinator =>
     pruneFromMoveIndex: vi.fn(),
     markSkipped: vi.fn(),
     sessionId: null,
+    // g-2nrn: the final upload validates the coordinator epoch against the
+    // store BEFORE stopping uploads and again after the tail wait. Track the
+    // live store id so the guard passes in the normal flow; tests that exercise
+    // staleness override this per-case.
+    getEpoch: vi.fn(() => ({
+      generation: 0,
+      sessionId: useGameStore.getState().sessionId,
+    })),
+    settleWithin: vi.fn().mockResolvedValue(undefined),
     store: { getState: vi.fn().mockReturnValue({ analysisMap: new Map() }) },
     // Coordinator-owned recording/SRS owner (g-2m0p). The lifecycle only calls
     // cancelPendingSrsReviews on it; spy on that to assert the early-clear contract.
@@ -1821,6 +1830,147 @@ describe("useChessGameLifecycle", () => {
         synthetic_terminal_eval: true,
       }),
     );
+  });
+
+  // ---------------------------------------------------------------
+  // g-2nrn: bounded tail wait ahead of the final upload
+  // ---------------------------------------------------------------
+  describe("g-2nrn: penultimate-ply tail wait", () => {
+    const buildTerminalGame = () => {
+      const chess = new Chess();
+      const moveHistory = ["f3", "e5", "g4", "Qh4#"].map((san) => {
+        const move = chess.move(san);
+        return {
+          san: move.san,
+          fen: chess.fen(),
+          uci: move.from + move.to + (move.promotion ?? ""),
+        };
+      });
+      return { chess, moveHistory };
+    };
+
+    const endGameOnce = () =>
+      endGameMock.mockResolvedValueOnce({
+        session_id: "session-123",
+        result: "checkmate_win",
+        ended_at: "2026-04-28T00:00:00Z",
+        rating: null,
+        opening_score_changes: OPENING_CHANGES,
+      });
+
+    it("waits on the PENULTIMATE ply only, not the terminal ply", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      endGameOnce();
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      // 4 plies -> penultimate index is 2. The terminal ply (3) is filled
+      // deterministically by fillUnresolvedTerminal, so waiting on it would add
+      // latency for a value we synthesize anyway.
+      expect(coordinator.settleWithin).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).toEqual([2]);
+      // Earlier plies (n-5 etc.) are long settled and are never waited on.
+      expect(vi.mocked(coordinator.settleWithin).mock.calls[0][0]).not.toContain(0);
+    });
+
+    it("waits AFTER stopping uploads, so the upload stays the last /moves", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      endGameOnce();
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      // stop -> wait -> upload. Stopping does NOT stop analysis resolution, so
+      // this ordering preserves g-y90g while still exposing a late eval.
+      const stopOrder = vi.mocked(coordinator.stopSessionUploads).mock
+        .invocationCallOrder[0];
+      const waitOrder = vi.mocked(coordinator.settleWithin).mock
+        .invocationCallOrder[0];
+      expect(stopOrder).toBeLessThan(waitOrder);
+      expect(waitOrder).toBeLessThan(
+        uploadSessionMovesMock.mock.invocationCallOrder[0],
+      );
+    });
+
+    it("hands the upload only the REMAINDER of the absolute deadline", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+      endGameOnce();
+
+      // Burn ~250ms of the budget inside the tail wait.
+      vi.mocked(coordinator.settleWithin).mockImplementationOnce(
+        () => new Promise((resolve) => setTimeout(resolve, 250)),
+      );
+      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+
+      await act(async () => {
+        await result.current.handleGameEnd();
+      });
+
+      // The terminal bound must stay 4s, not drift to 4.25s: the upload
+      // inherits 4000 - elapsed, never a fresh 4000.
+      expect(timeoutSpy).toHaveBeenCalled();
+      const granted = timeoutSpy.mock.calls[0][0] as number;
+      expect(granted).toBeLessThan(4000);
+      expect(granted).toBeLessThanOrEqual(3750);
+      // AbortSignal.timeout rejects a fractional delay.
+      expect(Number.isInteger(granted)).toBe(true);
+      timeoutSpy.mockRestore();
+    });
+
+    it("uploads nothing when the session was already replaced (step-1 guard)", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+      // A stale invocation for a session that is no longer current must stop
+      // NOTHING — otherwise it would disable the NEW session's uploads.
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd("session-stale");
+      });
+
+      expect(coordinator.stopSessionUploads).not.toHaveBeenCalled();
+      expect(coordinator.settleWithin).not.toHaveBeenCalled();
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled();
+    });
+
+    it("uploads nothing when a new session starts DURING the wait (step-5 guard)", async () => {
+      const { chess, moveHistory } = buildTerminalGame();
+      const { result, coordinator } = setup({
+        chess, moveHistory, isGameActive: true, isRated: false, playerColor: "white",
+      });
+      await waitFor(() => expect(fetchCurrentRatingMock).toHaveBeenCalledTimes(1));
+
+      // startSession() mid-wait bumps the generation, replaces uploadState and
+      // clears analysisMap. Building the payload afterwards would persist the
+      // NEW session's data under the OLD session id.
+      vi.mocked(coordinator.getEpoch)
+        .mockReturnValueOnce({ generation: 0, sessionId: "session-123" })
+        .mockReturnValueOnce({ generation: 1, sessionId: "session-123" });
+
+      await act(async () => {
+        await result.current.uploadFullMoveHistoryBeforeEnd("session-123");
+      });
+
+      expect(coordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
+      expect(uploadSessionMovesMock).not.toHaveBeenCalled();
+    });
   });
 
   // g-terminal-draws: the same final-upload path fills an unresolved terminal

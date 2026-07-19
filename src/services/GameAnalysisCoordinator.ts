@@ -1070,6 +1070,97 @@ export class GameAnalysisCoordinator {
     })
   }
 
+  /**
+   * Block until every given move index has settled, or until `budgetMs` elapses
+   * — whichever comes first (g-2nrn).
+   *
+   * NEVER rejects. A timeout, a failed analysis, an index that was never
+   * scheduled and a superseded request are all the same outcome to the only
+   * caller (the terminal full-history upload): proceed with whatever
+   * `analysisMap` holds. Settling is a synchronization barrier here, not a
+   * value fetch — the caller re-reads `analysisMap` afterwards — so this
+   * deliberately does not expose `waitForAnalysis`'s rejection contract, which
+   * rejects SYNCHRONOUSLY for a never-scheduled index and would throw into any
+   * caller that did not individually await it.
+   *
+   * Already-resolved indices cost nothing: no waiter is registered and no timer
+   * is armed, so the common fully-settled tail adds zero latency.
+   *
+   * On expiry every still-pending waiter is DEREGISTERED. `waitForAnalysis`
+   * has no timeout of its own, so a plain `Promise.race` at the call site would
+   * strand its waiter in `analysisWaiters` for the rest of the session.
+   */
+  async settleWithin(moveIndices: number[], budgetMs: number): Promise<void> {
+    if (budgetMs <= 0) return
+    // A dead worker never settles anything; waiting out the full budget would
+    // burn terminal-action latency for nothing.
+    if (this.store.getState().status === 'error') return
+
+    const analysisMap = this.store.getState().analysisMap
+    const pending = moveIndices.filter((idx) => !analysisMap.has(idx))
+    if (pending.length === 0) return
+
+    const registered: Array<{ moveIndex: number; waiter: AnalysisWaiter }> = []
+    const settled = pending.map(
+      (moveIndex) =>
+        new Promise<void>((resolve) => {
+          const requestId = this.latestRequestIds.get(moveIndex)
+          // Never scheduled, or already terminal/superseded: nothing to await.
+          if (
+            !requestId ||
+            (!this.pendingMoveIndices.has(requestId) &&
+              !this.pendingMeta.has(requestId))
+          ) {
+            resolve()
+            return
+          }
+          const waiter: AnalysisWaiter = {
+            generation: this.sessionGeneration,
+            requestId,
+            // Both legs collapse to "settled" — the result is read from
+            // analysisMap, and a rejection still means we should stop waiting.
+            resolve: () => resolve(),
+            reject: () => resolve(),
+          }
+          const waiters =
+            this.analysisWaiters.get(moveIndex) ?? new Set<AnalysisWaiter>()
+          waiters.add(waiter)
+          this.analysisWaiters.set(moveIndex, waiters)
+          registered.push({ moveIndex, waiter })
+        }),
+    )
+    if (registered.length === 0) return
+
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.all(settled),
+        new Promise<void>((resolve) => {
+          budgetTimer = setTimeout(resolve, budgetMs)
+        }),
+      ])
+    } finally {
+      // Clear unconditionally: a settled tail must not leave a live handle
+      // behind (it would hang fake-timer tests and outlive the session).
+      if (budgetTimer !== undefined) clearTimeout(budgetTimer)
+      for (const { moveIndex, waiter } of registered) {
+        this.deregisterWaiter(moveIndex, waiter)
+      }
+    }
+  }
+
+  /** Drop a single waiter WITHOUT settling it, pruning the index entry when it
+   *  empties. Used when a bounded wait gives up: the analysis may still resolve
+   *  later, and must not fire into an abandoned waiter. */
+  private deregisterWaiter(moveIndex: number, waiter: AnalysisWaiter) {
+    const waiters = this.analysisWaiters.get(moveIndex)
+    if (!waiters) return
+    waiters.delete(waiter)
+    if (waiters.size === 0) {
+      this.analysisWaiters.delete(moveIndex)
+    }
+  }
+
   clearAnalysis() {
     this.store.getState().clearAll()
     this.lastStreamingUpdateMs = 0

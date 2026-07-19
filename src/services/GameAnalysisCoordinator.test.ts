@@ -406,6 +406,110 @@ describe('GameAnalysisCoordinator', () => {
   })
 
   // ---------------------------------------------------------------
+  // g-2nrn: bounded tail wait for the terminal full-history upload
+  // ---------------------------------------------------------------
+  describe('settleWithin (bounded tail wait)', () => {
+    const waiterCount = (moveIndex: number) =>
+      ((coordinator as any).analysisWaiters.get(moveIndex)?.size ?? 0) as number
+
+    it('returns without arming a timer when every index is already resolved', async () => {
+      coordinator.startSession('session-settled')
+      coordinator.store.getState().resolveAnalysis(0, {
+        id: 'cached', move: 'e2e4', bestMove: 'e2e4', bestEval: 10, playedEval: 10,
+        currentPositionEval: 10, playedEvalMate: null, currentPositionEvalMate: null,
+        moveIndex: 0, delta: 0, classification: 'best', blunder: false, recordable: false,
+      })
+
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      await coordinator.settleWithin([0], 300)
+
+      // The common fully-settled tail must add zero latency.
+      expect(setTimeoutSpy).not.toHaveBeenCalled()
+      setTimeoutSpy.mockRestore()
+    })
+
+    it('returns as soon as the pending analysis settles, before the budget', async () => {
+      coordinator.startSession('session-settle-fast')
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      let done = false
+      const wait = coordinator.settleWithin([0], 300).then(() => { done = true })
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id: requestId, move: 'e2e4', bestMove: 'e2e4',
+          bestEval: 20, playedEval: 20, delta: 0, classification: 'best',
+        },
+      })
+      await vi.advanceTimersByTimeAsync(200) // release the buffered fallback
+      await wait
+
+      expect(done).toBe(true)
+      expect(waiterCount(0)).toBe(0)
+    })
+
+    it('gives up at the budget and deregisters its waiter', async () => {
+      coordinator.startSession('session-settle-slow')
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const wait = coordinator.settleWithin([0], 300)
+
+      // Nothing settles within the budget.
+      await vi.advanceTimersByTimeAsync(300)
+      await expect(wait).resolves.toBeUndefined()
+
+      // The whole point of putting the bound INSIDE the coordinator: a
+      // Promise.race at the call site would strand this waiter for the rest of
+      // the session.
+      expect(waiterCount(0)).toBe(0)
+
+      // A late resolution must still land in analysisMap and must not throw
+      // into the abandoned waiter.
+      ;(coordinator as any).handleWorkerMessage({
+        data: {
+          type: 'analysis', id: requestId, move: 'e2e4', bestMove: 'e2e4',
+          bestEval: 20, playedEval: 20, delta: 0, classification: 'best',
+        },
+      })
+      await vi.advanceTimersByTimeAsync(200)
+      expect(coordinator.store.getState().analysisMap.get(0)).toMatchObject({ id: requestId })
+    })
+
+    it('never rejects — a never-scheduled index returns immediately', async () => {
+      coordinator.startSession('session-unscheduled')
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+
+      // waitForAnalysis would reject SYNCHRONOUSLY here; settleWithin must not,
+      // and must not burn the budget waiting for something that will never come.
+      await expect(coordinator.settleWithin([7], 300)).resolves.toBeUndefined()
+      expect(setTimeoutSpy).not.toHaveBeenCalled()
+      setTimeoutSpy.mockRestore()
+    })
+
+    it('never rejects when the analysis fails', async () => {
+      coordinator.startSession('session-settle-fail')
+      const requestId = coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      const wait = coordinator.settleWithin([0], 300)
+
+      ;(coordinator as any).handleWorkerMessage({
+        data: { type: 'error', id: requestId, message: 'engine exploded' },
+      })
+      await vi.advanceTimersByTimeAsync(200)
+
+      await expect(wait).resolves.toBeUndefined()
+    })
+
+    it('does not wait when the worker is already in an error state', async () => {
+      coordinator.startSession('session-settle-dead')
+      coordinator.analyzeMove('fen-0', 'e2e4', 'white', 0, 20)
+      coordinator.store.getState().setStatus('error')
+
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout')
+      await expect(coordinator.settleWithin([0], 300)).resolves.toBeUndefined()
+      expect(setTimeoutSpy).not.toHaveBeenCalled()
+      setTimeoutSpy.mockRestore()
+    })
+  })
+
+  // ---------------------------------------------------------------
   // g-position-analysis Phase 6: drill-truth side channel
   // ---------------------------------------------------------------
   describe('waitForDrillGrade (drill-truth side channel)', () => {

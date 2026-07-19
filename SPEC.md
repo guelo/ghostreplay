@@ -1180,7 +1180,15 @@ Worker B (the Analyst) produces all engine evaluations used for blunder detectio
 
 **Stopping condition:** Search terminates when depth 17 is reached. The evaluation from the final `info` line before `bestmove` is used.
 
-**Dual-search protocol:** Each move triggers two independent searches (played-move position and best-move position). Using post-move positions for both avoids depth-mismatch inflation that occurs when comparing pre-move minimax against post-move searches.
+**Dual-search protocol:** The delta is computed from two independent **post-move** searches (played-move position and best-move position). Using post-move positions for both avoids depth-mismatch inflation that occurs when comparing pre-move minimax against post-move searches.
+
+**Search count per move:** Up to **three** depth-17 searches run, not two — the two compared post-move searches are preceded by a root search that identifies the best move:
+
+1. **Root search** on the pre-move position → yields `bestMove`.
+2. **Post-played search** (`position fen <fen> moves <playedMove>`) → E_user.
+3. **Post-best search** (`position fen <fen> moves <bestMove>`) → E_best. Skipped when `playedMove === bestMove`, since search 2 already evaluated that position.
+
+Searches 2 and 3 are each skipped when the resulting position is terminal (checkmate/stalemate), where the score is assigned deterministically instead of searched. A non-terminal move where the player did not find the best move therefore costs the full three searches.
 
 **Implementation (JavaScript):**
 ```javascript
@@ -1188,10 +1196,18 @@ Worker B (the Analyst) produces all engine evaluations used for blunder detectio
 worker.postMessage('setoption name Hash value 128');
 worker.postMessage('setoption name MultiPV value 1');
 
-// Per-move analysis: two searches
+// Per-move analysis: up to three searches.
+// 1. Root search on the pre-move position to find bestMove.
+worker.postMessage(`position fen ${fen}`);
+worker.postMessage('go depth 17');
+// ... after `bestmove <bestMove>` is received:
+
+// 2. Post-played position (skipped if terminal — score assigned directly).
 worker.postMessage(`position fen ${fen} moves ${playedMove}`);
 worker.postMessage('go depth 17');
-// ... then after bestmove received:
+
+// 3. Post-best position — only when playedMove !== bestMove
+//    (and likewise skipped if that position is terminal).
 worker.postMessage(`position fen ${fen} moves ${bestMove}`);
 worker.postMessage('go depth 17');
 ```
