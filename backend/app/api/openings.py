@@ -5,7 +5,8 @@ import os
 import time
 import uuid
 from collections import defaultdict, deque
-from dataclasses import dataclass, fields as dc_fields
+from collections.abc import Mapping
+from dataclasses import dataclass, fields as dc_fields, replace
 from datetime import datetime
 from typing import Literal
 
@@ -33,6 +34,7 @@ from app.opening_cache import (
     observed_edge_parent_chunk_count,
     resolve_tree_cache_state,
 )
+from app.opening_densify import RoutingView, routing_view
 from app.opening_evidence import EdgeEvidence, overlay_evidence
 from app.opening_graph import OpeningGraph, get_opening_graph
 from app.opening_quality import mate_to_cp
@@ -579,9 +581,10 @@ class TreeNode(BaseModel):
     opening_name: str | None
     eco: str | None
     in_book: bool
-    is_navigable: bool         # uci in _structural_children(parent) OR this column's user-selected move; gates node clicks only — board drops accept any legal move (g-obh5)
+    is_navigable: bool         # uci in _navigable_children(parent) OR this column's user-selected move; gates node clicks only — board drops accept any legal move (g-obh5)
     is_observed: bool
-    is_user_selected: bool     # legal move chosen on the board, not in book/observed (g-obh5)
+    is_user_selected: bool     # legal move chosen on the board, outside the navigable set (g-obh5)
+    is_transposition: bool = False  # edge supplied by the routing overlay: in the book through a different move order (g-openings-transpose)
     is_prepared: bool
     user_choice_count: int
     encounter_count: int
@@ -657,6 +660,11 @@ class _ChildEdge:
     in_book: bool
     is_observed: bool
     edge: EdgeEvidence | None
+    # True iff this exact (parent, uci) edge comes from the validated routing
+    # overlay (g-openings-transpose). Independent of the other flags: an edge can
+    # be observed AND a transposition; it is never in_book (the artifact only
+    # carries edges absent from the base graph).
+    is_transposition: bool = False
 
 
 @dataclass
@@ -672,6 +680,13 @@ class _RawNode:
     is_navigable: bool
     is_observed: bool
     is_user_selected: bool
+    is_transposition: bool
+    # Display-only first-boundary card (shown, terminal, not navigable). It sits
+    # outside the scorer domain, so hydration must suppress its scorer metrics even
+    # when a cached row exists for the destination — a middlegame position CAN own
+    # a row via an observed move order, and showing it would contradict the
+    # documented null-metrics contract for boundary cards.
+    is_display_boundary: bool
     is_prepared: bool
     user_choice_count: int
     encounter_count: int
@@ -718,9 +733,14 @@ class _OpeningTreeBuilder:
         batch_computed_at: datetime | None,
         player_color: str,
         user_id: int,
+        routing: RoutingView | None = None,
     ) -> None:
         self.db = db
         self.graph = graph
+        # Same immutable snapshot drill routing uses. None ⇒ an empty overlay, so
+        # a missing/stale artifact (or a caller that does not supply one) renders
+        # exactly today's base/observed tree.
+        self.routing = routing if routing is not None else RoutingView(graph)
         self.roots = roots
         self.batch_id = batch_id
         self.batch_computed_at = batch_computed_at
@@ -732,6 +752,7 @@ class _OpeningTreeBuilder:
         # replay, resolution, and terminal-reason derivation).
         self._mid_cache: dict[str, bool] = {}
         self._struct_cache: dict[str, dict[str, _ChildEdge]] = {}
+        self._nav_cache: dict[str, dict[str, _ChildEdge]] = {}
         self._column_cache: dict[str, dict[str, _ChildEdge]] = {}
 
         # Observed-edge read model, indexed by normalized parent FEN. Populated by
@@ -771,7 +792,10 @@ class _OpeningTreeBuilder:
         # Wave 1: line positions pos_norm[0..k].
         line_fens = set(pos_norm[: k + 1])
         self._load_observed(line_fens)
-        # Wave 2: frontier = all column children of every line position. After wave 1
+        # Wave 2: frontier = all column children of every line position — including
+        # transposition destinations, since _column_children now covers the overlay,
+        # so those parents join this wave instead of falling through to the
+        # per-parent straggler query (still two waves, not three). After wave 1
         # each line position's _column_children is a pure in-memory derivation (its own
         # observed edges are cached), so this issues no extra queries beyond the wave-2
         # IN-query. Frontier FENs that are themselves line positions (the on-line child
@@ -875,20 +899,79 @@ class _OpeningTreeBuilder:
         self._struct_cache[norm_fen] = result
         return result
 
+    def _overlay_children(self, norm_fen: str) -> Mapping[str, str]:
+        """Routing-overlay edges out of ``norm_fen``, by UCI → child FEN.
+
+        Read straight off the overlay rather than through
+        ``RoutingView.routing_children``, which unions base and overlay edges and
+        so cannot tell them apart — using the merged accessor would classify
+        ordinary base boundary edges as transpositions.
+        """
+        return self.routing.overlay.children_of(norm_fen)
+
+    def _navigable_children(self, norm_fen: str) -> dict[str, _ChildEdge]:
+        """Clickable moves: the structural (scorer-domain) set plus browsable
+        transpositions (g-openings-transpose).
+
+        An overlay edge is navigable when it lands on a non-middlegame position
+        and the parent is not itself a middlegame position — the overlay must
+        never reopen a line past the opening boundary. Overlay edges never enter
+        ``_structural_children``, so the scorer's domain, the graph fingerprint,
+        and the opening roots are untouched; only browsing widens.
+
+        An overlay edge that duplicates an observed one merges into a single card
+        keeping the evidence, while still being identified as a transposition.
+        """
+        cached = self._nav_cache.get(norm_fen)
+        if cached is not None:
+            return cached
+
+        overlay = self._overlay_children(norm_fen)
+        # Provenance is tagged INDEPENDENTLY of navigation eligibility: an edge
+        # that is in the overlay is a transposition even when it is also observed,
+        # even when it crosses into the middlegame, and even when its parent is
+        # already a middlegame position. Folding the tag into the eligibility
+        # filter below would strip provenance from exactly those cases and render
+        # them as "Off book" — a move from the player's own games, which they are
+        # not.
+        result = {
+            uci: (replace(edge, is_transposition=True) if uci in overlay else edge)
+            for uci, edge in self._structural_children(norm_fen).items()
+        }
+        # Eligibility, by contrast, is filtered: the overlay only volunteers NEW
+        # forward-progress edges, and never past the opening boundary.
+        if not self._is_middlegame(norm_fen):
+            for uci, child_fen in overlay.items():
+                if uci in result:
+                    continue
+                if self._is_middlegame(child_fen):
+                    continue  # boundary-crossing: display-only, added by the column
+                result[uci] = _ChildEdge(
+                    uci=uci,
+                    child_fen=child_fen,
+                    in_book=False,
+                    is_observed=False,
+                    edge=None,
+                    is_transposition=True,
+                )
+        self._nav_cache[norm_fen] = result
+        return result
+
     def _column_children(self, norm_fen: str) -> dict[str, _ChildEdge]:
         """Displayed moves: the navigable set plus the display-only boundary.
 
         When the parent is itself not yet a middlegame position, its middlegame
-        book children are shown as terminal, non-navigable boundary nodes (the
-        first move that crosses into the middlegame). A middlegame parent — only
-        reachable via an observed continuation — adds no such boundary, so
-        ``_column_children`` ⊇ ``_structural_children`` always holds.
+        children — from the book AND from the routing overlay — are shown as
+        terminal, non-navigable boundary nodes (the first move that crosses into
+        the middlegame). A middlegame parent — only reachable via an observed
+        continuation — adds no such boundary, so ``_column_children`` ⊇
+        ``_navigable_children`` ⊇ ``_structural_children`` always holds.
         """
         cached = self._column_cache.get(norm_fen)
         if cached is not None:
             return cached
 
-        result = dict(self._structural_children(norm_fen))
+        result = dict(self._navigable_children(norm_fen))
         if not self._is_middlegame(norm_fen):
             for uci, child_fen in self._book_children(norm_fen).items():
                 if uci in result:
@@ -902,6 +985,19 @@ class _OpeningTreeBuilder:
                         in_book=True,
                         is_observed=False,
                         edge=None,
+                    )
+            for uci, child_fen in self._overlay_children(norm_fen).items():
+                if uci in result:
+                    continue
+                if self._is_middlegame(child_fen):
+                    # Same display-only boundary treatment, overlay provenance.
+                    result[uci] = _ChildEdge(
+                        uci=uci,
+                        child_fen=child_fen,
+                        in_book=False,
+                        is_observed=False,
+                        edge=None,
+                        is_transposition=True,
                     )
         self._column_cache[norm_fen] = result
         return result
@@ -1087,10 +1183,13 @@ class _OpeningTreeBuilder:
             norm_i = pos_norm[i]
             if board_i.is_checkmate() or board_i.is_stalemate():
                 continue  # genuinely no children
-            structural = self._structural_children(norm_i)
+            navigable = self._navigable_children(norm_i)
             # Local copy (NOT the cache): the selected off-tree move is injected
-            # per-line and must never leak into _column_cache.
-            column = dict(self._column_children(norm_i))
+            # per-line and must never leak into _column_cache. Transpositions are
+            # persistent column members and DO go through the cache, so they stay
+            # visible in a cached shorter-prefix view.
+            persistent = self._column_children(norm_i)
+            column = dict(persistent)
             selected_uci = line[i] if i < k else None
             if selected_uci is not None and selected_uci not in column:
                 # A legal move past the book/observed frontier (g-obh5): the
@@ -1106,6 +1205,10 @@ class _OpeningTreeBuilder:
                     in_book=False,
                     is_observed=False,
                     edge=None,
+                    # The overlay never *volunteers* a move out of a middlegame
+                    # parent, but a manually selected one is still a transposition
+                    # and is labelled as such on the wire.
+                    is_transposition=selected_uci in self._overlay_children(norm_i),
                 )
             if not column:
                 continue  # leaf with nothing selected (only at i == k) — no reveal column
@@ -1125,11 +1228,14 @@ class _OpeningTreeBuilder:
                 child_is_mate = board_i.is_checkmate()
                 child_is_stale = board_i.is_stalemate()
                 board_i.pop()
-                # A move selected on the board that is not in the structural set is
+                # A move selected on the board that is not in the navigable set is
                 # the third move type: forced navigable for THIS line only (the
-                # same move as an unselected sibling stays non-navigable).
-                is_user_selected = uci == selected_uci and uci not in structural
-                is_navigable = uci in structural or is_user_selected
+                # same move as an unselected sibling stays non-navigable). Tested
+                # against `navigable`, not `structural`, so an ordinary selected
+                # transposition is NOT relabelled "Your move" while a selected
+                # middlegame boundary (base or overlay) still is, as today.
+                is_user_selected = uci == selected_uci and uci not in navigable
+                is_navigable = uci in navigable or is_user_selected
                 node_obj = self.graph.get_node(child.child_fen)
                 edge = child.edge
                 drill_root = self.roots.get_root(child.child_fen)
@@ -1144,6 +1250,15 @@ class _OpeningTreeBuilder:
                         is_navigable=is_navigable,
                         is_observed=child.is_observed,
                         is_user_selected=is_user_selected,
+                        is_transposition=child.is_transposition,
+                        # Boundary membership is a property of the POSITION, not of
+                        # this line's selection: a persistent column member outside
+                        # the navigable set sits outside the scorer domain whether or
+                        # not the user happens to have it selected. Derived from
+                        # `persistent` (pre-injection) rather than `not is_navigable`,
+                        # since selecting such a card promotes is_navigable and would
+                        # otherwise restore the destination's cached row.
+                        is_display_boundary=uci in persistent and uci not in navigable,
                         is_prepared=bool(
                             edge is not None
                             and (edge.live_attempts >= 2 or edge.live_passes >= 1)
@@ -1266,7 +1381,11 @@ class _OpeningTreeBuilder:
         inherited_eco: str | None,
         selected_uci: str | None,
     ) -> TreeNode:
-        row = position_rows.get(rn.child_fen)
+        # Metrics follow the destination, EXCEPT for display-only boundary cards:
+        # those sit outside the scorer domain, so a row the destination happens to
+        # own (reached through some other, observed move order) must not leak onto
+        # them. Evals are a position property, not a scorer metric, so they stay.
+        row = None if rn.is_display_boundary else position_rows.get(rn.child_fen)
         ev = move_evals.get((rn.parent_full_fen, rn.uci))
         has_own_name = rn.own_name is not None
         return TreeNode(
@@ -1281,6 +1400,7 @@ class _OpeningTreeBuilder:
             is_navigable=rn.is_navigable,
             is_observed=rn.is_observed,
             is_user_selected=rn.is_user_selected,
+            is_transposition=rn.is_transposition,
             is_prepared=rn.is_prepared,
             user_choice_count=rn.user_choice_count,
             encounter_count=rn.encounter_count,
@@ -1480,8 +1600,28 @@ def get_opening_tree(
     db.rollback()
     _record_timing(timings, "rollback_ms", stage_started)
 
+    # Same load-once, provenance-validated snapshot drill routing uses. It already
+    # degrades to an empty overlay (and logs) when the artifact is missing or
+    # stale; the guard here covers anything it does NOT catch, so a browsing
+    # nicety can never take /openings down — worst case the tree is the base +
+    # observed one, exactly as before transposition cards existed.
+    try:
+        routing = routing_view(graph)
+    except Exception:
+        logger.exception(
+            "opening_tree: routing view unavailable; serving the base tree without "
+            "transposition cards"
+        )
+        routing = None
     builder = _OpeningTreeBuilder(
-        db, graph, roots, batch_id, batch_computed_at, player_color, user.user_id
+        db,
+        graph,
+        roots,
+        batch_id,
+        batch_computed_at,
+        player_color,
+        user.user_id,
+        routing=routing,
     )
     response = builder.build(move, opening, timings=timings)
     response.cache_state = cache_state

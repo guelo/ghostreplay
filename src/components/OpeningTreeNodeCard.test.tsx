@@ -13,6 +13,7 @@ const childView: OpeningTreeNodeView = {
   eco: "C60",
   inBook: true,
   isUserSelected: false,
+  isTransposition: false,
   score: 72,
   evalCp: 120,
   evalMate: null,
@@ -33,6 +34,7 @@ const rootView: OpeningTreeNodeView = {
   eco: null,
   inBook: true,
   isUserSelected: false,
+  isTransposition: false,
   score: null,
   evalCp: 40,
   evalMate: null,
@@ -276,6 +278,47 @@ describe("OpeningTreeNodeCard — compact", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
+  it("shows 'Transposition' instead of 'Off book' for an overlay edge", () => {
+    // A transposition edge is not in this parent's book (inBook=false) but IS in
+    // the book through another move order — labelling it "Off book" would claim
+    // it came from the player's own games (g-openings-transpose).
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: false, isTransposition: true }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Transposition")).toBeInTheDocument();
+    expect(screen.queryByText("Off book")).toBeNull();
+  });
+
+  it("prefers 'Your move' over 'Transposition' when both flags are set", () => {
+    // The documented non-disjoint case: a selected overlay edge outside the
+    // navigable set. Exactly one move-type chip renders, and "Your move" wins.
+    render(
+      <OpeningTreeNodeCard
+        variant="compact"
+        node={{ ...childView, inBook: false, isTransposition: true, isUserSelected: true }}
+        onSelect={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Your move")).toBeInTheDocument();
+    expect(screen.queryByText("Transposition")).toBeNull();
+    expect(screen.queryByText("Off book")).toBeNull();
+  });
+
+  it("shows the 'Transposition' chip on the expanded card too", () => {
+    render(
+      <OpeningTreeNodeCard
+        variant="expanded"
+        node={{ ...childView, inBook: false, isTransposition: true }}
+      />,
+    );
+    expect(screen.getByText("Transposition")).toBeInTheDocument();
+    expect(screen.queryByText("Off book")).toBeNull();
+  });
+
   it("never shows the 'Off book' chip on the root", () => {
     render(
       <OpeningTreeNodeCard
@@ -438,6 +481,7 @@ const familyView: OpeningTreeNodeView = {
   eco: "C60",
   inBook: true,
   isUserSelected: false,
+  isTransposition: false,
   score: 72,
   evalCp: null,
   evalMate: null,

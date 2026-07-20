@@ -82,6 +82,7 @@ function toNodeView(
     eco: item.eco,
     inBook: true,
     isUserSelected: false,
+    isTransposition: false,
     score,
     evalCp: null,
     evalMate: null,

@@ -20,6 +20,7 @@ from types import MappingProxyType
 
 import chess
 import pytest
+from unittest.mock import patch
 
 from app.opening_densify import (
     EMPTY_DENSIFIED_EDGES,
@@ -27,11 +28,13 @@ from app.opening_densify import (
     DensificationError,
     DensifiedEdges,
     RoutingView,
+    _reset_routing_views_for_testing,
     compute_densified_edges,
     graph_topology_fingerprint,
     load_densified_edges,
     longest_path_depths,
     resolve_artifact_path,
+    routing_view,
     scan_transposition_edges,
     serialize_edges,
 )
@@ -476,6 +479,41 @@ class TestArtifact:
         path.write_text(json.dumps(payload))
         with pytest.raises(DensificationError, match="duplicates an existing"):
             load_densified_edges(graph, path)
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["[]", '"nope"', "42", "null",
+         '{"schema_version": 1, "edges": [{"a": 1}], "edge_count": 1}'],
+    )
+    def test_load_normalizes_every_invalid_shape_to_densification_error(
+        self, tmp_path: Path, raw: str
+    ):
+        """DensificationError is the ONLY exception `_build_routing_view` degrades
+        on. A payload that is valid JSON but not the expected shape must not leak
+        an AttributeError/TypeError past it: that escapes the routing-view
+        singleton uncached, so drill routing 500s and every consumer re-raises and
+        re-logs on each request instead of falling back once."""
+        path = tmp_path / ARTIFACT
+        path.write_text(raw)
+        with pytest.raises(DensificationError):
+            load_densified_edges(_graph([("a", "1", "b")]), path)
+
+    def test_a_malformed_artifact_degrades_to_one_cached_empty_routing_view(
+        self, tmp_path: Path
+    ):
+        """The fallback must be cached: a broken artifact costs one log line, not
+        one per request, and every consumer sees the same empty overlay."""
+        graph = _graph([("a", "1", "b")])
+        path = tmp_path / ARTIFACT
+        path.write_text("[]")
+        _reset_routing_views_for_testing()
+        with patch("app.opening_densify.resolve_artifact_path", return_value=path):
+            first = routing_view(graph)
+            second = routing_view(graph)
+        assert first is second                 # built once, cached
+        assert len(first.overlay) == 0         # degraded to the base graph
+        assert first.routing_children("a") == {"1": "b"}
+        _reset_routing_views_for_testing()
 
     def test_load_rejects_a_miscounted_artifact(self, tmp_path: Path):
         graph = _graph([("a", "1", "b")])

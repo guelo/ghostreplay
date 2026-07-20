@@ -135,6 +135,7 @@ export function nodeToView(node: TreeNode): OpeningTreeNodeView {
     eco: node.eco,
     inBook: node.in_book,
     isUserSelected: node.is_user_selected,
+    isTransposition: node.is_transposition ?? false,
     score: node.opening_score,
     evalCp: node.eval_cp,
     evalMate: node.eval_mate,
@@ -172,6 +173,7 @@ export function synthesizeRootView(
     // null SAN, so the chip never shows on the root regardless.
     inBook: true,
     isUserSelected: false,
+    isTransposition: false,
     score: response.root_opening_score ?? null,
     evalCp: response.root_eval_cp,
     evalMate: response.root_eval_mate,

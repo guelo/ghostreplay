@@ -138,6 +138,14 @@ describe("nodeToView", () => {
         .isUserSelected,
     ).toBe(true);
   });
+
+  it("maps is_transposition onto the view, defaulting to false", () => {
+    // Optional on the wire so an older backend response still renders.
+    expect(nodeToView(makeNode({ uci: "g8f6" })).isTransposition).toBe(false);
+    expect(
+      nodeToView(makeNode({ uci: "g8f6", is_transposition: true })).isTransposition,
+    ).toBe(true);
+  });
 });
 
 describe("synthesizeRootView", () => {
@@ -278,6 +286,38 @@ describe("buildTreeView", () => {
     expect(col0.nodes.find((n) => n.uci === "d2d4")!.selectLine).toEqual([
       "d2d4",
     ]);
+  });
+
+  it("makes a navigable transposition clickable and appends its move to the line", () => {
+    // g-openings-transpose: a transposition card is a persistent, discoverable
+    // column member — selecting it extends the URL line like any book move, and
+    // it is NOT dropped by the line-scope filter (that only sheds stale
+    // user-selected siblings).
+    const view = buildTreeView(
+      makeResponse({
+        columns: [
+          {
+            position_fen: "start",
+            ply: 0,
+            selected_uci: null,
+            nodes: [
+              makeNode({
+                uci: "g8f6",
+                in_book: false,
+                is_transposition: true,
+                is_navigable: true,
+              }),
+            ],
+          },
+        ],
+      }),
+      { selectionLine: [], loadedThroughPly: 2, isExactResponseLine: true },
+    );
+    const node = view.columns[1].nodes.find((n) => n.uci === "g8f6")!;
+    expect(node.isSelectable).toBe(true);
+    expect(node.selectLine).toEqual(["g8f6"]);
+    expect(node.view.isTransposition).toBe(true);
+    expect(node.view.isUserSelected).toBe(false);
   });
 
   it("marks non-navigable boundary nodes as not selectable; root stays selectable", () => {

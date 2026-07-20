@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.opening_aggregate import CachedPositionScoreRow
 from app.opening_cache import opening_score_inputs_fingerprint
+from app.opening_densify import DensifiedEdges, RoutingView
 from app.opening_evidence import EdgeEvidence, EvidenceOverlay, NodeEvidence
 from app.opening_graph import OpeningGraph, OpeningGraphNode
 from app.opening_roots import OpeningRoot, OpeningRoots
@@ -186,7 +187,7 @@ def _pos_row(fen: str, *, score=None, confidence=None, coverage=None,
 
 def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
           batch=None, position_rows=None, move_evals=None, root_eval=None,
-          mid_fens=None, user_id=123):
+          mid_fens=None, user_id=123, routing=None, routing_error=None):
     """Issue a GET /tree with all DB-touching collaborators patched.
 
     The persisted tree read models are simulated in memory: ``ensure_tree_cache``
@@ -197,6 +198,10 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
     batch lookup. ``batch_id`` is non-None whenever the fixture carries any cache
     content (a batch, observed edges, or position rows); the cold/no-evidence book-only
     path is modelled by leaving all three empty so ``batch_id`` resolves to None.
+
+    ``routing`` injects a :class:`RoutingView` (transposition overlay); omitted, the
+    route sees the base graph with no overlay — today's behaviour. ``routing_error``
+    makes the patched ``routing_view`` raise, modelling a broken artifact load.
     """
     graph = graph or _make_graph()
     roots = roots or _make_roots()
@@ -231,7 +236,13 @@ def _call(client, auth_headers, *, params, graph=None, roots=None, overlay=None,
     def _lre(db, fen):
         return root_eval
 
+    def _routing_view(g):
+        if routing_error is not None:
+            raise routing_error
+        return routing if routing is not None else RoutingView(g)
+
     cms = [
+        patch("app.api.openings.routing_view", side_effect=_routing_view),
         patch("app.api.openings.get_opening_graph", return_value=graph),
         patch("app.api.openings.get_opening_roots", return_value=roots),
         patch("app.api.openings.ensure_tree_cache", side_effect=_ensure),
@@ -278,7 +289,7 @@ def _make_builder(graph, roots, overlay, player_color="white", *, batch_id=1,
 
 
 def _run_build(graph, roots, overlay, moves, *, player_color="white", batch_id=1,
-               extra_batch_edges=None):
+               extra_batch_edges=None, routing=None, mid_fens=None):
     """Run ``builder.build()`` with the bounded prefetch served from ``overlay``.
 
     Models the persisted batch as the ``overlay`` edges plus optional
@@ -302,14 +313,21 @@ def _run_build(graph, roots, overlay, moves, *, player_color="white", batch_id=1
         requested_parents.append(wanted)
         return {p: list(es) for p, es in store.items() if p in wanted}
 
-    builder = _OpeningTreeBuilder(None, graph, roots, batch_id, None, player_color, 123)
-    with (
-        patch("app.api.openings.lookup_observed_edges_for_parents", side_effect=_loep),
-        patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
-        patch("app.api.openings.lookup_move_evals",
-              side_effect=lambda db, reqs: {r: None for r in reqs}),
-        patch("app.api.openings.lookup_root_eval", return_value=None),
-    ):
+    builder = _OpeningTreeBuilder(
+        None, graph, roots, batch_id, None, player_color, 123, routing=routing
+    )
+    with contextlib.ExitStack() as stack:
+        for cm in (
+            patch("app.api.openings.lookup_observed_edges_for_parents", side_effect=_loep),
+            patch("app.api.openings.lookup_position_scores_for_batch", return_value={}),
+            patch("app.api.openings.lookup_move_evals",
+                  side_effect=lambda db, reqs: {r: None for r in reqs}),
+            patch("app.api.openings.lookup_root_eval", return_value=None),
+        ):
+            stack.enter_context(cm)
+        if mid_fens is not None:
+            stack.enter_context(patch("app.api.openings.is_middlegame_position",
+                                      side_effect=lambda fen: fen in mid_fens))
         response = builder.build(moves, None)
     return builder, response, requested_parents
 
@@ -533,7 +551,13 @@ def test_tree_selected_boundary_move_becomes_navigable(client, auth_headers):
     # stays non-navigable, see test_tree_middlegame_book_child_is_terminal_boundary).
     resp = _call(client, auth_headers, mid_fens={NC6},
                  params={"player_color": "white",
-                         "move": ["e2e4", "e7e5", "g1f3", "b8c6"]})
+                         "move": ["e2e4", "e7e5", "g1f3", "b8c6"]},
+                 # Selecting a boundary must not restore its cached row: boundary
+                 # membership is a property of the position, not of the selection.
+                 position_rows={
+                     NC6: _pos_row(NC6, score=88.0, confidence=0.9, coverage=0.7,
+                                   sample_size=20, game_count=9, has_evidence=True),
+                 })
     data = resp.json()
     assert data["canonical_line"] == ["e2e4", "e7e5", "g1f3", "b8c6"]
     assert data["selected_fen"] == NC6
@@ -542,6 +566,10 @@ def test_tree_selected_boundary_move_becomes_navigable(client, auth_headers):
     assert boundary["is_user_selected"] is True
     # It IS a book move (just a middlegame boundary), so in_book stays true.
     assert boundary["in_book"] is True
+    assert boundary["opening_score"] is None
+    assert boundary["confidence"] is None
+    assert boundary["coverage"] is None
+    assert boundary["game_count"] is None
 
 
 def test_tree_chain_of_off_tree_moves_all_render(client, auth_headers):
@@ -1409,3 +1437,416 @@ def test_tree_response_carries_cache_state(client, auth_headers):
                           headers=auth_headers())
     assert resp.status_code == 200
     assert resp.json()["cache_state"] == "bootstrap_timeout"
+
+
+# --- transposition cards (g-openings-transpose) -------------------------------
+#
+# The motivating route: 1.c4 e6 2.Nc3 Nf6 3.d4 d5 reaches the same normalized
+# position as the Queen's Gambit Declined order 1.d4 d5 2.c4 e6 3.Nc3 Nf6. The
+# base ECO graph reaches the Hedgehog System only through 1.c4 Nf6 2.Nc3 e6, so
+# the two English-order edges below exist ONLY in the routing overlay.
+
+ENGLISH_NC3 = "rnbqkbnr/pppp1ppp/4p3/8/2P5/2N5/PP1PPPPP/R1BQKBNR b KQkq -"
+HEDGEHOG = "rnbqkb1r/pppp1ppp/4pn2/8/2P5/2N5/PP1PPPPP/R1BQKBNR w KQkq -"
+PRE_D5 = "rnbqkb1r/pppp1ppp/4pn2/8/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq -"
+QGD_TARGET = "rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq -"
+
+# The two edges the base graph deliberately lacks. d7d5 (PRE_D5 -> QGD_TARGET) is
+# a BASE edge, so the last step of the route is ordinary book navigation.
+ENGLISH_OVERLAY_EDGES = (
+    (ENGLISH_NC3, "g8f6", HEDGEHOG),
+    (HEDGEHOG, "d2d4", PRE_D5),
+)
+
+
+def _english_graph() -> OpeningGraph:
+    """Base ECO graph for the English/QGD transposition, WITHOUT the two English-
+    order edges the overlay supplies. Every position on the route is present and
+    named — reached through the source book's own move orders."""
+    lines = [
+        ["c2c4", "e7e6", "b1c3"],                            # -> ENGLISH_NC3
+        ["c2c4", "g8f6", "b1c3", "e7e6"],                    # -> HEDGEHOG
+        ["d2d4", "g8f6", "c2c4", "e7e6", "b1c3", "d7d5"],    # -> PRE_D5 -> QGD_TARGET
+        ["d2d4", "d7d5", "c2c4", "e7e6", "b1c3", "g8f6"],    # -> QGD_TARGET (QGD order)
+    ]
+    names = {
+        ENGLISH_NC3: ("English Opening: Agincourt Defense", "A13"),
+        HEDGEHOG: ("English Opening: Anglo-Indian Defense, Hedgehog System", "A17"),
+        PRE_D5: ("Indian Defense: Anti-Nimzo-Indian", "E10"),
+        QGD_TARGET: ("Queen's Gambit Declined: Normal Defense", "D31"),
+    }
+    nodes: dict[str, OpeningGraphNode] = {}
+
+    def _ensure(fen: str) -> OpeningGraphNode:
+        if fen not in nodes:
+            name, eco = names.get(fen, (None, None))
+            nodes[fen] = _node(fen, name, eco)
+        return nodes[fen]
+
+    _ensure(START)
+    for line in lines:
+        board = chess.Board()
+        for uci in line:
+            parent = normalize_fen(board.fen())
+            board.push(chess.Move.from_uci(uci))
+            child = normalize_fen(board.fen())
+            _ensure(parent).children[uci] = child
+            _ensure(child).parents.add((parent, uci))
+    return OpeningGraph(nodes, START)
+
+
+def _english_routing(graph: OpeningGraph, edges=ENGLISH_OVERLAY_EDGES) -> RoutingView:
+    return RoutingView(graph, DensifiedEdges(tuple(sorted(edges))))
+
+
+def _english_call(client, auth_headers, moves, **kwargs):
+    graph = kwargs.pop("graph", None) or _english_graph()
+    kwargs.setdefault("routing", _english_routing(graph))
+    kwargs.setdefault("mid_fens", frozenset())
+    return _call(
+        client, auth_headers,
+        params=[("player_color", "white"), *(("move", m) for m in moves)],
+        graph=graph, roots=OpeningRoots({}, {}), **kwargs,
+    )
+
+
+def test_english_transposition_is_navigable_from_the_english_move_order(
+    client, auth_headers
+):
+    """1. ...Nf6 from 1.c4 e6 2.Nc3 is offered as a navigable transposition card,
+    even though the base graph reaches the Hedgehog only via 1.c4 Nf6 2.Nc3 e6."""
+    resp = _english_call(client, auth_headers, ["c2c4", "e7e6", "b1c3"])
+    assert resp.status_code == 200
+    column = next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3)
+    node = _by_uci(column, "g8f6")
+    assert node["is_transposition"] is True
+    assert node["is_navigable"] is True
+    assert node["is_user_selected"] is False
+    assert node["in_book"] is False       # not this parent's book edge
+    assert node["child_fen"] == HEDGEHOG
+
+
+def test_english_transposition_card_carries_the_destinations_own_name(
+    client, auth_headers
+):
+    """4. A transposition card is named by the destination graph node itself, so
+    it reads as the real opening rather than inheriting an ancestor's name."""
+    resp = _english_call(client, auth_headers, ["c2c4", "e7e6", "b1c3"])
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["opening_name"] == (
+        "English Opening: Anglo-Indian Defense, Hedgehog System"
+    )
+    assert node["eco"] == "A17"
+
+
+def test_english_route_reaches_qgd_normal_defense_through_cards(client, auth_headers):
+    """2 + 3. The full route is card-navigable: d4 from the Hedgehog is a second
+    transposition, and the base d7d5 edge lands on the same normalized position
+    the QGD move order reaches."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6", "d2d4", "d7d5"]
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    columns = {c["position_fen"]: c for c in body["columns"]}
+
+    d4_node = _by_uci(columns[HEDGEHOG], "d2d4")
+    assert d4_node["is_transposition"] is True
+    assert d4_node["is_navigable"] is True
+
+    d5_node = _by_uci(columns[PRE_D5], "d7d5")
+    assert d5_node["is_transposition"] is False   # ordinary base-book edge
+    assert d5_node["in_book"] is True
+    assert d5_node["is_navigable"] is True
+    assert d5_node["child_fen"] == QGD_TARGET
+    assert d5_node["opening_name"] == "Queen's Gambit Declined: Normal Defense"
+
+    # Same destination as the canonical QGD order 1.d4 d5 2.c4 e6 3.Nc3 Nf6.
+    assert body["selected_fen"] == QGD_TARGET
+
+
+def test_transposition_merges_with_an_observed_edge_keeping_its_evidence(
+    client, auth_headers
+):
+    """5. An edge that is both observed and in the overlay is ONE card that keeps
+    its evidence counts while still being identified as a transposition."""
+    key, edge = _obs_edge(
+        ["c2c4", "e7e6", "b1c3", "g8f6"],
+        traversal_count=7, live_attempts=3, live_passes=2,
+    )
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3"], overlay=_overlay("white", {key: edge})
+    )
+    column = next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3)
+    assert _ucis(column).count("g8f6") == 1
+    node = _by_uci(column, "g8f6")
+    assert node["is_transposition"] is True
+    assert node["is_observed"] is True
+    assert node["encounter_count"] == 7
+    assert node["user_choice_count"] == 3
+    assert node["is_prepared"] is True
+
+
+def test_missing_overlay_falls_back_to_the_base_tree(client, auth_headers):
+    """6. With no usable overlay the tree is exactly today's base/observed tree:
+    the English-order Nf6 simply is not offered."""
+    resp = _english_call(client, auth_headers, ["c2c4", "e7e6", "b1c3"], routing=None)
+    assert resp.status_code == 200
+    columns = {c["position_fen"]: c for c in resp.json()["columns"]}
+    # Without the overlay this position is a base-graph leaf, so it has no column
+    # at all — the English-order Nf6 is simply undiscoverable, as today.
+    assert "g8f6" not in _ucis(columns.get(ENGLISH_NC3, {"nodes": []}))
+
+
+def test_routing_view_failure_does_not_break_the_tree(client, auth_headers):
+    """6. A raising overlay load degrades to the base tree rather than 500ing."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3"],
+        routing_error=RuntimeError("artifact unreadable"),
+    )
+    assert resp.status_code == 200
+    columns = {c["position_fen"]: c for c in resp.json()["columns"]}
+    # Without the overlay this position is a base-graph leaf, so it has no column
+    # at all — the English-order Nf6 is simply undiscoverable, as today.
+    assert "g8f6" not in _ucis(columns.get(ENGLISH_NC3, {"nodes": []}))
+
+
+def test_overlay_edge_into_a_middlegame_is_a_display_only_boundary(
+    client, auth_headers
+):
+    """7. An overlay edge crossing into the middlegame gets the same treatment as
+    a base boundary edge: visible, terminal, non-navigable, null scorer metrics."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3"], mid_fens=frozenset({HEDGEHOG})
+    )
+    column = next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3)
+    node = _by_uci(column, "g8f6")
+    assert node["is_transposition"] is True
+    assert node["is_navigable"] is False
+    assert node["terminal_reason"] == "opening_boundary"
+    assert node["opening_score"] is None
+
+
+def test_middlegame_parent_gains_no_overlay_children(client, auth_headers):
+    """8. The overlay never reopens a line past the opening boundary: a parent that
+    is already a middlegame position gets no unobserved overlay expansion."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6"],
+        mid_fens=frozenset({HEDGEHOG}),
+    )
+    columns = {c["position_fen"]: c for c in resp.json()["columns"]}
+    assert "d2d4" not in _ucis(columns.get(HEDGEHOG, {"nodes": []}))
+
+
+def test_selected_overlay_boundary_pins_both_transposition_and_user_selected(
+    client, auth_headers
+):
+    """10. The documented non-disjoint case: selecting an overlay edge that crosses
+    the middlegame boundary sets BOTH flags — it really comes from the overlay, and
+    it really is navigable only because it is the selected move of this line."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6"],
+        mid_fens=frozenset({HEDGEHOG}),
+        # Boundary membership is a position property, so selecting the card must
+        # not restore the destination's cached row (owned via another move order).
+        position_rows={
+            HEDGEHOG: _pos_row(HEDGEHOG, score=88.0, confidence=0.9, coverage=0.7,
+                               sample_size=20, game_count=9, has_evidence=True),
+        },
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["is_transposition"] is True
+    assert node["is_user_selected"] is True
+    assert node["is_navigable"] is True          # for this line only
+    assert node["terminal_reason"] == "opening_boundary"
+    assert node["opening_score"] is None
+    assert node["confidence"] is None
+    assert node["coverage"] is None
+    assert node["game_count"] is None
+
+
+def test_overlay_edge_selected_from_a_middlegame_parent_is_still_a_transposition(
+    client, auth_headers
+):
+    """10b. The injection-path variant of the same overlap: the overlay does not
+    volunteer d4 from a middlegame Hedgehog (test 8), but a manually selected one
+    is still identified as a transposition."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6", "d2d4"],
+        mid_fens=frozenset({HEDGEHOG}),
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == HEDGEHOG), "d2d4"
+    )
+    assert node["is_transposition"] is True
+    assert node["is_user_selected"] is True
+    assert node["is_navigable"] is True
+
+
+def test_selected_non_boundary_transposition_is_not_user_selected(client, auth_headers):
+    """11. An ordinary (non-boundary) transposition is a persistent card, so being
+    the selected move must NOT relabel it as the user's own board exploration."""
+    resp = _english_call(client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6"])
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["is_transposition"] is True
+    assert node["is_user_selected"] is False
+    assert node["is_navigable"] is True
+
+
+def test_transposition_destination_hydrates_normal_position_metrics(
+    client, auth_headers
+):
+    """12. Metrics follow the destination, not the edge's provenance: an unobserved
+    transposition has zero edge counts but full destination-position metrics."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3"],
+        position_rows={
+            HEDGEHOG: _pos_row(HEDGEHOG, score=71.5, confidence=0.8, coverage=0.6,
+                               sample_size=12, game_count=4, has_evidence=True),
+        },
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["opening_score"] == 71.5
+    assert node["confidence"] == 0.8
+    assert node["coverage"] == 0.6
+    assert node["game_count"] == 4
+    assert node["encounter_count"] == 0
+    assert node["user_choice_count"] == 0
+    assert node["is_prepared"] is False
+
+
+def test_transposition_survives_a_shorter_prefix_render(client, auth_headers):
+    """13. A transposition is a persistent column member, not an ephemeral per-line
+    injection: it is still listed in its column when a DEEPER line is requested, and
+    with is_user_selected false, so a cached shorter-prefix view keeps it (the
+    frontend drops stale user-selected siblings only)."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6", "d2d4", "d7d5"]
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["is_transposition"] is True
+    assert node["is_user_selected"] is False
+
+
+def test_transposition_frontier_is_covered_by_wave_two_prefetch(client, auth_headers):
+    """14. Transposition destinations join the existing wave-two frontier rather
+    than adding a third wave or per-node queries: exactly 2 observed-edge queries
+    and no per-parent stragglers."""
+    graph = _english_graph()
+    key, edge = _obs_edge(["c2c4", "e7e6"], traversal_count=2)
+    builder, response, requested = _run_build(
+        graph, OpeningRoots({}, {}), _overlay("white", {key: edge}),
+        ["c2c4", "e7e6", "b1c3"],
+        routing=_english_routing(graph), mid_fens=frozenset(),
+    )
+    assert builder._observed_edge_query_count == 2
+    assert builder._observed_straggler_count == 0
+    assert len(requested) == 2
+    # The Hedgehog is only reachable via the overlay, so its presence in wave two
+    # proves the transposition frontier was collected.
+    assert HEDGEHOG in requested[1]
+
+
+def test_overlay_never_widens_the_scorer_structural_domain(client, auth_headers):
+    """Pinned invariants: transposition cards are a display/navigation layer only.
+    The scorer's structural-child domain, the graph fingerprint, and the canonical
+    book path are all computed from the base graph and must not move."""
+    from app.api.openings import _OpeningTreeBuilder
+
+    graph = _english_graph()
+    fingerprint_before = graph.fingerprint
+    routing = _english_routing(graph)
+    builder = _OpeningTreeBuilder(
+        None, graph, OpeningRoots({}, {}), None, None, "white", 123, routing=routing
+    )
+    with patch("app.api.openings.is_middlegame_position", return_value=False):
+        structural = builder._structural_children(ENGLISH_NC3)
+        navigable = builder._navigable_children(ENGLISH_NC3)
+        column = builder._column_children(ENGLISH_NC3)
+        # The canonical book path still routes through the source book's own move
+        # order (1.c4 Nf6 2.Nc3 e6), never through the overlay.
+        book_path = builder._bfs_book_path(HEDGEHOG)
+
+    assert "g8f6" not in structural            # scorer domain unchanged
+    assert "g8f6" in navigable                 # browsable
+    assert set(structural) <= set(navigable) <= set(column)
+    assert book_path == ["c2c4", "g8f6", "b1c3", "e7e6"]
+    assert graph.fingerprint == fingerprint_before
+    assert graph.get_node(ENGLISH_NC3).children == {}   # graph never mutated
+
+
+def test_observed_boundary_edge_keeps_its_overlay_provenance(client, auth_headers):
+    """Provenance is independent of navigation eligibility: an observed edge that
+    is ALSO an overlay edge and crosses into the middlegame keeps
+    is_transposition, so the card is never mislabelled "Off book" (a move from the
+    player's own games) when it is in fact a book transposition."""
+    key, edge = _obs_edge(["c2c4", "e7e6", "b1c3", "g8f6"], traversal_count=4)
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3"],
+        overlay=_overlay("white", {key: edge}), mid_fens=frozenset({HEDGEHOG}),
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["is_observed"] is True
+    assert node["is_transposition"] is True
+    assert node["in_book"] is False
+
+
+def test_observed_overlay_edge_from_a_middlegame_parent_keeps_its_provenance(
+    client, auth_headers
+):
+    """The other half of the same contract: an observed edge out of an ALREADY
+    middlegame parent gets no overlay expansion (test 8) but must still report the
+    overlay provenance it genuinely has."""
+    key, edge = _obs_edge(["c2c4", "e7e6", "b1c3", "g8f6", "d2d4"], traversal_count=3)
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3", "g8f6"],
+        overlay=_overlay("white", {key: edge}), mid_fens=frozenset({HEDGEHOG}),
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == HEDGEHOG), "d2d4"
+    )
+    assert node["is_observed"] is True
+    assert node["is_transposition"] is True
+    assert node["is_navigable"] is True   # observed edges are phase-authoritative
+
+
+def test_display_only_boundary_card_never_shows_scorer_metrics(client, auth_headers):
+    """A display-only boundary card is outside the scorer domain, so a cached row
+    the destination owns via another (observed) move order must not leak onto it —
+    the null-metrics contract holds even when a row exists."""
+    resp = _english_call(
+        client, auth_headers, ["c2c4", "e7e6", "b1c3"],
+        mid_fens=frozenset({HEDGEHOG}),
+        position_rows={
+            HEDGEHOG: _pos_row(HEDGEHOG, score=88.0, confidence=0.9, coverage=0.7,
+                               sample_size=20, game_count=9, has_evidence=True),
+        },
+    )
+    node = _by_uci(
+        next(c for c in resp.json()["columns"] if c["position_fen"] == ENGLISH_NC3),
+        "g8f6",
+    )
+    assert node["is_navigable"] is False
+    assert node["terminal_reason"] == "opening_boundary"
+    assert node["opening_score"] is None
+    assert node["confidence"] is None
+    assert node["coverage"] is None
+    assert node["game_count"] is None

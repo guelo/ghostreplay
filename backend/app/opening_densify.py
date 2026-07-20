@@ -352,6 +352,15 @@ def load_densified_edges(graph: OpeningGraph, path: Path) -> DensifiedEdges:
     except (OSError, json.JSONDecodeError) as exc:
         raise DensificationError(f"Cannot read {path}: {exc}") from exc
 
+    # Every invalid shape must normalize to DensificationError: this is the ONLY
+    # exception `_build_routing_view` degrades on, and a leaked AttributeError
+    # from a non-object payload would escape the singleton uncached — 500ing
+    # drill routing and re-raising per request for every other consumer.
+    if not isinstance(payload, dict):
+        raise DensificationError(
+            f"{path}: payload must be a JSON object, got {type(payload).__name__}"
+        )
+
     schema_version = payload.get("schema_version")
     if schema_version != SCHEMA_VERSION:
         raise DensificationError(
@@ -380,7 +389,13 @@ def load_densified_edges(graph: OpeningGraph, path: Path) -> DensifiedEdges:
     edges: list[DensifiedEdge] = []
     seen: set[tuple[str, str]] = set()
     for raw in raw_edges:
-        if not isinstance(raw, list) or len(raw) != 3:
+        if (
+            not isinstance(raw, list)
+            or len(raw) != 3
+            or not all(isinstance(field, str) for field in raw)
+        ):
+            # The str check is part of the same normalization: an unhashable
+            # element would otherwise raise TypeError out of the dict lookups below.
             raise DensificationError(f"{path}: malformed edge {raw!r}")
         parent_fen, uci, child_fen = raw
         parent = graph.get_node(parent_fen)
@@ -416,7 +431,8 @@ def _build_routing_view(graph: OpeningGraph) -> RoutingView:
     if path is None or not path.is_file():
         logger.error(
             "opening_densify: no %s found beside the opening data; drill routing "
-            "will not cross transpositions. Regenerate with "
+            "will not cross transpositions and /openings will not show "
+            "transposition cards. Regenerate with "
             "scripts/densify_opening_graph.py.",
             ARTIFACT_FILENAME,
         )
@@ -429,7 +445,7 @@ def _build_routing_view(graph: OpeningGraph) -> RoutingView:
         # exact diff is the guard that makes a stale artifact non-silent.
         logger.error(
             "opening_densify: %s is unusable; drill routing will not cross "
-            "transpositions",
+            "transpositions and /openings will not show transposition cards",
             path,
             exc_info=True,
         )

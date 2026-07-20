@@ -7346,6 +7346,10 @@
     --swatch-color: var(--color-violet-500);
 }
 
+.openings-metrics-legend__swatch--transposition {
+    --swatch-color: var(--color-emerald-500);
+}
+
 .openings-metrics-legend__swatch--selected {
     --swatch-color: var(--color-sky-500);
 }
@@ -10712,6 +10716,37 @@ button.tree-node-card--compact {
 
 .tree-node-card__off-book:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--color-violet-500) 60%, transparent);
+    outline-offset: 1px;
+}
+
+/* "Transposition" chip — a book position reached through a different move order
+   (g-openings-transpose). Same plumbing as the off-book chip, in emerald so it
+   reads as in-book rather than as the player's own off-book branch. */
+.tree-node-card__transposition {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid color-mix(in srgb, var(--color-emerald-500) 55%, transparent);
+    border-radius: 0.3rem;
+    background: color-mix(in srgb, var(--color-emerald-500) 16%, var(--card-bg));
+    font-size: 0.6rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    line-height: 1.2;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--color-emerald-500) 72%, var(--text-primary));
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.tree-node-card__transposition:hover {
+    background: color-mix(in srgb, var(--color-emerald-500) 28%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--color-emerald-500) 75%, transparent);
+}
+
+.tree-node-card__transposition:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--color-emerald-500) 60%, transparent);
     outline-offset: 1px;
 }
 

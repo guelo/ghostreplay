@@ -32,9 +32,15 @@ export interface OpeningTreeNodeView {
    *  an off-book branch from the player's games; the name is inherited from the
    *  last book leaf, so an "Off book" chip flags it. Always true for the root. */
   inBook: boolean;
-  /** A legal move chosen on the board, not from the book or the player's games —
-   *  the third move type. Flagged with a "Your move" chip (wins over off-book). */
+  /** A legal move chosen on the board, outside the navigable set — the third
+   *  move type. Flagged with a "Your move" chip (wins over off-book). */
   isUserSelected: boolean;
+  /** The edge reaches a named book position through a different move order
+   *  (g-openings-transpose) → a "Transposition" chip, which outranks "Off book"
+   *  (an overlay edge is never off book) but loses to "Your move": when both are
+   *  set, the actionable fact is that the line continues only because the user
+   *  selected it past the opening boundary. Exactly one move-type chip renders. */
+  isTransposition: boolean;
   /** 0–100 opening score; null = no evidence. */
   score: number | null;
   /** White-relative centipawns (+white / −black); null when no best-move row. */
@@ -286,6 +292,55 @@ function SelectedMoveChip() {
   );
 }
 
+/**
+ * Marks a move that is in the opening book, but reached through a different move
+ * order than the book records (g-openings-transpose). The destination position is
+ * a named book position, so the card carries its real name/ECO — this is emphatically
+ * NOT an off-book move from the player's games.
+ */
+function TranspositionChip() {
+  return (
+    <PopoverChip
+      label="Transposition"
+      ariaLabel="Transposition — what does this mean?"
+      triggerClassName="tree-node-card__transposition"
+      title="Transposition"
+    >
+      This move reaches a known opening position through a different move order.
+    </PopoverChip>
+  );
+}
+
+/**
+ * The single move-type chip for a card, as a total order over overlapping flags:
+ * Your move &gt; Transposition &gt; Off book &gt; Book move (no chip). The card never
+ * renders two chips — notably, a selected overlay edge outside the navigable set
+ * carries both isUserSelected and isTransposition, and "Your move" wins (the
+ * provenance is still on the wire for anything that needs it). Only the `move`
+ * kind and non-root nodes get a chip at all.
+ */
+function MoveTypeChip({
+  node,
+  kind,
+}: {
+  node: OpeningTreeNodeView;
+  kind: "move" | "family";
+}) {
+  if (kind !== "move" || isSynthesizedRoot(node, kind)) {
+    return null;
+  }
+  if (node.isUserSelected) {
+    return <SelectedMoveChip />;
+  }
+  if (node.isTransposition) {
+    return <TranspositionChip />;
+  }
+  if (!node.inBook) {
+    return <OffBookChip />;
+  }
+  return null;
+}
+
 /** The synthesized `/openings` start card — never a family card (whose `san` is
  *  also null and whose `moves` may defensively be `[]`). Only this renders as
  *  "Starting position" with no move list. */
@@ -351,8 +406,6 @@ function CompactBody({
 }) {
   const isRoot = isSynthesizedRoot(node, kind);
   const isMove = kind === "move";
-  const isUserSelected = isMove && !isRoot && node.isUserSelected;
-  const isOffBook = isMove && !isRoot && !node.inBook && !node.isUserSelected;
   const name = isRoot ? "Starting position" : formatOpeningName(node.openingName);
   const evalText = formatWhiteEval(node.evalCp, node.evalMate) || "—";
 
@@ -378,8 +431,7 @@ function CompactBody({
       </span>
       {!isRoot && (isMove || node.moveListSan.length > 0) && (
         <span className="tree-node-card__line tree-node-card__line--secondary">
-          {isUserSelected && <SelectedMoveChip />}
-          {isOffBook && <OffBookChip />}
+          <MoveTypeChip node={node} kind={kind} />
           <MoveListLine
             sanMoves={node.moveListSan}
             startPly={node.moveListStartPly}
@@ -415,8 +467,6 @@ function ExpandedBody({
 
   const isRoot = isSynthesizedRoot(node, kind);
   const isMove = kind === "move";
-  const isUserSelected = isMove && !isRoot && node.isUserSelected;
-  const isOffBook = isMove && !isRoot && !node.inBook && !node.isUserSelected;
   const headerLabel = isRoot
     ? "Starting position"
     : formatOpeningName(node.openingName);
@@ -435,8 +485,7 @@ function ExpandedBody({
               startPly={node.moveListStartPly}
               variant="expanded"
             />
-            {isUserSelected && <SelectedMoveChip />}
-            {isOffBook && <OffBookChip />}
+            <MoveTypeChip node={node} kind={kind} />
           </span>
         )}
       </div>

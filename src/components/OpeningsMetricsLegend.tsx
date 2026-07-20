@@ -79,6 +79,16 @@ function OpeningsMetricsLegend() {
             </li>
             <li>
               <span
+                className="openings-metrics-legend__swatch openings-metrics-legend__swatch--transposition"
+                aria-hidden="true"
+              />
+              <span>
+                <strong>Transposition</strong> — in the opening book, but reached
+                through a different move order.
+              </span>
+            </li>
+            <li>
+              <span
                 className="openings-metrics-legend__swatch openings-metrics-legend__swatch--selected"
                 aria-hidden="true"
               />

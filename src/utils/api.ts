@@ -1508,6 +1508,12 @@ export interface TreeNode {
   /** A legal move chosen on the board that is not in book/observed — the third
    *  move type. Line-scoped: only emitted as the selected move of its column. */
   is_user_selected: boolean
+  /** The edge comes from the validated routing overlay: it reaches a named book
+   *  position through a different move order (g-openings-transpose). Not
+   *  mutually exclusive with the other flags — a selected overlay edge outside
+   *  the navigable set carries this AND is_user_selected. Optional so an older
+   *  backend response still parses. */
+  is_transposition?: boolean
   is_prepared: boolean
   user_choice_count: number
   encounter_count: number
