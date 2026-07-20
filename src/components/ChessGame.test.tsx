@@ -68,6 +68,7 @@ vi.mock("../utils/api", async (importOriginal) => {
 vi.mock("../utils/openingDeltaPoll", () => ({
   pollFreshOpeningDelta: (...args: unknown[]) =>
     pollFreshOpeningDeltaMock(...args),
+  abortOpeningDeltaPolls: () => {},
 }));
 
 const evaluatePositionMock = vi.fn();

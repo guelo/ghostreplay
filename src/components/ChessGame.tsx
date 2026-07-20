@@ -16,6 +16,7 @@ import { useLiveOpeningLineage } from "../hooks/useLiveOpeningLineage";
 import { GAME_MOBILE_QUERY } from "../styles/breakpoints";
 import { useGameStore } from "../stores/useGameStore";
 import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
+import { useLastDrillDeltaToast } from "../hooks/useLastDrillDeltaToast";
 import { strictnessFromCp } from "./chess-game/ui/DrillSetupPanel.helpers";
 import type { OpeningLineageItem, OpeningRootItem } from "../utils/api";
 import { checkDrillRoute, failDrill, getOpeningRoots } from "../utils/api";
@@ -299,8 +300,19 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
   const isProvisional = useGameStore((s) => s.isProvisional);
   const ratingScores = useGameStore((s) => s.ratingScores);
   const scoreChanges = useGameStore((s) => s.scoreChanges);
-  const openingScoreChanges = useGameStore((s) => s.openingScoreChanges);
+  const openingScoreDelta = useGameStore((s) => s.openingScoreDelta);
+  // Inline badges render a delta ONLY for the session that earned it (g-f3m4).
+  // A stale-stamped delta (its drill was replaced) renders nothing here; it is
+  // surfaced as a last-drill toast instead.
+  const openingScoreChanges = useMemo(
+    () =>
+      openingScoreDelta?.sessionId === sessionId ? openingScoreDelta.items : null,
+    [openingScoreDelta, sessionId],
+  );
   const ratingChange = useGameStore((s) => s.ratingChange);
+  // A previous drill's diff that reconciled after the player moved on (g-f3m4).
+  const { toast: lastDrillDeltaToast, dismiss: dismissLastDrillDelta } =
+    useLastDrillDeltaToast();
   const [pendingPromotion, setPendingPromotion] = useState<{ from: string; to: string } | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
   const [optionSquares, setOptionSquares] = useState<
@@ -748,7 +760,9 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
           // barrier before the backend reads session_moves, and going off-route
           // means the target opening was never reached. Clear any prior value so
           // DrillStopActions shows no (stale) delta.
-          useGameStore.getState().setOpeningScoreChanges(null);
+          // Clear the CURRENT slot only — a queued late notification from a
+          // previous drill is owned by that drill and must survive (g-f3m4).
+          useGameStore.getState().clearOpeningDelta();
           drillFailedMoveIndexRef.current = result.moveIndex;
           setDrillFailInfo({
             playedMoveUci: route.failure?.played_move_uci ?? result.moveUci,
@@ -1262,7 +1276,10 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       const store = useGameStore.getState();
       store.setDrillState("failed");
       store.setDrillTerminalReason("accuracy");
-      store.setOpeningScoreChanges(contract.opening_score_changes ?? null);
+      store.setTerminalOpeningDelta(
+        sessionId,
+        contract.opening_score_changes ?? null,
+      );
       // Reconcile the warm delta to the provably-fresh value once the background
       // recompute lands (g-fix-end-latency).
       void pollFreshOpeningDelta(sessionId);
@@ -2132,6 +2149,8 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
                 onPromotionPick={handlePromotionPick}
                 onPromotionCancel={handlePromotionCancel}
                 streakToast={blocksStreakToast ? null : streakToast}
+                lastDrillDeltaToast={lastDrillDeltaToast}
+                onDismissLastDrillDelta={dismissLastDrillDelta}
                 boardNotice={boardNotice}
                 isDrillMode={isDrillMode}
                 onSwitchToPlayMode={handleSwitchToPlayMode}

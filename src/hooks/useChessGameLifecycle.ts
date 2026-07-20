@@ -26,7 +26,10 @@ import { playEndGameAudio } from "../components/chess-game/endGameAudio";
 import { sampleEloBin } from "../components/chess-game/elo";
 import type { BoardOrientation, OpenHistoryOptions, ResolvedReview } from "../components/chess-game/types";
 import { useGameStore } from "../stores/useGameStore";
-import { pollFreshOpeningDelta } from "../utils/openingDeltaPoll";
+import {
+  abortOpeningDeltaPolls,
+  pollFreshOpeningDelta,
+} from "../utils/openingDeltaPoll";
 import type { GameAnalysisCoordinator } from "../services/GameAnalysisCoordinator";
 import {
   buildSessionMoveUploads,
@@ -425,7 +428,10 @@ export const useChessGameLifecycle = ({
           const s = useGameStore.getState();
           s.setDrillState(contract.drill_state);
           s.setDrillTerminalReason(contract.terminal_reason ?? null);
-          s.setOpeningScoreChanges(contract.opening_score_changes ?? null);
+          s.setTerminalOpeningDelta(
+            finalizingSessionId,
+            contract.opening_score_changes ?? null,
+          );
           // The immediate delta is the warm/possibly-stale cache; reconcile to the
           // provably-fresh value once the background recompute lands (g-fix-end-latency).
           void pollFreshOpeningDelta(finalizingSessionId);
@@ -471,7 +477,10 @@ export const useChessGameLifecycle = ({
         // still earn them), so set them outside the rating block.
         useGameStore
           .getState()
-          .setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
+          .setTerminalOpeningDelta(
+            finalizingSessionId,
+            endResponse.opening_score_changes ?? null,
+          );
         // Reconcile the warm delta to the provably-fresh value once the background
         // recompute lands (g-fix-end-latency).
         void pollFreshOpeningDelta(finalizingSessionId);
@@ -592,7 +601,10 @@ export const useChessGameLifecycle = ({
           applyRatingScores(endResponse.scores_after ?? endResponse.scores);
         }
         const s = useGameStore.getState();
-        s.setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
+        s.setTerminalOpeningDelta(
+          store.sessionId!,
+          endResponse.opening_score_changes ?? null,
+        );
         // Reconcile the warm delta to the provably-fresh value once the background
         // recompute lands (g-fix-end-latency). store.sessionId is the id resigned above.
         void pollFreshOpeningDelta(store.sessionId!);
@@ -660,6 +672,9 @@ export const useChessGameLifecycle = ({
         announcedEndGameSessionIdRef.current = null;
 
         const store = useGameStore.getState();
+        // The end screen is gone as of this click; a delta reconciling during the
+        // awaits below belongs in the late queue, not an invisible slot (g-f3m4).
+        store.setDepartingSession(store.sessionId);
         if (
           store.sessionId &&
           store.isGameActive &&
@@ -697,7 +712,11 @@ export const useChessGameLifecycle = ({
 
         const response = await startGame(store.engineElo, resolvedPlayerColor);
         const s2 = useGameStore.getState();
-        s2.setSessionId(response.session_id);
+        // Flip the session and clear the delta slot as ONE transition (g-f3m4);
+        // a separate flip-then-clear would destroy a delta that resolved during
+        // the await. Late arrivals were already routed to the queue by the
+        // setDepartingSession mark above.
+        s2.beginSession(response.session_id);
         s2.setIsGameActive(true);
         setIsStartingGame(false);
         setShowStartOverlay(false);
@@ -709,7 +728,6 @@ export const useChessGameLifecycle = ({
         s2.setGameResult(null);
         s2.setRatingChange(null);
         s2.setScoreChanges(null);
-        s2.setOpeningScoreChanges(null);
         s2.setMoveHistory([]);
         s2.setViewIndex(null);
         resetEngine();
@@ -748,6 +766,9 @@ export const useChessGameLifecycle = ({
         setEngineMessage(message);
         setStartError(message);
         setIsStartingGame(false);
+        // The start failed, so the player is still on the old session's end
+        // screen — undo the departure mark or its delta would only ever queue.
+        useGameStore.getState().setDepartingSession(null);
       }
     },
     [
@@ -795,6 +816,9 @@ export const useChessGameLifecycle = ({
         announcedEndGameSessionIdRef.current = null;
 
         const store = useGameStore.getState();
+        // The end screen is gone as of this click; a delta reconciling during the
+        // awaits below belongs in the late queue, not an invisible slot (g-f3m4).
+        store.setDepartingSession(store.sessionId);
         if (store.sessionId && store.isGameActive && !store.isPracticeContinuation) {
           // Cancel pending SRS reviews BEFORE the awaited abandon/endGame.
           coordinator.decisionOwner.cancelPendingSrsReviews();
@@ -826,7 +850,8 @@ export const useChessGameLifecycle = ({
         const records: MoveRecord[] = [];
 
         const s = useGameStore.getState();
-        s.setSessionId(response.session_id);
+        // Atomic flip + clear; see the startGame path (g-f3m4).
+        s.beginSession(response.session_id);
         s.setIsGameActive(true);
         s.setPlayerColor(options.playerColor);
         s.setBoardOrientation(options.playerColor);
@@ -851,7 +876,6 @@ export const useChessGameLifecycle = ({
         s.setGameResult(null);
         s.setRatingChange(null);
         s.setScoreChanges(null);
-        s.setOpeningScoreChanges(null);
 
         resetEngine();
         coordinator.clearSession();
@@ -908,6 +932,8 @@ export const useChessGameLifecycle = ({
         setEngineMessage(message);
         setStartError(message);
         setIsStartingGame(false);
+        // See handleNewGame: a failed start leaves the old end screen up.
+        useGameStore.getState().setDepartingSession(null);
         return null;
       }
     },
@@ -1033,7 +1059,10 @@ export const useChessGameLifecycle = ({
       // block (P2: a resigned game must still surface them).
       useGameStore
         .getState()
-        .setOpeningScoreChanges(endResponse.opening_score_changes ?? null);
+        .setTerminalOpeningDelta(
+          finalizingSessionId,
+          endResponse.opening_score_changes ?? null,
+        );
       // Reconcile the warm delta to the provably-fresh value once the background
       // recompute lands (g-fix-end-latency).
       void pollFreshOpeningDelta(finalizingSessionId);
@@ -1084,6 +1113,12 @@ export const useChessGameLifecycle = ({
     store.setBoardOrientation(store.playerColor);
     setEngineMessage(null);
     store.setSessionId(null);
+    // Deliberate abandonment, not a supersede: drop the current delta, drop any
+    // queued late notifications, and invalidate in-flight polls so a response
+    // already on the wire cannot resurface as a phantom toast (g-f3m4). The
+    // token invalidates results; aborting stops the loops still retrying.
+    store.abandonOpeningDeltas();
+    abortOpeningDeltaPolls();
     store.setIsGameActive(false);
     store.setGameResult(null);
     store.setMoveHistory([]);

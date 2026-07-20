@@ -41,9 +41,11 @@ vi.mock("../openings/openingBook", () => ({
 // session id at each terminal site. (The full ../utils/api mock above omits
 // getOpeningScoreDelta, so the real helper would call an undefined fn.)
 const pollFreshOpeningDeltaMock = vi.fn();
+const abortOpeningDeltaPollsMock = vi.fn();
 vi.mock("../utils/openingDeltaPoll", () => ({
   pollFreshOpeningDelta: (...args: unknown[]) =>
     pollFreshOpeningDeltaMock(...args),
+  abortOpeningDeltaPolls: () => abortOpeningDeltaPollsMock(),
 }));
 
 const initialStoreState = useGameStore.getInitialState();
@@ -975,6 +977,10 @@ describe("useChessGameLifecycle", () => {
     // Reset clears decision state via the coordinator's clearSession → the
     // owner's fullReset (driven by emitReset), not a React ref.
     expect(coordinator.clearSession).toHaveBeenCalledTimes(1);
+    // Abandonment must also stop the delta polls, not merely invalidate their
+    // results: a loop that never sees `is_fresh` never reaches the token check
+    // and would keep retrying against a session the player discarded (g-f3m4).
+    expect(abortOpeningDeltaPollsMock).toHaveBeenCalled();
   });
 
   it("clears pending SRS review registry when replacing an abandoned session", async () => {
@@ -1614,7 +1620,7 @@ describe("useChessGameLifecycle", () => {
     },
   ];
 
-  it("populates openingScoreChanges from the game-end response and uploads the full history first", async () => {
+  it("stamps the opening delta from the game-end response and uploads the full history first", async () => {
     const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
     const move = chess.move({ from: "g6", to: "g7" });
     if (!move || !chess.isCheckmate()) {
@@ -1642,7 +1648,12 @@ describe("useChessGameLifecycle", () => {
     });
 
     await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
-    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The delta is stamped with the session that earned it (g-f3m4).
+    expect(useGameStore.getState().openingScoreDelta).toEqual({
+      sessionId: "session-123",
+      items: OPENING_CHANGES,
+      origin: "terminal",
+    });
     // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
     // P1: the full move history is uploaded BEFORE endGame's recompute. Assert
@@ -1653,7 +1664,7 @@ describe("useChessGameLifecycle", () => {
     );
   });
 
-  it("populates openingScoreChanges from the resign response (P2)", async () => {
+  it("stamps the opening delta from the resign response (P2)", async () => {
     const chess = new Chess();
     chess.move("e4");
     const { result } = setup({
@@ -1678,7 +1689,12 @@ describe("useChessGameLifecycle", () => {
     });
 
     await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
-    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The delta is stamped with the session that earned it (g-f3m4).
+    expect(useGameStore.getState().openingScoreDelta).toEqual({
+      sessionId: "session-123",
+      items: OPENING_CHANGES,
+      origin: "terminal",
+    });
     // The reconcile-poll fires for the finalizing session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("session-123");
     expect(uploadSessionMovesMock).toHaveBeenCalled();
@@ -1687,7 +1703,7 @@ describe("useChessGameLifecycle", () => {
     );
   });
 
-  it("populates openingScoreChanges from the natural-end drill contract", async () => {
+  it("stamps the opening delta from the natural-end drill contract", async () => {
     const chess = new Chess("7k/8/6QK/8/8/8/8/8 w - - 0 1");
     const move = chess.move({ from: "g6", to: "g7" });
     if (!move || !chess.isCheckmate()) {
@@ -1719,7 +1735,12 @@ describe("useChessGameLifecycle", () => {
     });
 
     expect(naturalEndDrillMock).toHaveBeenCalled();
-    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The delta is stamped with the session that earned it (g-f3m4).
+    expect(useGameStore.getState().openingScoreDelta).toEqual({
+      sessionId: "drill-session-xanz",
+      items: OPENING_CHANGES,
+      origin: "terminal",
+    });
     // The reconcile-poll fires for the finalizing drill session (g-fix-end-latency).
     expect(pollFreshOpeningDeltaMock).toHaveBeenCalledWith("drill-session-xanz");
     // P1: the drill's moves are uploaded BEFORE naturalEndDrill recomputes (and
@@ -1763,7 +1784,12 @@ describe("useChessGameLifecycle", () => {
     await waitFor(() => expect(useGameStore.getState().isGameActive).toBe(false));
     // The primary terminal action still ran despite the upload failure.
     expect(endGameMock).toHaveBeenCalled();
-    expect(useGameStore.getState().openingScoreChanges).toEqual(OPENING_CHANGES);
+    // The delta is stamped with the session that earned it (g-f3m4).
+    expect(useGameStore.getState().openingScoreDelta).toEqual({
+      sessionId: "session-123",
+      items: OPENING_CHANGES,
+      origin: "terminal",
+    });
   });
 
   // g-y90g: the final full upload stops the incremental uploader FIRST (folded

@@ -2658,6 +2658,86 @@
     font-size: 0.8rem;
 }
 
+/* Last-drill opening-score notification (g-f3m4). Its own slot, top-right, so
+   it never competes with the single-slot board notice (top-left) or the streak
+   toast (bottom-right). Interactive (dismissable), so unlike its siblings it
+   keeps pointer events. */
+.last-drill-delta-toast {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    z-index: 8;
+    max-width: 15rem;
+    padding: 0.6rem 1.6rem 0.6rem 0.85rem;
+    border-radius: 0.75rem;
+    border: 1px solid var(--border-color);
+    background: var(--overlay-bg);
+    box-shadow: var(--shadow-md);
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    animation: blunder-toast-in 250ms ease-out;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+
+.last-drill-delta-toast__dismiss {
+    position: absolute;
+    top: 0.15rem;
+    right: 0.3rem;
+    border: none;
+    background: none;
+    color: var(--text-tertiary);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.2rem;
+    cursor: pointer;
+}
+
+.last-drill-delta-toast__label {
+    font-weight: 800;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-tertiary);
+}
+
+.last-drill-delta-toast__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.last-drill-delta-toast__item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.6rem;
+}
+
+.last-drill-delta-toast__opening {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.last-drill-delta-toast__delta {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    flex: 0 0 auto;
+}
+
+.last-drill-delta-toast__item--up .last-drill-delta-toast__delta {
+    color: var(--success);
+}
+
+.last-drill-delta-toast__item--down .last-drill-delta-toast__delta {
+    color: var(--error);
+}
+
 /* Shared warning-triangle icon (board notice + revert/resign dialogs) */
 .warning-triangle-icon {
     flex: 0 0 auto;

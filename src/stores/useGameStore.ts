@@ -9,8 +9,51 @@ import {
   setSoundMuted as persistSoundMuted,
   setSoundVolume as persistSoundVolume,
 } from "../utils/soundSettings";
+import { hasRenderableBadge } from "../utils/openingDeltaBadge";
 
 type BoardOrientation = "white" | "black";
+
+/** Where a delta came from: the terminal endpoint's warm (possibly stale) read,
+ *  or the poll's provably-fresh reconciliation. Only "reconciled" deltas are
+ *  worth promoting to a late notification — a warm terminal delta is commonly
+ *  equal to the stored before-score and would render the same suppressed zero. */
+export type DeltaOrigin = "terminal" | "reconciled";
+
+export type SessionOpeningDelta = {
+  sessionId: string;
+  items: OpeningScoreDeltaItem[] | null;
+  origin: DeltaOrigin;
+};
+
+export type LateOpeningDelta = SessionOpeningDelta & { nonce: number };
+
+/** Late-notification queue cap. Matches DELTA_POLL_MAX_CONCURRENT so the two
+ *  layers can never hold different numbers of drills in flight. */
+export const LATE_OPENING_DELTA_LIMIT = 3;
+
+let lateDeltaNonce = 0;
+
+/**
+ * Append to the bounded late queue, dropping the OLDEST on overflow. Same loss
+ * policy as the poll layer's concurrency overflow, so the two can never discard
+ * different drills. The drop is warned about rather than silent — losing a
+ * notification is a real (if acceptable) outcome worth seeing in a console.
+ */
+function enqueueLate(
+  queue: LateOpeningDelta[],
+  delta: SessionOpeningDelta,
+): LateOpeningDelta[] {
+  lateDeltaNonce += 1;
+  const next = [...queue, { ...delta, nonce: lateDeltaNonce }];
+  while (next.length > LATE_OPENING_DELTA_LIMIT) {
+    const dropped = next.shift();
+    console.warn(
+      `[OpeningDelta] Late-delta queue full (${LATE_OPENING_DELTA_LIMIT}); ` +
+        `dropped oldest (session ${dropped?.sessionId}).`,
+    );
+  }
+  return next;
+}
 
 /** Resolve a React-style SetStateAction (value or updater function). */
 const resolve = <T>(update: SetStateAction<T>, prev: T): T =>
@@ -59,8 +102,25 @@ export type GameState = {
   ratingScores: RatingScores;
   ratingChange: RatingChange | null;
   scoreChanges: RatingScores | null;
-  // Per-played-opening score deltas for the just-ended game/drill (g-xanz).
-  openingScoreChanges: OpeningScoreDeltaItem[] | null;
+  /** Per-played-opening score deltas for the CURRENT session's ended game/drill
+   *  (g-xanz), explicitly stamped with the session that earned them (g-f3m4) so a
+   *  late reconciliation can never be misattributed to the next drill. */
+  openingScoreDelta: SessionOpeningDelta | null;
+  /** Deltas that reconciled after their session was replaced — surfaced as a
+   *  "last drill" toast instead of being dropped or leaking into the current
+   *  drill's inline badges (g-f3m4). Bounded FIFO, newest last. */
+  lateOpeningDeltas: LateOpeningDelta[];
+  /** Monotonic token invalidating in-flight delta polls. Deliberate abandonment
+   *  (handleReset) bumps it; a poll carrying a stale token is dropped at COMMIT
+   *  time, closing the race where a response resolves between abort and commit. */
+  openingDeltaPollToken: number;
+  /** The session the player has committed to leaving, set BEFORE the awaited
+   *  /start round-trip (g-f3m4). It is still `sessionId`, but its end screen is
+   *  already gone, so a delta reconciling now would commit to a slot nobody can
+   *  see. Marking the departure routes it straight to the late queue — which is
+   *  also what lets `beginSession` stop promoting, since a delta that WAS
+   *  visible inline must not be replayed as a toast. */
+  departingSessionId: string | null;
   soundMuted: boolean;
   soundVolume: number;
 };
@@ -96,9 +156,32 @@ export type GameActions = {
   setRatingScores: (update: SetStateAction<RatingScores>) => void;
   setRatingChange: (update: SetStateAction<RatingChange | null>) => void;
   setScoreChanges: (update: SetStateAction<RatingScores | null>) => void;
-  setOpeningScoreChanges: (
-    update: SetStateAction<OpeningScoreDeltaItem[] | null>,
+  /** Record the terminal endpoint's warm delta for `sessionId`. */
+  setTerminalOpeningDelta: (
+    sessionId: string,
+    items: OpeningScoreDeltaItem[] | null,
   ) => void;
+  /** Commit a reconciled poll result. Compares against the LIVE sessionId and
+   *  poll token inside the updater, so the whole decision is one atomic
+   *  transition against the state the commit actually lands on. */
+  applyPolledOpeningDelta: (
+    sessionId: string,
+    items: OpeningScoreDeltaItem[] | null,
+    pollToken: number,
+  ) => void;
+  /** Mark (or unmark, with null) the session the player is leaving, so a delta
+   *  reconciling during the /start round-trip is queued rather than committed to
+   *  an invisible inline slot. */
+  setDepartingSession: (sessionId: string | null) => void;
+  /** Flip to a new session and clear the current delta slot as ONE transaction. */
+  beginSession: (sessionId: string) => void;
+  /** Clear the current slot only; the late queue is untouched. */
+  clearOpeningDelta: () => void;
+  /** Deliberate abandonment: drop both slots and invalidate in-flight polls. */
+  abandonOpeningDeltas: () => void;
+  /** Dismiss one late notification BY NONCE (never by session — acking by
+   *  session could silently remove a later duplicate that was never shown). */
+  acknowledgeLateOpeningDelta: (nonce: number) => void;
   setSoundMuted: (update: SetStateAction<boolean>) => void;
   setSoundVolume: (update: SetStateAction<number>) => void;
 };
@@ -136,7 +219,10 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
   },
   ratingChange: null,
   scoreChanges: null,
-  openingScoreChanges: null,
+  openingScoreDelta: null,
+  lateOpeningDeltas: [],
+  openingDeltaPollToken: 0,
+  departingSessionId: null,
   soundMuted: getSoundMuted(),
   soundVolume: getSoundVolume(),
 
@@ -185,8 +271,60 @@ export const useGameStore = create<GameState & GameActions>((set) => ({
     set((s) => ({ ratingChange: resolve(u, s.ratingChange) })),
   setScoreChanges: (u) =>
     set((s) => ({ scoreChanges: resolve(u, s.scoreChanges) })),
-  setOpeningScoreChanges: (u) =>
-    set((s) => ({ openingScoreChanges: resolve(u, s.openingScoreChanges) })),
+  setTerminalOpeningDelta: (sessionId, items) =>
+    set(() => ({
+      openingScoreDelta: { sessionId, items, origin: "terminal" as const },
+    })),
+
+  applyPolledOpeningDelta: (sessionId, items, pollToken) =>
+    set((s) => {
+      // Superseded by a deliberate abandonment while this request was in flight.
+      if (pollToken !== s.openingDeltaPollToken) return {};
+      const delta: SessionOpeningDelta = {
+        sessionId,
+        items,
+        origin: "reconciled" as const,
+      };
+      // Still the current drill AND its end screen is still up: reconcile the
+      // warm value in place, where it renders as inline badges.
+      if (s.sessionId === sessionId && s.departingSessionId !== sessionId) {
+        return { openingScoreDelta: delta };
+      }
+      // The player moved on. Surface it as a last-drill notification rather than
+      // dropping it — but only if it would actually render something.
+      if (!hasRenderableBadge(items)) return {};
+      return { lateOpeningDeltas: enqueueLate(s.lateOpeningDeltas, delta) };
+    }),
+
+  setDepartingSession: (sessionId) =>
+    set(() => ({ departingSessionId: sessionId })),
+
+  // Flip and clear as ONE transaction: a poll resolving fresh during the /start
+  // await lands in the current slot, and a separate flip-then-clear would
+  // destroy it. Nothing is promoted here — a delta sitting in the slot either
+  // rendered inline (replaying it as a toast would double-show it) or arrived
+  // while `departingSessionId` was set, in which case it was already queued.
+  beginSession: (sessionId) =>
+    set(() => ({
+      sessionId,
+      departingSessionId: null,
+      openingScoreDelta: null,
+    })),
+
+  clearOpeningDelta: () => set(() => ({ openingScoreDelta: null })),
+
+  abandonOpeningDeltas: () =>
+    set((s) => ({
+      openingScoreDelta: null,
+      lateOpeningDeltas: [],
+      departingSessionId: null,
+      openingDeltaPollToken: s.openingDeltaPollToken + 1,
+    })),
+
+  acknowledgeLateOpeningDelta: (nonce) =>
+    set((s) => ({
+      lateOpeningDeltas: s.lateOpeningDeltas.filter((d) => d.nonce !== nonce),
+    })),
   setSoundMuted: (u) =>
     set((s) => ({ soundMuted: persistSoundMuted(resolve(u, s.soundMuted)) })),
   setSoundVolume: (u) =>

@@ -10,6 +10,9 @@ import type {
   OpeningScoreDeltaItem,
   OpeningScoreStatus,
 } from "../utils/api";
+// Shared with the last-drill toast (g-f3m4) so both surfaces agree on exactly
+// what counts as a change.
+import { badgeFor } from "../utils/openingDeltaBadge";
 
 interface GameOpeningLineageProps {
   playerColor: OpeningPlayerColor;
@@ -33,31 +36,6 @@ interface GameOpeningLineageProps {
    *  score, so a cold cache reads as "loading" rather than "unscored".
    *  Defaults to "ready" — callers that never see a cold cache can omit it. */
   scoreStatus?: OpeningScoreStatus;
-}
-
-type LineageBadge = { diff: number; after: number; dir: "up" | "down" };
-
-/**
- * Derive the inline score-diff badge for one opening, or null to render nothing.
- * The badge is computed from the ROUNDED before/after (the cards display rounded
- * scores), so a sub-1.0 float wobble never renders a misleading `+0`/`+1`.
- *
- * Brand-new openings (is_new) have no baseline, so the diff is quantified against
- * 0 — a new opening ending at 37 reads `+37 → 37` (g-gkkn). Its card itself stays
- * "—" (there was no prior score); the badge is the sole signal of the new value.
- */
-function badgeFor(change: OpeningScoreDeltaItem | undefined): LineageBadge | null {
-  if (!change || change.after == null) return null;
-  const after = Math.round(change.after);
-  const before = change.is_new
-    ? 0
-    : change.before == null
-      ? null
-      : Math.round(change.before);
-  if (before == null) return null;
-  const diff = after - before;
-  if (diff === 0) return null;
-  return { diff, after, dir: diff > 0 ? "up" : "down" };
 }
 
 /**
