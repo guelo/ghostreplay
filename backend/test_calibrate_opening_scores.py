@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 import py_compile
 import subprocess
 import sys
@@ -1262,7 +1263,17 @@ _FZ_MIRRORED = (
     "roots_fingerprint", "evidence_derivation_fingerprint", "pair_count",
     "min_observations", "cohort_rules", "release_guard_opening_key",
     "release_guard_child_opening_key",
+    "capture_scorer_source_digest", "capture_source_revision",
+    "capture_python_version", "capture_chess_version",
 )
+
+# Synthetic capture attestation (g-p4ih-producer-bind): format-valid, deliberately NOT
+# the current environment's values — every green load below also exercises the
+# non-gating decision.
+_FZ_CAPTURE_DIGEST = "d1" * 32
+_FZ_CAPTURE_REVISION = "ab" * 20
+_FZ_CAPTURE_PYTHON = "CPython 3.12.1"
+_FZ_CAPTURE_CHESS = "1.11.2"
 
 
 def _fz_root() -> str:
@@ -1323,6 +1334,10 @@ def _fz_header_input(**overrides) -> "cal.ArtifactHeaderInput":
         cache_epoch=7,
         captured_model_version="sm-v2-3",
         evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+        capture_scorer_source_digest=_FZ_CAPTURE_DIGEST,
+        capture_source_revision=_FZ_CAPTURE_REVISION,
+        capture_python_version=_FZ_CAPTURE_PYTHON,
+        capture_chess_version=_FZ_CAPTURE_CHESS,
     )
     base.update(overrides)
     return cal.ArtifactHeaderInput(**base)
@@ -1427,7 +1442,7 @@ class TestReleaseGuardKeys:
         assert cal.RELEASE_GUARD_CHILD_OPENING_KEY == normalize_fen(board.fen())
 
     def test_pinned_module_constants(self):
-        assert cal.ARTIFACT_SCHEMA_VERSION == 1
+        assert cal.ARTIFACT_SCHEMA_VERSION == 2
         assert cal.COHORT_RULES_ID == "opening-cohort-rules-v1"
         assert cal.DEFAULT_MIN_OBSERVATIONS == 20
         assert cal.TIMESTAMP_FLOOR == datetime(2000, 1, 1, tzinfo=timezone.utc)
@@ -1738,7 +1753,7 @@ class TestSemanticRejectionTable:
 
     def test_unsupported_schema_version(self):
         def p(pl):
-            pl["header"]["schema_version"] = 2
+            pl["header"]["schema_version"] = 3
         _fz_reject(p, "unsupported schema", exc=cal.UnsupportedArtifactSchemaError)
 
     def test_format_malformed_cohort_rules(self):
@@ -2072,6 +2087,138 @@ class TestProvenanceRecordSchema:
         prov = _fz_prov(bs, sha256="ABC123")
         with pytest.raises(cal.ProvenanceRecordError, match="sha256"):
             cal.load_frozen_artifact(bs, prov, _fz_rb())
+
+
+class TestCaptureAttestation:
+    """g-p4ih-producer-bind: the four capture-attestation fields are presence+format
+    validated on BOTH sides, mirrored by integrity, and NEVER equality-gated at load."""
+
+    _FIELDS = (
+        "capture_scorer_source_digest",
+        "capture_source_revision",
+        "capture_python_version",
+        "capture_chess_version",
+    )
+    _MALFORMED = {
+        "capture_scorer_source_digest": "ABC123",  # bad length + non-lowercase-hex
+        "capture_source_revision": "ab" * 19 + "a",  # 39 hex chars, not 40
+        "capture_python_version": "PyPy 3.12.1",  # non-CPython implementation
+        "capture_chess_version": "1.11",  # two segments violate ^\d+.\d+.\d+$
+    }
+
+    def test_round_trip_green(self):
+        cohort = _fz_load(_fz_freeze())
+        h = cohort.header
+        assert h.capture_scorer_source_digest == _FZ_CAPTURE_DIGEST
+        assert h.capture_source_revision == _FZ_CAPTURE_REVISION
+        assert h.capture_python_version == _FZ_CAPTURE_PYTHON
+        assert h.capture_chess_version == _FZ_CAPTURE_CHESS
+
+    @pytest.mark.parametrize("field", _FIELDS)
+    def test_header_missing_field_distinct_error(self, field):
+        def p(pl):
+            del pl["header"][field]
+        msg = _fz_reject(p, "missing required key")
+        assert field in msg
+
+    @pytest.mark.parametrize("field", _FIELDS)
+    def test_record_missing_field_distinct_error(self, field):
+        bs = _fz_freeze()
+        record = json.loads(_fz_prov(bs))
+        del record[field]
+        with pytest.raises(cal.ProvenanceRecordError, match="missing required key") as ei:
+            cal.load_frozen_artifact(bs, cal._canonical_dumps(record), _fz_rb())
+        assert field in str(ei.value)
+
+    @pytest.mark.parametrize("field", _FIELDS)
+    def test_header_malformed_field_distinct_error(self, field):
+        def p(pl):
+            pl["header"][field] = self._MALFORMED[field]
+        msg = _fz_reject(p, f"header.{field}")
+        assert "missing required key" not in msg
+
+    @pytest.mark.parametrize("field", _FIELDS)
+    def test_record_malformed_field_distinct_error(self, field):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs, **{field: self._MALFORMED[field]})
+        with pytest.raises(cal.ProvenanceRecordError) as ei:
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        assert f"provenance.{field}" in str(ei.value)
+
+    def test_python_version_without_implementation_rejected(self):
+        # platform.python_version() alone is NOT enough: the byte-stability contract is
+        # CPython-only, so the implementation must be pinned inside the value.
+        def p(pl):
+            pl["header"]["capture_python_version"] = "3.12.1"
+        _fz_reject(p, "capture_python_version")
+
+    def test_chess_version_suffixed_rejected(self):
+        # The explicit malformed-value proof for the ^\d+.\d+.\d+$ grammar; if
+        # python-chess ever ships a suffixed release, widening the regex is a
+        # deliberate change caught here.
+        def p(pl):
+            pl["header"]["capture_chess_version"] = "1.11.2rc1"
+        _fz_reject(p, "capture_chess_version")
+
+    @pytest.mark.parametrize("field,other", [
+        ("capture_scorer_source_digest", "e2" * 32),
+        ("capture_source_revision", "cd" * 20),
+        ("capture_python_version", "CPython 3.13.2"),
+        ("capture_chess_version", "1.12.0"),
+    ])
+    def test_header_record_disagreement_is_integrity_mismatch(self, field, other):
+        bs = _fz_freeze()
+        prov = _fz_prov(bs, **{field: other})  # format-valid on BOTH sides
+        with pytest.raises(cal.ArtifactIntegrityError) as ei:
+            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        assert field in str(ei.value)
+
+    def test_attestation_differing_from_current_environment_loads_green(self):
+        """THE NON-GATING DECISION (g-p4ih-producer-bind): the attestation is recorded
+        and reviewed, never equality-gated at load. Do NOT "fix" a red version of this
+        test by extending _check_scoring_validity or RuntimeBinding — an equality gate
+        would reimpose re-capture on every dependency bump and create standing pressure
+        to re-run authorized PRODUCTION captures of private data."""
+        current_python = f"{platform.python_implementation()} {platform.python_version()}"
+        different_python = "CPython 3.9.1" if current_python != "CPython 3.9.1" else "CPython 3.8.1"
+        different_chess = "9.9.9" if chess.__version__ != "9.9.9" else "9.9.8"
+        different_digest = "0" * 64 if cal.scorer_source_digest() != "0" * 64 else "1" * 64
+        bs = _fz_freeze(header=_fz_header_input(
+            capture_scorer_source_digest=different_digest,
+            capture_source_revision="f" * 40,  # certainly not the resolved HEAD
+            capture_python_version=different_python,
+            capture_chess_version=different_chess,
+        ))
+        cohort = cal.load_frozen_artifact(
+            bs, _fz_prov(bs, header=json.loads(bs)["header"]), _fz_rb()
+        )
+        assert cohort.header.capture_python_version == different_python  # loaded GREEN
+
+    def test_genuine_v1_artifact_gets_version_diagnostic(self):
+        """REAL prior-schema bytes — v1 key set, WITHOUT the four capture fields — must
+        fail as UnsupportedArtifactSchemaError, never as a missing-keys error. (A v2
+        payload with only its schema_version changed still carries the four keys and
+        would pass the key set, so this builds genuinely v1-shaped bytes.)"""
+        payload = json.loads(_fz_freeze())
+        for field in self._FIELDS:
+            del payload["header"][field]
+        payload["header"]["schema_version"] = 1
+        bs = cal._canonical_dumps(payload)
+        with pytest.raises(cal.UnsupportedArtifactSchemaError) as ei:
+            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb())
+        assert "unsupported schema" in str(ei.value)
+        assert "missing required" not in str(ei.value)
+
+    def test_genuine_v1_record_gets_version_diagnostic(self):
+        bs = _fz_freeze()
+        record = json.loads(_fz_prov(bs))
+        for field in self._FIELDS:
+            del record[field]
+        record["schema_version"] = 1
+        with pytest.raises(cal.UnsupportedArtifactSchemaError) as ei:
+            cal.load_frozen_artifact(bs, cal._canonical_dumps(record), _fz_rb())
+        assert "unsupported schema" in str(ei.value)
+        assert "missing required" not in str(ei.value)
 
 
 class TestCohortMembership:
@@ -2431,6 +2578,10 @@ def _bsi_artifact(tmp_path, *, as_of=_FZ_AS_OF, graph=None, roots=None, inputs=N
         cache_epoch=7,
         captured_model_version="sm-v2-3",
         evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+        capture_scorer_source_digest=_FZ_CAPTURE_DIGEST,
+        capture_source_revision=_FZ_CAPTURE_REVISION,
+        capture_python_version=_FZ_CAPTURE_PYTHON,
+        capture_chess_version=_FZ_CAPTURE_CHESS,
     )
     art = cal.freeze_frozen_artifact(inputs, header)
     hdr = json.loads(art)["header"]
@@ -2574,16 +2725,31 @@ class TestLiveClockSingleSampling:
 
 
 class TestScorerSourceDigest:
-    def test_exact_ten_file_pin(self):
+    def test_exact_manifest_pin(self):
+        # The app.* import CLOSURE of both entry points (g-p4ih-producer-bind) + the
+        # declared dependency set + the scorer itself.
         assert cal.SCORER_SOURCE_FILES == (
+            "backend/app/analysis_profiles.py",
+            "backend/app/analysis_trust.py",
+            "backend/app/centipawn_loss.py",
+            "backend/app/database_url.py",
+            "backend/app/db.py",
+            "backend/app/evidence_contracts.py",
             "backend/app/fen.py",
             "backend/app/game_phase.py",
+            "backend/app/models.py",
+            "backend/app/move_classification.py",
+            "backend/app/opening_aggregate.py",
             "backend/app/opening_cache.py",
             "backend/app/opening_evidence.py",
             "backend/app/opening_graph.py",
             "backend/app/opening_quality.py",
             "backend/app/opening_rootcalc.py",
             "backend/app/opening_roots.py",
+            "backend/app/opening_score_scheduler.py",
+            "backend/app/position_analysis_policy.py",
+            "backend/app/position_analysis_repo.py",
+            "backend/app/posthog_client.py",
             "backend/requirements.txt",
             "backend/scripts/calibrate_opening_scores_v2.py",
         )
@@ -2596,6 +2762,34 @@ class TestScorerSourceDigest:
         # opening_rootcalc imports app.opening_evidence; dropping it must be caught.
         reduced = tuple(p for p in cal.SCORER_SOURCE_FILES
                         if p != "backend/app/opening_evidence.py")
+        with pytest.raises(cal.ScorerSourceManifestError):
+            cal.check_scorer_source_manifest(reduced)
+
+    @pytest.mark.parametrize("dropped", [
+        "backend/app/analysis_profiles.py",
+        "backend/app/analysis_trust.py",
+        "backend/app/centipawn_loss.py",
+        "backend/app/models.py",
+        "backend/app/position_analysis_repo.py",
+    ])
+    def test_closure_guard_rejects_dropped_derivation_module(self, dropped):
+        # The F1 hazard (g-p4ih-producer-bind): opening_evidence.py — the derivation
+        # entry point capture runs — imports these; a manifest missing any of them
+        # would let a dirty edit move captured evidence under an unchanged digest.
+        reduced = tuple(p for p in cal.SCORER_SOURCE_FILES if p != dropped)
+        with pytest.raises(cal.ScorerSourceManifestError, match="import-closure"):
+            cal.check_scorer_source_manifest(reduced)
+
+    def test_closure_walks_through_a_module_absent_from_the_manifest(self):
+        # app.database_url is reached only THROUGH app.db. Dropping BOTH must still
+        # report both: the walk follows a discovered module even when it is absent
+        # from the manifest, so a gap cannot hide its own transitive imports.
+        reduced = tuple(
+            p for p in cal.SCORER_SOURCE_FILES
+            if p not in ("backend/app/db.py", "backend/app/database_url.py")
+        )
+        closure = cal.scorer_imported_app_modules(reduced)
+        assert {"app.db", "app.database_url"} <= closure
         with pytest.raises(cal.ScorerSourceManifestError):
             cal.check_scorer_source_manifest(reduced)
 

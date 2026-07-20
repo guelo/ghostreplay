@@ -56,18 +56,37 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # The COMPLETE, sorted manifest of repo-relative POSIX source paths whose EXACT on-disk
 # bytes the scores are bound to. This is the CODE surface the content fingerprints
 # (graph/roots/evidence-derivation) cannot see: a graph-walk or normalization change moves
-# scores under an unchanged content fingerprint. The scorer's direct scoring imports are
-# part of the binding, not just the scorer entry point; requirements.txt is the DECLARED
+# scores under an unchanged content fingerprint. requirements.txt is the DECLARED
 # dependency set (the chess pin lives inside the digest through it).
+#
+# CLOSURE INVARIANT (g-p4ih-producer-bind): the manifest must be CLOSED under app.*
+# imports of every .py it contains — both the scoring entry point (opening_rootcalc.py)
+# AND the derivation entry point (opening_evidence.py) pull in modules whose bytes shape
+# the captured overlay, so an import outside the manifest would let a dirty edit move
+# evidence under an unchanged digest. check_scorer_source_manifest() enforces this as a
+# fixpoint over static app.* imports; add whatever it names.
 SCORER_SOURCE_FILES: tuple[str, ...] = (
+    "backend/app/analysis_profiles.py",
+    "backend/app/analysis_trust.py",
+    "backend/app/centipawn_loss.py",
+    "backend/app/database_url.py",
+    "backend/app/db.py",
+    "backend/app/evidence_contracts.py",
     "backend/app/fen.py",
     "backend/app/game_phase.py",
+    "backend/app/models.py",
+    "backend/app/move_classification.py",
+    "backend/app/opening_aggregate.py",
     "backend/app/opening_cache.py",
     "backend/app/opening_evidence.py",
     "backend/app/opening_graph.py",
     "backend/app/opening_quality.py",
     "backend/app/opening_rootcalc.py",
     "backend/app/opening_roots.py",
+    "backend/app/opening_score_scheduler.py",
+    "backend/app/position_analysis_policy.py",
+    "backend/app/position_analysis_repo.py",
+    "backend/app/posthog_client.py",
     "backend/requirements.txt",
     "backend/scripts/calibrate_opening_scores_v2.py",
 )
@@ -1268,7 +1287,12 @@ def build_grid_report(
 # dependency. A non-CPython interpreter is OUT of the byte-stability contract.
 # ---------------------------------------------------------------------------
 
-ARTIFACT_SCHEMA_VERSION: int = 1
+# v2 (g-p4ih-producer-bind): the header + provenance record carry the four
+# capture-attestation fields (capture_scorer_source_digest / capture_source_revision /
+# capture_python_version / capture_chess_version). The key sets are closed, so widening
+# them is a schema bump: a v1 artifact/record is refused with
+# UnsupportedArtifactSchemaError, never a missing-keys error.
+ARTIFACT_SCHEMA_VERSION: int = 2
 # The pinned lower instant used only to bound the offset range and keep offset
 # reconstruction (as_of - timedelta(us)) total. A fixed aware-UTC constant, never a
 # per-run value.
@@ -1286,6 +1310,19 @@ _CAPTURED_MODEL_VERSION_RE = re.compile(r"^sm-v\d+-\d+$")
 _PAIR_ID_RE = re.compile(r"^pair-\d+$")
 _SUBJECT_ID_RE = re.compile(r"^subject-\d+$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Capture attestation (g-p4ih-producer-bind): format-pinned, never free-form — the
+# provenance record is committed to Git, so an open string would be an identifying-detail
+# channel. capture_scorer_source_digest reuses _SHA256_RE.
+_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+# The interpreter IMPLEMENTATION and version, pinned to CPython: the byte-stability
+# contract above rests on CPython's shortest-round-trip float repr, so a non-CPython
+# capture runtime is out of contract and its artifact is rejected on format. This is a
+# byte-stability FORMAT constraint, NOT a capture-vs-release environment-equality gate.
+_CAPTURE_PYTHON_VERSION_RE = re.compile(r"^CPython \d+\.\d+\.\d+$")
+# python-chess's three-segment release scheme (the version of the IMPORTED chess module,
+# chess.__version__). If python-chess ever ships a two-segment or suffixed version, this
+# regex is the single place to widen.
+_CAPTURE_CHESS_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 # White-before-black source ordering for deterministic pseudonym assignment (mirrors
 # opening_evidence._COLOR_RANK; defined locally to avoid importing a private symbol).
@@ -1403,6 +1440,12 @@ class ArtifactHeaderInput:
     cache_epoch: int | None
     captured_model_version: str  # SCORE_MODEL_VERSION at capture, ^sm-v\d+-\d+$
     evidence_derivation_fingerprint: str
+    # Capture attestation (g-p4ih-producer-bind): WHO manufactured the overlay — recorded
+    # and reviewed, never equality-gated at load. g-p4ih-capture computes the values.
+    capture_scorer_source_digest: str  # scorer_source_digest() over the closed manifest
+    capture_source_revision: str  # the resolved HEAD commit, ^[0-9a-f]{40}$
+    capture_python_version: str  # f"{python_implementation()} {python_version()}", CPython-pinned
+    capture_chess_version: str  # the IMPORTED chess.__version__ (never importlib.metadata)
 
 
 @dataclass(frozen=True)
@@ -1421,6 +1464,10 @@ class LoadedHeader:
     release_guard_opening_key: str
     release_guard_child_opening_key: str
     cache_epoch: int | None
+    capture_scorer_source_digest: str
+    capture_source_revision: str
+    capture_python_version: str
+    capture_chess_version: str
 
 
 @dataclass(frozen=True)
@@ -1465,6 +1512,10 @@ class _ValidatedProvenance:
     cohort_rules: str
     release_guard_opening_key: str
     release_guard_child_opening_key: str
+    capture_scorer_source_digest: str
+    capture_source_revision: str
+    capture_python_version: str
+    capture_chess_version: str
 
 
 # ---- Canonical encoding primitives ----
@@ -1586,6 +1637,10 @@ def freeze_frozen_artifact(
             "release_guard_opening_key": RELEASE_GUARD_OPENING_KEY,
             "release_guard_child_opening_key": RELEASE_GUARD_CHILD_OPENING_KEY,
             "cache_epoch": header.cache_epoch,
+            "capture_scorer_source_digest": header.capture_scorer_source_digest,
+            "capture_source_revision": header.capture_source_revision,
+            "capture_python_version": header.capture_python_version,
+            "capture_chess_version": header.capture_chess_version,
         },
         "pairs": pair_objs,
     }
@@ -1784,6 +1839,8 @@ _HEADER_KEYS = frozenset({
     "roots_fingerprint", "evidence_derivation_fingerprint", "min_observations",
     "pair_count", "cohort_rules", "release_guard_opening_key",
     "release_guard_child_opening_key", "cache_epoch",
+    "capture_scorer_source_digest", "capture_source_revision",
+    "capture_python_version", "capture_chess_version",
 })
 _PAIR_KEYS = frozenset({
     "pair_id", "player_color", "subject_id", "cohort_role", "surrogate_user_id",
@@ -1805,20 +1862,78 @@ _PROVENANCE_KEYS = frozenset({
     "roots_fingerprint", "evidence_derivation_fingerprint", "pair_count",
     "min_observations", "cohort_rules", "release_guard_opening_key",
     "release_guard_child_opening_key",
+    "capture_scorer_source_digest", "capture_source_revision",
+    "capture_python_version", "capture_chess_version",
 })
 
 
 # ---- Semantic validation (Phase A; provenance-independent well-formedness) ----
 
 
-def _validate_header(header: object, *, supported_schema_version: int = ARTIFACT_SCHEMA_VERSION) -> LoadedHeader:
-    obj = _require_keys(header, _HEADER_KEYS, "header")
-    schema_version = _check_int(obj["schema_version"], "header.schema_version")
-    if schema_version != supported_schema_version:
+def _dispatch_schema_version(
+    obj: object, obj_label: str, field_label: str, supported: int, *, err: type[FrozenArtifactError]
+) -> int:
+    """Schema-version DISPATCH, run BEFORE any closed key set (g-p4ih-producer-bind).
+
+    The v2 closed key sets include the four capture-attestation fields, so a GENUINE
+    prior-schema object — one that lacks them — would fail inside ``_require_keys`` as
+    "missing required key(s)" and the promised version diagnostic would never fire.
+    Requires the object be a mapping and ``schema_version`` a present int, then refuses
+    any unsupported version; only after that may a closed key set apply."""
+    if not isinstance(obj, dict):
+        raise err(f"{obj_label} must be a JSON object; got {type(obj).__name__}")
+    if "schema_version" not in obj:
+        raise err(f"{obj_label} missing required key(s): ['schema_version']")
+    version = _check_int(obj["schema_version"], field_label, err=err)
+    if version != supported:
         raise UnsupportedArtifactSchemaError(
-            f"unsupported schema: header.schema_version={schema_version}, "
-            f"only {supported_schema_version} is supported"
+            f"unsupported schema: {field_label}={version}, only {supported} is supported"
         )
+    return version
+
+
+def _validate_capture_attestation(
+    obj: Mapping[str, object], prefix: str, *, err: type[FrozenArtifactError]
+) -> dict[str, str]:
+    """Presence + FORMAT validation of the four capture-attestation fields
+    (g-p4ih-producer-bind), shared by the header and the provenance record. Recorded and
+    reviewed, never equality-gated at load — nothing here compares against the current
+    environment."""
+    digest = _check_str(obj["capture_scorer_source_digest"], f"{prefix}.capture_scorer_source_digest", err=err)
+    if not _SHA256_RE.match(digest):
+        raise err(
+            f"{prefix}.capture_scorer_source_digest must be 64-char lowercase hex; got {digest!r}"
+        )
+    revision = _check_str(obj["capture_source_revision"], f"{prefix}.capture_source_revision", err=err)
+    if not _GIT_REVISION_RE.match(revision):
+        raise err(
+            f"{prefix}.capture_source_revision must be a 40-char lowercase hex commit; got {revision!r}"
+        )
+    python_version = _check_str(obj["capture_python_version"], f"{prefix}.capture_python_version", err=err)
+    if not _CAPTURE_PYTHON_VERSION_RE.match(python_version):
+        raise err(
+            f"{prefix}.capture_python_version must match ^CPython \\d+.\\d+.\\d+$ (the "
+            f"byte-stability contract is CPython-only); got {python_version!r}"
+        )
+    chess_version = _check_str(obj["capture_chess_version"], f"{prefix}.capture_chess_version", err=err)
+    if not _CAPTURE_CHESS_VERSION_RE.match(chess_version):
+        raise err(
+            f"{prefix}.capture_chess_version must match ^\\d+.\\d+.\\d+$; got {chess_version!r}"
+        )
+    return {
+        "capture_scorer_source_digest": digest,
+        "capture_source_revision": revision,
+        "capture_python_version": python_version,
+        "capture_chess_version": chess_version,
+    }
+
+
+def _validate_header(header: object, *, supported_schema_version: int = ARTIFACT_SCHEMA_VERSION) -> LoadedHeader:
+    schema_version = _dispatch_schema_version(
+        header, "header", "header.schema_version", supported_schema_version,
+        err=ArtifactSemanticError,
+    )
+    obj = _require_keys(header, _HEADER_KEYS, "header")
     as_of = _validate_canonical_as_of(obj["as_of"], "header.as_of")
     if as_of < TIMESTAMP_FLOOR:
         raise ArtifactSemanticError(
@@ -1840,6 +1955,7 @@ def _validate_header(header: object, *, supported_schema_version: int = ARTIFACT
     cache_epoch = obj["cache_epoch"]
     if cache_epoch is not None:
         cache_epoch = _check_int(cache_epoch, "header.cache_epoch", minimum=0)
+    attestation = _validate_capture_attestation(obj, "header", err=ArtifactSemanticError)
     return LoadedHeader(
         schema_version=schema_version,
         as_of=as_of,
@@ -1859,6 +1975,7 @@ def _validate_header(header: object, *, supported_schema_version: int = ARTIFACT
             obj["release_guard_child_opening_key"], "header.release_guard_child_opening_key"
         ),
         cache_epoch=cache_epoch,
+        **attestation,
     )
 
 
@@ -2287,16 +2404,15 @@ def _canonical_reencode_check(payload: object, artifact_bytes: bytes) -> None:
 
 def _validate_provenance_record(provenance_bytes: bytes) -> _ValidatedProvenance:
     record = _hardened_loads(provenance_bytes, ProvenanceRecordError)
+    schema_version = _dispatch_schema_version(
+        record, "provenance record", "provenance.schema_version", ARTIFACT_SCHEMA_VERSION,
+        err=ProvenanceRecordError,
+    )
     obj = _require_keys(record, _PROVENANCE_KEYS, "provenance record", err=ProvenanceRecordError)
     sha256 = _check_str(obj["sha256"], "provenance.sha256", err=ProvenanceRecordError)
     if not _SHA256_RE.match(sha256):
         raise ProvenanceRecordError(
             f"provenance.sha256 must be 64-char lowercase hex; got {sha256!r}"
-        )
-    schema_version = _check_int(obj["schema_version"], "provenance.schema_version", err=ProvenanceRecordError)
-    if schema_version != ARTIFACT_SCHEMA_VERSION:
-        raise UnsupportedArtifactSchemaError(
-            f"unsupported schema: provenance.schema_version={schema_version}"
         )
     captured_model_version = _check_str(obj["captured_model_version"], "provenance.captured_model_version", err=ProvenanceRecordError)
     if not _CAPTURED_MODEL_VERSION_RE.match(captured_model_version):
@@ -2329,6 +2445,7 @@ def _validate_provenance_record(provenance_bytes: bytes) -> _ValidatedProvenance
         release_guard_child_opening_key=_check_nonempty_str(
             obj["release_guard_child_opening_key"], "provenance.release_guard_child_opening_key", err=ProvenanceRecordError
         ),
+        **_validate_capture_attestation(obj, "provenance", err=ProvenanceRecordError),
     )
 
 
@@ -2348,6 +2465,8 @@ def _check_integrity(header: LoadedHeader, artifact_sha256: str, record: _Valida
             "roots_fingerprint", "evidence_derivation_fingerprint", "pair_count",
             "min_observations", "cohort_rules", "release_guard_opening_key",
             "release_guard_child_opening_key",
+            "capture_scorer_source_digest", "capture_source_revision",
+            "capture_python_version", "capture_chess_version",
         )
         if getattr(header, name) != getattr(record, name)
     ]
@@ -2358,6 +2477,20 @@ def _check_integrity(header: LoadedHeader, artifact_sha256: str, record: _Valida
 
 
 def _check_scoring_validity(header: LoadedHeader, runtime_binding: RuntimeBinding) -> None:
+    """Phase C: header vs the CURRENT runtime — derivation compatibility and release-policy
+    pins only.
+
+    The four capture-attestation fields (capture_scorer_source_digest /
+    capture_source_revision / capture_python_version / capture_chess_version) are
+    DELIBERATELY not compared here and not on RuntimeBinding (g-p4ih-producer-bind).
+    They are AUDITABILITY, not compatibility: an equality gate on the producer's digest,
+    revision, or runtime would silently reimpose "re-capture on every dependency bump" —
+    discarding the property that evidence_derivation_fingerprint deliberately excludes
+    model-side versions so a frozen artifact survives model bumps — and would create
+    standing pressure to re-run authorized PRODUCTION captures of private data for
+    routine reasons. The producer-side hazard is closed at capture time instead
+    (clean-tree refusal over the closed manifest, g-p4ih-capture); an artifact whose
+    attestation differs from the current environment loads GREEN."""
     drift = [
         name
         for name in (
@@ -3339,10 +3472,9 @@ _SCORER_SOURCE_DIGEST_AT_IMPORT = scorer_source_digest()
 # read would let this process promote its own flag after the scorer was compiled.
 
 
-def scorer_imported_app_modules() -> set[str]:
-    """The set of ``app.*`` modules opening_rootcalc.py imports (parsed statically). The
-    scorer's DIRECT scoring imports; a completeness guard asserts each is bound."""
-    src = (_REPO_ROOT / "backend/app/opening_rootcalc.py").read_text(encoding="utf-8")
+def _app_imports_of(path: Path) -> set[str]:
+    """The ``app.*`` modules ``path`` imports, parsed statically — never executed."""
+    src = path.read_text(encoding="utf-8")
     modules: set[str] = set()
     for node in ast.walk(ast.parse(src)):
         if isinstance(node, ast.ImportFrom):
@@ -3355,17 +3487,49 @@ def scorer_imported_app_modules() -> set[str]:
     return modules
 
 
+def _app_module_rel(module: str) -> str:
+    return "backend/" + module.replace(".", "/") + ".py"
+
+
+def scorer_imported_app_modules(manifest: tuple[str, ...] = SCORER_SOURCE_FILES) -> set[str]:
+    """The ``app.*`` import CLOSURE of every ``.py`` in ``manifest`` (parsed statically).
+
+    A fixpoint walk (g-p4ih-producer-bind): start from each manifest ``.py`` — the
+    scoring entry point (opening_rootcalc.py) AND the derivation entry point
+    (opening_evidence.py) alike — follow each module's static app.* Import/ImportFrom
+    edges, and iterate until no new module appears. The walk follows a discovered module
+    even when it is ABSENT from ``manifest``, so a missing module's own transitive
+    imports are still reported rather than hidden behind the first gap."""
+    modules: set[str] = set()
+    pending = [_REPO_ROOT / rel for rel in manifest if rel.endswith(".py")]
+    while pending:
+        path = pending.pop()
+        try:
+            imported = _app_imports_of(path)
+        except OSError:
+            continue  # a missing file is the manifest-membership check's diagnostic, not ours
+        for module in imported:
+            if module not in modules:
+                modules.add(module)
+                pending.append(_REPO_ROOT / _app_module_rel(module))
+    return modules
+
+
 def check_scorer_source_manifest(manifest: tuple[str, ...] = SCORER_SOURCE_FILES) -> None:
-    """Fail closed if any ``app.*`` module opening_rootcalc.py imports is missing from
-    ``manifest``, so a future scoring import cannot silently escape scorer_source_digest.
-    Parametrized on ``manifest`` so a test can prove a reduced manifest is rejected."""
+    """Fail closed unless ``manifest`` is CLOSED under app.* imports: every app.* module
+    in the import closure of the manifest's ``.py`` files must itself be in ``manifest``,
+    so neither a future scoring import nor a derivation import (the code that
+    MANUFACTURES a frozen overlay — the surface capture_scorer_source_digest attests)
+    can silently escape scorer_source_digest. Parametrized on ``manifest`` so a test can
+    prove a reduced manifest is rejected."""
     covered = set(manifest)
-    for module in sorted(scorer_imported_app_modules()):
-        rel = "backend/" + module.replace(".", "/") + ".py"
+    for module in sorted(scorer_imported_app_modules(manifest)):
+        rel = _app_module_rel(module)
         if rel not in covered:
             raise ScorerSourceManifestError(
-                f"scoring import {module!r} ({rel}) is not in SCORER_SOURCE_FILES — a new "
-                "app.* import must be added to the source binding manifest"
+                f"import-closure member {module!r} ({rel}) is not in SCORER_SOURCE_FILES — "
+                "every app.* module the manifest's files reach must be added to the source "
+                "binding manifest"
             )
 
 
@@ -3535,7 +3699,13 @@ class ArtifactProvenance:
     + the load-time SHA-256. This lives on the INPUT and is the structure the selector's
     binding checks compare AGAINST; the SelectionResult echo is produced only AFTER the
     checks pass. ``captured_model_version`` is the CAPTURE model — provenance only, never
-    compared to the scoring-time model."""
+    compared to the scoring-time model.
+
+    The four capture-attestation fields (g-p4ih-producer-bind) DELIBERATELY do not
+    propagate here: this is the gating-relevant subset the selector compares against, and
+    the attestation is non-gating and inert at scoring time. The scored cohort is still
+    content-bound to it through ``provenance_record_sha256``, which hashes the on-disk
+    provenance-record bytes that now carry the four fields."""
 
     artifact_sha256: str
     artifact_as_of: datetime

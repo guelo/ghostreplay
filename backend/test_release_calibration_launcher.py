@@ -706,7 +706,9 @@ class TestLaunchEndToEnd:
         """The other half of the fixture's contract, against the real repo. Note this can only
         FAIL when an unrelated tracked file is dirty — the discriminating version lives in
         TestOverlayCommit, which manufactures that condition instead of waiting for it."""
-        outsider = "backend/app/db.py"
+        # opening_densify.py is deliberately OUTSIDE the scorer manifest (its own test in
+        # test_opening_densify.py pins that), so it is a stable outsider here.
+        outsider = "backend/app/opening_densify.py"
         assert outsider not in _E2E_OVERLAY
         committed = subprocess.run(["git", "-C", str(_REPO_ROOT), "show", f"HEAD:{outsider}"],
                                    capture_output=True, check=True).stdout
