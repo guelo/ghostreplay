@@ -241,10 +241,15 @@ def _cached(conn, sid):
 # ---------------------------------------------------------------------------
 
 
-def test_revision_is_the_single_head_and_descends_from_the_previous_one():
+def test_revision_descends_from_the_previous_one_on_a_single_linear_head():
     script = ScriptDirectory.from_config(_alembic_config())
+    # History stays linear (exactly one head). This revision is no longer that
+    # head — a later migration (g-upload-observe's session_upload_receipt)
+    # descends from it — but it must remain a well-formed ancestor of the head.
     heads = list(script.get_heads())
-    assert heads == [REVISION], f"expected a single head {REVISION}, got {heads}"
+    assert len(heads) == 1, f"expected a single head, got {heads}"
+    ancestry = {rev.revision for rev in script.walk_revisions(base="base", head=heads[0])}
+    assert REVISION in ancestry, f"{REVISION} is not an ancestor of head {heads[0]}"
 
     # Asserted against ScriptDirectory's walk, not a hardcoded string: a future
     # revision inserted between 20260718_01 and B must fail HERE rather than

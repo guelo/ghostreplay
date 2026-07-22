@@ -1268,7 +1268,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       // Durably upload the full move history before failDrill computes the
       // opening-score delta, so the recompute sees this drill's complete chain
       // (mirrors the natural-end barrier). Bounded; degrades on timeout.
-      await uploadFullMoveHistoryBeforeEnd(sessionId);
+      await uploadFullMoveHistoryBeforeEnd(sessionId, "accuracy_fail");
       const contract = await failDrill(sessionId, "accuracy");
       if (!isPostRootMoveStillCurrent(sessionId, result)) {
         return;

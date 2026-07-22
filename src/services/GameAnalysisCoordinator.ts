@@ -1818,8 +1818,12 @@ export class GameAnalysisCoordinator {
       state.sessionId,
       payload,
       controller
-        ? { signal: controller.signal, recomputeOpportunity: false }
-        : { recomputeOpportunity: false },
+        ? {
+            uploadKind: 'incremental',
+            signal: controller.signal,
+            recomputeOpportunity: false,
+          }
+        : { uploadKind: 'incremental', recomputeOpportunity: false },
     )
       .then(() => {
         if (state.abortController === controller) {

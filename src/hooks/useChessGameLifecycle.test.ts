@@ -324,9 +324,9 @@ describe("useChessGameLifecycle", () => {
           move_san: "e5",
         }),
       ]),
-      // Terminal resign-before-revert: the final upload drives the single
-      // opportunity recompute (g-y90g).
-      expect.objectContaining({ recomputeOpportunity: true }),
+      // Terminal resign-before-revert: tagged as a revert upload, and drives the
+      // single opportunity recompute (g-y90g / g-upload-observe).
+      expect.objectContaining({ uploadKind: "revert", recomputeOpportunity: true }),
     );
     expect(endGameMock).toHaveBeenCalledWith(
       "session-123",
@@ -1833,9 +1833,17 @@ describe("useChessGameLifecycle", () => {
     expect(
       vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
     ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
-    // The final upload drives the single opportunity recompute.
+    // The final upload is tagged final_full with the game-end terminal action and
+    // drives the single opportunity recompute (g-upload-observe).
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
-      expect.objectContaining({ recomputeOpportunity: true }),
+      expect.objectContaining({
+        uploadKind: "final_full",
+        terminalAction: "game_end",
+        recomputeOpportunity: true,
+      }),
+    );
+    expect(uploadSessionMovesMock.mock.calls[0][2].deadlineMs).toEqual(
+      expect.any(Number),
     );
     expect(uploadSessionMovesMock.mock.calls[0][1]).toHaveLength(4);
     expect(uploadSessionMovesMock.mock.calls[0][1][2]).toEqual(
@@ -1941,21 +1949,25 @@ describe("useChessGameLifecycle", () => {
       vi.mocked(coordinator.settleWithin).mockImplementationOnce(
         () => new Promise((resolve) => setTimeout(resolve, 250)),
       );
-      const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
 
       await act(async () => {
         await result.current.handleGameEnd();
       });
 
-      // The terminal bound must stay 4s, not drift to 4.25s: the upload
-      // inherits 4000 - elapsed, never a fresh 4000.
-      expect(timeoutSpy).toHaveBeenCalled();
-      const granted = timeoutSpy.mock.calls[0][0] as number;
+      // The terminal bound must stay 4s, not drift to 4.25s: uploadSessionMoves is
+      // handed deadlineMs = 4000 - elapsed (it constructs its own timeout from that
+      // value, so the recorded deadline and the live signal cannot drift), never a
+      // fresh 4000.
+      const options = uploadSessionMovesMock.mock.calls[0][2] as {
+        uploadKind: string;
+        deadlineMs: number;
+      };
+      expect(options.uploadKind).toBe("final_full");
+      const granted = options.deadlineMs;
       expect(granted).toBeLessThan(4000);
       expect(granted).toBeLessThanOrEqual(3750);
-      // AbortSignal.timeout rejects a fractional delay.
+      // Floored to an integer — AbortSignal.timeout rejects a fractional delay.
       expect(Number.isInteger(granted)).toBe(true);
-      timeoutSpy.mockRestore();
     });
 
     it("uploads nothing when the session was already replaced (step-1 guard)", async () => {
@@ -1968,7 +1980,10 @@ describe("useChessGameLifecycle", () => {
       // A stale invocation for a session that is no longer current must stop
       // NOTHING — otherwise it would disable the NEW session's uploads.
       await act(async () => {
-        await result.current.uploadFullMoveHistoryBeforeEnd("session-stale");
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-stale",
+          "game_end",
+        );
       });
 
       expect(coordinator.stopSessionUploads).not.toHaveBeenCalled();
@@ -1991,7 +2006,10 @@ describe("useChessGameLifecycle", () => {
         .mockReturnValueOnce({ generation: 1, sessionId: "session-123" });
 
       await act(async () => {
-        await result.current.uploadFullMoveHistoryBeforeEnd("session-123");
+        await result.current.uploadFullMoveHistoryBeforeEnd(
+          "session-123",
+          "game_end",
+        );
       });
 
       expect(coordinator.stopSessionUploads).toHaveBeenCalledTimes(1);
@@ -2091,7 +2109,11 @@ describe("useChessGameLifecycle", () => {
       vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
     ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
-      expect.objectContaining({ recomputeOpportunity: true }),
+      expect.objectContaining({
+        uploadKind: "final_full",
+        terminalAction: "resign",
+        recomputeOpportunity: true,
+      }),
     );
   });
 
@@ -2137,7 +2159,7 @@ describe("useChessGameLifecycle", () => {
       vi.mocked(coordinator.stopSessionUploads).mock.invocationCallOrder[0],
     ).toBeLessThan(uploadSessionMovesMock.mock.invocationCallOrder[0]);
     expect(uploadSessionMovesMock.mock.calls[0][2]).toEqual(
-      expect.objectContaining({ recomputeOpportunity: true }),
+      expect.objectContaining({ uploadKind: "revert", recomputeOpportunity: true }),
     );
   });
 

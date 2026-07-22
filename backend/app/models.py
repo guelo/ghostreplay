@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -17,8 +19,35 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
+from sqlalchemy.sql.functions import FunctionElement
+
+
+class statement_timestamp(FunctionElement):  # noqa: N801 (renders as a SQL function)
+    """Wall-clock time of the CURRENT STATEMENT, as a dialect-portable DDL default.
+
+    Postgres' ``now()`` is TRANSACTION-start time, so a row inserted by a request
+    that waited on a row lock would be stamped seconds before the insert actually
+    happened. This renders ``statement_timestamp()`` on Postgres and falls back to
+    ``CURRENT_TIMESTAMP`` elsewhere (SQLite has no ``statement_timestamp``), so the
+    same metadata emits valid, equivalent DDL on both dialects.
+    """
+
+    type = DateTime(timezone=True)
+    name = "statement_timestamp"
+    inherit_cache = True
+
+
+@compiles(statement_timestamp)
+def _compile_statement_timestamp_default(element, compiler, **kw) -> str:
+    return "CURRENT_TIMESTAMP"
+
+
+@compiles(statement_timestamp, "postgresql")
+def _compile_statement_timestamp_postgresql(element, compiler, **kw) -> str:
+    return "statement_timestamp()"
 
 
 def encode_uci_line(line: list[str] | None) -> str | None:
@@ -345,6 +374,73 @@ class SessionMove(Base):
     decision_source: Mapped[str | None] = mapped_column(String(20))
     target_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id"))
     segment: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
+
+
+class SessionUploadReceipt(Base):
+    """Durable, transactional receipt of a final full move-history upload (g-upload-observe).
+
+    Written inside the SAME transaction as the moves for a ``final_full`` upload
+    (the end-of-session upload identified by a client-sent ``terminal_action``),
+    keyed by the middleware-normalized ``client_request_id``. It is the join
+    target that turns an observed client timeout into an exact commit
+    classification: a receipt present ⇒ the final payload committed; a receipt
+    absent (past the adjudication horizon) ⇒ the final request did NOT commit.
+    Unlike the fire-and-forget ``session_moves_uploaded`` PostHog event, its
+    presence/absence does not depend on analytics delivery — it is durable state.
+
+    Append-only sink: ``session_id`` is a PLAIN column (NO FK) so the insert takes
+    no ``KEY SHARE`` lock on ``game_sessions`` and cannot perturb the writer-lock
+    DAG (SPEC.md). The insert is flushed BEFORE the ``evidence_seq`` cursor bump,
+    so it never lands after the transaction's final blocking statement.
+    ``client_request_id`` is NOT NULL: a ``final_full`` upload lacking a valid
+    client id is rejected 400 before any writes, so a null-id receipt (which would
+    falsely read as loss against the client's id) can never exist.
+    """
+
+    __tablename__ = "session_upload_receipt"
+    __table_args__ = (
+        Index("idx_session_upload_receipt_session", "session_id"),
+        Index("idx_session_upload_receipt_user", "user_id"),
+        Index("idx_session_upload_receipt_client_request_id", "client_request_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    user_id: Mapped[int] = mapped_column(BIGINT_SQLITE, nullable=False)
+    # Middleware-normalized (canonical lowercase) client-generated id; the join key.
+    client_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False
+    )
+    # Middleware's server-generated request id, to cross-join api_request for
+    # server-side timing. Text (not FK) — api_request lives in analytics, not the DB.
+    server_request_id: Mapped[str | None] = mapped_column(Text)
+    # The g-y90g finality flag as sent for this upload (final_full sends true).
+    recompute_opportunity: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Server-side cross-check from game_session.session_mode ('normal'|'drill') for
+    # MATCHED receipts only; the missing-receipt cohort is classified by the client
+    # event's terminal_action instead (it has no receipt to read this from).
+    session_mode: Mapped[str | None] = mapped_column(Text)
+    # Client-sent, allowlisted terminal action that identified this as final_full.
+    terminal_action: Mapped[str | None] = mapped_column(Text)
+    # CLIENT-DECLARED Content-Length (validated int), named so it is never conflated
+    # with the client event's payload_bytes (actual serialized bytes).
+    content_length_bytes: Mapped[int | None] = mapped_column(Integer)
+    # INSERT time (pre-commit, before the cursor bump), NOT commit-completion time.
+    # Stamped APP-SIDE at flush rather than by ``now()``: Postgres defines now() as
+    # TRANSACTION-start time, so a request that waited seconds on the session row
+    # lock would be stamped seconds before its receipt was actually inserted — the
+    # one thing this column must not do. The DDL default is the statement-clock
+    # backstop for any non-ORM insert (never ``now()``, for the same reason), and
+    # matches the migration on both dialects. Coarse adjudication ordering only;
+    # server-commit TIMING comes from the joined api_request, not this column.
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        server_default=statement_timestamp(),
+        nullable=False,
+    )
 
 
 class AnalysisCache(Base):

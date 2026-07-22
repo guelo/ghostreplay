@@ -266,88 +266,34 @@ describe('uploadSessionMoves', () => {
     mockStore = {}
   })
 
-  it('sends POST request to session moves endpoint', async () => {
-    mockResponse({ moves_inserted: 2 })
+  const sampleMove = {
+    move_number: 1,
+    color: 'white' as const,
+    move_san: 'e4',
+    fen_after: 'fen-1',
+    eval_cp: 20,
+    eval_mate: null,
+    best_move_san: 'e4',
+    best_move_eval_cp: 20,
+    eval_delta: 0,
+    classification: 'best' as const,
+    fen_before: 'fen-0',
+    move_uci: 'e2e4',
+    best_move_uci: 'e2e4',
+    decision_source: null,
+    target_blunder_id: null,
+  }
 
-    await uploadSessionMoves('sess-1', [
-      {
-        move_number: 1,
-        color: 'white',
-        move_san: 'e4',
-        fen_after: 'fen-1',
-        eval_cp: 20,
-        eval_mate: null,
-        best_move_san: 'e4',
-        best_move_eval_cp: 20,
-        eval_delta: 0,
-        classification: 'best',
-        fen_before: 'fen-0',
-        move_uci: 'e2e4',
-        best_move_uci: 'e2e4',
-        decision_source: null,
-        target_blunder_id: null,
-      },
-      {
-        move_number: 1,
-        color: 'black',
-        move_san: 'e5',
-        fen_after: 'fen-2',
-        eval_cp: 10,
-        eval_mate: null,
-        best_move_san: 'e5',
-        best_move_eval_cp: 12,
-        eval_delta: 2,
-        classification: 'excellent',
-        fen_before: 'fen-1',
-        move_uci: 'e7e5',
-        best_move_uci: 'e7e5',
-        decision_source: 'backend_engine',
-        target_blunder_id: null,
-      },
-    ])
+  it('sends POST request to the session moves endpoint', async () => {
+    mockResponse({ moves_inserted: 1 })
+
+    await uploadSessionMoves('sess-1', [sampleMove], { uploadKind: 'incremental' })
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/session/sess-1/moves'),
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({
-          moves: [
-            {
-              move_number: 1,
-              color: 'white',
-              move_san: 'e4',
-              fen_after: 'fen-1',
-              eval_cp: 20,
-              eval_mate: null,
-              best_move_san: 'e4',
-              best_move_eval_cp: 20,
-              eval_delta: 0,
-              classification: 'best',
-              fen_before: 'fen-0',
-              move_uci: 'e2e4',
-              best_move_uci: 'e2e4',
-              decision_source: null,
-              target_blunder_id: null,
-            },
-            {
-              move_number: 1,
-              color: 'black',
-              move_san: 'e5',
-              fen_after: 'fen-2',
-              eval_cp: 10,
-              eval_mate: null,
-              best_move_san: 'e5',
-              best_move_eval_cp: 12,
-              eval_delta: 2,
-              classification: 'excellent',
-              fen_before: 'fen-1',
-              move_uci: 'e7e5',
-              best_move_uci: 'e7e5',
-              decision_source: 'backend_engine',
-              target_blunder_id: null,
-            },
-          ],
-        }),
+        body: JSON.stringify({ moves: [sampleMove] }),
       }),
     )
   })
@@ -356,37 +302,90 @@ describe('uploadSessionMoves', () => {
     const expected = { moves_inserted: 4 }
     mockResponse(expected)
 
-    const result = await uploadSessionMoves('sess-1', [])
+    const result = await uploadSessionMoves('sess-1', [], { uploadKind: 'incremental' })
 
     expect(result).toEqual(expected)
   })
 
-  it('passes an abort signal when provided', async () => {
+  it('forwards the external cancellation signal for an incremental upload', async () => {
     mockResponse({ moves_inserted: 0 })
     const controller = new AbortController()
 
-    await uploadSessionMoves('sess-1', [], { signal: controller.signal })
+    await uploadSessionMoves('sess-1', [], {
+      uploadKind: 'incremental',
+      signal: controller.signal,
+    })
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining('/api/session/sess-1/moves'),
-      expect.objectContaining({
-        signal: controller.signal,
-      }),
+      expect.objectContaining({ signal: controller.signal }),
+    )
+  })
+
+  it('constructs the timeout from deadlineMs for a final_full upload', async () => {
+    mockResponse({ moves_inserted: 1 })
+
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'final_full',
+      terminalAction: 'game_end',
+      deadlineMs: 4000,
+    })
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit
+    // The union constructs its own AbortSignal.timeout(deadlineMs) internally.
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('sends terminal_action in the body ONLY for a final_full upload', async () => {
+    mockResponse({ moves_inserted: 1 })
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'final_full',
+      terminalAction: 'resign',
+      deadlineMs: 4000,
+    })
+    const finalBody = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect(finalBody.terminal_action).toBe('resign')
+
+    fetchMock.mockReset()
+    mockResponse({ moves_inserted: 0 })
+    await uploadSessionMoves('sess-1', [], { uploadKind: 'revert' })
+    const revertBody = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect('terminal_action' in revertBody).toBe(false)
+
+    fetchMock.mockReset()
+    mockResponse({ moves_inserted: 0 })
+    await uploadSessionMoves('sess-1', [], { uploadKind: 'incremental' })
+    const incBody = JSON.parse(fetchMock.mock.calls[0][1].body as string)
+    expect('terminal_action' in incBody).toBe(false)
+  })
+
+  it('sends the X-Client-Request-ID header keyed to a client-generated id', async () => {
+    mockResponse({ moves_inserted: 0 })
+
+    await uploadSessionMoves('sess-1', [], { uploadKind: 'incremental' })
+
+    const headers = (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<
+      string,
+      string
+    >
+    expect(headers['X-Client-Request-ID']).toEqual(expect.any(String))
+    expect(headers['X-Client-Request-ID']).toMatch(
+      /^[0-9a-f-]{36}$/i,
     )
   })
 
   it('throws on non-ok response', async () => {
     mockResponse({}, false, 'Unprocessable Entity', 422)
 
-    await expect(uploadSessionMoves('sess-1', [])).rejects.toThrow(
-      'Failed to upload session moves: Unprocessable Entity',
-    )
+    await expect(
+      uploadSessionMoves('sess-1', [], { uploadKind: 'incremental' }),
+    ).rejects.toThrow('Failed to upload session moves: Unprocessable Entity')
   })
 
   it('omits recompute_opportunity from the body when not specified', async () => {
     mockResponse({ moves_inserted: 0 })
 
-    await uploadSessionMoves('sess-1', [])
+    await uploadSessionMoves('sess-1', [], { uploadKind: 'incremental' })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
     expect(body).toEqual({ moves: [] })
@@ -396,7 +395,10 @@ describe('uploadSessionMoves', () => {
   it('includes recompute_opportunity: false when opted out (incremental upload)', async () => {
     mockResponse({ moves_inserted: 0 })
 
-    await uploadSessionMoves('sess-1', [], { recomputeOpportunity: false })
+    await uploadSessionMoves('sess-1', [], {
+      uploadKind: 'incremental',
+      recomputeOpportunity: false,
+    })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
     expect(body.recompute_opportunity).toBe(false)
@@ -405,10 +407,37 @@ describe('uploadSessionMoves', () => {
   it('includes recompute_opportunity: true when flagged (final upload)', async () => {
     mockResponse({ moves_inserted: 0 })
 
-    await uploadSessionMoves('sess-1', [], { recomputeOpportunity: true })
+    await uploadSessionMoves('sess-1', [sampleMove], {
+      uploadKind: 'final_full',
+      terminalAction: 'game_end',
+      deadlineMs: 4000,
+      recomputeOpportunity: true,
+    })
 
     const body = JSON.parse(fetchMock.mock.calls[0][1].body as string)
     expect(body.recompute_opportunity).toBe(true)
+  })
+
+  // Type-level contract (enforced by `tsc -b` in the build): the discriminated
+  // union rejects mixing the wrong fields across upload kinds. Never executed.
+  it('enforces the discriminated-union option shape at compile time', () => {
+    const _typeContracts = async () => {
+      // @ts-expect-error final_full REQUIRES terminalAction + deadlineMs
+      await uploadSessionMoves('s', [], { uploadKind: 'final_full' })
+      await uploadSessionMoves('s', [], {
+        uploadKind: 'incremental',
+        // @ts-expect-error incremental cannot carry terminalAction
+        terminalAction: 'game_end',
+      })
+      await uploadSessionMoves('s', [], {
+        uploadKind: 'revert',
+        // @ts-expect-error revert cannot carry deadlineMs
+        deadlineMs: 4000,
+      })
+      // @ts-expect-error uploadKind is required
+      await uploadSessionMoves('s', [], {})
+    }
+    expect(typeof _typeContracts).toBe('function')
   })
 })
 

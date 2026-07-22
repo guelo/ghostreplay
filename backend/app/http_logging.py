@@ -62,6 +62,24 @@ def _header_value(scope, header_name: bytes) -> str | None:
     return None
 
 
+def _normalize_client_request_id(raw: str | None) -> str | None:
+    """Validate + canonicalize an inbound ``X-Client-Request-ID`` header.
+
+    The client mints this id (``crypto.randomUUID()``) so EVERY request outcome —
+    including a timeout with no response — carries a join key. We normalize ONCE
+    here to the canonical lowercase hyphenated form: ``uuid.UUID()`` alone accepts
+    uppercase/braces/urn variants, so storing the normalized ``str()`` is what
+    bounds analytics cardinality and dedups. Invalid or absent ⇒ None (the server
+    request id, which stays server-generated, is unaffected).
+    """
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
 def _extract_client(scope) -> tuple[str | None, int | None]:
     forwarded_for = _header_value(scope, b"x-forwarded-for")
     if forwarded_for:
@@ -156,12 +174,18 @@ def _capture_api_request(
     duration_ms: float,
     request_id: str,
     user_id: object,
+    client_request_id: str | None,
 ) -> None:
     """Emit the per-request ``api_request`` latency event.
 
     Wrapped by the caller in try/except — an analytics failure must never alter
     the response. Skips OPTIONS, health checks, root and docs to keep volume and
     cardinality sane.
+
+    ``request_id`` (server-generated) and ``client_request_id`` (client-generated,
+    normalized) are SEPARATE fields: the server id echoes back on ``X-Request-ID``
+    and is null on the client only when no response arrived, while the client id is
+    the join key present on every attempt (including timeouts).
     """
     path = scope.get("path", "")
     if method == "OPTIONS" or _skip_analytics(path):
@@ -177,6 +201,7 @@ def _capture_api_request(
             "ok": status_code < 400,
             "status_class": f"{status_code // 100}xx",
             "request_id": request_id,
+            "client_request_id": client_request_id,
         },
     )
 
@@ -195,6 +220,24 @@ class HTTPLoggingMiddleware:
         path = scope.get("path", "")
         query_string = scope.get("query_string", b"")
         query = _redact_query(query_string)
+
+        # Validate + normalize the client-generated correlation id ONCE, then
+        # publish BOTH ids to request state so the endpoint reads them without
+        # re-parsing the header. This middleware is the OUTERMOST layer, so
+        # scope["state"] does not exist yet — creating it here shares one dict with
+        # the inner AuthMiddleware/route (Starlette's request.state uses
+        # scope.setdefault("state", {})). The server request_id stays
+        # server-generated; the client id is stored separately and never overwrites
+        # it (trusting client input would allow id collisions / cardinality blowup /
+        # non-ASCII values that break the X-Request-ID echo below).
+        client_request_id = _normalize_client_request_id(
+            _header_value(scope, b"x-client-request-id")
+        )
+        state = scope.setdefault("state", {})
+        if isinstance(state, dict):
+            state["request_id"] = request_id
+            state["client_request_id"] = client_request_id
+
         if method == "OPTIONS":
             await self.app(scope, receive, send)
             return
@@ -266,6 +309,7 @@ class HTTPLoggingMiddleware:
 
             http_fields: dict = {
                 "request_id": request_id,
+                "client_request_id": client_request_id,
                 "method": method,
                 "path": path,
                 "query": query,
@@ -296,6 +340,7 @@ class HTTPLoggingMiddleware:
                     http_fields["duration_ms"],
                     request_id,
                     user_id,
+                    client_request_id,
                 )
             except Exception:
                 logger.debug("api_request analytics capture failed", exc_info=True)

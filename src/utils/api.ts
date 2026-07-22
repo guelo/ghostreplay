@@ -144,6 +144,79 @@ export const isAbortError = (error: unknown): boolean =>
   (error as { name?: unknown } | null)?.name === 'AbortError'
 
 /**
+ * Classify a rejection raised while reading the response BODY.
+ *
+ * `fetch()` resolves as soon as the headers arrive, so a deadline that expires
+ * mid-body rejects HERE, not at `fetch()`. Blanket-labelling those `parse` would
+ * silently drop late deadline overruns out of the timeout cohort — exactly the
+ * population g-upload-observe exists to measure. The body stream errors with the
+ * signal's abort reason (`TimeoutError` for `AbortSignal.timeout()`), but some
+ * runtimes surface a bare `AbortError` on the stream instead, so we read
+ * `signal.reason` first and fall back to the thrown value.
+ *
+ * Returns `null` for a deliberate cancellation — not a round-trip outcome, so it
+ * goes unreported exactly as in the network branch.
+ */
+export const classifyBodyReadError = (
+  error: unknown,
+  signal?: AbortSignal | null,
+): ApiRequestErrorKind | null => {
+  const cause = signal?.aborted ? (signal.reason ?? error) : error
+  const name = (cause as { name?: unknown } | null)?.name
+  if (name === 'TimeoutError') return 'timeout'
+  if (name === 'AbortError') return null
+  return 'parse'
+}
+
+/**
+ * The four end-of-session terminal actions that trigger a `final_full` upload.
+ * Carried on the CLIENT `api_request_client` event (available even when no
+ * receipt exists), so it — not the server-only `session_mode` — classifies the
+ * drill-vs-game path for the unmatched (noncommit) cohort:
+ * `drill_natural_end`/`accuracy_fail` ⇒ drill, `game_end`/`resign` ⇒ normal game.
+ */
+export type TerminalAction =
+  | 'game_end'
+  | 'resign'
+  | 'drill_natural_end'
+  | 'accuracy_fail'
+
+/** Which of the three `/moves` callers emitted an upload (g-upload-observe). */
+export type UploadKind = 'final_full' | 'incremental' | 'revert'
+
+/**
+ * Mint a client-generated correlation id for a request. Unlike the server id
+ * (read off the response, absent on a timeout), this is attached to EVERY
+ * outcome — including a timed-out request that never got a response — so a
+ * client timeout can still be joined to the server's durable upload receipt.
+ */
+export const newClientRequestId = (): string => crypto.randomUUID()
+
+/** `document.visibilityState` when defined (guards non-DOM/test runtimes). */
+const readVisibilityState = (): string | undefined =>
+  typeof document !== 'undefined' ? document.visibilityState : undefined
+
+/**
+ * Optional per-request telemetry threaded through `requestJson` and attached to
+ * the `api_request_client` event on ALL outcome branches. Every field is
+ * optional; an absent field is emitted as null. `clientRequestId` additionally
+ * injects the `X-Client-Request-ID` request header so the server can key its
+ * durable receipt on the same id.
+ */
+export interface ApiRequestTelemetry {
+  uploadKind?: UploadKind
+  clientRequestId?: string
+  terminalAction?: TerminalAction | null
+  moveCount?: number
+  /** Actual transmitted UTF-8 byte length of the serialized body. */
+  payloadBytes?: number
+  /** The deadline that constructed the request's timeout (final_full only). */
+  deadlineMs?: number
+  /** `document.visibilityState` captured at call time (before the fetch). */
+  visibilityStateStart?: string
+}
+
+/**
  * Emit exactly one `api_request_client` event for the FINAL outcome of one
  * logical request (never per retry attempt). No-ops when analytics is disabled.
  * Client-side timing complements the server's `api_request`: it also sees
@@ -160,7 +233,12 @@ export const reportApiRequest = (params: {
   errorKind?: ApiRequestErrorKind
   /** Server-echoed request id, or null when no response was received. */
   requestId?: string | null
+  /** Correlation/upload telemetry; absent for most requests. */
+  telemetry?: ApiRequestTelemetry
 }): void => {
+  const t = params.telemetry
+  // Read visibility at EMIT for the end state; only meaningful alongside a start.
+  const visibilityEnd = t ? readVisibilityState() : undefined
   captureEvent('api_request_client', {
     route: normalizeApiPath(params.url),
     method: params.method,
@@ -170,6 +248,19 @@ export const reportApiRequest = (params: {
     attempts: params.attempts,
     error_kind: params.errorKind ?? null,
     request_id: params.requestId ?? null,
+    upload_kind: t?.uploadKind ?? null,
+    client_request_id: t?.clientRequestId ?? null,
+    terminal_action: t?.terminalAction ?? null,
+    move_count: t?.moveCount ?? null,
+    payload_bytes: t?.payloadBytes ?? null,
+    deadline_ms: t?.deadlineMs ?? null,
+    visibility_state_start: t?.visibilityStateStart ?? null,
+    visibility_state_end: visibilityEnd ?? null,
+    // A tab hidden mid-request: start !== end. Null unless both are known.
+    visibility_changed:
+      t?.visibilityStateStart != null && visibilityEnd != null
+        ? t.visibilityStateStart !== visibilityEnd
+        : null,
   })
 }
 // -------------------------------------------------------------------
@@ -262,12 +353,23 @@ const parseRetryAfterMs = (headerValue: string | null): number | undefined => {
 const delay = async (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * Read an error response's body, tolerating a malformed/empty one (a non-2xx with
+ * unparseable JSON is still an `http` outcome, so the envelope is simply absent).
+ *
+ * An ABORT rejection is deliberately NOT swallowed: a 4xx/5xx whose body stalls
+ * past the deadline is a `timeout`, and burying it here would report it as `http`
+ * and drop it out of the measured cohort exactly as the success path once did.
+ * The caller classifies the rethrown reason against the live signal.
+ */
 const parseJsonSafely = async (
   response: Response,
 ): Promise<ApiErrorEnvelope | null> => {
   try {
     return (await response.json()) as ApiErrorEnvelope
-  } catch {
+  } catch (error) {
+    const name = (error as { name?: unknown } | null)?.name
+    if (name === 'AbortError' || name === 'TimeoutError') throw error
     return null
   }
 }
@@ -304,12 +406,29 @@ const createApiError = async (
 const requestJson = async <T>(
   url: string,
   init: RequestInit,
-  options?: { retries?: number; fallbackMessage?: string },
+  options?: {
+    retries?: number
+    fallbackMessage?: string
+    telemetry?: ApiRequestTelemetry
+  },
 ): Promise<T> => {
   const retries = options?.retries ?? 0
   const method = init.method ?? 'GET'
   const fallbackMessage =
     options?.fallbackMessage ?? `Request failed: ${method} ${url}`
+  const telemetry = options?.telemetry
+  // Inject the client correlation id as a request header so the server keys its
+  // durable receipt on the SAME id the client event carries. Merged as a plain
+  // object (all callers pass object headers); a set id is a load-bearing join key.
+  const requestInit: RequestInit = telemetry?.clientRequestId
+    ? {
+        ...init,
+        headers: {
+          ...(init.headers as Record<string, string> | undefined),
+          'X-Client-Request-ID': telemetry.clientRequestId,
+        },
+      }
+    : init
   // Span the whole logical request (across retries) so duration/attempts reflect
   // what the caller actually waited for.
   const start = performance.now()
@@ -319,7 +438,7 @@ const requestJson = async <T>(
 
     let response: Response
     try {
-      response = await fetch(url, init)
+      response = await fetch(url, requestInit)
     } catch (error) {
       // Network-level failure (offline, DNS, CORS, timeout) — the server never
       // answered. Retry transient ones; report only the final outcome. A
@@ -337,6 +456,7 @@ const requestJson = async <T>(
           durationMs: performance.now() - start,
           attempts,
           errorKind: classifyNetworkError(error),
+          telemetry,
         })
       }
       throw error
@@ -355,9 +475,43 @@ const requestJson = async <T>(
           durationMs: performance.now() - start,
           attempts,
           requestId: readRequestId(response),
+          telemetry,
         })
         return parsed
-      } catch (parseError) {
+      } catch (bodyError) {
+        // fetch() already resolved at the headers, so a deadline expiring while
+        // the body streams rejects HERE — classify by the abort reason so it
+        // lands in the timeout cohort rather than masquerading as `parse`.
+        const errorKind = classifyBodyReadError(bodyError, requestInit.signal)
+        if (errorKind) {
+          reportApiRequest({
+            url,
+            method,
+            status: response.status,
+            ok: false,
+            durationMs: performance.now() - start,
+            attempts,
+            errorKind,
+            // Kept even for a late timeout: a real status plus a server request
+            // id prove the server answered, which is the strongest client-side
+            // evidence the write committed.
+            requestId: readRequestId(response),
+            telemetry,
+          })
+        }
+        throw bodyError
+      }
+    }
+
+    let apiError: ApiError
+    try {
+      apiError = await createApiError(response, fallbackMessage)
+    } catch (bodyError) {
+      // The error body stalled past the deadline. Same rule as the success path:
+      // the abort — not the status — is the outcome, so it belongs in the timeout
+      // cohort. No retry either; the signal is already spent.
+      const errorKind = classifyBodyReadError(bodyError, requestInit.signal)
+      if (errorKind) {
         reportApiRequest({
           url,
           method,
@@ -365,14 +519,13 @@ const requestJson = async <T>(
           ok: false,
           durationMs: performance.now() - start,
           attempts,
-          errorKind: 'parse',
+          errorKind,
           requestId: readRequestId(response),
+          telemetry,
         })
-        throw parseError
       }
+      throw bodyError
     }
-
-    const apiError = await createApiError(response, fallbackMessage)
     if (attempt < retries && apiError.retryable) {
       await delay(RETRY_BASE_DELAY_MS * 2 ** attempt)
       continue
@@ -386,6 +539,7 @@ const requestJson = async <T>(
       attempts,
       errorKind: 'http',
       requestId: readRequestId(response),
+      telemetry,
     })
     throw apiError
   }
@@ -618,6 +772,14 @@ interface SessionMovesRequest {
    * backend default.
    */
   recompute_opportunity?: boolean
+  /**
+   * Sent ONLY on the end-of-session `final_full` upload (g-upload-observe). Its
+   * PRESENCE is how the server identifies a final_full upload and gates the
+   * durable receipt write; the incremental and revert uploads omit it. Omitted
+   * from the body when undefined so those uploads send the exact shape they always
+   * have.
+   */
+  terminal_action?: TerminalAction
 }
 
 interface SessionMovesResponse {
@@ -875,29 +1037,88 @@ export const fetchRatingHistory = async (
 }
 
 /**
+ * Options for `uploadSessionMoves`, a discriminated union on `uploadKind` so the
+ * three callers can never mix the wrong fields (g-upload-observe):
+ *
+ *  - `final_full` REQUIRES `terminalAction` + `deadlineMs`. The timeout is
+ *    constructed HERE from `deadlineMs` (`AbortSignal.timeout`), so the recorded
+ *    `deadline_ms` and the live signal cannot drift; the call site no longer
+ *    builds its own signal.
+ *  - `incremental` passes an external cancellation `signal` straight through.
+ *  - `revert` has neither.
+ *
+ * The union guarantees `deadlineMs`/`terminalAction` and `signal` are never both
+ * present, so no signal-combining is ever needed.
+ */
+export type UploadSessionMovesOptions =
+  | {
+      uploadKind: 'final_full'
+      terminalAction: TerminalAction
+      deadlineMs: number
+      recomputeOpportunity?: boolean
+    }
+  | { uploadKind: 'incremental'; signal?: AbortSignal; recomputeOpportunity?: boolean }
+  | { uploadKind: 'revert'; recomputeOpportunity?: boolean }
+
+/**
  * Upload analyzed session moves in a single batch.
  */
 export const uploadSessionMoves = async (
   sessionId: string,
   moves: SessionMoveUpload[],
-  options?: { signal?: AbortSignal; recomputeOpportunity?: boolean },
+  options: UploadSessionMovesOptions,
 ): Promise<SessionMovesResponse> => {
   // Only include recompute_opportunity in the body when the caller specifies it,
   // so omitting it falls through to the backend default (true). Mid-game
   // incremental uploads pass false to skip the opportunity recompute (g-y90g).
-  const body: SessionMovesRequest =
-    options?.recomputeOpportunity === undefined
-      ? { moves }
-      : { moves, recompute_opportunity: options.recomputeOpportunity }
+  // terminal_action is sent ONLY on final_full — its presence is the server's
+  // final_full discriminator and the receipt-write gate.
+  const body: SessionMovesRequest = {
+    moves,
+    ...(options.recomputeOpportunity === undefined
+      ? {}
+      : { recompute_opportunity: options.recomputeOpportunity }),
+    ...(options.uploadKind === 'final_full'
+      ? { terminal_action: options.terminalAction }
+      : {}),
+  }
+  // Serialize ONCE: reuse the exact bytes for the fetch body AND the measured
+  // payload size. payloadBytes is the transmitted UTF-8 byte length (TextEncoder),
+  // NOT JSON.stringify(body).length (UTF-16 code units — wrong for multi-byte).
+  const bodyJson = JSON.stringify(body satisfies SessionMovesRequest)
+  const payloadBytes = new TextEncoder().encode(bodyJson).byteLength
+  const clientRequestId = newClientRequestId()
+
+  // Exactly one signal source per case (no combining): final_full constructs its
+  // own deadline here; incremental forwards the external signal; revert has none.
+  const signal =
+    options.uploadKind === 'final_full'
+      ? AbortSignal.timeout(options.deadlineMs)
+      : options.uploadKind === 'incremental'
+        ? options.signal
+        : undefined
+
+  const telemetry: ApiRequestTelemetry = {
+    uploadKind: options.uploadKind,
+    clientRequestId,
+    moveCount: moves.length,
+    payloadBytes,
+    terminalAction:
+      options.uploadKind === 'final_full' ? options.terminalAction : null,
+    deadlineMs:
+      options.uploadKind === 'final_full' ? options.deadlineMs : undefined,
+    visibilityStateStart: readVisibilityState(),
+  }
+
   return requestJson<SessionMovesResponse>(
     `${API_BASE_URL}/api/session/${sessionId}/moves`,
     {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify(body satisfies SessionMovesRequest),
-      signal: options?.signal,
+      body: bodyJson,
+      signal,
     },
-    { fallbackMessage: 'Failed to upload session moves' },
+    { fallbackMessage: 'Failed to upload session moves', telemetry },
   )
 }
 

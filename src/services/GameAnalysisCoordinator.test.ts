@@ -239,8 +239,13 @@ describe('GameAnalysisCoordinator', () => {
 
       expect(uploadSessionMovesMock).toHaveBeenCalledTimes(1)
       const options = uploadSessionMovesMock.mock.calls[0][2]
+      // Tagged as an incremental upload (isolable from final_full/revert in
+      // telemetry, g-upload-observe) and opts out of the opportunity recompute.
       expect(options).toEqual(
-        expect.objectContaining({ recomputeOpportunity: false }),
+        expect.objectContaining({
+          uploadKind: 'incremental',
+          recomputeOpportunity: false,
+        }),
       )
     })
   })

@@ -9,7 +9,7 @@ from enum import Enum
 from typing import Literal
 
 import chess
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import case, func, tuple_
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
@@ -60,6 +60,7 @@ from app.models import (
     Move,
     Position,
     SessionMove,
+    SessionUploadReceipt,
     decode_uci_line,
     encode_uci_line,
 )
@@ -155,6 +156,15 @@ class SessionMovesRequest(BaseModel):
     # (compute — safe, just slower). The graph upsert + analysis-cache write +
     # opening-score recompute enqueue still run on EVERY upload regardless.
     recompute_opportunity: bool = True
+    # Client-sent ONLY for the end-of-session final_full upload (g-upload-observe);
+    # the mid-game incremental uploader and the revert upload never send it. Its
+    # PRESENCE is how the server identifies a final_full upload and gates the
+    # durable receipt write — recompute_opportunity can't (the revert path also
+    # sends true). Pydantic allowlists the four terminal actions; anything else is
+    # rejected 422 before the endpoint runs.
+    terminal_action: (
+        Literal["game_end", "resign", "drill_natural_end", "accuracy_fail"] | None
+    ) = None
 
 
 class SessionMovesResponse(BaseModel):
@@ -1105,18 +1115,54 @@ def _run_session_move_evidence_side_effects(
         request_recompute(user_id, player_color)
 
 
+def _validated_content_length(http_request: Request) -> int | None:
+    """Parse the ``Content-Length`` header into a non-negative int, else None.
+
+    CLIENT-DECLARED metadata for the receipt (named ``content_length_bytes`` so it
+    is never conflated with the client event's ``payload_bytes`` — the actual
+    serialized byte count — nor with a true received-byte count). Best-effort: a
+    missing/malformed header records None rather than failing the upload.
+    """
+    raw = http_request.headers.get("content-length")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        return None
+    return value if value >= 0 else None
+
+
 def _emit_session_moves_uploaded(
-    user_id: int, *, move_count: int, recompute_queued: bool
+    user_id: int,
+    *,
+    move_count: int,
+    recompute_queued: bool,
+    client_request_id: str | None,
+    recompute_opportunity: bool,
+    session_mode: str | None,
 ) -> None:
     """Emit ``session_moves_uploaded`` once an upload is durably committed.
 
     Shared by both the SQLite/Postgres and generic-dialect return paths so the
     event reflects a persisted upload, not merely a received request.
+
+    This remains a CONVENIENCE/timing signal, NOT the measurement: ``capture()``
+    is fire-and-forget (no-ops without the SDK, swallows delivery failures), so a
+    missing event proves nothing. The exact final-upload commit classification
+    reads the durable ``session_upload_receipt`` row keyed by ``client_request_id``.
+    ``client_request_id`` is carried here so a delivered event can still be joined.
     """
     capture(
         str(user_id),
         "session_moves_uploaded",
-        {"move_count": move_count, "recompute_queued": recompute_queued},
+        {
+            "move_count": move_count,
+            "recompute_queued": recompute_queued,
+            "client_request_id": client_request_id,
+            "recompute_opportunity": recompute_opportunity,
+            "session_mode": session_mode,
+        },
     )
 
 
@@ -1128,6 +1174,7 @@ def _emit_session_moves_uploaded(
 def upsert_session_moves(
     session_id: uuid.UUID,
     request: SessionMovesRequest,
+    http_request: Request,
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> SessionMovesResponse:
@@ -1139,7 +1186,64 @@ def upsert_session_moves(
     _ensure_session_owned_by_user(game_session, user)
     _validate_unique_move_keys(request.moves)
 
+    # g-upload-observe. A client-sent terminal_action marks the end-of-session
+    # final_full upload — the one bounded by the 4s client deadline and the sole
+    # writer of a durable receipt. The middleware already validated + normalized
+    # the client-generated correlation id and published both ids to request state.
+    is_final_full = request.terminal_action is not None
+    client_request_id = getattr(http_request.state, "client_request_id", None)
+    server_request_id = getattr(http_request.state, "request_id", None)
+
+    # Reject a final_full upload lacking a valid client id BEFORE any writes. A
+    # header stripped by a proxy or malformed by a client would otherwise commit a
+    # null-id receipt that the join reads as loss against the client's id. Surfacing
+    # it as a clean 400 (error_kind='http', no commit) instead both keeps the
+    # receipt's client_request_id column non-null and never manufactures false loss.
+    if is_final_full and client_request_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="final_full upload requires a valid X-Client-Request-ID",
+        )
+
+    def _add_upload_receipt() -> None:
+        """Stage the durable final_full receipt into the CURRENT transaction.
+
+        Called in each dialect path immediately before that path's pre-cursor-bump
+        ``db.flush()``, so the receipt INSERT is flushed AHEAD of the
+        ``evidence_seq`` cursor bump (the transaction's final blocking statement)
+        and never lands after it. Written ONLY for final_full; a commit/insert
+        failure creates no receipt because it shares the transaction.
+
+        Also called on the empty-move-list path, which commits the receipt alone —
+        the endpoint must never return 200 for a final_full upload without one.
+        """
+        if not is_final_full:
+            return
+        db.add(
+            SessionUploadReceipt(
+                session_id=session_id,
+                user_id=user.user_id,
+                # Re-wrap the middleware-normalized canonical string; guaranteed
+                # non-null here by the reject-before-write guard above.
+                client_request_id=uuid.UUID(client_request_id),
+                server_request_id=server_request_id,
+                recompute_opportunity=request.recompute_opportunity,
+                session_mode=game_session.session_mode,
+                terminal_action=request.terminal_action,
+                content_length_bytes=_validated_content_length(http_request),
+            )
+        )
+
     if not request.moves:
+        # An empty upload writes no moves, but a final_full one still MUST leave a
+        # receipt: the join classifies "200 with no receipt" as a noncommit, so
+        # short-circuiting here would manufacture false loss for any final upload
+        # the client sends with an empty tail (the contract permits it even though
+        # the current lifecycle does not). No moves, no recompute, no cursor bump —
+        # the receipt INSERT is the only statement in this transaction.
+        if is_final_full:
+            _add_upload_receipt()
+            db.commit()
         return SessionMovesResponse(moves_inserted=0)
 
     values = [
@@ -1221,6 +1325,9 @@ def upsert_session_moves(
             # (backend sessions disable autoflush, so this flush is load-bearing).
             db.flush()
             recompute_session_accuracy(db, game_session)
+            # Stage the final_full receipt (no-op otherwise) so the drain flush
+            # below emits its INSERT ahead of the cursor bump (g-upload-observe).
+            _add_upload_receipt()
             # Drain the dirty accuracy assignment before the cursor bump so the
             # cache write lands ahead of the transaction's final statement.
             db.flush()
@@ -1253,6 +1360,9 @@ def upsert_session_moves(
                 user.user_id,
                 move_count=len(values),
                 recompute_queued=bool(evidence_moves),
+                client_request_id=client_request_id,
+                recompute_opportunity=request.recompute_opportunity,
+                session_mode=game_session.session_mode,
             )
         return SessionMovesResponse(
             moves_inserted=len(values),
@@ -1295,6 +1405,9 @@ def upsert_session_moves(
         # below drains them ahead of the conditional cursor bump.
         db.execute(statement)
         recompute_session_accuracy(db, game_session)
+        # Stage the final_full receipt (no-op otherwise) BEFORE this flush so its
+        # INSERT is emitted ahead of the cursor bump (g-upload-observe).
+        _add_upload_receipt()
         db.flush()
         if bump_for_evidence:
             bump_evidence_seq(db, user.user_id, game_session.player_color)
@@ -1327,6 +1440,9 @@ def upsert_session_moves(
             user.user_id,
             move_count=len(values),
             recompute_queued=bool(evidence_moves),
+            client_request_id=client_request_id,
+            recompute_opportunity=request.recompute_opportunity,
+            session_mode=game_session.session_mode,
         )
     return SessionMovesResponse(
         moves_inserted=len(values),

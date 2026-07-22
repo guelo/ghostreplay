@@ -456,7 +456,16 @@ def test_session_moves_emit_uploaded(client, auth_headers, captured, create_game
     assert r.status_code == 200
     did, _event, props = _one(captured, "session_moves_uploaded")
     assert did == "123"
-    assert props == {"move_count": len(moves), "recompute_queued": True}
+    # A plain (incremental-shaped) upload carries no client id and no terminal
+    # action; the convenience enrichment (g-upload-observe) is null id, the
+    # default finality flag, and the session's mode.
+    assert props == {
+        "move_count": len(moves),
+        "recompute_queued": True,
+        "client_request_id": None,
+        "recompute_opportunity": True,
+        "session_mode": "normal",
+    }
 
 
 def test_empty_session_moves_does_not_emit(client, auth_headers, captured, create_game_session):

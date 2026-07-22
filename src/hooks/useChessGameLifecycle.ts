@@ -5,6 +5,7 @@ import type {
   DrillSessionContract,
   DrillStrictness,
   TargetBlunderSrs,
+  TerminalAction,
 } from "../utils/api";
 import {
   abandonDrill,
@@ -265,7 +266,7 @@ export const useChessGameLifecycle = ({
   // hung or lock-bound /moves is cut off by an AbortSignal timeout; on
   // abort/reject we log and proceed, leaving the delta to degrade.
   const uploadFullMoveHistoryBeforeEnd = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, terminalAction: TerminalAction) => {
       // Stop the incremental uploader FIRST so this is the last /moves this
       // client emits for the session (g-y90g). Folding the stop in here — rather
       // than at each terminal call site — makes "the final full upload is the
@@ -352,8 +353,14 @@ export const useChessGameLifecycle = ({
               FINAL_UPLOAD_TIMEOUT_MS - (performance.now() - deadlineStartedAt),
             ),
           );
+          // final_full: uploadSessionMoves constructs the timeout from deadlineMs
+          // (so the recorded deadline_ms and the live signal cannot drift) and
+          // stamps upload_kind + terminal_action so this end-of-session upload is
+          // isolable in telemetry and joinable to its durable receipt (g-upload-observe).
           await uploadSessionMoves(sessionId, uploads, {
-            signal: AbortSignal.timeout(remainingBudgetMs),
+            uploadKind: "final_full",
+            terminalAction,
+            deadlineMs: remainingBudgetMs,
             recomputeOpportunity: true,
           });
         }
@@ -416,7 +423,7 @@ export const useChessGameLifecycle = ({
           // so the opening-score delta reflects this drill (g-xanz). This also
           // stops the incremental uploader (folded into the helper, g-y90g),
           // discarding the unresolved tail and flagging the opportunity recompute.
-          await uploadFullMoveHistoryBeforeEnd(store.sessionId);
+          await uploadFullMoveHistoryBeforeEnd(store.sessionId, "drill_natural_end");
           const contract = await naturalEndDrill(
             store.sessionId,
             result.type,
@@ -456,7 +463,7 @@ export const useChessGameLifecycle = ({
         // Await a complete move upload so the opening-score delta sees the full
         // played chain and fresh after-scores (replaces the prior fire-and-forget
         // resolved-only flush, which could race the recompute).
-        await uploadFullMoveHistoryBeforeEnd(store.sessionId);
+        await uploadFullMoveHistoryBeforeEnd(store.sessionId, "game_end");
 
         const endResponse = await endGame(
           store.sessionId,
@@ -580,6 +587,7 @@ export const useChessGameLifecycle = ({
         // opportunity recompute (g-y90g).
         coordinator.stopSessionUploads();
         await uploadSessionMoves(store.sessionId!, snapshotUploads, {
+          uploadKind: "revert",
           recomputeOpportunity: true,
         });
         if (!isCurrentRevertExecution(executionId)) {
@@ -1038,7 +1046,7 @@ export const useChessGameLifecycle = ({
 
       // Await a complete move upload so the resigned game's opening-score delta
       // reflects the full played chain (matches handleGameEnd).
-      await uploadFullMoveHistoryBeforeEnd(store.sessionId);
+      await uploadFullMoveHistoryBeforeEnd(store.sessionId, "resign");
 
       const endResponse = await endGame(
         store.sessionId,

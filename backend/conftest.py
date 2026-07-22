@@ -200,6 +200,23 @@ def _create_test_schema(conn) -> None:
             CHECK (decision_source IS NULL OR decision_source IN ('ghost_path', 'backend_engine', 'local_fallback'))
         )
     """))
+    # g-upload-observe: durable final_full upload receipt. session_id is a PLAIN
+    # column (NO FK) so the append-only insert takes no parent-row lock; mirrors
+    # the ORM/Alembic definition so backend tests run the same schema.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS session_upload_receipt (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            client_request_id TEXT NOT NULL,
+            server_request_id TEXT,
+            recompute_opportunity BOOLEAN NOT NULL,
+            session_mode TEXT,
+            terminal_action TEXT,
+            content_length_bytes INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    """))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS rating_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -480,6 +497,7 @@ def _reset_test_schema(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS position_analysis"))
     conn.execute(text("DROP TABLE IF EXISTS analysis_cache"))
     conn.execute(text("DROP TABLE IF EXISTS rating_history"))
+    conn.execute(text("DROP TABLE IF EXISTS session_upload_receipt"))
     conn.execute(text("DROP TABLE IF EXISTS session_moves"))
     conn.execute(text("DROP TABLE IF EXISTS moves"))
     conn.execute(text("DROP TABLE IF EXISTS blunders"))
