@@ -56,5 +56,11 @@ backend/.opening_graph_cache/
 /work
 /work.md
 
+# Frozen-cohort capture (g-p4ih-capture): the provenance-side exclusive temp pattern, so a
+# stale temp from a killed run can never be staged. The committed cohort_provenance.json is
+# reviewed (NOT ignored); the private artifact temp and the flock files live OUTSIDE the
+# working tree and need no entry.
+backend/scripts/fixtures/cohort_provenance.json.tmp-*
+
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/

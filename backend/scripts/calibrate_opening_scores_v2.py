@@ -25,22 +25,33 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
+import errno
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import math
 import os
 import platform
 import re
+import secrets
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Mapping, Protocol, Sequence
+from typing import Callable, Iterable, Mapping, Protocol, Sequence
+
+try:  # POSIX-only; capture's mutual-exclusion locks require it (governance-load-bearing).
+    import fcntl
+except ImportError:  # pragma: no cover - capture refuses on non-POSIX before using it
+    fcntl = None  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Source binding — ALL OF IT CAPTURED HERE, ABOVE EVERY SCORER IMPORT.
@@ -182,7 +193,10 @@ from app.opening_evidence import (  # noqa: E402
 )
 from app.opening_cache import (  # noqa: E402
     SCORE_MODEL_VERSION,
+    capture_freshness_snapshot,
+    current_cache_epoch,
     evidence_derivation_fingerprint,
+    list_opening_score_candidate_pairs,
 )
 from app.opening_graph import OpeningGraph, OpeningGraphNode, get_opening_graph  # noqa: E402
 from app.opening_quality import (  # noqa: E402
@@ -3931,7 +3945,19 @@ def _build_selection_inputs(
     artifact_bytes = Path(artifact_path).read_bytes()
     provenance_bytes = Path(provenance_path).read_bytes()
     runtime_binding = _current_runtime_binding(graph, roots)
-    loaded = load_frozen_artifact(artifact_bytes, provenance_bytes, runtime_binding)
+    try:
+        loaded = load_frozen_artifact(artifact_bytes, provenance_bytes, runtime_binding)
+    except ArtifactIntegrityError as exc:
+        # _check_integrity is a pure function over values and cannot name the files; the
+        # caller that knows the paths re-raises with path context + recovery guidance.
+        # BASENAMES only — never the full private artifact path (it would leak the private
+        # store's layout into scrollback / CI logs, the one channel nobody redacts).
+        raise ArtifactIntegrityError(
+            f"{exc}: the artifact and provenance record do not describe each other "
+            f"(record {Path(provenance_path).name}, artifact {Path(artifact_path).name}); "
+            "rerun capture-cohort to republish a matched pair, or restore the artifact "
+            "matching this record."
+        ) from exc
 
     header = loaded.header
     as_of = header.as_of  # the ONLY clock source on this path
@@ -4048,6 +4074,941 @@ def _build_selection_inputs(
         )
 
     return SelectionInputs(cohort=cohort, diagnostics=diagnostics)
+
+
+# ===========================================================================
+# Capture: snapshot freeze + consistency fence + atomic publication
+# (g-p4ih-capture). The PRODUCER of the frozen-cohort artifact. Reads all
+# evidence inside ONE read-only REPEATABLE READ PostgreSQL snapshot, verifies
+# the window was quiescent for the cohort's membership function via a
+# post-snapshot movement check from a fresh transaction, stamps as_of INSIDE
+# the fence, pseudonymizes at capture (the freeze transform runs it), self-
+# checks the candidate bytes through validate_capture_candidate, and publishes
+# with an artifact-before-record rename order whose failure modes are all
+# inert-and-recoverable.
+# ===========================================================================
+
+
+@dataclass(frozen=True)
+class CaptureValidationResult:
+    """The NARROW result of ``validate_capture_candidate`` — scalars only, nothing
+    scoreable. Deliberately NOT ``SelectionInputs``: returning that type would hand a
+    caller a ready-to-select bundle assembled from caller-supplied bytes and caller-
+    supplied registries, which is exactly the trust boundary ``build_selection_inputs``
+    exists to hold. The scored structures the self-check builds are constructed, asserted
+    against, and DISCARDED inside the function; only these four scalars escape, and
+    ``select_candidate`` cannot be fed from them."""
+
+    artifact_sha256: str
+    pair_count: int
+    quantile_count: int
+    as_of: datetime
+
+
+def validate_capture_candidate(
+    artifact_bytes: bytes,
+    provenance_bytes: bytes,
+    *,
+    graph: OpeningGraph,
+    roots: OpeningRoots,
+) -> CaptureValidationResult:
+    """Re-run the FULL load guard AND the release path's score-shape asserts against
+    CANDIDATE bytes, before capture publishes them. A NEW producer-safe entry point beside
+    ``build_selection_inputs``, because neither existing entry point can do the job:
+    ``build_selection_inputs`` is single-argument by contract and always reads the COMMITTED
+    provenance path (the very file capture has not published yet), and
+    ``_build_selection_inputs`` is TEST-ONLY. This takes the candidate bytes DIRECTLY and
+    the registries EXPLICITLY.
+
+    The CLOCK IS NOT AN ARGUMENT: it comes only from the validated header, exactly like the
+    public entry point. graph/roots are explicit so the producer threads the SAME instances
+    it froze against.
+
+    Runs: the split load guard (semantic validation, canonical-byte re-encode invariant,
+    SHA-256 recompute + header-vs-record equality, graph/roots +
+    evidence_derivation_fingerprint, release-guard keys / schema_version / cohort_rules /
+    min_observations policy pins); surrogate-uniqueness; ONE scoring pass under the header
+    ``as_of`` whose result is checked with the SAME two shape assertions the release path
+    uses — ``assert_min_quantile_scores_per_cell`` and ``assert_release_guard_score_shape``.
+    NOTHING stricter: a quantile pair that pools ZERO named scores for a cell is fine as
+    long as the POOLED distribution reaches len >= 2, exactly as the release path accepts.
+    """
+    runtime_binding = _current_runtime_binding(graph, roots)
+    loaded = load_frozen_artifact(artifact_bytes, provenance_bytes, runtime_binding)
+    header = loaded.header
+    as_of = header.as_of  # the ONLY clock source on this path
+
+    required_cells = build_arm_grid().cells
+    scored_pairs: list[ScoredPair] = []
+    for lp in loaded.pairs:
+        cell_grid = {
+            cell: score_overlay(
+                lp.surrogate_user_id,
+                lp.player_color,
+                graph,
+                lp.overlay,
+                roots,
+                cell.config,
+                as_of=as_of,
+                pair_id=lp.pair_id,
+                subject_id=lp.subject_id,
+                cohort_role=lp.cohort_role,
+            )
+            for cell in required_cells
+        }
+        scored_pairs.append(
+            ScoredPair.from_pair_scores(
+                pair_id=lp.pair_id,
+                subject_id=lp.subject_id,
+                surrogate_user_id=lp.surrogate_user_id,
+                cohort_role=lp.cohort_role,
+                player_color=lp.player_color,
+                grid=cell_grid,
+            )
+        )
+
+    # surrogate_user_id uniqueness (the load guard already pins surrogate == index + 1 per
+    # pair; assert the SET is distinct so a self-check failure names this specifically).
+    surrogates = [lp.surrogate_user_id for lp in loaded.pairs]
+    if len(set(surrogates)) != len(surrogates):
+        raise ArtifactIntegrityError(
+            f"duplicate surrogate_user_id in the loaded manifest: {surrogates}"
+        )
+
+    quantile_pairs = [p for p in scored_pairs if p.cohort_role == "quantile"]
+    guard_pairs = [p for p in scored_pairs if p.cohort_role == "release_guard"]
+    assert_min_quantile_scores_per_cell(quantile_pairs, required_cells)
+    assert_release_guard_score_shape(guard_pairs, required_cells, runtime_binding)
+
+    # Everything above is DISCARDED — only these four scalars escape.
+    return CaptureValidationResult(
+        artifact_sha256=loaded.artifact_sha256,
+        pair_count=header.pair_count,
+        quantile_count=len(quantile_pairs),
+        as_of=as_of,
+    )
+
+
+# ---- Typed capture errors (the subcommand maps these to exit codes) --------
+
+
+class CaptureError(RuntimeError):
+    """Base for all typed capture failures. Every one fails closed with NO shippable
+    half-state; turning them into exit codes and messages is the subcommand's job
+    (g-p4ih-release-cli). Private artifact paths appear as BASENAMES only."""
+
+
+class CaptureIsolationError(CaptureError):
+    """Not launched through capture_cohort.sh (missing -S / bytecode-off / launcher digest)."""
+
+
+class CaptureWorktreeError(CaptureError):
+    """A linked worktree or a release-launcher-hosted run (git-common-dir != git-dir)."""
+
+
+class CaptureGovernanceError(CaptureError):
+    """A repo-interior output path, or a missing release-guard user."""
+
+
+class CaptureDialectError(CaptureError):
+    """The bound engine is not PostgreSQL — there is no degraded fence."""
+
+
+class CaptureLockError(CaptureError):
+    """A concurrent capture already holds one of the two mutual-exclusion locks."""
+
+
+class CaptureSourceError(CaptureError):
+    """A dirty or unverifiable derivation source (manifest gap, moved digest, stale
+    bytecode, foreign import origin, shadow chess module, or non-CPython runtime)."""
+
+
+class CaptureFenceExhaustedError(CaptureError):
+    """Scoped movement observed on every bounded attempt — the window never quiesced."""
+
+
+class CaptureEpochUnavailableError(CaptureError):
+    """require_quiescent_epoch=True but the evidence_epoch singleton is missing, so no live
+    value can vouch for quiescence — a hard fail, never treated as quiescence."""
+
+
+class CaptureReleaseGuardShapeError(CaptureError):
+    """The release-guard query returned other than exactly two {white, black} pairs."""
+
+
+class CaptureSelfCheckError(CaptureError):
+    """The pre-publication self-check rejected the candidate bytes."""
+
+
+class CapturePublicationError(CaptureError):
+    """A filesystem operation on a private destination failed (create/write/fsync/rename).
+
+    Every OSError raised while touching a private path is funnelled through here for one
+    reason: ``str(OSError)`` renders as ``[Errno 2] No such file or directory:
+    '/private/store/cohort.json'``, so letting one escape prints the full private-store path
+    into a traceback and out of the typed error boundary the child's ``except CaptureError``
+    depends on. The message carries ``exc.strerror`` (the errno text ALONE) plus a BASENAME."""
+
+
+class CaptureInterRenameError(CaptureError):
+    """The second rename failed after the first succeeded — a recoverable mismatched pair."""
+
+
+@dataclass(frozen=True)
+class CaptureResult:
+    """What ``capture_cohort`` returns on success. Scalars + the final artifact path; the
+    subcommand redacts the path to a basename in any human-facing summary."""
+
+    artifact_path: Path
+    artifact_sha256: str
+    pair_count: int
+    quantile_count: int
+    release_guard_count: int
+    attempts: int
+    orphan_replaced: bool
+    snapshot_cache_epoch: int | None
+    current_view_cache_epoch: int | None
+
+
+@dataclass(frozen=True)
+class _CaptureAttestation:
+    scorer_source_digest: str
+    source_revision: str
+    python_version: str
+    chess_version: str
+
+
+@dataclass(frozen=True)
+class _PairSample:
+    evidence_seq: int
+    inputs_fingerprint: str
+    cache_epoch: int | None
+
+
+# ---- Precondition refusals (each a separate function so the fence/publication
+#      tests can drive the inner logic without a real two-process launch) -----
+
+
+def _require_capture_isolation() -> None:
+    """Precedence 1. Refuse a bare or wrongly-flagged invocation before any DB work: a
+    verified capture is launched by capture_cohort.sh (``python -I -S`` launcher -> ``-S``
+    child) with a pre-exec source digest. The in-process bytecode check fails closed
+    without the pre-exec environment, so an absent digest means capture was invoked bare."""
+    problems = []
+    if not getattr(sys.flags, "no_site", False):
+        problems.append("interpreter is not under -S (site.py / .pth / sitecustomize ran)")
+    if not sys.dont_write_bytecode:
+        problems.append("bytecode writing is enabled (PYTHONDONTWRITEBYTECODE unset / -B absent)")
+    if _LAUNCHER_SCORER_DIGEST is None:
+        problems.append(
+            f"{SCORER_SOURCE_DIGEST_ENV} was not inherited (capture was not launched through "
+            "capture_cohort.sh)"
+        )
+    if problems:
+        raise CaptureIsolationError(
+            "capture must be launched through capture_cohort.sh, which runs it under the "
+            "same two-process isolation the release path proves: " + "; ".join(problems)
+        )
+
+
+def _git_capture(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), *args],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+def _require_main_worktree() -> str:
+    """Precedence 2. Refuse a linked worktree (and thereby a release-launcher-hosted run,
+    which executes in a throwaway worktree): compare --git-common-dir against --git-dir,
+    which are equal ONLY in the main worktree. A launcher-hosted capture would write its
+    provenance record into a directory destroyed on exit, so the reviewable working-tree
+    diff would silently never appear. Returns the resolved git COMMON dir (the provenance
+    lock target)."""
+    result = _git_capture("rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir")
+    if result.returncode != 0:
+        raise CaptureWorktreeError(
+            "capture must run inside a git working tree, but `git rev-parse` failed; run it "
+            "from the origin checkout via capture_cohort.sh."
+        )
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        raise CaptureWorktreeError(
+            "could not resolve both --git-common-dir and --git-dir; refusing before any DB work"
+        )
+    common_dir, git_dir = lines
+    if Path(common_dir).resolve() != Path(git_dir).resolve():
+        raise CaptureWorktreeError(
+            "capture must run from the MAIN worktree, but this is a LINKED worktree "
+            f"(git-common-dir != git-dir). A capture hosted by the release launcher runs in "
+            "an exclusive throwaway worktree whose deletion would destroy the reviewable "
+            "cohort_provenance.json diff — capture uses its OWN isolated entrypoint "
+            "(capture_cohort.sh) that stays in the origin checkout."
+        )
+    return common_dir
+
+
+def _refuse_repo_interior_output(output: Path) -> Path:
+    """Precedence 3. Refuse an output path resolving inside the repository working tree: the
+    frozen-cohort artifact holds production-derived private data and must not become
+    commit-able by accident. Returns the RESOLVED output path.
+
+    A RELATIVE path is refused outright rather than resolved, because there is no single
+    honest directory to resolve it against: the operator types it in their own cwd, but the
+    launcher execs the child with ``cwd=<tree>/backend`` (release_calibration_launcher.launch),
+    so ``Path.resolve()`` in this process would silently mean a DIFFERENT directory than the
+    one the operator meant — publishing private evidence somewhere they did not name, or
+    refusing a destination that was in fact valid. An absolute path means the same thing in
+    both processes."""
+    if not Path(output).is_absolute():
+        raise CaptureGovernanceError(
+            "--output must be an ABSOLUTE path. The launcher runs the child with a different "
+            "working directory than the operator's shell, so a relative path would resolve "
+            "against a directory nobody chose — a private artifact published to the wrong "
+            "place, or a valid destination refused. Pass the full path to the private store."
+        )
+    resolved = Path(output).resolve()
+    try:
+        resolved.relative_to(_REPO_ROOT)
+        inside = True
+    except ValueError:
+        inside = False
+    if inside:
+        raise CaptureGovernanceError(
+            f"--output {resolved.name!r} resolves INSIDE the repository working tree; the "
+            "frozen-cohort artifact holds production-derived private data and must land at "
+            "an access-controlled path OUTSIDE the repo (governance invariant)."
+        )
+    return resolved
+
+
+def _engine_of(session_factory: Callable[[], "object"]):
+    """The engine a session_factory binds — without a DB round-trip (Session.get_bind()
+    returns the Engine without connecting)."""
+    probe = session_factory()
+    try:
+        return probe.get_bind()
+    finally:
+        probe.close()
+
+
+def _require_postgres_dialect(engine) -> None:
+    """Precedence 4. Refuse any non-PostgreSQL dialect before the first capture read: the
+    fence's ONLY consistency mechanism is PostgreSQL REPEATABLE READ snapshot isolation and
+    there is NO multi-transaction fallback (which would stamp overlays assembled across
+    transactions — the torn-artifact hazard the fence exists to exclude)."""
+    name = getattr(engine.dialect, "name", "<unknown>")
+    if name != "postgresql":
+        raise CaptureDialectError(
+            f"capture requires a PostgreSQL evidence DB (the consistency fence IS REPEATABLE "
+            f"READ snapshot isolation); the bound dialect is {name!r}. A dialect that cannot "
+            "provide the snapshot cannot produce a publishable artifact — there is no "
+            "degraded mode."
+        )
+
+
+# ---- Producer source/runtime binding (before any evidence read) ------------
+
+
+def _assert_chess_from_installed_distribution() -> None:
+    """CHESS-MODULE ORIGIN: check_scorer_import_origins covers app.* but NOT ``chess``, and
+    capture_chess_version alone cannot prove identity (this script inserts BACKEND_ROOT onto
+    sys.path before ``import chess``, so a shadow backend/chess.py declaring a matching
+    __version__ would pass both the grammar and the app.*-only origin check). Assert
+    ``chess.__file__`` resolves under the INSTALLED distribution, NOT the repo tree, cross-
+    checking the imported module's file against the distribution RECORD."""
+    chess_file = getattr(chess, "__file__", None)
+    if not chess_file:
+        raise CaptureSourceError("the imported chess module has no __file__; its origin is unverifiable")
+    chess_path = Path(chess_file).resolve()
+    try:
+        dist = importlib.metadata.distribution("chess")
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise CaptureSourceError(
+            "no installed 'chess' distribution metadata found; cannot verify the module origin"
+        ) from exc
+    # The imported module's file must be part of the INSTALLED distribution — either listed in
+    # its RECORD (authoritative) or, if the RECORD is unavailable, resolving under the install
+    # location. A repo-interior shadow (backend/chess.py, imported ahead of the package because
+    # this script puts BACKEND_ROOT on sys.path) satisfies NEITHER, even with a matching
+    # __version__. Note the repo-local venv (backend/.venv/.../site-packages) IS the install
+    # location, so a bare "under the repo tree" test would false-positive on it.
+    recorded: set[Path] = set()
+    for f in (dist.files or []):
+        try:
+            recorded.add(Path(dist.locate_file(f)).resolve())
+        except Exception:  # pragma: no cover - defensive on odd RECORD entries
+            continue
+    if recorded:
+        if chess_path not in recorded:
+            raise CaptureSourceError(
+                f"the imported chess module ({chess_path}) is not listed in the installed chess "
+                "distribution's RECORD — a repo-interior shadow (e.g. backend/chess.py) can "
+                "declare any __version__ and would be imported ahead of the package. Remove it."
+            )
+    else:
+        install_base = Path(dist.locate_file("")).resolve()
+        try:
+            chess_path.relative_to(install_base)
+        except ValueError as exc:
+            raise CaptureSourceError(
+                f"the imported chess module ({chess_path}) does not resolve under the installed "
+                f"distribution location ({install_base}); refusing (possible shadow module)."
+            ) from exc
+
+
+def _resolve_clean_head_revision() -> str:
+    """A CLEAN-TREE requirement: ``git status --porcelain`` over SCORER_SOURCE_FILES must be
+    empty and HEAD must resolve to a 40-hex commit. A capture from a dirty derivation tree
+    REFUSES — the one place a hard refusal is right rather than a recorded warning, because
+    'it was captured from someone's uncommitted edit' is not a condition anyone can evaluate
+    six months later from a digest."""
+    status = _git_capture("status", "--porcelain", "--", *SCORER_SOURCE_FILES)
+    if status.returncode != 0:
+        raise CaptureSourceError(
+            "`git status --porcelain` over the scorer manifest failed; cannot verify a clean "
+            "derivation tree, so capture refuses."
+        )
+    dirty = [line for line in status.stdout.splitlines() if line.strip()]
+    if dirty:
+        raise CaptureSourceError(
+            "capture refuses to run from a DIRTY derivation tree; uncommitted changes over "
+            f"SCORER_SOURCE_FILES: {sorted(line[3:].strip() for line in dirty)}. An artifact "
+            "is a long-lived, authorized production of private data."
+        )
+    head = _git_capture("rev-parse", "HEAD")
+    revision = head.stdout.strip()
+    if head.returncode != 0 or not _GIT_REVISION_RE.match(revision):
+        raise CaptureSourceError(
+            "could not resolve a 40-hex HEAD commit for the capture attestation; refusing."
+        )
+    return revision
+
+
+def _capture_source_fence() -> _CaptureAttestation:
+    """Run the SAME in-process source fence _build_selection_inputs runs, but REQUIRING the
+    inherited launcher digest (unlike the dev/selection path, which tolerates its absence),
+    then the chess-origin, non-CPython, and clean-tree checks capture adds. Returns the four
+    reviewable attestation values. Any source instability refuses BEFORE any evidence read."""
+    impl = platform.python_implementation()
+    if impl != "CPython":
+        raise CaptureSourceError(
+            f"capture refuses to run under {impl}; the byte-stability contract puts non-CPython "
+            "runtimes out of scope, so a frozen artifact must always name CPython."
+        )
+    try:
+        check_scorer_source_manifest()
+        fenced_digest = scorer_source_digest()
+        if fenced_digest != _SCORER_SOURCE_DIGEST_AT_IMPORT:
+            raise ScorerSourceUnstableError(
+                "scorer source changed after this process imported it "
+                f"({_SCORER_SOURCE_DIGEST_AT_IMPORT[:12]} at import, {fenced_digest[:12]} on "
+                "disk): the running code is no longer the code on disk"
+            )
+        launcher_digest = _LAUNCHER_SCORER_DIGEST
+        if launcher_digest is None:
+            # The isolation precondition already refuses a missing digest; re-guard so this
+            # function is safe to call directly (capture REQUIRES the pre-exec digest).
+            raise ScorerSourceUnstableError(
+                f"{SCORER_SOURCE_DIGEST_ENV} was not inherited; capture requires the pre-exec "
+                "digest its launcher computes before this interpreter existed."
+            )
+        if launcher_digest != fenced_digest:
+            raise ScorerSourceUnstableError(
+                f"{SCORER_SOURCE_DIGEST_ENV} was computed before this interpreter started "
+                f"({launcher_digest[:12]}) but the tree now hashes {fenced_digest[:12]}: the "
+                "scorer moved while Python was compiling it — the code that would score is not "
+                "the code that was approved"
+            )
+        # Capture ALWAYS runs these (step 2 REQUIRED the launcher digest), unlike the
+        # selection path which runs them only when a launcher digest is present.
+        check_scorer_bytecode()
+        check_scorer_import_origins()
+    except (ScorerSourceManifestError, ScorerSourceUnstableError) as exc:
+        raise CaptureSourceError(str(exc)) from exc
+
+    _assert_chess_from_installed_distribution()
+    revision = _resolve_clean_head_revision()
+    return _CaptureAttestation(
+        scorer_source_digest=fenced_digest,
+        source_revision=revision,
+        python_version=f"{impl} {platform.python_version()}",
+        chess_version=chess.__version__,
+    )
+
+
+# ---- Mutual exclusion, private temps, orphan detection, publication --------
+
+
+@contextlib.contextmanager
+def _capture_locks(common_dir: str, resolved_output: Path):
+    """TWO flock(LOCK_EX | LOCK_NB) locks in FIXED order (provenance, then output), because
+    there are two shared resources and a checkout-relative lock protects neither reliably:
+
+      * provenance lock at <git-common-dir>/cohort-capture.lock — the COMMON dir is shared
+        by the main worktree and every linked worktree, so one lock file, one inode, no
+        matter how many checkouts exist; outside the tree, so untracked by construction.
+      * output lock at <output-parent>/.cohort-capture-<sha256(resolved output)>.lock, 0600
+        — the private destination may be written by captures from unrelated checkouts (or a
+        clone) that share no git common dir; keying on the resolved path follows the resource.
+
+    Nonblocking, because a second concurrent capture is an OPERATOR ERROR, not a queue. An
+    flock dies with the holding process (including kill -9), so there is no stale-lock reap."""
+    if fcntl is None:
+        raise CaptureLockError(
+            "capture's mutual-exclusion locks require POSIX fcntl.flock, unavailable on this "
+            "platform; refusing rather than publishing unserialized."
+        )
+    prov_lock = Path(common_dir) / "cohort-capture.lock"
+    out_hash = hashlib.sha256(str(resolved_output).encode("utf-8")).hexdigest()
+    out_lock = resolved_output.parent / f".cohort-capture-{out_hash}.lock"
+    fds: list[int] = []
+    try:
+        for lock_path, label in ((prov_lock, "provenance"), (out_lock, "output")):
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+            except OSError as exc:
+                # Creating the lock file is the FIRST thing that touches the private output
+                # directory, so it is where a missing/unwritable destination surfaces. Raise
+                # inside the typed hierarchy with the errno text alone — a bare OSError here
+                # prints the full private-store path in a traceback.
+                raise CapturePublicationError(
+                    f"cannot create the {label} lock {lock_path.name!r}: {exc.strerror}. "
+                    "Check that the destination directory exists and is writable by this uid."
+                ) from None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                os.close(fd)
+                raise CaptureLockError(
+                    f"another capture already holds the {label} lock ({lock_path.name}); a "
+                    "second concurrent capture against the same evidence DB is an operator "
+                    "error, not a queue to wait in — refusing before reading any evidence."
+                ) from exc
+            fds.append(fd)
+        yield
+    finally:
+        for fd in reversed(fds):
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+def _log_stale_temps(final_path: Path) -> None:
+    """LOG any leftover <final>.tmp-* beside a destination (a killed run's inert temp),
+    name them as operator cleanup, and do NOT delete them — they may be another capture's
+    live temp, and deleting private production-derived data on a guess is worse than
+    reporting it. BASENAMES only."""
+    try:
+        stale = sorted(p.name for p in final_path.parent.glob(f"{final_path.name}.tmp-*"))
+    except OSError:
+        return
+    if stale:
+        print(
+            f"[capture] found stale temp file(s) beside {final_path.name!r}: {stale}. These "
+            "are inert (never read, adopted, or renamed by a later run) — operator cleanup.",
+            file=sys.stderr,
+        )
+
+
+def _write_private_temp(final_path: Path, data: bytes) -> Path:
+    """Write ``data`` to a private, exclusive temp in the SAME directory as ``final_path``
+    (so os.replace is same-filesystem and atomic), mode 0600 AT CREATION (never briefly
+    group/world-readable under a normal umask), name unguessable from the pid alone
+    (<final>.tmp-<pid>-<token>), flushed + fsynced before the rename."""
+    token = secrets.token_hex(8)
+    temp_path = final_path.with_name(f"{final_path.name}.tmp-{os.getpid()}-{token}")
+    try:
+        fd = os.open(str(temp_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except OSError as exc:
+        raise CapturePublicationError(
+            f"cannot create the private temp beside {final_path.name!r}: {exc.strerror}."
+        ) from None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+        # ENOSPC/EIO/EDQUOT land here. Nothing was published (the final path is untouched),
+        # so this is a clean typed refusal — but only if the OSError does not escape with
+        # its filename attached.
+        if isinstance(exc, OSError):
+            raise CapturePublicationError(
+                f"writing the private temp beside {final_path.name!r} failed: {exc.strerror}. "
+                "The temp was removed; no final file was written."
+            ) from None
+        raise
+    return temp_path
+
+
+def _detect_and_log_orphan(resolved_output: Path, provenance_path: Path) -> bool:
+    """Startup orphan detection (under the locks, before evidence reads): if a file already
+    exists at the final artifact path whose SHA-256 MISMATCHES the current provenance
+    record, log that it is being REPLACED — never 'adopted' (its fence provenance cannot be
+    verified after the fact). The rerun's renames overwrite both files. BASENAME only."""
+    try:
+        if not resolved_output.exists():
+            return False
+        record = json.loads(provenance_path.read_bytes())
+        record_sha = record.get("sha256")
+        if not record_sha:
+            return False
+        existing_sha = hashlib.sha256(resolved_output.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return False
+    if existing_sha != record_sha:
+        print(
+            f"[capture] REPLACING a mismatched artifact at {resolved_output.name!r}: its "
+            "SHA-256 does not match the committed provenance record, so its fence provenance "
+            "cannot be verified — it is replaced, never adopted.",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
+@contextlib.contextmanager
+def _repeatable_read_snapshot(session_factory: Callable[[], "object"]):
+    """ONE read-only REPEATABLE READ snapshot on ONE connection: under PostgreSQL snapshot
+    isolation every statement sees the SAME snapshot, so all stamped overlays/counters/
+    digests describe one moment even if the world moves while capturing. Rolled back (never
+    committed — capture writes nothing to the evidence DB) on exit."""
+    db = session_factory()
+    try:
+        conn = db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+        conn.exec_driver_sql("SET TRANSACTION READ ONLY")
+        yield db
+    finally:
+        db.rollback()
+        db.close()
+
+
+def _collect_pair_samples(db, pairs) -> dict[tuple[int, str], _PairSample]:
+    """One ``capture_freshness_snapshot`` bundle per pair. inputs_fingerprint is the
+    COMPOSITE registry-plus-raw-input fingerprint (NOT a bare row digest), so a registry
+    change is as visible to the fence as an evidence change; evidence_seq is the per-pair
+    counter; cache_epoch is the global epoch as observed in THIS transaction."""
+    out: dict[tuple[int, str], _PairSample] = {}
+    for (uid, color) in pairs:
+        snap = capture_freshness_snapshot(db, uid, color)
+        out[(uid, color)] = _PairSample(
+            evidence_seq=snap.evidence_seq,
+            inputs_fingerprint=snap.inputs_fingerprint,
+            cache_epoch=snap.cache_epoch,
+        )
+    return out
+
+
+def capture_cohort(
+    *,
+    session_factory: Callable[[], "object"],
+    output: Path,
+    release_guard_user: int,
+    require_quiescent_epoch: bool = False,
+    max_attempts: int = 3,
+) -> CaptureResult:
+    """Freeze a frozen-cohort artifact from live PostgreSQL evidence under a strict
+    consistency fence, self-check it in full, and publish it atomically alongside a
+    reviewable provenance record. Keyword-only, fully typed, no argparse/sys.argv/sys.exit —
+    it returns a CaptureResult or raises a typed CaptureError; the subcommand maps those to
+    exit codes (g-p4ih-release-cli). See the g-p4ih-capture design for the full contract."""
+    # Argument validity first: it costs nothing, touches nothing, and a non-positive
+    # max_attempts would otherwise run an EMPTY retry loop and fall through to the
+    # `assert accepted is not None` below — an AssertionError outside the typed hierarchy,
+    # which the subcommand's `except CaptureError` does not catch.
+    if max_attempts < 1:
+        raise CaptureGovernanceError(
+            f"max_attempts must be >= 1 (got {max_attempts}); a capture that is allowed zero "
+            "attempts cannot establish a fence, and 'no attempts' is an operator error, not a "
+            "quiescence verdict."
+        )
+    # --- precondition refusals, in documented precedence, before any DB work ---
+    _require_capture_isolation()             # 1: launched through capture_cohort.sh
+    common_dir = _require_main_worktree()    # 2: main worktree (not the release launcher's)
+    resolved_output = _refuse_repo_interior_output(output)  # 3: not commit-able
+    engine = _engine_of(session_factory)
+    _require_postgres_dialect(engine)        # 4: PostgreSQL or refuse
+    provenance_path = COHORT_PROVENANCE_PATH
+
+    with _capture_locks(common_dir, resolved_output):
+        # Producer source/runtime binding + the four attestation values (before any read).
+        attestation = _capture_source_fence()
+        # Startup orphan detection, under the locks (reads both destinations).
+        orphan_replaced = _detect_and_log_orphan(resolved_output, provenance_path)
+
+        # Resolve ONE graph/roots pair and thread the SAME instances through header
+        # construction, derivation, and the self-check (OpeningGraph caches its fingerprint
+        # while nodes stay mutable, so re-resolving could stamp one graph's fingerprint over
+        # another graph's overlay).
+        graph = get_opening_graph()
+        roots = get_opening_roots()
+
+        accepted = None
+        for attempt in range(1, max_attempts + 1):
+            # --- ONE read-only REPEATABLE READ snapshot: all evidence reads live here ---
+            with _repeatable_read_snapshot(session_factory) as db:
+                raw_pairs = list_opening_score_candidate_pairs(db)
+                guard_pairs = list_opening_score_candidate_pairs(db, user_id=release_guard_user)
+                fence_pairs = list(dict.fromkeys([*raw_pairs, *guard_pairs]))
+                snap_samples = _collect_pair_samples(db, fence_pairs)
+                overlays = {p: overlay_evidence(db, p[0], p[1], graph) for p in fence_pairs}
+                obs_totals = {
+                    p: sum(node.quality_count for node in overlays[p].nodes.values())
+                    for p in fence_pairs
+                }
+                # as_of stamped ONCE, INSIDE the fence, AFTER the snapshot is established —
+                # so it is >= every timestamp the snapshot can contain.
+                as_of = datetime.now(timezone.utc)
+                # The GLOBAL epoch as observed inside the accepted snapshot: THIS is stamped.
+                snapshot_epoch = current_cache_epoch(db)
+                bundle_epochs = {s.cache_epoch for s in snap_samples.values()}
+                if bundle_epochs and bundle_epochs != {snapshot_epoch}:  # pragma: no cover
+                    raise AssertionError(
+                        f"snapshot epoch inconsistency: bundles {bundle_epochs} vs "
+                        f"current_cache_epoch {snapshot_epoch} (REPEATABLE READ violated)"
+                    )
+
+            # Strict mode fails CLOSED on an UNAVAILABLE snapshot epoch (missing singleton):
+            # shared writes fire triggers that silently no-op, so quiescence is unprovable.
+            if require_quiescent_epoch and snapshot_epoch is None:
+                raise CaptureEpochUnavailableError(
+                    "require_quiescent_epoch=True but the evidence_epoch singleton is missing "
+                    "(snapshot current_cache_epoch is None): a None is proof that quiescence "
+                    "is unprovable, never a match — a hard fail, not a retry."
+                )
+
+            # --- POST-SNAPSHOT movement check from a NEW (READ COMMITTED) transaction ---
+            with session_factory() as re_db:
+                re_raw = list_opening_score_candidate_pairs(re_db)
+                re_guard = list_opening_score_candidate_pairs(re_db, user_id=release_guard_user)
+                re_present = set(re_raw) | set(re_guard)
+                common = [p for p in fence_pairs if p in re_present]
+                re_samples = _collect_pair_samples(re_db, common)
+                post_epoch = current_cache_epoch(re_db)
+
+            reasons: list[str] = []
+            if set(re_raw) != set(raw_pairs):
+                reasons.append("raw candidate-set drift (a pair appeared in or vanished from the pre-filter list)")
+            if set(re_guard) != set(guard_pairs):
+                reasons.append("release-guard pair-set drift")
+            for p in common:
+                s0, s1 = snap_samples[p], re_samples[p]
+                if (s0.evidence_seq != s1.evidence_seq
+                        or s0.inputs_fingerprint != s1.inputs_fingerprint):
+                    reasons.append(
+                        f"pair at surrogate position {fence_pairs.index(p)} moved "
+                        "(evidence_seq / inputs_fingerprint)"
+                    )
+            scoped_moved = bool(reasons)
+
+            if require_quiescent_epoch and post_epoch is None:
+                raise CaptureEpochUnavailableError(
+                    "require_quiescent_epoch=True but the evidence_epoch singleton is missing "
+                    "in the post-snapshot re-read (current_cache_epoch is None) — a hard fail."
+                )
+            epoch_moved = snapshot_epoch != post_epoch
+
+            # Scoped movement -> discard + retry (the window was not quiescent for the cohort's
+            # MEMBERSHIP FUNCTION).
+            if scoped_moved:
+                if attempt >= max_attempts:
+                    raise CaptureFenceExhaustedError(
+                        f"the capture window was not quiescent on any of {max_attempts} "
+                        f"attempts (scoped movement): {reasons}. No final artifact, no "
+                        "provenance-record change."
+                    )
+                print(
+                    f"[capture] attempt {attempt}/{max_attempts} discarded — scoped movement: "
+                    f"{reasons}; retrying with a fresh snapshot.",
+                    file=sys.stderr,
+                )
+                continue
+
+            # Global-epoch movement: retry under strict mode; LOG + stamp the snapshot epoch
+            # under the default scoped mode (unrelated engine traffic must not STARVE capture).
+            if require_quiescent_epoch and epoch_moved:
+                if attempt >= max_attempts:
+                    raise CaptureFenceExhaustedError(
+                        "require_quiescent_epoch=True and the global cache_epoch advanced on "
+                        f"every one of {max_attempts} attempts; no quiescent window."
+                    )
+                print(
+                    f"[capture] attempt {attempt}/{max_attempts} discarded — strict global "
+                    f"epoch movement {snapshot_epoch} -> {post_epoch}; retrying.",
+                    file=sys.stderr,
+                )
+                continue
+            if epoch_moved:
+                print(
+                    f"[capture] global cache_epoch advanced {snapshot_epoch} -> {post_epoch} "
+                    "during the window (unrelated engine traffic); no captured pair moved, so "
+                    f"stamping the SNAPSHOT epoch {snapshot_epoch} and continuing.",
+                    file=sys.stderr,
+                )
+
+            accepted = attempt
+            break
+
+        assert accepted is not None  # the loop either breaks with a value or raises
+        attempts = accepted
+
+        # --- capture-time cohort membership ---
+        guard_colors = {color for (_uid, color) in guard_pairs}
+        if len(guard_pairs) != 2 or guard_colors != {"white", "black"}:
+            raise CaptureReleaseGuardShapeError(
+                f"the release-guard query returned {len(guard_pairs)} pair(s) with colors "
+                f"{sorted(guard_colors)}; capture requires EXACTLY two, one white and one "
+                "black. No final artifact, no provenance change."
+            )
+        guard_set = set(guard_pairs)
+        # Subtract the guard pairs FIRST, THEN threshold the remainder -> quantile cohort, so
+        # a threshold-clearing release-guard pair is never double-counted as quantile.
+        quantile_pairs = [
+            p for p in raw_pairs
+            if p not in guard_set and obs_totals[p] >= DEFAULT_MIN_OBSERVATIONS
+        ]
+        captured_inputs = [
+            CapturedPairInput(
+                overlays[p], "release_guard",
+                snap_samples[p].evidence_seq, snap_samples[p].inputs_fingerprint,
+            )
+            for p in guard_pairs
+        ] + [
+            CapturedPairInput(
+                overlays[p], "quantile",
+                snap_samples[p].evidence_seq, snap_samples[p].inputs_fingerprint,
+            )
+            for p in quantile_pairs
+        ]
+
+        # --- freeze (pseudonymization runs INSIDE the transform) + provenance record ---
+        header = ArtifactHeaderInput(
+            as_of=as_of,
+            graph_fingerprint=graph.fingerprint,
+            roots_fingerprint=roots.fingerprint,
+            cache_epoch=snapshot_epoch,
+            captured_model_version=SCORE_MODEL_VERSION,
+            evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+            capture_scorer_source_digest=attestation.scorer_source_digest,
+            capture_source_revision=attestation.source_revision,
+            capture_python_version=attestation.python_version,
+            capture_chess_version=attestation.chess_version,
+        )
+        artifact_bytes = freeze_frozen_artifact(captured_inputs, header)
+        artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+        # The record mirrors the header's non-cache fields (constants for the release-policy
+        # pins, header input for the rest) so _check_integrity's field-by-field compare
+        # passes; the one deliberate deviation is the trailing newline (this file is COMMITTED
+        # to Git, where a missing final newline shows as a diff marker; the load guard parses
+        # with json.loads, which ignores trailing whitespace). The ARTIFACT gets no newline.
+        record = {
+            "sha256": artifact_sha256,
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
+            "as_of": _canonical_as_of(as_of),
+            "captured_model_version": SCORE_MODEL_VERSION,
+            "graph_fingerprint": graph.fingerprint,
+            "roots_fingerprint": roots.fingerprint,
+            "evidence_derivation_fingerprint": evidence_derivation_fingerprint(),
+            "pair_count": len(captured_inputs),
+            "min_observations": DEFAULT_MIN_OBSERVATIONS,
+            "cohort_rules": COHORT_RULES_ID,
+            "release_guard_opening_key": RELEASE_GUARD_OPENING_KEY,
+            "release_guard_child_opening_key": RELEASE_GUARD_CHILD_OPENING_KEY,
+            "capture_scorer_source_digest": attestation.scorer_source_digest,
+            "capture_source_revision": attestation.source_revision,
+            "capture_python_version": attestation.python_version,
+            "capture_chess_version": attestation.chess_version,
+        }
+        record_bytes = _canonical_dumps(record) + b"\n"
+
+        # --- private temps + self-check against the temp bytes + atomic publication ---
+        # Capture is the PRODUCER of the committed provenance record, so it owns creating the
+        # fixtures directory the record and its exclusive temp live in.
+        try:
+            provenance_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CapturePublicationError(
+                f"cannot create the provenance directory {provenance_path.parent.name!r}: "
+                f"{exc.strerror}."
+            ) from None
+        _log_stale_temps(resolved_output)
+        _log_stale_temps(provenance_path)
+        artifact_temp = _write_private_temp(resolved_output, artifact_bytes)
+        record_temp = None
+        try:
+            record_temp = _write_private_temp(provenance_path, record_bytes)
+            try:
+                validate_capture_candidate(
+                    artifact_bytes, record_bytes, graph=graph, roots=roots
+                )
+            except FrozenArtifactError as exc:
+                raise CaptureSelfCheckError(
+                    "the pre-publication self-check rejected the candidate bytes for "
+                    f"{resolved_output.name!r}: {exc}"
+                ) from exc
+            except Exception as exc:
+                # The self-check runs a FULL scoring pass, and score_overlay is a large
+                # surface that can fail in ways the artifact vocabulary does not name (a
+                # ValueError out of the grid config, a RuntimeError from a registry, a
+                # KeyError on an unexpected overlay shape). Those are still SELF-CHECK
+                # failures: nothing has been published, both temps are about to be unlinked,
+                # and the operator's contract is a typed diagnostic + exit 1 rather than a
+                # traceback out of a command that promised neither. Deliberately NOT
+                # BaseException: KeyboardInterrupt/SystemExit must still unwind.
+                raise CaptureSelfCheckError(
+                    "the pre-publication self-check FAILED for "
+                    f"{resolved_output.name!r} — {type(exc).__name__}: {exc}. This is a "
+                    "scoring/runtime failure rather than a rejection of the candidate "
+                    "bytes; nothing was published."
+                ) from exc
+            # Artifact-rename-before-record-rename: the reviewable, committable half never
+            # lands before the artifact it describes exists.
+            try:
+                os.replace(artifact_temp, resolved_output)
+            except OSError as exc:
+                # BEFORE the first rename nothing has been published: the prior artifact and
+                # the committed record are both untouched, and the finally-block unlinks both
+                # temps. A clean typed refusal, with the errno text only.
+                raise CapturePublicationError(
+                    f"publishing the artifact to {resolved_output.name!r} failed: "
+                    f"{exc.strerror}. Nothing was published — the previous artifact and the "
+                    "committed provenance record are both untouched."
+                ) from None
+            artifact_temp = None
+            try:
+                os.replace(record_temp, provenance_path)
+                record_temp = None
+            except OSError as exc:
+                raise CaptureInterRenameError(
+                    f"the artifact was published to {resolved_output.name!r} but renaming the "
+                    f"provenance record into {provenance_path.name} failed ({exc.strerror}); the pre-"
+                    "existing artifact bytes are already gone and rolling back would be a "
+                    "second unverified write. Rerun capture-cohort to republish a matched pair "
+                    "— the load guard rejects the current mismatched pair on its SHA-256 check."
+                ) from exc
+        finally:
+            # Best-effort unlink of any temp that did not become a final file.
+            for tmp in (artifact_temp, record_temp):
+                if tmp is not None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(tmp)
+
+    return CaptureResult(
+        artifact_path=resolved_output,
+        artifact_sha256=artifact_sha256,
+        pair_count=len(captured_inputs),
+        quantile_count=len(quantile_pairs),
+        release_guard_count=len(guard_pairs),
+        attempts=attempts,
+        orphan_replaced=orphan_replaced,
+        snapshot_cache_epoch=snapshot_epoch,
+        current_view_cache_epoch=post_epoch,
+    )
 
 
 @dataclass(frozen=True)
@@ -4542,8 +5503,99 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def main(argv: list[str] | None = None, *, session_factory=None) -> dict[str, object]:
-    args = _parse_args(argv if argv is not None else sys.argv[1:])
+def _positive_int(raw: str) -> int:
+    """argparse type for a >= 1 count. argparse turns the ValueError into its own usage
+    error (exit 2), which is the right shell contract for a malformed argument — the
+    operation raises CaptureGovernanceError for the same value (exit 1) when called
+    directly, so neither boundary depends on the other to be safe."""
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f"must be >= 1, got {value}")
+    return value
+
+
+def _run_capture_cohort_child(argv: list[str], *, session_factory=None) -> int:
+    """The MINIMAL capture-cohort child dispatch — g-p4ih-capture's ONLY CLI surface. The
+    -S child (reached through capture_cohort.sh -> -I -S launcher -> -S child) recognizes
+    the ``capture-cohort`` invocation, sources ``--output`` and the release-guard user from
+    GHOSTREPLAY_RELEASE_GUARD_USER (NEVER a CLI argument: a production user id must not enter
+    shell history or the process listing), calls ``capture_cohort(...)``, and maps its typed
+    errors to exit codes + a REDACTED summary. It RETURNS before the legacy flat ``_parse_args``
+    ever runs, so no live-report option can attach to a capture run. The polished subcommand
+    surface (flat-parser -> subcommands, per-mode option sets, mutual exclusion) is
+    g-p4ih-release-cli's, which SUBSUMES this branch."""
+    parser = argparse.ArgumentParser(
+        prog="calibrate_opening_scores_v2.py capture-cohort",
+        description="Freeze + fence + publish a frozen-cohort artifact (g-p4ih-capture).",
+    )
+    parser.add_argument(
+        "--output", required=True, type=Path,
+        help="Final artifact path; MUST resolve OUTSIDE the repository working tree.",
+    )
+    parser.add_argument(
+        "--require-quiescent-epoch", action="store_true",
+        help="Promote global-epoch movement to a retry trigger (explicit maintenance window).",
+    )
+    parser.add_argument(
+        "--max-attempts", type=_positive_int, default=3,
+        help="Fence attempts before giving up (>= 1). Rejected at the CLI boundary as well as "
+             "in the operation, so the bad value never reaches the retry loop.",
+    )
+    args = parser.parse_args(argv)
+
+    raw_user = os.environ.get("GHOSTREPLAY_RELEASE_GUARD_USER", "").strip()
+    if not raw_user:
+        print(
+            "[capture] GHOSTREPLAY_RELEASE_GUARD_USER is required and supplied only via the "
+            "environment (never a CLI argument: a production user id must not enter shell "
+            "history or every process listing on the capture host).",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        release_guard_user = int(raw_user)
+    except ValueError:
+        print("[capture] GHOSTREPLAY_RELEASE_GUARD_USER must be an integer user id.", file=sys.stderr)
+        return 2
+
+    if session_factory is None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        session_factory = sessionmaker(
+            bind=engine, autoflush=False, autocommit=False, expire_on_commit=False
+        )
+
+    try:
+        result = capture_cohort(
+            session_factory=session_factory,
+            output=args.output,
+            release_guard_user=release_guard_user,
+            require_quiescent_epoch=args.require_quiescent_epoch,
+            max_attempts=args.max_attempts,
+        )
+    except CaptureError as exc:
+        print(f"[capture] {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    # Redacted summary: the artifact BASENAME only, never the full private path.
+    print(
+        f"[capture] published {result.artifact_path.name!r} sha256={result.artifact_sha256[:12]} "
+        f"pairs={result.pair_count} quantile={result.quantile_count} "
+        f"release_guard={result.release_guard_count} attempts={result.attempts} "
+        f"orphan_replaced={result.orphan_replaced}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None, *, session_factory=None):
+    raw_argv = sys.argv[1:] if argv is None else argv
+    # The minimal capture-cohort dispatch RETURNS before the flat live-report parser, so no
+    # legacy option (--limit / --users / --pairs / ...) can attach to a capture run.
+    if raw_argv and raw_argv[0] == "capture-cohort":
+        return _run_capture_cohort_child(raw_argv[1:], session_factory=session_factory)
+    args = _parse_args(raw_argv)
 
     if args.write_bench:
         if not args.allow_writes:
@@ -4628,4 +5680,8 @@ def _named_root_count(roots: OpeningRoots) -> int:
 
 
 if __name__ == "__main__":
-    main()
+    _result = main()
+    # The capture-cohort child returns an int exit code the launcher must propagate; the
+    # legacy report path returns a dict (exit 0).
+    if isinstance(_result, int):
+        sys.exit(_result)

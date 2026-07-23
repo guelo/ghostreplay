@@ -1382,18 +1382,93 @@ def _fz_load(artifact_bytes: bytes, provenance_bytes: bytes | None = None, rb=No
     )
 
 
+class _FingerprintOnly:
+    """A stand-in registry for the producer entry point (g-p4ih-capture).
+
+    ``_current_runtime_binding`` reads exactly one attribute off graph and roots —
+    ``.fingerprint`` — so these two stubs reproduce ``_fz_rb()`` EXACTLY, which is what lets
+    the same bytes go through both entry points under the same binding. A rejecting row
+    never reaches scoring, so nothing else about a real registry is needed."""
+
+    __slots__ = ("fingerprint",)
+
+    def __init__(self, fingerprint: str) -> None:
+        self.fingerprint = fingerprint
+
+
+_FZ_GRAPH_STUB = _FingerprintOnly(_FZ_GRAPH_FP)
+_FZ_ROOTS_STUB = _FingerprintOnly(_FZ_ROOTS_FP)
+
+
+def _fz_assert_self_check_parity(artifact_bytes, provenance_bytes, expected):
+    """g-p4ih-capture: whatever the CONSUMER's load guard rejects, the PRODUCER's
+    pre-publication self-check must reject identically.
+
+    This is asserted HERE, inside the shared rejection helper, rather than transcribed into
+    the capture tests — so every row of this module's malformation corpus is a parity row by
+    construction, and a row added tomorrow is covered the day it lands. The failure mode it
+    exists to prevent is a self-check that keeps header/provenance validation but skips pair
+    semantics: capture would then publish an artifact the release path fails closed on, and
+    the operator would discover it at release time with no artifact to fall back to."""
+    try:
+        cal.validate_capture_candidate(
+            artifact_bytes, provenance_bytes,
+            graph=_FZ_GRAPH_STUB, roots=_FZ_ROOTS_STUB,
+        )
+    except Exception as exc:  # noqa: BLE001 - the comparison IS the assertion
+        actual = (type(exc), str(exc))
+    else:
+        raise AssertionError(
+            "validate_capture_candidate ACCEPTED bytes the load guard rejected with "
+            f"{expected[0].__name__}: {expected[1]!r} — capture would publish an artifact "
+            "the release path refuses to load"
+        )
+    assert actual == expected, (
+        "the producer self-check and the consumer load guard disagree on the same bytes:\n"
+        f"  load_frozen_artifact:        {expected[0].__name__}: {expected[1]!r}\n"
+        f"  validate_capture_candidate:  {actual[0].__name__}: {actual[1]!r}"
+    )
+
+
+def _fz_reject_bytes(artifact_bytes, provenance_bytes, substring, exc=cal.ArtifactSemanticError):
+    """The BYTE-LEVEL rejection assertion, shared by ``_fz_reject`` and by every
+    hand-crafted raw-byte case (duplicate JSON keys, Infinity/-0.0 literals, whitespace /
+    unsorted-key / exponent-float non-canonicality, shuffled nodes, token ordering,
+    integrity/digest, provenance-record schema, Phase-C drift, ...).
+
+    Assert ``load_frozen_artifact`` raises ``exc`` matching ``substring`` under the NORMAL
+    ``_fz_rb()`` binding, THEN replay the same bytes through the capture producer's self-check
+    and require it to reject IDENTICALLY (same type, same message). Routing the raw-byte cases
+    through here — rather than calling ``load_frozen_artifact`` directly — is what makes the
+    parity claim cover the WHOLE rejection corpus and not just the rows that go through
+    ``_fz_reject``.
+
+    There is NO parity opt-out, on purpose. The self-check builds its binding from the
+    registries it is handed, and those reproduce ``_fz_rb()`` EXACTLY (asserted by
+    ``TestSharedRejectionCorpusIsWiredToTheSelfCheck``), so it applies the identical load
+    guard to identical bytes — every rejection row is a parity row unconditionally. A Phase-C
+    DRIFT row proves its drift the way the mirrored min_observations/cohort_rules rows already
+    do: put the drifted value in BOTH the header and the record (so integrity passes) and load
+    under the normal binding — never by injecting a custom binding the self-check cannot see."""
+    with pytest.raises(exc) as ei:
+        cal.load_frozen_artifact(artifact_bytes, provenance_bytes, _fz_rb())
+    assert substring in str(ei.value), f"expected {substring!r} in {ei.value!r}"
+    _fz_assert_self_check_parity(
+        artifact_bytes, provenance_bytes, (type(ei.value), str(ei.value)))
+    return str(ei.value)
+
+
 def _fz_reject(perturb, substring, exc=cal.ArtifactSemanticError):
     """Perturb a fresh valid payload, re-encode canonically, load with SCHEMA-VALID
     provenance (from the reference header), and assert the load raises ``exc`` whose
     message contains ``substring``. Provenance is good so a header malformation is
-    owned by Phase A semantic validation, not integrity."""
+    owned by Phase A semantic validation, not integrity.
+
+    Delegates the assertion (loader + producer-self-check parity) to ``_fz_reject_bytes``."""
     payload = json.loads(_fz_freeze())
     perturb(payload)
     bs = cal._canonical_dumps(payload)
-    with pytest.raises(exc) as ei:
-        cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb())
-    assert substring in str(ei.value), f"expected {substring!r} in {ei.value!r}"
-    return str(ei.value)
+    return _fz_reject_bytes(bs, _fz_prov(bs), substring, exc)
 
 
 class TestEvidenceDerivationFingerprint:
@@ -1644,8 +1719,7 @@ class TestSemanticRejectionTable:
         bs = _fz_freeze()
         assert b'"pair_count":4,' in bs
         raw = bs.replace(b'"pair_count":4,', b'"pair_count":4,"pair_count":4,', 1)
-        with pytest.raises(cal.ArtifactSemanticError, match="duplicate JSON object key"):
-            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+        _fz_reject_bytes(raw, _fz_prov(raw), "duplicate JSON object key")
 
     def test_duplicate_node_key(self):
         def p(pl):
@@ -1723,8 +1797,7 @@ class TestSemanticRejectionTable:
         bs = _fz_freeze()
         assert b'"quality_sum":25.0' in bs
         raw = bs.replace(b'"quality_sum":25.0', b'"quality_sum":Infinity', 1)
-        with pytest.raises(cal.ArtifactSemanticError, match="non-finite JSON literal"):
-            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+        _fz_reject_bytes(raw, _fz_prov(raw), "non-finite JSON literal")
 
     def test_unknown_source_counts_label(self):
         def p(pl):
@@ -1774,8 +1847,7 @@ class TestSemanticRejectionTable:
         inputs[2] = cal.CapturedPairInput(overlay, "quantile", 3, "fp-2b")
         early = datetime(1999, 1, 1, tzinfo=timezone.utc)
         bs = _fz_freeze(inputs, header=_fz_header_input(as_of=early))
-        with pytest.raises(cal.ArtifactSemanticError, match="TIMESTAMP_FLOOR"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs, header=json.loads(bs)["header"]), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs, header=json.loads(bs)["header"]), "TIMESTAMP_FLOOR")
 
     def test_shuffled_nodes_sequence(self):
         # A two-node overlay whose nodes are out of fen order (strict-order owns this,
@@ -1784,8 +1856,7 @@ class TestSemanticRejectionTable:
         pair = payload["pairs"][_fz_two_node_index(payload)]
         pair["nodes"] = list(reversed(pair["nodes"]))
         bs = cal._canonical_dumps(payload)
-        with pytest.raises(cal.ArtifactSemanticError, match="strictly ascending by fen"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs, header=payload["header"]), "strictly ascending by fen")
 
     def test_out_of_order_phase_samples(self):
         def p(pl):
@@ -1886,30 +1957,26 @@ class TestCanonicalByteReencode:
     def test_whitespace_rejected(self):
         payload = json.loads(_fz_freeze())
         raw = json.dumps(payload, sort_keys=True).encode("ascii")  # default separators add spaces
-        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
-            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+        _fz_reject_bytes(raw, _fz_prov(raw), "non-canonical bytes", cal.ArtifactCanonicalBytesError)
 
     def test_unsorted_keys_rejected(self):
         payload = json.loads(_fz_freeze())
         reordered = {"pairs": payload["pairs"], "header": payload["header"]}  # pairs before header
         raw = json.dumps(reordered, separators=(",", ":")).encode("ascii")
-        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
-            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+        _fz_reject_bytes(raw, _fz_prov(raw), "non-canonical bytes", cal.ArtifactCanonicalBytesError)
 
     def test_exponent_float_rejected(self):
         bs = _fz_freeze()
         assert b'"quality_sum":25.0' in bs
         raw = bs.replace(b'"quality_sum":25.0', b'"quality_sum":25e0', 1)
-        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
-            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+        _fz_reject_bytes(raw, _fz_prov(raw), "non-canonical bytes", cal.ArtifactCanonicalBytesError)
 
     def test_negative_zero_rejected(self):
         payload = json.loads(_fz_freeze())
         payload["pairs"][2]["nodes"][0]["quality_sum"] = -0.0
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("ascii")
         assert b"-0.0" in raw
-        with pytest.raises(cal.ArtifactCanonicalBytesError, match="non-canonical bytes"):
-            cal.load_frozen_artifact(raw, _fz_prov(raw), _fz_rb())
+        _fz_reject_bytes(raw, _fz_prov(raw), "non-canonical bytes", cal.ArtifactCanonicalBytesError)
 
 
 class TestProducerCanonicalStructure:
@@ -1971,8 +2038,8 @@ class TestProducerCanonicalStructure:
         node = payload["pairs"][2]["nodes"][0]
         node["session_tokens"] = ["pair-02-g10", "pair-02-g2"]
         bs = cal._canonical_dumps(payload)
-        with pytest.raises(cal.ArtifactSemanticError, match="strictly ascending by numeric token index"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs, header=payload["header"]),
+                         "strictly ascending by numeric token index")
 
 
 class TestSplitLoadGuard:
@@ -1981,52 +2048,62 @@ class TestSplitLoadGuard:
         payload = json.loads(_fz_freeze())
         payload["header"]["schema_version"] = 7
         bs = cal._canonical_dumps(payload)
-        with pytest.raises(cal.UnsupportedArtifactSchemaError, match="unsupported schema"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs), "unsupported schema", cal.UnsupportedArtifactSchemaError)
 
     def test_integrity_field_mismatch(self):
         bs = _fz_freeze()
         prov = _fz_prov(bs, graph_fingerprint="tampered")
-        with pytest.raises(cal.ArtifactIntegrityError, match="integrity"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "integrity", cal.ArtifactIntegrityError)
 
     def test_integrity_digest_mismatch(self):
         bs = _fz_freeze()
         prov = _fz_prov(bs)
         prov = prov.replace(hashlib.sha256(bs).hexdigest().encode(), (b"0" * 64), 1)
-        with pytest.raises(cal.ArtifactIntegrityError, match="digest"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "digest", cal.ArtifactIntegrityError)
+
+    # Phase-C drift, INVERTED so it is producer-parity too (g-p4ih-capture): put the drifted
+    # value in the header AND mirror it into the record so integrity passes, then load under
+    # the NORMAL binding — which now disagrees with the header. validate_capture_candidate
+    # promises to rerun the full split guard including these exact fields, so it must produce
+    # the identical drift diagnostic. (The older form injected a custom binding the self-check
+    # could not see, which left precisely this guarantee untested.) Same pattern as the
+    # mirrored min_observations / cohort_rules rows below.
+    def _drift_header(self, field, drifted_value):
+        payload = json.loads(_fz_freeze())
+        payload["header"][field] = drifted_value
+        bs = cal._canonical_dumps(payload)
+        prov = _fz_prov(bs, header=payload["header"])  # record MIRRORS the drifted value
+        return _fz_reject_bytes(bs, prov, field, cal.ArtifactScoringValidityError)
 
     def test_scoring_validity_graph_drift(self):
-        bs = _fz_freeze()
-        with pytest.raises(cal.ArtifactScoringValidityError, match="drifted"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb(graph_fingerprint="drifted"))
+        msg = self._drift_header("graph_fingerprint", "drifted")
+        assert "drifted from the current runtime" in msg
 
     def test_scoring_validity_derivation_drift(self):
-        bs = _fz_freeze()
-        with pytest.raises(cal.ArtifactScoringValidityError, match="drifted"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb(evidence_derivation_fingerprint="old-derivation"))
+        msg = self._drift_header("evidence_derivation_fingerprint", "old-derivation")
+        assert "drifted from the current runtime" in msg
 
     def test_scoring_validity_release_key_drift(self):
-        bs = _fz_freeze()
-        with pytest.raises(cal.ArtifactScoringValidityError, match="drifted"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb(release_guard_opening_key="wrong"))
+        # A DIFFERENT but well-formed key (Phase A only requires a non-empty string), so the
+        # rejection is the Phase-C drift and not a semantic malformation.
+        msg = self._drift_header("release_guard_opening_key", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -")
+        assert "drifted from the current runtime" in msg
 
     def test_min_observations_mirrored_passes_ab_fails_c(self):
         payload = json.loads(_fz_freeze())
         payload["header"]["min_observations"] = 0
         bs = cal._canonical_dumps(payload)
         prov = _fz_prov(bs, header=payload["header"])  # record MIRRORS 0
-        with pytest.raises(cal.ArtifactScoringValidityError, match="min_observations"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        # The DEFAULT binding rejects this (min_observations must be DEFAULT_MIN_OBSERVATIONS),
+        # and the self-check uses the default binding too — so parity holds.
+        _fz_reject_bytes(bs, prov, "min_observations", cal.ArtifactScoringValidityError)
 
     def test_non_current_cohort_rules_mirrored_passes_ab_fails_c(self):
         payload = json.loads(_fz_freeze())
         payload["header"]["cohort_rules"] = "opening-cohort-rules-v2"
         bs = cal._canonical_dumps(payload)
         prov = _fz_prov(bs, header=payload["header"])  # format-valid, mirrored
-        with pytest.raises(cal.ArtifactScoringValidityError, match="cohort_rules"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "cohort_rules", cal.ArtifactScoringValidityError)
 
     def test_model_version_bump_still_loads(self):
         # A captured sm-v2-3 artifact loads green after an sm-v2-4 bump: raw overlays
@@ -2037,13 +2114,11 @@ class TestSplitLoadGuard:
 
     def test_str_artifact_bytes_rejected(self):
         bs = _fz_freeze()
-        with pytest.raises(TypeError, match="artifact_bytes must be bytes"):
-            cal.load_frozen_artifact(bs.decode(), _fz_prov(bs), _fz_rb())
+        _fz_reject_bytes(bs.decode(), _fz_prov(bs), "artifact_bytes must be bytes", TypeError)
 
     def test_str_provenance_bytes_rejected(self):
         bs = _fz_freeze()
-        with pytest.raises(TypeError, match="provenance_bytes must be bytes"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs).decode(), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs).decode(), "provenance_bytes must be bytes", TypeError)
 
 
 class TestProvenanceRecordSchema:
@@ -2052,41 +2127,35 @@ class TestProvenanceRecordSchema:
         record = json.loads(_fz_prov(bs))
         record["pairs"] = []
         prov = cal._canonical_dumps(record)
-        with pytest.raises(cal.ProvenanceRecordError, match="unknown key"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "unknown key", cal.ProvenanceRecordError)
 
     def test_duplicate_object_key_rejected(self):
         bs = _fz_freeze()
         prov = _fz_prov(bs)
         raw = prov.replace(b'"pair_count":4', b'"pair_count":4,"pair_count":4', 1)
-        with pytest.raises(cal.ProvenanceRecordError, match="duplicate JSON object key"):
-            cal.load_frozen_artifact(bs, raw, _fz_rb())
+        _fz_reject_bytes(bs, raw, "duplicate JSON object key", cal.ProvenanceRecordError)
 
     def test_format_malformed_cohort_rules_rejected(self):
         bs = _fz_freeze()
         prov = _fz_prov(bs, cohort_rules="free text")
-        with pytest.raises(cal.ProvenanceRecordError, match="opening-cohort-rules"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "opening-cohort-rules", cal.ProvenanceRecordError)
 
     def test_format_malformed_captured_model_version_rejected(self):
         bs = _fz_freeze()
         prov = _fz_prov(bs, captured_model_version="leaked")
-        with pytest.raises(cal.ProvenanceRecordError, match="sm-v"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "sm-v", cal.ProvenanceRecordError)
 
     def test_missing_required_key_rejected(self):
         bs = _fz_freeze()
         record = json.loads(_fz_prov(bs))
         del record["roots_fingerprint"]
         prov = cal._canonical_dumps(record)
-        with pytest.raises(cal.ProvenanceRecordError, match="missing required key"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "missing required key", cal.ProvenanceRecordError)
 
     def test_malformed_sha256_rejected(self):
         bs = _fz_freeze()
         prov = _fz_prov(bs, sha256="ABC123")
-        with pytest.raises(cal.ProvenanceRecordError, match="sha256"):
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
+        _fz_reject_bytes(bs, prov, "sha256", cal.ProvenanceRecordError)
 
 
 class TestCaptureAttestation:
@@ -2126,9 +2195,9 @@ class TestCaptureAttestation:
         bs = _fz_freeze()
         record = json.loads(_fz_prov(bs))
         del record[field]
-        with pytest.raises(cal.ProvenanceRecordError, match="missing required key") as ei:
-            cal.load_frozen_artifact(bs, cal._canonical_dumps(record), _fz_rb())
-        assert field in str(ei.value)
+        msg = _fz_reject_bytes(bs, cal._canonical_dumps(record), "missing required key",
+                               cal.ProvenanceRecordError)
+        assert field in msg
 
     @pytest.mark.parametrize("field", _FIELDS)
     def test_header_malformed_field_distinct_error(self, field):
@@ -2141,9 +2210,7 @@ class TestCaptureAttestation:
     def test_record_malformed_field_distinct_error(self, field):
         bs = _fz_freeze()
         prov = _fz_prov(bs, **{field: self._MALFORMED[field]})
-        with pytest.raises(cal.ProvenanceRecordError) as ei:
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
-        assert f"provenance.{field}" in str(ei.value)
+        _fz_reject_bytes(bs, prov, f"provenance.{field}", cal.ProvenanceRecordError)
 
     def test_python_version_without_implementation_rejected(self):
         # platform.python_version() alone is NOT enough: the byte-stability contract is
@@ -2169,9 +2236,7 @@ class TestCaptureAttestation:
     def test_header_record_disagreement_is_integrity_mismatch(self, field, other):
         bs = _fz_freeze()
         prov = _fz_prov(bs, **{field: other})  # format-valid on BOTH sides
-        with pytest.raises(cal.ArtifactIntegrityError) as ei:
-            cal.load_frozen_artifact(bs, prov, _fz_rb())
-        assert field in str(ei.value)
+        _fz_reject_bytes(bs, prov, field, cal.ArtifactIntegrityError)
 
     def test_attestation_differing_from_current_environment_loads_green(self):
         """THE NON-GATING DECISION (g-p4ih-producer-bind): the attestation is recorded
@@ -2204,10 +2269,9 @@ class TestCaptureAttestation:
             del payload["header"][field]
         payload["header"]["schema_version"] = 1
         bs = cal._canonical_dumps(payload)
-        with pytest.raises(cal.UnsupportedArtifactSchemaError) as ei:
-            cal.load_frozen_artifact(bs, _fz_prov(bs), _fz_rb())
-        assert "unsupported schema" in str(ei.value)
-        assert "missing required" not in str(ei.value)
+        msg = _fz_reject_bytes(bs, _fz_prov(bs), "unsupported schema",
+                               cal.UnsupportedArtifactSchemaError)
+        assert "missing required" not in msg
 
     def test_genuine_v1_record_gets_version_diagnostic(self):
         bs = _fz_freeze()
@@ -2215,17 +2279,16 @@ class TestCaptureAttestation:
         for field in self._FIELDS:
             del record[field]
         record["schema_version"] = 1
-        with pytest.raises(cal.UnsupportedArtifactSchemaError) as ei:
-            cal.load_frozen_artifact(bs, cal._canonical_dumps(record), _fz_rb())
-        assert "unsupported schema" in str(ei.value)
-        assert "missing required" not in str(ei.value)
+        msg = _fz_reject_bytes(bs, cal._canonical_dumps(record), "unsupported schema",
+                               cal.UnsupportedArtifactSchemaError)
+        assert "missing required" not in msg
 
 
 class TestCohortMembership:
     def test_below_threshold_quantile_pair_rejected(self):
         bs = _fz_freeze(_fz_inputs(quantile_obs=(5, 22)))
-        with pytest.raises(cal.ArtifactSemanticError, match="below header.min_observations"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs, header=json.loads(bs)["header"]), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs, header=json.loads(bs)["header"]),
+                         "below header.min_observations")
 
     def test_release_guard_below_threshold_ok(self):
         # Guards are exempt from the observation threshold (release-gate-only).
@@ -2314,8 +2377,7 @@ class TestSessionTokenUnion:
         ]
         bs = cal._canonical_dumps(payload)
         # Provenance mirrors the (canonical, self-consistent) bytes.
-        with pytest.raises(cal.ArtifactSemanticError, match="canonical spelling"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs, header=payload["header"]), "canonical spelling")
 
     def test_alias_token_union_string_based(self):
         # Belt-and-suspenders: even a token that clears the per-token spelling check
@@ -2324,8 +2386,7 @@ class TestSessionTokenUnion:
         payload = json.loads(_fz_freeze())
         payload["pairs"][2]["nodes"][0]["session_tokens"] = ["pair-02-g0", "pair-02-g2"]
         bs = cal._canonical_dumps(payload)
-        with pytest.raises(cal.ArtifactSemanticError, match="contiguous zero-based"):
-            cal.load_frozen_artifact(bs, _fz_prov(bs, header=payload["header"]), _fz_rb())
+        _fz_reject_bytes(bs, _fz_prov(bs, header=payload["header"]), "contiguous zero-based")
 
 
 class TestArtifactShapeGuard:
