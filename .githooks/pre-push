@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+# Turn Node deprecations and rejected promises into hard failures. ESLint and
+# pytest have their own warning-as-error flags below.
+NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--throw-deprecation --unhandled-rejections=strict"
+export NODE_OPTIONS
+
+run() {
+  printf '\n==> %s\n' "$1"
+  shift
+  "$@"
+}
+
+run_without_warnings() {
+  local label=$1
+  local output_file
+  local command_status
+
+  shift
+  output_file=$(mktemp "${TMPDIR:-/tmp}/ghostreplay-pre-push.XXXXXX")
+
+  printf '\n==> %s\n' "$label"
+  set +e
+  "$@" 2>&1 | tee "$output_file"
+  command_status=${PIPESTATUS[0]}
+  set -e
+
+  if ((command_status != 0)); then
+    rm -f "$output_file"
+    return "$command_status"
+  fi
+
+  if LC_ALL=C grep -Eq 'Warning:|warning:|^\(!\)' "$output_file"; then
+    printf '\n%s emitted a warning; push rejected.\n' "$label" >&2
+    rm -f "$output_file"
+    return 1
+  fi
+
+  rm -f "$output_file"
+}
+
+run "Frontend lint (warnings are errors)" npm run lint -- --max-warnings=0
+run_without_warnings "Frontend typecheck and production build" npm run build
+run_without_warnings "Frontend unit and component tests" npm run test:run
+run_without_warnings "Frontend end-to-end tests (screenshot gallery excluded)" npm run test:e2e:run
+
+if [ ! -x backend/.venv/bin/python ]; then
+  printf '\nBackend virtualenv is missing: backend/.venv/bin/python\n' >&2
+  printf 'Create it and install backend/requirements-dev.txt before pushing.\n' >&2
+  exit 1
+fi
+
+run "Backend tests (warnings are errors)" \
+  backend/.venv/bin/python -W error -m pytest -c backend/pytest.ini backend
+
+printf '\nAll pre-push checks passed.\n'

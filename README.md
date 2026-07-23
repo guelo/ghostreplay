@@ -33,6 +33,19 @@ Playwright will launch:
 
 See `e2e/README.md` for seeded account details and additional E2E commands.
 
+## Pre-push checks
+
+Enable the version-controlled Git hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Before every push, the hook runs ESLint with zero warnings allowed, the
+TypeScript/production build, all Vitest tests, all non-screenshot Playwright
+tests, and the full backend pytest suite with Python warnings treated as
+errors. The backend virtual environment must exist at `backend/.venv`.
+
 The default dev command prints the local URL in the terminal. Open it in a browser and you should see the home page at `/`. Use the **Play a Game** CTA (or navigate to `/game`) to launch gameplay.
 
 ## Verifying the chess game
