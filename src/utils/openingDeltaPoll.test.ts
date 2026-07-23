@@ -182,12 +182,15 @@ describe("pollFreshOpeningDelta", () => {
 
     const done = pollFreshOpeningDelta("s1");
     await settle();
-    for (let i = 0; i < 20; i += 1) {
+    // One extra tick past the ceiling to prove the loop stops on its own.
+    for (let i = 0; i < 31; i += 1) {
       await tick();
     }
     await done;
 
-    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(15);
+    // Matches DELTA_POLL_MAX_ATTEMPTS (~45s ceiling; raised from 15 in
+    // g-drill-delta-latency's cheap fallback).
+    expect(getOpeningScoreDeltaMock).toHaveBeenCalledTimes(30);
     expect(useGameStore.getState().openingScoreDelta).toBeNull();
   });
 
@@ -333,7 +336,7 @@ describe("pollFreshOpeningDelta", () => {
   it("stops retrying once the polls are aborted, freeing the concurrency slot", async () => {
     // handleReset's token bump only invalidates a COMMIT. A loop the server keeps
     // answering `is_fresh: false` never commits, so without an explicit abort it
-    // would burn all 15 attempts and hold a slot against the next drill.
+    // would burn its full attempt budget and hold a slot against the next drill.
     getOpeningScoreDeltaMock.mockResolvedValue({
       opening_score_changes: null,
       is_fresh: false,

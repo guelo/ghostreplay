@@ -6,7 +6,15 @@ import { useGameStore } from "../stores/useGameStore";
 // recompute cycle apart; the max-attempts ceiling bounds total work even if the
 // user lingers on the end screen.
 const DELTA_POLL_INTERVAL_MS = 1500;
-const DELTA_POLL_MAX_ATTEMPTS = 15; // ≈ 22s ceiling
+// Ceiling must clear the backend recompute FLOOR. g-drill-delta-latency Phase 0
+// measured that floor at ~26s in prod (heavy user): scheduler debounce + the
+// whole-(user,color) evidence-overlay rebuild + the ~17k-row batch commit — NOT
+// the score pass. The old 15-attempt / ~22s ceiling sat *below* that floor, so
+// the badge almost never went fresh before the poll gave up. 30 attempts ≈ 45s
+// clears the observed worst case with margin; the g-f3m4 "last drill" toast
+// still catches anything slower. (Cutting the floor itself is g-delta-commit-
+// decouple + g-overlay-evidence-reuse, not this fallback.)
+const DELTA_POLL_MAX_ATTEMPTS = 30; // ≈ 45s ceiling
 const DELTA_POLL_REQUEST_TIMEOUT_MS = 4000;
 // Matches the store's LATE_OPENING_DELTA_LIMIT: a poll that survives to commit
 // needs a queue slot to land in, so holding more polls than the queue can hold
