@@ -250,7 +250,7 @@ export const useChessGameLifecycle = ({
         }
       })
       .catch(() => {});
-  }, []);
+  }, [setSeedEngineElo]);
 
   // Durably upload the FULL move history before a terminal recompute. The
   // end-of-session opening-score delta diffs the played chain from session_moves
@@ -503,15 +503,9 @@ export const useChessGameLifecycle = ({
     }
   }, [
     chess,
-    coordinator,
     finishLocalGame,
     uploadFullMoveHistoryBeforeEnd,
-    setBlunderReviewId,
-    setBlunderReviewSrs,
-    setBlunderTargetFen,
     setEngineMessage,
-    setResolvedReview,
-    setShowPostGamePrompt,
   ]);
 
   const rewindBoardLocally = useCallback((storeMoveHistory: MoveRecord[]) => {
@@ -547,8 +541,6 @@ export const useChessGameLifecycle = ({
     setBlunderTargetFen,
     setResolvedReview,
     setPendingPromotion,
-    setShowRevertWarning,
-    clearBlunderBoardOverride,
   ]);
 
   const executeRevert = useCallback(async () => {
@@ -794,7 +786,9 @@ export const useChessGameLifecycle = ({
       clearBlunderBoardOverride,
       clearReviewedDrillReturn,
       setEngineMessage,
+      setIsRevertPending,
       setIsStartingGame,
+      setRevertError,
       setReviewFailModal,
       setShowFlash,
       setShowPassToast,
@@ -1010,7 +1004,7 @@ export const useChessGameLifecycle = ({
       { type: "resign", message: "Drill abandoned." },
       { playEndGameAudio: false, finalizingSessionId },
     );
-  }, [finishLocalGame]);
+  }, [coordinator, finishLocalGame]);
 
   const handleResign = useCallback(async () => {
     const store = useGameStore.getState();

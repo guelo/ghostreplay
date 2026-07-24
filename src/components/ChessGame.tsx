@@ -541,7 +541,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       setBlunderAlert(null);
       setDrillFailInfo(null);
     },
-    [analysisStore, clearBlunderBoardOverride, clearMoveHighlights, isPlayerMoveIndex, pendingPromotion],
+    [analysisStore, clearBlunderBoardOverride, clearMoveHighlights, isPlayerMoveIndex, pendingPromotion, setViewIndex],
   );
 
   // Return-to-live for the floating board pill (g-1y68 A1) — the same path the
@@ -1183,7 +1183,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     } catch {
       // ignore corrupted storage
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showStartOverlay]);
 
   // Match pending drill setup after openingFamilies loads
@@ -1744,7 +1743,7 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
       });
       setViewIndex(moveIndex - 1);
     },
-    [clearBlunderBoardOverride],
+    [clearBlunderBoardOverride, setViewIndex],
   );
 
   // SRS fail spotlight: auto-reveal the blunder arrows + bubble (same path as a
@@ -1860,7 +1859,6 @@ const ChessGame = ({ onOpenHistory }: ChessGameProps = {}) => {
     setIsDrillMode(true);
     setShowPostGamePrompt(false);
     setShowStartOverlay(true);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Instantly restart the drill: opening/side/strictness replay exactly, but

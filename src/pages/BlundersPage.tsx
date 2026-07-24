@@ -310,12 +310,15 @@ function BlundersPage() {
   }, [analysis, selected, openingByBlunderId]);
 
   useEffect(() => {
+    // The ref holds a Set allocated once by useRef and never reassigned, so
+    // this capture is what the cleanup below would read anyway.
+    const inFlightLookups = openingAnalysisLookupRef.current;
     const candidates = blunders.filter(
       (blunder) =>
         openingByBlunderId[blunder.id] === null &&
         !blunder.opening_family &&
         !!blunder.source_session_id &&
-        !openingAnalysisLookupRef.current.has(blunder.id),
+        !inFlightLookups.has(blunder.id),
     );
     if (candidates.length === 0) {
       return;
@@ -323,7 +326,7 @@ function BlundersPage() {
 
     let cancelled = false;
     for (const blunder of candidates) {
-      openingAnalysisLookupRef.current.add(blunder.id);
+      inFlightLookups.add(blunder.id);
     }
 
     const bySession = new Map<string, BlunderListItem[]>();
@@ -364,7 +367,7 @@ function BlundersPage() {
     return () => {
       cancelled = true;
       for (const blunder of candidates) {
-        openingAnalysisLookupRef.current.delete(blunder.id);
+        inFlightLookups.delete(blunder.id);
       }
     };
   }, [blunders, openingByBlunderId]);

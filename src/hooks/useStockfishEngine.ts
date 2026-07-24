@@ -102,6 +102,8 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
     )
     workerRef.current = worker
     const pendingMap = pendingEvaluations.current
+    const requestFens = requestFenById.current
+    const requestCacheKeys = requestCacheKeyById.current
 
     if (import.meta.env.DEV) {
       ;(window as unknown as { __sf?: (cmd: string) => void }).__sf = (
@@ -204,8 +206,8 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
       worker.removeEventListener('message', handleMessage)
       worker.removeEventListener('error', handleError)
       rejectPendingEvaluations(pendingMap, new Error('Stockfish worker disposed'))
-      requestFenById.current.clear()
-      requestCacheKeyById.current.clear()
+      requestFens.clear()
+      requestCacheKeys.clear()
       worker.terminate()
       workerRef.current = null
       if (import.meta.env.DEV) {

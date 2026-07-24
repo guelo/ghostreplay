@@ -194,6 +194,11 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
   const [containerWidth, setContainerWidth] = useState(400);
   const containerRef = useRef<HTMLDivElement>(null);
 
+  // Mirrors the latest prop so the mount-only fetch below can seed the view
+  // range from the current window without re-fetching when the preset changes.
+  const windowDaysRef = useRef(windowDays);
+  windowDaysRef.current = windowDays;
+
   // Fetch all data once on mount
   useEffect(() => {
     let cancelled = false;
@@ -216,7 +221,7 @@ function RatingGraph({ windowDays, presetKey }: RatingGraphProps) {
             const next = computeViewRange(
               initialDataMin,
               initialDomainMax,
-              windowDays,
+              windowDaysRef.current,
             );
             return rangesEqual(prev, next) ? prev : next;
           });

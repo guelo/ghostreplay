@@ -303,8 +303,6 @@ export const useChessGameController = ({
       decisionOwner,
       resolvedReview,
       setBlunderAlert,
-      setBlunderReviewId,
-      setBlunderReviewSrs,
       setResolvedReview,
       clearBlunderBoardOverride,
     ],

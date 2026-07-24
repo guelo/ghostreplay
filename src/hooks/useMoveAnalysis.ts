@@ -568,6 +568,16 @@ export const useMoveAnalysis = (
     // so that a singleton store survives remount without data loss).
     store.getState().resetTransient()
 
+    // These ref containers are allocated once by useRef and never reassigned,
+    // so capturing them for this mount is identical to reading `.current` in
+    // the cleanup below — it just avoids the stale-ref lint warning.
+    const pendingVariations = pendingVariationPlies.current
+    const resolution = resolutionState.current
+    const exactBest = exactBestTruth.current
+    const variationTimers = variationWatchdogTimers.current
+    const startedVariations = variationStarted.current
+    const discardedVariations = discardedVariationIds.current
+
     const worker = new Worker(
       new URL('../workers/analysisWorker.ts', import.meta.url),
       { type: 'module' },
@@ -890,26 +900,28 @@ export const useMoveAnalysis = (
         bootWatchdogTimer.current = null
       }
       // Invalidate any in-flight async cache callbacks so they cannot mutate
-      // the store after unmount (Finding 5), and clear timers.
+      // the store after unmount (Finding 5), and clear timers. This bumps the
+      // live counter on purpose — a captured copy would not invalidate anything.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       mountToken.current++
       // Free every still-pending variation entry so a remount can re-request
       // those FENs (Finding F3).
-      for (const requestId of pendingVariationPlies.current.keys()) {
+      for (const requestId of pendingVariations.keys()) {
         onVariationErrorRef.current?.(requestId)
       }
-      pendingVariationPlies.current.clear()
-      for (const entry of resolutionState.current.values()) {
+      pendingVariations.clear()
+      for (const entry of resolution.values()) {
         if (entry.watchdogTimer) clearTimeout(entry.watchdogTimer)
         if (entry.cacheTimer) clearTimeout(entry.cacheTimer)
       }
-      resolutionState.current.clear()
-      exactBestTruth.current.clear()
-      for (const timer of variationWatchdogTimers.current.values()) {
+      resolution.clear()
+      exactBest.clear()
+      for (const timer of variationTimers.values()) {
         clearTimeout(timer)
       }
-      variationWatchdogTimers.current.clear()
-      variationStarted.current.clear()
-      discardedVariationIds.current.clear()
+      variationTimers.clear()
+      startedVariations.clear()
+      discardedVariations.clear()
       if (cacheFlushTimer.current !== null) {
         clearTimeout(cacheFlushTimer.current)
         cacheFlushTimer.current = null

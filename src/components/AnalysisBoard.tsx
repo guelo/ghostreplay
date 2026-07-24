@@ -634,7 +634,7 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     }, ENGINE_EVALUATION_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timerId);
-  }, [displayedFen, evaluatePosition, showEngineArrows, trustedBest, searchmoves]);
+  }, [displayedFen, evaluatePosition, showEngineArrows, trustedBest, searchmoves, stopSearch]);
 
   // Whether the restricted search path is active (same condition as the engine request)
   const useRestrictedSearch = !!(
@@ -644,9 +644,11 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     searchmoves.length > 0
   );
 
-  const activeEngineLines = showEngineArrows && engineInfoFen === displayedFen
-    ? engineLines
-    : [];
+  const activeEngineLines = useMemo(
+    () =>
+      showEngineArrows && engineInfoFen === displayedFen ? engineLines : [],
+    [showEngineArrows, engineInfoFen, displayedFen, engineLines],
+  );
   const activeEngineDepth = activeEngineLines[0]?.depth ?? 0;
   const cappedEngineDepth = Math.min(activeEngineDepth, ENGINE_SEARCH_DEPTH);
   const engineProgressPercent = (cappedEngineDepth / ENGINE_SEARCH_DEPTH) * 100;
