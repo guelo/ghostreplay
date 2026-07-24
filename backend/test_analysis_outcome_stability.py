@@ -59,7 +59,8 @@ def _cp_white_mover_cases() -> list[tuple[int, int, str]]:
     mover + white pov => player-relative == white-relative and
     eval_delta = best - played.
     """
-    cases = json.load(open(_FIXTURE))["cases"]
+    with open(_FIXTURE) as f:
+        cases = json.load(f)["cases"]
     out: list[tuple[int, int, str]] = []
     for c in cases:
         if (

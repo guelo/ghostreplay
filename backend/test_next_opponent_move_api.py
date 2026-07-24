@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
-from sqlalchemy import text
+from sqlalchemy import DateTime, bindparam, text
 from sqlalchemy.orm import Session as SqlAlchemySession
 
 from app.fen import fen_hash
@@ -297,11 +297,13 @@ def test_next_opponent_move_ghost_branch_happy_path(
     )
 
     # Insert blunder on position B for this user, backdated so it's due for SRS review
+    # Typed bindparam so the dialect adapts the datetime the same way the ORM
+    # would; a bare datetime reaches sqlite3's deprecated default adapter.
     db_session.execute(
         text("""
             INSERT INTO blunders (user_id, position_id, bad_move_san, best_move_san, eval_loss_cp, created_at)
             VALUES (:uid, :pid, 'Nf6', 'd5', 150, :created_at)
-        """),
+        """).bindparams(bindparam("created_at", type_=DateTime(timezone=True))),
         {"uid": user_id, "pid": pos_b_id, "created_at": datetime.now(timezone.utc) - timedelta(hours=5)},
     )
     db_session.commit()

@@ -169,6 +169,46 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_matrix.py::test_pg_nil_uuid_session_is_backfilled",
     "test_release_b_pg_matrix.py::test_pg_detector_parity",
     "test_release_b_pg_matrix.py::test_pg_integer_division_floors_like_the_validator",
+    # Frozen-cohort capture: the consistency fence + atomic publication
+    # (g-p4ih-capture). The contract under test IS PostgreSQL REPEATABLE READ
+    # snapshot isolation — a concurrent evidence write that the snapshot must not
+    # see and the post-snapshot re-read must — so none of it is expressible off
+    # the real dialect.
+    "test_capture_cohort_pg.py::test_a_killed_lock_holder_releases_immediately_with_no_stale_reap",
+    "test_capture_cohort_pg.py::test_a_losing_capture_reads_no_evidence_at_all",
+    "test_capture_cohort_pg.py::test_a_rejection_and_a_crash_are_different_diagnostics",
+    "test_capture_cohort_pg.py::test_candidate_disappearance_triggers_retry",
+    "test_capture_cohort_pg.py::test_candidate_set_appearance_triggers_retry",
+    "test_capture_cohort_pg.py::test_concurrent_capture_refused_before_reading",
+    "test_capture_cohort_pg.py::test_dialect_refuses_non_postgres",
+    "test_capture_cohort_pg.py::test_first_rename_failure_leaves_the_prior_pair_untouched",
+    "test_capture_cohort_pg.py::test_guard_pair_movement_triggers_retry",
+    "test_capture_cohort_pg.py::test_inter_rename_failure_is_recoverable_mismatched_pair",
+    "test_capture_cohort_pg.py::test_missing_output_directory_is_a_typed_refusal",
+    "test_capture_cohort_pg.py::test_movement_every_attempt_exhausts_with_no_side_effects",
+    "test_capture_cohort_pg.py::test_orphan_replaced_on_rerun",
+    "test_capture_cohort_pg.py::test_published_artifact_is_0600",
+    "test_capture_cohort_pg.py::test_quiescent_run_completes_first_attempt",
+    "test_capture_cohort_pg.py::test_release_guard_shape_at_source_fails",
+    "test_capture_cohort_pg.py::test_rerun_is_byte_identical",
+    "test_capture_cohort_pg.py::test_retry_then_succeed_on_first_attempt_movement",
+    "test_capture_cohort_pg.py::test_self_check_failure_leaves_prior_untouched",
+    "test_capture_cohort_pg.py::test_self_check_rejects_a_cohort_the_release_path_would_reject",
+    "test_capture_cohort_pg.py::test_self_check_runs_real_scoring_and_publishes",
+    "test_capture_cohort_pg.py::test_starvation_regression_global_epoch_only_does_not_retry",
+    "test_capture_cohort_pg.py::test_strict_mode_retries_on_global_epoch_movement",
+    "test_capture_cohort_pg.py::test_the_child_exits_one_without_a_traceback_on_a_self_check_crash",
+    "test_capture_cohort_pg.py::test_the_locks_are_held_across_BOTH_renames",
+    "test_capture_cohort_pg.py::test_threshold_crossing_movement_alone_can_exhaust_the_fence",
+    "test_capture_cohort_pg.py::test_threshold_crossing_write_to_a_non_captured_pair_triggers_retry",
+    "test_capture_cohort_pg.py::test_unavailable_epoch_strict_fails_default_stamps_null",
+    # The self-check's unexpected-failure boundary; param cases pinned below.
+    "test_capture_cohort_pg.py::test_unexpected_self_check_failures_stay_inside_the_typed_boundary",
+    # The full launch from a clean committed clone: fence against a real snapshot,
+    # real scoring, both renames, and the reviewable provenance diff.
+    "test_capture_end_to_end.py::test_a_crash_between_the_two_renames_fails_closed_and_reruns_clean",
+    "test_capture_end_to_end.py::test_a_second_capture_to_the_same_output_is_refused",
+    "test_capture_end_to_end.py::test_full_capture_publishes_artifact_and_reviewable_provenance_diff",
 })
 
 # The SRS/moves cross-root lock matrix must run all four session/blunder lock
@@ -190,6 +230,15 @@ REQUIRED_PG_GATE_PARAM_CASES = frozenset({
     "test_release_b_pg_matrix.py::test_pg_detector_parity[white_white_adjacency]",
     "test_release_b_pg_matrix.py::test_pg_detector_parity[contiguous_surplus]",
     "test_release_b_pg_matrix.py::test_pg_detector_parity[empty]",
+    # Each exception the self-check's scoring pass can raise outside the artifact
+    # vocabulary is pinned: dropping one would silently narrow the proof that the
+    # subcommand still emits a typed diagnostic instead of a traceback.
+    "test_capture_cohort_pg.py::"
+    "test_unexpected_self_check_failures_stay_inside_the_typed_boundary[boom0]",
+    "test_capture_cohort_pg.py::"
+    "test_unexpected_self_check_failures_stay_inside_the_typed_boundary[boom1]",
+    "test_capture_cohort_pg.py::"
+    "test_unexpected_self_check_failures_stay_inside_the_typed_boundary[boom2]",
 })
 
 

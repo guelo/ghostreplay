@@ -249,6 +249,16 @@ class EngineProc:
                 self.proc.kill()
             except Exception:
                 pass
+        # The reader thread owns stdout, so let it observe EOF and finish before
+        # the pipes are closed; otherwise the fds leak to the garbage collector
+        # (an unraisable ResourceWarning from whichever thread happens to run).
+        self._reader.join(timeout=5)
+        for pipe in (self.proc.stdin, self.proc.stdout):
+            try:
+                if pipe is not None:
+                    pipe.close()
+            except Exception:
+                pass
 
 
 def _init_engine(engine: EngineProc) -> None:
