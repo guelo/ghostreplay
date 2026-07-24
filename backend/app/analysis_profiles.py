@@ -80,6 +80,13 @@ class Profile:
     # Legacy single-column network identity, retired from the identity set.
     network_id: str | None = None
     dominates: frozenset[str] = field(default_factory=frozenset)
+    # Identity fields validated by a per-field DYNAMIC rule instead of exact
+    # equality (g-browser-policy-v2 D2.1 / g-mk1d). Empty for every profile
+    # registered today, so ``verify_identity`` is exact equality over all
+    # IDENTITY_FIELDS — byte-identical to the historical per-call-site checks.
+    # g-mk1d attaches validators (e.g. a declared per-device depth range) here
+    # without introducing a second verifier.
+    dynamic_fields: frozenset[str] = field(default_factory=frozenset)
 
 
 # Runtime-observable identity matched by ``resolve_profile`` at write time.
@@ -131,8 +138,15 @@ _DIGEST_FIELDS = (
 )
 
 CANONICAL_PROFILE_ID = "canonical-sf18-depth24-v1"
+CANONICAL_LINUX_PROFILE_ID = "canonical-sf18-depth24-linux-v1"
 BROWSER_PROFILE_ID = "browser-game-v1"
 BROWSER_ANALYSIS_PROFILE_ID = "browser-analysis-v1"
+# The corrective visible-MultiPV reuse producer (g-reuse-d21-search): evidence
+# derived from the already-completed, unrestricted visible depth-21 MultiPV-3
+# search, with best+played taken from two lines of the SAME request (no hidden
+# child searches). Replaces the defective hidden ``browser-analysis-v1`` protocol
+# for an exact key via a PROTOCOL_CORRECTION edge.
+BROWSER_ANALYSIS_MULTIPV_PROFILE_ID = "browser-analysis-multipv-v2"
 JEFFML_PROFILE_ID = "jeffml-scores-v1"
 
 # The Stockfish-18 lite-single browser analyzer protocol: a root best-move search
@@ -142,6 +156,13 @@ JEFFML_PROFILE_ID = "jeffml-scores-v1"
 # producer, only deeper — bumped independently of ``ANALYZER_PROTOCOL_VERSION``
 # (the canonical analyzer) because it is a distinct producer contract.
 BROWSER_ANALYZER_PROTOCOL_VERSION = "browser-analyzer-v1"
+
+# The corrective visible-MultiPV reuse protocol (g-reuse-d21-search): a single
+# completed unrestricted visible depth-21 MultiPV-3 root search. The best and the
+# played line are two lines of that SAME search reported from one root
+# side-to-move perspective, so the tuple is internally consistent by construction
+# (no independent post-move continuation searches, unlike browser-analyzer-v1).
+BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION = "browser-visible-multipv-v1"
 
 
 def _manifest_digest(values: dict) -> str:
@@ -352,14 +373,78 @@ _BROWSER_ANALYSIS = Profile(
     profile_manifest_digest=_manifest_digest(_BROWSER_ANALYSIS_IDENTITY),
     authoritative=False,
     replacement_eligible=True,
-    active=True,
+    # RETIRED (g-reuse-d21-search): the hidden root + independent post-move
+    # protocol is internally inconsistent (g-kgiq). Flipping ``active`` False stops
+    # new v1 rows being written (the endpoint producer discriminator fails a stale
+    # client closed) while KEEPING stored v1 rows identity-verified — the manifest
+    # digest excludes ``active``/``dominates`` — so their DISPLAY_OVERLAY capability
+    # (retirement-surviving) and corrective replacement by the successor keep
+    # working.
+    active=False,
     dominates=frozenset({BROWSER_PROFILE_ID}),
     **_BROWSER_ANALYSIS_IDENTITY,
 )
 
+# --- Browser visible-MultiPV reuse profile (g-reuse-d21-search) ----------------
+#
+# The corrective successor to the retired hidden ``browser-analysis-v1``. Evidence
+# is derived by REUSING the already-completed, unrestricted visible depth-21
+# MultiPV-3 search that the analysis board runs for arrows/lines — no additional
+# Stockfish search. The identity is the ACTUAL visible worker (stockfishWorker.ts):
+# the same pinned lite-single artifact and single net as browser-analysis-v1, but
+# the visible worker's real Hash (64 MB) and MultiPV (3), under the internally
+# consistent browser-visible-multipv-v1 protocol.
+#
+# NON-authoritative (never a trusted /lookup hit, never reclaims legacy rows,
+# never overwrites canonical) but replacement_eligible, so it correctively
+# replaces a defective browser-analysis-v1 row (PROTOCOL_CORRECTION edge) and a
+# weaker browser-game-v1 d17 row (TIER_BASELINE edge) for the exact key.
+_BROWSER_ANALYSIS_MULTIPV_IDENTITY = {
+    "engine_name": "Stockfish",
+    "engine_version": "18",
+    "engine_build": "a8fbc05ec6920b56d7485826dcb02c5ffd2826bcbf751cf973046f237a9096f1",
+    "eval_file_id": (
+        "nn-9067e33176e8.nnue:"
+        "9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+    ),
+    "eval_file_small_id": None,
+    "search_limit_type": "depth",
+    "search_limit_value": 21,
+    "threads": 1,
+    # Actual visible-worker value (stockfishWorker.ts sets Hash 64), distinct from
+    # the retired hidden worker's Hash 128. If the visible worker's Hash is ever
+    # standardized elsewhere, change both the code and this manifest together.
+    "hash_mb": 64,
+    # Unrestricted visible root MultiPV.
+    "multipv": 3,
+    "analyzer_protocol_version": BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION,
+}
+
+_BROWSER_ANALYSIS_MULTIPV = Profile(
+    profile_id=BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+    eval_file="nn-9067e33176e8.nnue",
+    eval_file_small=None,
+    profile_manifest_digest=_manifest_digest(_BROWSER_ANALYSIS_MULTIPV_IDENTITY),
+    authoritative=False,
+    replacement_eligible=True,
+    active=True,
+    dynamic_fields=frozenset(),  # fixed profile
+    # Mirrors the two new outgoing EDGES in evidence_policy.py; the registry-load
+    # assertion checks EDGES<->dominates parity in both directions.
+    dominates=frozenset({BROWSER_ANALYSIS_PROFILE_ID, BROWSER_PROFILE_ID}),
+    **_BROWSER_ANALYSIS_MULTIPV_IDENTITY,
+)
+
 _REGISTRY: dict[str, Profile] = {
         p.profile_id: p
-        for p in (_CANONICAL, _CANONICAL_LINUX, _BROWSER, _BROWSER_ANALYSIS, _JEFFML)
+        for p in (
+            _CANONICAL,
+            _CANONICAL_LINUX,
+            _BROWSER,
+            _BROWSER_ANALYSIS,
+            _BROWSER_ANALYSIS_MULTIPV,
+            _JEFFML,
+        )
 }
 
 
@@ -368,6 +453,11 @@ def get_profile(profile_id: str | None) -> Profile | None:
     if profile_id is None:
         return None
     return _REGISTRY.get(profile_id)
+
+
+def list_profiles() -> tuple[Profile, ...]:
+    """Every registered profile (active and retired). Read-only snapshot."""
+    return tuple(_REGISTRY.values())
 
 
 def resolve_profile(observed: dict) -> str | None:

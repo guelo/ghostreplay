@@ -8,12 +8,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.analysis_profiles import (
-    IDENTITY_FIELDS,
     StrengthComparison,
     compare_search_strength,
     get_profile,
 )
 from app.analysis_trust import cache_row_as_move_dict, move_trust_flags
+from app.evidence_policy import verify_identity
 from app.db import get_db
 from app.evidence_contracts import contract_satisfied
 from app.fen import normalize_fen
@@ -96,7 +96,9 @@ def _is_authoritative(row: AnalysisCache) -> bool:
     # counting as trusted/authoritative cache hits.
     if profile is None or not profile.authoritative or not profile.active:
         return False
-    return all(getattr(row, f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+    # verify_identity reads getattr(row, f) off the ORM row (no dict projection),
+    # preserving the historical access shape.
+    return verify_identity(row)
 
 
 def _row_contract_data(row: AnalysisCache) -> dict:

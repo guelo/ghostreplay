@@ -1,8 +1,34 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
+  CompletedRootAnalysis,
   EngineInfo,
   WorkerResponse,
 } from '../workers/stockfishMessages'
+
+// Establish immutability on the MAIN THREAD. The worker→main postMessage boundary
+// structured-clones the payload, stripping any Object.freeze applied inside the
+// worker, so the snapshot arriving here is mutable and must be frozen transitively
+// (the object, its lines, each line's pv array, and each score object) before the
+// UI and the reuse layer observe it (g-reuse-d21-search §3).
+const deepFreezeSnapshot = (
+  snapshot: CompletedRootAnalysis,
+): CompletedRootAnalysis => {
+  for (const line of snapshot.lines) {
+    if (line.pv) {
+      Object.freeze(line.pv)
+    }
+    if (line.score) {
+      Object.freeze(line.score)
+    }
+    Object.freeze(line)
+  }
+  Object.freeze(snapshot.lines)
+  if (snapshot.searchmoves) {
+    Object.freeze(snapshot.searchmoves)
+  }
+  Object.freeze(snapshot.limit)
+  return Object.freeze(snapshot)
+}
 
 type EngineStatus = 'booting' | 'ready' | 'error'
 
@@ -39,6 +65,11 @@ const evalCacheKey = (fen: string, options?: EvaluationSignature): string => {
 type EvaluationResult = {
   move: string
   raw: string
+  // The immutable completed-root snapshot for this resolution. Callers that only
+  // read .move / .raw (applyEngineMove and every other evaluatePosition caller)
+  // ignore it; the reuse layer consumes it. Present on both fresh completions and
+  // display-cache hits so the reuse path never distinguishes a re-surfaced search.
+  snapshot: CompletedRootAnalysis
 }
 
 type PendingEntry = {
@@ -74,7 +105,10 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
   const [info, setInfo] = useState<EngineInfo[]>([])
   const [infoFen, setInfoFen] = useState<string | null>(null)
   const [isThinking, setIsThinking] = useState(false)
-  const evalCache = useRef<Map<string, EngineInfo[]>>(new Map())
+  // Caches the immutable CompletedRootAnalysis snapshot (not the streamed
+  // EngineInfo[]) so a display-cache hit resolves the identical frozen value a
+  // fresh completion would (g-reuse-d21-search §3.1).
+  const evalCache = useRef<Map<string, CompletedRootAnalysis>>(new Map())
   const activeCacheKey = useRef<string | null>(null)
   const requestFenById = useRef<Map<string, string>>(new Map())
   const requestCacheKeyById = useRef<Map<string, string>>(new Map())
@@ -147,10 +181,13 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
           }
           break
         case 'bestmove': {
+          // Deep-freeze the RECEIVED snapshot so the UI and the reuse layer observe
+          // one immutable value. Resolve exactly this frozen object.
+          const snapshot = deepFreezeSnapshot(message.snapshot)
           const entry = pendingMap.get(message.id)
 
           if (entry) {
-            entry.resolve({ move: message.move, raw: message.raw })
+            entry.resolve({ move: message.move, raw: message.raw, snapshot })
             pendingMap.delete(message.id)
           }
           requestFenById.current.delete(message.id)
@@ -160,11 +197,12 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
           if (message.id === activeRequestId.current) {
             activeRequestId.current = null
             setIsThinking(false)
+            // Replace the streaming lines with the snapshot's frozen lines so the
+            // displayed and persisted lines are identical (one root opinion), and
+            // cache the snapshot itself.
+            setInfo(snapshot.lines)
             if (cacheKey) {
-              setInfo((current) => {
-                evalCache.current.set(cacheKey, current)
-                return current
-              })
+              evalCache.current.set(cacheKey, snapshot)
             }
           }
           break
@@ -232,7 +270,8 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
         return Promise.reject(new Error('Stockfish worker not ready'))
       }
 
-      // Return cached result if available
+      // Return cached result if available. Resolves the SAME frozen snapshot a
+      // fresh completion would, feeding the identical reuse path (§3.1).
       const cacheKey = evalCacheKey(fen, options)
       const cached = evalCache.current.get(cacheKey)
       if (cached) {
@@ -246,11 +285,11 @@ export const useStockfishEngine = (options: UseStockfishEngineOptions = {}) => {
           pendingEvaluations.current,
           new Error('Stockfish evaluation superseded'),
         )
-        setInfo(cached)
+        setInfo(cached.lines)
         setInfoFen(fen)
         setIsThinking(false)
         activeCacheKey.current = cacheKey
-        return Promise.resolve({ move: cached[0]?.pv?.[0] ?? '', raw: '' })
+        return Promise.resolve({ move: cached.bestMove, raw: '', snapshot: cached })
       }
 
       setInfo([])

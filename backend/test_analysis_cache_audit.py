@@ -77,6 +77,39 @@ def test_unknown_profile_id_is_contaminated():
     assert should_invalidate(cat, include_legacy_null=False)
 
 
+def _multipv_row(**overrides) -> dict:
+    """A valid, identity-stamped browser-analysis-multipv-v2 row."""
+    from app.analysis_profiles import BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+    from app.analysis_profiles import stamp_profile_full
+
+    row = _canonical_row(
+        source="analysis",
+        analysis_profile_id=BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+    )
+    # Replace the canonical identity columns with the successor's.
+    for f in IDENTITY_FIELDS:
+        row.pop(f, None)
+    row.update(stamp_profile_full(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID))
+    row.update(overrides)
+    return row
+
+
+def test_new_multipv_profile_row_is_non_auth_valid_not_contaminated():
+    # A correctly-stamped visible-MultiPV successor row is valid but not canonical,
+    # so it classifies NON_AUTH_VALID (the repair tool leaves it alone).
+    cat = classify_row(_multipv_row())
+    assert cat is Category.NON_AUTH_VALID
+    assert not should_invalidate(cat, include_legacy_null=False)
+    assert not should_invalidate(cat, include_legacy_null=True)
+
+
+def test_forged_multipv_profile_row_is_contaminated():
+    # A mismatched identity under the successor's profile claim is still caught.
+    cat = classify_row(_multipv_row(engine_build="0" * 64))
+    assert cat is Category.CONTAMINATED_PROFILE_CLAIM
+    assert should_invalidate(cat, include_legacy_null=False)
+
+
 def test_legacy_row_with_satisfied_contract_is_kept():
     # Profile-less but declares a contract its evidence satisfies -> the guard
     # would accept it, so it is kept in every mode.

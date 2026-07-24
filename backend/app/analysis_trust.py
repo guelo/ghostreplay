@@ -29,6 +29,7 @@ from app.evidence_contracts import (
     legacy_v2_satisfies_move,
     legacy_v2_satisfies_position,
 )
+from app.evidence_policy import verify_identity
 
 # Deterministic source preference shared by the position-grain ranking (the repo's
 # legacy fallback) and the move-grain ranking (``tree_eval._move_sort_key``): a
@@ -64,7 +65,7 @@ def _effectively_authoritative(data: dict) -> bool:
     profile = get_profile(data.get("analysis_profile_id"))
     if profile is None or not profile.authoritative or not profile.active:
         return False
-    return all(data.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+    return verify_identity(data)
 
 
 def position_trust_flags(data: dict) -> tuple[bool, bool, bool]:

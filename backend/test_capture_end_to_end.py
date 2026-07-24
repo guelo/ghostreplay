@@ -61,6 +61,13 @@ _EXTRA_SYNC = (
     "backend/scripts/capture_cohort.sh",
     "backend/scripts/capture_cohort_launcher.py",
     "backend/scripts/release_calibration_launcher.py",
+    # Canonical profile manifests are data files (not in the .py import closure of
+    # SCORER_SOURCE_FILES) that analysis_profiles.py reads at import time. Their
+    # ``dominates`` sets must stay consistent with evidence_policy.EDGES, so sync
+    # the working-tree copies into the clone (g-reuse-d21-search added
+    # browser-analysis-multipv-v2 to both).
+    "backend/app/canonical_profiles/canonical-sf18-depth24-v1.json",
+    "backend/app/canonical_profiles/canonical-sf18-depth24-linux-v1.json",
 )
 
 pytestmark = pytest.mark.skipif(

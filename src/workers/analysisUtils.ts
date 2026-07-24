@@ -550,6 +550,21 @@ export const checkMateEvents = (
  * Both `prevScore` and `nextScore` are from post-move positions where the
  * opponent is to move, sharing the same `scorePov`.
  */
+/**
+ * Maps a mover-relative win-chance loss to a classification label. Shared by
+ * `classifyMoveAdvanced` (post-move opponent-to-move scores) and
+ * `classifyRootAlternative` (root same-search alternatives) so the two classifiers
+ * cannot drift on the threshold ladder. Mirrors `_classify_win_chance_drop` in
+ * `backend/app/move_classification.py`.
+ */
+export const classifyWinChanceDrop = (drop: number): MoveClassification => {
+  if (drop >= 0.30) return 'blunder'
+  if (drop >= 0.20) return 'mistake'
+  if (drop >= 0.10) return 'inaccuracy'
+  if (drop >= 0.02) return 'good'
+  return 'excellent'
+}
+
 export const classifyMoveAdvanced = (input: {
   prevScore: EngineScore
   nextScore: EngineScore
@@ -569,9 +584,43 @@ export const classifyMoveAdvanced = (input: {
 
   const drop = mover === 'white' ? -(nextWc - prevWc) : (nextWc - prevWc)
 
-  if (drop >= 0.30) return 'blunder'
-  if (drop >= 0.20) return 'mistake'
-  if (drop >= 0.10) return 'inaccuracy'
-  if (drop >= 0.02) return 'good'
-  return 'excellent'
+  return classifyWinChanceDrop(drop)
+}
+
+/**
+ * Classifies a played root move against the best root move using two lines of the
+ * SAME completed search (g-reuse-d21-search §5.1).
+ *
+ * `bestScore` and `playedScore` are both ROOT side-to-move (`mover`)-relative
+ * EngineScores from one completed request — NOT the post-move opponent-to-move
+ * scores `classifyMoveAdvanced` takes. Routing root scores through that
+ * classifier's argument order would misclassify, so this uses a truthful root
+ * contract while sharing `calculateWinChance` / `checkMateEvents` /
+ * `classifyWinChanceDrop`. `isBestMove` (played UCI === best UCI) short-circuits to
+ * `best`. Pinned to the Python `classify_root_alternative` by the shared golden
+ * fixture `backend/tests/fixtures/root_classification_vectors.json`.
+ */
+export const classifyRootAlternative = (input: {
+  bestScore: EngineScore
+  playedScore: EngineScore
+  mover: 'white' | 'black'
+  isBestMove: boolean
+}): MoveClassification => {
+  const { bestScore, playedScore, mover, isBestMove } = input
+
+  if (isBestMove) return 'best'
+
+  // Both scores are already mover-relative (root, `mover` to move), so mate
+  // transitions use scorePov === mover (no opponent-frame flip): best plays the
+  // "prev/better" role, played the "next/worse" role.
+  const mateResult = checkMateEvents(bestScore, playedScore, mover, mover)
+  if (mateResult) return mateResult
+
+  const bestWc = calculateWinChance(bestScore, mover)
+  const playedWc = calculateWinChance(playedScore, mover)
+
+  // Mover-relative loss from best to played (best is >= played for the mover).
+  const drop = mover === 'white' ? bestWc - playedWc : playedWc - bestWc
+
+  return classifyWinChanceDrop(drop)
 }

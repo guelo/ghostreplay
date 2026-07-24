@@ -20,10 +20,11 @@ from sqlalchemy.orm import Session
 from app.analysis_cache_policy import Reason
 from app.analysis_cache_repo import write_analysis_cache_rows
 from app.analysis_profiles import (
-    BROWSER_ANALYSIS_PROFILE_ID,
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_PROFILE_ID,
     stamp_profile_full,
 )
+from app.move_classification import EngineScore, classify_root_alternative
 from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
 from app.centipawn_loss import (
     centipawn_loss,
@@ -273,6 +274,13 @@ class AnalysisEvidenceRequest(BaseModel):
     # Cap defensive against a runaway client; normal operation submits one dwelled
     # move at a time. An over-cap request 422s the whole batch by design.
     rows: list[AnalysisEvidenceRow] = Field(default_factory=list, max_length=60)
+    # Endpoint-controlled producer discriminator (g-reuse-d21-search §6.3). Optional
+    # at schema validation so an under-specified/stale client degrades to per-row
+    # rejection (stale_producer / unknown_producer), never a batch 422. The only
+    # allowed value is "visible-multipv-v1", which maps server-side to the
+    # browser-analysis-multipv-v2 profile. A stale client running the retired hidden
+    # worker sends no producer and fails closed.
+    producer: str | None = None
 
 
 class AnalysisEvidenceResult(BaseModel):
@@ -1674,10 +1682,25 @@ EVIDENCE_NOT_IN_SESSION = "not_in_session"
 EVIDENCE_DUPLICATE_KEY = "duplicate_request_key"
 EVIDENCE_INVALID_LEGALITY = "invalid_legality"
 EVIDENCE_CONTRACT_UNSATISFIED = "contract_unsatisfied"
+# The submitted classification does not follow from the best/played root-relative
+# scores (g-reuse-d21-search §6.1). Every row's label is independently rederived
+# with the root-alternative classifier and any disagreement is rejected pre-writer.
+EVIDENCE_CLASSIFICATION_MISMATCH = "classification_mismatch"
+# Producer discriminator rejections (g-reuse-d21-search §6.3), both pre-writer.
+# A stale client running the retired hidden-worker producer sends no producer field.
+EVIDENCE_STALE_PRODUCER = "stale_producer"
+EVIDENCE_UNKNOWN_PRODUCER = "unknown_producer"
 # Post-writer anomaly, not a success: the shared writer returned but omitted a
 # survivor key, violating its one-Reason-per-row contract. Surfaced as a distinct
 # reason so a writer regression shows up instead of being masked as new_key.
 EVIDENCE_WRITER_NO_RESULT = "writer_no_result"
+
+# The single allowed producer token and its server-side profile mapping. The
+# client selects no profile id; the endpoint maps a recognized producer to the
+# stamped profile. Any other (or absent) producer is rejected per-row.
+_EVIDENCE_PRODUCER_PROFILE = {
+    "visible-multipv-v1": BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+}
 
 # Writer verdicts under which the STORED row is now THIS browser-analysis evidence,
 # so the endpoint emits a MoveUpgrade for the open MoveList (g-xox0 Part B). Every
@@ -1689,6 +1712,9 @@ _EVIDENCE_ACCEPTED_REASONS = frozenset(
     {
         Reason.NEW_KEY.value,
         Reason.DOMINATES_REPLACE.value,
+        # The corrective replacement of a defective retired browser-analysis-v1 row
+        # by the visible-MultiPV successor is an accepted write (g-reuse-d21-search).
+        Reason.PROTOCOL_CORRECTED_REPLACE.value,
         Reason.SAME_PROFILE_SUPERSET_MERGE.value,
         Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,
         Reason.SAME_PROFILE_IDEMPOTENT.value,
@@ -1751,15 +1777,35 @@ def _session_membership_keys(session_moves: list[SessionMove]) -> set[tuple[str,
     return keys
 
 
-def _build_evidence_cache_row(row: AnalysisEvidenceRow) -> tuple[dict | None, str | None]:
-    """Validate legality + contract for one primary row and build the writer dict.
+def _white_relative_score(cp: int, mate: int | None, mover: str) -> EngineScore:
+    """Convert a white-relative wire eval to a ROOT mover-relative EngineScore.
 
-    Returns ``(cache_row, None)`` on success or ``(None, reason)`` on rejection. SAN is
-    derived server-side from the validated UCI and is never trusted from the client;
-    the row is stamped with the ``browser-analysis-v1`` profile identity,
+    Evidence rows store white-relative evals (see ``AnalysisEvidenceRow``); the
+    root-alternative classifier needs mover-relative (root side-to-move) scores. A
+    present mate count uses the raw ``mate`` (a mate-to-CP ``eval`` is only for the
+    delta arithmetic), else the finite CP.
+    """
+    if mate is not None:
+        value = mate if mover == "white" else -mate
+        return EngineScore("mate", value)
+    value = cp if mover == "white" else -cp
+    return EngineScore("cp", value)
+
+
+def _build_evidence_cache_row(
+    row: AnalysisEvidenceRow, profile_id: str
+) -> tuple[dict | None, str | None]:
+    """Validate legality + contract + classification for one primary row and build
+    the writer dict.
+
+    Returns ``(cache_row, None)`` on success or ``(None, reason)`` on rejection. SAN
+    is derived server-side from the validated UCI and is never trusted from the
+    client; the row is stamped with the endpoint-selected ``profile_id`` identity,
     ``source="analysis"``, and the ``resolver-complete-v2`` contract, which is then
-    revalidated (a server-side backstop that rechecks ``eval_delta`` from the
-    white-relative evals).
+    revalidated. Beyond the contract's enum/arithmetic checks, the classification is
+    independently REDERIVED from the best/played root-relative scores with the
+    root-alternative classifier and any disagreement is rejected (g-reuse-d21-search
+    §6.1) — lower lines and mate transitions are as client-supplied as line 1.
     """
     try:
         board = chess.Board(row.fen)
@@ -1793,13 +1839,34 @@ def _build_evidence_cache_row(row: AnalysisEvidenceRow) -> tuple[dict | None, st
         "eval_delta": row.eval_delta,
         "classification": row.classification,
         "source": "analysis",
-        "analysis_profile_id": BROWSER_ANALYSIS_PROFILE_ID,
+        "analysis_profile_id": profile_id,
         "evidence_contract_id": RESOLVER_COMPLETE_V2,
-        **stamp_profile_full(BROWSER_ANALYSIS_PROFILE_ID),
+        **stamp_profile_full(profile_id),
     }
 
     if not contract_satisfied(RESOLVER_COMPLETE_V2, cache_row):
         return None, EVIDENCE_CONTRACT_UNSATISFIED
+
+    # Independent classification rederivation (§6.1). The contract guarantees
+    # played_eval / best_eval are finite ints and classification is a valid enum;
+    # now enforce that the LABEL follows from the scores.
+    is_best = row.move_uci == row.best_move_uci
+    # ``best`` requires the played move to BE the best move with equal scores and
+    # zero delta — a client cannot label a zero-loss best while carrying a drop.
+    if row.classification == "best" and not (
+        is_best
+        and row.played_eval == row.best_eval
+        and row.played_eval_mate == row.best_eval_mate
+        and (row.eval_delta or 0) == 0
+    ):
+        return None, EVIDENCE_CLASSIFICATION_MISMATCH
+
+    mover = "white" if board.turn == chess.WHITE else "black"
+    best_score = _white_relative_score(row.best_eval, row.best_eval_mate, mover)
+    played_score = _white_relative_score(row.played_eval, row.played_eval_mate, mover)
+    expected = classify_root_alternative(best_score, played_score, mover, is_best)
+    if expected != row.classification:
+        return None, EVIDENCE_CLASSIFICATION_MISMATCH
 
     return cache_row, None
 
@@ -1807,11 +1874,28 @@ def _build_evidence_cache_row(row: AnalysisEvidenceRow) -> tuple[dict | None, st
 def _prepare_analysis_evidence_rows(
     rows: list[AnalysisEvidenceRow],
     membership: set[tuple[str, str]],
+    producer: str | None,
 ) -> list[_PreparedEvidenceRow]:
-    """Membership → dedupe → legality → contract, one result per request row in
-    order. The first occurrence of each ``(fen, move_uci)`` that passed membership is
-    primary; later occurrences get ``duplicate_request_key`` and never reach the
-    writer, so the writer receives only unique keys."""
+    """Membership → dedupe → producer → legality → contract → classification, one
+    result per request row in order. The first occurrence of each
+    ``(fen, move_uci)`` that passed membership is primary; later occurrences get
+    ``duplicate_request_key`` and never reach the writer, so the writer receives
+    only unique keys.
+
+    The producer discriminator (§6.3) gates every primary row before the cache-row
+    build: an absent producer is a stale client (``stale_producer``), an
+    unrecognized one is ``unknown_producer``, and the single allowed
+    ``visible-multipv-v1`` maps to the browser-analysis-multipv-v2 profile."""
+    if producer is None:
+        producer_reason: str | None = EVIDENCE_STALE_PRODUCER
+        profile_id: str | None = None
+    elif producer not in _EVIDENCE_PRODUCER_PROFILE:
+        producer_reason = EVIDENCE_UNKNOWN_PRODUCER
+        profile_id = None
+    else:
+        producer_reason = None
+        profile_id = _EVIDENCE_PRODUCER_PROFILE[producer]
+
     prepared: list[_PreparedEvidenceRow] = []
     seen_keys: set[tuple[str, str]] = set()
     for row in rows:
@@ -1827,7 +1911,13 @@ def _prepare_analysis_evidence_rows(
             )
             continue
         seen_keys.add(key)
-        cache_row, reason = _build_evidence_cache_row(row)
+        if producer_reason is not None:
+            prepared.append(
+                _PreparedEvidenceRow(row.fen, row.move_uci, producer_reason, None)
+            )
+            continue
+        assert profile_id is not None
+        cache_row, reason = _build_evidence_cache_row(row, profile_id)
         prepared.append(_PreparedEvidenceRow(row.fen, row.move_uci, reason, cache_row))
     return prepared
 
@@ -1842,13 +1932,17 @@ def submit_analysis_evidence(
     db: Session = Depends(get_db),
     user: TokenPayload = Depends(get_current_user),
 ) -> AnalysisEvidenceResponse:
-    """Persist approved depth-21 analysis-board evidence through the shared cache
-    writer (g-cache-stronger-evals).
+    """Persist approved visible-MultiPV analysis-board evidence through the shared
+    cache writer (g-reuse-d21-search).
 
-    Owner-only and scoped to exact mainline moves of the session. Rows are stamped
-    with the non-authoritative but replacement-eligible ``browser-analysis-v1``
-    profile, so complete evidence can replace a weaker ``browser-game-v1`` row for
-    the same exact ``(fen_before, move_uci)`` but never becomes a trusted /lookup hit,
+    Owner-only and scoped to exact mainline moves of the session. The endpoint-
+    controlled producer discriminator maps ``producer="visible-multipv-v1"`` to the
+    non-authoritative but replacement-eligible ``browser-analysis-multipv-v2``
+    profile; a stale client sending no/unknown producer fails closed per-row. Each
+    row's classification is independently rederived from its root-relative scores.
+    Complete evidence can correctively replace a defective retired
+    ``browser-analysis-v1`` row and a weaker ``browser-game-v1`` row for the same
+    exact ``(fen_before, move_uci)``, but never becomes a trusted /lookup hit,
     reclaims legacy rows, or overwrites canonical depth-24 evidence.
     """
     game_session = _get_session_or_404(db, session_id)
@@ -1876,7 +1970,7 @@ def submit_analysis_evidence(
     )
     membership = _session_membership_keys(session_moves)
 
-    prepared = _prepare_analysis_evidence_rows(rows, membership)
+    prepared = _prepare_analysis_evidence_rows(rows, membership, request.producer)
 
     survivors = [p.cache_row for p in prepared if p.cache_row is not None]
     writer_reasons: dict[tuple[str, str], str] = {}

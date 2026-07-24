@@ -1,274 +1,469 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
+import { renderHook, render, act } from '@testing-library/react'
+import { useEffect, useLayoutEffect } from 'react'
 import {
-  buildEvidenceRow,
+  deriveEvidenceRow,
+  completedSearchSignature,
   useAnalysisEvidence,
-  EVIDENCE_SEARCH_DEPTH,
+  type EvidenceReuseContext,
 } from './analysisEvidence'
-import type { AnalysisWorkerResponse } from '../workers/analysisMessages'
+import type {
+  CompletedRootAnalysis,
+  EngineInfo,
+  EngineScore,
+} from '../workers/stockfishMessages'
 
 const submitAnalysisEvidenceMock = vi.fn()
-
 vi.mock('../utils/api', () => ({
   submitAnalysisEvidence: (...args: unknown[]) => submitAnalysisEvidenceMock(...args),
 }))
 
-type MessageHandler = (event: MessageEvent) => void
-let messageHandler: MessageHandler | null = null
-let workerConstructed = 0
-const postMessageMock = vi.fn()
-const terminateMock = vi.fn()
+const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
+// Black to move (after 1. e4), 20 legal moves.
+const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+// White to move, exactly 1 legal move (Kxg2).
+const FEN_1LEGAL = '7k/8/8/8/8/8/6q1/7K w - - 0 1'
+// White to move, exactly 2 legal moves (Kh2 / Kf1).
+const FEN_2LEGAL = '8/8/8/8/8/5k2/7r/6K1 w - - 0 1'
 
-function MockWorker() {
-  workerConstructed += 1
-  // @ts-expect-error -- mock constructor
-  this.postMessage = postMessageMock
-  // @ts-expect-error -- mock constructor
-  this.addEventListener = vi.fn((type: string, handler: MessageHandler) => {
-    if (type === 'message') messageHandler = handler
-  })
-  // @ts-expect-error -- mock constructor
-  this.removeEventListener = vi.fn()
-  // @ts-expect-error -- mock constructor
-  this.terminate = terminateMock
+const cp = (value: number): EngineScore => ({ type: 'cp', value })
+const mate = (value: number): EngineScore => ({ type: 'mate', value })
+const line = (
+  multipv: number,
+  pv: string[],
+  score: EngineScore,
+  depth = 21,
+): EngineInfo => ({ depth, multipv, pv, score })
+
+// Default snapshot: black to move at AFTER_E4, unrestricted depth-21 MultiPV-3.
+const snap = (o: Partial<CompletedRootAnalysis> = {}): CompletedRootAnalysis => ({
+  requestId: 'r',
+  fen: AFTER_E4,
+  bestMove: 'e7e5',
+  lines: [
+    line(1, ['e7e5', 'g1f3'], cp(20)),
+    line(2, ['c7c5', 'g1f3'], cp(10)),
+    line(3, ['d7d5', 'g1f3'], cp(5)),
+  ],
+  limit: { type: 'depth', value: 21 },
+  multipv: 3,
+  searchmoves: null,
+  ...o,
+})
+
+const rowOf = (r: ReturnType<typeof deriveEvidenceRow>) => {
+  if (!('row' in r)) throw new Error(`expected a row, got skip=${JSON.stringify(r)}`)
+  return r.row
 }
 
-vi.stubGlobal('Worker', MockWorker)
+// --------------------------------------------------------------------------- #
+// deriveEvidenceRow — eligibility gate + atomic row
+// --------------------------------------------------------------------------- #
+describe('deriveEvidenceRow', () => {
+  it('played move on line 1 builds best with equal evals and zero delta', () => {
+    const row = rowOf(deriveEvidenceRow(snap(), AFTER_E4, 'e7e5'))
+    expect(row.classification).toBe('best')
+    expect(row.best_move_uci).toBe('e7e5')
+    expect(row.eval_delta).toBe(0)
+    expect(row.played_eval).toBe(row.best_eval)
+    expect(row.best_line_uci).toEqual(['e7e5', 'g1f3'])
+  })
 
-const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
-// Black to move (after 1. e4).
-const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
+  it('played move on a lower line uses same-search scores (black to move)', () => {
+    const row = rowOf(deriveEvidenceRow(snap(), AFTER_E4, 'c7c5'))
+    // Black mover: white-relative best = -20 (line1 cp20), played = -10 (line2 cp10).
+    expect(row.best_eval).toBe(-20)
+    expect(row.played_eval).toBe(-10)
+    // Black to move: delta = playedWhite - bestWhite = -10 - (-20) = 10.
+    expect(row.eval_delta).toBe(10)
+    expect(row.best_move_uci).toBe('e7e5')
+    expect(row.classification).not.toBe('best')
+  })
 
-type AnalysisMsg = Extract<AnalysisWorkerResponse, { type: 'analysis' }>
+  it('white-to-move root: evals stay white-relative and delta = best - played', () => {
+    const s = snap({
+      fen: START,
+      bestMove: 'e2e4',
+      lines: [
+        line(1, ['e2e4', 'e7e5'], cp(40)),
+        line(2, ['g1f3', 'g8f6'], cp(25)),
+        line(3, ['d2d4', 'd7d5'], cp(20)),
+      ],
+    })
+    const row = rowOf(deriveEvidenceRow(s, START, 'g1f3'))
+    expect(row.best_eval).toBe(40)
+    expect(row.played_eval).toBe(25)
+    expect(row.eval_delta).toBe(15)
+  })
 
-const analysisMsg = (overrides: Partial<AnalysisMsg> = {}): AnalysisMsg => ({
-  type: 'analysis',
-  id: 'x',
-  move: 'e2e4',
-  bestMove: 'e2e4',
-  bestLine: ['e2e4', 'e7e5'],
-  bestEval: 30,
-  playedEval: 30,
-  bestEvalMate: null,
-  playedEvalMate: null,
-  delta: 0,
-  classification: 'best',
-  canonical: true,
-  ...overrides,
+  it('converts mate scores to white-relative (black to move)', () => {
+    const s = snap({
+      bestMove: 'e7e5',
+      lines: [
+        line(1, ['e7e5', 'g1f3'], mate(2)),
+        line(2, ['c7c5', 'g1f3'], cp(10)),
+        line(3, ['d7d5', 'g1f3'], cp(5)),
+      ],
+    })
+    const row = rowOf(deriveEvidenceRow(s, AFTER_E4, 'e7e5'))
+    // Black mover -> white-relative mate count sign flips.
+    expect(row.best_eval_mate).toBe(-2)
+    expect(row.played_eval_mate).toBe(-2)
+  })
+
+  it('skips a played move absent from all lines (unrepresented, no row)', () => {
+    const r = deriveEvidenceRow(snap(), AFTER_E4, 'b8c6')
+    expect(r).toEqual({ skip: 'unrepresented' })
+  })
+
+  it('skips a restricted searchmoves / MultiPV-2 hybrid result', () => {
+    const restricted = snap({ multipv: 2, searchmoves: ['c7c5'] })
+    expect(deriveEvidenceRow(restricted, AFTER_E4, 'e7e5')).toEqual({ skip: 'restricted' })
+    const mp2 = snap({ multipv: 2 })
+    expect(deriveEvidenceRow(mp2, AFTER_E4, 'e7e5')).toEqual({ skip: 'restricted' })
+  })
+
+  it('skips a non-depth-21 search', () => {
+    const movetime = snap({ limit: { type: 'movetime', value: 1200 }, multipv: 1 })
+    expect(deriveEvidenceRow(movetime, AFTER_E4, 'e7e5')).toEqual({ skip: 'restricted' })
+    const d20 = snap({ limit: { type: 'depth', value: 20 } })
+    expect(deriveEvidenceRow(d20, AFTER_E4, 'e7e5')).toEqual({ skip: 'restricted' })
+  })
+
+  it('skips a snapshot whose FEN differs from the target position (stale)', () => {
+    expect(deriveEvidenceRow(snap({ fen: START }), AFTER_E4, 'e7e5')).toEqual({ skip: 'stale' })
+  })
+
+  it('requires all three dense slots at a 3+-legal position', () => {
+    const twoSlots = snap({ lines: [line(1, ['e7e5', 'g1f3'], cp(20)), line(2, ['c7c5', 'g1f3'], cp(10))] })
+    expect(deriveEvidenceRow(twoSlots, AFTER_E4, 'e7e5')).toEqual({ skip: 'sparse' })
+  })
+
+  it('rejects a mixed-depth snapshot (a slot below terminal depth)', () => {
+    const mixed = snap({
+      lines: [
+        line(1, ['e7e5', 'g1f3'], cp(20)),
+        line(2, ['c7c5', 'g1f3'], cp(10), 20), // shallow
+        line(3, ['d7d5', 'g1f3'], cp(5)),
+      ],
+    })
+    expect(deriveEvidenceRow(mixed, AFTER_E4, 'e7e5')).toEqual({ skip: 'sparse' })
+  })
+
+  it('is eligible at a 1-legal-move position with a single dense slot', () => {
+    const s = snap({
+      fen: FEN_1LEGAL,
+      bestMove: 'h1g2',
+      lines: [line(1, ['h1g2', 'h8g8'], cp(900))],
+    })
+    const row = rowOf(deriveEvidenceRow(s, FEN_1LEGAL, 'h1g2'))
+    expect(row.classification).toBe('best')
+    expect(row.move_uci).toBe('h1g2')
+  })
+
+  it('is eligible at a 2-legal-move position with two dense slots', () => {
+    const s = snap({
+      fen: FEN_2LEGAL,
+      bestMove: 'g1h2',
+      lines: [line(1, ['g1h2', 'f3f2'], cp(0)), line(2, ['g1f1', 'h2h1'], cp(-50))],
+    })
+    const row = rowOf(deriveEvidenceRow(s, FEN_2LEGAL, 'g1f1'))
+    expect(row.best_move_uci).toBe('g1h2')
+    expect(row.move_uci).toBe('g1f1')
+  })
+
+  it('rejects when line 1 has only a single-move PV', () => {
+    const s = snap({ lines: [line(1, ['e7e5'], cp(20)), line(2, ['c7c5', 'g1f3'], cp(10)), line(3, ['d7d5', 'g1f3'], cp(5))] })
+    // Line 1 fails the multi-move-PV gate; it is also not a dense slot count issue.
+    const r = deriveEvidenceRow(s, AFTER_E4, 'e7e5')
+    expect('skip' in r).toBe(true)
+  })
+
+  it('rejects when line 1 does not begin with bestMove', () => {
+    const s = snap({ bestMove: 'c7c5' }) // line 1 pv[0] is e7e5, not c7c5
+    expect(deriveEvidenceRow(s, AFTER_E4, 'e7e5')).toEqual({ skip: 'incomplete' })
+  })
 })
 
 // --------------------------------------------------------------------------- #
-// buildEvidenceRow
+// completedSearchSignature — content signature
 // --------------------------------------------------------------------------- #
-describe('buildEvidenceRow', () => {
-  it('white to move: evals stay white-relative, delta recomputed', () => {
-    const row = buildEvidenceRow(START, 'e2e4', analysisMsg({ bestEval: 40, playedEval: 25 }))
-    expect(row).not.toBeNull()
-    expect(row!.played_eval).toBe(25)
-    expect(row!.best_eval).toBe(40)
-    // white to move: delta = best - played = 15.
-    expect(row!.eval_delta).toBe(15)
-    expect(row!.best_move_uci).toBe('e2e4')
-    expect(row!.best_line_uci).toEqual(['e2e4', 'e7e5'])
-    expect(row!.classification).toBe('best')
-  })
-
-  it('black to move: converts mover-relative to white-relative and recomputes delta', () => {
-    // mover=black. best is good for black (+50 mover) -> white -50; played -20 mover -> white +20.
-    const row = buildEvidenceRow(
-      AFTER_E4,
-      'e7e5',
-      analysisMsg({ move: 'e7e5', bestMove: 'e7e5', bestEval: 50, playedEval: -20, delta: -999 }),
+describe('completedSearchSignature', () => {
+  it('differs when the played-line score differs, even with same fen/options/bestMove', () => {
+    const s1 = snap()
+    const s2 = snap({
+      lines: [line(1, ['e7e5', 'g1f3'], cp(20)), line(2, ['c7c5', 'g1f3'], cp(1)), line(3, ['d7d5', 'g1f3'], cp(5))],
+    })
+    const r1 = rowOf(deriveEvidenceRow(s1, AFTER_E4, 'c7c5'))
+    const r2 = rowOf(deriveEvidenceRow(s2, AFTER_E4, 'c7c5'))
+    expect(completedSearchSignature('s1', s1, r1)).not.toBe(
+      completedSearchSignature('s1', s2, r2),
     )
-    expect(row).not.toBeNull()
-    expect(row!.best_eval).toBe(-50)
-    expect(row!.played_eval).toBe(20)
-    // black to move: delta = whitePlayed - whiteBest = 20 - (-50) = 70. message.delta ignored.
-    expect(row!.eval_delta).toBe(70)
   })
 
-  it('clamps a negative recomputed delta to zero', () => {
-    // white to move, played (100) better than "best" (50) -> raw delta negative.
-    const row = buildEvidenceRow(START, 'e2e4', analysisMsg({ bestEval: 50, playedEval: 100 }))
-    expect(row!.eval_delta).toBe(0)
+  it('is stable for the same completed search', () => {
+    const s = snap()
+    const r = rowOf(deriveEvidenceRow(s, AFTER_E4, 'e7e5'))
+    expect(completedSearchSignature('s1', s, r)).toBe(completedSearchSignature('s1', s, r))
   })
 
-  it('converts mate counts to white-relative', () => {
-    const row = buildEvidenceRow(
-      AFTER_E4,
-      'e7e5',
-      analysisMsg({
-        move: 'e7e5',
-        bestMove: 'e7e5',
-        bestEval: 31900,
-        playedEval: 31900,
-        bestEvalMate: 2,
-        playedEvalMate: 2,
-      }),
+  it('never collides across sessions', () => {
+    const s = snap()
+    const r = rowOf(deriveEvidenceRow(s, AFTER_E4, 'e7e5'))
+    expect(completedSearchSignature('s1', s, r)).not.toBe(
+      completedSearchSignature('s2', s, r),
     )
-    // black mover -> white-relative mate sign flips.
-    expect(row!.best_eval_mate).toBe(-2)
-    expect(row!.played_eval_mate).toBe(-2)
-  })
-
-  it('drops a non-canonical result', () => {
-    expect(buildEvidenceRow(START, 'e2e4', analysisMsg({ canonical: false }))).toBeNull()
-  })
-
-  it('drops a one-move PV', () => {
-    expect(buildEvidenceRow(START, 'e2e4', analysisMsg({ bestLine: ['e2e4'] }))).toBeNull()
-  })
-
-  it('drops a null bestMove / (none)', () => {
-    expect(buildEvidenceRow(START, 'e2e4', analysisMsg({ bestMove: '(none)' }))).toBeNull()
-  })
-
-  it('drops when a required eval is null', () => {
-    expect(buildEvidenceRow(START, 'e2e4', analysisMsg({ playedEval: null }))).toBeNull()
-    expect(buildEvidenceRow(START, 'e2e4', analysisMsg({ bestEval: null }))).toBeNull()
-  })
-
-  it('drops when classification is null', () => {
-    expect(buildEvidenceRow(START, 'e2e4', analysisMsg({ classification: null }))).toBeNull()
   })
 })
 
 // --------------------------------------------------------------------------- #
-// useAnalysisEvidence
+// useAnalysisEvidence — submission + dedupe lifecycle
 // --------------------------------------------------------------------------- #
-const postedAnalyzeMove = () =>
-  postMessageMock.mock.calls.map(([m]) => m).find((m) => m?.type === 'analyze-move')
+const ctx = (o: Partial<EvidenceReuseContext> = {}): EvidenceReuseContext => ({
+  fenBefore: AFTER_E4,
+  moveUci: 'e7e5',
+  isMainline: true,
+  engineEnabled: true,
+  ...o,
+})
 
 describe('useAnalysisEvidence', () => {
   beforeEach(() => {
-    postMessageMock.mockClear()
-    terminateMock.mockClear()
     submitAnalysisEvidenceMock.mockReset()
     submitAnalysisEvidenceMock.mockResolvedValue([])
-    messageHandler = null
-    workerConstructed = 0
   })
-
   afterEach(() => {
     vi.restoreAllMocks()
   })
 
-  it('no-ops entirely when sessionId is absent', () => {
-    const { result } = renderHook(() => useAnalysisEvidence(undefined))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    expect(workerConstructed).toBe(0)
-    expect(postMessageMock).not.toHaveBeenCalled()
-    expect(submitAnalysisEvidenceMock).not.toHaveBeenCalled()
-  })
-
-  it('posts an analyze-move at the evidence depth and submits the mapped row', async () => {
-    const { result } = renderHook(() => useAnalysisEvidence('s1'))
-    expect(workerConstructed).toBe(1)
-
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const msg = postedAnalyzeMove()
-    expect(msg).toMatchObject({
-      type: 'analyze-move',
-      fen: START,
-      move: 'e2e4',
-      playerColor: 'white',
-      depth: EVIDENCE_SEARCH_DEPTH,
-    })
-
+  const flush = async () => {
     await act(async () => {
-      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
+      await Promise.resolve()
+      await Promise.resolve()
     })
+  }
+
+  it('submits the derived row for an eligible completed search', async () => {
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => {
+      result.current.considerCompletedSearch(snap(), ctx())
+    })
+    await flush()
     expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(1)
     const [sessionId, rows] = submitAnalysisEvidenceMock.mock.calls[0]
     expect(sessionId).toBe('s1')
-    expect(rows[0]).toMatchObject({ fen: START, move_uci: 'e2e4', best_move_uci: 'e2e4' })
+    expect(rows[0]).toMatchObject({ fen: AFTER_E4, move_uci: 'e7e5', best_move_uci: 'e7e5' })
   })
 
-  it('does not submit a non-canonical result', async () => {
-    const { result } = renderHook(() => useAnalysisEvidence('s1'))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const msg = postedAnalyzeMove()
-    await act(async () => {
-      messageHandler?.({ data: analysisMsg({ id: msg.id, canonical: false }) } as MessageEvent)
-    })
+  it('no-ops without a sessionId', async () => {
+    const { result } = renderHook(() => useAnalysisEvidence(undefined))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
     expect(submitAnalysisEvidenceMock).not.toHaveBeenCalled()
   })
 
-  it('dedupes a completed (fen, move) — no second analyze-move', async () => {
+  it('no-ops when engine analysis is disabled', async () => {
     const { result } = renderHook(() => useAnalysisEvidence('s1'))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const msg = postedAnalyzeMove()
-    await act(async () => {
-      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
-    })
-    postMessageMock.mockClear()
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    expect(postMessageMock).not.toHaveBeenCalled()
-  })
-
-  it('cancel prevents an interrupted search from submitting', async () => {
-    const { result } = renderHook(() => useAnalysisEvidence('s1'))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const msg = postedAnalyzeMove()
-    act(() => result.current.cancel())
-    expect(postMessageMock).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'cancel-analysis', id: msg.id }),
-    )
-    // A late analysis for the canceled id must NOT submit.
-    await act(async () => {
-      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
-    })
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx({ engineEnabled: false })))
+    await flush()
     expect(submitAnalysisEvidenceMock).not.toHaveBeenCalled()
   })
 
-  it('cancels the in-flight search when a new move is requested (one at a time)', () => {
+  it('no-ops inside a variation', async () => {
     const { result } = renderHook(() => useAnalysisEvidence('s1'))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const first = postedAnalyzeMove()
-    act(() => result.current.requestEvidence(AFTER_E4, 'e7e5', 'black'))
-    expect(postMessageMock).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'cancel-analysis', id: first.id }),
-    )
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx({ isMainline: false })))
+    await flush()
+    expect(submitAnalysisEvidenceMock).not.toHaveBeenCalled()
   })
 
-  // g-xox0 Part B: consume the endpoint result and surface an accepted upgrade.
+  it('no-ops with a null wire key (legacy move)', async () => {
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx({ moveUci: null })))
+    await flush()
+    expect(submitAnalysisEvidenceMock).not.toHaveBeenCalled()
+  })
+
+  it('does not submit an unrepresented played move', async () => {
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx({ moveUci: 'b8c6' })))
+    await flush()
+    expect(submitAnalysisEvidenceMock).not.toHaveBeenCalled()
+  })
+
+  it('dedupes: an identical resolved signature does not resubmit', async () => {
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('in-flight exclusion: a second call before the POST resolves launches no second request', async () => {
+    let resolveSubmit: (v: unknown[]) => void = () => {}
+    submitAnalysisEvidenceMock.mockReturnValue(
+      new Promise((r) => {
+        resolveSubmit = r as (v: unknown[]) => void
+      }),
+    )
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(1)
+    await act(async () => {
+      resolveSubmit([])
+      await Promise.resolve()
+    })
+  })
+
+  it('retry: a network failure clears in-flight so a later completion resubmits', async () => {
+    submitAnalysisEvidenceMock.mockRejectedValueOnce(new Error('network'))
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    submitAnalysisEvidenceMock.mockResolvedValueOnce([])
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('terminal: an HTTP-200 rejection does not resubmit', async () => {
+    submitAnalysisEvidenceMock.mockResolvedValue([
+      { fen: AFTER_E4, move_uci: 'e7e5', reason: 'incompatible_keep', upgrade: null },
+    ])
+    const { result } = renderHook(() => useAnalysisEvidence('s1'))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('a sessionId change clears the dedupe sets', async () => {
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string }) => useAnalysisEvidence(sid),
+      { initialProps: { sid: 's1' } },
+    )
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    rerender({ sid: 's2' })
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(2)
+    expect(submitAnalysisEvidenceMock.mock.calls[1][0]).toBe('s2')
+  })
+
   const upgrade = {
     classification: 'best' as const,
-    eval_cp: 45,
+    eval_cp: 20,
     eval_mate: null,
-    best_move_san: 'e4',
-    best_move_eval_cp: 45,
+    best_move_san: 'e5',
+    best_move_eval_cp: 20,
     eval_delta: 0,
     authoritative: false,
   }
 
-  it('fires onAcceptedEvidence with the upgrade on an accepted result', async () => {
+  it('ignores a POST that resolves after an in-place session change', async () => {
+    // A submission launched under s1 must not touch s2's dedupe state or invoke
+    // s2's onAcceptedEvidence when it completes late (g-reuse-d21-search P2).
+    let resolveSubmit: (v: unknown[]) => void = () => {}
+    submitAnalysisEvidenceMock.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveSubmit = r as (v: unknown[]) => void
+      }),
+    )
     const onAccepted = vi.fn()
-    submitAnalysisEvidenceMock.mockResolvedValue([
-      { fen: START, move_uci: 'e2e4', reason: 'new_key', upgrade },
-    ])
-    const { result } = renderHook(() => useAnalysisEvidence('s1', onAccepted))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const msg = postedAnalyzeMove()
+    const { result, rerender } = renderHook(
+      ({ sid }: { sid: string }) => useAnalysisEvidence(sid, onAccepted),
+      { initialProps: { sid: 's1' } },
+    )
+    // Launch under s1 (POST hangs), then switch to s2 before it resolves.
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    rerender({ sid: 's2' })
+    // The stale s1 POST now completes with an accepted upgrade.
     await act(async () => {
-      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
-      await Promise.resolve()
+      resolveSubmit([{ fen: AFTER_E4, move_uci: 'e7e5', reason: 'new_key', upgrade }])
+      await flush()
     })
-    expect(onAccepted).toHaveBeenCalledWith(START, 'e2e4', upgrade)
+    // Stale completion is dropped: s2's callback never fires...
+    expect(onAccepted).not.toHaveBeenCalled()
+    // ...and the s1 signature did not leak into s2's terminal set, so a genuine
+    // s2 completion of the same content still submits and fires.
+    submitAnalysisEvidenceMock.mockResolvedValueOnce([
+      { fen: AFTER_E4, move_uci: 'e7e5', reason: 'new_key', upgrade },
+    ])
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    expect(submitAnalysisEvidenceMock).toHaveBeenCalledTimes(2)
+    expect(onAccepted).toHaveBeenCalledWith(AFTER_E4, 'e7e5', upgrade)
   })
 
-  it('does not fire onAcceptedEvidence when the result carries no upgrade', async () => {
+  it('drops a POST that settles at the session-change commit', async () => {
+    // Tighter than the stale test above: the s1 POST is settled from a sibling LAYOUT
+    // effect at the exact s2 commit, so the completion runs at the commit boundary
+    // rather than after all effects have flushed. Asserts the generation guard is
+    // already armed at that point (the callback is dropped).
+    //
+    // NOTE: this cannot by itself prove the invalidation is a LAYOUT effect rather
+    // than a passive one — RTL's `act` eagerly flushes passive effects at the commit
+    // boundary, collapsing the very timing gap that motivates useLayoutEffect. That
+    // window is browser-only (React defers passive effects past commit) and is why
+    // the invalidation uses useLayoutEffect; see the hook. What this test DOES pin is
+    // the guard mechanism itself: remove the generation check and it fails.
+    let resolveSubmit: (v: unknown[]) => void = () => {}
+    submitAnalysisEvidenceMock.mockReturnValueOnce(
+      new Promise((r) => {
+        resolveSubmit = r as (v: unknown[]) => void
+      }),
+    )
+    const onAccepted = vi.fn()
+    const captured: {
+      fn?: (s: CompletedRootAnalysis, c: EvidenceReuseContext) => void
+    } = {}
+
+    function Harness({ sid }: { sid: string }) {
+      const { considerCompletedSearch } = useAnalysisEvidence(sid, onAccepted)
+      useEffect(() => {
+        captured.fn = considerCompletedSearch
+      }, [considerCompletedSearch])
+      // Settle the hanging s1 POST during the s2 commit — a completion at the commit
+      // boundary rather than after all effects have flushed.
+      useLayoutEffect(() => {
+        if (sid === 's2') {
+          resolveSubmit([{ fen: AFTER_E4, move_uci: 'e7e5', reason: 'new_key', upgrade }])
+        }
+      }, [sid])
+      return null
+    }
+
+    const { rerender } = render(<Harness sid="s1" />)
+    await act(async () => captured.fn?.(snap(), ctx())) // launch s1 POST (hangs)
+    await act(async () => {
+      rerender(<Harness sid="s2" />)
+      await flush()
+    })
+    expect(onAccepted).not.toHaveBeenCalled()
+  })
+
+  it('fires onAcceptedEvidence with the endpoint upgrade on an accepted write', async () => {
     const onAccepted = vi.fn()
     submitAnalysisEvidenceMock.mockResolvedValue([
-      { fen: START, move_uci: 'e2e4', reason: 'incompatible_keep', upgrade: null },
+      { fen: AFTER_E4, move_uci: 'e7e5', reason: 'new_key', upgrade },
     ])
     const { result } = renderHook(() => useAnalysisEvidence('s1', onAccepted))
-    act(() => result.current.requestEvidence(START, 'e2e4', 'white'))
-    const msg = postedAnalyzeMove()
-    await act(async () => {
-      messageHandler?.({ data: analysisMsg({ id: msg.id }) } as MessageEvent)
-      await Promise.resolve()
-    })
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
+    expect(onAccepted).toHaveBeenCalledWith(AFTER_E4, 'e7e5', upgrade)
+  })
+
+  it('does not fire onAcceptedEvidence when the write carries no upgrade', async () => {
+    const onAccepted = vi.fn()
+    submitAnalysisEvidenceMock.mockResolvedValue([
+      { fen: AFTER_E4, move_uci: 'e7e5', reason: 'incompatible_keep', upgrade: null },
+    ])
+    const { result } = renderHook(() => useAnalysisEvidence('s1', onAccepted))
+    await act(async () => result.current.considerCompletedSearch(snap(), ctx()))
+    await flush()
     expect(onAccepted).not.toHaveBeenCalled()
   })
 })

@@ -13,13 +13,25 @@ from app.move_classification import (
     EngineScore,
     calculate_win_chance,
     classify_move_advanced,
+    classify_root_alternative,
 )
 
 FIXTURE = Path(__file__).resolve().parent / "tests" / "fixtures" / "classification_vectors.json"
+ROOT_FIXTURE = (
+    Path(__file__).resolve().parent
+    / "tests"
+    / "fixtures"
+    / "root_classification_vectors.json"
+)
 
 
 def _load_cases():
     with open(FIXTURE) as f:
+        return json.load(f)["cases"]
+
+
+def _load_root_cases():
+    with open(ROOT_FIXTURE) as f:
         return json.load(f)["cases"]
 
 
@@ -33,6 +45,30 @@ def test_classification_golden_vectors(case):
         case["isBest"],
     )
     assert result == case["expected"]
+
+
+@pytest.mark.parametrize("case", _load_root_cases())
+def test_root_classification_golden_vectors(case):
+    result = classify_root_alternative(
+        EngineScore.from_dict(case["bestScore"]),
+        EngineScore.from_dict(case["playedScore"]),
+        case["mover"],
+        case["isBest"],
+    )
+    assert result == case["expected"]
+
+
+def test_root_vectors_cover_every_bucket():
+    """The root fixture must exercise every classification bucket and mate paths."""
+    expected = {c["expected"] for c in _load_root_cases()}
+    assert expected == {
+        "best",
+        "excellent",
+        "good",
+        "inaccuracy",
+        "mistake",
+        "blunder",
+    }
 
 
 def test_all_buckets_present():

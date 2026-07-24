@@ -229,7 +229,10 @@ def test_browser_analysis_profile_authority_and_dominance():
     p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
     assert p.authoritative is False
     assert p.replacement_eligible is True
-    assert p.active is True
+    # RETIRED (g-reuse-d21-search): the hidden internally-inconsistent protocol is
+    # now inactive. Its stored rows stay identity-verified (digest excludes
+    # ``active``), so dominance/digest are unchanged.
+    assert p.active is False
     assert p.dominates == frozenset({"browser-game-v1"})
     # Digest is non-null and stable (recomputable from the identity fields).
     assert p.profile_manifest_digest is not None
@@ -276,3 +279,70 @@ def test_stamp_identity_is_narrower_than_stamp_profile_full():
         "profile_manifest_digest",
     }
     assert set(narrow.keys()) < set(full.keys())
+
+
+# --- browser-analysis-multipv-v2 successor profile (g-reuse-d21-search) ---------
+
+from app.analysis_profiles import (  # noqa: E402
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+    BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION,
+)
+
+
+def test_browser_analysis_multipv_profile_pinned_identity():
+    # The successor's identity is the ACTUAL visible worker (stockfishWorker.ts):
+    # same pinned lite-single artifact + single net as v1, but the visible worker's
+    # real Hash (64) and MultiPV (3), under the internally-consistent protocol. If
+    # the visible worker's engine params ever change, this pin and the code move
+    # together — a silent drift would let forged rows identity-verify.
+    p = get_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert p is not None
+    assert p.engine_name == "Stockfish"
+    assert p.engine_version == "18"
+    assert p.engine_build == _WASM_SHA256  # same artifact as retired v1
+    assert profiles._FULL_SHA256.match(p.engine_build)
+    assert p.search_limit_type == "depth"
+    assert p.search_limit_value == 21
+    # The two identity columns that DISTINGUISH it from the retired v1.
+    assert p.multipv == 3
+    assert p.hash_mb == 64
+    assert p.threads == 1
+    assert p.eval_file_id == _NET_ID  # same single net as v1
+    assert p.eval_file_small_id is None
+    assert p.analyzer_protocol_version == BROWSER_VISIBLE_MULTIPV_PROTOCOL_VERSION
+    assert p.analyzer_protocol_version == "browser-visible-multipv-v1"
+
+
+def test_browser_analysis_multipv_profile_authority_and_dominance():
+    p = get_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    # Active successor, non-authoritative but replacement-eligible.
+    assert p.active is True
+    assert p.authoritative is False
+    assert p.replacement_eligible is True
+    # Correctively replaces the retired hidden protocol AND the weaker d17 game
+    # baseline for the same key (PROTOCOL_CORRECTION + TIER_BASELINE edges).
+    assert p.dominates == frozenset(
+        {BROWSER_ANALYSIS_PROFILE_ID, BROWSER_PROFILE_ID}
+    )
+    # Digest is non-null and recomputable from the identity fields.
+    assert p.profile_manifest_digest is not None
+    recomputed = profiles._manifest_digest(
+        {f: getattr(p, f) for f in profiles._DIGEST_FIELDS}
+    )
+    assert recomputed == p.profile_manifest_digest
+
+
+def test_multipv_successor_identity_distinct_from_retired_v1():
+    # The successor and the retired v1 share build+net but MUST NOT collide: the
+    # Hash/MultiPV/protocol differences give them distinct manifest digests, so a
+    # v1-stamped row can never masquerade as the successor (and vice versa).
+    v1 = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    v2 = get_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert (v1.hash_mb, v1.multipv) != (v2.hash_mb, v2.multipv)
+    assert v1.analyzer_protocol_version != v2.analyzer_protocol_version
+    assert v1.profile_manifest_digest != v2.profile_manifest_digest
+
+
+def test_canonical_manifests_dominate_multipv_successor():
+    for pid in (CANONICAL_PROFILE_ID, LINUX_PROFILE_ID):
+        assert BROWSER_ANALYSIS_MULTIPV_PROFILE_ID in get_profile(pid).dominates

@@ -1,0 +1,395 @@
+{
+  "description": "Golden vectors pinning classify_root_alternative (Python) and classifyRootAlternative (TS). bestScore/playedScore are ROOT side-to-move (mover)-relative EngineScores from the SAME completed search. isBest short-circuits to 'best'.",
+  "cases": [
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "mover": "white",
+      "isBest": true,
+      "expected": "best"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "mover": "black",
+      "isBest": true,
+      "expected": "best"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 1
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": 1
+      },
+      "mover": "white",
+      "isBest": true,
+      "expected": "best"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 40
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 10
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "good"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 40
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 10
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "good"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 200
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 200
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 300
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -100
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 300
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -100
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 120
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -250
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 600
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -600
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 600
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -600
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 30
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 20
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 30
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 20
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 100
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": -1
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 100
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": -1
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 1200
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": -3
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": -5
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 2
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 2
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 1
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -800
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 3
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": -2
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "blunder"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 1
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": 5
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "bestScore": {
+        "type": "mate",
+        "value": 1
+      },
+      "playedScore": {
+        "type": "mate",
+        "value": 5
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "excellent"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 40
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -40
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 40
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -40
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 70
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -70
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "mistake"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 70
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -70
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "mistake"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 50
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -30
+      },
+      "mover": "white",
+      "isBest": false,
+      "expected": "inaccuracy"
+    },
+    {
+      "bestScore": {
+        "type": "cp",
+        "value": 0
+      },
+      "playedScore": {
+        "type": "cp",
+        "value": -90
+      },
+      "mover": "black",
+      "isBest": false,
+      "expected": "inaccuracy"
+    }
+  ]
+}

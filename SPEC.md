@@ -524,29 +524,87 @@ response exposes `source`, `analysis_profile_id`, `engine_version`, `engine_buil
 `evidence_contract_id`, and an `authoritative` trust flag derived from the same
 validation the writer uses.
 
-**Stronger analysis-board evidence (g-cache-stronger-evals).** The analysis board
-runs a deeper depth-21 search than the in-game depth-17 producer, and that stronger
-evidence is now persistable. Key points:
+**Stronger analysis-board evidence (g-cache-stronger-evals → g-reuse-d21-search).**
+The analysis board runs a depth-21 search that is deeper than the in-game depth-17
+producer, and that stronger evidence is persistable. As of **g-reuse-d21-search**
+the durable producer no longer runs a *second* hidden analyzer: it REUSES the
+already-completed, unrestricted visible depth-21 MultiPV-3 search the board already
+performs for arrows/lines. Key points:
 
-- **Browser profile ordering** is `browser-game-v1 < browser-analysis-v1 <
-  canonical-24`, expressed by explicit `dominates` edges only — never by raw numeric
-  depth. `browser-analysis-v1` `dominates` `browser-game-v1`; both canonical
-  manifests `dominates` `browser-analysis-v1`.
-- **`authoritative` vs `replacement_eligible`.** `Profile.authoritative` still means
-  canonical: read-trusted on `/lookup`, reclaims legacy rows, `resolve_profile`
-  stamped. A new `replacement_eligible` flag is split out: a NON-authoritative but
-  replacement-eligible profile (`browser-analysis-v1`) may replace a weaker
-  *compatible* profile via a `dominates` edge, but never becomes read-trusted, never
-  reclaims legacy/unidentified rows, and never overwrites canonical depth-24.
-  `replacement_eligible` defaults from `authoritative`, so canonical/browser-game
-  behavior is unchanged (browser-game stays first-wins).
-- **`browser-analyzer-v1`** is the analysisWorker post-move protocol at depth 21 —
-  root best-move + post-played + post-best searches, `computeAnalysisResult`, and
-  `classifyMoveAdvanced` (accepted only when the worker reports `canonical===true`) —
-  the same method as browser-game, just deeper. A hybrid display result (restricted
-  `searchmoves`, an excluded cached best move, or a merged cached line) is NEVER
-  stamped as this profile; only the unrestricted analyzer worker produces evidence.
-- **Exact-key model.** `SessionAnalysisMove` now carries `fen_before` and `move_uci`.
+- **Visible-MultiPV reuse producer.** When the exact played mainline move appears in
+  the completed visible MultiPV lines, a same-search evidence row is derived from
+  line 1 (best) and the played line — with NO additional Stockfish search — and
+  submitted through the analysis-evidence endpoint. The best and played facts are two
+  lines of ONE completed request, so the tuple is internally consistent by
+  construction (unlike the retired hidden protocol, whose independent post-move
+  searches could contradict the hidden root ordering — g-kgiq). When the played move
+  is OUTSIDE the visible lines the producer does nothing and the existing depth-17
+  evidence is retained (no targeted search — a separate product/compute decision). A
+  restricted/hybrid visible search (the `trustedBest` `searchmoves` MultiPV-2 path) is
+  skipped; the reuse feature never spends extra compute to widen coverage there.
+- **Five-layer evidence vocabulary (`backend/app/evidence_policy.py`).** The shared
+  browser-evidence policy (g-browser-policy-v2) separates *identity* (does a row's
+  stored metadata match its claimed profile — one `verify_identity`, replacing five
+  duplicated exact-equality checks; a per-profile `dynamic_fields` seam, empty today,
+  is reserved for g-mk1d), *protocol* (is the producer internally consistent —
+  `PROTOCOLS`), *contract* (evidence shape — `evidence_contracts`), *comparison*
+  (which of two valid rows supersedes the other and why — `compare_evidence_rows`),
+  and *capability* (which consumers may reuse a row — `has_capability`). Read/reuse
+  grants beyond `DISPLAY_OVERLAY` (g-v21l), measured-strength comparison (g-mk1d), and
+  the cross-grain authority rule (g-6xc3) lay their API here but are not yet wired.
+- **`EDGES` and kinds.** Cross-profile ordering is explicit directed edges, never raw
+  depth, each tagged `AUTHORITY` (canonical over any non-authoritative row),
+  `PROTOCOL_CORRECTION` (a truthful protocol fixes a defective one), or `TIER_BASELINE`
+  (a deeper same-family tier replaces a shallower one). Current edges: both canonical
+  manifests → {`browser-game-v1`, `browser-analysis-v1`, `browser-analysis-multipv-v2`,
+  `jeffml-scores-v1`} (AUTHORITY); `browser-analysis-v1` → `browser-game-v1`
+  (TIER_BASELINE); **`browser-analysis-multipv-v2` → `browser-analysis-v1`**
+  (PROTOCOL_CORRECTION); **`browser-analysis-multipv-v2` → `browser-game-v1`**
+  (TIER_BASELINE). A registry-load assertion fails closed unless `EDGES` and each
+  profile's `dominates` set agree in both directions. `compare_evidence_rows`
+  implements the authority barrier and explicit-edge steps; unequal non-edged rows are
+  `INCOMPARABLE` (measured strength is g-mk1d). Cache Rule 5 routes through it: a
+  PROTOCOL_CORRECTION supersession reports `protocol_corrected_replace`, AUTHORITY /
+  TIER_BASELINE keep `dominates_replace`.
+- **`browser-analysis-multipv-v2` profile.** The corrective successor. Its identity is
+  the ACTUAL visible worker (`stockfishWorker.ts`): the same pinned
+  `stockfish-18-lite-single` artifact and single net `nn-9067e33176e8.nnue` as the
+  retired hidden profile, but the visible worker's real **Hash 64** and **MultiPV 3**
+  under the internally-consistent `browser-visible-multipv-v1` protocol, at depth 21.
+  NON-authoritative, `replacement_eligible`, ACTIVE. It correctively replaces a
+  defective `browser-analysis-v1` row (PROTOCOL_CORRECTION) and a weaker
+  `browser-game-v1` d17 row (TIER_BASELINE) for the exact key, but never dominates
+  canonical, reclaims legacy rows, or becomes read-trusted.
+- **`browser-analysis-v1` retirement.** The hidden root + independent post-move
+  protocol (`browser-analyzer-v1`) is internally inconsistent and is RETIRED
+  (`active=False`) in this release. Its stored rows stay `identity_verified` (the
+  manifest digest excludes `active`/`dominates`), so they keep `DISPLAY_OVERLAY`
+  (a retirement-surviving capability) and remain correctively replaceable, but a new
+  incoming v1 row fails closed (`inactive_profile_keep`) — closing the fail-open
+  retirement window in the decision layer, in addition to the endpoint discriminator.
+- **Producer discriminator (mandatory).** The endpoint stamps all identity/profile
+  fields server-side; the client selects no profile id and instead sends
+  `producer: "visible-multipv-v1"`. An absent producer (a stale client running the
+  retired hidden worker) is rejected per-row `stale_producer`; an unrecognized value
+  `unknown_producer`; the single allowed token maps to `browser-analysis-multipv-v2`.
+  HTTP stays 200 with the normal result list.
+- **Backend classification rederivation (every row).** Beyond
+  `resolver-complete-v2`'s enum/arithmetic checks, the endpoint independently rederives
+  each row's classification from the best/played root-relative scores using a dedicated
+  root-alternative classifier and rejects any disagreement (`classification_mismatch`).
+  Lower lines and mate transitions are as client-supplied as line 1. The root
+  classifier (`classify_root_alternative` / `classifyRootAlternative`) takes a truthful
+  ROOT side-to-move contract — NOT the post-move opponent-to-move argument order of
+  `classify_move_advanced` — while sharing the win-chance / mate thresholds; the two
+  classifiers are pinned across TS and Python by
+  `backend/tests/fixtures/root_classification_vectors.json`.
+- **Capabilities / overlay.** `display_upgrade_eligible` is now
+  `has_capability(row, DISPLAY_OVERLAY)` AND the profile's `OVERLAY_MODE == ALWAYS`
+  (truth-table-identical to the old `dominates(browser-game-v1)` test for the profiles
+  that existed before, now additionally admitting `browser-analysis-multipv-v2`).
+  Canonical holds all eight capabilities; `browser-analysis-multipv-v2` and the retired
+  `browser-analysis-v1` hold only `DISPLAY_OVERLAY`; browser-game / jeffml hold none.
+- **Exact-key model.** `SessionAnalysisMove` carries `fen_before` and `move_uci`.
   The FEN half is the durable `SessionMove.fen_before` (the same bytes browser-game
   wrote); the UCI half is server-derived from stored SAN via python-chess (SessionMove
   has no stored UCI). Evidence writes key on those exact values so a depth-21 row
@@ -602,11 +660,25 @@ evidence is now persistable. Key points:
   eval re-verification is out of scope. Evidence-writing surfaces are the saved-game
   `GameAnalysisPage`, `HistoryPage`, and `BlundersPage` boards; `DrillAnalysisPage` and
   ephemeral boards never write.
-- **Driver.** The evidence driver owns a SECOND Stockfish WASM worker separate from
-  the display engine and is NOT gated on position-grain `trustedBest` (the write policy
-  protects canonical rows). Debounce, dedupe, one-at-a-time scheduling, cancel-on-nav,
-  and display-settled gating bound the competing-engine cost; deeper read-time skip
-  logic is deferred to `g-v21l`.
+- **Reuse layer (no second worker).** The evidence layer (`src/services/analysisEvidence.ts`)
+  owns NO Stockfish worker and runs NO extra search. `stockfishWorker.ts` builds an
+  immutable completed-root snapshot atomically at its `bestmove` boundary (associating
+  every info line with the request id, accumulating PV-bearing slots by one-based
+  multipv index); the snapshot is deep-frozen on the MAIN THREAD in
+  `useStockfishEngine` (a structured-clone across `postMessage` strips a worker-side
+  freeze) and both the UI and the reuse layer observe that one frozen value. On each
+  visible-search completion `AnalysisBoard` feeds the snapshot to
+  `considerCompletedSearch` with the current next-mainline-move context read via a ref,
+  so a stale search that settles after navigation is ignored (its `fen` no longer
+  matches the current `fenBefore`). The layer's eligibility gate requires a saved
+  session, `showEngineArrows`, the mainline (not a variation), exact non-null wire
+  `fen_before`/`move_uci`, an unrestricted depth-21 MultiPV-3 shape, `min(3, legalMoves)`
+  dense depth-21 slots, and the played move present as `pv[0]` of a complete line;
+  submission is deduped by a content signature over the evidence-bearing snapshot/row
+  with disjoint in-flight and terminal sets (a network failure clears in-flight and may
+  retry; any HTTP 200 is terminal; a session change clears both). With visible engine
+  analysis disabled, no analysis-board evidence computation or submission occurs.
+  Read-time skip logic for stronger browser rows is deferred to `g-v21l`.
 
 **Position-truth foundation (g-position-analysis).** `analysis_cache` conflates two
 grains on one row — *position* facts (the position's best move / best line / best

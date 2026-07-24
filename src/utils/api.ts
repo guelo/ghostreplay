@@ -1299,7 +1299,10 @@ export const submitAnalysisEvidence = async (
     {
       method: 'POST',
       headers: getAuthHeaders(),
-      body: JSON.stringify({ rows }),
+      // The endpoint-controlled producer discriminator: this bundle reuses the
+      // completed visible depth-21 MultiPV search (g-reuse-d21-search §6.3). A
+      // stale bundle that omits this fails closed server-side (stale_producer).
+      body: JSON.stringify({ rows, producer: 'visible-multipv-v1' }),
     },
     { fallbackMessage: 'Failed to submit analysis evidence' },
   )

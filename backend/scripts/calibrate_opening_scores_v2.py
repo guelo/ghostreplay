@@ -83,6 +83,7 @@ SCORER_SOURCE_FILES: tuple[str, ...] = (
     "backend/app/database_url.py",
     "backend/app/db.py",
     "backend/app/evidence_contracts.py",
+    "backend/app/evidence_policy.py",
     "backend/app/fen.py",
     "backend/app/game_phase.py",
     "backend/app/models.py",

@@ -92,6 +92,25 @@ def check_mate_events(
     return None
 
 
+def _classify_win_chance_drop(drop: float) -> MoveClassification:
+    """Map a mover-relative win-chance loss to a classification label.
+
+    Factored out of ``classify_move_advanced`` so the post-move classifier and the
+    root-alternative classifier (:func:`classify_root_alternative`) share ONE
+    threshold ladder and cannot drift. Mirrors the same ladder in
+    ``analysisUtils.ts``.
+    """
+    if drop >= 0.30:
+        return "blunder"
+    if drop >= 0.20:
+        return "mistake"
+    if drop >= 0.10:
+        return "inaccuracy"
+    if drop >= 0.02:
+        return "good"
+    return "excellent"
+
+
 def classify_move_advanced(
     prev_score: EngineScore,
     next_score: EngineScore,
@@ -116,12 +135,43 @@ def classify_move_advanced(
 
     drop = -(next_wc - prev_wc) if mover == "white" else (next_wc - prev_wc)
 
-    if drop >= 0.30:
-        return "blunder"
-    if drop >= 0.20:
-        return "mistake"
-    if drop >= 0.10:
-        return "inaccuracy"
-    if drop >= 0.02:
-        return "good"
-    return "excellent"
+    return _classify_win_chance_drop(drop)
+
+
+def classify_root_alternative(
+    best_score: EngineScore,
+    played_score: EngineScore,
+    mover: str,
+    is_best: bool,
+) -> MoveClassification:
+    """Classify a played root move vs. the best root move from ONE completed search.
+
+    Root-alternative contract (g-reuse-d21-search §5.1): ``best_score`` and
+    ``played_score`` are both ROOT side-to-move (``mover``)-relative EngineScores
+    reported by the SAME completed request — NOT the post-move opponent-to-move
+    scores :func:`classify_move_advanced` takes. Routing root scores through that
+    classifier's argument order would misclassify, so this uses a truthful root
+    contract while SHARING :func:`calculate_win_chance`, :func:`check_mate_events`,
+    and :func:`_classify_win_chance_drop`.
+
+    ``is_best`` (played UCI == best UCI) short-circuits to ``best``. The frontend
+    ``classifyRootAlternative`` mirrors this exactly, pinned by the shared golden
+    fixture ``backend/tests/fixtures/root_classification_vectors.json``.
+    """
+    if is_best:
+        return "best"
+
+    # Both scores are already mover-relative (root position, ``mover`` to move),
+    # so mate transitions are evaluated with score_pov == mover (no opponent-frame
+    # flip): best plays the "prev/better" role, played the "next/worse" role.
+    mate_result = check_mate_events(best_score, played_score, mover, mover)
+    if mate_result:
+        return mate_result
+
+    best_wc = calculate_win_chance(best_score, mover)
+    played_wc = calculate_win_chance(played_score, mover)
+
+    # Mover-relative loss from best to played (best is >= played for the mover).
+    drop = (best_wc - played_wc) if mover == "white" else (played_wc - best_wc)
+
+    return _classify_win_chance_drop(drop)

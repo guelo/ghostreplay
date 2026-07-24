@@ -9,6 +9,7 @@ from app.analysis_cache_policy import (
     decide_analysis_cache_replacement,
 )
 from app.analysis_profiles import (
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_ANALYSIS_PROFILE_ID,
     BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
@@ -252,9 +253,25 @@ def test_invalid_incoming_with_existing_kept():
 # ============================================================================
 
 def _browser_analysis(fields, contract=RESOLVER_COMPLETE_V2, values=None):
-    # The endpoint stamps the full pinned identity, so its rows identity-verify.
+    # The RETIRED hidden analyzer profile (browser-analysis-v1, now inactive). Its
+    # stored rows stay identity-verified (digest excludes ``active``), so they can
+    # still be an EXISTING row that a successor correctively replaces, but an
+    # INCOMING v1 row now fails closed (inactive_profile_keep).
     return _row(
         profile=BROWSER_ANALYSIS_PROFILE_ID,
+        contract=contract,
+        verified=True,
+        fields=fields,
+        values=values,
+    )
+
+
+def _browser_analysis_multipv(fields, contract=RESOLVER_COMPLETE_V2, values=None):
+    # The corrective visible-MultiPV successor (browser-analysis-multipv-v2, active,
+    # replacement-eligible). The endpoint stamps the full pinned identity, so its
+    # rows identity-verify.
+    return _row(
+        profile=BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
         contract=contract,
         verified=True,
         fields=fields,
@@ -278,9 +295,17 @@ def _agree(fields, overrides=None):
 
 
 # --- replacement eligibility flags ------------------------------------------
-def test_browser_analysis_is_replacement_eligible_not_authoritative():
-    row = _browser_analysis(_V2_CORE)
+def test_browser_analysis_multipv_is_replacement_eligible_not_authoritative():
+    row = _browser_analysis_multipv(_V2_CORE)
     assert row.is_replacement_eligible() is True
+    assert row.is_effectively_authoritative() is False
+
+
+def test_retired_browser_analysis_not_replacement_eligible():
+    # browser-analysis-v1 is retired (inactive); is_replacement_eligible requires
+    # an active profile, so its rows no longer participate as an INCOMING replacer.
+    row = _browser_analysis(_V2_CORE)
+    assert row.is_replacement_eligible() is False
     assert row.is_effectively_authoritative() is False
 
 
@@ -295,19 +320,51 @@ def test_canonical_is_replacement_eligible_and_authoritative():
     assert row.is_effectively_authoritative() is True
 
 
-# --- Rule 5: browser-analysis dominates browser-game ------------------------
-def test_browser_analysis_replaces_browser_game():
+# --- Rule 5: browser-analysis-multipv (successor) dominates browser-game -----
+def test_browser_analysis_multipv_replaces_browser_game():
     values = _agree(_V2_CORE)
     existing = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    # TIER_BASELINE edge -> dominates_replace (not the corrective reason).
     assert decision is Decision.REPLACE
     assert reason is Reason.DOMINATES_REPLACE
 
 
-def test_browser_game_cannot_replace_browser_analysis():
+def test_browser_analysis_multipv_correctively_replaces_retired_analysis():
+    # The corrective PROTOCOL_CORRECTION edge: the truthful visible-MultiPV
+    # successor replaces a defective (but still identity-verified) retired
+    # browser-analysis-v1 row for the exact key, independent of numeric depth.
     values = _agree(_V2_CORE)
     existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.REPLACE
+    assert reason is Reason.PROTOCOL_CORRECTED_REPLACE
+
+
+def test_retired_analysis_incoming_fails_closed():
+    # A stale client that manages to submit a retired browser-analysis-v1 row is
+    # kept out (inactive_profile_keep), even over a weaker browser-game row.
+    values = _agree(_V2_CORE)
+    existing = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)
+    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.INACTIVE_PROFILE_KEEP
+
+
+def test_retired_analysis_incoming_missing_key_fails_closed():
+    # Even on a missing key, a retired-profile incoming is never inserted.
+    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2)
+    decision, reason = decide_analysis_cache_replacement(None, incoming)
+    assert decision is Decision.KEEP
+    assert reason is Reason.INACTIVE_PROFILE_KEEP
+
+
+def test_browser_game_cannot_replace_browser_analysis_multipv():
+    values = _agree(_V2_CORE)
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
     incoming = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     # Stopped at the Rule 3 eligibility gate (existing is identified) — never
@@ -316,35 +373,46 @@ def test_browser_game_cannot_replace_browser_analysis():
     assert reason is Reason.NON_AUTHORITATIVE_KEEP
 
 
-def test_browser_analysis_cannot_replace_canonical():
+def test_browser_analysis_multipv_cannot_replace_canonical():
     existing = _canonical(_V2_CORE, contract=RESOLVER_COMPLETE_V2)
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2)
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
-    # Canonical is not in browser-analysis's dominates set -> Rule 5 INCOMPATIBLE.
+    # Canonical is authoritative; the comparator gives B_SUPERSEDES -> Rule 5
+    # INCOMPATIBLE.
     assert decision is Decision.KEEP
     assert reason is Reason.INCOMPATIBLE_KEEP
 
 
-def test_browser_analysis_cannot_reclaim_legacy():
+def test_browser_analysis_multipv_cannot_reclaim_legacy():
     existing = _legacy({"played_eval"})
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2)
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     # Replacement-eligible but NOT authoritative -> Rule 4 true-authority gate.
     assert decision is Decision.KEEP
     assert reason is Reason.LEGACY_KEEP_NON_AUTH
 
 
-def test_browser_analysis_cannot_reclaim_unidentified():
+def test_browser_analysis_multipv_cannot_reclaim_unidentified():
     existing = _row(profile=CANONICAL_PROFILE_ID, contract=RESOLVER_COMPLETE_V2, verified=False, fields=_V2_CORE)
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2)
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.LEGACY_KEEP_NON_AUTH
 
 
-def test_canonical_v2_replaces_browser_analysis():
+def test_canonical_v2_replaces_retired_browser_analysis():
     values = _agree(_V2_CORE)
     existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    incoming = _canonical(_V2_CORE, contract=RESOLVER_COMPLETE_V2, values=values)
+    decision, reason = decide_analysis_cache_replacement(existing, incoming)
+    # AUTHORITY edge -> dominates_replace even over the retired row.
+    assert decision is Decision.REPLACE
+    assert reason is Reason.DOMINATES_REPLACE
+
+
+def test_canonical_v2_replaces_browser_analysis_multipv():
+    values = _agree(_V2_CORE)
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
     incoming = _canonical(_V2_CORE, contract=RESOLVER_COMPLETE_V2, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.REPLACE
@@ -355,66 +423,67 @@ def test_future_canonical_move_complete_would_not_replace_browser_analysis_v2():
     """g-6xc3 gap: a canonical move-complete-v1 row does NOT supersede
     resolver-complete-v2, so the current contract check keeps the browser-analysis
     v2 row. Captured so the cross-grain gap is a deliberate, tested behavior."""
-    existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2)
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2)
     incoming = _canonical({"played_eval", "classification"}, contract=MOVE_COMPLETE)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
-    # Canonical dominates browser-analysis, but move-complete-v1 is not a superset
-    # of resolver-complete-v2 -> contract_ok False -> kept.
+    # Canonical dominates browser-analysis-multipv via AUTHORITY, but
+    # move-complete-v1 is not a superset of resolver-complete-v2 -> contract_ok
+    # False -> kept.
     assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP
 
 
-# --- Rule 2: same browser-analysis profile merges ---------------------------
-def test_browser_analysis_same_profile_idempotent():
+# --- Rule 2: same browser-analysis-multipv profile merges -------------------
+def test_browser_analysis_multipv_same_profile_idempotent():
     values = _agree(_V2_CORE)
-    existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.SAME_PROFILE_IDEMPOTENT
 
 
-def test_browser_analysis_same_profile_superset_merge():
+def test_browser_analysis_multipv_same_profile_superset_merge():
     values = _agree(_V2_WITH_MATE)
-    existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
-    incoming = _browser_analysis(_V2_WITH_MATE, RESOLVER_COMPLETE_V2, values=values)
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)
+    incoming = _browser_analysis_multipv(_V2_WITH_MATE, RESOLVER_COMPLETE_V2, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     # A mate field the incoming row adds counts as a contributed field for merge.
     assert decision is Decision.MERGE
     assert reason is Reason.SAME_PROFILE_SUPERSET_MERGE
 
 
-def test_browser_analysis_same_profile_merge_conflict():
-    existing = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=_agree(_V2_CORE, {"played_eval": 10}))
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=_agree(_V2_CORE, {"played_eval": 20}))
+def test_browser_analysis_multipv_same_profile_merge_conflict():
+    existing = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=_agree(_V2_CORE, {"played_eval": 10}))
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=_agree(_V2_CORE, {"played_eval": 20}))
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.MERGE_CONFLICT_KEEP
 
 
 # --- Mate-field dominance exclusion (Rule 5) --------------------------------
-def test_cp_only_browser_analysis_replaces_browser_game_with_mate():
+def test_cp_only_browser_analysis_multipv_replaces_browser_game_with_mate():
     values = _agree(_V2_WITH_MATE)
     existing = _browser(_V2_WITH_MATE, RESOLVER_COMPLETE, values=values)  # has mate counts
-    incoming = _browser_analysis(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)  # CP only
+    incoming = _browser_analysis_multipv(_V2_CORE, RESOLVER_COMPLETE_V2, values=values)  # CP only
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     # Without the mate strip this would be INCOMING_LESS_COMPLETE_KEEP.
     assert decision is Decision.REPLACE
     assert reason is Reason.DOMINATES_REPLACE
 
 
-def test_browser_analysis_with_mate_replaces_browser_game_cp_only():
+def test_browser_analysis_multipv_with_mate_replaces_browser_game_cp_only():
     values = _agree(_V2_WITH_MATE)
     existing = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)  # CP only
-    incoming = _browser_analysis(_V2_WITH_MATE, RESOLVER_COMPLETE_V2, values=values)  # has mate
+    incoming = _browser_analysis_multipv(_V2_WITH_MATE, RESOLVER_COMPLETE_V2, values=values)  # has mate
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.REPLACE
     assert reason is Reason.DOMINATES_REPLACE
 
 
-def test_cp_only_canonical_replaces_browser_analysis_with_mate():
+def test_cp_only_canonical_replaces_browser_analysis_multipv_with_mate():
     values = _agree(_V2_WITH_MATE)
-    existing = _browser_analysis(_V2_WITH_MATE, RESOLVER_COMPLETE_V2, values=values)
+    existing = _browser_analysis_multipv(_V2_WITH_MATE, RESOLVER_COMPLETE_V2, values=values)
     incoming = _canonical(_V2_CORE, contract=RESOLVER_COMPLETE_V2, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.REPLACE
@@ -435,7 +504,7 @@ def test_dominant_incoming_missing_non_mate_field_still_kept():
     """Exclusion is scoped to mate fields: a missing NON-mate field still blocks."""
     values = _agree(_V2_CORE)
     existing = _browser(_V2_CORE, RESOLVER_COMPLETE, values=values)
-    incoming = _browser_analysis(_V2_CORE - {"best_line_uci"}, RESOLVER_COMPLETE_V2, values=values)
+    incoming = _browser_analysis_multipv(_V2_CORE - {"best_line_uci"}, RESOLVER_COMPLETE_V2, values=values)
     decision, reason = decide_analysis_cache_replacement(existing, incoming)
     assert decision is Decision.KEEP
     assert reason is Reason.INCOMING_LESS_COMPLETE_KEEP

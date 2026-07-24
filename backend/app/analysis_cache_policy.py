@@ -17,11 +17,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from app.analysis_profiles import BROWSER_PROFILE_ID, IDENTITY_FIELDS, get_profile
+from app.analysis_profiles import get_profile
 from app.evidence_contracts import (
     contract_satisfied,
     is_strict_successor,
     is_superset_or_successor,
+)
+from app.evidence_policy import (
+    Capability,
+    EdgeKind,
+    OverlayMode,
+    Supersession,
+    compare_evidence_rows,
+    has_capability,
+    overlay_mode,
+    verify_identity,
 )
 
 # Evidence fields whose presence/agreement participate in completeness + merge.
@@ -61,7 +71,14 @@ class Reason(str, Enum):
     NEW_KEY = "new_key"
     INVALID_INCOMING_KEEP = "invalid_incoming_keep"
     DOMINATES_REPLACE = "dominates_replace"
+    # A corrective PROTOCOL_CORRECTION edge replaced the row (g-reuse-d21-search):
+    # the truthful visible-MultiPV protocol supersedes the defective hidden
+    # protocol for an exact key, independent of numeric strength. An accepted write.
+    PROTOCOL_CORRECTED_REPLACE = "protocol_corrected_replace"
     NON_AUTHORITATIVE_KEEP = "non_authoritative_keep"
+    # Incoming row claims a RETIRED (inactive) profile: kept (rejected), closing
+    # the fail-open retirement window (g-reuse-d21-search D6). NOT an accepted write.
+    INACTIVE_PROFILE_KEEP = "inactive_profile_keep"
     LEGACY_KEEP_NON_AUTH = "legacy_keep_non_auth"
     LEGACY_REPLACED_BY_AUTH = "legacy_replaced_by_auth"
     SAME_PROFILE_IDEMPOTENT = "same_profile_idempotent"
@@ -147,6 +164,22 @@ def incoming_is_valid(incoming: CacheRow) -> bool:
     return True
 
 
+def declared_profile_inactive(incoming: CacheRow) -> bool:
+    """True when the row claims a registered but RETIRED (inactive) profile.
+
+    Such a row is never stored — not even as a NEW_KEY insert (closes the
+    fail-open retirement window, g-reuse-d21-search D6). This is deliberately
+    SEPARATE from :func:`incoming_is_valid`: a retired-profile row's identity
+    verifies fine, so the audit anchor keeps treating it as valid (not
+    contaminated); it is simply refused storage. Callers that partition rows
+    before the replacement decision (the batch writer's insert path) must apply
+    this gate themselves so a retired row can never be inserted as a NEW_KEY
+    without ever reaching :func:`decide_analysis_cache_replacement`.
+    """
+    declared = get_profile(incoming.analysis_profile_id)
+    return declared is not None and not declared.active
+
+
 def decide_analysis_cache_replacement(
     existing: CacheRow | None,
     incoming: CacheRow,
@@ -155,6 +188,13 @@ def decide_analysis_cache_replacement(
     # claim is never stored.
     if not incoming_is_valid(incoming):
         return Decision.KEEP, Reason.INVALID_INCOMING_KEEP
+
+    # Validity: an incoming row claiming a RETIRED (inactive) profile is never
+    # stored — not even as a NEW_KEY insert. The endpoint producer discriminator
+    # already fails a stale client closed before the writer, so this is defense in
+    # depth; the batch writer applies the same gate on its insert path.
+    if declared_profile_inactive(incoming):
+        return Decision.KEEP, Reason.INACTIVE_PROFILE_KEEP
 
     # Rule 1: missing key.
     if existing is None:
@@ -219,12 +259,13 @@ def decide_analysis_cache_replacement(
             return Decision.REPLACE, Reason.LEGACY_REPLACED_BY_AUTH
         return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
 
-    # Rule 5: different family, incoming replacement-eligible.
-    incoming_profile = get_profile(incoming.analysis_profile_id)
-    has_dominates = bool(
-        incoming_profile and existing_eff in incoming_profile.dominates
-    )
-    if not has_dominates:
+    # Rule 5: different family, incoming replacement-eligible. The raw
+    # ``dominates`` lookup is rerouted through the shared comparator so the
+    # authority barrier and explicit edges (AUTHORITY / PROTOCOL_CORRECTION /
+    # TIER_BASELINE) live in one place (g-reuse-d21-search D6). The comparator
+    # gives ordering + edge kind; the completeness gate below is unchanged.
+    comparison = compare_evidence_rows(incoming, existing)
+    if comparison.outcome is not Supersession.A_SUPERSEDES:
         return Decision.KEEP, Reason.INCOMPATIBLE_KEEP
     contract_ok = is_superset_or_successor(
         incoming.evidence_contract_id, existing.evidence_contract_id
@@ -237,7 +278,15 @@ def decide_analysis_cache_replacement(
         existing.populated_fields - OPTIONAL_MATE_FIELDS
     )
     if contract_ok and superset_ok:
-        return Decision.REPLACE, Reason.DOMINATES_REPLACE
+        # PROTOCOL_CORRECTION gets its own reason so the corrective replacement of
+        # a defective hidden row is observable; AUTHORITY / TIER_BASELINE keep the
+        # historical dominates_replace reason for parity.
+        reason = (
+            Reason.PROTOCOL_CORRECTED_REPLACE
+            if comparison.kind is EdgeKind.PROTOCOL_CORRECTION
+            else Reason.DOMINATES_REPLACE
+        )
+        return Decision.REPLACE, reason
     return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
 
 
@@ -247,11 +296,12 @@ def populated_fields_of(data: dict) -> frozenset[str]:
 
 
 def _identity_verified(data: dict) -> bool:
-    """True when stored identity metadata matches the claimed profile."""
-    profile = get_profile(data.get("analysis_profile_id"))
-    if profile is None:
-        return False
-    return all(data.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+    """True when stored identity metadata matches the claimed profile.
+
+    Delegates to the single :func:`app.evidence_policy.verify_identity` so all
+    five call-sites share one implementation.
+    """
+    return verify_identity(data)
 
 
 def project_cache_row(data: dict) -> CacheRow:
@@ -286,12 +336,18 @@ def display_upgrade_eligible(row: CacheRow) -> bool:
     browser-analysis label over an already-displayed untrusted browser-game d17 label
     is not a trust escalation.
 
-    v2 (post-g-mk1d): swap the fixed ``dominates(browser-game-v1)`` test for the
-    row-level strength comparator so dynamic-depth browser-game rows rank too.
+    v2 (g-reuse-d21-search): the fixed ``dominates(browser-game-v1)`` test is
+    replaced by the capability model — ``has_capability(row, DISPLAY_OVERLAY)`` AND
+    the profile's ``OVERLAY_MODE == ALWAYS``. The truth table is IDENTICAL to the
+    old test (canonical + browser-analysis-v1 both grant DISPLAY_OVERLAY and are
+    ALWAYS; browser-game/jeffml/legacy grant nothing), now additionally admitting
+    the corrective browser-analysis-multipv-v2. DISPLAY_OVERLAY is
+    retirement-surviving, so a retired browser-analysis-v1 row still overlays.
     """
     if not (row.identity_verified and row.contract_satisfied):
         return False
     if "classification" not in row.populated_fields:
         return False
-    profile = get_profile(row.effective_profile_id())
-    return bool(profile and BROWSER_PROFILE_ID in profile.dominates)
+    if not has_capability(row, Capability.DISPLAY_OVERLAY):
+        return False
+    return overlay_mode(row.effective_profile_id()) is OverlayMode.ALWAYS

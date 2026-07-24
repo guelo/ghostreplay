@@ -588,7 +588,14 @@ def _run_probe(monkeypatch, tree: Path, scratch: Path, pycache: Path, command=No
 
 # HEAD, overlaid with exactly this task's inputs: the bytes the digest binds, plus the module
 # the probe imports to build its artifact. Nothing else — see worktree_rev.
-_E2E_OVERLAY = (*cal.SCORER_SOURCE_FILES, "backend/test_calibrate_opening_scores.py")
+_E2E_OVERLAY = (
+    *cal.SCORER_SOURCE_FILES,
+    "backend/test_calibrate_opening_scores.py",
+    # Data files analysis_profiles.py reads at import; their ``dominates`` sets must
+    # match evidence_policy.EDGES (g-reuse-d21-search added browser-analysis-multipv-v2).
+    "backend/app/canonical_profiles/canonical-sf18-depth24-v1.json",
+    "backend/app/canonical_profiles/canonical-sf18-depth24-linux-v1.json",
+)
 
 
 def _overlay_commit(repo_root: Path, rel_paths: Sequence[str], index_path: Path) -> str:

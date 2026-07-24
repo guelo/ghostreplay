@@ -37,6 +37,30 @@ function emit(response: WorkerResponse) {
   messageHandler(new MessageEvent('message', { data: response }))
 }
 
+// bestmove now carries an immutable completed-root snapshot (g-reuse-d21-search).
+// These legacy tests only assert move/cache behavior, so a minimal snapshot suffices.
+function bestmoveMsg(
+  id: string,
+  move: string,
+  lines: import('../workers/stockfishMessages').EngineInfo[] = [],
+): WorkerResponse {
+  return {
+    type: 'bestmove',
+    id,
+    move,
+    raw: `bestmove ${move}`,
+    snapshot: {
+      requestId: id,
+      fen: '',
+      bestMove: move,
+      lines,
+      limit: { type: 'movetime', value: 1200 },
+      multipv: 1,
+      searchmoves: null,
+    },
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -186,6 +210,61 @@ describe('useStockfishEngine', () => {
     logSpy.mockRestore()
   })
 
+  it('deep-freezes the resolved snapshot (runtime immutability)', async () => {
+    const useStockfishEngine = await loadHook()
+    const { result } = renderHook(() => useStockfishEngine())
+    act(() => emit({ type: 'ready' }))
+    const worker = workerInstances[0]
+
+    let promise!: Promise<{
+      move: string
+      raw: string
+      snapshot: {
+        lines: Array<{ pv?: string[]; score?: { value: number } }>
+      }
+    }>
+    await act(async () => {
+      promise = result.current.evaluatePosition('fen-frozen', { depth: 21, multipv: 3 })
+    })
+    const requestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
+    act(() => emit({ type: 'thinking', id: requestId, fen: 'fen-frozen' }))
+    act(() =>
+      emit({
+        type: 'bestmove',
+        id: requestId,
+        move: 'e2e4',
+        raw: 'bestmove e2e4',
+        snapshot: {
+          requestId,
+          fen: 'fen-frozen',
+          bestMove: 'e2e4',
+          lines: [{ depth: 21, multipv: 1, pv: ['e2e4', 'e7e5'], score: { type: 'cp', value: 30 } }],
+          limit: { type: 'depth', value: 21 },
+          multipv: 3,
+          searchmoves: null,
+        },
+      }),
+    )
+    const resolved = await promise
+    const snapshot = resolved.snapshot
+
+    expect(Object.isFrozen(snapshot)).toBe(true)
+    expect(Object.isFrozen(snapshot.lines)).toBe(true)
+    expect(Object.isFrozen(snapshot.lines[0])).toBe(true)
+    expect(Object.isFrozen(snapshot.lines[0].pv)).toBe(true)
+    expect(Object.isFrozen(snapshot.lines[0].score)).toBe(true)
+    // Runtime immutability, not just a readonly type: writes throw in strict mode.
+    expect(() => {
+      ;(snapshot.lines as unknown[]).push({})
+    }).toThrow()
+    expect(() => {
+      snapshot.lines[0].pv![0] = 'hacked'
+    }).toThrow()
+    expect(() => {
+      snapshot.lines[0].score!.value = 999
+    }).toThrow()
+  })
+
   it('does not reuse a single-pv cache entry for a later multipv request', async () => {
     const useStockfishEngine = await loadHook()
     const { result } = renderHook(() => useStockfishEngine())
@@ -219,7 +298,7 @@ describe('useStockfishEngine', () => {
         raw: 'info depth 21 multipv 1 score cp 30 pv e2e4',
       })
     })
-    act(() => emit({ type: 'bestmove', id: firstRequestId, move: 'e2e4', raw: 'bestmove e2e4' }))
+    act(() => emit(bestmoveMsg(firstRequestId, 'e2e4')))
     await act(async () => {
       await firstPromise
     })
@@ -242,7 +321,7 @@ describe('useStockfishEngine', () => {
     const secondRequestId = worker.postMessage.mock.calls.at(-1)?.[0]?.id as string
 
     act(() => emit({ type: 'thinking', id: secondRequestId, fen: 'fen-1' }))
-    act(() => emit({ type: 'bestmove', id: secondRequestId, move: 'e2e4', raw: 'bestmove e2e4' }))
+    act(() => emit(bestmoveMsg(secondRequestId, 'e2e4')))
     await act(async () => {
       await secondPromise
     })
@@ -309,7 +388,7 @@ describe('useStockfishEngine', () => {
         info: { depth: 21, multipv: 1, pv: ['d2d4'], score: { type: 'cp', value: 80 } },
         raw: 'info depth 21 multipv 1 score cp 80 pv d2d4',
       })
-      emit({ type: 'bestmove', id: firstRequestId, move: 'd2d4', raw: 'bestmove d2d4' })
+      emit(bestmoveMsg(firstRequestId, 'd2d4'))
     })
     expect(result.current.info).toEqual([])
 
@@ -321,7 +400,7 @@ describe('useStockfishEngine', () => {
         info: { depth: 21, multipv: 1, pv: ['g1f3'], score: { type: 'cp', value: 15 } },
         raw: 'info depth 21 multipv 1 score cp 15 pv g1f3',
       })
-      emit({ type: 'bestmove', id: secondRequestId, move: 'g1f3', raw: 'bestmove g1f3' })
+      emit(bestmoveMsg(secondRequestId, 'g1f3', [{ depth: 21, multipv: 1, pv: ['g1f3'], score: { type: 'cp', value: 15 } }]))
     })
 
     await expect(firstRejection).resolves.toMatchObject({
@@ -338,7 +417,7 @@ describe('useStockfishEngine', () => {
       cachedPromise = result.current.evaluatePosition('fen-2', { depth: 21 })
     })
 
-    await expect(cachedPromise).resolves.toEqual({ move: 'g1f3', raw: '' })
+    await expect(cachedPromise).resolves.toMatchObject({ move: 'g1f3', raw: '' })
     expect(worker.postMessage).toHaveBeenCalledWith({ type: 'command', command: 'stop' })
     expect(worker.postMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'evaluate-position', fen: 'fen-2' }),
@@ -368,7 +447,7 @@ describe('useStockfishEngine', () => {
         info: { depth: 21, multipv: 1, pv: ['c2c4'], score: { type: 'cp', value: 25 } },
         raw: 'info depth 21 multipv 1 score cp 25 pv c2c4',
       })
-      emit({ type: 'bestmove', id: cachedRequestId, move: 'c2c4', raw: 'bestmove c2c4' })
+      emit(bestmoveMsg(cachedRequestId, 'c2c4', [{ depth: 21, multipv: 1, pv: ['c2c4'], score: { type: 'cp', value: 25 } }]))
     })
     await act(async () => {
       await cachedSeedPromise
@@ -389,7 +468,7 @@ describe('useStockfishEngine', () => {
       cachedPromise = result.current.evaluatePosition('fen-cached', { depth: 21 })
     })
 
-    await expect(cachedPromise).resolves.toEqual({ move: 'c2c4', raw: '' })
+    await expect(cachedPromise).resolves.toMatchObject({ move: 'c2c4', raw: '' })
     await expect(activeRejection).resolves.toMatchObject({
       message: 'Stockfish evaluation superseded',
     })
@@ -402,7 +481,7 @@ describe('useStockfishEngine', () => {
         info: { depth: 21, multipv: 1, pv: ['e7e5'], score: { type: 'cp', value: 5 } },
         raw: 'info depth 21 multipv 1 score cp 5 pv e7e5',
       })
-      emit({ type: 'bestmove', id: activeRequestId, move: 'e7e5', raw: 'bestmove e7e5' })
+      emit(bestmoveMsg(activeRequestId, 'e7e5'))
     })
 
     expect(result.current.info[0]?.pv).toEqual(['c2c4'])

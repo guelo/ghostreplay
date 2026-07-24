@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.analysis_profiles import (
+    BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
     BROWSER_ANALYSIS_PROFILE_ID,
     BROWSER_PROFILE_ID,
     CANONICAL_PROFILE_ID,
@@ -22,6 +23,7 @@ from app.analysis_profiles import (
     stamp_profile_full,
 )
 from app.api.session import (
+    EVIDENCE_CLASSIFICATION_MISMATCH,
     EVIDENCE_CONTRACT_UNSATISFIED,
     EVIDENCE_DUPLICATE_KEY,
     EVIDENCE_INVALID_LEGALITY,
@@ -69,10 +71,13 @@ def _seed_browser_analysis_row(
     db, *, fen, move_uci, move_san="e4", best_move_uci="e2e4", best_move_san="e4",
     best_line_uci="e2e4 e7e5", played_eval=40, best_eval=40, eval_delta=0,
     classification="best", played_eval_mate=None, best_eval_mate=None,
+    profile=BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
 ):
-    """Seed an eligible, identity-stamped browser-analysis-v1 (resolver-complete-v2)
-    row — the durable evidence Part C overlays and a same-profile merge/idempotent
-    partner for Part B."""
+    """Seed an eligible, identity-stamped analysis row (resolver-complete-v2) — the
+    durable evidence Part C overlays and a same-profile merge/idempotent partner for
+    Part B. Defaults to the active browser-analysis-multipv-v2 successor; pass
+    ``profile=BROWSER_ANALYSIS_PROFILE_ID`` to seed a RETIRED hidden-analysis row
+    (still identity-verified, still DISPLAY_OVERLAY, correctively replaceable)."""
     data = dict(
         fen_before=fen,
         normalized_fen_before=normalize_fen(fen),
@@ -88,10 +93,10 @@ def _seed_browser_analysis_row(
         eval_delta=eval_delta,
         classification=classification,
         source="analysis",
-        analysis_profile_id=BROWSER_ANALYSIS_PROFILE_ID,
+        analysis_profile_id=profile,
         evidence_contract_id=RESOLVER_COMPLETE_V2,
     )
-    data.update(stamp_profile_full(BROWSER_ANALYSIS_PROFILE_ID))
+    data.update(stamp_profile_full(profile))
     row = AnalysisCache(**data)
     db.add(row)
     db.commit()
@@ -158,12 +163,20 @@ def _evidence_row(
     }
 
 
-def _post(client, auth_headers, session_id, rows, user_id=123):
+def _post(client, auth_headers, session_id, rows, user_id=123, producer="visible-multipv-v1"):
+    body: dict = {"rows": rows}
+    if producer is not _NO_PRODUCER:
+        body["producer"] = producer
     return client.post(
         f"/api/session/{session_id}/analysis-evidence",
-        json={"rows": rows},
+        json=body,
         headers=auth_headers(user_id=user_id),
     )
+
+
+# Sentinel so a test can post with NO producer field at all (stale-client path),
+# distinct from producer=None which would still send "producer": null.
+_NO_PRODUCER = object()
 
 
 def _seed_browser_game_row(db, *, fen, move_uci, played_eval=25, best_eval=25, **overrides):
@@ -267,32 +280,134 @@ def test_membership_keys_skip_legacy_null_fen():
 
 def test_build_evidence_cache_row_stamps_profile_and_derives_san():
     row = AnalysisEvidenceRow(**_evidence_row())
-    cache_row, reason = _build_evidence_cache_row(row)
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert reason is None
-    assert cache_row["analysis_profile_id"] == BROWSER_ANALYSIS_PROFILE_ID
+    assert cache_row["analysis_profile_id"] == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
     assert cache_row["source"] == "analysis"
     assert cache_row["evidence_contract_id"] == "resolver-complete-v2"
     # SAN derived server-side from the validated UCI.
     assert cache_row["move_san"] == "e4"
     assert cache_row["best_move_san"] == "e4"
     # Full pinned identity stamped so the row identity-verifies.
-    p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    p = get_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert cache_row["engine_build"] == p.engine_build
     assert cache_row["eval_file_id"] == p.eval_file_id
 
 
 def test_build_evidence_cache_row_rejects_illegal_best_move():
     row = AnalysisEvidenceRow(**_evidence_row(best_move_uci="e2e5"))  # illegal from start
-    cache_row, reason = _build_evidence_cache_row(row)
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert cache_row is None
     assert reason == EVIDENCE_INVALID_LEGALITY
 
 
 def test_build_evidence_cache_row_rejects_illegal_pv():
     row = AnalysisEvidenceRow(**_evidence_row(best_line_uci=("e2e4", "e2e4")))  # 2nd ply illegal
-    cache_row, reason = _build_evidence_cache_row(row)
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert cache_row is None
     assert reason == EVIDENCE_INVALID_LEGALITY
+
+
+# --------------------------------------------------------------------------- #
+# _build_evidence_cache_row — classification rederivation POV + mate coverage
+#
+# The stored evals are white-relative; the root classifier needs ROOT
+# side-to-move-relative scores. These pin the black-to-move POV flip and the
+# mate transitions, which the white-CP endpoint tests above never exercise. The
+# evals mirror the frontend encoding (analysisEvidence.ts): mate -> mateToCp
+# (MATE_BASE_CP=10000, decay 10), then white-relative sign flip.
+# --------------------------------------------------------------------------- #
+def _black_row(**overrides):
+    """A black-to-move evidence row: after 1.e4, best e7e5, an inferior a7a6."""
+    base = dict(
+        fen=FEN_AFTER_E4,
+        move_uci="a7a6",
+        best_move_uci="e7e5",
+        best_line_uci=("e7e5", "g1f3"),
+    )
+    base.update(overrides)
+    return _evidence_row(**base)
+
+
+def test_build_evidence_cache_row_black_root_normalizes_pov():
+    # White-relative: best -40 (black better), played +60 (white better). For BLACK
+    # the correct root-relative drop is an 'inaccuracy'. If the endpoint failed to
+    # flip POV it would derive 'excellent' and reject this row — so acceptance here
+    # is what proves the black normalization.
+    row = AnalysisEvidenceRow(
+        **_black_row(
+            played_eval=60, best_eval=-40, eval_delta=100, classification="inaccuracy"
+        )
+    )
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert reason is None
+    assert cache_row is not None
+    assert cache_row["classification"] == "inaccuracy"
+    assert cache_row["move_san"] == "a6"
+    assert cache_row["best_move_san"] == "e5"
+
+
+def test_build_evidence_cache_row_black_root_rejects_white_pov_label():
+    # Same black-to-move scores mislabeled with the un-flipped (white-POV) verdict
+    # 'excellent' -> rederivation catches the POV error and rejects.
+    row = AnalysisEvidenceRow(
+        **_black_row(
+            played_eval=60, best_eval=-40, eval_delta=100, classification="excellent"
+        )
+    )
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert cache_row is None
+    assert reason == EVIDENCE_CLASSIFICATION_MISMATCH
+
+
+def test_build_evidence_cache_row_black_root_mate_lost_is_blunder():
+    # Black had mate-in-2 (white-relative best_eval -9980, best_eval_mate -2) but the
+    # played move drops to a mere +50 for black (white-relative -50). Root-relative
+    # this is a MateLost -> 'blunder'. Pins the mate-transition branch for black.
+    row = AnalysisEvidenceRow(
+        **_black_row(
+            best_eval=-9980, best_eval_mate=-2,
+            played_eval=-50, played_eval_mate=None,
+            eval_delta=9930, classification="blunder",
+        )
+    )
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert reason is None
+    assert cache_row is not None
+    assert cache_row["classification"] == "blunder"
+    assert cache_row["best_eval_mate"] == -2
+
+
+def test_build_evidence_cache_row_black_root_mate_rejects_wrong_label():
+    # The same MateLost mislabeled 'excellent' (what an un-flipped POV would yield)
+    # is rejected.
+    row = AnalysisEvidenceRow(
+        **_black_row(
+            best_eval=-9980, best_eval_mate=-2,
+            played_eval=-50, played_eval_mate=None,
+            eval_delta=9930, classification="excellent",
+        )
+    )
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert cache_row is None
+    assert reason == EVIDENCE_CLASSIFICATION_MISMATCH
+
+
+def test_build_evidence_cache_row_white_root_mate_lost_is_blunder():
+    # White-to-move mate transition: white had mate-in-2 (best_eval 9980,
+    # best_eval_mate 2) but the played move drops to +50 -> MateLost 'blunder'.
+    row = AnalysisEvidenceRow(
+        **_evidence_row(
+            move_uci="e2e4", best_move_uci="d2d4", best_line_uci=("d2d4", "d7d5"),
+            best_eval=9980, best_eval_mate=2,
+            played_eval=50, played_eval_mate=None,
+            eval_delta=9930, classification="blunder",
+        )
+    )
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    assert reason is None
+    assert cache_row is not None
+    assert cache_row["classification"] == "blunder"
 
 
 def test_evidence_row_caps_best_line_length():
@@ -306,7 +421,7 @@ def test_evidence_row_caps_best_line_length():
 
 def test_build_evidence_cache_row_rejects_sparse_contract():
     row = AnalysisEvidenceRow(**_evidence_row(played_eval=None))
-    cache_row, reason = _build_evidence_cache_row(row)
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert cache_row is None
     assert reason == EVIDENCE_CONTRACT_UNSATISFIED
 
@@ -314,7 +429,7 @@ def test_build_evidence_cache_row_rejects_sparse_contract():
 def test_build_evidence_cache_row_rejects_inconsistent_delta():
     # White to move: expected delta = best - played = 70, submitted 5 -> rejected.
     row = AnalysisEvidenceRow(**_evidence_row(played_eval=30, best_eval=100, eval_delta=5))
-    cache_row, reason = _build_evidence_cache_row(row)
+    cache_row, reason = _build_evidence_cache_row(row, BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert cache_row is None
     assert reason == EVIDENCE_CONTRACT_UNSATISFIED
 
@@ -326,7 +441,7 @@ def test_prepare_dedupes_and_flags_not_in_session():
         AnalysisEvidenceRow(**_evidence_row()),  # duplicate key
         AnalysisEvidenceRow(**_evidence_row(fen=FEN_AFTER_E4, move_uci="e7e5")),  # not in session
     ]
-    prepared = _prepare_analysis_evidence_rows(rows, membership)
+    prepared = _prepare_analysis_evidence_rows(rows, membership, "visible-multipv-v1")
     assert prepared[0].reason is None and prepared[0].cache_row is not None
     assert prepared[1].reason == EVIDENCE_DUPLICATE_KEY
     assert prepared[2].reason == EVIDENCE_NOT_IN_SESSION
@@ -428,9 +543,9 @@ def test_endpoint_inserts_new_key_with_stamped_identity(client, auth_headers, cr
     assert resp.json()["results"][0]["reason"] == "new_key"
     row = _cache_row(db_session, START, "e2e4")
     assert row.source == "analysis"
-    assert row.analysis_profile_id == BROWSER_ANALYSIS_PROFILE_ID
+    assert row.analysis_profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
     assert row.evidence_contract_id == "resolver-complete-v2"
-    p = get_profile(BROWSER_ANALYSIS_PROFILE_ID)
+    p = get_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
     assert row.engine_build == p.engine_build
     assert row.eval_file_id == p.eval_file_id
     assert row.move_san == "e4"  # server-derived
@@ -445,8 +560,92 @@ def test_endpoint_replaces_browser_game_row(client, auth_headers, create_game_se
     assert resp.json()["results"][0]["reason"] == "dominates_replace"
     row = _cache_row(db_session, START, "e2e4")
     assert row.source == "analysis"
-    assert row.analysis_profile_id == BROWSER_ANALYSIS_PROFILE_ID
+    assert row.analysis_profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
     assert row.played_eval == 40
+
+
+def test_endpoint_correctively_replaces_retired_analysis_row(client, auth_headers, create_game_session, db_session):
+    # A stored RETIRED browser-analysis-v1 row (the defective hidden protocol) is
+    # correctively replaced by the visible-MultiPV successor for the exact key.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    _seed_browser_analysis_row(
+        db_session, fen=START, move_uci="e2e4", played_eval=25, best_eval=25,
+        profile=BROWSER_ANALYSIS_PROFILE_ID,
+    )
+    resp = _post(client, auth_headers, session_id, [_evidence_row(played_eval=40, best_eval=40)])
+    result = resp.json()["results"][0]
+    assert result["reason"] == "protocol_corrected_replace"
+    row = _cache_row(db_session, START, "e2e4")
+    assert row.analysis_profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+    assert row.played_eval == 40
+    # An accepted write emits an upgrade for the open MoveList.
+    assert result["upgrade"] is not None
+
+
+def test_endpoint_stale_client_no_producer_fails_closed(client, auth_headers, create_game_session, db_session):
+    # A stale client running the retired hidden worker sends no producer field ->
+    # stale_producer, HTTP 200, nothing written.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    resp = _post(client, auth_headers, session_id, [_evidence_row()], producer=_NO_PRODUCER)
+    assert resp.status_code == 200
+    result = resp.json()["results"][0]
+    assert result["reason"] == "stale_producer"
+    assert result["upgrade"] is None
+    assert _cache_row(db_session, START, "e2e4") is None
+
+
+def test_endpoint_unknown_producer_fails_closed(client, auth_headers, create_game_session, db_session):
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    resp = _post(client, auth_headers, session_id, [_evidence_row()], producer="something-else-v9")
+    assert resp.status_code == 200
+    result = resp.json()["results"][0]
+    assert result["reason"] == "unknown_producer"
+    assert _cache_row(db_session, START, "e2e4") is None
+
+
+def test_endpoint_rederives_and_rejects_mislabeled_best(client, auth_headers, create_game_session, db_session):
+    # Played e2e4 (in session) but the best move is d2d4 with a real drop, mislabeled
+    # 'best' -> classification == best requires played UCI == best UCI -> rejected.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    row = _evidence_row(
+        move_uci="e2e4", best_move_uci="d2d4", best_line_uci=("d2d4", "d7d5"),
+        played_eval=-100, best_eval=100, eval_delta=200, classification="best",
+    )
+    resp = _post(client, auth_headers, session_id, [row])
+    assert resp.json()["results"][0]["reason"] == "classification_mismatch"
+    assert _cache_row(db_session, START, "e2e4") is None
+
+
+def test_endpoint_rederives_and_rejects_mislabeled_lower_line(client, auth_headers, create_game_session, db_session):
+    # A genuine large drop (best d2d4 far better) mislabeled as merely 'good'.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    row = _evidence_row(
+        move_uci="e2e4", best_move_uci="d2d4", best_line_uci=("d2d4", "d7d5"),
+        played_eval=-250, best_eval=120, eval_delta=370, classification="good",
+    )
+    resp = _post(client, auth_headers, session_id, [row])
+    assert resp.json()["results"][0]["reason"] == "classification_mismatch"
+
+
+def test_endpoint_accepts_correctly_labeled_lower_line(client, auth_headers, create_game_session, db_session):
+    # A correctly-classified non-best move (small drop -> 'good') is accepted and
+    # rederivation agrees.
+    session_id = create_game_session(user_id=123)
+    _seed_e4_move(db_session, session_id)
+    row = _evidence_row(
+        move_uci="e2e4", best_move_uci="d2d4", best_line_uci=("d2d4", "d7d5"),
+        played_eval=10, best_eval=40, eval_delta=30, classification="good",
+    )
+    resp = _post(client, auth_headers, session_id, [row])
+    assert resp.json()["results"][0]["reason"] == "new_key"
+    stored = _cache_row(db_session, START, "e2e4")
+    assert stored is not None
+    assert stored.classification == "good"
 
 
 def test_endpoint_divergent_uci_inserts_new_key_and_leaves_old_row(client, auth_headers, create_game_session, db_session):
@@ -621,7 +820,7 @@ def test_endpoint_new_key_returns_upgrade(client, auth_headers, create_game_sess
     # White to move -> mover-relative == white-relative (no flip). Non-authoritative.
     assert up["eval_cp"] == 45
     assert up["authoritative"] is False
-    assert up["analysis_profile_id"] == BROWSER_ANALYSIS_PROFILE_ID
+    assert up["analysis_profile_id"] == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
     assert up["depth"] == 21
 
 

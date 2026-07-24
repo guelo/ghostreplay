@@ -47,7 +47,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 
-from app.analysis_profiles import IDENTITY_FIELDS, get_profile
+from app.evidence_policy import verify_identity
 from app.analysis_trust import (
     cache_row_as_position_dict,
     position_trust_flags,
@@ -80,10 +80,7 @@ _POSITION_WRITABLE_FIELDS = (
 
 
 def _identity_verified(data: dict) -> bool:
-    profile = get_profile(data.get("analysis_profile_id"))
-    if profile is None:
-        return False
-    return all(data.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+    return verify_identity(data)
 
 
 def _project_position(data: dict) -> PositionRow:

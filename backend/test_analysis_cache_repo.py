@@ -329,6 +329,80 @@ def test_profileless_legacy_row_still_inserts(file_db):
     s2.close()
 
 
+def _full_evidence_profile_row(profile_id):
+    """A valid, fully-stamped, contract-satisfying row under ``profile_id``.
+
+    Satisfies resolver-complete-v2 (all required evidence fields present) and
+    identity-verifies against the registry, so the ONLY reason the writer could
+    refuse it is the profile's active/retired state.
+    """
+    from app.analysis_profiles import stamp_profile_full
+    from app.evidence_contracts import RESOLVER_COMPLETE_V2
+
+    row = {
+        "fen_before": FEN,
+        "move_uci": "e2e4",
+        "move_san": "e4",
+        "source": "analysis",
+        "analysis_profile_id": profile_id,
+        "evidence_contract_id": RESOLVER_COMPLETE_V2,
+        "best_move_uci": "e2e4",
+        "best_move_san": "e4",
+        "best_line_uci": "e2e4 e7e5",
+        "played_eval": 30,
+        "best_eval": 30,
+        "eval_delta": 0,
+        "classification": "best",
+    }
+    row.update(stamp_profile_full(profile_id))
+    return row
+
+
+def test_retired_profile_row_never_inserted_as_new_key(file_db):
+    """A correctly-stamped RETIRED-profile row is refused at the insert path.
+
+    Regression for g-reuse-d21-search P1: the batch writer partitioned validity
+    with ``incoming_is_valid`` (which a retired row PASSES) and bulk-inserted
+    missing keys before the replacement decision ever ran, so a retired
+    browser-analysis-v1 row landed as a phantom NEW_KEY. The inactive gate must
+    run on the insert path against the real writer, not only in the pure policy.
+    """
+    from app.analysis_cache_policy import Reason
+    from app.analysis_profiles import BROWSER_ANALYSIS_PROFILE_ID, get_profile
+
+    assert not get_profile(BROWSER_ANALYSIS_PROFILE_ID).active  # precondition
+    _, Factory = file_db
+    row = _full_evidence_profile_row(BROWSER_ANALYSIS_PROFILE_ID)
+    s = Factory()
+    results = write_analysis_cache_rows(s, [row])
+    s.close()
+    assert all(r is Reason.INACTIVE_PROFILE_KEEP for _, r in results)
+    s2 = Factory()
+    assert s2.query(AnalysisCache).count() == 0  # nothing stored
+    s2.close()
+
+
+def test_active_successor_profile_row_inserts(file_db):
+    """Control: the ACTIVE successor is not caught by the retirement gate."""
+    from app.analysis_cache_policy import Reason
+    from app.analysis_profiles import (
+        BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+        get_profile,
+    )
+
+    assert get_profile(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID).active  # precondition
+    _, Factory = file_db
+    row = _full_evidence_profile_row(BROWSER_ANALYSIS_MULTIPV_PROFILE_ID)
+    s = Factory()
+    results = write_analysis_cache_rows(s, [row])
+    s.close()
+    assert all(r is Reason.NEW_KEY for _, r in results)
+    s2 = Factory()
+    stored = s2.query(AnalysisCache).one()
+    assert stored.analysis_profile_id == BROWSER_ANALYSIS_MULTIPV_PROFILE_ID
+    s2.close()
+
+
 def test_dedupe_rejects_differing_source(file_db):
     """Equal evidence but differing provenance is ambiguous -> reject the key."""
     from app.analysis_cache_policy import Reason

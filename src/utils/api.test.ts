@@ -1161,7 +1161,9 @@ describe('submitAnalysisEvidence', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ rows: [row] }),
+        // The endpoint-controlled producer discriminator is sent so a stale bundle
+        // that omits it fails closed server-side (g-reuse-d21-search §6.3).
+        body: JSON.stringify({ rows: [row], producer: 'visible-multipv-v1' }),
       }),
     )
     expect(results).toEqual([{ fen: row.fen, move_uci: 'e2e4', reason: 'new_key' }])

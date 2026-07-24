@@ -22,5 +22,5 @@
   "analyzer_protocol_version": "analyzer-v1",
   "authoritative": true,
   "active": true,
-  "dominates": ["browser-game-v1", "browser-analysis-v1", "jeffml-scores-v1"]
+  "dominates": ["browser-game-v1", "browser-analysis-v1", "browser-analysis-multipv-v2", "jeffml-scores-v1"]
 }

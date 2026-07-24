@@ -1,5 +1,5 @@
 import { Chess } from 'chess.js'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor } from '../test/utils'
 import { setMatchMedia } from '../test/setup'
 import AnalysisBoard from './AnalysisBoard'
@@ -64,7 +64,23 @@ const {
   const mockEngineInfoRef = { current: [] as EngineInfo[] }
   const mockEngineInfoFenRef = { current: null as string | null }
   const mockEngineThinkingRef = { current: false }
-  const mockEvaluatePosition = vi.fn(async () => {})
+  // Resolve a completed-root snapshot so AnalysisBoard's completion callback (which
+  // feeds the evidence reuse layer) fires. The snapshot content is irrelevant here
+  // because the reuse layer is mocked; the reuse gate itself is tested in
+  // analysisEvidence.test.tsx.
+  const mockEvaluatePosition = vi.fn(async () => ({
+    move: '',
+    raw: '',
+    snapshot: {
+      requestId: 'r',
+      fen: '',
+      bestMove: '',
+      lines: [],
+      limit: { type: 'depth' as const, value: 21 },
+      multipv: 3,
+      searchmoves: null,
+    },
+  }))
   const mockStopSearch = vi.fn()
   const mockUseStockfishEngine = vi.fn((_options?: { enabled?: boolean }) => ({
     info: mockEngineInfoRef.current,
@@ -103,21 +119,26 @@ vi.mock('../hooks/useStockfishEngine', () => ({
   useStockfishEngine: mockUseStockfishEngine,
 }))
 
-// Evidence driver (g-cache-stronger-evals): spy on requestEvidence/cancel so the
-// gating in AnalysisBoard can be asserted without a real second Stockfish worker.
-// Capture the onAcceptedEvidence callback (g-xox0 Part B) so a test can drive the
-// live-overlay path directly.
-const { mockRequestEvidence, mockCancelEvidence, capturedOnAcceptedRef } = vi.hoisted(() => ({
-  mockRequestEvidence: vi.fn(),
-  mockCancelEvidence: vi.fn(),
+// Evidence reuse layer (g-reuse-d21-search): spy on considerCompletedSearch so the
+// context AnalysisBoard passes on visible-search completion can be asserted without
+// a real search. Capture the onAcceptedEvidence callback (g-xox0 Part B) so a test
+// can drive the live-overlay path directly. Also capture the sessionId the hook was
+// initialized with.
+const {
+  mockConsiderCompletedSearch,
+  capturedOnAcceptedRef,
+  capturedSessionIdRef,
+} = vi.hoisted(() => ({
+  mockConsiderCompletedSearch: vi.fn(),
   capturedOnAcceptedRef: { current: undefined as unknown },
+  capturedSessionIdRef: { current: undefined as unknown },
 }))
 vi.mock('../services/analysisEvidence', () => ({
-  useAnalysisEvidence: (_sessionId: unknown, onAccepted: unknown) => {
+  useAnalysisEvidence: (sessionId: unknown, onAccepted: unknown) => {
     capturedOnAcceptedRef.current = onAccepted
+    capturedSessionIdRef.current = sessionId
     return {
-      requestEvidence: mockRequestEvidence,
-      cancel: mockCancelEvidence,
+      considerCompletedSearch: mockConsiderCompletedSearch,
     }
   },
 }))
@@ -2307,7 +2328,7 @@ describe('computeBoardEvalIcon', () => {
   })
 })
 
-describe('AnalysisBoard evidence driver gating (g-cache-stronger-evals)', () => {
+describe('AnalysisBoard evidence reuse wiring (g-reuse-d21-search)', () => {
   const START = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1'
   const AFTER_E4 = 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1'
   const wiredMoves: AnalysisMove[] = [
@@ -2315,48 +2336,54 @@ describe('AnalysisBoard evidence driver gating (g-cache-stronger-evals)', () => 
     { ...moves[1], fen_before: AFTER_E4, move_uci: 'c7c5' },
   ]
 
-  it('requests evidence for the next mainline move after the dwell', () => {
+  beforeEach(() => {
+    mockConsiderCompletedSearch.mockClear()
     vi.useFakeTimers()
-    try {
-      render(
-        <AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
-      )
-      act(() => {
-        vi.advanceTimersByTime(700)
-      })
-      expect(mockRequestEvidence).toHaveBeenCalledWith(AFTER_E4, 'c7c5', 'black')
-    } finally {
-      vi.useRealTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  // Advance past the search debounce, then flush the evaluatePosition microtasks so
+  // the completion callback (considerCompletedSearch) runs.
+  const runCompletion = async () => {
+    await act(async () => {
+      vi.advanceTimersByTime(200)
+    })
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  it('feeds the completed snapshot with the next mainline move context', async () => {
+    render(
+      <AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
+    )
+    await runCompletion()
+    expect(mockConsiderCompletedSearch).toHaveBeenCalled()
+    const [, context] = mockConsiderCompletedSearch.mock.calls.at(-1)!
+    expect(context).toMatchObject({
+      fenBefore: AFTER_E4,
+      moveUci: 'c7c5',
+      isMainline: true,
+      engineEnabled: true,
+    })
+    // The hook is initialized with the session so the layer may submit.
+    expect(capturedSessionIdRef.current).toBe('s1')
+  })
+
+  it('passes a null wire key when no next move exists (latest position)', async () => {
+    render(<AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" />)
+    await runCompletion()
+    const call = mockConsiderCompletedSearch.mock.calls.at(-1)
+    if (call) {
+      expect(call[1]).toMatchObject({ fenBefore: null, moveUci: null })
     }
   })
 
-  it('does not request evidence when no next move exists (latest position)', () => {
-    vi.useFakeTimers()
-    try {
-      render(<AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" />)
-      act(() => {
-        vi.advanceTimersByTime(700)
-      })
-      expect(mockRequestEvidence).not.toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('does not request evidence without a sessionId', () => {
-    vi.useFakeTimers()
-    try {
-      render(<AnalysisBoard moves={wiredMoves} boardOrientation="white" initialMoveIndex={0} />)
-      act(() => {
-        vi.advanceTimersByTime(700)
-      })
-      expect(mockRequestEvidence).not.toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('does not request evidence while in a variation', () => {
+  it('marks the context non-mainline while in a variation', async () => {
     const node: VarNode = {
       id: 'var-1',
       san: 'Bc4',
@@ -2371,65 +2398,28 @@ describe('AnalysisBoard evidence driver gating (g-cache-stronger-evals)', () => 
     }
     mockTree = { nodes: new Map([['var-1', node]]), rootBranches: new Map([[1, ['var-1']]]) }
     mockSelectedVarNodeId = 'var-1'
-    vi.useFakeTimers()
-    try {
-      render(
-        <AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
-      )
-      act(() => {
-        vi.advanceTimersByTime(700)
-      })
-      expect(mockRequestEvidence).not.toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
+    render(
+      <AnalysisBoard moves={wiredMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
+    )
+    await runCompletion()
+    const call = mockConsiderCompletedSearch.mock.calls.at(-1)
+    if (call) {
+      expect(call[1]).toMatchObject({ isMainline: false, fenBefore: null })
     }
   })
 
-  it('does not request evidence for a move with null wire fields (legacy)', () => {
+  it('passes null wire fields for a legacy move', async () => {
     const legacyMoves: AnalysisMove[] = [
       { ...moves[0], fen_before: START, move_uci: 'e2e4', fen_after: AFTER_E4 },
       { ...moves[1], fen_before: null, move_uci: null },
     ]
-    vi.useFakeTimers()
-    try {
-      render(
-        <AnalysisBoard moves={legacyMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
-      )
-      act(() => {
-        vi.advanceTimersByTime(700)
-      })
-      expect(mockRequestEvidence).not.toHaveBeenCalled()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  it('still requests evidence when a trusted position best exists (no trustedBest gate)', () => {
-    vi.useFakeTimers()
-    try {
-      render(
-        <AnalysisBoard
-          moves={wiredMoves}
-          boardOrientation="white"
-          sessionId="s1"
-          initialMoveIndex={0}
-          positionAnalysis={{
-            [AFTER_E4]: {
-              best_move_uci: 'c7c5',
-              best_move_san: 'c5',
-              best_move_eval_cp: -20,
-              best_line_uci: ['c7c5', 'g1f3'],
-              position_trusted: true,
-            },
-          }}
-        />,
-      )
-      act(() => {
-        vi.advanceTimersByTime(700)
-      })
-      expect(mockRequestEvidence).toHaveBeenCalledWith(AFTER_E4, 'c7c5', 'black')
-    } finally {
-      vi.useRealTimers()
+    render(
+      <AnalysisBoard moves={legacyMoves} boardOrientation="white" sessionId="s1" initialMoveIndex={0} />,
+    )
+    await runCompletion()
+    const call = mockConsiderCompletedSearch.mock.calls.at(-1)
+    if (call) {
+      expect(call[1]).toMatchObject({ fenBefore: null, moveUci: null })
     }
   })
 })

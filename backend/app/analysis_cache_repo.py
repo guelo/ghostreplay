@@ -28,6 +28,7 @@ from app.analysis_cache_policy import (
     Decision,
     Reason,
     decide_analysis_cache_replacement,
+    declared_profile_inactive,
     incoming_is_valid,
     project_cache_row,
 )
@@ -482,6 +483,13 @@ def _run_batch(
         proj = project_cache_row(data)
         if not incoming_is_valid(proj):
             reason_by_key[key] = Reason.INVALID_INCOMING_KEEP
+            continue
+        # A row claiming a RETIRED profile is refused storage BEFORE the insert,
+        # mirroring decide_analysis_cache_replacement's gate. Without this the
+        # insert path would persist it as a phantom NEW_KEY for a missing key,
+        # never reaching the replacement decision (g-reuse-d21-search P1).
+        if declared_profile_inactive(proj):
+            reason_by_key[key] = Reason.INACTIVE_PROFILE_KEEP
             continue
         valid_rows.append(
             {"data": data, "key": key, "proj": proj, "cols": _insert_cols(data)}

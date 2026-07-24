@@ -52,8 +52,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from app.analysis_cache_policy import incoming_is_valid, populated_fields_of
-from app.analysis_profiles import IDENTITY_FIELDS, get_profile
+from app.analysis_profiles import get_profile
 from app.evidence_contracts import RESOLVER_COMPLETE_V2, contract_satisfied
+from app.evidence_policy import verify_identity
 
 # Evidence fields carried in the projection for overlap/agreement checks.
 _EVIDENCE_FIELDS = (
@@ -88,10 +89,7 @@ LEGACY_INVALIDATE = frozenset({Category.LEGACY_INVALID})
 
 
 def _identity_verified(data: dict) -> bool:
-    profile = get_profile(data.get("analysis_profile_id"))
-    if profile is None:
-        return False
-    return all(data.get(f) == getattr(profile, f) for f in IDENTITY_FIELDS)
+    return verify_identity(data)
 
 
 def _row_projection(data: dict):

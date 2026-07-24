@@ -15,6 +15,7 @@ import {
   isWithinRecordingMoveCap,
   classifyMove,
   classifyMoveAdvanced,
+  classifyRootAlternative,
   canResolvePositionAnalysis,
   canResolveMoveAnalysis,
   isTrustedPositionHit,
@@ -1089,6 +1090,9 @@ describe('isTrustedMoveHit', () => {
 // Shared golden vectors — same fixture drives backend test_move_classification.py
 // so the two classifier implementations cannot drift.
 import classificationVectors from '../../backend/tests/fixtures/classification_vectors.json'
+// Root-alternative golden vectors — same fixture drives the Python
+// classify_root_alternative so the two implementations cannot drift.
+import rootClassificationVectors from '../../backend/tests/fixtures/root_classification_vectors.json'
 // Shared per-move CPL cap vectors (g-no51) — same fixture drives backend
 // test_centipawn_loss.py so evalLoss and centipawn_loss cannot drift.
 import cplCapVectors from '../../backend/tests/fixtures/cpl_cap_vectors.json'
@@ -1108,6 +1112,27 @@ describe('classifyMoveAdvanced golden vectors (shared with backend)', () => {
           prevScore: c.prevScore,
           nextScore: c.nextScore,
           scorePov: c.scorePov,
+          mover: c.mover,
+          isBestMove: c.isBest,
+        }),
+      ).toBe(c.expected)
+    })
+  }
+})
+
+describe('classifyRootAlternative golden vectors (shared with backend)', () => {
+  for (const [i, c] of (rootClassificationVectors.cases as Array<{
+    bestScore: EngineScore
+    playedScore: EngineScore
+    mover: 'white' | 'black'
+    isBest: boolean
+    expected: string
+  }>).entries()) {
+    it(`case ${i}: ${c.expected}`, () => {
+      expect(
+        classifyRootAlternative({
+          bestScore: c.bestScore,
+          playedScore: c.playedScore,
           mover: c.mover,
           isBestMove: c.isBest,
         }),

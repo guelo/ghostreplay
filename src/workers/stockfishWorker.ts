@@ -3,7 +3,10 @@
 import stockfishEngineUrl from 'stockfish/bin/stockfish-18-lite-single.js?url'
 import stockfishWasmUrl from 'stockfish/bin/stockfish-18-lite-single.wasm?url'
 import type {
+  CompletedRootAnalysis,
+  EngineInfo,
   EvaluatePositionMessage,
+  SearchLimit,
   WorkerRequest,
   WorkerResponse,
 } from './stockfishMessages'
@@ -17,6 +20,47 @@ let runningSearch: EvaluatePositionMessage | null = null
 let engineConfigured = false
 const queuedOperations: Array<() => void> = []
 const queuedEvaluations: EvaluatePositionMessage[] = []
+// PV-bearing info slots of the CURRENT running search, keyed by one-based UCI
+// multipv index. Reset per search start; the latest line for each slot wins.
+// Used to build the atomic completed snapshot at bestmove (g-reuse-d21-search §3).
+let runningSlots = new Map<number, EngineInfo>()
+
+// Build one self-consistent copy from the accumulated slots — no references to the
+// still-mutating accumulator survive. Slots are emitted in ascending multipv order.
+function buildCompletedSnapshot(
+  request: EvaluatePositionMessage,
+  slots: Map<number, EngineInfo>,
+  bestMove: string,
+): CompletedRootAnalysis {
+  const lines: EngineInfo[] = Array.from(slots.keys())
+    .sort((a, b) => a - b)
+    .map((multipv) => {
+      const info = slots.get(multipv) as EngineInfo
+      return {
+        depth: info.depth,
+        score: info.score ? { ...info.score } : undefined,
+        pv: info.pv ? [...info.pv] : undefined,
+        multipv: info.multipv,
+      }
+    })
+
+  const limit: SearchLimit = request.depth
+    ? { type: 'depth', value: request.depth }
+    : { type: 'movetime', value: request.movetime ?? 1500 }
+
+  return {
+    requestId: request.id,
+    fen: request.fen,
+    bestMove,
+    lines,
+    limit,
+    multipv: request.multipv ?? 1,
+    searchmoves:
+      request.searchmoves && request.searchmoves.length > 0
+        ? [...request.searchmoves]
+        : null,
+  }
+}
 
 // Stockfish's browser worker bootstrap reads the wasm asset from location.hash.
 // This is a private package contract, so upgrades must be revalidated with the
@@ -84,6 +128,7 @@ function startEvaluation(request: EvaluatePositionMessage) {
   }
 
   runningSearch = request
+  runningSlots = new Map()
   ctx.postMessage({ type: 'thinking', id: request.id, fen: request.fen } satisfies WorkerResponse)
 
   const movesSegment =
@@ -144,15 +189,20 @@ function handleEngineLine(line: string) {
     if (runningSearch) {
       const parts = line.split(' ')
       const move = parts[1] ?? ''
+      // Build the atomic completed snapshot from the accumulated slots BEFORE
+      // clearing per-search state, associating every line with this request id.
+      const snapshot = buildCompletedSnapshot(runningSearch, runningSlots, move)
       ctx.postMessage({
         type: 'bestmove',
         id: runningSearch.id,
         move,
         raw: line,
+        snapshot,
       } satisfies WorkerResponse)
     }
 
     runningSearch = null
+    runningSlots = new Map()
 
     const nextRequest = queuedEvaluations.shift()
     if (nextRequest) {
@@ -165,6 +215,11 @@ function handleEngineLine(line: string) {
   const info = parseUciInfoLine(line)
 
   if (info && runningSearch) {
+    // Accumulate only PV-bearing lines by one-based multipv index for the snapshot;
+    // the latest line for each slot wins (deeper iterations overwrite shallower).
+    if (info.pv && info.pv.length > 0) {
+      runningSlots.set(info.multipv ?? 1, info)
+    }
     ctx.postMessage({ type: 'info', id: runningSearch.id, info, raw: line } satisfies WorkerResponse)
   }
 }
@@ -183,6 +238,7 @@ ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
         sendEngineCommand('ucinewgame')
       })
       runningSearch = null
+      runningSlots = new Map()
       queuedEvaluations.length = 0
       break
     }
@@ -206,6 +262,7 @@ ctx.addEventListener('message', (event: MessageEvent<WorkerRequest>) => {
       engine?.removeEventListener('error', handleEngineError)
       engine?.terminate()
       runningSearch = null
+      runningSlots = new Map()
       queuedEvaluations.length = 0
       engine = null
       engineReady = false

@@ -6,12 +6,13 @@ import { Chessboard, defaultArrowOptions } from "react-chessboard";
 import type { PieceDropHandlerArgs, SquareHandlerArgs } from "react-chessboard";
 import type { AnalysisMove, MoveUpgrade, PositionAnalysis } from "../utils/api";
 import type { HighlightedMoves } from "../utils/gameStats";
-import type { EngineInfo } from "../workers/stockfishMessages";
+import type { CompletedRootAnalysis, EngineInfo } from "../workers/stockfishMessages";
 import type { VariationNodeId, VarNode } from "../types/variationTree";
 import { useMoveAnalysis } from "../hooks/useMoveAnalysis";
 import { useVariationTree } from "../hooks/useVariationTree";
 import { useStockfishEngine } from "../hooks/useStockfishEngine";
 import { useAnalysisEvidence } from "../services/analysisEvidence";
+import type { EvidenceReuseContext } from "../services/analysisEvidence";
 import { createAnalysisStore } from "../stores/createAnalysisStore";
 import { useStore } from "zustand";
 import { isTrustedExactBestHit, playerToWhite, playerToWhiteMate, toWhitePerspective } from "../workers/analysisUtils";
@@ -43,7 +44,6 @@ const ENGINE_EVALUATION_DEBOUNCE_MS = 120;
 // Dwell before the evidence driver starts a depth-21 search on the displayed
 // mainline position (g-cache-stronger-evals). Long enough that scrubbing through
 // moves does not spawn a search per intermediate position.
-const EVIDENCE_DWELL_MS = 700;
 // Narrow viewports sit both material displays on one row, so each needs a label
 // to say whose captures they are; wider layouts hide these (CSS).
 const PLAYER_MATERIAL_LABEL = "You:";
@@ -312,44 +312,32 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     [],
   );
 
-  // Analysis-board evidence driver (g-cache-stronger-evals): persist stronger
-  // depth-21 evidence for the mainline move the user is dwelling on. No-ops when
-  // sessionId is absent (drill/ephemeral boards). On an accepted write it fires
-  // handleAcceptedEvidence so the open MoveList patches immediately (Part B).
-  const { requestEvidence: requestAnalysisEvidence, cancel: cancelAnalysisEvidence } =
-    useAnalysisEvidence(sessionId, handleAcceptedEvidence);
-
-  // Drive one evidence search for the NEXT mainline move after a dwell. Fires only
-  // on the mainline (never a variation), only when a real next move exists with
-  // exact wire keys, and only once the display engine has settled — so the two
-  // engines do not fight. Navigation reruns this effect: cleanup cancels any
-  // in-flight evidence search so an interrupted search never submits.
-  useEffect(() => {
-    if (!sessionId || isInVariation) return;
-    const nextMove = moves[effectiveIndex + 1];
-    const fen = nextMove?.fen_before;
-    const move = nextMove?.move_uci;
-    // Skip legacy moves with null wire fields; the driver never reconstructs them.
-    if (!fen || !move) return;
-    // Defer to the display engine: while it is searching, wait for it to settle.
-    if (engineThinking) return;
-    const playerColor = fenSideToMove(fen) === "w" ? "white" : "black";
-    const timer = window.setTimeout(() => {
-      requestAnalysisEvidence(fen, move, playerColor);
-    }, EVIDENCE_DWELL_MS);
-    return () => {
-      clearTimeout(timer);
-      cancelAnalysisEvidence();
-    };
-  }, [
+  // Analysis-board evidence reuse (g-reuse-d21-search): REUSE the completed visible
+  // depth-21 MultiPV search — no second worker, no extra search. On an accepted
+  // write it fires handleAcceptedEvidence so the open MoveList patches immediately
+  // (Part B). No-ops when sessionId is absent (drill/ephemeral boards).
+  const { considerCompletedSearch } = useAnalysisEvidence(
     sessionId,
-    isInVariation,
-    effectiveIndex,
-    moves,
-    engineThinking,
-    requestAnalysisEvidence,
-    cancelAnalysisEvidence,
-  ]);
+    handleAcceptedEvidence,
+  );
+
+  // The evidence context for the NEXT mainline move after the displayed position,
+  // read at completion time (via a ref) so a stale search that settles after the
+  // user has navigated away is ignored (its snapshot.fen no longer matches the
+  // current fenBefore). Legacy moves with null wire fields are never reconstructed.
+  const evidenceNextMove = isInVariation ? undefined : moves[effectiveIndex + 1];
+  const evidenceContext: EvidenceReuseContext = {
+    fenBefore: evidenceNextMove?.fen_before ?? null,
+    moveUci: evidenceNextMove?.move_uci ?? null,
+    isMainline: !isInVariation,
+    engineEnabled: showEngineArrows,
+  };
+  const evidenceContextRef = useRef(evidenceContext);
+  // Sync in an effect (not during render): a visible search always completes after
+  // the commit, so the completion callback reads the up-to-date context.
+  useEffect(() => {
+    evidenceContextRef.current = evidenceContext;
+  });
 
   const traceNavigation = useCallback(
     (toIndex: number | null) => {
@@ -626,15 +614,34 @@ const AnalysisBoard = forwardRef<AnalysisBoardRef, AnalysisBoardProps>(({
     stopSearch();
 
     const timerId = window.setTimeout(() => {
+      // On completion, feed the immutable snapshot to the evidence reuse layer with
+      // the CURRENT context (via ref). The restricted MultiPV-2 search is skipped by
+      // the layer's eligibility gate; only the unrestricted MultiPV-3 search yields
+      // reusable evidence (g-reuse-d21-search §4). Failures stay best-effort.
+      const onCompleted = (result: { snapshot: CompletedRootAnalysis }) => {
+        considerCompletedSearch(result.snapshot, evidenceContextRef.current);
+      };
       if (trustedBest && searchmoves && searchmoves.length > 0) {
-        evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 2, searchmoves }).catch(() => {});
+        evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 2, searchmoves })
+          .then(onCompleted)
+          .catch(() => {});
       } else {
-        evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 3 }).catch(() => {});
+        evaluatePosition(displayedFen, { depth: ENGINE_SEARCH_DEPTH, multipv: 3 })
+          .then(onCompleted)
+          .catch(() => {});
       }
     }, ENGINE_EVALUATION_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timerId);
-  }, [displayedFen, evaluatePosition, showEngineArrows, trustedBest, searchmoves, stopSearch]);
+  }, [
+    displayedFen,
+    evaluatePosition,
+    showEngineArrows,
+    trustedBest,
+    searchmoves,
+    stopSearch,
+    considerCompletedSearch,
+  ]);
 
   // Whether the restricted search path is active (same condition as the engine request)
   const useRestrictedSearch = !!(
