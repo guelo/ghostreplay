@@ -44,7 +44,10 @@ git config core.hooksPath .githooks
 Before every push, the hook runs ESLint with zero warnings allowed, the
 TypeScript/production build, all Vitest tests, all non-screenshot Playwright
 tests, and the full backend pytest suite with Python warnings treated as
-errors. The backend virtual environment must exist at `backend/.venv`.
+errors. Every gate runs even if an earlier one fails. Combined stdout/stderr
+for each command is written to `.test-results/pre-push/`, and the final
+summary links each result to its output file. The backend virtual environment must
+exist at `backend/.venv`.
 
 The default dev command prints the local URL in the terminal. Open it in a browser and you should see the home page at `/`. Use the **Play a Game** CTA (or navigate to `/game`) to launch gameplay.
 

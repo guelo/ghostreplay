@@ -34,6 +34,7 @@ backend/.env
 __pycache__/
 *.py[cod]
 .venv/
+.test-results/
 
 # Models
 maia2/maia2_models/
