@@ -42,7 +42,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from dataclasses import dataclass, field, replace
+from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -254,8 +254,14 @@ def grade_rank(letter: str) -> int:
     a finite 0..100 number), so this covers A-F only and fails closed on anything
     else rather than silently ranking it. (The frontend gradeRank mirror returns null
     + reject-before-compare instead; that is g-p4ih-cutoff-fixture's.)
+
+    Fails closed with an explicit ``raise`` (NOT ``assert``): this function is on the
+    select_candidate decision path (every derived-grade gate ranks letters through it),
+    and ``python -O`` strips ``assert`` — degrading the promised fail-closed guard to a
+    bare ``KeyError`` from the dict lookup. g-p4ih-selection's -O claim depends on this.
     """
-    assert letter in GRADE_RANK, f"grade_rank expects an A-F grade; got {letter!r}"
+    if letter not in GRADE_RANK:
+        raise ValueError(f"grade_rank expects an A-F grade; got {letter!r}")
     return GRADE_RANK[letter]
 
 
@@ -455,8 +461,15 @@ class CutoffCollision(ValueError):
 
     ALWAYS raised (never a sentinel return) so g-p4ih-selection can catch it and
     record ``rejection_reason="cutoff_collision"``; the candidate is rejected, its
-    boundaries are never nudged apart.
+    boundaries are never nudged apart. Carries the collided ``Cutoffs`` on ``.cutoffs``
+    so the selector can populate cutoff_derivation's four boundary GateChecks from the
+    real (non-strict) boundary integers WITHOUT re-calling the g-p4ih.1.2-internal
+    ``_percentiles`` primitive.
     """
+
+    def __init__(self, message: str, cutoffs: "Cutoffs | None" = None) -> None:
+        super().__init__(message)
+        self.cutoffs = cutoffs
 
 
 @dataclass(frozen=True)
@@ -508,11 +521,13 @@ def derive_cutoffs(scores: list[float]) -> Cutoffs:
     if not (cutoffs.d < cutoffs.c < cutoffs.b < cutoffs.a):
         raise CutoffCollision(
             f"non-strict grade ordering d<c<b<a: {cutoffs.d} < {cutoffs.c} < "
-            f"{cutoffs.b} < {cutoffs.a}"
+            f"{cutoffs.b} < {cutoffs.a}",
+            cutoffs,
         )
     if not cutoffs.alert < cutoffs.watch:
         raise CutoffCollision(
-            f"non-strict tone ordering alert<watch: {cutoffs.alert} < {cutoffs.watch}"
+            f"non-strict tone ordering alert<watch: {cutoffs.alert} < {cutoffs.watch}",
+            cutoffs,
         )
     return cutoffs
 
@@ -5067,6 +5082,1193 @@ def build_winner_binding(
         release_guard_opening_key=prov.release_guard_opening_key,
         release_guard_child_opening_key=prov.release_guard_child_opening_key,
     )
+
+
+# ---------------------------------------------------------------------------
+# Candidate evaluation + SelectionResult semantics (g-p4ih-selection)
+#
+# select_candidate decides ship / no-ship from already-bound SelectionInputs as a
+# SIDE-EFFECT-FREE, DETERMINISTIC-within-the-runtime selector whose returned dataclass
+# IS the release artifact (never an ``assert`` that ``python -O`` strips). It runs the
+# fail-closed binding checks 0-5 BEFORE any gate, then the candidate-selection procedure
+# (raw admissibility -> provisional cutoffs -> derived-grade gates -> total-order winner
+# -> no-ship). Every validation on this path is ``if ... raise`` / a recorded GateCheck.
+# ---------------------------------------------------------------------------
+
+
+class SelectionBindingError(Exception):
+    """The ONE selector-facing binding failure. Every fail-closed check 0-5 raises this,
+    naming the single fact that did not hold, so a caller's ``except SelectionBindingError``
+    is exhaustive over binding failures. The two g-p4ih-artifact helpers check 3 delegates
+    to raise ReleaseGuardShapeError; those are re-raised as SelectionBindingError with the
+    original preserved as ``__cause__``. Nothing escapes as a bare ValueError/TypeError."""
+
+
+# The NOT-A-ready grades as a TUPLE (never the display string "{C,D,F}"): the "in" gates
+# are true membership, so ``"C" in NOT_A_READY_GRADES`` is a grade test, not a substring
+# test that any single character appearing in the punctuation would pass.
+NOT_A_READY_GRADES: tuple[str, ...] = ("C", "D", "F")
+
+# Float-reassociation slack on the report-stage identity (reported == pre_fold_quality x
+# multiplier), EXACT in real arithmetic. Absolute, boundary INCLUSIVE (op "<=").
+FOLD_IDENTITY_TOL = 1.0e-9
+# Raw parent-<=-child epsilon (criterion 2 and real_parent_le_child_raw).
+RAW_PARENT_CHILD_EPS = 1.0
+
+# The pinned gate-name inventories that DEFINE rejection_reason and the per-phase
+# CandidateResult gate tuples. Order IS the evaluation/precedence order within a phase.
+RAW_GATE_ORDER: tuple[str, ...] = (
+    "parent_le_child_raw",
+    "coverage_consistent_raw_3a",
+    "fold_symmetry_i",
+    "opp_guard",
+    "leak",
+    "user_tp",
+    "real_parent_le_child_raw",
+)
+DERIVED_GATE_ORDER: tuple[str, ...] = (
+    "user14_grade_1",
+    "coverage_consistent_derived_3b",
+    "white_black_ii",
+    "real_black_1e4_grade",
+    "real_parent_le_child",
+)
+_CUTOFF_GATE_NAME = "cutoff_derivation"
+# The four cutoff_derivation boundary checks, IN ORDER: the strict grade ladder
+# d<c<b<a plus the tone ordering alert<watch. Pinned so the phase cannot be forged from
+# four repeated or arbitrary checks.
+_CUTOFF_CHECK_NAMES: tuple[str, ...] = (
+    "cutoff_d_lt_c", "cutoff_c_lt_b", "cutoff_b_lt_a", "cutoff_alert_lt_watch",
+)
+# The closed GateOutcome name inventory ("cutoff_collision" is NOT a gate name).
+_GATE_NAME_INVENTORY: frozenset[str] = frozenset(
+    RAW_GATE_ORDER + DERIVED_GATE_ORDER + (_CUTOFF_GATE_NAME,)
+)
+_GATE_SCALES: frozenset[str] = frozenset({"raw", "derived"})
+# The pinned reason-code render order for no_ship_reason: raw gates, then derived gates,
+# then "cutoff_collision" last. NOT alphabetical, NOT Counter iteration order.
+REASON_CODE_ORDER: tuple[str, ...] = (
+    RAW_GATE_ORDER + DERIVED_GATE_ORDER + ("cutoff_collision",)
+)
+# Per-role fold_symmetry_i check count: ARM-1 (two identities + multiplier-equality) = 3;
+# ARM-2 (two identities + user-mult<1 + opp-mult==1.0) = 4.
+_ARM_FOLD_CHECK_COUNT: dict[str, int] = {"arm1": 3, "arm2": 4}
+_VALID_CANDIDATE_ROLES: tuple[str, ...] = ("arm1", "arm2")
+_OP_SYMBOLS: frozenset[str] = frozenset({"<", "<=", ">=", "==", "in"})
+
+
+def _eval_op(measured: object, op: str, limit: object) -> bool:
+    """The ONE op-applier GateCheck.passed and GateOutcome verdicts re-derive through."""
+    if op == "<":
+        return measured < limit  # type: ignore[operator]
+    if op == "<=":
+        return measured <= limit  # type: ignore[operator]
+    if op == ">=":
+        return measured >= limit  # type: ignore[operator]
+    if op == "==":
+        return measured == limit
+    if op == "in":
+        return measured in limit  # type: ignore[operator]
+    raise ValueError(f"GateCheck op must be one of {sorted(_OP_SYMBOLS)}; got {op!r}")
+
+
+def _is_real_number(value: object) -> bool:
+    """int/float but NOT bool (bool is an int subclass; True must never read as 1.0)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+@dataclass(frozen=True)
+class GateCheck:
+    """ONE comparison in a gate's audit trail. ``passed`` is DERIVED and RE-VERIFIED:
+    __post_init__ recomputes it from (measured, op, limit) via _eval_op and RAISES unless
+    the stored value matches, so a self-contradictory audit line is unconstructible."""
+
+    name: str
+    measured: float | int | str
+    limit: float | int | str | tuple[str, ...]
+    op: str
+    passed: bool
+
+    def __post_init__(self) -> None:
+        if self.op not in _OP_SYMBOLS:
+            raise ValueError(
+                f"GateCheck {self.name!r}: op must be one of {sorted(_OP_SYMBOLS)}; "
+                f"got {self.op!r}"
+            )
+        if type(self.passed) is not bool:
+            raise ValueError(
+                f"GateCheck {self.name!r}: passed must be a bool, got {type(self.passed).__name__}"
+            )
+        if self.op == "in":
+            if not (isinstance(self.limit, tuple) and all(isinstance(x, str) for x in self.limit)):
+                raise ValueError(
+                    f"GateCheck {self.name!r}: op 'in' requires a tuple[str, ...] limit "
+                    f"(true membership), got {self.limit!r} — a str limit would make it "
+                    "substring containment"
+                )
+            if not isinstance(self.measured, str):
+                raise ValueError(
+                    f"GateCheck {self.name!r}: op 'in' requires a str measured, got "
+                    f"{type(self.measured).__name__}"
+                )
+        elif self.op == "==":
+            both_num = _is_real_number(self.measured) and _is_real_number(self.limit)
+            both_str = isinstance(self.measured, str) and isinstance(self.limit, str)
+            if not (both_num or both_str):
+                raise ValueError(
+                    f"GateCheck {self.name!r}: op '==' requires numeric (non-bool) or str "
+                    f"operands, got {self.measured!r} / {self.limit!r}"
+                )
+        else:  # "<", "<=", ">="
+            if not (_is_real_number(self.measured) and _is_real_number(self.limit)):
+                raise ValueError(
+                    f"GateCheck {self.name!r}: op {self.op!r} requires numeric (non-bool) "
+                    f"operands, got {self.measured!r} / {self.limit!r}"
+                )
+        recomputed = _eval_op(self.measured, self.op, self.limit)
+        if self.passed != recomputed:
+            raise ValueError(
+                f"GateCheck {self.name!r}: stored passed={self.passed} contradicts "
+                f"{self.measured!r} {self.op} {self.limit!r} == {recomputed}"
+            )
+
+
+@dataclass(frozen=True)
+class GateOutcome:
+    """One gate's verdict over its ``checks``. ``passed`` is DERIVED and RE-VERIFIED:
+    __post_init__ RAISES unless name/scale are in their closed inventories, ``checks`` is
+    non-empty, and ``passed == all(c.passed for c in checks)`` — an aggregate verdict its
+    own checks contradict is unconstructible."""
+
+    name: str
+    scale: str
+    passed: bool
+    checks: tuple[GateCheck, ...]
+    detail: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "checks", tuple(self.checks))
+        if self.name not in _GATE_NAME_INVENTORY:
+            raise ValueError(
+                f"GateOutcome name {self.name!r} not in the closed inventory "
+                f"{sorted(_GATE_NAME_INVENTORY)}"
+            )
+        if self.scale not in _GATE_SCALES:
+            raise ValueError(f"GateOutcome {self.name!r}: scale must be raw|derived, got {self.scale!r}")
+        if not self.checks:
+            raise ValueError(f"GateOutcome {self.name!r}: checks must be non-empty")
+        for c in self.checks:
+            if not isinstance(c, GateCheck):
+                raise ValueError(
+                    f"GateOutcome {self.name!r}: every check must be a GateCheck, got "
+                    f"{type(c).__name__}"
+                )
+        if type(self.passed) is not bool:
+            raise ValueError(f"GateOutcome {self.name!r}: passed must be a bool")
+        recomputed = all(c.passed for c in self.checks)
+        if self.passed != recomputed:
+            raise ValueError(
+                f"GateOutcome {self.name!r}: stored passed={self.passed} contradicts "
+                f"all(check.passed)=={recomputed}"
+            )
+
+
+@dataclass(frozen=True)
+class Arm:
+    """A NAMED release-policy object binding, as ONE inseparable record, the four facts
+    every downstream step reads off it. Deep-immutable (all scalar/tuple), VALIDATING."""
+
+    role: str
+    scope: str
+    cells: tuple[GridCell, ...]
+    fold_symmetry_check_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cells", tuple(self.cells))
+        if self.role not in _VALID_CANDIDATE_ROLES:
+            raise ValueError(f"Arm role must be arm1|arm2, got {self.role!r}")
+        if self.scope not in ("all", "user"):
+            raise ValueError(f"Arm scope must be all|user, got {self.scope!r}")
+        expected_scope = "all" if self.role == "arm1" else "user"
+        if self.scope != expected_scope:
+            raise ValueError(
+                f"Arm {self.role!r} scope must be {expected_scope!r}, got {self.scope!r}"
+            )
+        if not self.cells:
+            raise ValueError(f"Arm {self.role!r}: cells must be non-empty")
+        for cell in self.cells:
+            if cell.report_fold_scope != self.scope:
+                raise ValueError(
+                    f"Arm {self.role!r}: cell {cell.label!r} report_fold_scope "
+                    f"{cell.report_fold_scope!r} != arm scope {self.scope!r}"
+                )
+        if tuple(cell.report_fold_p for cell in self.cells) != REPORT_FOLD_P_GRID:
+            raise ValueError(
+                f"Arm {self.role!r}: swept p-grid "
+                f"{tuple(c.report_fold_p for c in self.cells)} != REPORT_FOLD_P_GRID "
+                f"{REPORT_FOLD_P_GRID}"
+            )
+        if self.fold_symmetry_check_count != _ARM_FOLD_CHECK_COUNT[self.role]:
+            raise ValueError(
+                f"Arm {self.role!r}: fold_symmetry_check_count must be "
+                f"{_ARM_FOLD_CHECK_COUNT[self.role]}, got {self.fold_symmetry_check_count}"
+            )
+
+
+ARM1 = Arm(role="arm1", scope="all", cells=arm1_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=3)
+ARM2 = Arm(role="arm2", scope="user", cells=arm2_cells(REPORT_FOLD_P_GRID), fold_symmetry_check_count=4)
+# The pinned release policy. NOT caller-controlled: the arm sequence sets BOTH the
+# enumeration order (ARM-1 preferred; ARM-2 the lazy fallback) AND the required-cell set.
+RELEASE_ARMS: tuple[Arm, ...] = (ARM1, ARM2)
+
+
+def _required_cells(arms: tuple[Arm, ...]) -> frozenset[GridCell]:
+    """Both anchors + every arm's swept cells + B1 — computed FROM the arm descriptors so
+    the cells the selector reads and the cells it insists were scored cannot drift apart."""
+    cells: set[GridCell] = {ORIGINAL_CELL, CURRENT_SM_V2_3_CELL, B1_CELL}
+    for arm in arms:
+        cells.update(arm.cells)
+    return frozenset(cells)
+
+
+@dataclass(frozen=True)
+class CandidateResult:
+    """One (arm, cell) candidate's full, self-consistent decision record. __post_init__
+    ENFORCES the record against itself (every clause an ``if ... raise``): a malformed
+    candidate cannot be constructed, let alone serialized."""
+
+    cell: GridCell
+    role: str
+    p: float
+    evaluated: bool
+    raw_gates: tuple[GateOutcome, ...]
+    cutoffs_outcome: GateOutcome | None
+    provisional_cutoffs: Cutoffs | None
+    distribution: DistributionStats | None
+    derived_gates: tuple[GateOutcome, ...]
+    admitted: bool
+    rejection_reason: str | None
+    order_keys: tuple[float, float, float] | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "raw_gates", tuple(self.raw_gates))
+        object.__setattr__(self, "derived_gates", tuple(self.derived_gates))
+        if self.role not in _VALID_CANDIDATE_ROLES:
+            raise ValueError(f"CandidateResult role must be arm1|arm2, got {self.role!r}")
+        if self.p != self.cell.report_fold_p:
+            raise ValueError(
+                f"CandidateResult p={self.p} != cell.report_fold_p={self.cell.report_fold_p}"
+            )
+        if not self.evaluated:
+            # Lazy ARM-2: represented HONESTLY as not-reached, never a false rejection.
+            if (
+                self.raw_gates
+                or self.cutoffs_outcome is not None
+                or self.provisional_cutoffs is not None
+                or self.distribution is not None
+                or self.derived_gates
+                or self.admitted
+                or self.rejection_reason is not None
+                or self.order_keys is not None
+            ):
+                raise ValueError(
+                    f"CandidateResult {self.role}@{self.p}: not evaluated but carries "
+                    "gate/cutoff/distribution/admitted/reason/order state"
+                )
+            return
+        # --- evaluated candidate: gate inventories, presence invariants, reason code ---
+        if tuple(g.name for g in self.raw_gates) != RAW_GATE_ORDER:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: raw_gates names "
+                f"{tuple(g.name for g in self.raw_gates)} != {RAW_GATE_ORDER}"
+            )
+        fold = next(g for g in self.raw_gates if g.name == "fold_symmetry_i")
+        if len(fold.checks) != _ARM_FOLD_CHECK_COUNT[self.role]:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: fold_symmetry_i has "
+                f"{len(fold.checks)} checks, expected {_ARM_FOLD_CHECK_COUNT[self.role]}"
+            )
+        raw_passed = all(g.passed for g in self.raw_gates)
+        # cutoffs_outcome is None IFF step 2 never ran (a raw gate failed).
+        if raw_passed and self.cutoffs_outcome is None:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: raw passed but no cutoffs_outcome"
+            )
+        if not raw_passed and self.cutoffs_outcome is not None:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: raw failed but cutoffs_outcome present"
+            )
+        # The step-2 outcome, when present, must BE cutoff_derivation: its pinned name,
+        # scale, and the four boundary checks IN ORDER with the "<" op — not merely four
+        # arbitrary checks. Otherwise any passing GateOutcome (e.g. a raw
+        # parent_le_child_raw, or four repeated look-alikes) could masquerade as the phase.
+        if self.cutoffs_outcome is not None:
+            if self.cutoffs_outcome.name != _CUTOFF_GATE_NAME:
+                raise ValueError(
+                    f"CandidateResult {self.role}@{self.p}: cutoffs_outcome.name "
+                    f"{self.cutoffs_outcome.name!r} != {_CUTOFF_GATE_NAME!r}"
+                )
+            if self.cutoffs_outcome.scale != "derived":
+                raise ValueError(
+                    f"CandidateResult {self.role}@{self.p}: cutoffs_outcome must be derived-scale"
+                )
+            checks = self.cutoffs_outcome.checks
+            if tuple(c.name for c in checks) != _CUTOFF_CHECK_NAMES:
+                raise ValueError(
+                    f"CandidateResult {self.role}@{self.p}: cutoffs_outcome checks "
+                    f"{tuple(c.name for c in checks)} != {_CUTOFF_CHECK_NAMES}"
+                )
+            if any(c.op != "<" for c in checks):
+                raise ValueError(
+                    f"CandidateResult {self.role}@{self.p}: every cutoff boundary check is a '<' comparison"
+                )
+            # When the cutoffs derived (passed), the four checks' operands ARE the boundary
+            # integers d<c<b<a and alert<watch — tie them to the emitted Cutoffs, so no
+            # fabricated boundary values can ride under the pinned names.
+            if self.provisional_cutoffs is not None:
+                cut = self.provisional_cutoffs
+                expected_operands = (
+                    (cut.d, cut.c), (cut.c, cut.b), (cut.b, cut.a), (cut.alert, cut.watch),
+                )
+                if tuple((c.measured, c.limit) for c in checks) != expected_operands:
+                    raise ValueError(
+                        f"CandidateResult {self.role}@{self.p}: cutoff boundary operands do "
+                        "not match the emitted provisional_cutoffs"
+                    )
+        # distribution / order_keys exist IFF step 2 ran, i.e. IFF raw admissibility passed.
+        # A raw-rejected candidate cannot carry a fabricated distribution or order keys.
+        if (self.distribution is not None) != raw_passed:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: distribution presence must equal "
+                "step-2 reachability (raw admissibility passed)"
+            )
+        cutoffs_passed = self.cutoffs_outcome is not None and self.cutoffs_outcome.passed
+        if (self.provisional_cutoffs is not None) != cutoffs_passed:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: provisional_cutoffs presence must "
+                "equal cutoffs_outcome.passed"
+            )
+        if bool(self.derived_gates) != cutoffs_passed:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: derived_gates non-empty must equal "
+                "cutoffs_outcome present AND passed"
+            )
+        if self.derived_gates and tuple(g.name for g in self.derived_gates) != DERIVED_GATE_ORDER:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: derived_gates names "
+                f"{tuple(g.name for g in self.derived_gates)} != {DERIVED_GATE_ORDER}"
+            )
+        # order_keys presence + value == recomputed from distribution and p.
+        if (self.order_keys is None) != (self.distribution is None):
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: order_keys presence must equal "
+                "distribution presence"
+            )
+        if self.distribution is not None:
+            expected_keys = _order_keys(self.distribution, self.p)
+            if self.order_keys != expected_keys:
+                raise ValueError(
+                    f"CandidateResult {self.role}@{self.p}: order_keys {self.order_keys} != "
+                    f"recomputed {expected_keys}"
+                )
+        # admitted IFF all gates passed.
+        all_passed = raw_passed and cutoffs_passed and all(g.passed for g in self.derived_gates)
+        if self.admitted != all_passed:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: admitted={self.admitted} but "
+                f"all-gates-passed={all_passed}"
+            )
+        # rejection_reason is not None IFF (evaluated AND not admitted); == first failure.
+        expected_reason = _expected_reason(self.raw_gates, self.cutoffs_outcome, self.derived_gates)
+        if self.rejection_reason != expected_reason:
+            raise ValueError(
+                f"CandidateResult {self.role}@{self.p}: rejection_reason "
+                f"{self.rejection_reason!r} != first-failure {expected_reason!r}"
+            )
+
+
+@dataclass(frozen=True)
+class ReferenceResult:
+    """The B1 calibration REFERENCE channel — NON-gating, NOT a candidate, present on
+    EVERY result. Carries B1's pooled distribution_stats, provisional cutoffs (None on
+    collision), and the black-guard RELEASE_GUARD_OPENING_KEY raw score + provisional
+    grade at B1_CELL. Carries NO gates and NO admitted field."""
+
+    cell: GridCell
+    role: str
+    distribution: DistributionStats
+    provisional_cutoffs: Cutoffs | None
+    real_black_1e4_raw: float
+    real_black_1e4_grade: str | None
+
+    def __post_init__(self) -> None:
+        if self.role != "b1":
+            raise ValueError(f"ReferenceResult role must be 'b1', got {self.role!r}")
+        if self.cell != B1_CELL:
+            raise ValueError("ReferenceResult cell must be B1_CELL")
+        if (self.provisional_cutoffs is None) != (self.real_black_1e4_grade is None):
+            raise ValueError(
+                "ReferenceResult: provisional_cutoffs is None IFF real_black_1e4_grade is None"
+            )
+
+
+@dataclass(frozen=True)
+class SelectionResult:
+    """The release artifact the selector returns (NEVER an assert). DEEPLY immutable: no
+    field is, transitively, a dict/list/set. __post_init__ enforces the COMPLETE ship /
+    no-ship cross-field truth table so winner/no_ship/winner_cutoffs/winner_binding/
+    no_ship_reason can never diverge. ``cohort`` is an InitVar (unstored) used only to
+    recompute build_winner_binding for the truth-table check."""
+
+    candidates: tuple[CandidateResult, ...]
+    winner: CandidateResult | None
+    winner_cutoffs: Cutoffs | None
+    no_ship: bool
+    no_ship_reason: str | None
+    b1_reference: ReferenceResult
+    cohort_provenance: ArtifactProvenance
+    winner_binding: WinnerBinding | None
+    cohort: InitVar[ScoredCalibrationCohort]
+
+    def __post_init__(self, cohort: ScoredCalibrationCohort) -> None:
+        object.__setattr__(self, "candidates", tuple(self.candidates))
+        # The candidate set is BOTH arms' full sweep — the pinned (role, CELL) multiset,
+        # order-independent (the private arm-swap reorders it but never changes the
+        # multiset). Keying on the full GridCell (not just its p) rejects a candidate whose
+        # cell was swapped for an unscored look-alike sharing the same role and p.
+        expected_candidates = Counter(
+            (arm.role, cell) for arm in RELEASE_ARMS for cell in arm.cells
+        )
+        if Counter((c.role, c.cell) for c in self.candidates) != expected_candidates:
+            raise ValueError(
+                "SelectionResult: candidates are not the pinned (role, cell) sweep of both arms"
+            )
+        # cohort_provenance IS the verified input-side record (identity, not a rebuild) —
+        # so a forged provenance disagreeing with winner_binding cannot be smuggled in.
+        if self.cohort_provenance is not cohort.provenance:
+            raise ValueError("SelectionResult: cohort_provenance must be cohort.provenance (identity)")
+        admitted = [c for c in self.candidates if c.admitted]
+        for c in self.candidates:
+            if c.evaluated is False and c.admitted is True:
+                raise ValueError("SelectionResult: an unevaluated candidate is admitted")
+        if self.no_ship != (self.winner is None):
+            raise ValueError("SelectionResult: no_ship must equal (winner is None)")
+        if (self.winner_cutoffs is not None) == self.no_ship:
+            raise ValueError("SelectionResult: exactly one cutoff set is emitted IFF ship")
+        if self.no_ship:
+            if self.winner is not None or self.winner_cutoffs is not None or self.winner_binding is not None:
+                raise ValueError("SelectionResult no-ship: winner/cutoffs/binding must all be None")
+            if admitted:
+                raise ValueError("SelectionResult no-ship: an admitted candidate is present")
+            if not self.no_ship_reason:
+                raise ValueError("SelectionResult no-ship: no_ship_reason must be a non-empty string")
+            expected = _no_ship_reason(self.candidates)
+            if self.no_ship_reason != expected:
+                raise ValueError(
+                    f"SelectionResult no-ship: no_ship_reason {self.no_ship_reason!r} != "
+                    f"canonical {expected!r}"
+                )
+            return
+        # --- ship ---
+        winner = self.winner
+        if not any(winner is c for c in self.candidates):
+            raise ValueError("SelectionResult ship: winner must be an element (identity) of candidates")
+        if not (winner.admitted and winner.evaluated):
+            raise ValueError("SelectionResult ship: winner must be evaluated and admitted")
+        best = max(admitted, key=lambda c: c.order_keys)
+        if winner is not best:
+            raise ValueError("SelectionResult ship: winner is not the total-order max over admitted")
+        # winner_cutoffs IS the winner's provisional_cutoffs object (identity, not equality):
+        # exactly the ONE emitted set, not a look-alike Cutoffs with the same field values.
+        if self.winner_cutoffs is not winner.provisional_cutoffs:
+            raise ValueError("SelectionResult ship: winner_cutoffs must BE winner.provisional_cutoffs")
+        if winner.cell not in cohort.config_fingerprints:
+            raise ValueError("SelectionResult ship: winner.cell absent from cohort.config_fingerprints")
+        if self.winner_binding is None:
+            raise ValueError("SelectionResult ship: winner_binding must be present")
+        if self.no_ship_reason is not None:
+            raise ValueError("SelectionResult ship: no_ship_reason must be None")
+        if self.winner_binding != build_winner_binding(cohort, winner.cell):
+            raise ValueError(
+                "SelectionResult ship: winner_binding != build_winner_binding(cohort, winner.cell)"
+            )
+
+
+def _order_keys(distribution: DistributionStats, p: float) -> tuple[float, float, float]:
+    """(spread, min adjacent-quantile gap, -p) — the step-4 total order, MAXIMIZED."""
+    spread = distribution.p95 - distribution.p05
+    min_gap = min(
+        distribution.p25 - distribution.p05,
+        distribution.p50 - distribution.p25,
+        distribution.p75 - distribution.p50,
+        distribution.p95 - distribution.p75,
+    )
+    return (spread, min_gap, -p)
+
+
+def _expected_reason(
+    raw_gates: tuple[GateOutcome, ...],
+    cutoffs_outcome: GateOutcome | None,
+    derived_gates: tuple[GateOutcome, ...],
+) -> str | None:
+    """The FIRST failure in the pinned precedence raw -> cutoff -> derived (phases
+    short-circuit; within a phase, tuple order), or None if every reached gate passed."""
+    for g in raw_gates:
+        if not g.passed:
+            return g.name
+    if cutoffs_outcome is not None and not cutoffs_outcome.passed:
+        return "cutoff_collision"
+    for g in derived_gates:
+        if not g.passed:
+            return g.name
+    return None
+
+
+def _no_ship_reason(candidates: tuple[CandidateResult, ...]) -> str:
+    """The multiset of each EVALUATED candidate's rejection_reason, rendered in the fixed
+    REASON_CODE_ORDER, one ``<code>×<count>`` segment per non-zero count, joined by ', '.
+    Deterministic FUNCTION of the input (NOT Counter iteration order); B1 is excluded."""
+    counts: Counter[str] = Counter(
+        c.rejection_reason for c in candidates if c.evaluated and c.rejection_reason is not None
+    )
+    return ", ".join(f"{code}×{counts[code]}" for code in REASON_CODE_ORDER if counts[code])
+
+
+# ---- Binding checks 0-5 (fail closed; ONE selector-facing exception family) ----
+
+
+def _require_exact_type(value: object, expected: type, label: str) -> None:
+    if type(value) is not expected:
+        raise SelectionBindingError(
+            f"binding: {label} must be exactly {expected.__name__}, got {type(value).__name__}"
+        )
+
+
+def _require_str(value: object, label: str) -> None:
+    if type(value) is not str:
+        raise SelectionBindingError(f"binding: {label} must be str, got {type(value).__name__}")
+
+
+def _require_nonempty_str(value: object, label: str) -> None:
+    _require_str(value, label)
+    if not value:
+        raise SelectionBindingError(f"binding: {label} must be a non-empty str")
+
+
+def _require_int(value: object, label: str) -> None:
+    # NOT bool: bool is an int subclass, so True would pass a naive int check.
+    if type(value) is not int:
+        raise SelectionBindingError(
+            f"binding: {label} must be int (not bool), got {type(value).__name__}"
+        )
+
+
+def _require_bool(value: object, label: str) -> None:
+    if type(value) is not bool:
+        raise SelectionBindingError(f"binding: {label} must be bool, got {type(value).__name__}")
+
+
+def _require_aware_utc_datetime(value: object, label: str) -> None:
+    if type(value) is not datetime:
+        raise SelectionBindingError(
+            f"binding: {label} must be exactly datetime, got {type(value).__name__}"
+        )
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise SelectionBindingError(f"binding: {label} must be an aware UTC datetime")
+
+
+def _check_wrapper_types(inputs: SelectionInputs) -> None:
+    """Check 0 — EXACT wrapper-graph + field/element types, run FIRST. type(x) is T
+    (never isinstance): a subclass is precisely how __eq__/__hash__ get overridden and how
+    a mutable field survives the all-scalar walk to be echoed into the release artifact."""
+    _require_exact_type(inputs, SelectionInputs, "inputs")
+    _require_exact_type(inputs.cohort, ScoredCalibrationCohort, "inputs.cohort")
+    _require_exact_type(inputs.diagnostics, DiagnosticSuite, "inputs.diagnostics")
+    cohort = inputs.cohort
+    diagnostics = inputs.diagnostics
+    prov = cohort.provenance
+    _require_exact_type(prov, ArtifactProvenance, "cohort.provenance")
+
+    _require_aware_utc_datetime(cohort.as_of, "cohort.as_of")
+    _require_aware_utc_datetime(diagnostics.as_of, "diagnostics.as_of")
+    _require_aware_utc_datetime(prov.artifact_as_of, "provenance.artifact_as_of")
+
+    for name in (
+        "artifact_sha256", "graph_fingerprint", "roots_fingerprint", "cohort_rules",
+        "evidence_derivation_fingerprint", "release_guard_opening_key",
+        "release_guard_child_opening_key",
+    ):
+        _require_str(getattr(prov, name), f"provenance.{name}")
+    _require_nonempty_str(prov.captured_model_version, "provenance.captured_model_version")
+    _require_int(prov.schema_version, "provenance.schema_version")
+    _require_int(prov.pair_count, "provenance.pair_count")
+    _require_int(prov.min_observations, "provenance.min_observations")
+
+    if cohort.source_revision is not None:
+        _require_str(cohort.source_revision, "cohort.source_revision")
+    if type(cohort.source_dirty_paths) is not tuple:
+        raise SelectionBindingError("binding: cohort.source_dirty_paths must be a tuple")
+    for i, path in enumerate(cohort.source_dirty_paths):
+        _require_str(path, f"cohort.source_dirty_paths[{i}]")
+    _require_bool(cohort.scorer_source_verified_preexec, "cohort.scorer_source_verified_preexec")
+    for name in (
+        "model_version", "scorer_contract_id", "scorer_source_digest",
+        "provenance_record_sha256", "runtime_python", "runtime_chess_version",
+    ):
+        _require_str(getattr(cohort, name), f"cohort.{name}")
+    # The diagnostics binding stamps are compared in check 1(c); a str SUBCLASS overriding
+    # __eq__ would satisfy those comparisons against anything, so exact-type them HERE.
+    for name in ("model_version", "scorer_contract_id"):
+        _require_str(getattr(diagnostics, name), f"diagnostics.{name}")
+
+    for label, fps in (
+        ("cohort.config_fingerprints", cohort.config_fingerprints),
+        ("diagnostics.config_fingerprints", diagnostics.config_fingerprints),
+    ):
+        for key, val in fps.items():
+            _require_exact_type(key, GridCell, f"{label} key")
+            _require_str(val, f"{label}[{getattr(key, 'label', key)!r}]")
+
+    for p in cohort.pairs:
+        _require_exact_type(p, ScoredPair, "cohort.pairs element")
+        for name in ("pair_id", "subject_id", "cohort_role", "player_color"):
+            _require_str(getattr(p, name), f"pair {p.pair_id!r}.{name}")
+        if type(p.surrogate_user_id) is not int:
+            raise SelectionBindingError(
+                f"binding: pair {p.pair_id!r}.surrogate_user_id must be int (not bool/str), "
+                f"got {type(p.surrogate_user_id).__name__}"
+            )
+        for cell, cs in p.grid.items():
+            _require_exact_type(cell, GridCell, f"pair {p.pair_id!r}.grid key")
+            _require_exact_type(cs, CellScore, f"pair {p.pair_id!r}.grid value")
+            if type(cs.named_scores) is not tuple:
+                raise SelectionBindingError(
+                    f"binding: pair {p.pair_id!r} CellScore.named_scores must be a tuple"
+                )
+            for k, v in cs.named_score_map.items():
+                _require_str(k, f"pair {p.pair_id!r} named_score_map key")
+                if not _is_real_number(v):
+                    raise SelectionBindingError(
+                        f"binding: pair {p.pair_id!r} named_score_map[{k!r}] must be a "
+                        f"number (not bool), got {type(v).__name__}"
+                    )
+
+    for cell, dcr in diagnostics.cells.items():
+        _require_exact_type(cell, GridCell, "diagnostics.cells key")
+        _require_exact_type(dcr, DiagnosticCellResult, "diagnostics.cells value")
+
+
+_DERIVATION_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _check_runtime_and_provenance(inputs: SelectionInputs, arms: tuple[Arm, ...]) -> None:
+    """Check 1 — runtime binding (a) + provenance invariants (b) RE-DERIVED from module
+    constants, never trusted, + fingerprint/model/contract cross-check (c). BEFORE any echo."""
+    cohort = inputs.cohort
+    diagnostics = inputs.diagnostics
+    prov = cohort.provenance
+    # (a) runtime binding — exact-string equality.
+    if cohort.runtime_python != platform.python_version():
+        raise SelectionBindingError(
+            f"binding: runtime_python {cohort.runtime_python!r} != interpreter "
+            f"{platform.python_version()!r}"
+        )
+    if cohort.runtime_chess_version != chess.__version__:
+        raise SelectionBindingError(
+            f"binding: runtime_chess_version {cohort.runtime_chess_version!r} != "
+            f"chess {chess.__version__!r}"
+        )
+    # (b) provenance invariants.
+    if prov.release_guard_opening_key != RELEASE_GUARD_OPENING_KEY:
+        raise SelectionBindingError("binding: provenance.release_guard_opening_key mismatch")
+    if prov.release_guard_child_opening_key != RELEASE_GUARD_CHILD_OPENING_KEY:
+        raise SelectionBindingError("binding: provenance.release_guard_child_opening_key mismatch")
+    if prov.schema_version != ARTIFACT_SCHEMA_VERSION:
+        raise SelectionBindingError(
+            f"binding: provenance.schema_version {prov.schema_version} != {ARTIFACT_SCHEMA_VERSION}"
+        )
+    if prov.min_observations != DEFAULT_MIN_OBSERVATIONS:
+        raise SelectionBindingError(
+            f"binding: provenance.min_observations {prov.min_observations} != {DEFAULT_MIN_OBSERVATIONS}"
+        )
+    if prov.cohort_rules != COHORT_RULES_ID:
+        raise SelectionBindingError(f"binding: provenance.cohort_rules {prov.cohort_rules!r} mismatch")
+    if prov.evidence_derivation_fingerprint != evidence_derivation_fingerprint():
+        raise SelectionBindingError("binding: provenance.evidence_derivation_fingerprint mismatch")
+    if not (prov.pair_count == len(cohort.pairs) == len(cohort.manifest_pair_ids)):
+        raise SelectionBindingError(
+            f"binding: pair_count {prov.pair_count} disagrees with len(pairs) "
+            f"{len(cohort.pairs)} / len(manifest_pair_ids) {len(cohort.manifest_pair_ids)}"
+        )
+    for name in (
+        "artifact_sha256", "graph_fingerprint", "roots_fingerprint",
+    ):
+        val = getattr(prov, name)
+        if not _DERIVATION_HEX_RE.match(val):
+            raise SelectionBindingError(f"binding: provenance.{name} is not 64-char lowercase hex: {val!r}")
+    for name in ("provenance_record_sha256", "scorer_source_digest"):
+        val = getattr(cohort, name)
+        if not _DERIVATION_HEX_RE.match(val):
+            raise SelectionBindingError(f"binding: cohort.{name} is not 64-char lowercase hex: {val!r}")
+    # (c) fingerprint / model / contract cross-check.
+    required_cells = _required_cells(arms)
+    for cell in required_cells:
+        if cohort.config_fingerprints.get(cell) != _cfg_fp(cell):
+            raise SelectionBindingError(
+                f"binding: cohort.config_fingerprints[{cell.label!r}] != recomputed _cfg_fp"
+            )
+    for cell in diagnostics.cells:
+        if diagnostics.config_fingerprints.get(cell) != _cfg_fp(cell):
+            raise SelectionBindingError(
+                f"binding: diagnostics.config_fingerprints[{cell.label!r}] != recomputed _cfg_fp"
+            )
+    if not (cohort.model_version == diagnostics.model_version == SCORE_MODEL_VERSION):
+        raise SelectionBindingError(
+            f"binding: model_version skew (cohort {cohort.model_version!r} / diagnostics "
+            f"{diagnostics.model_version!r} / constant {SCORE_MODEL_VERSION!r})"
+        )
+    if not (cohort.scorer_contract_id == diagnostics.scorer_contract_id == REPORT_SCORER_CONTRACT_ID):
+        raise SelectionBindingError(
+            f"binding: scorer_contract_id skew (cohort {cohort.scorer_contract_id!r} / diagnostics "
+            f"{diagnostics.scorer_contract_id!r} / constant {REPORT_SCORER_CONTRACT_ID!r})"
+        )
+
+
+def _check_required_cells(inputs: SelectionInputs, arms: tuple[Arm, ...]) -> frozenset[GridCell]:
+    """Check 2 — EXACT required-cell coverage, computed FROM the arm descriptors."""
+    cohort = inputs.cohort
+    required_cells = _required_cells(arms)
+    if cohort.required_cells != required_cells:
+        raise SelectionBindingError(
+            "binding: cohort.required_cells != cells derived from RELEASE_ARMS"
+        )
+    for p in cohort.pairs:
+        if set(p.grid.keys()) != required_cells:
+            raise SelectionBindingError(
+                f"binding: pair {p.pair_id!r} grid keys != required_cells (missing/extra cell)"
+            )
+    if set(inputs.diagnostics.cells.keys()) != (required_cells | set(DEMO_CELLS)):
+        raise SelectionBindingError(
+            "binding: diagnostics cell set != required_cells | DEMO_CELLS"
+        )
+    return required_cells
+
+
+def _selector_runtime_binding() -> RuntimeBinding:
+    """A RuntimeBinding carrying ONLY the module-constant release-guard keys the two
+    g-p4ih-artifact score-shape helpers read (graph/roots fingerprints are inert here)."""
+    return RuntimeBinding(
+        graph_fingerprint="",
+        roots_fingerprint="",
+        evidence_derivation_fingerprint=evidence_derivation_fingerprint(),
+        min_observations=DEFAULT_MIN_OBSERVATIONS,
+        cohort_rules=COHORT_RULES_ID,
+        release_guard_opening_key=RELEASE_GUARD_OPENING_KEY,
+        release_guard_child_opening_key=RELEASE_GUARD_CHILD_OPENING_KEY,
+    )
+
+
+def _check_pair_binding(
+    inputs: SelectionInputs, required_cells: frozenset[GridCell]
+) -> tuple[tuple[ScoredPair, ...], ScoredPair, ScoredPair]:
+    """Check 3 — one-to-one pair binding + EXHAUSTIVE role partition (allowlist) +
+    release-guard EXACT shape + a non-degenerate pool. Returns (quantile_pairs, white_guard,
+    black_guard). Wraps the two g-p4ih-artifact helpers' ReleaseGuardShapeError."""
+    cohort = inputs.cohort
+    pair_ids = [p.pair_id for p in cohort.pairs]
+    if len(pair_ids) != len(set(pair_ids)):
+        raise SelectionBindingError("binding: duplicate pair_id in cohort.pairs")
+    if set(pair_ids) != set(cohort.manifest_pair_ids):
+        raise SelectionBindingError("binding: cohort.pairs pair_ids != manifest_pair_ids (unknown/missing)")
+    surrogates = [p.surrogate_user_id for p in cohort.pairs]
+    if len(surrogates) != len(set(surrogates)):
+        raise SelectionBindingError("binding: duplicate surrogate_user_id in cohort.pairs")
+    for index, p in enumerate(cohort.pairs):
+        if p.surrogate_user_id < 1:
+            raise SelectionBindingError(f"binding: pair {p.pair_id!r} surrogate_user_id must be >= 1")
+        if p.surrogate_user_id != index + 1:
+            raise SelectionBindingError(
+                f"binding: pair {p.pair_id!r} surrogate_user_id {p.surrogate_user_id} != index+1 {index + 1}"
+            )
+    # (a) role partition EXHAUSTIVE — allowlist, never an implicit else.
+    for p in cohort.pairs:
+        if p.cohort_role not in _VALID_COHORT_ROLES:
+            raise SelectionBindingError(
+                f"binding: pair {p.pair_id!r} cohort_role {p.cohort_role!r} not in "
+                f"{_VALID_COHORT_ROLES}"
+            )
+    quantile_pairs = tuple(p for p in cohort.pairs if p.cohort_role == "quantile")
+    guard_pairs = tuple(p for p in cohort.pairs if p.cohort_role == "release_guard")
+    if len(quantile_pairs) + len(guard_pairs) != len(cohort.pairs):
+        raise SelectionBindingError("binding: role partition is not total")
+    # (b) release-guard shape (structural + score shape).
+    if len(guard_pairs) != 2:
+        raise SelectionBindingError(
+            f"binding: expected exactly two release_guard pairs, got {len(guard_pairs)}"
+        )
+    colors = sorted(g.player_color for g in guard_pairs)
+    if colors != ["black", "white"]:
+        raise SelectionBindingError(
+            f"binding: release_guard colors must be exactly {{white, black}}, got {colors}"
+        )
+    if len({g.subject_id for g in guard_pairs}) != 1:
+        raise SelectionBindingError("binding: the two release_guard pairs must share one subject_id")
+    if guard_pairs[0].pair_id == guard_pairs[1].pair_id:
+        raise SelectionBindingError("binding: the two release_guard pairs must have distinct pair_ids")
+    runtime_binding = _selector_runtime_binding()
+    try:
+        assert_release_guard_score_shape(guard_pairs, tuple(required_cells), runtime_binding)
+    except ReleaseGuardShapeError as exc:
+        raise SelectionBindingError(str(exc)) from exc
+    # (c) quantile cardinality — pairs AND pooled scores (two checks, not one).
+    if len(quantile_pairs) < 2:
+        raise SelectionBindingError(
+            f"binding: need >= 2 quantile pairs for derive_cutoffs, got {len(quantile_pairs)}"
+        )
+    try:
+        assert_min_quantile_scores_per_cell(quantile_pairs, tuple(required_cells))
+    except ReleaseGuardShapeError as exc:
+        raise SelectionBindingError(str(exc)) from exc
+    white_guard = next(g for g in guard_pairs if g.player_color == "white")
+    black_guard = next(g for g in guard_pairs if g.player_color == "black")
+    return quantile_pairs, white_guard, black_guard
+
+
+def _check_single_clock(inputs: SelectionInputs) -> None:
+    """Check 4 — one clock across cohort, diagnostics, and provenance (all on the INPUT)."""
+    cohort = inputs.cohort
+    if not (
+        cohort.as_of == inputs.diagnostics.as_of == cohort.provenance.artifact_as_of
+    ):
+        raise SelectionBindingError(
+            "binding: single-clock mismatch across cohort.as_of / diagnostics.as_of / "
+            "provenance.artifact_as_of"
+        )
+
+
+_DIAGNOSTIC_UNIT_FIELDS = (
+    "synth_root_coverage_fraction", "synth_user_turn_multiplier", "synth_opp_turn_multiplier",
+)
+_DIAGNOSTIC_SCORE_FIELDS = (
+    "synth_black_root_score", "synth_caro_child_score", "synth_opp_turn_score",
+    "synth_user_turn_pre_fold_quality", "synth_opp_turn_pre_fold_quality",
+    "broad_guard_opp_score", "specialist_pre_fold_quality", "user_tp_score",
+)
+
+
+def _require_operand(value: object, lo: float, hi: float, cell: GridCell, field: str) -> None:
+    """Check 5(0) type -> finite -> range, in that order, naming the cell and field. A
+    TypeError from a comparison must never leak — an out-of-type operand raises the
+    fail-closed binding error instead."""
+    if not _is_real_number(value):
+        raise SelectionBindingError(
+            f"binding: operand {field} at cell {cell.label!r} must be a number (not bool), "
+            f"got {type(value).__name__}"
+        )
+    fv = float(value)
+    if not math.isfinite(fv):
+        raise SelectionBindingError(f"binding: operand {field} at cell {cell.label!r} is not finite: {fv}")
+    if not (lo <= fv <= hi):
+        raise SelectionBindingError(
+            f"binding: operand {field} at cell {cell.label!r} out of [{lo}, {hi}]: {fv}"
+        )
+
+
+def _check_operand_domain(inputs: SelectionInputs, required_cells: frozenset[GridCell]) -> None:
+    """Check 5 — ACCEPTED TYPE, then finite, then in range, on EVERY value a gate or
+    derive_cutoffs can read. The gates FAIL OPEN on invalid numbers, so the domain is a
+    binding fact, not a gate result. Guard scores (check 3b) and pool cardinality (check
+    3c) are NOT restated here."""
+    diagnostics = inputs.diagnostics
+    for cell, dcr in diagnostics.cells.items():
+        for field in _DIAGNOSTIC_UNIT_FIELDS:
+            _require_operand(getattr(dcr, field), 0.0, 1.0, cell, field)
+        for field in _DIAGNOSTIC_SCORE_FIELDS:
+            _require_operand(getattr(dcr, field), 0.0, 100.0, cell, field)
+    quantile_pairs = tuple(p for p in inputs.cohort.pairs if p.cohort_role == "quantile")
+    for cell in required_cells:
+        for qp in quantile_pairs:
+            for i, score in enumerate(qp.grid[cell].named_scores):
+                _require_operand(score, 0.0, 100.0, cell, f"quantile pair {qp.pair_id!r} named_scores[{i}]")
+
+
+# ---- Gate builders + candidate evaluation ----
+
+
+def _grade_letter(score: float, cutoffs: Cutoffs | None) -> str:
+    """FIXED band when cutoffs is None (raw gates), else the DERIVED provisional grade."""
+    return fixed_band(score) if cutoffs is None else provisional_grade(score, cutoffs)
+
+
+def _coverage_implied_score(cov: float, p: float) -> float:
+    return 100.0 * cov ** p
+
+
+def _parent_le_child_raw(dcr: DiagnosticCellResult) -> GateOutcome:
+    limit = dcr.synth_caro_child_score + RAW_PARENT_CHILD_EPS
+    check = GateCheck(
+        "parent_le_child_raw", dcr.synth_black_root_score, limit, "<=",
+        dcr.synth_black_root_score <= limit,
+    )
+    return GateOutcome("parent_le_child_raw", "raw", check.passed, (check,), "raw parent <= best child + eps")
+
+
+def _coverage_consistent(name: str, scale: str, dcr: DiagnosticCellResult, p: float, cutoffs: Cutoffs | None) -> GateOutcome:
+    """Criterion 3a (raw / fixed band) or 3b (derived / provisional grade): parent grades
+    no better than the Caro child AND no more than one letter above the coverage-implied
+    band. Grade "no better than X" == grade_rank(parent) >= grade_rank(X)."""
+    parent_rank = grade_rank(_grade_letter(dcr.synth_black_root_score, cutoffs))
+    child_rank = grade_rank(_grade_letter(dcr.synth_caro_child_score, cutoffs))
+    cov_rank = grade_rank(_grade_letter(_coverage_implied_score(dcr.synth_root_coverage_fraction, p), cutoffs))
+    c1 = GateCheck(f"{name}_parent_le_child", parent_rank, child_rank, ">=", parent_rank >= child_rank)
+    c2 = GateCheck(f"{name}_parent_le_cov", parent_rank, cov_rank - 1, ">=", parent_rank >= cov_rank - 1)
+    return GateOutcome(name, scale, c1.passed and c2.passed, (c1, c2), "parent grade consistent with child + coverage")
+
+
+def _fold_symmetry(dcr: DiagnosticCellResult, arm: Arm) -> GateOutcome:
+    id_user = abs(dcr.synth_black_root_score - dcr.synth_user_turn_pre_fold_quality * dcr.synth_user_turn_multiplier)
+    id_opp = abs(dcr.synth_opp_turn_score - dcr.synth_opp_turn_pre_fold_quality * dcr.synth_opp_turn_multiplier)
+    checks = [
+        GateCheck("fold_identity_user", id_user, FOLD_IDENTITY_TOL, "<=", id_user <= FOLD_IDENTITY_TOL),
+        GateCheck("fold_identity_opp", id_opp, FOLD_IDENTITY_TOL, "<=", id_opp <= FOLD_IDENTITY_TOL),
+    ]
+    if arm.role == "arm1":
+        um, om = dcr.synth_user_turn_multiplier, dcr.synth_opp_turn_multiplier
+        checks.append(GateCheck("fold_multiplier_equal", um, om, "==", um == om))
+    else:
+        um = dcr.synth_user_turn_multiplier
+        om = dcr.synth_opp_turn_multiplier
+        checks.append(GateCheck("fold_user_multiplier_lt_1", um, 1.0, "<", um < 1.0))
+        checks.append(GateCheck("fold_opp_multiplier_eq_1", om, 1.0, "==", om == 1.0))
+    passed = all(c.passed for c in checks)
+    return GateOutcome("fold_symmetry_i", "raw", passed, tuple(checks), "side-to-move fold symmetry")
+
+
+def _opp_guard(cand: DiagnosticCellResult, ref: DiagnosticCellResult) -> GateOutcome:
+    cand_rank = grade_rank(fixed_band(cand.broad_guard_opp_score))
+    ref_rank = grade_rank(fixed_band(ref.broad_guard_opp_score))
+    raw_drop = ref.broad_guard_opp_score - cand.broad_guard_opp_score
+    c1 = GateCheck("opp_guard_rank", cand_rank, ref_rank + OPP_GUARD_MAX_RANK_DROP, "<=", cand_rank <= ref_rank + OPP_GUARD_MAX_RANK_DROP)
+    c2 = GateCheck("opp_guard_raw", raw_drop, OPP_GUARD_MAX_RAW_DROP_PTS, "<=", raw_drop <= OPP_GUARD_MAX_RAW_DROP_PTS)
+    return GateOutcome("opp_guard", "raw", c1.passed and c2.passed, (c1, c2), "opponent regression guard")
+
+
+def _leak(cand: DiagnosticCellResult, ref: DiagnosticCellResult) -> GateOutcome:
+    cand_rank = grade_rank(fixed_band(cand.specialist_pre_fold_quality))
+    ref_rank = grade_rank(fixed_band(ref.specialist_pre_fold_quality))
+    raw_inc = cand.specialist_pre_fold_quality - ref.specialist_pre_fold_quality
+    c1 = GateCheck("leak_rank", cand_rank, ref_rank - LEAK_MAX_RANK_INCREASE, ">=", cand_rank >= ref_rank - LEAK_MAX_RANK_INCREASE)
+    c2 = GateCheck("leak_raw", raw_inc, LEAK_MAX_RAW_INCREASE_PTS, "<=", raw_inc <= LEAK_MAX_RAW_INCREASE_PTS)
+    return GateOutcome("leak", "raw", c1.passed and c2.passed, (c1, c2), "unprepared-branch leak guard")
+
+
+def _user_tp(cand: DiagnosticCellResult, ref: DiagnosticCellResult) -> GateOutcome:
+    ref_grade = fixed_band(ref.user_tp_score)
+    cand_rank = grade_rank(fixed_band(cand.user_tp_score))
+    c_ref = GateCheck("user_tp_reference_a", ref_grade, "A", "==", ref_grade == "A")
+    c_cand = GateCheck("user_tp_candidate_le_c", cand_rank, grade_rank("C"), ">=", cand_rank >= grade_rank("C"))
+    return GateOutcome("user_tp", "raw", c_ref.passed and c_cand.passed, (c_ref, c_cand), "user-turn true-positive drop")
+
+
+def _real_parent_le_child_raw(black_guard: ScoredPair, cell: GridCell) -> GateOutcome:
+    parent = black_guard.grid[cell].named_score_map[RELEASE_GUARD_OPENING_KEY]
+    child = black_guard.grid[cell].named_score_map[RELEASE_GUARD_CHILD_OPENING_KEY]
+    limit = child + RAW_PARENT_CHILD_EPS
+    check = GateCheck("real_parent_le_child_raw", parent, limit, "<=", parent <= limit)
+    return GateOutcome("real_parent_le_child_raw", "raw", check.passed, (check,), "real black 1.e4 <= Caro child + eps")
+
+
+def _raw_gates(cell: GridCell, arm: Arm, dcr: DiagnosticCellResult, ref: DiagnosticCellResult, black_guard: ScoredPair) -> tuple[GateOutcome, ...]:
+    return (
+        _parent_le_child_raw(dcr),
+        _coverage_consistent("coverage_consistent_raw_3a", "raw", dcr, cell.report_fold_p, None),
+        _fold_symmetry(dcr, arm),
+        _opp_guard(dcr, ref),
+        _leak(dcr, ref),
+        _user_tp(dcr, ref),
+        _real_parent_le_child_raw(black_guard, cell),
+    )
+
+
+def _user14_grade_1(dcr: DiagnosticCellResult, cutoffs: Cutoffs) -> GateOutcome:
+    grade = provisional_grade(dcr.user_tp_score, cutoffs)
+    check = GateCheck("user14_grade_1", grade, NOT_A_READY_GRADES, "in", grade in NOT_A_READY_GRADES)
+    return GateOutcome("user14_grade_1", "derived", check.passed, (check,), "User-14 final grade in {C,D,F}")
+
+
+def _white_black_ii(white_guard: ScoredPair, black_guard: ScoredPair, cell: GridCell, cutoffs: Cutoffs) -> GateOutcome:
+    white = provisional_grade(white_guard.grid[cell].named_score_map[RELEASE_GUARD_OPENING_KEY], cutoffs)
+    black = provisional_grade(black_guard.grid[cell].named_score_map[RELEASE_GUARD_OPENING_KEY], cutoffs)
+    diff = abs(grade_rank(white) - grade_rank(black))
+    check = GateCheck("white_black_ii", diff, 1, "<=", diff <= 1)
+    return GateOutcome("white_black_ii", "derived", check.passed, (check,), "White/Black 1.e4 within one letter")
+
+
+def _real_black_1e4_grade(black_guard: ScoredPair, cell: GridCell, cutoffs: Cutoffs) -> GateOutcome:
+    grade = provisional_grade(black_guard.grid[cell].named_score_map[RELEASE_GUARD_OPENING_KEY], cutoffs)
+    check = GateCheck("real_black_1e4_grade", grade, NOT_A_READY_GRADES, "in", grade in NOT_A_READY_GRADES)
+    return GateOutcome("real_black_1e4_grade", "derived", check.passed, (check,), "real black 1.e4 grade in {C,D,F}")
+
+
+def _real_parent_le_child(black_guard: ScoredPair, cell: GridCell, cutoffs: Cutoffs) -> GateOutcome:
+    parent_rank = grade_rank(provisional_grade(black_guard.grid[cell].named_score_map[RELEASE_GUARD_OPENING_KEY], cutoffs))
+    child_rank = grade_rank(provisional_grade(black_guard.grid[cell].named_score_map[RELEASE_GUARD_CHILD_OPENING_KEY], cutoffs))
+    check = GateCheck("real_parent_le_child", parent_rank, child_rank, ">=", parent_rank >= child_rank)
+    return GateOutcome("real_parent_le_child", "derived", check.passed, (check,), "real parent grade >= child grade (in rank)")
+
+
+def _derived_gates(cell: GridCell, dcr: DiagnosticCellResult, white_guard: ScoredPair, black_guard: ScoredPair, cutoffs: Cutoffs) -> tuple[GateOutcome, ...]:
+    return (
+        _user14_grade_1(dcr, cutoffs),
+        _coverage_consistent("coverage_consistent_derived_3b", "derived", dcr, cell.report_fold_p, cutoffs),
+        _white_black_ii(white_guard, black_guard, cell, cutoffs),
+        _real_black_1e4_grade(black_guard, cell, cutoffs),
+        _real_parent_le_child(black_guard, cell, cutoffs),
+    )
+
+
+def _cutoff_outcome(cutoffs: Cutoffs, passed: bool) -> GateOutcome:
+    checks = (
+        GateCheck("cutoff_d_lt_c", cutoffs.d, cutoffs.c, "<", cutoffs.d < cutoffs.c),
+        GateCheck("cutoff_c_lt_b", cutoffs.c, cutoffs.b, "<", cutoffs.c < cutoffs.b),
+        GateCheck("cutoff_b_lt_a", cutoffs.b, cutoffs.a, "<", cutoffs.b < cutoffs.a),
+        GateCheck("cutoff_alert_lt_watch", cutoffs.alert, cutoffs.watch, "<", cutoffs.alert < cutoffs.watch),
+    )
+    return GateOutcome("cutoff_derivation", "derived", passed, checks, "derived grade/tone boundary ordering")
+
+
+def _pool_for(cell: GridCell, quantile_pairs: tuple[ScoredPair, ...]) -> list[float]:
+    return [s for qp in quantile_pairs for s in qp.grid[cell].named_scores]
+
+
+def _lazy_candidate(cell: GridCell, arm: Arm) -> CandidateResult:
+    return CandidateResult(
+        cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=False,
+        raw_gates=(), cutoffs_outcome=None, provisional_cutoffs=None, distribution=None,
+        derived_gates=(), admitted=False, rejection_reason=None, order_keys=None,
+    )
+
+
+def _evaluate_candidate(
+    cell: GridCell, arm: Arm, quantile_pairs: tuple[ScoredPair, ...],
+    white_guard: ScoredPair, black_guard: ScoredPair,
+    dcr: DiagnosticCellResult, ref: DiagnosticCellResult,
+) -> CandidateResult:
+    raw_gates = _raw_gates(cell, arm, dcr, ref, black_guard)
+    if not all(g.passed for g in raw_gates):
+        return CandidateResult(
+            cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=True,
+            raw_gates=raw_gates, cutoffs_outcome=None, provisional_cutoffs=None,
+            distribution=None, derived_gates=(), admitted=False,
+            rejection_reason=_expected_reason(raw_gates, None, ()), order_keys=None,
+        )
+    pool = _pool_for(cell, quantile_pairs)
+    distribution = distribution_stats(pool)
+    order_keys = _order_keys(distribution, cell.report_fold_p)
+    try:
+        cutoffs = derive_cutoffs(pool)
+    except CutoffCollision as exc:
+        outcome = _cutoff_outcome(exc.cutoffs, passed=False)
+        return CandidateResult(
+            cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=True,
+            raw_gates=raw_gates, cutoffs_outcome=outcome, provisional_cutoffs=None,
+            distribution=distribution, derived_gates=(), admitted=False,
+            rejection_reason="cutoff_collision", order_keys=order_keys,
+        )
+    outcome = _cutoff_outcome(cutoffs, passed=True)
+    derived = _derived_gates(cell, dcr, white_guard, black_guard, cutoffs)
+    admitted = all(g.passed for g in derived)
+    return CandidateResult(
+        cell=cell, role=arm.role, p=cell.report_fold_p, evaluated=True,
+        raw_gates=raw_gates, cutoffs_outcome=outcome, provisional_cutoffs=cutoffs,
+        distribution=distribution, derived_gates=derived, admitted=admitted,
+        rejection_reason=_expected_reason(raw_gates, outcome, derived), order_keys=order_keys,
+    )
+
+
+def _b1_reference(quantile_pairs: tuple[ScoredPair, ...], black_guard: ScoredPair) -> ReferenceResult:
+    pool = _pool_for(B1_CELL, quantile_pairs)
+    distribution = distribution_stats(pool)
+    raw = black_guard.grid[B1_CELL].named_score_map[RELEASE_GUARD_OPENING_KEY]
+    try:
+        cutoffs = derive_cutoffs(pool)
+    except CutoffCollision:
+        return ReferenceResult(
+            cell=B1_CELL, role="b1", distribution=distribution, provisional_cutoffs=None,
+            real_black_1e4_raw=raw, real_black_1e4_grade=None,
+        )
+    return ReferenceResult(
+        cell=B1_CELL, role="b1", distribution=distribution, provisional_cutoffs=cutoffs,
+        real_black_1e4_raw=raw, real_black_1e4_grade=provisional_grade(raw, cutoffs),
+    )
+
+
+def _select_candidate(inputs: SelectionInputs, arms: tuple[Arm, ...]) -> SelectionResult:
+    """The private, arm-injectable selector unit tests call directly. The public entry
+    point calls it with the pinned RELEASE_ARMS, so no release-path caller can reach the
+    arm-swap by accident (release policy is not caller-controlled)."""
+    _check_wrapper_types(inputs)
+    _check_runtime_and_provenance(inputs, arms)
+    required_cells = _check_required_cells(inputs, arms)
+    quantile_pairs, white_guard, black_guard = _check_pair_binding(inputs, required_cells)
+    _check_single_clock(inputs)
+    _check_operand_domain(inputs, required_cells)
+
+    cohort = inputs.cohort
+    diagnostics = inputs.diagnostics
+    ref = diagnostics.cells[CURRENT_SM_V2_3_CELL]
+
+    results: dict[int, CandidateResult] = {}
+    # Enumerate all (arm, cell) candidates in the pinned order; ARM-1 first, then ARM-2.
+    enumeration: list[tuple[int, Arm, GridCell]] = []
+    idx = 0
+    for arm in arms:
+        for cell in arm.cells:
+            enumeration.append((idx, arm, cell))
+            idx += 1
+
+    winner: CandidateResult | None = None
+    # ARM-1 (preferred) evaluated first; ARM-2 only if ARM-1 yields zero survivors (lazy).
+    for arm in arms:
+        arm_indices = [(i, c) for (i, a, c) in enumeration if a is arm]
+        for i, cell in arm_indices:
+            results[i] = _evaluate_candidate(
+                cell, arm, quantile_pairs, white_guard, black_guard,
+                diagnostics.cells[cell], ref,
+            )
+        admitted = [results[i] for i, _ in arm_indices if results[i].admitted]
+        if admitted:
+            winner = max(admitted, key=lambda c: c.order_keys)
+            # Remaining arms stay lazy (unevaluated).
+            break
+    # Fill any arms never reached with lazy placeholders.
+    for i, arm, cell in enumeration:
+        if i not in results:
+            results[i] = _lazy_candidate(cell, arm)
+
+    candidates = tuple(results[i] for i, _, _ in enumeration)
+    b1 = _b1_reference(quantile_pairs, black_guard)
+
+    if winner is None:
+        return SelectionResult(
+            candidates=candidates, winner=None, winner_cutoffs=None, no_ship=True,
+            no_ship_reason=_no_ship_reason(candidates), b1_reference=b1,
+            cohort_provenance=cohort.provenance, winner_binding=None, cohort=cohort,
+        )
+    return SelectionResult(
+        candidates=candidates, winner=winner, winner_cutoffs=winner.provisional_cutoffs,
+        no_ship=False, no_ship_reason=None, b1_reference=b1,
+        cohort_provenance=cohort.provenance,
+        winner_binding=build_winner_binding(cohort, winner.cell), cohort=cohort,
+    )
+
+
+def select_candidate(inputs: SelectionInputs) -> SelectionResult:
+    """Decide ship / no-ship from already-bound SelectionInputs. SINGLE-ARGUMENT: the arm
+    sequence IS release policy (the pinned RELEASE_ARMS), never a parameter. Side-effect-
+    free and deterministic within the runtime binding check 1(a) pins (no clock, RNG, DB,
+    artifact read, or re-scoring). The returned SelectionResult IS the release artifact."""
+    return _select_candidate(inputs, RELEASE_ARMS)
 
 
 # ---------------------------------------------------------------------------

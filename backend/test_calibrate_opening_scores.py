@@ -751,7 +751,9 @@ class TestGradeDecoupling:
         # "no more than one letter above": B is one above C -> passes; A two above -> fails.
         assert cal.grade_rank("B") >= cal.grade_rank("C") - 1
         assert not (cal.grade_rank("A") >= cal.grade_rank("C") - 1)
-        with pytest.raises((AssertionError, KeyError)):
+        # grade_rank fails closed with an explicit raise (NOT assert): it is on the
+        # select_candidate decision path, and python -O strips asserts (g-p4ih-selection).
+        with pytest.raises(ValueError):
             cal.grade_rank("Z")
 
     def test_fixed_band_boundaries(self):
