@@ -82,7 +82,7 @@ pytestmark = pytest.mark.skipif(
 def workdir():
     """A scratch directory OUTSIDE the repo working tree (TMPDIR may point inside it, and
     a repo-interior --output is a governance refusal that would mask the real assertion)."""
-    path = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-launch-", dir="/private/tmp"))
+    path = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-launch-", dir=os.path.realpath("/tmp")))
     try:
         yield path
     finally:

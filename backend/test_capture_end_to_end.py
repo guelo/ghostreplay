@@ -66,7 +66,7 @@ def _git(cwd: Path, *args: str) -> str:
 @pytest.fixture(scope="module")
 def capture_clone():
     """A throwaway clone of this repo with the working-tree scorer committed onto it."""
-    root = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-e2e-", dir="/private/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-e2e-", dir=os.path.realpath("/tmp")))
     clone = root / "checkout"
     try:
         subprocess.run(
@@ -97,7 +97,7 @@ def capture_clone():
 
 @pytest.fixture
 def outdir():
-    path = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-e2e-out-", dir="/private/tmp"))
+    path = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-e2e-out-", dir=os.path.realpath("/tmp")))
     try:
         yield path
     finally:

@@ -120,7 +120,7 @@ class _Env:
 @pytest.fixture
 def capenv(pg_engine, pg_session_factory, monkeypatch):
     _reset(pg_engine)
-    out_dir = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-pgtest-", dir="/private/tmp"))
+    out_dir = Path(tempfile.mkdtemp(prefix="ghostreplay-capture-pgtest-", dir=os.path.realpath("/tmp")))
     env = _Env(pg_session_factory, out_dir)
 
     att = cal._CaptureAttestation(
