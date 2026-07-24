@@ -15,15 +15,10 @@ output_dir=.test-results/pre-push
 mkdir -p "$output_dir"
 
 # A gate with reject_warnings=true fails when its output has a line matching
-# warning_pattern that is not matched by warning_allowlist_pattern. The
-# allowlist is only for warnings from Node itself or from a dependency's
-# internals — things no change in this repo can silence. Keep it short and
-# match the full message: every entry is a warning we stop being told about.
-#
+# warning_pattern.
 # React 19 prints its test warnings with no "Warning:" prefix, so the act()
 # ones need their own patterns to be caught at all.
 warning_pattern='Warning:|warning:|^\(!\)|not wrapped in act\(|not configured to support act\('
-warning_allowlist_pattern='ExperimentalWarning: localStorage is not available because --localstorage-file was not provided\.|^\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)$|\[DEP0205\] DeprecationWarning: `module\.register\(\)` is deprecated\.'
 
 declare -a result_names=()
 declare -a result_statuses=()
@@ -56,7 +51,6 @@ run_gate() {
     local offenders
     offenders=$(
       LC_ALL=C grep -E "$warning_pattern" "$output_file" |
-        LC_ALL=C grep -Ev "$warning_allowlist_pattern" |
         sort -u || true
     )
     if [[ -n $offenders ]]; then
@@ -103,15 +97,15 @@ run_gate \
 # Playwright's own config loader calls the deprecated module.register()
 # (DEP0205, node_modules/playwright/lib/common/esmLoaderHost.js) on Node >=26,
 # so --throw-deprecation crashes the run before any test starts. Drop it for
-# this gate only — the warning it then prints is allowlisted above. Any other
-# deprecation, including one from our own e2e code, still fails the gate.
+# this gate only and suppress that specific warning. Any other deprecation,
+# including one from our own e2e code, still fails the gate.
 run_gate \
   "Frontend end-to-end tests" \
   "Frontend end-to-end tests (screenshot gallery excluded)" \
   "$output_dir/frontend-e2e-tests.out" \
   true \
   "npm run test:e2e:run" \
-  env NODE_OPTIONS="${NODE_OPTIONS//--throw-deprecation/}" npm run test:e2e:run
+  env NODE_OPTIONS="${NODE_OPTIONS//--throw-deprecation/} --disable-warning=DEP0205" npm run test:e2e:run
 
 if [ ! -x backend/.venv/bin/python ]; then
   backend_log="$output_dir/backend-tests.out"
