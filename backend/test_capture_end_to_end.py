@@ -18,8 +18,15 @@ uncommitted diff a human could review and commit. The attestation the child stam
 (`capture_source_revision`, `capture_scorer_source_digest`) is the digest the launcher
 computed before the child interpreter existed.
 
-Skipped without GHOSTREPLAY_TEST_PG_URL (@pg_required) and without the repo venv. Real
-scoring across the arm grid is minutes, not seconds.
+Skipped without GHOSTREPLAY_TEST_PG_URL (@pg_required). Real scoring across the arm grid is
+minutes, not seconds.
+
+INTERPRETER. Capture derives the child's dependency paths from the interpreter it is handed
+(GHOSTREPLAY_PYTHON), so that interpreter's environment must carry the scorer's deps. Locally
+that is the repo venv (backend/.venv). On CI there is no repo venv — dependencies are
+installed into the interpreter running pytest — so we fall back to sys.executable, which is
+exactly that interpreter. The launcher already supports a non-venv interpreter (see
+release_calibration_launcher._audited_dep_paths: venv is None -> the base install IS the env).
 """
 from __future__ import annotations
 
@@ -29,6 +36,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -40,7 +48,10 @@ import scripts.calibrate_opening_scores_v2 as cal
 from test_capture_cohort_pg import _reset, _seed_scorable_cohort
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VENV_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
+# Prefer the repo venv when present (the local developer setup); otherwise use the
+# interpreter running pytest, which on CI is the environment the deps were installed into.
+_REPO_VENV_PYTHON = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
+VENV_PYTHON = _REPO_VENV_PYTHON if _REPO_VENV_PYTHON.exists() else Path(sys.executable)
 GUARD_USER = 14
 
 # Files the clone needs at working-tree state, not HEAD state: everything the source digest
@@ -53,7 +64,8 @@ _EXTRA_SYNC = (
 )
 
 pytestmark = pytest.mark.skipif(
-    not VENV_PYTHON.exists(), reason="needs the repo venv"
+    not os.access(VENV_PYTHON, os.X_OK),
+    reason=f"no usable python interpreter at {VENV_PYTHON}",
 )
 
 
