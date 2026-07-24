@@ -14,6 +14,17 @@ overall_status=0
 output_dir=.test-results/pre-push
 mkdir -p "$output_dir"
 
+# A gate with reject_warnings=true fails when its output has a line matching
+# warning_pattern that is not matched by warning_allowlist_pattern. The
+# allowlist is only for warnings from Node itself or from a dependency's
+# internals — things no change in this repo can silence. Keep it short and
+# match the full message: every entry is a warning we stop being told about.
+#
+# React 19 prints its test warnings with no "Warning:" prefix, so the act()
+# ones need their own patterns to be caught at all.
+warning_pattern='Warning:|warning:|^\(!\)|not wrapped in act\(|not configured to support act\('
+warning_allowlist_pattern='ExperimentalWarning: localStorage is not available because --localstorage-file was not provided\.|^\(Use `node --trace-warnings \.\.\.` to show where the warning was created\)$|\[DEP0205\] DeprecationWarning: `module\.register\(\)` is deprecated\.'
+
 declare -a result_names=()
 declare -a result_statuses=()
 declare -a result_logs=()
@@ -41,12 +52,20 @@ run_gate() {
   command_status=${PIPESTATUS[0]}
   set -e
 
-  if ((command_status == 0)) &&
-    [[ $reject_warnings == true ]] &&
-    LC_ALL=C grep -Eq 'Warning:|warning:|^\(!\)' "$output_file"; then
-    printf '\n%s emitted a warning; push rejected.\n' "$label" |
-      tee -a "$output_file" >&2
-    command_status=1
+  if ((command_status == 0)) && [[ $reject_warnings == true ]]; then
+    local offenders
+    offenders=$(
+      LC_ALL=C grep -E "$warning_pattern" "$output_file" |
+        LC_ALL=C grep -Ev "$warning_allowlist_pattern" |
+        sort -u || true
+    )
+    if [[ -n $offenders ]]; then
+      {
+        printf '\n%s emitted a warning; push rejected. Offending lines:\n' "$label"
+        printf '%s\n' "$offenders" | head -n 20
+      } | tee -a "$output_file" >&2
+      command_status=1
+    fi
   fi
 
   if ((command_status == 0)); then
@@ -78,16 +97,21 @@ run_gate \
   "Frontend unit and component tests" \
   "$output_dir/frontend-tests.out" \
   true \
-  "npm run test:run" \
-  npm run test:run
+  "npm run test:run -- --no-color" \
+  npm run test:run -- --no-color
 
+# Playwright's own config loader calls the deprecated module.register()
+# (DEP0205, node_modules/playwright/lib/common/esmLoaderHost.js) on Node >=26,
+# so --throw-deprecation crashes the run before any test starts. Drop it for
+# this gate only — the warning it then prints is allowlisted above. Any other
+# deprecation, including one from our own e2e code, still fails the gate.
 run_gate \
   "Frontend end-to-end tests" \
   "Frontend end-to-end tests (screenshot gallery excluded)" \
   "$output_dir/frontend-e2e-tests.out" \
   true \
   "npm run test:e2e:run" \
-  npm run test:e2e:run
+  env NODE_OPTIONS="${NODE_OPTIONS//--throw-deprecation/}" npm run test:e2e:run
 
 if [ ! -x backend/.venv/bin/python ]; then
   backend_log="$output_dir/backend-tests.out"
