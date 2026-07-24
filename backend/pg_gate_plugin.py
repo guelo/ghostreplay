@@ -169,6 +169,21 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_matrix.py::test_pg_nil_uuid_session_is_backfilled",
     "test_release_b_pg_matrix.py::test_pg_detector_parity",
     "test_release_b_pg_matrix.py::test_pg_integer_division_floors_like_the_validator",
+    # Release-B single-runner guard + stall observation (g-b-runner-guard). The
+    # session-scoped two-key advisory guard on a dedicated connection, its survival
+    # across 20260709_02's autocommit-block commit, cross-process serialization
+    # proven exactly-once by audit counters, the Config.attributes acquisition
+    # timeout, fail-safe release, the "Alembic owns the migration transaction"
+    # ordering, and the migration connection's in-flight application_name. None is
+    # observable from the SQLite suite: SQLite has no advisory locks, no
+    # autocommit-block commit to survive, no cross-process migration proxy, and no
+    # pg_stat_activity/pg_locks to observe.
+    "test_migration_guard.py::test_pg_guard_held_across_the_whole_chain_from_base",
+    "test_migration_guard.py::test_pg_seeded_concurrent_backfill_is_applied_exactly_once",
+    "test_migration_guard.py::test_pg_acquisition_timeout_raises_concurrent_migration_error",
+    "test_migration_guard.py::test_pg_guard_is_released_when_the_migration_fails",
+    "test_migration_guard.py::test_pg_alembic_owns_the_migration_transaction",
+    "test_migration_guard.py::test_pg_migration_application_name_is_visible_in_flight",
     # Frozen-cohort capture: the consistency fence + atomic publication
     # (g-p4ih-capture). The contract under test IS PostgreSQL REPEATABLE READ
     # snapshot isolation — a concurrent evidence write that the snapshot must not
