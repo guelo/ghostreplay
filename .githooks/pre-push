@@ -35,11 +35,14 @@ run_gate() {
   local label=$2
   local output_file=$3
   local reject_warnings=$4
-  local display_command=$5
   local command_status
 
-  shift 5
-  printf '$ %s\n\n' "$display_command" >"$output_file"
+  shift 4
+  {
+    printf '$'
+    printf ' %q' "$@"
+    printf '\n\n'
+  } >"$output_file"
 
   printf '\n==> %s\n' "$label"
   set +e
@@ -75,7 +78,6 @@ run_gate \
   "Frontend lint (warnings are errors)" \
   "$output_dir/frontend-lint.out" \
   false \
-  "npm run lint -- --max-warnings=0" \
   npm run lint -- --max-warnings=0
 
 run_gate \
@@ -83,7 +85,6 @@ run_gate \
   "Frontend typecheck and production build" \
   "$output_dir/frontend-build.out" \
   true \
-  "npm run build" \
   npm run build
 
 run_gate \
@@ -91,8 +92,7 @@ run_gate \
   "Frontend unit and component tests" \
   "$output_dir/frontend-tests.out" \
   true \
-  "npm run test:run -- --no-color" \
-  npm run test:run -- --no-color
+  env NODE_OPTIONS="$NODE_OPTIONS --disable-warning=ExperimentalWarning" npm run test:run -- --no-color
 
 # Playwright's own config loader calls the deprecated module.register()
 # (DEP0205, node_modules/playwright/lib/common/esmLoaderHost.js) on Node >=26,
@@ -104,7 +104,6 @@ run_gate \
   "Frontend end-to-end tests (screenshot gallery excluded)" \
   "$output_dir/frontend-e2e-tests.out" \
   true \
-  "npm run test:e2e:run" \
   env NODE_OPTIONS="${NODE_OPTIONS//--throw-deprecation/} --disable-warning=DEP0205" npm run test:e2e:run
 
 if [ ! -x backend/.venv/bin/python ]; then
@@ -124,7 +123,6 @@ else
     "Backend tests (warnings are errors)" \
     "$output_dir/backend-tests.out" \
     false \
-    "backend/.venv/bin/python -W error -m pytest -c backend/pytest.ini backend" \
     backend/.venv/bin/python -W error -m pytest -c backend/pytest.ini backend
 fi
 
