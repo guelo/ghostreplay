@@ -57,6 +57,20 @@ export default defineConfig({
       ...posthogProxy,
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Split the two large, rarely-changing vendors out of the entry chunk.
+        // They are still loaded eagerly (posthog must init before first paint),
+        // so this buys cache stability across deploys rather than fewer bytes;
+        // the actual first-load win comes from the lazy routes in AppRoutes.tsx.
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom', 'react-dom/client'],
+          'vendor-posthog': ['posthog-js', '@posthog/react'],
+        },
+      },
+    },
+  },
   preview: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',
