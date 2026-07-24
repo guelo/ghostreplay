@@ -167,6 +167,30 @@ def _skip_analytics(path: str) -> bool:
     )
 
 
+def _privacy_signals(scope) -> dict:
+    """Whether this request carries browser privacy signals (GPC / DNT).
+
+    These are the HTTP-header equivalents of the client-side gates in
+    ``src/analytics/posthog.ts``: GPC arrives as ``Sec-GPC: 1`` (mirrors the
+    ``navigator.globalPrivacyControl === true`` pre-init bail) and DNT as
+    ``DNT: 1`` (mirrors the SDK's ``respect_dnt`` opt-out). Server capture is
+    unaffected by these signals, so tagging every ``api_request`` with them
+    measures the TRUE prevalence of the signals that silence client capture —
+    without needing client capture to work. This is the denominator that decides
+    g-client-event-gap: if ``client_capture_gated`` is ~100% of requests, the
+    client silence is the real audience mix; if it is a minority while client
+    capture is ~0%, the gate over-fires and f72b4c4 has a defect.
+    """
+    gpc = _header_value(scope, b"sec-gpc") == "1"
+    dnt = _header_value(scope, b"dnt") in ("1", "yes")
+    return {
+        "gpc_signaled": gpc,
+        "dnt_signaled": dnt,
+        # True iff the client PostHog init would have been gated for this client.
+        "client_capture_gated": gpc or dnt,
+    }
+
+
 def _capture_api_request(
     scope,
     method: str,
@@ -202,6 +226,7 @@ def _capture_api_request(
             "status_class": f"{status_code // 100}xx",
             "request_id": request_id,
             "client_request_id": client_request_id,
+            **_privacy_signals(scope),
         },
     )
 
