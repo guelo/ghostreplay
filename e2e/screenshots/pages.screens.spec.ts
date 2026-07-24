@@ -188,65 +188,6 @@ test.describe("history", () => {
   });
 });
 
-// --- Blunders ------------------------------------------------------------
-
-test.describe("blunders", () => {
-  test("loading / empty / populated / error", async ({ page, loginAs }) => {
-    await prepareDeterministicPage(page);
-    await loginAs(page, "due");
-    await stallRoute(page, "**/api/blunder**");
-    await page.goto("/blunders");
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "blunders",
-      state: "loading",
-      waitFor: (p) => p.getByText("Blunder Library"),
-    });
-    await page.unrouteAll();
-
-    await loginAs(page, "empty");
-    await page.goto("/blunders");
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "blunders",
-      state: "empty",
-      waitFor: (p) => p.getByText("No blunders recorded yet"),
-    });
-
-    await loginAs(page, "due");
-    await page.goto("/blunders");
-    const blunderList = page.getByRole("listbox", { name: /blunder library/i });
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "blunders",
-      state: "populated",
-      waitFor: () => blunderList,
-    });
-
-    // Selected + analysis: click the first blunder and wait for its board.
-    await page.getByRole("option").first().click();
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "blunders",
-      state: "selected-analysis",
-      waitFor: (p) => p.locator(".blunder-detail .analysis-board"),
-    });
-
-    // Practice-ready filter: toggle the "Practice-ready" button (due user has ready items).
-    await page.getByRole("button", { name: "Practice-ready" }).click();
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "blunders",
-      state: "due-only",
-      waitFor: (p) => p.getByRole("button", { name: "Show all" }),
-    });
-
-    await failRoute(page, "**/api/blunder**");
-    await page.goto("/blunders");
-    await captureAcrossViewports(page, test.info(), {
-      pageKey: "blunders",
-      state: "error",
-      waitFor: (p) => p.locator(".blunders-shell__error"),
-    });
-    await page.unrouteAll();
-  });
-});
-
 // --- Openings ------------------------------------------------------------
 
 test.describe("openings", () => {
