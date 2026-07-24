@@ -595,9 +595,11 @@ describe("ChessGame characterization safeguards", () => {
     const line = new Chess();
     line.move("e4");
     const rootFen = line.fen();
-    useGameStore.setState({
-      drillOpeningKey: rootFen,
-      drillState: "active",
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: rootFen,
+        drillState: "active",
+      });
     });
     checkDrillRouteMock.mockResolvedValueOnce({
       status: "root_reached",
@@ -733,10 +735,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 25,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 25,
+      });
     });
 
     mockCoordinator.waitForAnalysis.mockReset();
@@ -840,10 +844,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 25,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 25,
+      });
     });
 
     mockCoordinator.waitForAnalysis.mockReset();
@@ -896,10 +902,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 25,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 25,
+      });
     });
 
     failDrillMock.mockClear();
@@ -943,10 +951,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 25,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 25,
+      });
     });
 
     failDrillMock.mockClear();
@@ -990,10 +1000,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 0,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 0,
+      });
     });
 
     failDrillMock.mockClear();
@@ -1029,10 +1041,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 0,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 0,
+      });
     });
 
     failDrillMock.mockClear();
@@ -1063,9 +1077,11 @@ describe("ChessGame characterization safeguards", () => {
 
   const driveOffRouteFail = async () => {
     await startGameAsWhite();
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "active",
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "active",
+      });
     });
     checkDrillRouteMock.mockResolvedValueOnce({
       status: "failed",
@@ -1183,10 +1199,12 @@ describe("ChessGame characterization safeguards", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 25,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 25,
+      });
     });
     mockCoordinator.waitForAnalysis.mockReset();
     mockCoordinator.waitForAnalysis
@@ -1657,12 +1675,14 @@ describe("ChessGame characterization safeguards", () => {
 
   it("instant Again re-randomizes opponent difficulty (g-ncvm)", async () => {
     await driveOffRouteFail();
-    useGameStore.setState({
-      playerColor: "white",
-      drillStrictness: "lenient",
-      drillStrictnessCp: 20,
-      engineElo: 1500,
-      playerRating: 1500,
+    act(() => {
+      useGameStore.setState({
+        playerColor: "white",
+        drillStrictness: "lenient",
+        drillStrictnessCp: 20,
+        engineElo: 1500,
+        playerRating: 1500,
+      });
     });
     // Math.random() === 0 makes sampleEloBin return MAIA_ELO_BINS[0] regardless
     // of rating, so the resampled bin is deterministic and ≠ the stored 1500.
@@ -1685,11 +1705,13 @@ describe("ChessGame characterization safeguards", () => {
 
   it("captures drill_again_clicked when Again is pressed", async () => {
     await driveOffRouteFail();
-    useGameStore.setState({
-      playerColor: "white",
-      drillStrictness: "lenient",
-      drillStrictnessCp: 20,
-      playerRating: 1500,
+    act(() => {
+      useGameStore.setState({
+        playerColor: "white",
+        drillStrictness: "lenient",
+        drillStrictnessCp: 20,
+        playerRating: 1500,
+      });
     });
     // Mocked Math.random pins the resampled bin so we can assert the exact value.
     vi.spyOn(Math, "random").mockReturnValue(0);
@@ -1836,11 +1858,13 @@ describe("ChessGame characterization safeguards", () => {
 
   it("applies the opponent move when restarting an opponent-first drill", async () => {
     await driveOffRouteFail();
-    useGameStore.setState({
-      playerColor: "black",
-      boardOrientation: "black",
-      drillStrictness: "lenient",
-      drillStrictnessCp: 20,
+    act(() => {
+      useGameStore.setState({
+        playerColor: "black",
+        boardOrientation: "black",
+        drillStrictness: "lenient",
+        drillStrictnessCp: 20,
+      });
     });
     startDrillMock.mockResolvedValueOnce(makeDrillResponse({ player_color: "black" }));
     getNextOpponentMoveMock.mockClear();
@@ -1905,12 +1929,14 @@ describe("ChessGame characterization safeguards", () => {
       }),
     );
     await driveOffRouteFail();
-    useGameStore.setState({
-      playerColor: "white",
-      engineElo: 1500,
-      playerRating: 1500,
-      drillStrictness: "lenient",
-      drillStrictnessCp: 20,
+    act(() => {
+      useGameStore.setState({
+        playerColor: "white",
+        engineElo: 1500,
+        playerRating: 1500,
+        drillStrictness: "lenient",
+        drillStrictnessCp: 20,
+      });
     });
     // Opening difficulty is resampled (g-ncvm), not seeded from store/localStorage.
     vi.spyOn(Math, "random").mockReturnValue(0);
@@ -2179,12 +2205,14 @@ describe("ChessGame characterization safeguards", () => {
     getOpeningRootsMock.mockResolvedValue({ families: [] });
     abandonDrillMock.mockResolvedValueOnce({ drill_state: "failed" });
     await startGameAsWhite();
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "active",
-      drillStrictness: "lenient",
-      drillStrictnessCp: 20,
-      playerColor: "white",
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "active",
+        drillStrictness: "lenient",
+        drillStrictnessCp: 20,
+        playerColor: "white",
+      });
     });
 
     fireEvent.click(screen.getByRole("button", { name: /resign/i }));
@@ -2812,7 +2840,9 @@ describe("ChessGame blunder recording", () => {
       });
     });
 
-    await new Promise((r) => setTimeout(r, 50));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
 
     expect(recordBlunderMock).not.toHaveBeenCalled();
   });
@@ -4838,10 +4868,12 @@ describe("ChessGame post-root drill outcome stability (AC4)", () => {
       });
 
       render(<ChessGame />);
-      useGameStore.setState({
-        drillOpeningKey: "target-fen",
-        drillState: "root_reached",
-        drillStrictnessCp: threshold,
+      act(() => {
+        useGameStore.setState({
+          drillOpeningKey: "target-fen",
+          drillState: "root_reached",
+          drillStrictnessCp: threshold,
+        });
       });
 
       mockCoordinator.waitForAnalysis.mockResolvedValue({
@@ -4890,10 +4922,12 @@ describe("ChessGame post-root drill outcome stability (AC4)", () => {
     });
 
     render(<ChessGame />);
-    useGameStore.setState({
-      drillOpeningKey: "target-fen",
-      drillState: "root_reached",
-      drillStrictnessCp: 0,
+    act(() => {
+      useGameStore.setState({
+        drillOpeningKey: "target-fen",
+        drillState: "root_reached",
+        drillStrictnessCp: 0,
+      });
     });
 
     mockCoordinator.waitForAnalysis.mockResolvedValue({
@@ -5115,6 +5149,12 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
     expect(mockNavigate).toHaveBeenCalledWith("/drill-analysis");
     // Snapshot is re-used as-is, never rebuilt/overwritten on return.
     expect(useDrillAnalysisStore.getState().snapshot).toBe(snapshot);
+
+    // Flush the mount-time getStatsAchievements() resolution inside act() so its
+    // state update doesn't leak past this test.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it("retains the engine Elo on the mount resample but resamples it on Again", async () => {
@@ -5225,9 +5265,12 @@ describe("ChessGame return to drill after analyze (g-65ve)", () => {
   ])(
     "falls back to ordinary /play: $name",
     ({ setup, endedRecovery }) => {
-      it("surfaces the ended-session recovery banner (not the auto-opened start popup) and no reviewed Again action", () => {
+      it("surfaces the ended-session recovery banner (not the auto-opened start popup) and no reviewed Again action", async () => {
         setup();
         render(<ChessGame />);
+        // Flush the mount-time getStatsAchievements() resolution inside act() so
+        // its state update doesn't leak past this synchronous assertion block.
+        await act(async () => {});
 
         // No reviewed "Again" action exposed.
         expect(screen.queryByRole("button", { name: /^again$/i })).toBeNull();

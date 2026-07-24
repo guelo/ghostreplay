@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import BlundersPage from './BlundersPage';
 
@@ -174,6 +174,13 @@ describe('BlundersPage', () => {
     expect(captureEventMock).toHaveBeenCalledWith('blunder_selected', {
       blunder_id: 1,
       filter: 'all',
+    });
+
+    // Selecting the card kicks off an async analysis fetch that updates state
+    // after this assertion; flush it inside act() so it doesn't leak past the
+    // test as a "not wrapped in act(...)" warning.
+    await act(async () => {
+      await Promise.resolve();
     });
   });
 

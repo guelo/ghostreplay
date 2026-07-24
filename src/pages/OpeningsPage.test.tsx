@@ -800,6 +800,13 @@ describe("OpeningsPage tree", () => {
     // Null-metric node still renders and is selectable.
     clickMove("e4");
     expect(location()).toBe("/openings?color=white&move=e2e4");
+
+    // Navigating refetches the tree at the new route; flush that async update
+    // inside act() so it doesn't leak past the test as a "not wrapped in
+    // act(...)" warning.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it("renders non-navigable boundary nodes as non-clickable cards", async () => {
