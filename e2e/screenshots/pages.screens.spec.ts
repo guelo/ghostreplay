@@ -542,9 +542,13 @@ const startGameAsWhite = async (page: Page): Promise<void> => {
   // also match the Play/Drill mode toggle, which is the already-active default
   // and goes disabled the instant the game starts — never click that here.)
   const playWhite = page.getByRole("button", { name: /play white/i });
-  if ((await playWhite.count()) > 0) {
-    await playWhite.click();
-  }
+  // Wait for the button before clicking: the start overlay mounts after the
+  // /play page resolves its data, so a bare `.count()` (which does NOT
+  // auto-wait) can read 0 and silently skip the click, leaving the game
+  // unstarted. `.click()` auto-waits, but assert visibility first for a clear
+  // failure if the overlay never appears.
+  await expect(playWhite).toBeVisible({ timeout: 15_000 });
+  await playWhite.click();
   await expect(page.locator(".game-status-badge--live")).toBeVisible({
     timeout: 15_000,
   });
