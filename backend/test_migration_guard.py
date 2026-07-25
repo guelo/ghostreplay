@@ -57,6 +57,7 @@ from app.migration_guard import (
     MIGRATION_TEST_BARRIER_ENV,
     RUNNER_APP_NAME,
     ConcurrentMigrationError,
+    _MigrationStallProbe,
     _acquire_migration_guard,
     _log_backend_pid,
     _release_migration_guard,
@@ -879,17 +880,23 @@ def test_stall_probe_env_wiring_no_stale_leak_across_sequential_runs(tmp_path, m
     ``migration_stall_probe.report()`` placement in the inner finally (SQLite skips the
     guard/label/barrier, but report() still runs). ``migration_stall_probe`` is the
     stable shared instance env.py imports, so its state is observable here.
+
+    The spy goes on the CLASS, never on the singleton: patching the instance would
+    leave the original bound method behind as an instance attribute when monkeypatch
+    undoes it, shadowing the class for the rest of the process — which silently
+    disables every LATER class-level patch of ``report()`` (the PG stall-probe tests'
+    spies included). ``_MigrationStallProbe.__slots__`` now rejects that outright.
     """
     migration_stall_probe.reset()
 
     reports: list[str] = []
-    real_report = migration_stall_probe.report
+    real_report = _MigrationStallProbe.report
 
-    def _spy_report():
+    def _spy_report(self):
         reports.append("fired")
-        return real_report()
+        return real_report(self)
 
-    monkeypatch.setattr(migration_stall_probe, "report", _spy_report)
+    monkeypatch.setattr(_MigrationStallProbe, "report", _spy_report)
 
     # --- Run 1: records a first-row-lock timestamp, then FAILS. ---
     failing_url = _seed_failing_sqlite_db(tmp_path, "stall_fail.db")
@@ -919,3 +926,21 @@ def test_stall_probe_env_wiring_no_stale_leak_across_sequential_runs(tmp_path, m
     assert reports == ["fired"]  # inner finally fired on success too
     assert migration_stall_probe._first_row_lock_at is None  # no stale leak
     migration_stall_probe.reset()
+
+
+def test_the_stall_probe_singleton_cannot_be_shadowed_per_instance():
+    """A test spy must go on the CLASS, and the singleton must refuse the alternative.
+
+    ``env.py`` and revision 20260719_01 both bind the singleton DIRECTLY, so method
+    resolution goes instance-first: one instance attribute named ``report`` shadows
+    the class for every later caller in the process. ``monkeypatch.setattr(instance,
+    "report", spy)`` plants exactly that on UNDO — it captures the inherited bound
+    method and writes it back into the instance — so the leak outlives the test that
+    caused it and silently disables every later CLASS-level patch, in another file,
+    only in full-suite order (g-relb-stall-probe-order).
+
+    ``__slots__`` makes it a loud AttributeError at the offending line instead.
+    """
+    with pytest.raises(AttributeError):
+        migration_stall_probe.report = lambda: None
+    assert not hasattr(migration_stall_probe, "__dict__")

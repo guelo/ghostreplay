@@ -317,6 +317,17 @@ class _MigrationStallProbe:
     report() compare them.
     """
 
+    # No instance __dict__, on purpose. ``env.py`` and the revision both hold a
+    # DIRECT reference to the module singleton below, so an instance-level
+    # attribute would shadow the class for every later caller in the process — and
+    # ``monkeypatch.setattr(instance, "report", spy)`` creates exactly that on
+    # UNDO: it captures the inherited bound method and writes it back into the
+    # instance, permanently. A later test that patches the CLASS then silently
+    # never fires, in a different file, only in full-suite order. __slots__ turns
+    # that into an immediate AttributeError at the offending call site. Patch the
+    # CLASS (``_MigrationStallProbe.report``), never the singleton.
+    __slots__ = ("_first_row_lock_at", "_max_stall_ms", "_projected_stall_ms")
+
     def __init__(self) -> None:
         self._first_row_lock_at: float | None = None  # monotonic seconds
         self._max_stall_ms: float | None = None

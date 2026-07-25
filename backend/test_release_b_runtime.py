@@ -993,18 +993,22 @@ def test_sqlite_upgrade_records_no_stall_and_takes_no_row_lock(tmp_path, monkeyp
     migration_guard.migration_stall_probe.reset()
 
     anchored: list[tuple] = []
-    real = migration_guard.migration_stall_probe.record_first_row_lock
+    real = migration_guard._MigrationStallProbe.record_first_row_lock
 
-    def spy(ts, **kw):
+    def spy(self, ts, **kw):
         anchored.append((ts, kw))
-        return real(ts, **kw)
+        return real(self, ts, **kw)
 
-    # Patched on the SINGLETON, not on the revision module: Alembic re-imports the
-    # revision file on every upgrade, but the revision resolves the probe through
+    # Patched on the probe's CLASS, not on the revision module: Alembic re-imports
+    # the revision file on every upgrade, but the revision resolves the probe through
     # ``app.migration_guard`` at call time and ``sys.modules`` is shared, so the
-    # spy survives the re-import.
+    # spy survives the re-import. And on the CLASS rather than on the singleton:
+    # patching the instance leaves the original bound method behind as an instance
+    # attribute when monkeypatch undoes it, shadowing the class for the rest of the
+    # process (``__slots__`` now rejects it outright — see
+    # test_migration_guard.py::test_the_stall_probe_singleton_cannot_be_shadowed_per_instance).
     monkeypatch.setattr(
-        migration_guard.migration_stall_probe, "record_first_row_lock", spy
+        migration_guard._MigrationStallProbe, "record_first_row_lock", spy
     )
 
     cfg = _alembic_config()
