@@ -18,4 +18,14 @@ cd "$BACKEND_DIR"
 source .venv/bin/activate
 python scripts/seed_e2e_data.py --reset --database-url "$DATABASE_URL"
 
-exec uvicorn app.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --no-access-log
+# Keep idle connections alive longer than any gap a run can produce.
+#
+# Playwright's request context pools sockets, so with uvicorn's 5s default the
+# server closes an idle keep-alive connection while the client still holds it.
+# A request issued in the window between that close and the client noticing it
+# dies with ECONNRESET / "socket hang up" before reaching the app — a transport
+# race, reproducible at a ~5.000s idle gap, that failed the pre-push gate on a
+# fixture login. 75s clears the 30s per-test timeout with room to spare, so the
+# server never closes first during a run. See g-e2e-login-econnreset.
+exec uvicorn app.main:app --host 127.0.0.1 --port "$BACKEND_PORT" --no-access-log \
+  --timeout-keep-alive 75
