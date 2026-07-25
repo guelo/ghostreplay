@@ -716,10 +716,18 @@ test.describe("play", () => {
       page.locator(".opening-picker__trigger"),
     ).toHaveText(/Select opening/, { timeout: 180_000 });
 
+    // Pick a strictness tier — the fine-tune slider only renders once
+    // strictnessCp is non-null, so without this the panel captures without it.
+    await page
+      .locator(".strictness-tier-grid")
+      .getByRole("button", { name: "Standard" })
+      .click();
+    await expect(page.locator(".strictness-slider-row")).toBeVisible();
+
     await captureAcrossViewports(page, test.info(), {
       pageKey: "play",
       state: "drill-setup",
-      waitFor: (p) => p.locator(".opening-picker__trigger"),
+      waitFor: (p) => p.locator(".strictness-slider-row"),
     });
   });
 
