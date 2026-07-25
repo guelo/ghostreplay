@@ -17,39 +17,100 @@ Owning beads:
 - `g-b-runtime-envelope` — consumes these constants to arm the SQL timeouts, the
   run-time growth factors, and the admission projection.
 - `g-b-sizing-harness` — **Phase 3**: reruns the frozen shipped revision with its
-  guards armed on fresh restores, verifies the constants against production, and
-  records the health-window verdict. **Nothing merges to production on the
-  strength of the Phase 1/2 run recorded here.**
+  guards armed on fresh restores and records the health-window verdict.
+  Re-scoped 2026-07-25 to the **from-scratch** run — see §0 and §5. It was
+  written as the merge gate ("nothing merges to production on the strength of the
+  Phase 1/2 run recorded here"), and that gate did not hold: the revision reached
+  production before the constants existed.
+- `g-b-size-pg18-major` — production runs PostgreSQL **18.4**; every measurement
+  in §2 was taken on **15.18**.
 
 ---
 
 ## 0. Status of the numbers in this document
 
-> **These constants are DERIVED BUT NOT PRODUCTION-QUALIFIED.**
+> **The migration these constants size HAS ALREADY RUN IN PRODUCTION.**
 >
-> The Phase 1 measurement recorded below was taken against a **locally
-> synthesized snapshot-shaped database**, not a production restore: no production
-> snapshot, fork, or dump was available to the derivation. Every constant is a
-> real measurement of the real shipped statements against a real PostgreSQL, and
-> every derivation rule in the design was applied — but the **absolute values
-> describe a 6,000-session / 357,000-move database on an Apple-silicon laptop
-> with a local SSD**, and production is neither of those things.
+> Established 2026-07-25 from a full restore of the valtron dump
+> `ghostreplay-20260724T101501Z.dump` (source server PostgreSQL 18.4, `pg_dump`
+> 18.3, database `railway`). Four independent facts, any one of which is
+> suggestive and which together are conclusive:
 >
-> Concretely, the numbers most likely to move and the direction they will move:
+> - `alembic_version` is **`20260720_01`**, whose `down_revision` is
+>   `20260719_01`.
+> - `ck_game_sessions_player_accuracy` is **`convalidated = true`**.
+>   `20260709_01` creates it `NOT VALID`; `20260719_01` is the only thing that
+>   validates it.
+> - Both populations are **empty**: `BACKFILL_REMAINING` and `REPAIR_REMAINING`
+>   both return 0, and `COVERAGE_ASSERT_SQL` returns 0.
+> - **1,603 of the 1,646** ended-visible sessions ended *before the serving write
+>   hook existed* — back to 2026-02-08 — and carry
+>   `player_accuracy_algo_version = 1`. The hook was committed 2026-07-11 23:57
+>   PDT (`95be57a`), so no deploy of it can predate that instant; the cutoff is
+>   the commit, not a deploy date, which makes the count a lower bound. A hook
+>   that stamps a session when it *ends* cannot have stamped a session that ended
+>   in February. Something backfilled them, and 95 rows carry the backfill's own
+>   fail-closed fingerprint: version 1 with a `NULL` accuracy.
 >
-> | Constant | Why it will change | Direction |
-> |---|---|---|
-> | `SIZED_*` (all four) | production's relations are larger | **up** |
-> | `MARGINED_MS_PER_SCAN_STMT` | scales with the whole `session_moves` relation | **up** |
-> | `MARGINED_MS_COVERAGE_ASSERT` | scales with the whole `game_sessions` relation | **up** |
-> | `TEARDOWN_ALLOWANCE_MS` | a local SSD with no fsync contention is the best case for commit and for cancel-to-unlock | **up** |
-> | `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` / `_PER_ROW` | same | **up** |
-> | `MARGINED_MS_PER_ROW` | CPU-bound PGN parse; laptop cores are fast | **up** |
-> | `B_TESTED` / `R_TESTED` | bounded by what was exercised here | up **or** down |
+>   Do **not** date this from the `20260709_01` filename. Revision filenames are
+>   authored dates, not deploy dates — that revision was itself committed
+>   2026-07-11 (`8b49bed`), two days after the date it carries.
 >
-> `g-b-sizing-harness` **must** re-derive against a production restore and
-> replace this section. An adjusted number there is a refinement, not a
-> reopening; a structural runtime change reopens `g-b-runtime-envelope`.
+> What ran was the version that landed 2026-07-19 (`e2967d2`, "Release B
+> backfill/repair/fail-closed core"). The sizing harness (`5e47bfa`, 2026-07-24)
+> and the runtime envelope (`40b3379`, 2026-07-25) were committed **afterwards**,
+> and the revision has since grown 2,030 insertions / 218 deletions. So **none of
+> the admission constants, the armed SQL timeouts, the admission projection, the
+> compute watchdog, or the observed-lock-hold tripwire executed in production** —
+> and Alembic will not re-run `20260719_01` against that database. The run
+> completed without incident and left the clean terminal state verified in §6,
+> but the guard rails in this document are not what made that true.
+>
+> **What the constants still govern** is any environment that runs the migration
+> **from scratch**: a fresh development or staging database, a rebuilt
+> production, or a restore brought up to head. That is now their entire purpose,
+> and it is the frame for the remaining sizing work in §5.
+
+### Production's row counts, and what the dump does *not* tell us
+
+| Dimension | Production (2026-07-24) | Phase 1 snapshot | Ratio |
+|---|---|---|---|
+| `count(*) game_sessions` | 4,184 | 6,000 | 0.70 |
+| `count(*) session_moves` | 131,676 | 357,000 | 0.37 |
+
+**Row counts only.** A logical dump does not carry the source database's physical
+footprint, so `pg_total_relation_size` on a restore describes the *locally
+rebuilt* relations — no bloat, no dead tuples, PostgreSQL 18's page layout, and
+freshly built indexes — and not production's on-disk size. Nothing here licenses
+a `SIZED_SESSIONS_BYTES` or `SIZED_MOVES_BYTES` claim about production, and the
+byte column that first appeared in this table has been removed rather than
+qualified.
+
+Three readings of the same restore make the point better than the argument does:
+4,079,616 bytes on first query, 4,096,000 minutes later once autovacuum
+materialised the FSM/VM forks, and 6,144,000 on a sizing copy after synthesis
+rewrote every ended-visible row. The number measures what has been done to the
+copy, not what production holds.
+
+**Fewer rows does not mean smaller constants.** The direction table this section
+previously carried claimed the frozen constants were "conservative relative to
+production". That does not follow and has been withdrawn. Every `MARGINED_*` term
+is an *elapsed time*, and elapsed time is a joint property of relation size,
+chosen plan, storage, CPU and server major version. Production runs PostgreSQL
+**18.4** against measurements taken on **15.18**; a planner two majors newer may
+pick a different plan, and the table below already concedes that plan direction
+moves either way. Row counts transfer from a dump. Timings do not.
+
+What remains unqualified, and which way each one leans:
+
+| Constant | Status |
+|---|---|
+| `SIZED_TOTAL_ROWS`, `SIZED_M_TOTAL` | snapshot is 1.4-2.7x production's **row** counts |
+| `SIZED_SESSIONS_BYTES`, `SIZED_MOVES_BYTES` | **not obtainable from a logical dump.** A production-restore run measures the restore's own footprint. Only the live database can supply these. |
+| `MARGINED_MS_PER_SCAN_STMT`, `MARGINED_MS_COVERAGE_ASSERT`, `MARGINED_MS_BACKFILL_*` | measured on **PostgreSQL 15.18**; production runs **18.4**. These price a *plan*, not an intrinsic relation cost, and a planner two majors newer is free to choose differently — in either direction. See `g-b-size-pg18-major`, and trap #2 below for what a plan change is worth. §7 re-measures them on 18.4. |
+| `TEARDOWN_ALLOWANCE_MS`, `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` / `_PER_ROW` | an Apple-silicon laptop with a local SSD and no fsync contention is the best case for both commit and cancel-to-unlock — **up** against a real host |
+| `MARGINED_MS_PER_ROW` | CPU-bound PGN parse; laptop cores are fast — **up** |
+| `B_TESTED` / `R_TESTED` | bounded by what was exercised — up **or** down |
 
 ---
 
@@ -394,12 +455,45 @@ shape against the same relation:
   scan**, the worst case for an unindexed filter. Deliberately conservative: a
   direct measurement can only lower it.
 
+  > **Withdrawn 2026-07-25 by §7.** "A direct measurement can only lower it" was
+  > not a safe claim, and its stated reason is wrong: the sweep is keyset
+  > pagination, which PostgreSQL serves from the primary key with a filter, so it
+  > reads the relation roughly **once in total** rather than once per page. Nine
+  > times the pages costs 1.4x the time, not 9x. The `pages x scan` model
+  > overestimates by the page count, so the direction happened to hold here — but
+  > it held for a reason the derivation did not state and had never measured.
+
 `scripts/size_accuracy_backfill.py` now measures both directly
 (`backfill_remaining` and `backfill_select_sweep` in `time_scan_statements`, and
 `--derive` emits both constants), so the next sizing run produces measured values.
 `g-b-size-derive-backfill-terms` owns that re-measurement, and sizing
 qualification may adjust the numbers and rerun this bead's gates — an adjusted
 *number* is expected refinement, not a structural change.
+
+**Measured 2026-07-25 against the production restore; see §7.** An earlier
+version of this paragraph concluded the opposite — that the restore "cannot
+supply these two numbers", because production's backfill population is zero and a
+sweep over an empty population is a single empty page. **That was wrong, and it
+is retracted rather than annotated**, because it was the reasoning that nearly
+skipped the measurement entirely.
+
+Two errors in it. The harness *synthesizes* both populations from a
+production-shaped restore — `synthesize_stale` and `synthesize_repair`, which
+§5's own Phase 1 procedure already prescribes — so an empty production population
+is not a constraint on what can be measured. And `BACKFILL_REMAINING_SQL` filters
+`game_sessions` on the unindexed version predicate, so it is a full relation scan
+whether it matches zero rows or a million; `--derive` files it under "scan work:
+no population, no zero branch" for exactly that reason. The one true observation
+in the paragraph — that 4,184 sessions is smaller than the 6,000-row basis — is a
+reason to *normalize* the result, which §7 does, not a reason not to measure.
+
+Both terms were measured directly. `MARGINED_MS_BACKFILL_REMAINING = 6` is now
+**qualified** — the worst of seven measurements, each normalized on the basis of
+the copy it ran on, is exactly 6. `MARGINED_MS_BACKFILL_SELECT_SWEEP = 37` stays
+**PROVISIONAL**, but the label now means something specific and worse than "not
+yet measured": measurement showed a **scalar cannot price this statement at all**,
+because its cost depends on the operator-chosen batch size and the runtime admits
+batch sizes down to 1. `g-b-sweep-batch-cost` (P1) replaces it.
 
 `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` is denominated in **microseconds** on
 purpose. The measured slope is 0.000575 ms/row; rounded up to an integer
@@ -494,19 +588,576 @@ Migration placement and the health timeout do not relax the stall limit.
 
 ---
 
-## 5. Outstanding for `g-b-sizing-harness` (Phase 3)
+## 5. Outstanding for `g-b-sizing-harness` (Phase 3), re-scoped
 
-- [ ] Re-run Phase 1 against a **production snapshot / fork / restored dump**,
-      full restore where possible, and re-derive every constant in §3.
-- [ ] Record production's `N_stale`, `N_repair` and `N_broken_audit` **from the
-      audit** — an audit that was never run blocks the deploy.
-- [ ] Record production's four relation dimensions as `SIZED_*`; if the restore
-      was partial, record the scaling applied.
+Phase 3 was written as the merge gate: "nothing merges to production on the
+strength of the Phase 1/2 run recorded here." That gate did not hold — §0 — so
+Phase 3 is no longer gating a production deploy that has not happened. It is
+re-scoped to qualifying the **from-scratch** run, which is the only run these
+constants can still govern.
+
+The re-scope changes what a production restore is *for*. It is no longer the
+population to be measured — production's populations are both zero, so a restore
+brought to head does nothing and times nothing. It is a **shape**: real PGN
+lengths, real eval density, real ply distributions, at a relation size a
+from-scratch environment will approach as it fills.
+
+- [ ] Re-run Phase 1 on **PostgreSQL 18.x**, matching production's major version.
+      Everything below inherits this; a scan constant measured on 15 prices a
+      plan 18 may not choose (`g-b-size-pg18-major`).
+- [ ] Drive the populations by **synthesis**, and say so. A production restore
+      has `N_stale = 0` and `N_repair = 0`; the harness's `--synthesize-stale` /
+      `--synthesize-repair K` paths are now the *only* way to obtain either, and
+      §1's `--derive` refusals already reject an unsynthesized snapshot rather
+      than fabricating a per-row constant from it.
+- [ ] Size against the **largest** relation a from-scratch environment is
+      expected to reach, not against today's 4,184 sessions. The two backfill
+      terms are `O(G_sessions)` on an unindexed predicate and the sweep's page
+      count is `ceil(G_sessions / MAX_BATCH_SIZE) + 1`, so both are functions of
+      the relation the migration will meet, not of the one it met in July 2026.
 - [ ] Re-run the cancel probe at **both scopes** on production-like storage;
       `TEARDOWN_ALLOWANCE_MS` and the two atomic-teardown constants are the ones
-      a laptop SSD most flatters.
+      a laptop SSD most flatters, and §0 leaves them the constants still leaning
+      **up**.
 - [ ] Run the frozen shipped revision with its guards **armed** on fresh
       restores — twice: once production-shaped, once seeded to force the
-      full-size batches the production population may be too small to produce.
+      full-size batches a small population cannot produce. This is the only
+      remaining check that exercises the runtime envelope at all, since
+      production never did.
 - [ ] Record the health-window verdict and the final
-      `GHOSTREPLAY_ACCURACY_BACKFILL_MODE`.
+      `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` for a from-scratch deploy.
+
+---
+
+## 6. Production verification of the deployed run (2026-07-25)
+
+Read-only, against the restore described in §0. Nothing was written; the
+statements are the revision's own, imported through Alembic rather than restated,
+so this checks the shipped assertions and not a paraphrase of them.
+
+### The revision's own assertions
+
+| Assertion | Result | |
+|---|---|---|
+| `COVERAGE_ASSERT_SQL` — ended-visible rows not at version 1 | 0 | ✅ |
+| `SOUNDNESS_ASSERT_SQL` — a *served value* computed over a broken grid | 0 | ✅ |
+| `BACKFILL_REMAINING_SQL` | 0 | ✅ converged |
+| `REPAIR_REMAINING_SQL` | 0 | ✅ converged |
+
+### The 95 rows left at version 1 with a `NULL` accuracy
+
+Version 1 with a `NULL` value is the backfill's fail-closed outcome: the row is
+marked *considered* so it leaves the population, while no accuracy is served. All
+95 were re-read through `LOAD_MOVES_PG` and re-run through the revision's own
+`_accuracy_for`:
+
+| Refusal | Rows |
+|---|---|
+| Incomplete — stored plies < the PGN's mainline ply count | 46 |
+| Eval gap on a player transition (`eval_cp`/`eval_mate` missing) | 30 |
+| Broken ply grid — `ply_coordinates_intact` refused | 10 |
+| PGN unparseable, or no mainline plies | 5 |
+| No `session_moves` rows at all | 4 |
+
+**Not one of them recomputes to a value today.** Every `NULL` is a refusal the
+frozen algorithm still makes on the same rows, so none of them is lost work that
+a rerun would recover.
+
+The 10 broken grids are also why `REPAIR_REMAINING` is legitimately 0 rather than
+suspiciously 0: the repair phase targets rows carrying a *served value* over a
+broken grid, and the backfill refused all ten with a `NULL` instead of writing
+one. `SOUNDNESS_ASSERT_SQL` returning 0 is the same fact from the other side.
+
+### What this does not certify
+
+95 of 1,646 ended-visible sessions — **5.8%** — serve no accuracy. That is the
+backfill behaving correctly over defective inputs, not a migration defect, and it
+is out of scope here. The upstream capture defects it exposes (46 truncated move
+records, 30 partial eval coverage, 10 broken ply grids, 5 unparseable PGNs, 4
+sessions with no moves at all) are tracked separately in `g-acc-null-cohort`.
+
+---
+
+## 7. Phase 1/2 re-derivation on a production restore, PostgreSQL 18.4 (2026-07-25)
+
+**Owning bead:** `g-b-size-derive-backfill-terms`. This is the run that finally
+times `BACKFILL_REMAINING_SQL` and the selection sweep directly, instead of
+pricing them from the coverage assertion as §3 did.
+
+**Fixture.** The 2026-07-24 production dump, restored into a local Homebrew
+`postgresql@18` cluster — **18.4, production's exact major and minor** — with one
+disposable copy per run, cloned `CREATE DATABASE … TEMPLATE`. Production has the
+CHECK already `convalidated` (§0), so each copy drops and re-adds it `NOT VALID`,
+reconstructing the pre-`20260719_01` state; the condition is `20260709_01`'s
+verbatim. Populations come from the harness's own `--synthesize-stale` /
+`--synthesize-repair`, which is the documented procedure — production's own
+populations are both zero, and §1's `--derive` refusals reject an unsynthesized
+snapshot rather than fabricating a per-row constant from it.
+
+Production's 1,646 ended-visible sessions cannot supply a large backfill batch
+**and** a contract-floor repair population at once: synthesis runs stale-then-
+repair and the two are disjoint, so `K = 1000` leaves `N_stale = 646`. That is a
+fixture ceiling, not a cost measurement, and it is why `B_TESTED` below is not
+frozen.
+
+### The two terms, measured
+
+| Statement | Trials | Max (ms) | Median (ms) | `ceil(3 x max)` | Frozen in §3 |
+|---|---|---|---|---|---|
+| `BACKFILL_REMAINING_SQL` (`N_stale` = 646) | 3 | 1.15 | 1.04 | 4 | 6 |
+| `BACKFILL_REMAINING_SQL` (`N_stale` = 1,646) | 5 | 1.07 | 0.96 | 4 | 6 |
+| selection sweep, worst case (below) | 5 | 4.86 | 4.17 | 15 | 37 |
+
+**Both provisional values are conservative here by measurement rather than by
+assumption** — but by less than the raw columns suggest, because a timing has to
+be carried onto the frozen basis before it can be compared to a frozen constant.
+Normalized on the basis of the copy each ran on (see "Normalizing to the frozen
+basis" below): `MARGINED_MS_BACKFILL_REMAINING` by **3.58x**
+(`6 / (1.147 x 1.46172)`), `MARGINED_MS_BACKFILL_SELECT_SWEEP` by **4.12x**
+(`37 / (4.86 x 1.84871)`) — not the 3.6x and ~5x an unnormalized reading gives.
+For the sweep, read "here" strictly: the row above is one page size, and the
+constant is breached at others, including at page size 100 once enough trials are
+run. See the domain measurement two sections down.
+
+### The sweep does not re-scan the relation once per page
+
+The sweep had to be re-measured outside the harness, because the harness measures
+it with whatever stale population the run happens to carry, paged at the
+**currently frozen** `MAX_BATCH_SIZE` — while the same run re-derives
+`MAX_BATCH_SIZE` afterwards. The Phase 1a run swept `N_stale = 646` at page size
+1,000 and reported **2 pages**; the worst case for this shape is the whole
+ended-visible set at the shipped page size. Measured on a copy with
+`N_stale = 1,646`, `G_sessions = 4,184`:
+
+| Page size | Pages | Max (ms) | Median (ms) | `ceil(3 x max)` |
+|---|---|---|---|---|
+| 1,646 | 2 | 4.55 | 3.27 | 14 |
+| 1,000 | 3 | 4.45 | 4.42 | 14 |
+| 646 | 4 | 4.86 | 4.17 | **15** |
+| 500 | 5 | 5.02 | 4.32 | 16 |
+| 250 | 8 | 4.99 | 4.66 | 15 |
+| 100 | 18 | 6.46 | 5.89 | 20 |
+
+Nine times the pages costs 1.4x the time. **So §3's derivation model is wrong
+about the plan, not merely pessimistic about the number.** It priced each page at
+"a whole `game_sessions` scan, the worst case for an unindexed filter" and
+multiplied by the page count. The population predicate is indeed unindexed, but
+the sweep is keyset pagination — `WHERE … AND id > :last ORDER BY id LIMIT n` —
+which PostgreSQL serves from the primary key with a filter, so the sweep reads
+the relation roughly **once in total** and each additional page adds startup, not
+a scan. The `pages x scan` product overestimates by the page count.
+
+That also retires §3's claim that "a direct measurement can only lower it". The
+claim happened to hold here, but its stated reason — that per-page full scans are
+the worst case — describes a plan PostgreSQL does not choose. A different planner
+may not choose this one either; the honest statement is that the model's shape
+was never measured until now.
+
+### …but it is not page-count *independent* either
+
+The table above stops at page size 100 because that is where the *sizing*
+procedure stops. The **runtime** does not: `resolve_batch_size`
+(`20260719_01:1198`) admits `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH` anywhere in
+`1..MAX_BATCH_SIZE`. Extending the same measurement across the full admissible
+domain, on the same copy — **all twelve points, 3 trials each, maxima**:
+
+| Page size | Pages | Max (ms) | Median (ms) | `ceil(3 x max)` vs frozen 37 |
+|---|---|---|---|---|
+| 1 | 1,647 | 257.05 | 236.39 | **772** — 21x under-charged |
+| 2 | 824 | 134.66 | 134.28 | 404 |
+| 5 | 331 | 54.85 | 54.70 | 165 |
+| 10 | 166 | 25.05 | 25.02 | 76 |
+| 25 | 67 | 12.02 | 11.83 | **37** — break-even |
+| 50 | 34 | 8.08 | 7.70 | 25 |
+| 100 | 18 | 5.96 | 5.47 | 18 |
+| 250 | 8 | 5.58 | 5.03 | 17 |
+| 500 | 5 | 4.49 | 4.34 | 14 |
+| 646 | 4 | 13.60 | 4.60 | 41 |
+| 1,000 | 3 | 3.79 | 3.57 | 12 |
+| 1,646 | 2 | 3.60 | 3.25 | 11 |
+
+The correct reading is that the sweep is *not proportional to* page count, not
+that it is independent of it. Past roughly 50 pages the per-page term dominates,
+and the frozen scalar is break-even at page size 25 on today's population — a
+break-even point that moves with `N_stale`.
+
+The `646` row is a host outlier — 13.60 ms max against a 4.60 ms median at four
+pages — and it is kept in the table rather than dropped. A maximum over trials is
+precisely the statistic outliers land in, and every number fitted to this set
+changes depending on whether it is present.
+
+A single frozen scalar therefore cannot price this statement across the range the
+runtime admits. Tracked as `g-b-sweep-batch-cost` (P1), which **blocks** the
+de-provisionalization of this term and `g-b-runtime-envelope`, since the
+projection and the import-time scan budget are its arithmetic.
+
+`MARGINED_MS_BACKFILL_REMAINING` is untouched by this: `BACKFILL_REMAINING_SQL`
+runs once per pass, not once per page, so it carries no page-count term.
+
+### A least-squares fit is not a cost model
+
+An earlier draft of this section reported `sweep_ms ≈ 4.101 + 0.15424 x pages`
+and read the two coefficients as a ready-made replacement model — a 4.1 ms
+relation-scan component plus 154 µs per page. **That line is withdrawn as a
+model.** The two-component *shape* survives; the fitted line does not, for two
+reasons.
+
+**It is a central tendency, not a bound.** An ordinary least-squares line through
+a set of maxima passes *through* them, so it necessarily sits below some of the
+very measurements it was fitted to. At 824 pages it predicts 131.20 ms against a
+measured 134.66 ms; tripling both coefficients gives 393.59 ms, still short of
+the `ceil(3 x 134.66) = 404` ms the same margin applied to the measurement
+demands. The 3x margin is being spent covering fit error instead of covering
+variance. A model that is frozen and then divided into a deadline has to be an
+**upper envelope** over its measurements, not a regression through them.
+
+**It was not reproducible from what was published.** The fit was computed over
+all twelve maxima; the table printed beside it listed eight, and the copy in
+`g-b-sweep-batch-cost` listed eleven. Those eleven yield
+`3.029 + 0.15517 x pages` — a materially different intercept — and the
+twelve-point fit's own worst residual is at the `646` outlier the eleven-point
+table had silently removed. The raw per-trial timings had not been kept, so
+neither line could be checked against its inputs.
+
+Re-measured with **7 trials per point and every trial preserved to disk** —
+[`docs/sizing/sweep_batch_domain_20260725.json`](sizing/sweep_batch_domain_20260725.json),
+which carries both runs, the copy's dimensions, and the withdrawn fit — same
+copy, `N_stale = 1,646`, `G_sessions = 4,184`:
+
+| Page size | Pages | Max (ms) | Median (ms) | Min (ms) |
+|---|---|---|---|---|
+| 1 | 1,647 | 282.25 | 273.53 | 245.30 |
+| 2 | 824 | 155.00 | 127.83 | 117.56 |
+| 5 | 331 | 64.07 | 51.01 | 47.08 |
+| 10 | 166 | 32.95 | 30.46 | 28.35 |
+| 25 | 67 | 16.16 | 14.79 | 14.00 |
+| 50 | 34 | 10.37 | 9.49 | 8.75 |
+| 100 | 18 | 6.94 | 6.37 | 6.04 |
+| 250 | 8 | 6.57 | 5.67 | 5.39 |
+| 500 | 5 | 5.61 | 5.11 | 4.70 |
+| 646 | 4 | 4.94 | 4.50 | 4.09 |
+| 1,000 | 3 | **12.75** | 3.57 | 3.46 |
+| 1,646 | 2 | 3.66 | 3.31 | 3.10 |
+
+Two things this run establishes that the first could not. **The outlier moved** —
+three pages here, four pages before — so it is host noise rather than a property
+of a page count, and *some* point will always carry one. The model has to
+tolerate an outlier, not have it removed. And **eleven of the twelve maxima
+rose** — which is the *tendency* of a larger sample, not a guarantee. Be precise
+about why: a maximum over more independent trials has a higher expected value,
+because more draws means more chances at the tail. It is monotonic only for a
+*cumulative* maximum over appended trials; these are two independent runs, so
+nothing forces any individual point up. The twelfth point shows it — at 4 pages
+the maximum *fell*, 13.60 → 4.94, because that is precisely where run B's outlier
+had landed. Both directions are the same phenomenon: a maximum over few trials is
+whatever the host happened to do, so a 3-trial maximum is an estimate of a bound
+and not a bound.
+
+OLS over these maxima gives `5.9466 + 0.170443 x pages`, which under-predicts its
+own worst measurement by 8.61 ms. Shifting the intercept up by exactly that
+residual yields a line covering every measured maximum by construction:
+
+```
+sweep_ms(pages) <= 14.5556 + 0.170444 x pages
+```
+
+**Both coefficients are rounded UP** from the stored
+`14.555555580170807 + 0.1704431364318315`, and that is not cosmetic. The
+construction makes the line *touch* its worst point — at 824 pages the envelope
+equals the measurement exactly — so rounding either coefficient to display
+precision in the normal, nearest direction pushes the line below the point it was
+built to cover. Printed as `0.170443` it yields 155.000632 against a measured
+155.0007: a bound broken by 68 nanoseconds, entirely by transcription. A bound's
+coefficients round one way only.
+
+| Pages | Measured max | Envelope | `ceil(3 x envelope)` | `ceil(3 x max)` |
+|---|---|---|---|---|
+| 1,647 | 282.25 | 295.28 | 886 | 847 |
+| 824 | 155.00 | 155.00 | 466 | 466 |
+| 331 | 64.07 | 70.97 | 213 | 193 |
+| 166 | 32.95 | 42.85 | 129 | 99 |
+| 67 | 16.16 | 25.98 | 78 | 49 |
+| 34 | 10.37 | 20.35 | 62 | 32 |
+| 18 | 6.94 | 17.62 | 53 | 21 |
+| 8 | 6.57 | 15.92 | 48 | 20 |
+| 5 | 5.61 | 15.41 | 47 | 17 |
+| 4 | 4.94 | 15.24 | 46 | 15 |
+| 3 | 12.75 | 15.07 | 46 | 39 |
+| 2 | 3.66 | 14.90 | 45 | 11 |
+
+`envelope(pages_i) >= max_i` holds at every point, and therefore so does
+`ceil(3 x envelope(pages_i)) >= ceil(3 x max_i)`. **That pair of columns is the
+invariant `g-b-sweep-batch-cost` has to carry as a test rather than as a table**:
+a frozen two-component model whose margined value drops below `3x` a measurement
+it was fitted to has silently stopped being conservative, and nothing else in the
+revision would notice.
+
+This envelope is **evidence for that bead, not a value to freeze**. It is fitted
+to one host, one PostgreSQL, one relation shape and twelve points; shifting an
+OLS intercept is the crudest construction that satisfies the constraint, and it
+inherits OLS's slope wholesale. A constrained fit that minimizes conservatism
+subject to covering every point is the bead's to choose.
+
+### Normalizing to the frozen basis
+
+The shipped constants are frozen against `SIZED_TOTAL_ROWS = 6,000` and
+`SIZED_SESSIONS_BYTES = 10,010,624`. Bringing a measurement onto that basis uses
+the growth factor the runtime itself uses, `max(rows ratio, bytes ratio)` — with
+the ratios taken against **the copy the measurement actually ran on**.
+
+That last clause is not pedantry. All seven sizing copies hold the same 4,184
+sessions, and their `game_sessions` relations differ by 26%:
+
+| Copy | `game_sessions` bytes | Rows ratio | Bytes ratio | Growth factor |
+|---|---|---|---|---|
+| `gr_p1_sweep` | 5,414,912 | 1.43403 | **1.84871** | 1.84871 |
+| `gr_p1_empty` | 5,431,296 | 1.43403 | **1.84314** | 1.84314 |
+| `gr_p1_b1000` | 6,144,000 | 1.43403 | **1.62933** | 1.62933 |
+| `gr_p1_b100` | 6,758,400 | 1.43403 | **1.48121** | 1.48121 |
+| `gr_p1_b250` | 6,815,744 | 1.43403 | **1.46875** | 1.46875 |
+| `gr_p1_atomic`, `gr_p1_b500` | 6,848,512 | 1.43403 | **1.46172** | 1.46172 |
+
+**Same source population and same `game_sessions` row count — not identical
+data.** Every copy is the same restore of `ghostreplay-20260724T101501Z.dump`,
+but each was then mutated by the synthesis its own measurement needed, into three
+distinct states:
+
+| Copies | Synthesis | `session_moves` | `N_stale` |
+|---|---|---|---|
+| `gr_p1_atomic`, `gr_p1_b100/250/500/1000` | stale + repair | 130,676 | 646 |
+| `gr_p1_sweep` | stale only | 131,676 | 1,646 |
+| `gr_p1_empty` | stamped | 131,676 | 0 |
+
+`synthesize_repair` *deletes* one ply from each of K sessions, which is where the
+missing 1,000 moves went. So the byte spread is partly dead tuples from rewrite
+and vacuum state and partly a genuinely different post-synthesis relation, and
+**neither component is recoverable from the frozen dimension alone** — which is
+the provenance defect in `g-b-size-harness-defects` #1, seen from the outside. It
+matters because the normalization factor is
+`SIZED_bytes / measured_bytes`, so the **least** bloated copy demands the
+**largest** factor. Normalizing a timing with some other copy's byte reading
+under-charges it, and an earlier version of this section normalized everything
+with 6,144,000 — which is `gr_p1_b1000`'s figure alone.
+
+**`MARGINED_MS_BACKFILL_REMAINING`**, every Phase 1 measurement paired with its
+own copy:
+
+| Source | Copy | Max (ms) | Growth | `ceil(3 x max x growth)` |
+|---|---|---|---|---|
+| `m_atomic` | `gr_p1_atomic` | 1.147 | 1.46172 | **6** |
+| `m_batch_100` | `gr_p1_b100` | 0.989 | 1.48121 | 5 |
+| `m_batch_1000` | `gr_p1_b1000` | 1.056 | 1.62933 | **6** |
+| `m_batch_250` | `gr_p1_b250` | 1.018 | 1.46875 | 5 |
+| `m_batch_500` | `gr_p1_b500` | 0.916 | 1.46172 | 5 |
+| `m_empty` | `gr_p1_empty` | 0.920 | 1.84314 | **6** |
+| 5-trial rerun, `N_stale` = 1,646 | `gr_p1_sweep` | 1.070 | 1.84871 | **6** |
+
+`MARGINED_MS_BACKFILL_REMAINING = 6` is **directly qualified and stays**: the
+worst of seven independent measurements, each normalized on its own basis, is
+exactly 6. It carries no page-count term, and nothing in `g-b-sweep-batch-cost`
+touches it.
+
+**`MARGINED_MS_BACKFILL_SELECT_SWEEP`** — every sweep run was on `gr_p1_sweep`,
+growth **1.84871**:
+
+| Source | Pages | Max (ms) | `ceil(3 x max x 1.84871)` | vs frozen 37 |
+|---|---|---|---|---|
+| run A, 5 trials, page size 100 | 18 | 6.46 | 36 | ✅ within, by 1 ms |
+| run B, 3 trials, page size 100 | 18 | 5.96 | 34 | ✅ within |
+| **run C, 7 trials, page size 100** | 18 | **6.94** | **39** | ❌ **breached** |
+| run B, 3 trials, page size 25 | 67 | 12.02 | 67 | ❌ breached |
+| run C, 7 trials, page size 25 | 67 | 16.16 | 90 | ❌ breached |
+| run B, 3 trials, page size 1 | 1,647 | 257.05 | 1,426 | ❌ breached |
+| **run C, 7 trials, page size 1** | 1,647 | **282.25** | **1,566** | ❌ breached |
+
+**This retires the "qualified for page sizes ≥ 100" carve-out.** Two errors were
+propping it up. The basis error above: with `gr_p1_sweep`'s own 5,414,912 bytes
+the factor is 1.84871, not 1.62933, which alone moves run A from 32 to 36 — one
+millisecond of headroom rather than five. And three trials: run C's seven trials
+put the same page size at 39. So the sweep constant is not qualified at *any*
+page size that has been measured with enough trials to estimate a maximum. It is
+not "qualified over part of its domain"; it is unqualified, and the domain
+finding is about *how badly*, not *whether*.
+
+**37 still stays**, for the reason it always did — a scalar cannot be repaired by
+choosing a different scalar. There is no single value that is honest at page
+size 1 and not absurd at page size 646; the measured range spans 42x.
+`g-b-sweep-batch-cost` replaces the term with a model rather than re-picking the
+scalar, and this table is its acceptance evidence.
+
+### How bad is this, actually
+
+The two consumers answer this very differently, and they have to be worked
+separately. At the worst reachable configuration — `MIN_ADMITTED_BATCH = 1`,
+`SIZED_TOTAL_ROWS = 6,000`, so `ceil(6000/1) + 1 = 6,001` pages — the envelope
+prices the sweep at `14.5556 x 1.848714… + 0.170444 x 6001` = 1049.74 ms,
+margined `ceil(3 x 1049.74)` = **3,150 ms**.
+
+> **Every exact figure in this section is provisional on a decision that has not
+> been made.** They all assume the two components are frozen as **floats** with a
+> **single** ceiling applied to the margined total. Freeze the scan component as
+> integer milliseconds (27) and the per-page component as integer microseconds
+> (171) — which is what `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` already establishes
+> as this revision's convention for sub-millisecond slopes — and every number
+> below moves:
+>
+> | | float, one ceil | int ms + int µs |
+> |---|---|---|
+> | sweep at 6,001 pages | 3,150 ms | 3,160 ms |
+> | atomic projection at `N_stale` = 6,000 | 34.739 s | 34.749 s |
+> | first `N_stale` rejected | 5,141 | 5,139 |
+> | false-admission band | 5,141 … 5,674 | 5,139 … 5,674 |
+> | import-time budget | 85.008 s | 85.208 s |
+> | import breach at `SIZED_TOTAL_ROWS` ≥ | 85,694 | 85,415 |
+>
+> The *shape* of every conclusion survives either choice — that is why they are
+> stated as conclusions. The digits do not. `g-b-sweep-batch-cost` must fix the
+> unit of each component, whether the ceiling is per-component or applied once to
+> the margined total, and whether the 3x margin multiplies before or after, and
+> only then publish exact budgets and thresholds.
+
+Note what is and is not scaled there. Only the **scan component** carries
+`g_sessions`; the per-page component is statement startup and is indifferent to
+relation size. The revision's current line
+(`BACKFILL_SELECT_SWEEPS_UNDER_LOCK * MARGINED_MS_BACKFILL_SELECT_SWEEP * g_sessions`,
+`20260719_01:1646`) multiplies the *whole* scalar by `g_sessions`, which the
+two-component model must not inherit.
+
+**Import-time scan budget** — comfortable:
+
+| | Charged | Bound |
+|---|---|---|
+| today | `42x521 + 6 + 20x(37+6)` = 22.748 s | |
+| with the model | `42x521 + 6 + 20x(3150+6)` = **85.008 s** | `REVISION_DEADLINE_S` = 900 s |
+
+815 s of headroom; it would take `SIZED_TOTAL_ROWS` at or above 85,694 to breach
+(85,415 under the integer-unit freeze — see the caveat above). An
+earlier version of this section asserted the opposite — that `MAX_PASSES` sweeps
+at batch size 1 could not fit the revision deadline — which was written without
+doing the multiplication. Nothing here forces raising the minimum admitted batch
+size, and `resolve_batch_size`'s `1..MAX_BATCH_SIZE` range should be left alone
+unless some other measurement argues against it.
+
+**Atomic stall projection** — this is where the constant actually bites, and an
+earlier version of this section got it wrong by comparing the sweep *contribution*
+against the whole 30 s bound. `project_atomic_stall_ms` (`20260719_01:1646`) is
+seven terms, not one: per-stale-row and per-repair-row mutation, three
+`session_moves` scans, the coverage assertion, the sweep, the convergence count,
+and the teardown reserve. At `N_stale = 6,000`, `N_repair = 0`, growth factors 1:
+
+| Sweep term | Full projection | vs `MAX_WRITER_STALL_MS` = 30 s |
+|---|---|---|
+| scalar 37 ms | 31.626 s | rejects |
+| model 3,150 ms | **34.739 s** | rejects, by more |
+
+Both reject at 6,000, so the interesting quantity is not a single point but where
+each *starts* rejecting. Sweeping `N_stale` under the same favourable assumptions:
+
+| | First `N_stale` rejected |
+|---|---|
+| with the model | **5,141** |
+| with the scalar 37 | **5,675** |
+
+**`5,141 … 5,674` is the false-admission band** — populations that atomic mode
+admits today and would refuse once the sweep is priced correctly. That is the
+honest P1 impact, and it sits just below the frozen `SIZED_TOTAL_ROWS = 6,000`.
+The ~58,511 figure an earlier version of this table carried is only where the
+sweep term *alone* reaches 30 s; it is not an atomic-projection threshold and
+should not be read as one.
+
+So the severity is: the import-time budget has ample room, the atomic projection
+does not, and the reason to fix this is not an impending failure but that **an
+admission projection whose dominant variable is missing from it cannot refuse an
+inadmissible configuration.** Its verdicts today are a property of the current
+relation size, not of the check.
+
+Two arithmetic notes for whoever picks that up. `ceil(3 x 257.05 x 1.629333…) =
+ceil(1256.4604) = 1257`; the **1,256** this table read before was a slip, and is
+superseded by the 1,426 above in any case. And carry ratios unrounded into the
+`ceil`: `10010624 / 6144000 = 1.629333…`, and writing it as `1.6292` rounds the
+growth factor *down*, against the one direction it exists to protect. A factor
+rounded down and then `ceil`-ed can only under-charge; the ceiling has to be the
+last operation.
+
+### Full derived table, and why it is *not* frozen
+
+`--derive` over the eight measurements emits every constant. Recorded for the
+qualification bead, **not** applied to the revision:
+
+| Constant | §3 frozen (15.18) | This run (18.4) |
+|---|---|---|
+| `SIZED_TOTAL_ROWS` | 6,000 | 4,184 |
+| `SIZED_SESSIONS_BYTES` | 10,010,624 | 6,144,000 |
+| `SIZED_M_TOTAL` | 357,000 | 130,676 |
+| `SIZED_MOVES_BYTES` | 93,241,344 | 45,817,856 |
+| `MARGINED_MS_PER_ROW` | 5 | 5 |
+| `MARGINED_MS_PER_REPAIR_ROW` | 2 | 2 |
+| `MARGINED_MS_PER_SCAN_STMT` | 521 | 164 |
+| `MARGINED_MS_COVERAGE_ASSERT` | 6 | 4 |
+| `MARGINED_MS_BACKFILL_REMAINING` | 6 | 4 |
+| `MARGINED_MS_BACKFILL_SELECT_SWEEP` | 37 | 9 *(2-page artifact; 15 worst case)* |
+| `SCAN_STMT_TIMEOUT_MS` | 521 | 164 |
+| `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | 68 |
+| `TEARDOWN_ALLOWANCE_MS` | 7 | 7 |
+| `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 2 | 4 |
+| `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` | 2 | 2 |
+| `MAX_BATCH_SIZE` / `DEFAULT_BATCH_SIZE` | 1,000 | 646 |
+| `REPAIR_BATCH_SIZE` | 2,500 | 1,000 |
+| `EST_MAX_LOCK_HOLD_MS` | 5,007 | 5,007 |
+
+Decision 1 re-runs to the same verdict: `T_stall_prod = 1,578.7 ms`, margined
+4,736.0 ms against `MAX_WRITER_STALL_MS = 30,000` — **atomic**.
+
+Three reasons this table is recorded rather than applied, all of which the
+qualification bead has to clear first:
+
+1. **The `SIZED_*` this run recorded are post-synthesis.** `_run_atomic` reads
+   `dimensions_before` at the start of the measured pass, and `main()` runs
+   synthesis *before* that — so `SIZED_SESSIONS_BYTES` is 6,144,000 against
+   4,096,000 pre-synthesis (the stale UPDATE's dead tuples), and `SIZED_M_TOTAL`
+   is 130,676 against production's 131,676 (repair synthesis deletes one ply from
+   each of `K` sessions).
+
+   This is a **provenance** problem, not an unsafe number. Those *are* the
+   dimensions the timed statements actually saw, so each timing is correctly
+   paired with them; what is missing is the pre-synthesis reading beside it, and
+   the record of which one each timing belongs to. Swapping in pre-synthesis
+   dimensions **without rebasing the timings** would be strictly worse — a
+   measurement taken against 6,144,000 bytes, divided by a 4,096,000-byte basis,
+   is mismatched provenance dressed as a correction. The fix is to record both
+   and keep every timing with its own basis. Tracked as
+   `g-b-size-harness-defects`.
+2. **The byte dimensions are not production's at all**, synthesized or not — §0.
+   A logical dump does not carry a physical footprint.
+3. **`MAX_BATCH_SIZE` and `REPAIR_BATCH_SIZE` are fixture-bounded**, per the
+   ceiling above. `min(formula, tested)` is behaving exactly as designed; it is
+   the fixture that cannot demonstrate 1,000, not the cost.
+
+Applying two rows of this table while the `SIZED_*` rows stay at §3's values
+would still be wrong, though not for the reason first given here. `_growth_factor`
+(`20260719_01:1506`) is `max(1.0, byte ratio, row ratio)` — **clamped at 1.0**, so
+a shrunk relation earns no discount and applying `4`/`15` would *not* charge 0.70
+against today's relation; it would charge them in full. The real gap is the blind
+spot the mismatch opens above today's size: with the terms measured at 4,184 rows
+but the basis still declaring 6,000, the relation can grow all the way from 4,184
+to 6,000 — a 1.43x increase in exactly the quantity these terms scale with —
+while the growth factor sits pinned at 1.0 and charges nothing extra. A frozen
+term and the basis it was measured against have to move together.
+
+### Harness defect found and fixed under this bead
+
+`synthesize_stamped` stamped **every** ended-visible row with accuracy 100,
+including rows whose ply grid is broken — which manufactures repair candidates
+(version 1 + non-NULL accuracy + broken grid) instead of clearing them. Its
+docstring claimed it stamped "over grids that are NOT broken"; the SQL had no
+such filter. Invisible on any fixture with intact grids, which is every fixture
+in the repo and the entire Phase 1 snapshot. Against a production restore it
+turned the empty teardown point into a 10-row mutation — production's 10 real
+broken grids — and `--derive` correctly rejected the whole derivation.
+
+Fixed: a broken grid is now stamped version 1 with a **NULL** accuracy, which is
+what the fail-closed backfill itself writes for such a row, and an intact grid
+gets 100. Regression test:
+`test_release_b_pg_matrix.py::test_pg_synthesize_stamped_empties_both_populations_with_broken_grids_present`,
+PostgreSQL-gated and pinned in the gate manifest. It fails against the previous
+SQL and passes against the fix.

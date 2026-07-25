@@ -187,6 +187,11 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_matrix.py::test_pg_nil_uuid_session_is_backfilled",
     "test_release_b_pg_matrix.py::test_pg_detector_parity",
     "test_release_b_pg_matrix.py::test_pg_integer_division_floors_like_the_validator",
+    # The sizing harness's empty teardown point. Only reachable on PostgreSQL:
+    # the failure needs PLY_DETECTOR_SQL over uuid session ids against a row that
+    # already carries a served value on a broken grid.
+    "test_release_b_pg_matrix.py::"
+    "test_pg_synthesize_stamped_empties_both_populations_with_broken_grids_present",
     # Release-B runtime envelope (g-b-runtime-envelope). Every one of these is
     # structurally invisible to the SQLite suite: SQLite has no statement_timeout
     # and no lock_timeout, no FOR NO KEY UPDATE SKIP LOCKED, no second writer to

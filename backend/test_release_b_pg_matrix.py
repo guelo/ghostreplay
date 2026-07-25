@@ -48,6 +48,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, event, text
 
 import pg_gate_plugin
+from scripts import size_accuracy_backfill
 from app.accuracy_rows_v1 import ply_color, ply_coordinates_intact
 from app.accuracy_v1 import AccuracyMove, compute_game_accuracy, expected_total_moves_from_pgn
 from test_release_b_migrations import (
@@ -559,3 +560,66 @@ def test_pg_integer_division_floors_like_the_validator(pg_engine):
             )
         ).all()
     assert [(i, expr) for i, expr in rows] == [(i, i // 2 + 1) for i in range(12)]
+
+
+# ---------------------------------------------------------------------------
+# 5. The sizing harness's empty teardown point.
+# ---------------------------------------------------------------------------
+
+
+@pg_gate_plugin.pg_gate
+def test_pg_synthesize_stamped_empties_both_populations_with_broken_grids_present(
+    pg_engine,
+):
+    """``synthesize_stamped`` must leave NOTHING for either phase to do.
+
+    It exists to prepare the atomic teardown FLOOR: a run that executes VALIDATE
+    and every scan while mutating zero rows. ``--derive`` enforces that with an
+    explicit ``n_mutated == 0``, so a synthesis that leaves one row for the
+    repair phase does not degrade the floor — it rejects the whole derivation.
+
+    The case that breaks it is a session that ALREADY has a broken grid. A repair
+    candidate is version 1 AND non-NULL accuracy AND a broken grid, so stamping
+    such a row with a value manufactures a candidate rather than clearing one.
+    Every fixture in this repo seeds intact grids unless it is specifically
+    testing the detector, and the Phase 1 sizing snapshot was synthesized with
+    intact grids throughout — so the unconditional form passed everywhere and
+    failed first against a production restore carrying 10 real broken grids.
+    Both shapes are therefore seeded here, and the assertion is on the two
+    convergence statements rather than on the UPDATE's row count.
+    """
+    intact_id, broken_id = uuid.uuid4(), uuid.uuid4()
+    try:
+        with pg_engine.begin() as conn:
+            _seed_pg_session(
+                conn, intact_id, status="ended", mode="normal", drill_state=None,
+                version=None, plies=INTACT_PLIES, user_id=910010,
+            )
+            # Version 1 with a served value over a broken grid: the exact row the
+            # repair phase hunts, and the one stamping must not recreate.
+            _seed_pg_session(
+                conn, broken_id, status="ended", mode="normal", drill_state=None,
+                version=1, accuracy=BROKEN_UNGUARDED_ACCURACY, plies=BROKEN_PLIES,
+                user_id=910011,
+            )
+
+        with pg_engine.begin() as conn:
+            size_accuracy_backfill.synthesize_stamped(conn)
+
+        with pg_engine.connect() as conn:
+            assert mod.remaining_scan(conn, mod.BACKFILL_REMAINING_SQL)[0] == 0
+            assert mod.remaining_scan(conn, mod.REPAIR_REMAINING_SQL)[0] == 0
+            # The broken row is stamped considered, but serves nothing.
+            assert conn.execute(
+                text(
+                    "SELECT player_accuracy, player_accuracy_algo_version "
+                    "FROM game_sessions WHERE id = CAST(:i AS uuid)"
+                ).bindparams(i=str(broken_id))
+            ).one() == (None, 1)
+    finally:
+        with pg_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "DELETE FROM game_sessions WHERE id = ANY(CAST(:ids AS uuid[]))"
+                ).bindparams(ids=[str(intact_id), str(broken_id)])
+            )

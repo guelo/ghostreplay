@@ -427,16 +427,35 @@ def synthesize_stamped(conn) -> int:
     VALIDATE's own commit cost into the per-row slope, where it does not belong.
 
     So the floor is its own run against its own fresh restore: stamp everything
-    version 1 with a non-NULL accuracy over grids that are NOT broken, which
-    empties BOTH populations (version 1 excludes the backfill; an intact grid
-    excludes the repair) while leaving the constraint unvalidated. The value 100
-    satisfies the range CHECK the run is about to validate.
+    version 1, which empties the backfill population, while leaving the
+    constraint unvalidated. The value 100 satisfies the range CHECK the run is
+    about to validate.
+
+    Emptying the REPAIR population needs the grid, and that is why the value is
+    conditional. A repair candidate is version 1 AND a non-NULL accuracy AND a
+    broken grid, so stamping a broken-grid row with 100 CREATES a candidate
+    instead of removing one, and the "empty" run then mutates the rows the repair
+    phase nulls. A fixture with no broken grids hides this completely: the first
+    Phase 1 snapshot was synthesized with intact grids throughout, so the
+    unconditional form measured a genuinely empty run there and the defect only
+    surfaced against a production restore, whose 10 real broken grids turned the
+    floor measurement into a 10-row mutation and made ``--derive`` reject it.
+
+    So a broken grid is stamped version 1 with a NULL accuracy — which is exactly
+    what the fail-closed backfill itself writes for such a row — and an intact
+    grid gets 100. Both populations end up empty for the right reason: version 1
+    excludes every row from the backfill, and no row is left carrying a served
+    value over a broken grid.
     """
     return conn.execute(
         text(
             f"""
             UPDATE game_sessions
-            SET player_accuracy = 100, player_accuracy_algo_version = {mod.ALGO_VERSION}
+            SET player_accuracy_algo_version = {mod.ALGO_VERSION},
+                player_accuracy = CASE
+                  WHEN id IN ({mod.PLY_DETECTOR_SQL}) THEN NULL
+                  ELSE 100
+                END
             WHERE {mod.VISIBLE_ENDED_SQL}
             """
         )

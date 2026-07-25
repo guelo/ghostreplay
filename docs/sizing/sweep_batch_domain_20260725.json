@@ -1,0 +1,427 @@
+{
+  "what": "MARGINED_MS_BACKFILL_SELECT_SWEEP across the full admissible GHOSTREPLAY_ACCURACY_BACKFILL_BATCH domain (1..MAX_BATCH_SIZE).",
+  "why": "The frozen scalar prices a statement whose cost depends on the operator-chosen batch size. Evidence for g-b-sweep-batch-cost.",
+  "measured": "2026-07-25",
+  "server": "PostgreSQL 18.4 (production's own major.minor), local port 5433",
+  "database": "gr_p1_sweep -- disposable restore of ghostreplay-20260724T101501Z.dump with populations synthesized",
+  "statement": "keyset SELECT_BATCH_* page: WHERE <population predicate> AND id > :last ORDER BY id LIMIT :n, swept to exhaustion; one 'sweep' = every page of one pass, so pages = ceil(N_stale / batch_size) + 1",
+  "dimensions_of_this_copy": {
+    "n_stale": 1646,
+    "g_sessions": 4184,
+    "g_moves": 131676,
+    "game_sessions_bytes": 5414912,
+    "session_moves_bytes": 45817856,
+    "note": "These are POST-synthesis dimensions -- what the timed statements actually saw. Each timing must stay paired with them; substituting pre-synthesis dimensions without rebasing the timings is mismatched provenance.",
+    "sibling_copies_note": "The seven sizing copies share a source restore and a game_sessions row count (4,184) but are NOT identical data: gr_p1_atomic and gr_p1_b100/250/500/1000 ran stale+repair synthesis (130,676 moves, N_stale=646), gr_p1_sweep ran stale only (131,676 moves, N_stale=1,646), gr_p1_empty ran stamped (131,676 moves, N_stale=0). Their game_sessions relations read 5,414,912..6,848,512 bytes -- PARTLY dead tuples from rewrite and vacuum state, PARTLY a genuinely different post-synthesis relation. A timing may only be normalized by the basis of the copy it actually ran on."
+  },
+  "frozen_basis": {
+    "SIZED_TOTAL_ROWS": 6000,
+    "SIZED_SESSIONS_BYTES": 10010624,
+    "growth_factor_for_this_copy": 1.848714069591528,
+    "note": "max(6000/4184, 10010624/5414912) = 1.84871; the byte ratio wins. Sibling copies carrying the SAME 4184 game_sessions rows read 5414912..6848512 bytes -- PARTLY dead tuples from synthesis rewrite and vacuum state, PARTLY a genuinely different post-synthesis relation, since the copies ran different syntheses (see dimensions_of_this_copy.sibling_copies_note). The factor is therefore only valid for timings taken on THIS copy."
+  },
+  "runs": [
+    {
+      "id": "B",
+      "trials_per_point": 3,
+      "raw_trials_retained": false,
+      "note": "Original domain run. Per-trial timings were NOT kept -- this is why run C exists. Maxima only; do not refit from these. The 4-page point (13.60 ms against a 4.60 ms median) is a host outlier.",
+      "points": [
+        {
+          "batch_size": 1,
+          "pages": 1647,
+          "max_ms": 257.05,
+          "median_ms": 236.39
+        },
+        {
+          "batch_size": 2,
+          "pages": 824,
+          "max_ms": 134.66,
+          "median_ms": 134.28
+        },
+        {
+          "batch_size": 5,
+          "pages": 331,
+          "max_ms": 54.85,
+          "median_ms": 54.7
+        },
+        {
+          "batch_size": 10,
+          "pages": 166,
+          "max_ms": 25.05,
+          "median_ms": 25.02
+        },
+        {
+          "batch_size": 25,
+          "pages": 67,
+          "max_ms": 12.02,
+          "median_ms": 11.83
+        },
+        {
+          "batch_size": 50,
+          "pages": 34,
+          "max_ms": 8.08,
+          "median_ms": 7.7
+        },
+        {
+          "batch_size": 100,
+          "pages": 18,
+          "max_ms": 5.96,
+          "median_ms": 5.47
+        },
+        {
+          "batch_size": 250,
+          "pages": 8,
+          "max_ms": 5.58,
+          "median_ms": 5.03
+        },
+        {
+          "batch_size": 500,
+          "pages": 5,
+          "max_ms": 4.49,
+          "median_ms": 4.34
+        },
+        {
+          "batch_size": 646,
+          "pages": 4,
+          "max_ms": 13.6,
+          "median_ms": 4.6
+        },
+        {
+          "batch_size": 1000,
+          "pages": 3,
+          "max_ms": 3.79,
+          "median_ms": 3.57
+        },
+        {
+          "batch_size": 1646,
+          "pages": 2,
+          "max_ms": 3.6,
+          "median_ms": 3.25
+        }
+      ]
+    },
+    {
+      "id": "C",
+      "trials_per_point": 7,
+      "raw_trials_retained": true,
+      "note": "Re-measurement with every trial preserved. ELEVEN of the twelve maxima exceed run B's at the same page count -- the tendency of a larger sample, not a guarantee: a maximum over more independent trials has a higher EXPECTED value, but monotonicity holds only for a cumulative maximum over appended trials, and these are two independent runs. The twelfth FELL (4 pages, 13.60 -> 4.94) because that is where run B's outlier had landed. The outlier itself moved from 4 pages to 3, confirming host noise rather than a page-count property. A 3-trial maximum is an estimate of a bound, not a bound.",
+      "points": [
+        {
+          "batch_size": 1,
+          "pages": 1647,
+          "trials_ms": [
+            250.4284,
+            276.4272,
+            282.2492,
+            273.5255,
+            276.4539,
+            259.0798,
+            245.3021
+          ],
+          "max_ms": 282.2492,
+          "median_ms": 273.5255,
+          "min_ms": 245.3021
+        },
+        {
+          "batch_size": 2,
+          "pages": 824,
+          "trials_ms": [
+            155.0007,
+            132.0837,
+            133.321,
+            117.9777,
+            117.5643,
+            119.3906,
+            127.827
+          ],
+          "max_ms": 155.0007,
+          "median_ms": 127.827,
+          "min_ms": 117.5643
+        },
+        {
+          "batch_size": 5,
+          "pages": 331,
+          "trials_ms": [
+            53.187,
+            47.0794,
+            64.0732,
+            49.3032,
+            51.0109,
+            50.4428,
+            54.2187
+          ],
+          "max_ms": 64.0732,
+          "median_ms": 51.0109,
+          "min_ms": 47.0794
+        },
+        {
+          "batch_size": 10,
+          "pages": 166,
+          "trials_ms": [
+            30.7838,
+            29.8323,
+            28.3456,
+            30.4563,
+            32.9484,
+            28.6116,
+            31.0893
+          ],
+          "max_ms": 32.9484,
+          "median_ms": 30.4563,
+          "min_ms": 28.3456
+        },
+        {
+          "batch_size": 25,
+          "pages": 67,
+          "trials_ms": [
+            14.7852,
+            15.1205,
+            13.9978,
+            14.1008,
+            14.5542,
+            16.0489,
+            16.1556
+          ],
+          "max_ms": 16.1556,
+          "median_ms": 14.7852,
+          "min_ms": 13.9978
+        },
+        {
+          "batch_size": 50,
+          "pages": 34,
+          "trials_ms": [
+            9.3891,
+            10.2031,
+            10.3706,
+            9.4896,
+            9.6196,
+            8.9023,
+            8.7507
+          ],
+          "max_ms": 10.3706,
+          "median_ms": 9.4896,
+          "min_ms": 8.7507
+        },
+        {
+          "batch_size": 100,
+          "pages": 18,
+          "trials_ms": [
+            6.0425,
+            6.3574,
+            6.3697,
+            6.4606,
+            6.4183,
+            6.1548,
+            6.9392
+          ],
+          "max_ms": 6.9392,
+          "median_ms": 6.3697,
+          "min_ms": 6.0425
+        },
+        {
+          "batch_size": 250,
+          "pages": 8,
+          "trials_ms": [
+            5.9286,
+            5.4012,
+            5.5812,
+            5.3927,
+            5.6701,
+            6.5659,
+            5.6687
+          ],
+          "max_ms": 6.5659,
+          "median_ms": 5.6687,
+          "min_ms": 5.3927
+        },
+        {
+          "batch_size": 500,
+          "pages": 5,
+          "trials_ms": [
+            5.1815,
+            5.6125,
+            5.1095,
+            4.7697,
+            5.3057,
+            4.6963,
+            4.8764
+          ],
+          "max_ms": 5.6125,
+          "median_ms": 5.1095,
+          "min_ms": 4.6963
+        },
+        {
+          "batch_size": 646,
+          "pages": 4,
+          "trials_ms": [
+            4.641,
+            4.5019,
+            4.7417,
+            4.4612,
+            4.94,
+            4.2142,
+            4.0948
+          ],
+          "max_ms": 4.94,
+          "median_ms": 4.5019,
+          "min_ms": 4.0948
+        },
+        {
+          "batch_size": 1000,
+          "pages": 3,
+          "trials_ms": [
+            3.5675,
+            3.5704,
+            4.0145,
+            3.9485,
+            3.5149,
+            3.4621,
+            12.7491
+          ],
+          "max_ms": 12.7491,
+          "median_ms": 3.5704,
+          "min_ms": 3.4621
+        },
+        {
+          "batch_size": 1646,
+          "pages": 2,
+          "trials_ms": [
+            3.3063,
+            3.2906,
+            3.3145,
+            3.6626,
+            3.28,
+            3.1032,
+            3.6211
+          ],
+          "max_ms": 3.6626,
+          "median_ms": 3.3063,
+          "min_ms": 3.1032
+        }
+      ]
+    }
+  ],
+  "fits": {
+    "ols_over_run_C_maxima": {
+      "intercept_ms": 5.946607402786317,
+      "per_page_ms": 0.1704431364318315,
+      "max_positive_residual_ms": 8.608948177384491
+    },
+    "upper_envelope_over_run_C": {
+      "intercept_ms": 14.555555580170807,
+      "per_page_ms": 0.1704431364318315,
+      "published_rounded_up": {
+        "intercept_ms": 14.5556,
+        "per_page_ms": 0.170444,
+        "note": "Both coefficients rounded UP. The construction makes the line TOUCH its worst point (pages=824), so nearest-rounding either coefficient for display pushes it below that point: 14.5556 + 0.170443*824 = 155.000632 vs a measured 155.0007. A bound's coefficients round one way only."
+      }
+    },
+    "envelope_construction": "OLS intercept shifted up by the maximum positive residual, so envelope(pages_i) >= max_i by construction.",
+    "invariant_holds": true,
+    "invariant": "for every measured point i: envelope(pages_i) >= max_i, and therefore ceil(3*envelope(pages_i)) >= ceil(3*max_i). NOTE the earlier value of this flag was false, produced by comparing a real 3*envelope against an integer ceil(3*max) -- an off-by-rounding in the CHECK, not in the envelope. Compare ceil to ceil. A frozen model must keep passing this or it has stopped being conservative.",
+    "withdrawn": {
+      "line": "4.101 + 0.15424 * pages",
+      "why": "OLS through a set of maxima is a central tendency, not a bound: at 824 pages it predicts 131.20 vs a measured 134.66, and 3x the coefficients (393.59) is still under ceil(3*134.66) = 404. It was also unreproducible -- computed over 12 maxima, published beside an 8-row table, and copied into the bead as 11 rows, which refit to 3.029 + 0.15517."
+    },
+    "invariant_holds_for_published": true,
+    "margin_check": [
+      {
+        "pages": 1647,
+        "max_ms": 282.2492,
+        "envelope_ms": 295.27686800000004,
+        "ceil_3x_envelope": 886,
+        "ceil_3x_max": 847,
+        "covered": true
+      },
+      {
+        "pages": 824,
+        "max_ms": 155.0007,
+        "envelope_ms": 155.00145600000002,
+        "ceil_3x_envelope": 466,
+        "ceil_3x_max": 466,
+        "covered": true
+      },
+      {
+        "pages": 331,
+        "max_ms": 64.0732,
+        "envelope_ms": 70.972564,
+        "ceil_3x_envelope": 213,
+        "ceil_3x_max": 193,
+        "covered": true
+      },
+      {
+        "pages": 166,
+        "max_ms": 32.9484,
+        "envelope_ms": 42.849304000000004,
+        "ceil_3x_envelope": 129,
+        "ceil_3x_max": 99,
+        "covered": true
+      },
+      {
+        "pages": 67,
+        "max_ms": 16.1556,
+        "envelope_ms": 25.975348,
+        "ceil_3x_envelope": 78,
+        "ceil_3x_max": 49,
+        "covered": true
+      },
+      {
+        "pages": 34,
+        "max_ms": 10.3706,
+        "envelope_ms": 20.350696,
+        "ceil_3x_envelope": 62,
+        "ceil_3x_max": 32,
+        "covered": true
+      },
+      {
+        "pages": 18,
+        "max_ms": 6.9392,
+        "envelope_ms": 17.623592000000002,
+        "ceil_3x_envelope": 53,
+        "ceil_3x_max": 21,
+        "covered": true
+      },
+      {
+        "pages": 8,
+        "max_ms": 6.5659,
+        "envelope_ms": 15.919152,
+        "ceil_3x_envelope": 48,
+        "ceil_3x_max": 20,
+        "covered": true
+      },
+      {
+        "pages": 5,
+        "max_ms": 5.6125,
+        "envelope_ms": 15.407820000000001,
+        "ceil_3x_envelope": 47,
+        "ceil_3x_max": 17,
+        "covered": true
+      },
+      {
+        "pages": 4,
+        "max_ms": 4.94,
+        "envelope_ms": 15.237376,
+        "ceil_3x_envelope": 46,
+        "ceil_3x_max": 15,
+        "covered": true
+      },
+      {
+        "pages": 3,
+        "max_ms": 12.7491,
+        "envelope_ms": 15.066932,
+        "ceil_3x_envelope": 46,
+        "ceil_3x_max": 39,
+        "covered": true
+      },
+      {
+        "pages": 2,
+        "max_ms": 3.6626,
+        "envelope_ms": 14.896488,
+        "ceil_3x_envelope": 45,
+        "ceil_3x_max": 11,
+        "covered": true
+      }
+    ]
+  }
+}
