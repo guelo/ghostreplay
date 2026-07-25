@@ -60,6 +60,11 @@ from sqlalchemy.orm import sessionmaker
 # reported against the test that caused it.
 _POOL_DRAIN_GRACE_SECONDS = 5.0
 
+# Ceiling on the per-test all-table TRUNCATE's wait for its ACCESS EXCLUSIVE locks.
+# Nothing the suite itself owns is running when it fires, so waiting longer only
+# converts an attributable failure into a hung run.
+_TRUNCATE_LOCK_TIMEOUT = "20s"
+
 # The live ``pg_engine`` for this run, published by the fixture so the autouse pool
 # leak guard can read it WITHOUT requesting the fixture (which would build an engine —
 # or skip — for tests that never wanted one). ``None`` whenever no engine exists.
@@ -573,6 +578,53 @@ def pg_session_factory(pg_engine):
     return sessionmaker(autocommit=False, autoflush=False, bind=pg_engine)
 
 
+def _other_backends(engine) -> str:
+    """Every OTHER backend on this database, as a diagnostic block.
+
+    Read on a fresh connection with autocommit so it works even from a failed
+    transaction. Anything here in ``active`` or ``idle in transaction`` while a test
+    fixture is truncating is a writer the suite does not own — a leaked daemon bound
+    to ``app.db.SessionLocal`` (which points at THIS database whenever DATABASE_URL
+    does, as it does in CI), a stray subprocess, or a second pytest run.
+    """
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            rows = conn.execute(text(
+                "SELECT pid, application_name, state, wait_event_type, wait_event, "
+                "       xact_start, left(query, 300) AS query "
+                "FROM pg_stat_activity "
+                "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                "ORDER BY xact_start NULLS LAST"
+            )).mappings().all()
+    except Exception as exc:  # noqa: BLE001 - diagnostics must never mask the real error
+        return f"  <could not read pg_stat_activity: {exc!r}>"
+    return "\n".join(f"  {dict(r)}" for r in rows) or "  <no other backends>"
+
+
+def _truncate_all(engine, table_names: str) -> None:
+    """Reset every table for one test, and name the intruder when that is impossible.
+
+    ``lock_timeout`` turns an indefinite block into a fast, attributable failure, and
+    both that and a deadlock are re-raised WITH the concurrent-backend dump. Without
+    it the suite reports an opaque ``DeadlockDetected`` inside a fixture and the
+    culprit — some writer still touching the shared test database — is invisible
+    (g-rating-serialize-flake).
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL lock_timeout = '{_TRUNCATE_LOCK_TIMEOUT}'"))
+            conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
+            # Re-seed the evidence_epoch singleton the TRUNCATE just removed — its
+            # triggers UPDATE ... WHERE id = 1 and silently no-op without the row.
+            conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
+    except Exception as exc:  # noqa: BLE001 - re-raised, enriched
+        raise RuntimeError(
+            f"per-test TRUNCATE of the shared PostgreSQL test database failed: {exc}\n"
+            "Something outside this test is holding locks on it. Backends at the "
+            f"moment of failure:\n{_other_backends(engine)}"
+        ) from exc
+
+
 @pytest.fixture
 def pg_client(pg_engine, pg_session_factory):
     """TestClient backed by Postgres, with per-test truncation for isolation.
@@ -590,11 +642,7 @@ def pg_client(pg_engine, pg_session_factory):
     from app.models import Base
 
     table_names = ", ".join(t.name for t in reversed(Base.metadata.sorted_tables))
-    with pg_engine.begin() as conn:
-        conn.execute(text(f"TRUNCATE TABLE {table_names} RESTART IDENTITY CASCADE"))
-        # Re-seed the evidence_epoch singleton the TRUNCATE just removed — its
-        # triggers UPDATE ... WHERE id = 1 and silently no-op without the row.
-        conn.execute(text("INSERT INTO evidence_epoch (id, value) VALUES (1, 0)"))
+    _truncate_all(pg_engine, table_names)
 
     def _override_pg_db():
         db = pg_session_factory()

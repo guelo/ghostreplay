@@ -311,12 +311,16 @@ def test_facade_forwards_recompute_opportunity_false(monkeypatch):
     captured: dict = {}
 
     def fake_enqueue(
-        session_id, user_id, player_color, moves, run_opportunity=True, is_final=False
+        self, session_id, user_id, player_color, moves, run_opportunity=True, is_final=False
     ):
         captured["run_opportunity"] = run_opportunity
         captured["is_final"] = is_final
 
-    monkeypatch.setattr(evidence_mod._scheduler, "enqueue", fake_enqueue)
+    # Patch the CLASS, never the singleton INSTANCE: monkeypatch restores an
+    # instance-patched inherited method as an INSTANCE attribute, which then shadows
+    # every later class-level patch for the rest of the process
+    # (g-rating-serialize-flake).
+    monkeypatch.setattr(SessionEvidenceScheduler, "enqueue", fake_enqueue)
     enqueue_session_evidence(
         object(),
         session_id=uuid.uuid4(),
@@ -405,10 +409,14 @@ def test_enqueue_swallows_start_failure(monkeypatch):
 def test_facade_swallows_enqueue_failure(monkeypatch):
     # The module facade is best-effort: any scheduler fault is logged and never
     # propagates into /moves (same contract as request_recompute).
-    def boom(*args, **kwargs):
+    called: list[int] = []
+
+    def boom(self, *args, **kwargs):
+        called.append(1)
         raise RuntimeError("enqueue blew up")
 
-    monkeypatch.setattr(evidence_mod._scheduler, "enqueue", boom)
+    # Class, not instance — see the note in the run_opportunity test above.
+    monkeypatch.setattr(SessionEvidenceScheduler, "enqueue", boom)
     enqueue_session_evidence(
         object(),
         session_id=uuid.uuid4(),
@@ -416,6 +424,10 @@ def test_facade_swallows_enqueue_failure(monkeypatch):
         player_color="white",
         evidence_moves=[_move(1, "white")],
         move_count=1,
+    )
+    assert called, "the facade never reached the faulting enqueue"
+    assert "enqueue" not in evidence_mod._scheduler.__dict__, (
+        "the singleton kept an instance-level `enqueue`, which shadows class patches"
     )
 
 

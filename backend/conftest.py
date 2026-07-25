@@ -612,6 +612,76 @@ def _no_op_baseline_enqueue():
         yield game_stub, drills_stub
 
 
+def stop_scheduler_daemon(singleton) -> bool:
+    """Stop ``singleton``'s worker if it is running, and leave it REUSABLE either way.
+
+    Returns True when a running daemon was actually stopped.
+
+    Unlatching is the part that is easy to omit and impossible to notice:
+    ``shutdown()`` latches ``_shutdown``, and every ``enqueue`` returns on that flag
+    BEFORE it would call ``start()``. A singleton left latched therefore silently
+    drops work for the whole rest of the process, and a later test asserting on
+    enqueue behaviour passes against a dead object.
+
+    It runs UNCONDITIONALLY, because a latched singleton need not have a live thread
+    to clean up: a test that exercises ``app.main.lifespan`` for real start()s and
+    then shutdown()s the baseline and evidence singletons, leaving both
+    ``_thread=None, _shutdown=True``. Returning early on "nothing to join" would
+    preserve exactly the state this exists to clear. Pinned by
+    test_opening_baseline_scheduler.py::test_daemon_containment_leaves_the_singleton_reusable.
+    """
+    thread = getattr(singleton, "_thread", None)
+    stopped = thread is not None and thread.is_alive()
+    if stopped:
+        # drain=False: queued work must not run against the shared database either —
+        # the point is that this daemon does no more work at all.
+        singleton.shutdown(drain=False, timeout=10.0)
+    # Restore the boundary state under the same condition variable ``shutdown()``
+    # sets it under. Pending work is dropped too: no queued job on a REAL singleton
+    # is ever legitimate across a test boundary, and leaving one behind would let the
+    # next ``start()`` run it against the configured database.
+    with singleton._cond:
+        singleton._shutdown = False
+        singleton._pending.clear()
+    return stopped
+
+
+@pytest.fixture(autouse=True)
+def _stop_leaked_scheduler_daemons():
+    """Stop any REAL scheduler singleton a test started, at that test's boundary.
+
+    The three module singletons default their ``session_factory`` to ``SessionLocal``,
+    i.e. ``DATABASE_URL`` — which in CI is the SHARED PostgreSQL test database, the
+    same one ``pg_client`` truncates between tests. A singleton started once is a
+    daemon thread for the REST OF THE PROCESS: it opens its own connections, holds its
+    own transactions, and writes on its own schedule, none of which any test owns.
+    Observed consequences, all order-dependent and all blaming an innocent test:
+    ``pg_client``'s all-table TRUNCATE deadlocking against it, and rows a test just
+    seeded not being visible to that test's own request (g-rating-serialize-flake).
+
+    The bound-alias patches above stop the DEFAULT path, but a test that deliberately
+    binds a real facade (to prove the endpoint survives a scheduler fault) still
+    reaches ``enqueue`` -> ``start()``. Containment belongs here, at the boundary,
+    rather than in each such test: bounding the daemon's life to the test that started
+    it is what keeps the failure attributable.
+
+    Stopping alone is NOT enough to leave the singleton reusable. ``shutdown()``
+    latches ``_shutdown = True``, and every ``enqueue`` returns on that flag BEFORE it
+    would call ``start()`` — so a latched singleton silently drops work for the whole
+    rest of the run, and a later test asserting on enqueue behaviour would pass
+    against a dead object. Clearing the flag after the join restores exactly the
+    post-construction state (``_thread`` is already None and ``_pending`` was dropped
+    by ``drain=False``), so the next test gets a live singleton again.
+    """
+    yield
+    from app.opening_baseline_scheduler import _scheduler as baseline_singleton
+    from app.opening_score_scheduler import _scheduler as score_singleton
+    from app.session_evidence_scheduler import _scheduler as evidence_singleton
+
+    for singleton in (baseline_singleton, score_singleton, evidence_singleton):
+        stop_scheduler_daemon(singleton)
+
+
 @pytest.fixture(autouse=True)
 def _reset_session_evidence_cache():
     """Clear the per-session opening-evidence replay cache between tests (g-25mp).

@@ -190,6 +190,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def unhandled_exception_handler(_: Request, __: Exception) -> JSONResponse:
+        # DELIBERATELY does not log. Starlette routes the `Exception`/500 handler to
+        # ServerErrorMiddleware (applications.py: `if key in (500, Exception)`), the
+        # OUTERMOST middleware, which sends this response and then unconditionally
+        # re-raises so the ASGI server can log it. The server is therefore the single
+        # owner of the traceback; logging here too would record every 500 twice.
+        # Pinned by test_error_envelope.py.
         return _build_error_response(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             "Internal server error",

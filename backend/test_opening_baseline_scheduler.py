@@ -457,13 +457,90 @@ def test_enqueue_swallows_auto_start_failure(monkeypatch):
     sched.enqueue(uuid.uuid4(), 1, "white")
 
 
+def test_daemon_containment_leaves_the_singleton_reusable():
+    """``conftest.stop_scheduler_daemon`` must stop the worker AND unlatch it.
+
+    Stopping is what keeps a leaked daemon from writing the shared database for the
+    rest of the run; unlatching is what keeps that containment from silently breaking
+    every later enqueue. ``shutdown()`` alone fails the second half: ``enqueue``
+    returns on ``_shutdown`` before it ever reaches ``start()`` — proven on a throwaway
+    instance here rather than by restarting the real singleton, which would run real
+    jobs against the configured database (g-rating-serialize-flake).
+    """
+    from conftest import stop_scheduler_daemon
+
+    def _reusable(sched, ran: threading.Event) -> None:
+        """Enqueue and require the job to actually RUN.
+
+        Deliberately NOT an assertion on ``_pending``: unlatching restores
+        auto-start, so the worker legitimately races the test to drain the entry
+        and a non-empty ``_pending`` is not something this test may rely on. The
+        job having run is the outcome that is both stable and the one we mean.
+        """
+        sched.enqueue(uuid.uuid4(), 1, "white")
+        try:
+            assert ran.wait(timeout=5.0), "a contained scheduler dropped a later enqueue"
+        finally:
+            sched.shutdown(drain=False, timeout=5.0)
+
+    # The half that is easy to get wrong: a latched scheduler accepts nothing.
+    # auto_start=False so no worker can exist at all — the empty ``_pending`` is
+    # then unambiguously the early return on ``_shutdown``, never a drain.
+    latched, _ = _make_scheduler(auto_start=False)
+    latched.shutdown(drain=False, timeout=5.0)
+    latched.enqueue(uuid.uuid4(), 1, "white")
+    with latched._cond:
+        assert latched._pending == {}, "a latched scheduler silently dropped the enqueue"
+
+    # Case 1: a LIVE daemon is stopped, unlatched, and still usable afterwards.
+    live_ran = threading.Event()
+    live, _ = _make_scheduler(run_job=lambda db, **kw: live_ran.set(), auto_start=True)
+    live.start()
+    assert live._thread is not None and live._thread.is_alive()
+
+    assert stop_scheduler_daemon(live) is True
+    assert live._thread is None          # the worker is gone...
+    assert live._shutdown is False       # ...and the singleton is not latched
+    _reusable(live, live_ran)
+
+    # Case 2: ALREADY LATCHED with no live thread — the state a test leaves behind
+    # when it runs app.main.lifespan for real (that start()s and shutdown()s the
+    # baseline and evidence singletons). There is no daemon to join, so the helper
+    # reports False, but it must STILL unlatch: otherwise every later facade call
+    # silently no-ops for the rest of the run.
+    dormant_ran = threading.Event()
+    dormant, _ = _make_scheduler(
+        run_job=lambda db, **kw: dormant_ran.set(), auto_start=True
+    )
+    dormant.shutdown(drain=False, timeout=5.0)
+    assert dormant._thread is None and dormant._shutdown is True
+
+    assert stop_scheduler_daemon(dormant) is False  # nothing was running...
+    assert dormant._shutdown is False               # ...but it is no longer latched
+    _reusable(dormant, dormant_ran)
+
+
 def test_facade_swallows_enqueue_failure(monkeypatch):
-    def boom(*args, **kwargs):
+    called: list[int] = []
+
+    def boom(self, *args, **kwargs):
+        called.append(1)
         raise RuntimeError("enqueue blew up")
 
-    monkeypatch.setattr(baseline_mod._scheduler, "enqueue", boom)
+    # Patch the CLASS, never the singleton INSTANCE. `monkeypatch.setattr(instance,
+    # "enqueue", ...)` records the inherited BOUND METHOD as the old value (getattr
+    # finds it on the class) and undo restores it as an INSTANCE attribute — which
+    # then permanently shadows every later class-level patch, including the two
+    # endpoint tests below. That is how the real baseline daemon escaped into the
+    # rest of the run and started writing the shared database
+    # (g-rating-serialize-flake).
+    monkeypatch.setattr(OpeningBaselineScheduler, "enqueue", boom)
     # The module facade is best-effort: never propagates into /start.
     enqueue_baseline_snapshot(uuid.uuid4(), 1, "white")
+    assert called, "the facade never reached the faulting enqueue"
+    assert "enqueue" not in baseline_mod._scheduler.__dict__, (
+        "the singleton kept an instance-level `enqueue`, which shadows class patches"
+    )
 
 
 def test_shutdown_drain_true_runs_pending():
@@ -523,7 +600,10 @@ def test_game_start_returns_201_when_enqueue_faults(client, auth_headers, monkey
     # Bind the REAL facade into the endpoint (overriding the autouse no-op) and make
     # the underlying scheduler enqueue fault: the facade must swallow it so /start
     # still returns 201 (best-effort contract).
+    called: list[int] = []
+
     def boom(self, *args, **kwargs):
+        called.append(1)
         raise RuntimeError("scheduler blew up")
 
     monkeypatch.setattr(OpeningBaselineScheduler, "enqueue", boom)
@@ -537,6 +617,10 @@ def test_game_start_returns_201_when_enqueue_faults(client, auth_headers, monkey
             headers=auth_headers(user_id=123),
         )
     assert resp.status_code == 201
+    # Without this the test passes on a 201 that never faulted at all — which is
+    # exactly what happened while an instance-level `enqueue` shadowed this patch,
+    # letting /start spin up the REAL daemon instead (g-rating-serialize-flake).
+    assert called, "the endpoint never reached the faulting enqueue"
 
 
 DRILL_ROOT_FEN = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
@@ -552,7 +636,10 @@ def _drill_roots() -> OpeningRoots:
 
 
 def test_drill_start_returns_201_when_enqueue_faults(client, auth_headers, monkeypatch):
+    called: list[int] = []
+
     def boom(self, *args, **kwargs):
+        called.append(1)
         raise RuntimeError("scheduler blew up")
 
     monkeypatch.setattr(OpeningBaselineScheduler, "enqueue", boom)
@@ -572,3 +659,4 @@ def test_drill_start_returns_201_when_enqueue_faults(client, auth_headers, monke
             headers=auth_headers(user_id=123),
         )
     assert resp.status_code == 201
+    assert called, "the endpoint never reached the faulting enqueue"

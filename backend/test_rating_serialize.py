@@ -244,7 +244,12 @@ def test_clock_skew_durable_head_is_games_played_first(client, auth_headers, db_
 # ---------------------------------------------------------------------------
 # Postgres: real row-lock serialization, double-end, and the cursor barrier.
 # ---------------------------------------------------------------------------
-_LOCKED_HOLD_SECONDS = 0.5
+# Every wait below is a DEADLOCK/HANG detector, never part of a proof: each one is
+# released by an observed state change (an event, or a Postgres-reported lock wait),
+# so a loaded machine makes these tests slower and never makes them fail. Generous
+# on purpose — the whole @pg_gate suite runs in one process and these ends contend
+# for a 15-connection pool (g-rating-serialize-flake).
+_HANDSHAKE_TIMEOUT_SECONDS = 30.0
 
 
 def _seed_pg_user(pg_session_factory, user_id: int) -> None:
@@ -269,6 +274,47 @@ def _seed_pg_game_session(pg_session_factory, user_id: int) -> uuid.UUID:
         return gs.id
     finally:
         db.close()
+
+
+def _end_diagnosis(future, captured: dict, pg_session_factory, session_id: str) -> str:
+    """What the in-flight ``/api/game/end`` actually did, for a failed handshake.
+
+    Three things a bare "it never paused" cannot tell apart, so all three are read:
+
+    * the end raised — this is also where an UNHANDLED crash inside the endpoint
+      surfaces: ``TestClient`` defaults to ``raise_server_exceptions=True``, so such
+      an exception propagates to the caller with its traceback intact rather than
+      coming back as a response (the app itself logs no traceback, by design — see
+      the handler note in ``app/main.py``);
+    * the end answered with an error status — a body, so a status the app CHOSE;
+    * the end answered 404/403 because the row it needed was not visible to it, which
+      is a fixture/isolation failure and not a rating-path failure at all. The
+      independent read below settles that: it says whether the session row is in the
+      database this test seeded (g-rating-serialize-flake).
+    """
+    try:
+        future.result(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+    except BaseException as exc:  # noqa: BLE001 - reported, not handled
+        outcome = f"the end call raised {exc!r}"
+    else:
+        resp = captured.get("resp")
+        outcome = (
+            "the end call returned without capturing a response"
+            if resp is None
+            else f"the end returned {resp.status_code}: {resp.text}"
+        )
+    probe = pg_session_factory()
+    try:
+        row = probe.execute(
+            text("SELECT status, user_id FROM game_sessions WHERE id = CAST(:s AS uuid)"),
+            {"s": session_id},
+        ).first()
+        total = probe.execute(text("SELECT count(*) FROM game_sessions")).scalar()
+    except Exception as exc:  # noqa: BLE001 - reported, not handled
+        return f"{outcome}; the state probe itself failed: {exc!r}"
+    finally:
+        probe.close()
+    return f"{outcome}; session row={tuple(row) if row else None}, game_sessions rows={total}"
 
 
 def _pg_start(pg_client, auth_headers, user_id: int) -> str:
@@ -298,7 +344,10 @@ def test_same_user_distinct_session_ends_chain_cleanly(pg_client, pg_session_fac
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        responses = [f.result(timeout=20) for f in [pool.submit(_run, s) for s in session_ids]]
+        responses = [
+            f.result(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+            for f in [pool.submit(_run, s) for s in session_ids]
+        ]
 
     assert all(r.status_code == 200 for r in responses), [(r.status_code, r.text) for r in responses]
     verify = pg_session_factory()
@@ -312,15 +361,42 @@ def test_same_user_distinct_session_ends_chain_cleanly(pg_client, pg_session_fac
     assert games == [1, 2, 3, 4]
 
 
+def _await_blocked_by(observer, blocked_pid: int, blocker_pid: int) -> bool:
+    """Poll until Postgres itself reports ``blocked_pid`` waiting on ``blocker_pid``.
+
+    ``pg_blocking_pids`` is the authority on "is this backend blocked, and by whom" —
+    it reads the lock manager, so it cannot mistake a merely-slow backend for a
+    blocked one, which is exactly what a wall-clock stall CAN do on a loaded machine.
+    Runs on the ``observer`` session (the leader's own connection, idle in its
+    transaction while holding the lock, so it is free to query).
+    """
+    deadline = time.perf_counter() + _HANDSHAKE_TIMEOUT_SECONDS
+    while time.perf_counter() < deadline:
+        blockers = observer.execute(
+            text("SELECT pg_blocking_pids(:p)"), {"p": blocked_pid}
+        ).scalar()
+        if blocker_pid in (blockers or []):
+            return True
+        time.sleep(0.02)
+    return False
+
+
 @pg_required
 def test_users_lock_prevents_lost_games_played_update(pg_engine, pg_session_factory):
-    """Deterministic lost-update proof. A leader reads the head and stalls before
-    inserting; a follower runs the same chain.
+    """Lost-update proof, sequenced by observed state rather than by the clock.
 
-    * WITH the users lock the follower blocks on it until the leader commits, then
-      reads the leader's row and chains 1 -> 2.
-    * WITHOUT the lock the follower reads the stale (empty) head during the leader's
-      stall and both insert games_played=1 — the lost update the lock prevents.
+    A leader reads the head and holds before inserting; a follower runs the same chain.
+
+    * WITH the users lock the follower blocks ON THE LEADER'S BACKEND — asserted via
+      ``pg_blocking_pids``, and confirmed by the fact that it has not read when the
+      leader releases — then reads the leader's row and chains 1 -> 2.
+    * WITHOUT the lock the follower reads the stale (empty) head before the leader
+      inserts and both write games_played=1 — the lost update the lock prevents.
+
+    The leader's hold ENDS on the handshake the scenario is about (the follower
+    blocked, or the follower's read), never on a sleep, so machine load can only make
+    this slower — it can never shrink the window and turn the proof into a coin flip
+    (g-rating-serialize-flake).
     """
     user_id = 4747
     _seed_pg_user(pg_session_factory, user_id)
@@ -335,39 +411,63 @@ def test_users_lock_prevents_lost_games_played_update(pg_engine, pg_session_fact
         "ORDER BY games_played DESC, recorded_at DESC, id DESC LIMIT 1"
     )
     lock_sql = text("SELECT id FROM users WHERE id = :u FOR NO KEY UPDATE")
+    pid_sql = text("SELECT pg_backend_pid()")
 
-    def scenario(take_lock: bool) -> tuple[list[int], float]:
+    def scenario(take_lock: bool) -> tuple[list[int], dict]:
         with pg_engine.begin() as conn:
             conn.execute(text("DELETE FROM rating_history WHERE user_id = :u"), {"u": user_id})
         leader_sid = _seed_pg_game_session(pg_session_factory, user_id)
         follower_sid = _seed_pg_game_session(pg_session_factory, user_id)
         leader_has_read = threading.Event()
-        follower_wait: dict[str, float] = {}
+        follower_at_lock = threading.Event()   # follower has a backend and is about to contend
+        follower_has_read = threading.Event()  # follower got past the (optional) lock
+        follower_pid: dict[str, int] = {}
+        observed: dict[str, bool] = {}
 
         def leader() -> None:
             db = pg_session_factory()
             try:
-                db.execute(text("SET LOCAL lock_timeout = '5s'"))
+                db.execute(text("SET LOCAL lock_timeout = '30s'"))
                 if take_lock:
                     db.execute(lock_sql, {"u": user_id})
                 head = db.execute(head_sql, {"u": user_id}).scalar()
                 leader_has_read.set()
-                time.sleep(_LOCKED_HOLD_SECONDS)  # hold the (optional) lock past the follower's read
+                if take_lock:
+                    # Hold until Postgres reports the follower parked on THIS backend's
+                    # lock; that observation, plus its read not having happened, is the
+                    # serialization itself.
+                    assert follower_at_lock.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS), (
+                        "the follower never reached the lock"
+                    )
+                    leader_pid = db.execute(pid_sql).scalar()
+                    observed["blocked_by_leader"] = _await_blocked_by(
+                        db, follower_pid["pid"], leader_pid
+                    )
+                    observed["read_during_hold"] = follower_has_read.is_set()
+                else:
+                    # Nothing to block on, so the follower's stale read is what ends the
+                    # hold: wait for the read the missing lock allows.
+                    observed["read_during_hold"] = follower_has_read.wait(
+                        timeout=_HANDSHAKE_TIMEOUT_SECONDS
+                    )
                 db.execute(insert_sql, {"u": user_id, "s": str(leader_sid), "g": (head or 0) + 1})
                 db.commit()
             finally:
                 db.close()
 
         def follower() -> None:
-            leader_has_read.wait(timeout=5)
+            assert leader_has_read.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS), (
+                "the leader never read the head"
+            )
             db = pg_session_factory()
             try:
-                db.execute(text("SET LOCAL lock_timeout = '5s'"))
-                started = time.perf_counter()
+                db.execute(text("SET LOCAL lock_timeout = '30s'"))
+                follower_pid["pid"] = db.execute(pid_sql).scalar()
+                follower_at_lock.set()
                 if take_lock:
                     db.execute(lock_sql, {"u": user_id})  # blocks until the leader commits
                 head = db.execute(head_sql, {"u": user_id}).scalar()
-                follower_wait["seconds"] = time.perf_counter() - started
+                follower_has_read.set()
                 db.execute(insert_sql, {"u": user_id, "s": str(follower_sid), "g": (head or 0) + 1})
                 db.commit()
             finally:
@@ -376,7 +476,7 @@ def test_users_lock_prevents_lost_games_played_update(pg_engine, pg_session_fact
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(leader), pool.submit(follower)]
             for f in futures:
-                f.result(timeout=15)
+                f.result(timeout=_HANDSHAKE_TIMEOUT_SECONDS * 2)
 
         verify = pg_session_factory()
         try:
@@ -386,13 +486,16 @@ def test_users_lock_prevents_lost_games_played_update(pg_engine, pg_session_fact
             ).scalars().all()
         finally:
             verify.close()
-        return games, follower_wait.get("seconds", 0.0)
+        return games, observed
 
-    locked_games, locked_wait = scenario(take_lock=True)
+    locked_games, locked = scenario(take_lock=True)
     assert locked_games == [1, 2]
-    assert locked_wait >= _LOCKED_HOLD_SECONDS / 2  # the follower demonstrably waited on the lock
+    # The follower demonstrably waited ON THE LEADER, and had not read when released.
+    assert locked["blocked_by_leader"] is True
+    assert locked["read_during_hold"] is False
 
-    unlocked_games, _ = scenario(take_lock=False)
+    unlocked_games, unlocked = scenario(take_lock=False)
+    assert unlocked["read_during_hold"] is True  # the stale read the lock would have stopped
     assert unlocked_games == [1, 1]  # regression: duplicate games_played without the lock
 
 
@@ -413,7 +516,10 @@ def test_concurrent_double_end_one_session_loser_gets_400(pg_client, pg_session_
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-        r1, r2 = [f.result(timeout=15) for f in [pool.submit(_run), pool.submit(_run)]]
+        r1, r2 = [
+            f.result(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
+            for f in [pool.submit(_run), pool.submit(_run)]
+        ]
 
     assert sorted([r1.status_code, r2.status_code]) == [200, 400], (
         (r1.status_code, r1.text), (r2.status_code, r2.text)
@@ -448,10 +554,14 @@ def test_cursor_writer_completes_while_end_paused_in_rating(
     paused = threading.Event()
     release = threading.Event()
     original = game_api.compute_rating_tracks
+    stall: dict[str, bool] = {}
 
     def _slow(*args, **kwargs):
         paused.set()
-        release.wait(timeout=10)
+        # Recorded, not merely waited on: an end that resumed on a timeout instead of
+        # on the release would run its own cursor bump ALONGSIDE the external writer,
+        # which is a different (and unproven) interleaving from the one asserted below.
+        stall["released"] = release.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
         return original(*args, **kwargs)
 
     end_response: dict[str, object] = {}
@@ -483,15 +593,23 @@ def test_cursor_writer_completes_while_end_paused_in_rating(
         max_workers=2
     ) as pool:
         end_future = pool.submit(_do_end)
-        assert paused.wait(timeout=10), "game end never reached its rating work"
+        if not paused.wait(timeout=_HANDSHAKE_TIMEOUT_SECONDS):
+            release.set()  # never leave the handler parked on a dead handshake
+            raise AssertionError(
+                "game end never reached its rating work; "
+                + _end_diagnosis(end_future, end_response, pg_session_factory, session_id)
+            )
         # The external cursor writer completes while the end is stalled: proof the
-        # cursor row is free during rating work (would time out under bump-first).
-        pool.submit(_external_bump).result(timeout=8)
+        # cursor row is free during rating work. The PROOF is its own 3s lock_timeout
+        # (a bump-first design makes this raise), so the future timeout below is only
+        # a hang detector and is deliberately generous.
+        pool.submit(_external_bump).result(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
         release.set()
-        end_future.result(timeout=10)
+        end_future.result(timeout=_HANDSHAKE_TIMEOUT_SECONDS)
 
     real_scheduler_enqueue.assert_not_called()
 
+    assert stall["released"] is True, "the end resumed on a timeout, not on the release"
     assert end_response["resp"].status_code == 200, end_response["resp"].text
     verify = pg_session_factory()
     try:

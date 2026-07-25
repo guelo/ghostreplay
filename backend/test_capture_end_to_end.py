@@ -213,6 +213,11 @@ def test_a_crash_between_the_two_renames_fails_closed_and_reruns_clean(
     scores the candidate, and the artifact rename lands."""
     provenance = capture_clone / "backend" / "scripts" / "fixtures" / "cohort_provenance.json"
     artifact = outdir / "frozen-cohort.json"
+    # backend/scripts/fixtures/ is untracked, so a fresh clone does not have it: the
+    # directory only exists once some capture has published into it. Create it here
+    # rather than depending on an earlier test in this module having run first —
+    # capture creates it itself, so this is exactly the state a real first run sees.
+    provenance.parent.mkdir(parents=True, exist_ok=True)
     if provenance.exists():
         provenance.unlink()
     # os.replace(file, non-empty-dir) fails; creating the temp beside it still works.
