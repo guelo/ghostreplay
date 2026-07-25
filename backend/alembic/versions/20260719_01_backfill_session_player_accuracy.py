@@ -85,6 +85,14 @@ functions defined here. Until then both modes execute on the migration connectio
 inside Alembic's single transaction (atomic semantics), which is why
 ``REPAIR_MAX_PASSES`` is 1: see "Retry and convergence" below.
 
+The **sizing constants** below the environment section are owned by
+**g-b-size-derive**. This revision only DECLARES them and checks, at import, the
+two invariants that are pure arithmetic over frozen literals (the zero-batch
+boundary and the scan budget). Arming timeouts from them, computing the run-time
+reserve/budget terms, and enforcing the admission projection are the runtime
+envelope's. They are measured by ``backend/scripts/size_accuracy_backfill.py``
+and their provenance is ``docs/release_b_runbook.md``.
+
 Deviations from the plan, stated rather than hidden
 ---------------------------------------------------
 - The ``*_locked`` selection statements are bundle FIELDS that are ``None`` on
@@ -146,11 +154,281 @@ logger = logging.getLogger("alembic.runtime.migration")
 ALGO_VERSION = 1
 
 CHECK_NAME = "ck_game_sessions_player_accuracy"
+
+
+class MigrationError(RuntimeError):
+    """Raised when a phase cannot converge or a fail-closed assertion fails.
+
+    Declared here rather than beside the phase functions because the sizing block
+    below raises it AT IMPORT: a zero-batch or scan-budget violation has to fail
+    when the revision is loaded, not 900 seconds into a run.
+    """
+
+
+# ===========================================================================
+# Sizing constants (g-b-size-derive).
+#
+# Everything below is either a POLICY BOUND chosen once and defended here, or a
+# MEASURED number frozen from a sizing run whose provenance — snapshot, date,
+# raw numbers, timed SHA — is recorded in docs/release_b_runbook.md. The
+# derivation that produced the measured values, and the harness that measured
+# them, are backend/scripts/size_accuracy_backfill.py.
+#
+# Measurement is NOT reachable from here. The shipped revision contains no
+# bypass, because a variable that disarms the atomic projection guard and the
+# batch deadline is production-reachable by definition: matching
+# current_database() only prevents ACCIDENTAL reuse against a differently named
+# database, and the production database name is knowable. Sizing runs in a
+# standalone harness by hand against a restored snapshot instead.
+#
+# g-b-runtime-envelope consumes these constants to arm the actual SQL timeouts,
+# compute the run-time reserve/budget terms, and enforce the admission
+# projection. This revision only DECLARES them and checks, at import, the two
+# invariants that are pure arithmetic over frozen literals.
+# ===========================================================================
+
+# --- policy bounds ---------------------------------------------------------
+
+#: Hard admission bound on how long the migration may hold a row lock a live
+#: writer could want.
+MAX_WRITER_STALL_MS = 30_000
+
+#: The enforced per-batch SQL deadline, measured from the start of the batch
+#: transaction. NOT by itself the lock-hold bound: see EST_MAX_LOCK_HOLD_MS.
+MAX_BATCH_MS = 5_000
+
+#: The longest any statement in a batch may wait on a lock. STRICTLY LESS than
+#: MAX_BATCH_MS — at or above it, a lock wait could only ever surface as a
+#: statement timeout and the setting would be decorative.
+BATCH_LOCK_WAIT_MS = 1_000
+
+#: The cap on any SINGLE row-lock wait in atomic mode, armed on the migration
+#: connection immediately after VALIDATE so the wait is a designed value rather
+#: than VALIDATE_LOCK_TIMEOUT leaking through Alembic's single transaction.
+#:
+#: A per-acquisition cap and nothing more. PostgreSQL applies lock_timeout
+#: separately to each acquisition, so k waits of just under this all succeed
+#: while their sum is k seconds of stall no per-wait cap ever sees. What bounds
+#: the sum is atomic mode's residual stall deadline (g-b-runtime-envelope), not
+#: this constant.
+#: https://www.postgresql.org/docs/current/runtime-config-client.html#GUC-LOCK-TIMEOUT
+ATOMIC_LOCK_WAIT_MS = BATCH_LOCK_WAIT_MS
+
+#: Lock wait for VALIDATE CONSTRAINT, which runs outside any batch budget and is
+#: overwritten immediately afterwards.
 VALIDATE_LOCK_TIMEOUT = "10s"
 
-DEFAULT_BATCH_SIZE = 500
-MAX_BATCH_SIZE = 5000
-REPAIR_BATCH_SIZE = 200
+#: ONE revision-wide wall clock — not a phase clock and not a runner clock.
+REVISION_DEADLINE_S = 900
+
+#: The pass bound the scan-budget invariant charges against, per phase. The
+#: runner's own per-phase limits (BACKFILL_MAX_PASSES / REPAIR_MAX_PASSES) must
+#: not exceed it, or the invariant would be charging fewer scans than a run can
+#: actually issue. A constant test asserts that.
+MAX_PASSES = 20
+
+#: The MAXIMUM number of scan-bearing session_moves statements that can execute
+#: after the first row lock in atomic mode. A bound, not an identity: on a run
+#: with N_stale = 0 and N_repair > 0 only two do, because the first row lock is
+#: then the repair's own and it falls AFTER the materialization. Excludes
+#: COVERAGE_ASSERT_SQL, which is charged by its own constant.
+ATOMIC_SCANS_UNDER_LOCK = 3
+
+# --- the sized relation dimensions ----------------------------------------
+#
+# MARGINED_MS_PER_SCAN_STMT and MARGINED_MS_COVERAGE_ASSERT are the only priced
+# terms that scale with a RELATION rather than with a population, and they are
+# the only ones a population recount cannot revalidate. The gap is not
+# hypothetical: a correctly stamped version-1 session is in NEITHER population,
+# yet it adds rows and pages to both relations — and Release A is the sole
+# production writer for the whole interval between sizing and deploy, so every
+# row it writes is exactly that shape. A guard that rechecks only the
+# populations is checking the one dimension that cannot move and ignoring the
+# one that must. So the dimensions the scan constants were measured against are
+# frozen here, and g-b-runtime-envelope's growth factors divide by them. A
+# dimension that lived only in the runbook could not be divided by anything.
+
+SIZED_TOTAL_ROWS = 6_000
+SIZED_SESSIONS_BYTES = 10_010_624
+SIZED_M_TOTAL = 357_000
+SIZED_MOVES_BYTES = 93_241_344
+
+# --- measured, margined 3x -------------------------------------------------
+
+#: Backfill cost per stale session at production's move distribution, x3.
+MARGINED_MS_PER_ROW = 5
+
+#: Per repair candidate: lock, SESSION-SCOPED re-read, conditional update, x3.
+#: Excludes every set-wide scan, which is why it is a genuinely per-row number —
+#: and that exclusion is legitimate only BECAUSE the materialization is hoisted
+#: out of the batch.
+MARGINED_MS_PER_REPAIR_ROW = 2
+
+#: One execution of the MOST EXPENSIVE COMPLETE scan-bearing statement over
+#: session_moves, x3. NOT the cost of a bare PLY_DETECTOR_SQL: nothing in the run
+#: ever executes the detector alone. What executes is the detector wrapped in a
+#: statement that also joins and filters game_sessions and then counts
+#: (REPAIR_REMAINING_SQL, SOUNDNESS_ASSERT_SQL, the pre-flight repair population
+#: count) or inserts into the temp table (REPAIR_POPULATE_SQL) — and every one of
+#: those costs strictly more than the detector by itself. Sizing times all four
+#: standalone and freezes the MAXIMUM; one constant prices all four because they
+#: are the same relation scan plus a bounded join or aggregate.
+#:
+#: Scales with the whole session_moves relation, not with either population, and
+#: is nonzero when both populations are zero.
+MARGINED_MS_PER_SCAN_STMT = 521
+
+#: One COVERAGE_ASSERT_SQL execution (a whole-game_sessions scan), x3. Priced
+#: separately because it scans a DIFFERENT relation and scales by a DIFFERENT
+#: ratio. In atomic mode it runs under every row lock the backfill took.
+MARGINED_MS_COVERAGE_ASSERT = 6
+
+#: The per-statement cap for EVERY scan-bearing statement: the repair population
+#: count, REPAIR_POPULATE_SQL, REPAIR_REMAINING_SQL, SOUNDNESS_ASSERT_SQL, AND
+#: COVERAGE_ASSERT_SQL. It must therefore cover the most expensive of them, not
+#: merely the cheapest — arming a statement with a timeout below its own measured
+#: cost is a self-inflicted cancellation, and the coverage assertion is the one
+#: that would take it.
+#:
+#: A CAP, not the armed value: what g-b-runtime-envelope arms is
+#: min(SCAN_STMT_TIMEOUT_MS, every deadline in force), so a scan starting late in
+#: the revision's clock gets only what is left rather than a fresh allowance.
+#: These statements are not inside a BATCH budget and MAX_BATCH_MS must never be
+#: armed on them.
+SCAN_STMT_TIMEOUT_MS = 521
+
+#: Margined worst-case Python compute for ONE session (parse + validate +
+#: score). A maximum, not a mean: what the compute watchdog has to survive is the
+#: worst single session in the population.
+MAX_SINGLE_SESSION_COMPUTE_MS = 79
+
+#: Margined worst-case teardown of ONE PER-BATCH-MODE BATCH TRANSACTION, taken as
+#: the larger of observed commit and observed CANCEL-TO-UNLOCK, because locks are
+#: held until whichever one has finished.
+#:
+#: Cancel-to-unlock, NOT teardown_ms. The tail a writer actually waits through on
+#: the breach path is not "how long ROLLBACK took": PostgreSQL notices the
+#: cancellation at the statement's next interrupt point, unwinds the statement,
+#: raises to the driver, Python then issues ROLLBACK, and the row locks release
+#: when that returns. A clock the cancelled process starts begins AFTER the
+#: interrupt latency and the unwind have already elapsed and cannot contain them,
+#: so freezing this from teardown_ms would under-size it by exactly the part that
+#: is hardest to predict. The measured input is instead the interval from cancel
+#: issuance to the moment a competing FOR NO KEY UPDATE NOWAIT on a held row
+#: ACQUIRES, observed from a second session.
+#:
+#: Its scope is exactly a BATCH — but a batch of EITHER phase, and the larger of
+#: the two is not necessarily the backfill's. REPAIR_BATCH_SIZE divides by a
+#: cheaper per-row cost, so it can exceed MAX_BATCH_SIZE (it does here: 2500
+#: against 1000), and the repair phase's per-batch transactions hold row locks
+#: until their own commits return. The breach path is therefore measured on a
+#: transaction of at least max(MAX_BATCH_SIZE, REPAIR_BATCH_SIZE) rows, which
+#: the sizing derivation enforces rather than trusts.
+#:
+#: It neither covers nor pretends to cover the teardown of atomic mode's single
+#: whole-population transaction — that has its own two constants below.
+TEARDOWN_ALLOWANCE_MS = 7
+
+#: Margined teardown of an atomic transaction that mutated NO rows: the COMMIT
+#: (or ROLLBACK) of a run that still executed VALIDATE and the scans. The
+#: population-independent floor of atomic teardown, and never zero — an atomic
+#: transaction that mutated nothing still commits.
+MARGINED_MS_ATOMIC_TEARDOWN_FIXED = 2
+
+#: Margined marginal teardown cost per MUTATED ROW in the atomic transaction, in
+#: MICROSECONDS. Denominated in µs on purpose: the marginal cost of one more
+#: dirty row at commit is far below a millisecond, and rounding it up to an
+#: integer millisecond would add a phantom second of projected stall per thousand
+#: rows and make atomic mode inadmissible on populations it comfortably handles.
+#: g-b-runtime-envelope's projection divides it by 1000; a constant test pins
+#: that, so a future "tidy-up" into milliseconds fails rather than silently
+#: inflating every atomic projection by three orders of magnitude.
+MARGINED_US_ATOMIC_TEARDOWN_PER_ROW = 2
+
+#: The largest backfill batch sizing ACTUALLY DEMONSTRATED — the largest size
+#: exercised in Phase 1 whose observed maximum single-batch duration satisfied
+#: 3 * observed <= MAX_BATCH_MS. Frozen beside the formula bound because the
+#: formula comes from a MEAN per-row cost and can name a batch size nothing ever
+#: ran; admitting that would mean the deployment's maximum batch was never
+#: demonstrated to fit the deadline, which is precisely what MAX_BATCH_SIZE
+#: exists to prevent.
+B_TESTED = 1_000
+R_TESTED = 3_000
+
+
+def _admitted_batch_size(margined_ms_per_row: int, tested: int, *, constant: str) -> int:
+    """min(formula, tested), with the zero-batch invariant checked rather than clamped.
+
+    B_formula = floor(MAX_BATCH_MS / MARGINED_MS_PER_ROW) must be at least 1,
+    which is exactly the condition MARGINED_MS_PER_ROW <= MAX_BATCH_MS. The
+    boundary is ADMISSIBLE: at equality B_formula is 1 and a one-row batch
+    consumes exactly the margined budget, which the 3x margin already inside the
+    per-row constant covers.
+
+    Above the boundary this RAISES rather than clamping to 1. Clamping would
+    silently violate the very budget the constant exists to enforce: it would
+    admit a batch whose single row is projected to overrun MAX_BATCH_MS and call
+    that "the minimum batch size", which is a re-sizing decision disguised as a
+    default.
+
+    A pure function, not an inline expression, so the boundary can be pinned from
+    both sides without reloading the module.
+    """
+    if margined_ms_per_row > MAX_BATCH_MS:
+        raise MigrationError(
+            f"{constant} ({margined_ms_per_row}) exceeds MAX_BATCH_MS ({MAX_BATCH_MS}); "
+            "re-size before deploying"
+        )
+    return min(MAX_BATCH_MS // margined_ms_per_row, tested)
+
+
+def _scan_budget_ms(margined_ms_per_scan_stmt: int, margined_ms_coverage_assert: int) -> int:
+    """Every scan-bearing statement a run can issue, charged against one clock.
+
+    Two scans per pass (REPAIR_POPULATE_SQL and REPAIR_REMAINING_SQL) for each of
+    both phases' MAX_PASSES, plus the two one-off session_moves scans every run
+    pays — the pre-flight repair population count and SOUNDNESS_ASSERT_SQL — plus
+    the coverage assertion. In atomic mode the pass bound is 1, so the per-pass
+    term collapses and what remains is what the stall formula already charges.
+    """
+    return (2 * MAX_PASSES + 2) * margined_ms_per_scan_stmt + margined_ms_coverage_assert
+
+
+#: EST_MAX_LOCK_HOLD_MS is the MARGINED EMPIRICAL ADMISSION ESTIMATE of how long
+#: one PER-BATCH-MODE BATCH can hold a row lock. It is not a hard bound and is
+#: not named as though it were. A constant test asserts it is <=
+#: MAX_WRITER_STALL_MS, which is arithmetic over frozen literals and proves that
+#: the ESTIMATE fits the budget — nothing more. It says nothing about atomic
+#: mode, whose single lock hold is bounded by the admission projection instead.
+#: What backs the estimate at run time is the compute watchdog, the armed SQL
+#: timeouts, and the observed-lock-hold tripwire, all in g-b-runtime-envelope.
+EST_MAX_LOCK_HOLD_MS = MAX_BATCH_MS + MAX_SINGLE_SESSION_COMPUTE_MS + TEARDOWN_ALLOWANCE_MS
+
+#: The largest batch any override may request, AND the largest batch sizing
+#: actually demonstrated. Derived at import so the zero-batch invariant is
+#: checked here rather than discovered at run time.
+MAX_BATCH_SIZE = _admitted_batch_size(
+    MARGINED_MS_PER_ROW, B_TESTED, constant="MARGINED_MS_PER_ROW"
+)
+DEFAULT_BATCH_SIZE = MAX_BATCH_SIZE
+REPAIR_BATCH_SIZE = _admitted_batch_size(
+    MARGINED_MS_PER_REPAIR_ROW, R_TESTED, constant="MARGINED_MS_PER_REPAIR_ROW"
+)
+
+# The scan-budget invariant, over frozen literals. A session_moves large enough
+# that the scans ALONE cannot fit the revision's wall clock fails loudly HERE
+# instead of exhausting MAX_PASSES and raising a misleading non-convergence error
+# 900 seconds later. g-b-runtime-envelope adds the run-time form of this check,
+# over the LIVE relation dimensions — the two are not redundant: a literal check
+# cannot see that the relations grew after sizing.
+if _scan_budget_ms(MARGINED_MS_PER_SCAN_STMT, MARGINED_MS_COVERAGE_ASSERT) >= (
+    REVISION_DEADLINE_S * 1000
+):
+    raise MigrationError(
+        "20260719_01 scan budget "
+        f"{_scan_budget_ms(MARGINED_MS_PER_SCAN_STMT, MARGINED_MS_COVERAGE_ASSERT)}ms "
+        f"does not fit REVISION_DEADLINE_S ({REVISION_DEADLINE_S}s); re-size before deploying"
+    )
 
 # A pass drains everything its selection can see; a nonzero remaining count means
 # a concurrent writer produced new work. Bounded so a pathological writer cannot
@@ -164,10 +442,6 @@ BACKFILL_MAX_PASSES = 3
 REPAIR_MAX_PASSES = 1
 
 CANDIDATES_TABLE = "_accuracy_repair_candidates"
-
-
-class MigrationError(RuntimeError):
-    """Raised when a phase cannot converge or a fail-closed assertion fails."""
 
 
 # ---------------------------------------------------------------------------
