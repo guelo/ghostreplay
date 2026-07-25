@@ -41,6 +41,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import dataclasses
 from collections import Counter
 from dataclasses import InitVar, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -121,6 +122,21 @@ SCORER_SOURCE_DIGEST_ENV = "GHOSTREPLAY_SCORER_SOURCE_DIGEST"
 # private worktree. This is the strongest an in-process read can be.
 _LAUNCHER_SCORER_DIGEST: str | None = (
     os.environ.get(SCORER_SOURCE_DIGEST_ENV, "").strip().lower() or None
+)
+
+# The env var through which the RELEASE launcher hands this process the SHA-256 of the
+# candidate cohort-provenance record it copied into the checkout before exec'ing us
+# (release_calibration_launcher.mount_cohort_provenance). Mirrored there, pinned equal by
+# a test. NOT part of SCORER_SOURCE_FILES: the record is data the run selects against, not
+# code the digest binds.
+COHORT_PROVENANCE_DIGEST_ENV = "GHOSTREPLAY_COHORT_PROVENANCE_SHA256"
+
+# Read at the TOP of the module and never re-read, for exactly the reason
+# _LAUNCHER_SCORER_DIGEST is: the value's only meaning is "a digest my launcher computed
+# over bytes it copied before I existed". An os.environ read at selection time would let
+# code inside this process mint the matching value after the record was already loaded.
+_MOUNTED_PROVENANCE_DIGEST: str | None = (
+    os.environ.get(COHORT_PROVENANCE_DIGEST_ENV, "").strip().lower() or None
 )
 
 
@@ -863,7 +879,9 @@ def parse_report_fold_grid(raw: str | None) -> tuple[float, ...]:
     STRICTER than RootCalcConfig (which accepts any finite non-negative p). Order-
     preserving dedupe (first-seen), returning a nonempty finite tuple — enumeration
     order is the tie-break substrate downstream. _parse_args converts the ValueError
-    into ``parser.error`` (SystemExit(2)); this function itself never touches argparse.
+    into ``parser.error`` (SystemExit(2)) WITHOUT forwarding its text — the messages here
+    name the offending token, and the CLI boundary never echoes argv. This function itself
+    never touches argparse.
     """
     if raw is None:
         return REPORT_FOLD_P_GRID
@@ -3367,7 +3385,7 @@ def require_preexec_verified_source(bound: object) -> None:
     """THE RELEASE GATE (g-p4ih-srcfence). Refuse anything carrying
     ``scorer_source_verified_preexec=False``.
 
-    Callers: ``--select-release`` (g-p4ih-release-cli) and the Phase-3 preflight
+    Callers: the ``select-release`` subcommand (g-p4ih-release-cli) and the Phase-3 preflight
     (g-p4ih-preflight), before applying an approved winner. Accepts anything stamped with
     the flag — ScoredCalibrationCohort or WinnerBinding — and reads it by attribute, so an
     unstamped object raises rather than sliding through as falsy.
@@ -3412,6 +3430,51 @@ def require_preexec_verified_source(bound: object) -> None:
             "backend/scripts/release_calibration_launcher.py, which hashes the manifest "
             "pre-exec and runs from an exclusive worktree"
         )
+
+
+class MountedProvenanceError(Exception):
+    """The candidate cohort-provenance record the release run is selecting against is not
+    the one a launcher bound before this interpreter existed. A release-trust refusal, in
+    the same family as UnverifiedScorerSourceError: nothing is known to be corrupt, the run
+    simply never established the binding."""
+
+
+def require_mounted_provenance() -> str:
+    """RELEASE TRUST GATE 1 (g-p4ih-release-cli). Return the SHA-256 of the candidate
+    provenance record a launcher MOUNTED into this checkout, refusing if there is none or
+    if the record on disk no longer hashes to it.
+
+    WHY THIS IS NOT OPTIONAL FOR select-release. The record is the reviewed approval of an
+    artifact, and ``build_selection_inputs`` reads it from COHORT_PROVENANCE_PATH — which
+    resolves relative to the EXECUTING checkout. A release run executes from a worktree
+    checked out from a REVISION, so without a mount it would select against whatever record
+    that revision happened to carry (the previous cohort's, or none), while the candidate
+    record sits uncommitted in the origin working tree. The mount is what makes the two the
+    same bytes, and this gate is what makes the mount mandatory rather than assumed.
+
+    Only the 12-char digest prefixes are reported: the record is production-derived.
+    """
+    if _MOUNTED_PROVENANCE_DIGEST is None:
+        raise MountedProvenanceError(
+            "select-release requires the candidate provenance record mounted by "
+            "release_calibration.sh --mount-cohort-provenance; a run without it would select "
+            "against whatever record the checked-out revision happens to carry."
+        )
+    try:
+        data = COHORT_PROVENANCE_PATH.read_bytes()
+    except OSError as exc:
+        raise MountedProvenanceError(
+            "the mounted cohort provenance record is unreadable in this checkout: "
+            f"{exc.strerror}."
+        ) from None
+    actual = hashlib.sha256(data).hexdigest()
+    if actual != _MOUNTED_PROVENANCE_DIGEST:
+        raise MountedProvenanceError(
+            f"the cohort provenance record in this checkout hashes to {actual[:12]} but the "
+            f"launcher mounted {_MOUNTED_PROVENANCE_DIGEST[:12]}: the record moved after the "
+            "mount, so the run would select against bytes nothing bound."
+        )
+    return actual
 
 
 # Cache verdicts under which CPython was FORCED to compile the source we hashed.
@@ -4366,10 +4429,100 @@ def _require_main_worktree() -> str:
     return common_dir
 
 
-def _refuse_repo_interior_output(output: Path) -> Path:
-    """Precedence 3. Refuse an output path resolving inside the repository working tree: the
-    frozen-cohort artifact holds production-derived private data and must not become
-    commit-able by accident. Returns the RESOLVED output path.
+def _private_path_forbidden_roots() -> tuple[Path, ...]:
+    """Every working tree a private path must not land in: the EXECUTING checkout, the
+    ORIGIN working tree, and EVERY registered worktree — all resolved.
+
+    ``_REPO_ROOT`` alone is not the rule. Under the release launcher the executing checkout
+    is ``<temp>/tree``, so ``/Users/…/ghostreplay/result.json`` reads as OUTSIDE it and a
+    single-root compare ACCEPTS a private result written straight into the shared working
+    tree, one ``git add .`` from being committed — the exact failure the rule exists to
+    prevent. The forbidden set therefore comes from GIT, which is the only thing that knows
+    what trees exist.
+
+    Resolution before comparison is not optional: git prints a worktree's real path while
+    ours may come from tempfile, and on macOS those spell the same directory differently
+    (/var/… vs /private/var/…). ``_worktree_registered`` in the launcher documents the same
+    trap; a raw-string compare would match nothing and the check would be decoration.
+
+    FAILS CLOSED. A non-zero git, a timeout, or a listing with no ``worktree`` line REFUSES
+    rather than falling back to the single-root compare — "git could not tell us" is not
+    "not registered", and the fallback would silently reinstate the accepted-into-the-repo
+    hole on exactly the runs where git is unhealthy.
+    """
+    try:
+        result = _git_capture("rev-parse", "--path-format=absolute", "--git-common-dir")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CaptureGovernanceError(
+            f"could not ask git which working trees exist ({type(exc).__name__}); refusing "
+            "the path rather than falling back to a weaker check."
+        ) from None
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(lines) != 1:
+        raise CaptureGovernanceError(
+            "could not resolve the git common directory; the private-path rule cannot be "
+            "evaluated, so the path is refused (a weaker fallback would accept paths inside "
+            "the origin checkout)."
+        )
+    common_dir = Path(lines[0]).resolve()
+    roots = {_REPO_ROOT.resolve(), common_dir.parent}
+    try:
+        # -z, NOT the line-oriented form. `git worktree list --porcelain` prints the path
+        # RAW and unquoted, and a directory name may legally contain a newline — which
+        # splitlines() then cuts in half, recording a PREFIX of the real worktree as the
+        # forbidden root. A result path inside the actual tree would compare as outside it.
+        # Under -z every attribute is NUL-terminated instead, so the path survives whole.
+        # Bytes, not text: a path is not required to be valid UTF-8 either.
+        listed = subprocess.run(
+            ["git", "-C", str(common_dir), "worktree", "list", "--porcelain", "-z"],
+            capture_output=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CaptureGovernanceError(
+            f"could not list the registered git worktrees ({type(exc).__name__}); refusing "
+            "the path rather than falling back to a weaker check."
+        ) from None
+    entries = [
+        os.fsdecode(field[len(b"worktree "):])
+        for field in listed.stdout.split(b"\0")
+        if field.startswith(b"worktree ")
+    ]
+    if listed.returncode != 0 or not entries:
+        raise CaptureGovernanceError(
+            "could not list the registered git worktrees; the private-path rule cannot be "
+            "evaluated, so the path is refused."
+        )
+    roots.update(Path(entry).resolve() for entry in entries)
+    return tuple(sorted(roots))
+
+
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    """``(st_dev, st_ino)`` for ``path``, or None if it does not exist.
+
+    The filesystem's own answer to "are these the same directory", which a string compare
+    only approximates. Any OTHER stat failure — a permission denial, a broken mount —
+    REFUSES: "I could not look" is not "it is somewhere else", and this is the check that
+    decides whether production-derived data may be written where a `git add .` can reach it.
+    """
+    try:
+        stat = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise CaptureGovernanceError(
+            f"could not stat a path component while evaluating the private-path rule "
+            f"({type(exc).__name__}); the path is refused rather than accepted unchecked."
+        ) from None
+    return (stat.st_dev, stat.st_ino)
+
+
+def _refuse_repo_interior_path(path: Path, *, option: str) -> Path:
+    """Precedence 3. Refuse a path resolving inside ANY git working tree of this repository
+    — the executing checkout, the origin checkout, or any other registered worktree. Returns
+    the RESOLVED path.
+
+    Private release inputs and outputs (the frozen-cohort artifact, the full SelectionResult)
+    hold production-derived data and must not become commit-able by accident, in any tree.
 
     A RELATIVE path is refused outright rather than resolved, because there is no single
     honest directory to resolve it against: the operator types it in their own cwd, but the
@@ -4377,27 +4530,60 @@ def _refuse_repo_interior_output(output: Path) -> Path:
     so ``Path.resolve()`` in this process would silently mean a DIFFERENT directory than the
     one the operator meant — publishing private evidence somewhere they did not name, or
     refusing a destination that was in fact valid. An absolute path means the same thing in
-    both processes."""
-    if not Path(output).is_absolute():
+    both processes.
+
+    CONTAINMENT IS DECIDED BY FILESYSTEM IDENTITY, not by comparing resolved path strings.
+    ``Path.resolve()`` resolves symlinks but PRESERVES the caller's spelling of every
+    component, and this repository lives on a case-insensitive filesystem (APFS, the macOS
+    default; NTFS behaves the same). ``/users/…/ghostreplay/result.json`` is therefore the
+    very same file as ``/Users/…/ghostreplay/result.json`` while comparing unequal to every
+    forbidden root — so a one-character difference in casing let both capture and selection
+    publish production-derived data straight into the checkout. ``(st_dev, st_ino)`` is the
+    filesystem's own answer, and it closes hard links and bind mounts in the same move.
+
+    The LEAF need not exist (``--result-output`` names a file about to be written), so the
+    walk covers the path AND every one of its parents; the first existing component that
+    matches a forbidden root is the refusal.
+
+    Messages name the BASENAME only: the containing directory of a private store is itself
+    identifying, and this message reaches stderr.
+    """
+    if not Path(path).is_absolute():
         raise CaptureGovernanceError(
-            "--output must be an ABSOLUTE path. The launcher runs the child with a different "
+            f"{option} must be an ABSOLUTE path. The launcher runs the child with a different "
             "working directory than the operator's shell, so a relative path would resolve "
             "against a directory nobody chose — a private artifact published to the wrong "
             "place, or a valid destination refused. Pass the full path to the private store."
         )
-    resolved = Path(output).resolve()
-    try:
-        resolved.relative_to(_REPO_ROOT)
-        inside = True
-    except ValueError:
-        inside = False
-    if inside:
+    resolved = Path(path).resolve()
+    forbidden = {
+        identity
+        for identity in (_path_identity(root) for root in _private_path_forbidden_roots())
+        if identity is not None
+    }
+    if not forbidden:
+        # git named working trees and NONE of them is on disk. That is not a clean bill of
+        # health, it is an unusable answer, and the fallback would be "accept".
         raise CaptureGovernanceError(
-            f"--output {resolved.name!r} resolves INSIDE the repository working tree; the "
-            "frozen-cohort artifact holds production-derived private data and must land at "
-            "an access-controlled path OUTSIDE the repo (governance invariant)."
+            "none of the working trees git listed could be identified on disk, so the "
+            "private-path rule cannot be evaluated and the path is refused."
         )
+    for candidate in (resolved, *resolved.parents):
+        if _path_identity(candidate) in forbidden:
+            raise CaptureGovernanceError(
+                f"{option} {resolved.name!r} resolves INSIDE a repository working tree; "
+                "release inputs and outputs hold production-derived private data and must "
+                "land at an access-controlled path OUTSIDE every checkout (governance "
+                "invariant)."
+            )
     return resolved
+
+
+def _refuse_repo_interior_output(output: Path) -> Path:
+    """The capture path's name for the rule above (``--output``). Kept as a thin wrapper so
+    ``capture_cohort`` inherits the widened forbidden-root set unchanged in TYPE
+    (CaptureGovernanceError) and message shape."""
+    return _refuse_repo_interior_path(output, option="--output")
 
 
 def _engine_of(session_factory: Callable[[], "object"]):
@@ -6585,65 +6771,919 @@ def _fmt_opt(value: float | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Release CLI: private serialization, redacted stdout, no-clobber publication
+# ---------------------------------------------------------------------------
+# The governance shape of select-release, in one sentence: the FULL SelectionResult goes to
+# a private file the operator names, and stdout carries ONLY a redacted, per-field-validated
+# approval summary — so a release decision is auditable from terminal scrollback, shell
+# logs, and CI logs without any of them carrying production-derived calibration data.
+
+
+class SummarySchemaError(Exception):
+    """The result could not be honestly written down: the full payload does not normalize
+    to JSON, or the redacted summary violates its own schema. Fail-closed — nothing is
+    published and nothing is printed, because a summary that cannot be validated is exactly
+    the one that might be leaking."""
+
+
+def _json_leaf(value: object) -> object:
+    """The ONE leaf converter. Anything without an obvious, lossless JSON form RAISES.
+
+    Deliberately NOT ``default=str``: a stringified object is a silent, unreviewable change
+    of meaning in a release record (``default=str`` is why the naive dump of a
+    SelectionResult produces one opaque repr string instead of a structure). A naive
+    datetime raises for the same reason the artifact loader rejects one — "which zone?" is
+    not a question a release record may leave open.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise TypeError(
+                "a naive datetime cannot be serialized into a release record: the instant "
+                "it names depends on the reader's zone"
+            )
+        return value.astimezone(timezone.utc).isoformat()
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(
+        f"{type(value).__name__} has no JSON form in a release record; add an explicit "
+        "conversion rather than letting it stringify"
+    )
+
+
+def _normalize(obj: object) -> object:
+    """Recurse dicts/lists/tuples into JSON containers; every leaf through ``_json_leaf``.
+
+    Sets RAISE. A release artifact carries sorted lists and never sets: set iteration order
+    is not a function of the contents, so a set anywhere would break the byte-identity that
+    makes two runs of the same decision comparable across the approval pause. Non-str dict
+    keys raise for the same reason — ``json.dumps`` would coerce them and ``sort_keys``
+    would then order coerced strings.
+    """
+    if isinstance(obj, (set, frozenset)):
+        raise TypeError(
+            "a release payload carries sorted lists, never sets — a set breaks the "
+            "byte-identity two runs of the same decision must have"
+        )
+    if isinstance(obj, Mapping):
+        out: dict[str, object] = {}
+        for key, value in obj.items():
+            if not isinstance(key, str):
+                raise TypeError(
+                    f"release payload keys must be str, got {type(key).__name__}"
+                )
+            out[key] = _normalize(value)
+        return out
+    if isinstance(obj, (list, tuple)):
+        return [_normalize(item) for item in obj]
+    return _json_leaf(obj)
+
+
+def serialize_full(result: SelectionResult) -> str:
+    """The COMPLETE SelectionResult as deterministic JSON — the private file's bytes.
+
+    ``dataclasses.asdict`` flattens the whole tree (CandidateResult / GateOutcome /
+    GateCheck / GridCell / Cutoffs / DistributionStats / ReferenceResult / WinnerBinding /
+    ArtifactProvenance) so every gate outcome is individually addressable instead of buried
+    in a repr; ``cohort`` is an InitVar and therefore not a field, so the unstored cohort
+    cannot ride along.
+
+    ``sort_keys=True`` gives byte-identical JSON across runs. ``allow_nan=False`` HARD-FAILS
+    on a NaN or Infinity anywhere — JSON has no such literals, and a release record that
+    silently emitted ``NaN`` would be unparseable by every strict reader. There is NO
+    ``default=`` hook: see ``_json_leaf``.
+    """
+    payload = _normalize(dataclasses.asdict(result))
+    return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
+
+
+# --- The redacted stdout summary: an EXACT allowlist, validated key-set by key-set -------
+
+# Sixteen keys, ENUMERATED rather than derived, so a field ADDED to WinnerBinding fails
+# test_winner_binding_key_tuple_matches_the_dataclass instead of silently escaping the
+# allowlist (or silently vanishing from the summary).
+_SUMMARY_BINDING_KEYS: tuple[str, ...] = (
+    "config_fingerprint",
+    "scorer_contract_id",
+    "scorer_source_digest",
+    "scorer_source_verified_preexec",
+    "provenance_record_sha256",
+    "runtime_python",
+    "runtime_chess_version",
+    "source_revision",
+    "source_dirty_paths",
+    "model_version",
+    "artifact_sha256",
+    "graph_fingerprint",
+    "roots_fingerprint",
+    "evidence_derivation_fingerprint",
+    "release_guard_opening_key",
+    "release_guard_child_opening_key",
+)
+# Eleven of ArtifactProvenance's twelve. pair_count is REMOVED: cohort size is a production
+# aggregate and the approver does not need it to judge a winner. It stays in the private file.
+_SUMMARY_PROVENANCE_KEYS: tuple[str, ...] = (
+    "schema_version",
+    "artifact_sha256",
+    "artifact_as_of",
+    "captured_model_version",
+    "graph_fingerprint",
+    "roots_fingerprint",
+    "evidence_derivation_fingerprint",
+    "min_observations",
+    "cohort_rules",
+    "release_guard_opening_key",
+    "release_guard_child_opening_key",
+)
+_SUMMARY_TOP_KEYS: frozenset[str] = frozenset({
+    "no_ship", "no_ship_reason_codes", "winner", "winner_cutoffs", "winner_binding",
+    "cohort_provenance", "provenance_record_sha256", "result_sha256", "candidates",
+    "b1_reference",
+})
+_SUMMARY_WINNER_KEYS: frozenset[str] = frozenset({"role", "p"})
+_SUMMARY_CUTOFF_KEYS: frozenset[str] = frozenset({"a", "b", "c", "d", "alert", "watch"})
+_SUMMARY_CANDIDATE_KEYS: frozenset[str] = frozenset({
+    "role", "p", "evaluated", "admitted", "rejection_reason", "gates",
+})
+_SUMMARY_GATE_KEYS: frozenset[str] = frozenset({"name", "scale", "passed"})
+_SUMMARY_B1_KEYS: frozenset[str] = frozenset({"role", "cutoffs_collided"})
+# rejection_reason / no_ship_reason_codes draw from the closed gate inventory PLUS the one
+# non-gate code the selector emits when derive_cutoffs collides.
+_SUMMARY_REASON_CODES: frozenset[str] = _GATE_NAME_INVENTORY | {"cutoff_collision"}
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+_MODEL_VERSION_RE = re.compile(r"^sm-v2-\d+$")
+_RUNTIME_VERSION_RE = re.compile(r"^\d+\.\d+(\.\d+)?$")
+
+
+def _summary_gates(candidate: CandidateResult) -> list[dict[str, object]]:
+    """The candidate's gate outcomes as {name, scale, passed}, in the pinned evaluation
+    order raw -> cutoff_derivation -> derived, TRUNCATED where evaluation actually stopped.
+
+    Names and booleans only. A GateCheck's measured/limit are real operand VALUES (scores,
+    quantiles, multipliers) and a GateOutcome.detail is free-form prose that may embed them,
+    so neither reaches stdout — they are in the private file, which the approver reads.
+    """
+    outcomes: list[GateOutcome] = list(candidate.raw_gates)
+    if candidate.cutoffs_outcome is not None:
+        outcomes.append(candidate.cutoffs_outcome)
+    outcomes.extend(candidate.derived_gates)
+    return [{"name": g.name, "scale": g.scale, "passed": g.passed} for g in outcomes]
+
+
+def build_redacted_summary(
+    result: SelectionResult, mounted_digest: str, result_sha256: str
+) -> dict[str, object]:
+    """The ONLY thing select-release prints. Names, booleans, digests, and the winner's six
+    cutoffs — nothing else.
+
+    ``mounted_digest`` IS A PARAMETER, not something read off ``result``, because the result
+    genuinely cannot supply it: ``SelectionResult.cohort`` is an InitVar consumed by
+    __post_init__ and never stored, so the ScoredCalibrationCohort carrying
+    ``provenance_record_sha256`` is unreachable; ``cohort_provenance`` is the header-derived
+    subset and carries no record digest by design; and ``winner_binding`` is None on
+    no-ship, which is precisely the case that most needs the digest (a no-ship still leaves
+    an uncommitted record the operator must decide about).
+
+    ``winner_cutoffs`` is a NAMED CARVE-OUT from "nothing percentile-derived reaches
+    stdout". These six integers ARE the release product: Phase 3 writes them verbatim into
+    src/utils/format.ts, where they become public to every user of the app. Withholding them
+    would withhold the thing being approved. The carve-out is scoped to the WINNER: no
+    rejected candidate's provisional_cutoffs and no distribution is admitted.
+
+    ``result_sha256`` replaces the earlier ``result_filename``. A basename is not inherently
+    non-identifying — operators name result files after cohorts, dates, and users — while a
+    content hash names the exact reviewed bytes and carries no operator-chosen string.
+    """
+    winner = result.winner
+    cutoffs = result.winner_cutoffs
+    binding = result.winner_binding
+    provenance = result.cohort_provenance
+    return {
+        "no_ship": result.no_ship,
+        # DISTINCT codes, lexicographically sorted: a set has no order, and the inventory is
+        # closed, so the order carries no information and must not vary run to run.
+        "no_ship_reason_codes": sorted(
+            {c.rejection_reason for c in result.candidates if c.rejection_reason is not None}
+        ),
+        "winner": None if winner is None else {"role": winner.role, "p": winner.p},
+        "winner_cutoffs": None if cutoffs is None else {
+            key: getattr(cutoffs, key) for key in ("a", "b", "c", "d", "alert", "watch")
+        },
+        "winner_binding": None if binding is None else {
+            key: (
+                list(getattr(binding, key))
+                if key == "source_dirty_paths"
+                else getattr(binding, key)
+            )
+            for key in _SUMMARY_BINDING_KEYS
+        },
+        "cohort_provenance": {
+            key: (
+                provenance.artifact_as_of.astimezone(timezone.utc).isoformat()
+                if key == "artifact_as_of"
+                else getattr(provenance, key)
+            )
+            for key in _SUMMARY_PROVENANCE_KEYS
+        },
+        "provenance_record_sha256": mounted_digest,
+        "result_sha256": result_sha256,
+        "candidates": [
+            {
+                "role": c.role,
+                "p": c.p,
+                "evaluated": c.evaluated,
+                "admitted": c.admitted,
+                "rejection_reason": c.rejection_reason,
+                "gates": _summary_gates(c),
+            }
+            for c in result.candidates
+        ],
+        # cutoffs_collided (== provisional_cutoffs is None) is the single bit stdout needs so
+        # a reader can tell "B1 collided" from "B1 was not computed". The B1 GRADE is NOT
+        # here: it is a letter derived from the REAL release-guard user's B1 score, i.e.
+        # production-derived per-user information. g-p4ih.2 step 7b already requires the
+        # approver to read the full private result, which carries the raw score, the grade,
+        # the distribution, and the provisional cutoffs.
+        "b1_reference": {
+            "role": result.b1_reference.role,
+            "cutoffs_collided": result.b1_reference.provisional_cutoffs is None,
+        },
+    }
+
+
+def _require_keyset(obj: object, expected: frozenset[str], label: str) -> dict:
+    """EQUALITY, never ``>=``: a superset test would let a future field ride along
+    unvalidated, which is how a redaction allowlist quietly stops being one."""
+    if not isinstance(obj, dict):
+        raise SummarySchemaError(f"{label} must be an object, got {type(obj).__name__}")
+    if set(obj) != expected:
+        missing = sorted(expected - set(obj))
+        extra = sorted(set(obj) - expected)
+        raise SummarySchemaError(
+            f"{label} key set is not the allowlist (missing={missing}, unexpected={extra})"
+        )
+    return obj
+
+
+def _require_summary_bool(value: object, label: str) -> bool:
+    if type(value) is not bool:
+        raise SummarySchemaError(f"{label} must be a bool, got {type(value).__name__}")
+    return value
+
+
+def _require_summary_int(value: object, label: str) -> int:
+    if type(value) is not int:
+        raise SummarySchemaError(f"{label} must be an int, got {type(value).__name__}")
+    return value
+
+
+def _require_pattern(value: object, pattern: re.Pattern[str], label: str) -> str:
+    if not isinstance(value, str) or not pattern.match(value):
+        raise SummarySchemaError(f"{label} does not match its pinned format")
+    return value
+
+
+def _require_equal(value: object, expected: object, label: str) -> None:
+    if value != expected:
+        raise SummarySchemaError(f"{label} is not the pinned value")
+
+
+def _require_p(value: object, label: str) -> None:
+    if not _is_real_number(value) or not (0.0 < float(value) <= 1.0):
+        raise SummarySchemaError(f"{label} must lie in (0, 1]")
+
+
+def _expected_gate_names(evaluated: bool, gates: list[dict]) -> tuple[str, ...]:
+    """The gate-name sequence this candidate's OWN FIELDS imply, so a DROPPED outcome
+    changes the expected length and fails rather than passing as a shorter well-formed list.
+
+    Reachability is derived, never trusted from the emitted list: CandidateResult pins each
+    transition (cutoffs_outcome present IFF every raw gate passed; derived_gates non-empty
+    IFF cutoffs_outcome present AND passed), which makes the four shapes total — 0 gates
+    (lazy arm-2), 7 (a raw gate failed), 8 (cutoffs collided), 13 (fully evaluated).
+    """
+    if not evaluated:
+        return ()
+    by_name = {g.get("name"): g for g in gates if isinstance(g, dict)}
+    expected = list(RAW_GATE_ORDER)
+    if all(by_name.get(name, {}).get("passed") is True for name in RAW_GATE_ORDER):
+        expected.append(_CUTOFF_GATE_NAME)
+        if by_name.get(_CUTOFF_GATE_NAME, {}).get("passed") is True:
+            expected.extend(DERIVED_GATE_ORDER)
+    return tuple(expected)
+
+
+def _validate_summary_candidate(candidate: object, index: int) -> None:
+    label = f"candidates[{index}]"
+    obj = _require_keyset(candidate, _SUMMARY_CANDIDATE_KEYS, label)
+    if obj["role"] not in _VALID_CANDIDATE_ROLES:
+        # b1 is NOT a candidate role — the reference arm rides the separate b1_reference
+        # field — and baseline/current are anchors, never candidates.
+        raise SummarySchemaError(f"{label}.role must be arm1|arm2")
+    _require_p(obj["p"], f"{label}.p")
+    evaluated = _require_summary_bool(obj["evaluated"], f"{label}.evaluated")
+    admitted = _require_summary_bool(obj["admitted"], f"{label}.admitted")
+    gates = obj["gates"]
+    if not isinstance(gates, list):
+        raise SummarySchemaError(f"{label}.gates must be a list")
+    reason = obj["rejection_reason"]
+    if reason is not None and reason not in _SUMMARY_REASON_CODES:
+        raise SummarySchemaError(f"{label}.rejection_reason is not a pinned reason code")
+    if not evaluated:
+        if admitted or reason is not None or gates:
+            raise SummarySchemaError(
+                f"{label}: an unevaluated candidate carries admitted=false, "
+                "rejection_reason=null, and an EMPTY gates list"
+            )
+        return
+    for position, gate in enumerate(gates):
+        gate_label = f"{label}.gates[{position}]"
+        entry = _require_keyset(gate, _SUMMARY_GATE_KEYS, gate_label)
+        if entry["name"] not in _GATE_NAME_INVENTORY:
+            raise SummarySchemaError(f"{gate_label}.name is not in the closed inventory")
+        if entry["scale"] not in _GATE_SCALES:
+            raise SummarySchemaError(f"{gate_label}.scale must be raw|derived")
+        if entry["name"] == _CUTOFF_GATE_NAME and entry["scale"] != "derived":
+            raise SummarySchemaError(f"{gate_label}: cutoff_derivation is derived-scale")
+        _require_summary_bool(entry["passed"], f"{gate_label}.passed")
+    names = tuple(g["name"] for g in gates)
+    expected = _expected_gate_names(evaluated, gates)
+    if len(names) not in (0, 7, 8, 13) or names != expected:
+        raise SummarySchemaError(
+            f"{label}.gates is not the pinned projection its own fields imply "
+            f"(len={len(names)}); an outcome was dropped or reordered"
+        )
+    # rejection_reason == the FIRST failure in raw -> cutoff -> derived precedence, with a
+    # failed cutoff_derivation reported as the non-gate code cutoff_collision.
+    expected_reason = None
+    for gate in gates:
+        if gate["passed"]:
+            continue
+        expected_reason = (
+            "cutoff_collision" if gate["name"] == _CUTOFF_GATE_NAME else gate["name"]
+        )
+        break
+    if reason != expected_reason:
+        raise SummarySchemaError(f"{label}.rejection_reason is not the first gate failure")
+    if admitted != (expected_reason is None and len(names) == 13):
+        raise SummarySchemaError(f"{label}.admitted disagrees with its own gate outcomes")
+
+
+def _validate_summary_binding(binding: object) -> dict:
+    obj = _require_keyset(binding, frozenset(_SUMMARY_BINDING_KEYS), "winner_binding")
+    for key in ("config_fingerprint", "scorer_source_digest", "provenance_record_sha256",
+                "artifact_sha256", "graph_fingerprint", "roots_fingerprint"):
+        _require_pattern(obj[key], _SHA256_RE, f"winner_binding.{key}")
+    _require_equal(obj["scorer_contract_id"], REPORT_SCORER_CONTRACT_ID,
+                   "winner_binding.scorer_contract_id")
+    _require_summary_bool(obj["scorer_source_verified_preexec"],
+                          "winner_binding.scorer_source_verified_preexec")
+    for key in ("runtime_python", "runtime_chess_version"):
+        _require_pattern(obj[key], _RUNTIME_VERSION_RE, f"winner_binding.{key}")
+    if obj["source_revision"] is not None:
+        _require_pattern(obj["source_revision"], _REVISION_RE, "winner_binding.source_revision")
+    dirty = obj["source_dirty_paths"]
+    if not isinstance(dirty, list) or any(p not in SCORER_SOURCE_FILES for p in dirty):
+        raise SummarySchemaError(
+            "winner_binding.source_dirty_paths must be a list of SCORER_SOURCE_FILES entries"
+        )
+    _require_pattern(obj["model_version"], _MODEL_VERSION_RE, "winner_binding.model_version")
+    _require_equal(obj["evidence_derivation_fingerprint"], evidence_derivation_fingerprint(),
+                   "winner_binding.evidence_derivation_fingerprint")
+    _require_equal(obj["release_guard_opening_key"], RELEASE_GUARD_OPENING_KEY,
+                   "winner_binding.release_guard_opening_key")
+    _require_equal(obj["release_guard_child_opening_key"], RELEASE_GUARD_CHILD_OPENING_KEY,
+                   "winner_binding.release_guard_child_opening_key")
+    return obj
+
+
+def _validate_summary_provenance(provenance: object) -> None:
+    obj = _require_keyset(provenance, frozenset(_SUMMARY_PROVENANCE_KEYS), "cohort_provenance")
+    _require_equal(obj["schema_version"], ARTIFACT_SCHEMA_VERSION,
+                   "cohort_provenance.schema_version")
+    for key in ("artifact_sha256", "graph_fingerprint", "roots_fingerprint"):
+        _require_pattern(obj[key], _SHA256_RE, f"cohort_provenance.{key}")
+    as_of = obj["artifact_as_of"]
+    try:
+        parsed = datetime.fromisoformat(as_of) if isinstance(as_of, str) else None
+    except ValueError:
+        parsed = None
+    if parsed is None or parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise SummarySchemaError("cohort_provenance.artifact_as_of must be ISO-8601 UTC")
+    _require_pattern(obj["captured_model_version"], _MODEL_VERSION_RE,
+                     "cohort_provenance.captured_model_version")
+    _require_equal(obj["evidence_derivation_fingerprint"], evidence_derivation_fingerprint(),
+                   "cohort_provenance.evidence_derivation_fingerprint")
+    _require_equal(obj["min_observations"], DEFAULT_MIN_OBSERVATIONS,
+                   "cohort_provenance.min_observations")
+    _require_equal(obj["cohort_rules"], COHORT_RULES_ID, "cohort_provenance.cohort_rules")
+    _require_equal(obj["release_guard_opening_key"], RELEASE_GUARD_OPENING_KEY,
+                   "cohort_provenance.release_guard_opening_key")
+    _require_equal(obj["release_guard_child_opening_key"], RELEASE_GUARD_CHILD_OPENING_KEY,
+                   "cohort_provenance.release_guard_child_opening_key")
+
+
+def validate_summary_schema(summary: dict[str, object], mounted_digest: str) -> None:
+    """Per-FIELD validation of the redacted summary, enforced BEFORE anything is printed or
+    published. Any violation raises SummarySchemaError (exit 5) and the run publishes
+    nothing.
+
+    Key-level redaction alone is not enough: a free-form field under an approved key would
+    reintroduce the operands the allowlist exists to exclude. So every value is checked
+    against a closed enum, a pinned format, a pinned constant, or a value domain — and every
+    object level is checked for key-set EQUALITY.
+    """
+    obj = _require_keyset(summary, _SUMMARY_TOP_KEYS, "summary")
+    no_ship = _require_summary_bool(obj["no_ship"], "no_ship")
+    codes = obj["no_ship_reason_codes"]
+    if not isinstance(codes, list) or any(c not in _SUMMARY_REASON_CODES for c in codes):
+        raise SummarySchemaError("no_ship_reason_codes must be pinned reason codes")
+    if codes != sorted(set(codes)):
+        raise SummarySchemaError("no_ship_reason_codes must be distinct and sorted")
+
+    winner = obj["winner"]
+    cutoffs = obj["winner_cutoffs"]
+    binding = obj["winner_binding"]
+    if no_ship != (winner is None):
+        raise SummarySchemaError("no_ship must equal (winner is None)")
+    if (cutoffs is None) != (winner is None) or (binding is None) != (winner is None):
+        raise SummarySchemaError(
+            "winner, winner_cutoffs, and winner_binding are present together or not at all"
+        )
+    if winner is not None:
+        w = _require_keyset(winner, _SUMMARY_WINNER_KEYS, "winner")
+        if w["role"] not in _VALID_CANDIDATE_ROLES:
+            raise SummarySchemaError("winner.role must be arm1|arm2")
+        _require_p(w["p"], "winner.p")
+        c = _require_keyset(cutoffs, _SUMMARY_CUTOFF_KEYS, "winner_cutoffs")
+        for key in ("a", "b", "c", "d", "alert", "watch"):
+            _require_summary_int(c[key], f"winner_cutoffs.{key}")
+        # The same strictness derive_cutoffs enforces. A summary violating it means the
+        # SERIALIZER is wrong, not the selector — which is exactly why it is checked here.
+        if not (c["d"] < c["c"] < c["b"] < c["a"]) or not c["alert"] < c["watch"]:
+            raise SummarySchemaError("winner_cutoffs violate d<c<b<a / alert<watch")
+        _validate_summary_binding(binding)
+
+    _validate_summary_provenance(obj["cohort_provenance"])
+
+    record_digest = _require_pattern(
+        obj["provenance_record_sha256"], _SHA256_RE, "provenance_record_sha256"
+    )
+    _require_pattern(obj["result_sha256"], _SHA256_RE, "result_sha256")
+    # ALWAYS — ship and no-ship alike. On a SHIP this is a three-way agreement between the
+    # launcher's pre-exec hash, the load guard's own hash of the on-disk record, and the
+    # binding Phase 3 will revalidate; any disagreement means the record moved mid-run.
+    if record_digest != mounted_digest:
+        raise SummarySchemaError(
+            "provenance_record_sha256 does not equal the digest the launcher mounted"
+        )
+    if binding is not None and binding["provenance_record_sha256"] != mounted_digest:
+        raise SummarySchemaError(
+            "winner_binding.provenance_record_sha256 does not equal the mounted digest"
+        )
+
+    candidates = obj["candidates"]
+    expected_count = sum(len(arm.cells) for arm in RELEASE_ARMS)
+    if not isinstance(candidates, list) or len(candidates) != expected_count:
+        raise SummarySchemaError(
+            f"candidates must be the pinned sweep of {expected_count} (role, cell) pairs"
+        )
+    for index, candidate in enumerate(candidates):
+        _validate_summary_candidate(candidate, index)
+    # The EXACT (role, p) multiset, not merely the right COUNT. (role, p) is a bijection
+    # with (role, cell) here — an arm's cells ARE its p-sweep — so this is the summary's
+    # form of the identity check SelectionResult.__post_init__ makes on (role, cell). A
+    # count-only check accepts a duplicated candidate standing in for a dropped one, which
+    # is a summary that silently omits a whole decision.
+    expected_sweep = Counter(
+        (arm.role, cell.report_fold_p) for arm in RELEASE_ARMS for cell in arm.cells
+    )
+    if Counter((c["role"], c["p"]) for c in candidates) != expected_sweep:
+        raise SummarySchemaError(
+            "candidates are not the pinned (role, p) sweep of both arms — one is "
+            "duplicated, missing, or renamed"
+        )
+    # The winner must BE one of them, and an ADMITTED one. Without this the summary can
+    # name a REJECTED candidate as the winner, which is the single most consequential
+    # thing an approval record can get wrong.
+    if winner is not None:
+        matching = [c for c in candidates if c["role"] == winner["role"] and c["p"] == winner["p"]]
+        if len(matching) != 1:
+            raise SummarySchemaError("winner does not name exactly one candidate")
+        if matching[0]["admitted"] is not True:
+            raise SummarySchemaError("winner names a candidate that was not admitted")
+    elif any(c["admitted"] for c in candidates):
+        raise SummarySchemaError("a no-ship summary carries an admitted candidate")
+    # And the reason codes must be exactly the distinct rejections the candidates record.
+    # Enum membership and sortedness do not stop an EMPTY list riding under a no-ship,
+    # which reads as "nothing objected" on the one decision that is entirely objections.
+    expected_codes = sorted(
+        {c["rejection_reason"] for c in candidates if c["rejection_reason"] is not None}
+    )
+    if codes != expected_codes:
+        raise SummarySchemaError(
+            "no_ship_reason_codes are not the distinct rejection reasons the candidates carry"
+        )
+
+    b1 = _require_keyset(obj["b1_reference"], _SUMMARY_B1_KEYS, "b1_reference")
+    _require_equal(b1["role"], "b1", "b1_reference.role")
+    _require_summary_bool(b1["cutoffs_collided"], "b1_reference.cutoffs_collided")
+
+
+def publish_no_clobber(dumped: str, final_path: Path) -> None:
+    """Publish the private result with ``os.link``, which fails EEXIST rather than replacing.
+
+    ``os.replace`` is deliberately NOT used here, and the difference from capture is the
+    point: capture republishes a cohort by design, but a SelectionResult is a DECISION
+    RECORD a human may already have reviewed, and silently overwriting it destroys the audit
+    trail across the approval pause.
+
+    The temp goes through ``_write_private_temp`` (O_CREAT|O_EXCL, 0600 at creation,
+    unguessable name, flush + fsync) and is unlinked whether the link succeeds or not, so no
+    failure leaves private bytes lying beside the destination.
+    """
+    temp_path = _write_private_temp(final_path, dumped.encode("utf-8"))
+    try:
+        os.link(temp_path, final_path)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_path)
+
+
+def _path_redactor(paths: Sequence[str]) -> Callable[[str], str]:
+    """Replace every spelling of the private paths — the absolute path, each parent
+    directory, the BASENAME, and every path component — with ``<redacted>``.
+
+    DEFENCE IN DEPTH, not the primary mechanism, and it MUST NOT be relied on as one. The
+    primary mechanism is that the error boundary prints FIXED, data-free messages and never
+    forwards ``str(exc)``. This exists because the leaks it catches are real and were in the
+    code: ``_write_private_temp`` names the result BASENAME in CapturePublicationError, and
+    ArtifactIntegrityError names both basenames — an earlier absolute-paths-only redactor
+    let ``Path.name`` sail through.
+
+    Tokens shorter than three characters are DELIBERATELY not replaced: a two-character
+    basename (an artifact called ``id``) is a substring of ordinary English, and replacing
+    it globally would corrupt every message that happens to contain it — including the ones
+    explaining the refusal. That is precisely why no boundary path may forward a message
+    that embeds a basename; the length floor is a limitation of this filter, not a gap the
+    filter is allowed to leave open.
+    """
+    tokens: set[str] = set()
+    for raw in paths:
+        if not raw:
+            continue
+        candidates = {Path(raw)}
+        with contextlib.suppress(OSError, RuntimeError):
+            candidates.add(Path(raw).resolve())
+        for path in candidates:
+            tokens.add(str(path))
+            tokens.add(str(path.parent))
+            tokens.update(part for part in path.parts if part not in ("/", ""))
+    # Longest first, so the absolute path is consumed before its own components are.
+    ordered = sorted((t for t in tokens if len(t) >= 3), key=len, reverse=True)
+
+    def redact(text: str) -> str:
+        for token in ordered:
+            text = text.replace(token, "<redacted>")
+        return text
+
+    return redact
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
+# The exact argv grammar. These are SUBCOMMANDS, not --capture-cohort / --select-release
+# FLAGS: the parser used to be flat, so a flag-style mode would let the legacy live-report
+# options (--limit, --users, --pairs, --report-fold-grid, --include-demo-diagnostics, and
+# the live --min-observations) silently coexist with a release-path run and be
+# accepted-and-ignored — exactly the class of operator error a release CLI must not permit.
+# Each subcommand exposes ONLY its compatible options.
+_SUBCOMMANDS: tuple[str, ...] = ("report", "capture-cohort", "select-release")
+
+
+# The CLOSED vocabulary of tokens this CLI is permitted to ECHO. It is populated ONLY
+# from this module's own add_argument / add_subparsers calls, i.e. exclusively from
+# literals in this source file, so membership is a PROOF that a token is not
+# operator-supplied data. It is never consulted for PARSING — argparse alone decides what
+# is valid; this set decides only what may be printed.
+_ECHOABLE_TOKENS: set[str] = set(_SUBCOMMANDS)
+
+# Options this CLI deliberately does NOT accept, kept as literals so a refusal can still
+# name them. --release-guard-user is the one that matters: the release-guard user is an
+# ENVIRONMENT-only input, so an operator reaching for the flag is better served by "that
+# flag is retired, and here is why" than by an anonymous token count.
+_RETIRED_OPTIONS: dict[str, str] = {
+    "--release-guard-user": (
+        "--release-guard-user is retired: the release-guard user is read ONLY from "
+        "GHOSTREPLAY_RELEASE_GUARD_USER, never from argv."
+    ),
+}
+_ECHOABLE_TOKENS.update(_RETIRED_OPTIONS)
+
+# The catch-all. Any parser failure this module cannot REBUILD from _ECHOABLE_TOKENS
+# collapses to this one fixed string — argparse's own rendering is never forwarded.
+_PARSER_ERROR_FIXED = (
+    "invalid arguments; details withheld. Read the usage above: each subcommand accepts "
+    "ONLY its own options. Neither a rejected argument nor its value is echoed, because "
+    "either may be a production user id or a private store path."
+)
+
+# The program name argparse prints in every usage block and error prefix. A literal, NOT
+# sys.argv[0]: see _RedactedArgumentParser.__init__.
+_PROG = "calibrate_opening_scores_v2.py"
+
+_REQUIRED_RE = re.compile(r"^the following arguments are required: (.+)$")
+_ARGUMENT_RE = re.compile(r"^argument ([^:]+): (.+)$", re.DOTALL)
+_NOT_ALLOWED_RE = re.compile(r"^not allowed with argument (.+)$")
+# argparse phrases that carry NO argv text at all, so they can be reproduced verbatim.
+_DATA_FREE_TAILS = frozenset({
+    "expected one argument",
+    "expected at least one argument",
+    "expected at most one argument",
+})
+
+
+class _VettedParserMessage(str):
+    """A parser message this module BUILT from _ECHOABLE_TOKENS, fixed prose, and counts.
+
+    The type is the vouching mechanism: ``error`` prints an instance of this class and
+    NOTHING else, so "is this text safe to display" is answered by construction rather
+    than by inspecting a string after the fact.
+    """
+
+
+class _RedactedArgumentParser(argparse.ArgumentParser):
+    """An ArgumentParser that never echoes a REJECTED ARGUMENT'S VALUE.
+
+    Stock argparse prints the offending tokens verbatim, and on this CLI that is a leak,
+    not a nuisance. ``--release-guard-user 987654`` comes back as ``unrecognized
+    arguments: --release-guard-user 987654``, putting a production user id on stderr —
+    the exact thing the environment-only guard contract exists to prevent. A wrong-mode
+    ``--output /abs/private/store/cohort.json`` puts the private store path there, which
+    is what the private-path rule exists to prevent. Both land in shell history, terminal
+    scrollback, and CI logs.
+
+    The rule is CONSTRUCTIVE, not subtractive: nothing argparse rendered is ever
+    forwarded, because sanitizing a rendered message is unbounded work and every version
+    of it leaked. A dash-prefix test called ``-987654`` an option name. A single-quote
+    filter missed ``"987654'x"``, since ``repr`` switches to double quotes when the value
+    contains an apostrophe. A custom ``parser.error(str(exc))`` was not quoted at all.
+    Each message here is instead ASSEMBLED from three provably data-free sources:
+
+    * ``_ECHOABLE_TOKENS`` — option names, subcommand names, and dests, every one of them
+      a literal from this file. A token is named only if it is a MEMBER; being
+      dash-prefixed, or merely looking like a flag, earns nothing.
+    * fixed prose written here.
+    * counts of what was withheld.
+
+    Anything that cannot be assembled that way becomes ``_PARSER_ERROR_FIXED``. Option
+    NAMES survive on purpose: naming the flag is what makes the refusal actionable, and a
+    flag whose spelling matches our own source is not the secret — its argument is.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # argv[0] IS PROCESS-CONTROLLED DATA. argparse defaults prog to
+        # os.path.basename(sys.argv[0]) and then prints it in BOTH the usage block and the
+        # "prog: error:" prefix — so a run launched as
+        # `exec -a PRIVATE-USER-987654 python ...`, or simply from a copy of this script
+        # living in the private store, would put that string on stderr twice, through a
+        # channel none of the message assembly above can see. Pinning prog to a source
+        # literal closes it for the root parser and for every subparser, whose prog
+        # argparse derives as "<parent prog> <name>".
+        kwargs.setdefault("prog", _PROG)
+        super().__init__(*args, **kwargs)
+
+    # Registration hooks. Every option string in this CLI passes through one of these, so
+    # the echoable vocabulary cannot drift away from the grammar it describes.
+    def add_argument(self, *args, **kwargs):  # type: ignore[override]
+        action = super().add_argument(*args, **kwargs)
+        _ECHOABLE_TOKENS.update(action.option_strings)
+        if not action.option_strings:
+            _ECHOABLE_TOKENS.update(
+                name for name in (action.dest, action.metavar)
+                if isinstance(name, str) and name != argparse.SUPPRESS
+            )
+        return action
+
+    def add_subparsers(self, **kwargs):  # type: ignore[override]
+        # add_subparsers bypasses add_argument, so its dest ("mode") is registered here —
+        # argparse names it in "the following arguments are required: mode".
+        action = super().add_subparsers(**kwargs)
+        _ECHOABLE_TOKENS.update(
+            name for name in (getattr(action, "dest", None), getattr(action, "metavar", None))
+            if isinstance(name, str) and name != argparse.SUPPRESS
+        )
+        return action
+
+    def parse_args(self, args=None, namespace=None):  # type: ignore[override]
+        parsed, extras = self.parse_known_args(args, namespace)
+        if extras:
+            named: list[str] = []
+            withheld = 0
+            for token in extras:
+                # --opt=VALUE: only the NAME half can ever be echoable, and it is echoed
+                # only if it is a member. A bare value token is withheld whether or not it
+                # starts with a dash.
+                name = token.split("=", 1)[0]
+                if name in _ECHOABLE_TOKENS:
+                    named.append(name)
+                else:
+                    withheld += 1
+            unique = list(dict.fromkeys(named))
+            detail = ", ".join(unique) if unique else "none nameable"
+            suffix = f"; plus {withheld} token(s) withheld" if withheld else ""
+            hints = " ".join(_RETIRED_OPTIONS[name] for name in unique if name in _RETIRED_OPTIONS)
+            self.error(_VettedParserMessage(
+                f"unrecognized arguments: {detail}{suffix}. Each subcommand accepts ONLY "
+                "its own options; values are never echoed because a rejected argument may "
+                f"be a production user id or a private store path.{' ' + hints if hints else ''}"
+            ))
+        return parsed
+
+    def _rebuild(self, message: str) -> _VettedParserMessage | None:
+        """Reassemble one of argparse's own messages from data-free parts, or give up.
+
+        Recognizing a SHAPE and rebuilding it is not the same as sanitizing it: the output
+        contains only members of _ECHOABLE_TOKENS and prose from this file, so an
+        unanticipated message shape degrades to the fixed string rather than leaking.
+        """
+        required = _REQUIRED_RE.match(message)
+        if required:
+            names = [
+                token for token in (part.strip() for part in required.group(1).split(","))
+                if token in _ECHOABLE_TOKENS
+            ]
+            if names:
+                return _VettedParserMessage(
+                    "the following arguments are required: " + ", ".join(names)
+                )
+            return None
+
+        argument = _ARGUMENT_RE.match(message)
+        if argument:
+            name, tail = argument.group(1), argument.group(2)
+            if name not in _ECHOABLE_TOKENS:
+                return None
+            if tail in _DATA_FREE_TAILS:
+                return _VettedParserMessage(f"argument {name}: {tail}")
+            conflict = _NOT_ALLOWED_RE.match(tail)
+            if conflict and conflict.group(1) in _ECHOABLE_TOKENS:
+                return _VettedParserMessage(
+                    f"argument {name}: not allowed with argument {conflict.group(1)}"
+                )
+            # invalid-choice, invalid-type, and every other tail quotes the argv token.
+            return _VettedParserMessage(
+                f"argument {name}: rejected; the value is withheld because it may be a "
+                "production user id or a private store path"
+            )
+        return None
+
+    def error(self, message: str):  # type: ignore[override]
+        if not isinstance(message, _VettedParserMessage):
+            message = self._rebuild(message) or _VettedParserMessage(_PARSER_ERROR_FIXED)
+        # The usage line super().error() prints alongside this is derived from the parser
+        # SPEC — prog (pinned to _PROG in __init__), option strings, metavars — every part
+        # of which is a literal in this file. No argv text reaches it.
+        super().error(str(message))
+
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database-url", default=DATABASE_URL)
-    parser.add_argument(
+    """Parse the subcommand grammar::
+
+        argv := [ "report" ] REPORT_OPTS*
+              | "capture-cohort" CAPTURE_OPTS*
+              | "select-release" SELECT_OPTS*
+
+    The ROOT parser carries NO options at all. Keeping the report options on the root would
+    make ``--limit 5 capture-cohort`` parse, which is the accepted-and-ignored hazard the
+    subcommand split exists to remove: every incompatible option is now rejected as
+    unrecognized (exit 2) in BOTH token orders.
+    """
+    # add_subparsers defaults parser_class to type(self), so every subparser inherits the
+    # value redaction too — which is where the wrong-mode leaks actually surface.
+    parser = _RedactedArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="mode", required=True)
+
+    report = subparsers.add_parser(
+        "report", help="The live calibration report (the default, and the legacy bare form)."
+    )
+    report.add_argument("--database-url", default=DATABASE_URL)
+    report.add_argument(
         "--min-observations",
         type=int,
         default=DEFAULT_MIN_OBSERVATIONS,
         help="Quality observations required to include a pair in distribution stats.",
     )
-    parser.add_argument(
+    report.add_argument(
         "--users",
         default=None,
         help="Comma-separated user_ids to restrict the run to.",
     )
-    parser.add_argument(
+    report.add_argument(
         "--pairs",
         default=None,
         help="Comma-separated user_id:color pairs to restrict the run to.",
     )
-    parser.add_argument("--limit", type=int, default=None, help="Limit candidate pairs.")
-    parser.add_argument(
+    report.add_argument("--limit", type=int, default=None, help="Limit candidate pairs.")
+    report.add_argument(
         "--report-fold-grid",
         default=None,
         help='Comma-separated report-fold p values to sweep the arms over '
         '(default "0.25,0.5,0.75,1.0"; domain 0 < p <= 1).',
     )
-    parser.add_argument(
+    report.add_argument(
         "--include-demo-diagnostics",
         action="store_true",
         help="Add the diagnostics-only demo rows (gate + uniform fold) to a STANDALONE "
         "run's diagnostics (default off; never enters cohort scoring).",
     )
-    parser.add_argument("--json", action="store_true", help="Emit the report as JSON.")
-    parser.add_argument(
+    report.add_argument("--json", action="store_true", help="Emit the report as JSON.")
+    report.add_argument(
         "--write-bench",
         action="store_true",
         help="Run one isolated recompute + time cache reads (requires --allow-writes "
         "and a guarded --database-url).",
     )
-    parser.add_argument(
+    report.add_argument(
         "--allow-writes",
         action="store_true",
         help="Required alongside --write-bench to acknowledge DB writes.",
     )
+
+    capture = subparsers.add_parser(
+        "capture-cohort",
+        help="Freeze + fence + publish a frozen-cohort artifact (g-p4ih-capture).",
+    )
+    capture.add_argument(
+        "--output", required=True, type=Path,
+        help="Final artifact path; MUST be ABSOLUTE and resolve OUTSIDE every worktree.",
+    )
+    capture.add_argument(
+        "--require-quiescent-epoch", action="store_true",
+        help="Promote global-epoch movement to a retry trigger (explicit maintenance window).",
+    )
+    # RETAINED: --max-attempts is a fence-RETRY BUDGET, not a threshold policy, so the
+    # reason --min-observations is banned here does not apply to it. capture_cohort
+    # validates it independently, so neither boundary depends on the other.
+    capture.add_argument(
+        "--max-attempts", type=_positive_int, default=3,
+        help="Fence attempts before giving up (>= 1). Rejected at the CLI boundary as well as "
+             "in the operation, so the bad value never reaches the retry loop.",
+    )
+
+    select = subparsers.add_parser(
+        "select-release",
+        help="Score a frozen-cohort artifact, decide ship/no-ship, write the FULL result to "
+             "a private path and print only a redacted approval summary.",
+    )
+    # Options, not positionals: an option keeps the grammar unambiguous under the launcher's
+    # argparse.REMAINDER forwarding. Both MUST be absolute because launch() execs the child
+    # with cwd=<tree>/backend, so a relative path would resolve against a directory the
+    # operator never chose.
+    select.add_argument(
+        "--artifact", required=True, type=Path,
+        help="ABSOLUTE path to the frozen-cohort artifact, OUTSIDE every worktree.",
+    )
+    select.add_argument(
+        "--result-output", required=True, type=Path,
+        help="ABSOLUTE path the FULL SelectionResult JSON is written to, OUTSIDE every "
+             "worktree. Never overwritten: an existing file is a refusal, not a republish.",
+    )
+
+    # LEGACY COMPATIBILITY. A bare invocation (`--json`, `--limit 5`, or nothing at all) is
+    # still the report. The test is on argv[0] ONLY — never a scan of the whole list — so an
+    # option VALUE that happens to spell a subcommand name (`--users capture-cohort`) is not
+    # a mode switch.
+    #
+    # ONE STATED EXCEPTION to "argv[0] not in _SUBCOMMANDS -> prepend report": a leading
+    # -h/--help is left alone, so the ROOT help — the only place the three subcommands are
+    # discoverable — stays reachable instead of resolving to `report --help`. It is still an
+    # argv[0]-only test, and it changes no row of the grammar consequence table.
+    if not argv or (argv[0] not in _SUBCOMMANDS and argv[0] not in ("-h", "--help")):
+        argv = ["report", *argv]
     args = parser.parse_args(argv)
-    # parse_report_fold_grid is a pure str|None -> tuple that RAISES ValueError on any
-    # invalid input; convert that into a clean fail-fast exit here (the ONLY place the
-    # parser object is in scope). The --report-fold-grid flag keeps default=None (a
-    # str-or-None, NOT a pre-parsed tuple), so argparse never applies a type callable to
-    # a non-string default and the "raw is None -> default" branch stays the sole
-    # default path.
-    try:
-        args.report_fold_p_grid = parse_report_fold_grid(args.report_fold_grid)
-    except ValueError as exc:
-        parser.error(str(exc))  # prints usage + message, raises SystemExit(2)
+
+    if args.mode == "report":
+        # parse_report_fold_grid is a pure str|None -> tuple that RAISES ValueError on any
+        # invalid input; convert that into a clean fail-fast exit here (the ONLY place the
+        # parser object is in scope). The --report-fold-grid flag keeps default=None (a
+        # str-or-None, NOT a pre-parsed tuple), so argparse never applies a type callable to
+        # a non-string default and the "raw is None -> default" branch stays the sole
+        # default path.
+        try:
+            args.report_fold_p_grid = parse_report_fold_grid(args.report_fold_grid)
+        except ValueError:
+            # str(exc) NAMES THE OFFENDING TOKEN ("got 987654.0"), so it is not forwarded —
+            # this was the one error path that reached stderr unquoted. The RULE is data-free
+            # and is the part the operator actually needs.
+            parser.error(_VettedParserMessage(
+                "argument --report-fold-grid: rejected; expected a comma-separated list of "
+                "report-fold p values with 0 < p <= 1 (e.g. 0.25,0.5,0.75,1.0). The offending "
+                "value is withheld."
+            ))  # prints usage + message, raises SystemExit(2)
     return args
 
 
@@ -6717,35 +7757,23 @@ def _positive_int(raw: str) -> int:
     return value
 
 
-def _run_capture_cohort_child(argv: list[str], *, session_factory=None) -> int:
-    """The MINIMAL capture-cohort child dispatch — g-p4ih-capture's ONLY CLI surface. The
-    -S child (reached through capture_cohort.sh -> -I -S launcher -> -S child) recognizes
-    the ``capture-cohort`` invocation, sources ``--output`` and the release-guard user from
-    GHOSTREPLAY_RELEASE_GUARD_USER (NEVER a CLI argument: a production user id must not enter
-    shell history or the process listing), calls ``capture_cohort(...)``, and maps its typed
-    errors to exit codes + a REDACTED summary. It RETURNS before the legacy flat ``_parse_args``
-    ever runs, so no live-report option can attach to a capture run. The polished subcommand
-    surface (flat-parser -> subcommands, per-mode option sets, mutual exclusion) is
-    g-p4ih-release-cli's, which SUBSUMES this branch."""
-    parser = argparse.ArgumentParser(
-        prog="calibrate_opening_scores_v2.py capture-cohort",
-        description="Freeze + fence + publish a frozen-cohort artifact (g-p4ih-capture).",
-    )
-    parser.add_argument(
-        "--output", required=True, type=Path,
-        help="Final artifact path; MUST resolve OUTSIDE the repository working tree.",
-    )
-    parser.add_argument(
-        "--require-quiescent-epoch", action="store_true",
-        help="Promote global-epoch movement to a retry trigger (explicit maintenance window).",
-    )
-    parser.add_argument(
-        "--max-attempts", type=_positive_int, default=3,
-        help="Fence attempts before giving up (>= 1). Rejected at the CLI boundary as well as "
-             "in the operation, so the bad value never reaches the retry loop.",
-    )
-    args = parser.parse_args(argv)
+def _run_capture_cohort(args: argparse.Namespace, *, session_factory=None) -> int:
+    """The capture-cohort subcommand. Sources ``--output`` from the parsed args and the
+    release-guard user from GHOSTREPLAY_RELEASE_GUARD_USER (NEVER a CLI argument: a
+    production user id must not enter shell history or every process listing on the capture
+    host), calls ``capture_cohort(...)``, and maps its typed errors to exit codes + a
+    REDACTED summary.
 
+    Exit codes are UNCHANGED from the minimal dispatch this subsumes — 0 success, 1 any
+    CaptureError, 2 argparse usage error and a missing/non-integer guard user — because
+    test_capture_end_to_end pins them. "exit 1 is uniquely no-ship" is a select-release
+    contract; capture has no no-ship notion.
+
+    Run it through backend/scripts/capture_cohort.sh from the ORIGIN checkout: never bare
+    (the fence requires the launcher's two-process isolation and pre-exec digest) and never
+    under the RELEASE launcher (whose throwaway worktree would take the reviewable
+    provenance diff with it on exit).
+    """
     raw_user = os.environ.get("GHOSTREPLAY_RELEASE_GUARD_USER", "").strip()
     if not raw_user:
         print(
@@ -6792,13 +7820,141 @@ def _run_capture_cohort_child(argv: list[str], *, session_factory=None) -> int:
     return 0
 
 
+def _run_select_release(args: argparse.Namespace) -> int:
+    """The select-release subcommand: the thin driver over build_selection_inputs +
+    select_candidate, plus the two release trust gates and the private/redacted output split.
+
+    THE WHOLE BODY IS INSIDE ONE try/except CHAIN. An uncaught Python exception exits 1,
+    which would collide with no-ship — and exit 1 must mean no-ship and NOTHING else, since
+    that is what a pipeline gates on. So nothing raises out of here; the chain is ordered
+    specific -> general and terminates in ``except Exception`` -> exit 6.
+
+    ``str(exc)`` is NEVER forwarded on the 3/4/5/6 paths. Path redaction alone would not be
+    enough, and the leaks are in the code today: SelectionBindingError embeds real operand
+    VALUES and cohort pair identifiers (_require_operand, _check_operand_domain), which
+    printing str(exc) would put on stderr — the one channel nobody redacts. What the
+    operator gets for diagnosis is the exit code plus the exception CLASS NAME. That is
+    deliberate: the inputs are in their private store and the failing condition is
+    reproducible there. A debug-verbosity switch is NOT provided — it would be a leak with a
+    flag on it.
+    """
+    redact = _path_redactor([str(args.artifact), str(args.result_output)])
+
+    def refuse(code: int, message: str) -> int:
+        print(f"[select-release] {redact(message)}", file=sys.stderr)
+        return code
+
+    # Which side of the run an OSError came from. Reading the artifact is an INPUT rejection
+    # (4); writing the result is an OUTPUT failure (5).
+    stage = "input"
+    try:
+        # Both paths validated BEFORE any scoring work, artifact then result.
+        artifact_path = _refuse_repo_interior_path(Path(args.artifact), option="--artifact")
+        result_path = _refuse_repo_interior_path(
+            Path(args.result_output), option="--result-output"
+        )
+        if not artifact_path.is_file():
+            return refuse(2, "--artifact must name an existing regular file.")
+        if not result_path.parent.is_dir():
+            # The CLI does not create it: creating directories under a private store is the
+            # operator's decision, not a side effect of a release run.
+            return refuse(
+                2, "--result-output's parent directory must exist and be a directory."
+            )
+
+        mounted_digest = require_mounted_provenance()          # trust gate 1
+        try:
+            inputs = build_selection_inputs(artifact_path)
+        except (FrozenArtifactError, OSError):
+            # The load failed — but the gate's read and the load guard's read are two
+            # INDEPENDENT reads of the same file, and the failure may BE the record moving
+            # between them (deleted, truncated, rewritten). Re-verify the mount before
+            # classifying: a moved record is a release-TRUST refusal (3), not a bad
+            # artifact (4), and reporting "No such file or directory" for it would both
+            # misclassify the failure and describe the wrong input. If the record is still
+            # exactly what the launcher mounted, the original failure stands.
+            require_mounted_provenance()  # raises MountedProvenanceError -> exit 3
+            raise
+        # Closes the remaining window between the gate's read and the load guard's own
+        # read: the cohort carries the digest of the bytes the guard actually hashed.
+        if inputs.cohort.provenance_record_sha256 != mounted_digest:
+            raise MountedProvenanceError(
+                "the provenance record the load guard hashed is not the record the launcher "
+                "mounted; it moved between the two reads."
+            )
+        require_preexec_verified_source(inputs.cohort)          # trust gate 2
+        result = select_candidate(inputs)
+
+        # BOTH payloads built and validated BEFORE any file is created: a run that would
+        # print an invalid summary must not leave a result file behind.
+        try:
+            dumped = serialize_full(result)
+            result_sha256 = hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+            summary = build_redacted_summary(result, mounted_digest, result_sha256)
+            validate_summary_schema(summary, mounted_digest)
+        except SummarySchemaError:
+            raise
+        except (TypeError, ValueError) as exc:  # normalizer, allow_nan, naive datetime
+            raise SummarySchemaError(type(exc).__name__) from exc
+
+        stage = "output"
+        publish_no_clobber(dumped, result_path)
+        # ONLY after the link succeeds, and stdout carries NOTHING ELSE.
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0 if result.winner is not None else 1
+    except MountedProvenanceError:
+        return refuse(3, "the candidate provenance mount is absent or disagrees with the "
+                         "record on disk; re-run under release_calibration.sh "
+                         "--mount-cohort-provenance.")
+    except UnverifiedScorerSourceError:
+        return refuse(3, "these scores carry scorer_source_verified_preexec=False, so the "
+                         "source digest is not proven to name the code that ran; re-run "
+                         "under release_calibration.sh.")
+    except (ScorerSourceUnstableError, ScorerSourceManifestError) as exc:
+        return refuse(3, f"the running code is not the code the digest names "
+                         f"({type(exc).__name__}); re-run from a clean checkout.")
+    except CaptureGovernanceError:
+        # A FIXED message, NOT str(exc). The exception names the offending BASENAME —
+        # capture's landed contract, and the right shape for a run whose --output the
+        # operator just typed — but a basename is not inherently non-identifying here, and
+        # a short one (an artifact called `id`) slips under _path_redactor's minimum token
+        # length by design: replacing 2-character strings globally would mangle ordinary
+        # words. So the leak is closed where it originates, by not forwarding the value.
+        return refuse(
+            2,
+            "--artifact and --result-output must each be an ABSOLUTE path that resolves "
+            "OUTSIDE every git working tree of this repository (the executing checkout, "
+            "the origin checkout, and every registered worktree). The launcher runs the "
+            "child with a different working directory than your shell, so a relative path "
+            "would resolve against a directory nobody chose. The rejected value is not "
+            "echoed: it names a private store.",
+        )
+    except FrozenArtifactError as exc:
+        return refuse(4, f"the artifact and the mounted provenance record were rejected by "
+                         f"the load guard ({type(exc).__name__}).")
+    except SelectionBindingError as exc:
+        return refuse(4, f"a fail-closed binding check refused these inputs "
+                         f"({type(exc).__name__}).")
+    except CapturePublicationError:
+        return refuse(5, "writing the private result failed; nothing was published.")
+    except FileExistsError:
+        return refuse(5, "a result already exists at the requested path; choose a new path "
+                         "or remove the reviewed result deliberately.")
+    except OSError as exc:
+        return refuse(4 if stage == "input" else 5, exc.strerror or "I/O error")
+    except SummarySchemaError:
+        return refuse(5, "the result failed its own serialization or redaction schema; "
+                         "nothing was published and nothing was printed.")
+    except Exception as exc:  # the catch-all: NEVER a traceback, NEVER str(exc)
+        return refuse(6, f"unexpected {type(exc).__name__}")
+
+
 def main(argv: list[str] | None = None, *, session_factory=None):
-    raw_argv = sys.argv[1:] if argv is None else argv
-    # The minimal capture-cohort dispatch RETURNS before the flat live-report parser, so no
-    # legacy option (--limit / --users / --pairs / ...) can attach to a capture run.
-    if raw_argv and raw_argv[0] == "capture-cohort":
-        return _run_capture_cohort_child(raw_argv[1:], session_factory=session_factory)
-    args = _parse_args(raw_argv)
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if args.mode == "capture-cohort":
+        return _run_capture_cohort(args, session_factory=session_factory)
+    if args.mode == "select-release":
+        return _run_select_release(args)
 
     if args.write_bench:
         if not args.allow_writes:
@@ -6884,7 +8040,7 @@ def _named_root_count(roots: OpeningRoots) -> int:
 
 if __name__ == "__main__":
     _result = main()
-    # The capture-cohort child returns an int exit code the launcher must propagate; the
-    # legacy report path returns a dict (exit 0).
+    # The release subcommands return an int exit code the launcher must propagate; the
+    # report path returns a dict (exit 0).
     if isinstance(_result, int):
         sys.exit(_result)

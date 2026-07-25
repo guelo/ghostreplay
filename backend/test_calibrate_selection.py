@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import copy
 import dataclasses
+import hashlib
 import inspect
 import json
 import math
@@ -1088,3 +1089,259 @@ class TestMinusOSubprocess:
         opt = subprocess.run([sys.executable, "-O", "-c", _RUNNER, "binding"],
                              capture_output=True, text=True, cwd=cwd, timeout=180)
         assert opt.returncode == 3, (opt.returncode, opt.stderr)
+
+
+# ---------------------------------------------------------------------------
+# g-p4ih-release-cli: build_redacted_summary + validate_summary_schema against
+# real SelectionResult fixtures (ship, no-ship, lazy arm-2, B1 collision).
+# ---------------------------------------------------------------------------
+
+MOUNTED = "1234567890abcdef" * 4  # 64-char lowercase hex, the launcher's mounted digest
+
+
+def _summary_for(inputs):
+    """A result + its summary, built exactly as the CLI builds them."""
+    cohort = dataclasses.replace(inputs.cohort, provenance_record_sha256=MOUNTED)
+    result = cal.select_candidate(cal.SelectionInputs(cohort=cohort, diagnostics=inputs.diagnostics))
+    dumped = cal.serialize_full(result)
+    result_sha256 = hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+    return result, cal.build_redacted_summary(result, MOUNTED, result_sha256)
+
+
+class TestSummaryAllowlist:
+    def test_winner_binding_key_tuple_matches_the_dataclass(self):
+        # ENUMERATED, not derived: a field ADDED to WinnerBinding must fail HERE rather than
+        # silently escaping the allowlist (or silently vanishing from the summary).
+        assert list(cal._SUMMARY_BINDING_KEYS) == [
+            f.name for f in dataclasses.fields(cal.WinnerBinding)
+        ]
+        assert len(cal._SUMMARY_BINDING_KEYS) == 16
+
+    def test_cohort_provenance_keys_are_the_eleven_gating_ones(self):
+        fields = {f.name for f in dataclasses.fields(cal.ArtifactProvenance)}
+        assert set(cal._SUMMARY_PROVENANCE_KEYS) == fields - {"pair_count"}
+        assert "pair_count" not in cal._SUMMARY_PROVENANCE_KEYS
+
+    def test_the_result_object_alone_cannot_supply_the_record_digest(self):
+        # The three facts that force mounted_digest to be a PARAMETER.
+        cohort_field = next(
+            f for f in dataclasses.fields(cal.SelectionResult) if f.name == "cohort_provenance"
+        )
+        assert cohort_field is not None
+        assert not hasattr(cal.select_candidate(_arm1_winner_inputs()), "cohort")  # unstored InitVar
+        assert "provenance_record_sha256" not in {
+            f.name for f in dataclasses.fields(cal.ArtifactProvenance)
+        }
+        no_ship = cal.select_candidate(_no_ship_inputs())
+        assert no_ship.winner_binding is None  # the obvious carrier is absent on no-ship
+
+
+class TestSummaryFixtures:
+    @pytest.mark.parametrize("builder", [
+        _arm1_winner_inputs, _arm2_winner_inputs, _no_ship_inputs, _collision_inputs,
+    ])
+    def test_every_fixture_validates(self, builder):
+        _result, summary = _summary_for(builder())
+        cal.validate_summary_schema(summary, MOUNTED)
+        assert set(summary) == set(cal._SUMMARY_TOP_KEYS)
+
+    def test_ship_agrees_three_ways_on_the_record_digest(self):
+        _result, summary = _summary_for(_arm1_winner_inputs())
+        assert summary["no_ship"] is False
+        assert summary["provenance_record_sha256"] == MOUNTED
+        assert summary["winner_binding"]["provenance_record_sha256"] == MOUNTED
+
+    def test_no_ship_still_carries_the_record_digest(self):
+        _result, summary = _summary_for(_no_ship_inputs())
+        assert summary["no_ship"] is True
+        assert summary["winner"] is summary["winner_cutoffs"] is summary["winner_binding"] is None
+        assert summary["provenance_record_sha256"] == MOUNTED
+        cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_lazy_arm2_candidates_are_honestly_empty(self):
+        _result, summary = _summary_for(_arm1_winner_inputs())
+        lazy = [c for c in summary["candidates"] if not c["evaluated"]]
+        assert lazy  # arm-1 won, so arm-2 was never reached
+        for candidate in lazy:
+            assert candidate["gates"] == []
+            assert candidate["admitted"] is False
+            assert candidate["rejection_reason"] is None
+
+    def test_b1_collision_is_a_bit_and_never_a_grade(self):
+        _result, summary = _summary_for(_collision_inputs())
+        assert summary["b1_reference"] == {"role": "b1", "cutoffs_collided": True}
+        _result, shipped = _summary_for(_arm1_winner_inputs())
+        assert shipped["b1_reference"] == {"role": "b1", "cutoffs_collided": False}
+
+    def test_the_winners_cutoffs_are_the_named_carve_out(self):
+        result, summary = _summary_for(_arm1_winner_inputs())
+        assert summary["winner_cutoffs"] == {
+            "a": result.winner_cutoffs.a, "b": result.winner_cutoffs.b,
+            "c": result.winner_cutoffs.c, "d": result.winner_cutoffs.d,
+            "alert": result.winner_cutoffs.alert, "watch": result.winner_cutoffs.watch,
+        }
+        # ...and no REJECTED candidate's cutoffs ride along with them.
+        for candidate in summary["candidates"]:
+            assert set(candidate) == set(cal._SUMMARY_CANDIDATE_KEYS)
+
+
+class TestSummaryValidation:
+    def _ship(self):
+        return _summary_for(_arm1_winner_inputs())[1]
+
+    def test_a_dropped_cutoffs_outcome_fails(self):
+        summary = self._ship()
+        winner = next(c for c in summary["candidates"] if c["admitted"])
+        winner["gates"] = [g for g in winner["gates"] if g["name"] != "cutoff_derivation"]
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_emptied_derived_gates_fail(self):
+        summary = self._ship()
+        winner = next(c for c in summary["candidates"] if c["admitted"])
+        winner["gates"] = [g for g in winner["gates"] if g["scale"] == "raw"] + [
+            g for g in winner["gates"] if g["name"] == "cutoff_derivation"
+        ]
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_reordered_gate_sequence_fails(self):
+        summary = self._ship()
+        winner = next(c for c in summary["candidates"] if c["admitted"])
+        winner["gates"] = list(reversed(winner["gates"]))
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_an_extra_key_at_any_level_fails(self):
+        for mutate in (
+            lambda s: s.__setitem__("extra", 1),
+            lambda s: s["cohort_provenance"].__setitem__("pair_count", 4),
+            lambda s: s["winner_binding"].__setitem__("extra", 1),
+            lambda s: s["b1_reference"].__setitem__("real_black_1e4_grade", "A"),
+            lambda s: s["candidates"][0].__setitem__("distribution", {}),
+            lambda s: s["candidates"][0]["gates"] and s["candidates"][0]["gates"][0].__setitem__("detail", "x"),
+        ):
+            summary = self._ship()
+            mutate(summary)
+            with pytest.raises(cal.SummarySchemaError):
+                cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_mismatched_record_digest_fails(self):
+        summary = self._ship()
+        summary["provenance_record_sha256"] = "f" * 64
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_mismatched_binding_digest_fails(self):
+        summary = self._ship()
+        summary["winner_binding"]["provenance_record_sha256"] = "f" * 64
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_cutoff_ordering_is_enforced(self):
+        summary = self._ship()
+        summary["winner_cutoffs"]["d"] = summary["winner_cutoffs"]["a"] + 1
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_p_outside_the_domain_fails(self):
+        summary = self._ship()
+        summary["winner"]["p"] = 0.0
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_b1_is_never_a_candidate_or_winner_role(self):
+        summary = self._ship()
+        summary["winner"]["role"] = "b1"
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+        summary = self._ship()
+        summary["candidates"][0]["role"] = "b1"
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_truncated_candidate_sweep_fails(self):
+        summary = self._ship()
+        summary["candidates"] = summary["candidates"][:-1]
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_an_off_inventory_reason_code_fails(self):
+        summary = self._ship()
+        summary["no_ship_reason_codes"] = ["not_a_gate"]
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_free_form_no_ship_reason_never_reaches_the_summary(self):
+        _result, summary = _summary_for(_no_ship_inputs())
+        assert "no_ship_reason" not in summary
+        assert all(code in cal._SUMMARY_REASON_CODES for code in summary["no_ship_reason_codes"])
+
+    def test_cross_field_ship_consistency_is_enforced(self):
+        summary = self._ship()
+        summary["no_ship"] = True
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+        summary = self._ship()
+        summary["winner_binding"] = None
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+
+class TestSummaryDecisionConsistency:
+    """Key sets and enums do not stop a summary that CONTRADICTS itself. These are the
+    cross-checks that make an approval record mean what it says."""
+
+    def _ship(self):
+        return _summary_for(_arm1_winner_inputs())[1]
+
+    def test_an_empty_reason_list_on_a_no_ship_fails(self):
+        _result, summary = _summary_for(_no_ship_inputs())
+        assert summary["no_ship_reason_codes"]  # the honest value is non-empty
+        summary["no_ship_reason_codes"] = []
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_reason_codes_must_be_the_candidates_own_rejections(self):
+        summary = self._ship()
+        summary["no_ship_reason_codes"] = ["leak"]  # in the enum, sorted, and untrue
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_duplicated_candidate_standing_in_for_a_dropped_one_fails(self):
+        summary = self._ship()
+        summary["candidates"][1] = copy.deepcopy(summary["candidates"][0])
+        assert len(summary["candidates"]) == 8  # the COUNT is still right
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_renamed_candidate_identity_fails(self):
+        summary = self._ship()
+        summary["candidates"][0]["p"] = 0.99
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_rejected_candidate_named_as_winner_fails(self):
+        summary = self._ship()
+        rejected = next(
+            c for c in summary["candidates"] if not c["admitted"] and c["evaluated"]
+        ) if any(not c["admitted"] and c["evaluated"] for c in summary["candidates"]) else None
+        if rejected is None:  # arm-1 sweep is wholly admitted; use the lazy arm-2 instead
+            rejected = next(c for c in summary["candidates"] if not c["evaluated"])
+        summary["winner"] = {"role": rejected["role"], "p": rejected["p"]}
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_winner_naming_no_candidate_at_all_fails(self):
+        summary = self._ship()
+        summary["winner"] = {"role": "arm2", "p": 0.99}
+        with pytest.raises(cal.SummarySchemaError):
+            cal.validate_summary_schema(summary, MOUNTED)
+
+    def test_a_no_ship_carrying_an_admitted_candidate_fails(self):
+        # A SHIP result relabelled as no-ship: every candidate stays internally consistent,
+        # so only the cross-check between the verdict and the candidate set catches it.
+        summary = self._ship()
+        summary.update(no_ship=True, winner=None, winner_cutoffs=None, winner_binding=None)
+        with pytest.raises(cal.SummarySchemaError, match="admitted candidate"):
+            cal.validate_summary_schema(summary, MOUNTED)

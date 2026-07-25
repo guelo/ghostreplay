@@ -6,20 +6,24 @@ exercised without a live database.
 """
 from __future__ import annotations
 
+import builtins
 import copy
 import dataclasses
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import py_compile
+import re
 import subprocess
 import sys
 from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import chess
@@ -40,6 +44,10 @@ from app.opening_rootcalc import (
 from app.opening_roots import OpeningRoot, OpeningRoots
 
 import scripts.calibrate_opening_scores_v2 as cal
+# The g-p4ih-selection fixture builders (hand-built SelectionInputs with honestly copied
+# stamps). Reused rather than duplicated: the release CLI is a thin driver over
+# select_candidate, so its tests need exactly the inputs that bead's tests already build.
+import test_calibrate_selection as selfix
 
 
 # --- in-memory fixtures (mirrors test_opening_rootcalc helpers) -------------
@@ -3045,7 +3053,7 @@ class TestScorerImportOrigins:
 class TestReleaseSourceGate:
     """The gate that spends the flag (g-p4ih-srcfence). build_selection_inputs deliberately
     does NOT refuse an unverified run — dev runs have no launcher and must still work — so
-    the refusal has to happen where the digest is actually relied on: --select-release and
+    the refusal has to happen where the digest is actually relied on: select-release and
     the Phase-3 preflight, before an approved winner is applied."""
 
     def test_refuses_an_unverified_cohort_and_winner(self, tmp_path):
@@ -3672,3 +3680,954 @@ class TestWinnerBinding:
         si = cal._build_selection_inputs(ap, provenance_path=pp, graph=graph, roots=roots)
         with pytest.raises(KeyError):
             cal.build_winner_binding(si.cohort, cal.GridCell(0.5, "off"))  # not a required cell
+
+
+# ---------------------------------------------------------------------------
+# g-p4ih-release-cli: subcommand grammar, private-path rule, private
+# serialization, redacted stdout, no-clobber publication, exit-code table.
+# ---------------------------------------------------------------------------
+
+# A value distinctive enough that finding it anywhere in a stream is proof of a leak.
+SENTINEL = 73.7317
+SENTINEL_TEXT = "73.7317"
+
+
+def _git_init(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, capture_output=True)
+    return root
+
+
+def _git_repo_with_commit(root: Path) -> Path:
+    """A repo with one commit, so `git worktree add` has something to check out."""
+    _git_init(root)
+    for key, value in (("user.email", "t@example.invalid"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(root), "config", key, value],
+                       check=True, capture_output=True)
+    (root / "seed.txt").write_text("seed\n")
+    subprocess.run(["git", "-C", str(root), "add", "seed.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "seed"],
+                   check=True, capture_output=True)
+    return root
+
+
+class TestSubcommandGrammar:
+    """The exact argv grammar. Every row asserts that an option belonging to another mode is
+    REJECTED as unrecognized rather than accepted-and-ignored — in BOTH token orders."""
+
+    @pytest.mark.parametrize("argv,expected", [
+        ([], {"mode": "report", "json": False, "limit": None}),
+        (["--json"], {"mode": "report", "json": True}),
+        (["report", "--json"], {"mode": "report", "json": True}),
+        (["--limit", "5"], {"mode": "report", "limit": 5}),
+        (["--users", "14", "--pairs", "14:black"], {"mode": "report", "users": "14"}),
+    ])
+    def test_report_rows(self, argv, expected):
+        args = cal._parse_args(argv)
+        for key, value in expected.items():
+            assert getattr(args, key) == value
+
+    def test_a_value_that_spells_a_subcommand_is_not_a_mode_switch(self):
+        # The legacy rewrite tests argv[0] ONLY, never a scan of the whole list.
+        args = cal._parse_args(["--users", "capture-cohort"])
+        assert args.mode == "report" and args.users == "capture-cohort"
+
+    @pytest.mark.parametrize("argv", [
+        ["--limit", "5", "capture-cohort"],
+        ["--min-observations", "5", "select-release"],
+        ["capture-cohort", "--limit", "5"],
+        ["select-release", "--min-observations", "5"],
+        ["select-release", "--output", "/abs/x"],
+        ["capture-cohort", "--result-output", "/abs/x"],
+        ["capture-cohort", "--artifact", "/abs/x"],
+        ["report", "--result-output", "/abs/x"],
+        ["select-release", "--artifact", "/abs/x"],          # --result-output required
+        ["select-release", "--result-output", "/abs/x"],      # --artifact required
+        ["capture-cohort"],                                    # --output required
+    ])
+    def test_incompatible_or_missing_options_exit_two(self, argv):
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(argv)
+        assert exc.value.code == 2
+
+    def test_max_attempts_is_retained_on_capture_cohort(self):
+        args = cal._parse_args(["capture-cohort", "--output", "/abs/x", "--max-attempts", "7"])
+        assert args.max_attempts == 7
+        assert cal._parse_args(["capture-cohort", "--output", "/abs/x"]).max_attempts == 3
+        with pytest.raises(SystemExit) as exc:  # _positive_int, never the retry loop
+            cal._parse_args(["capture-cohort", "--output", "/abs/x", "--max-attempts", "0"])
+        assert exc.value.code == 2
+
+    def test_release_paths_take_absolute_option_values_not_positionals(self):
+        args = cal._parse_args([
+            "select-release", "--artifact", "/abs/a.json", "--result-output", "/abs/r.json",
+        ])
+        assert args.mode == "select-release"
+        assert args.artifact == Path("/abs/a.json")
+        assert args.result_output == Path("/abs/r.json")
+
+    @pytest.mark.parametrize("argv", [
+        ["--help"], ["report", "--help"], ["capture-cohort", "--help"],
+        ["select-release", "--help"],
+    ])
+    def test_help_never_offers_a_release_guard_option(self, argv, capsys, monkeypatch):
+        monkeypatch.setenv("GHOSTREPLAY_RELEASE_GUARD_USER", "987654")
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(argv)
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert "release-guard-user" not in text
+        assert "987654" not in text  # the guard value never reaches any stream
+
+    def test_root_help_lists_the_three_subcommands(self, capsys):
+        with pytest.raises(SystemExit):
+            cal._parse_args(["--help"])
+        out = capsys.readouterr().out
+        for name in cal._SUBCOMMANDS:
+            assert name in out
+
+
+class TestPrivatePathRule:
+    """_refuse_repo_interior_path against a REAL temp repo with linked worktrees. The old
+    single-_REPO_ROOT compare accepted a path inside the ORIGIN checkout whenever the run
+    executed from a linked worktree — which is every release-launcher run."""
+
+    @pytest.fixture
+    def trees(self, tmp_path, monkeypatch):
+        origin = _git_repo_with_commit(tmp_path / "origin")
+        linked = tmp_path / "linked"
+        third = tmp_path / "third"
+        for worktree in (linked, third):
+            subprocess.run(
+                ["git", "-C", str(origin), "worktree", "add", "-q", "--detach", str(worktree)],
+                check=True, capture_output=True,
+            )
+        outside = tmp_path / "store"
+        outside.mkdir()
+        # Execute AS THE LAUNCHER DOES: from the linked worktree, not the origin checkout.
+        monkeypatch.setattr(cal, "_REPO_ROOT", linked)
+        return SimpleNamespace(origin=origin, linked=linked, third=third, outside=outside)
+
+    def test_origin_checkout_is_refused_from_a_linked_worktree(self, trees):
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(trees.origin / "result.json", option="--result-output")
+
+    def test_executing_checkout_is_refused(self, trees):
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(trees.linked / "result.json", option="--result-output")
+
+    def test_a_third_registered_worktree_is_refused(self, trees):
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(trees.third / "sub" / "r.json", option="--artifact")
+
+    def test_a_genuinely_outside_path_is_accepted(self, trees):
+        target = trees.outside / "result.json"
+        assert cal._refuse_repo_interior_path(target, option="--result-output") == target.resolve()
+
+    def test_relative_path_is_refused_outright(self, trees):
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_path(Path("result.json"), option="--result-output")
+        assert "ABSOLUTE" in str(exc.value)
+
+    def test_message_names_the_basename_only(self, trees):
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_path(trees.origin / "secret_dir" / "r.json", option="--artifact")
+        assert "secret_dir" not in str(exc.value)
+        assert "r.json" in str(exc.value)
+
+    def test_rev_parse_failure_refuses_rather_than_falling_back(self, trees, monkeypatch):
+        monkeypatch.setattr(
+            cal, "_git_capture",
+            lambda *a: subprocess.CompletedProcess(a, 1, stdout="", stderr="boom"),
+        )
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_path(trees.outside / "r.json", option="--artifact")
+        assert "refus" in str(exc.value).lower() or "cannot be evaluated" in str(exc.value)
+
+    def test_worktree_list_failure_refuses_rather_than_falling_back(self, trees, monkeypatch, tmp_path):
+        # rev-parse answers, but with a common dir git cannot list worktrees from: "could
+        # not tell us" is not "not registered".
+        bogus = tmp_path / "no-such-repo" / ".git"
+        monkeypatch.setattr(
+            cal, "_git_capture",
+            lambda *a: subprocess.CompletedProcess(a, 0, stdout=f"{bogus}\n", stderr=""),
+        )
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(trees.outside / "r.json", option="--artifact")
+
+    def test_capture_output_wrapper_keeps_its_type_and_option_name(self, trees):
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_output(trees.origin / "captured.json")
+        assert "--output" in str(exc.value)
+
+    @staticmethod
+    def _case_insensitive(root: Path) -> bool:
+        probe = root / "CaseProbe"
+        probe.mkdir()
+        try:
+            return (root / "caseprobe").is_dir()
+        finally:
+            probe.rmdir()
+
+    @pytest.mark.parametrize("option", ["--artifact", "--result-output", "--output"])
+    def test_a_case_aliased_spelling_of_a_worktree_is_refused(self, trees, option, tmp_path):
+        # THE alias bypass: resolve() follows symlinks but PRESERVES the caller's casing, so
+        # on a case-insensitive filesystem /users/... and /Users/... are the same directory
+        # spelled two ways — and a string compare called the second one "outside".
+        if not self._case_insensitive(tmp_path):
+            pytest.skip("case-sensitive filesystem: the alias does not exist here")
+        aliased = Path(str(trees.origin).replace("/private/", "/PRIVATE/", 1))
+        if aliased == trees.origin:  # tmp_path shape differs; fall back to the leading dir
+            head, _, tail = str(trees.origin).lstrip("/").partition("/")
+            aliased = Path("/") / head.upper() / tail
+        assert aliased.is_dir() and str(aliased) != str(trees.origin)
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(aliased / "result.json", option=option)
+
+    def test_a_symlinked_alias_of_a_worktree_is_refused(self, trees, tmp_path):
+        # The identity compare also covers the aliases resolve() DOES normalize, so the
+        # cheaper property is pinned rather than assumed.
+        link = tmp_path / "alias"
+        link.symlink_to(trees.origin)
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(link / "result.json", option="--artifact")
+
+    def test_a_newline_bearing_worktree_path_is_refused(self, tmp_path, monkeypatch):
+        # git prints the porcelain path RAW, so splitlines() recorded only the prefix before
+        # the newline and a result inside the real worktree compared as outside it. -z keeps
+        # the path whole.
+        origin = _git_repo_with_commit(tmp_path / "origin")
+        odd = tmp_path / "lin\nefeed"
+        subprocess.run(
+            ["git", "-C", str(origin), "worktree", "add", "-q", "--detach", str(odd)],
+            check=True, capture_output=True,
+        )
+        monkeypatch.setattr(cal, "_REPO_ROOT", origin)
+        roots = cal._private_path_forbidden_roots()
+        assert odd.resolve() in roots
+        with pytest.raises(cal.CaptureGovernanceError):
+            cal._refuse_repo_interior_path(odd / "result.json", option="--result-output")
+
+    def test_an_unstattable_component_refuses_rather_than_accepting(self, trees, monkeypatch):
+        # "I could not look" is not "it is somewhere else".
+        def boom(self):
+            raise PermissionError(13, "Permission denied")
+        monkeypatch.setattr(Path, "stat", boom)
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_path(trees.outside / "r.json", option="--artifact")
+        assert "refused" in str(exc.value)
+
+    def test_a_vanished_worktree_set_refuses_rather_than_accepting(self, trees, monkeypatch):
+        # git named trees, none of which is on disk: an unusable answer, not a clean bill.
+        monkeypatch.setattr(cal, "_private_path_forbidden_roots",
+                            lambda: (trees.outside / "gone",))
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_path(trees.outside / "r.json", option="--artifact")
+        assert "identified on disk" in str(exc.value)
+
+
+# --- select-release: the CLI harness ---------------------------------------
+
+
+def _run_select_release(
+    monkeypatch, capsys, tmp_path, inputs, *,
+    mount=True, mounted_digest=None, artifact=None, result=None, artifact_exists=True,
+    make_result_parent=True, select=None, build=None,
+):
+    """Drive `main(["select-release", ...])` end to end against a temp repo.
+
+    The private store lives OUTSIDE the temp checkout (`tmp_path/store` vs `tmp_path/repo`),
+    so the real git-derived private-path rule runs unstubbed. `_MOUNTED_PROVENANCE_DIGEST`
+    is patched to what a launcher would have handed the child: patching it to None is
+    exactly the state a BARE invocation is in.
+    """
+    monkeypatch.setattr(cal, "_REPO_ROOT", _git_init(tmp_path / "repo"))
+    store = tmp_path / "store"
+    store.mkdir(exist_ok=True)
+    record = store / "cohort_provenance.json"
+    record.write_bytes(b'{"candidate": "provenance record"}')
+    digest = hashlib.sha256(record.read_bytes()).hexdigest()
+    monkeypatch.setattr(cal, "COHORT_PROVENANCE_PATH", record)
+    monkeypatch.setattr(
+        cal, "_MOUNTED_PROVENANCE_DIGEST",
+        (mounted_digest if mounted_digest is not None else digest) if mount else None,
+    )
+    if build is not None:
+        monkeypatch.setattr(cal, "build_selection_inputs", build)
+    elif inputs is not None:
+        bound = cal.SelectionInputs(
+            cohort=dataclasses.replace(inputs.cohort, provenance_record_sha256=digest),
+            diagnostics=inputs.diagnostics,
+        )
+        monkeypatch.setattr(cal, "build_selection_inputs", lambda path: bound)
+    if select is not None:
+        monkeypatch.setattr(cal, "select_candidate", select)
+
+    artifact_path = Path(artifact) if artifact is not None else store / "cohort.json"
+    if artifact is None and artifact_exists:
+        artifact_path.write_bytes(b"{}")
+    if result is not None:
+        result_path = Path(result)
+    else:
+        parent = store / ("out" if make_result_parent else "missing-dir")
+        if make_result_parent:
+            parent.mkdir(exist_ok=True)
+        result_path = parent / "result.json"
+
+    capsys.readouterr()
+    code = cal.main([
+        "select-release", "--artifact", str(artifact_path),
+        "--result-output", str(result_path),
+    ])
+    captured = capsys.readouterr()
+    return SimpleNamespace(
+        code=code, out=captured.out, err=captured.err, result=result_path,
+        artifact=artifact_path, digest=digest, store=store, record=record,
+    )
+
+
+def _ship(monkeypatch, capsys, tmp_path, **kwargs):
+    return _run_select_release(
+        monkeypatch, capsys, tmp_path, selfix._arm1_winner_inputs(), **kwargs
+    )
+
+
+class TestTrustGates:
+    def test_missing_mount_refuses_before_anything_is_written(self, monkeypatch, capsys, tmp_path):
+        spy = MagicMock(side_effect=AssertionError("select_candidate must not be reached"))
+        run = _ship(monkeypatch, capsys, tmp_path, mount=False, select=spy)
+        assert run.code == 3
+        assert run.out == ""              # stdout carries ONLY a validated summary
+        assert not run.result.exists()
+        spy.assert_not_called()
+
+    def test_a_mount_that_disagrees_with_the_record_refuses(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, mounted_digest="a" * 64)
+        assert run.code == 3
+        assert run.out == ""
+        assert not run.result.exists()
+
+    def test_unverified_scorer_source_refuses_before_select_candidate(self, monkeypatch, capsys, tmp_path):
+        inputs = selfix._arm1_winner_inputs()
+        unverified = cal.SelectionInputs(
+            cohort=dataclasses.replace(inputs.cohort, scorer_source_verified_preexec=False),
+            diagnostics=inputs.diagnostics,
+        )
+        spy = MagicMock(side_effect=AssertionError("select_candidate must not be reached"))
+        run = _run_select_release(monkeypatch, capsys, tmp_path, unverified, select=spy)
+        assert run.code == 3
+        assert run.out == ""
+        assert not run.result.exists()
+        spy.assert_not_called()
+
+    def test_the_load_guards_own_digest_must_agree_with_the_mount(self, monkeypatch, capsys, tmp_path):
+        # The record moved between require_mounted_provenance's read and the load guard's.
+        inputs = selfix._arm1_winner_inputs()
+
+        def build(path):
+            return cal.SelectionInputs(
+                cohort=dataclasses.replace(inputs.cohort, provenance_record_sha256="b" * 64),
+                diagnostics=inputs.diagnostics,
+            )
+
+        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
+        assert run.code == 3
+        assert not run.result.exists()
+
+
+class TestArtifactInput:
+    def test_a_relative_artifact_is_refused_with_the_launcher_cwd_reason(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, artifact="cohort.json")
+        assert run.code == 2
+        assert "ABSOLUTE" in run.err
+        assert not run.result.exists()
+
+    def test_a_missing_artifact_is_refused(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, artifact_exists=False)
+        assert run.code == 2
+        assert not run.result.exists()
+
+    def test_a_directory_is_not_a_regular_file(self, monkeypatch, capsys, tmp_path):
+        directory = tmp_path / "store" / "a-directory"
+        directory.mkdir(parents=True)
+        run = _ship(monkeypatch, capsys, tmp_path, artifact=directory)
+        assert run.code == 2
+
+    def test_an_artifact_inside_a_worktree_is_refused(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, artifact=tmp_path / "repo" / "cohort.json")
+        assert run.code == 2
+
+    def test_a_result_output_inside_a_worktree_is_refused(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, result=tmp_path / "repo" / "result.json")
+        assert run.code == 2
+        assert not (tmp_path / "repo" / "result.json").exists()
+
+    def test_a_missing_result_parent_directory_is_refused_not_created(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path, make_result_parent=False)
+        assert run.code == 2
+        assert not run.result.parent.exists()
+
+
+class TestSerialization:
+    def test_the_private_file_round_trips_with_every_redacted_field(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 0
+        obj = json.loads(run.result.read_text())
+        assert isinstance(obj, dict)
+        assert set(obj) >= {
+            "candidates", "winner", "winner_cutoffs", "no_ship", "no_ship_reason",
+            "cohort_provenance", "winner_binding", "b1_reference",
+        }
+        assert obj["winner"]["role"] == "arm1"
+        b1 = obj["b1_reference"]
+        assert b1["role"] == "b1"
+        assert isinstance(b1["real_black_1e4_raw"], float)
+        assert set(b1["distribution"]) == {"p05", "p25", "p50", "p75", "p95"}
+        assert isinstance(obj["winner_binding"]["config_fingerprint"], str)
+        assert obj["winner_binding"]["config_fingerprint"]
+        # A COMPOUND gate's operands stay individually addressable — the whole reason the
+        # naive json.dumps(result, default=str) form is broken.
+        gate = next(
+            g for g in obj["winner"]["raw_gates"] if g["name"] == "coverage_consistent_raw_3a"
+        )
+        assert gate["checks"][0]["name"] == "coverage_consistent_raw_3a_parent_le_child"
+        assert gate["checks"][1]["name"] == "coverage_consistent_raw_3a_parent_le_cov"
+        for check in gate["checks"]:
+            assert isinstance(check["measured"], (int, float))
+            assert isinstance(check["limit"], (int, float))
+
+    def test_two_runs_serialize_to_identical_bytes(self):
+        first = cal.serialize_full(cal.select_candidate(selfix._arm1_winner_inputs()))
+        second = cal.serialize_full(cal.select_candidate(selfix._arm1_winner_inputs()))
+        assert first == second
+
+    def test_a_nan_in_a_gates_measured_hard_fails_the_dump(self, monkeypatch, capsys, tmp_path):
+        def nan_gate(dcr):
+            # NaN <= x is False, so passed=False is the self-consistent verdict the
+            # dataclass will accept — the NaN reaches the payload, which is the point.
+            check = cal.GateCheck("parent_le_child_raw", math.nan, 1.0, "<=", False)
+            return cal.GateOutcome("parent_le_child_raw", "raw", False, (check,), "nan")
+
+        monkeypatch.setattr(cal, "_parent_le_child_raw", nan_gate)
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 5
+        assert run.out == ""
+        assert not run.result.exists()
+
+    def test_a_set_anywhere_raises(self):
+        with pytest.raises(TypeError):
+            cal._normalize({"scores": {1.0, 2.0}})
+        with pytest.raises(TypeError):
+            cal._normalize([{"a": frozenset()}])
+
+    def test_a_naive_datetime_raises(self):
+        with pytest.raises(TypeError):
+            cal._json_leaf(datetime(2025, 1, 1))
+        assert cal._json_leaf(datetime(2025, 1, 1, tzinfo=timezone.utc)).endswith("+00:00")
+
+    def test_an_unconvertible_leaf_raises_rather_than_stringifying(self):
+        with pytest.raises(TypeError):
+            cal._normalize({"cell": object()})
+
+    def test_non_str_keys_raise(self):
+        with pytest.raises(TypeError):
+            cal._normalize({1: "x"})
+
+
+class TestRedactedStdout:
+    def test_the_summary_is_the_exact_allowlist(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 0
+        summary = json.loads(run.out)
+        assert set(summary) == set(cal._SUMMARY_TOP_KEYS)
+        assert set(summary["cohort_provenance"]) == set(cal._SUMMARY_PROVENANCE_KEYS)
+        assert "pair_count" not in summary["cohort_provenance"]
+        assert summary["b1_reference"] == {"role": "b1", "cutoffs_collided": False}
+        assert set(summary["winner_binding"]) == set(cal._SUMMARY_BINDING_KEYS)
+        assert set(summary["winner"]) == {"role", "p"}
+        assert set(summary["winner_cutoffs"]) == {"a", "b", "c", "d", "alert", "watch"}
+        assert summary["provenance_record_sha256"] == run.digest
+        assert summary["result_sha256"] == hashlib.sha256(run.result.read_bytes()).hexdigest()
+
+    def test_no_redacted_key_appears_anywhere_in_stdout(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        summary = json.loads(run.out)
+        for banned in ("checks", "detail", "distribution", "order_keys", "no_ship_reason\"",
+                       "result_path", "result_filename", "provisional_cutoffs",
+                       "cutoffs_outcome", "named_score", "\"cell\"", "measured", "limit"):
+            assert banned not in run.out
+        # real_black_1e4_grade is a legitimate GATE NAME; what must not appear is B1's own
+        # grade/raw/distribution, which the exact key set on b1_reference forecloses.
+        full_b1 = json.loads(run.result.read_text())["b1_reference"]
+        assert set(summary["b1_reference"]) == {"role", "cutoffs_collided"}
+        assert f'"{full_b1["real_black_1e4_grade"]}"' not in run.out
+        # ...while the private file DOES carry every redacted-away field.
+        full = run.result.read_text()
+        for present in ("checks", "detail", "distribution", "order_keys",
+                        "provisional_cutoffs", "real_black_1e4_grade", "real_black_1e4_raw"):
+            assert present in full
+
+    def test_gate_projection_covers_all_four_candidate_shapes(self, monkeypatch, capsys, tmp_path):
+        seen = set()
+        shapes = (selfix._arm1_winner_inputs(), selfix._arm2_winner_inputs(),
+                  selfix._no_ship_inputs(), selfix._collision_inputs())
+        for index, inputs in enumerate(shapes):
+            run = _run_select_release(monkeypatch, capsys, tmp_path, inputs,
+                                      result=tmp_path / "store" / f"result-{index}.json")
+            assert run.code in (0, 1)
+            summary = json.loads(run.out)
+            seen.update(len(c["gates"]) for c in summary["candidates"])
+        # unevaluated (lazy arm-2), raw-failed, cutoffs-collided, fully evaluated.
+        assert seen == {0, 7, 8, 13}
+
+    def test_no_ship_summary_still_carries_the_record_digest(self, monkeypatch, capsys, tmp_path):
+        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
+        assert run.code == 1
+        summary = json.loads(run.out)
+        assert summary["no_ship"] is True
+        assert summary["winner"] is None
+        assert summary["winner_binding"] is None
+        # The case an implementation is most likely to drop: the obvious source is None.
+        assert summary["provenance_record_sha256"] == run.digest
+
+    def test_b1_collision_is_reported_as_a_bit_never_a_grade(self, monkeypatch, capsys, tmp_path):
+        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._collision_inputs())
+        summary = json.loads(run.out)
+        assert summary["b1_reference"] == {"role": "b1", "cutoffs_collided": True}
+        assert "grade" not in run.out
+
+    def test_stdout_carries_no_score_operand(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        summary = json.loads(run.out)
+        # Every DECIMAL in stdout is a report-fold p or a digit inside a pinned version /
+        # derivation-fingerprint string. No score, quantile, multiplier, or coverage
+        # fraction reaches it. (The winner's cutoffs are the named carve-out, and they are
+        # INTEGERS, so they do not appear here at all.)
+        allowed = {str(c["p"]) for c in summary["candidates"]}
+        binding = summary["winner_binding"]
+        for pinned in (binding["runtime_python"], binding["runtime_chess_version"],
+                       binding["evidence_derivation_fingerprint"],
+                       summary["cohort_provenance"]["evidence_derivation_fingerprint"]):
+            allowed.update(re.findall(r"-?\d+\.\d+", pinned))
+        assert set(re.findall(r"-?\d+\.\d+", run.out)) <= allowed
+
+
+class TestPublication:
+    def test_publishing_over_an_existing_result_refuses_without_touching_it(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 0
+        original = run.result.read_bytes()
+        again = _ship(monkeypatch, capsys, tmp_path, result=run.result)
+        assert again.code == 5
+        assert again.out == ""
+        assert run.result.read_bytes() == original
+        assert not list(run.result.parent.glob("*.tmp-*"))
+
+    def test_a_write_failure_leaves_no_temp_and_no_final_file(self, monkeypatch, capsys, tmp_path):
+        def boom(src, dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(cal.os, "link", boom)
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 5
+        assert run.out == ""
+        assert not run.result.exists()
+        assert not list(run.result.parent.glob("*.tmp-*"))
+
+    def test_the_summary_is_printed_only_after_the_link_succeeds(self, monkeypatch, capsys, tmp_path):
+        # A module-level `print` shadows the builtin for name lookups inside cal, so this
+        # spies on exactly the scorer's own prints and nothing else.
+        order = []
+        real_link = cal.os.link
+
+        def traced_link(src, dst):
+            order.append("link")
+            return real_link(src, dst)
+
+        def traced_print(*args, **kwargs):
+            order.append("print" if kwargs.get("file") is None else "stderr")
+            return builtins.print(*args, **kwargs)
+
+        monkeypatch.setattr(cal.os, "link", traced_link)
+        monkeypatch.setattr(cal, "print", traced_print, raising=False)
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 0
+        assert order == ["link", "print"]
+
+
+class TestSentinelLeak:
+    """Content-level, over stdout AND stderr. Key-level redaction is not enough: the leaks
+    below are real values in messages the code raises today."""
+
+    def _planted(self, monkeypatch):
+        """Plant the sentinel in a GateCheck.measured, a GateOutcome.detail, and the
+        free-form no_ship_reason — the three places the private file legitimately carries
+        it and stdout must not."""
+        def sentinel_gate(dcr):
+            check = cal.GateCheck("parent_le_child_raw", SENTINEL, SENTINEL + 1.0, "<=", True)
+            return cal.GateOutcome(
+                "parent_le_child_raw", "raw", True, (check,), f"measured {SENTINEL}"
+            )
+
+        monkeypatch.setattr(cal, "_parent_le_child_raw", sentinel_gate)
+        monkeypatch.setattr(cal, "_no_ship_reason", lambda candidates: f"blocked at {SENTINEL}")
+
+    def test_the_file_carries_the_sentinel_and_neither_stream_does(self, monkeypatch, capsys, tmp_path):
+        self._planted(monkeypatch)
+        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
+        assert run.code == 1
+        assert SENTINEL_TEXT in run.result.read_text()
+        assert SENTINEL_TEXT not in run.out
+        assert SENTINEL_TEXT not in run.err
+
+    def test_a_binding_error_carrying_an_operand_value_leaks_nothing(self, monkeypatch, capsys, tmp_path):
+        def raiser(inputs):
+            raise cal.SelectionBindingError(
+                f"binding: operand synth_black_root_score at cell 'x' out of [0.0, 100.0]: "
+                f"{SENTINEL + 100}"
+            )
+
+        run = _ship(monkeypatch, capsys, tmp_path, select=raiser)
+        assert run.code == 4
+        assert SENTINEL_TEXT not in run.out + run.err
+        assert run.out == ""
+
+    def test_a_binding_error_carrying_a_pair_id_leaks_nothing(self, monkeypatch, capsys, tmp_path):
+        def raiser(inputs):
+            raise cal.SelectionBindingError(
+                f"binding: operand quantile pair 'pair-{SENTINEL}' named_scores[0] out of range"
+            )
+
+        run = _ship(monkeypatch, capsys, tmp_path, select=raiser)
+        assert run.code == 4
+        assert SENTINEL_TEXT not in run.out + run.err
+
+    def test_a_publication_failure_leaks_neither_basename_nor_path(self, monkeypatch, capsys, tmp_path):
+        def boom(final_path, data):
+            raise cal.CapturePublicationError(
+                f"cannot create the private temp beside {final_path.name!r}: No space left."
+            )
+
+        monkeypatch.setattr(cal, "_write_private_temp", boom)
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 5          # NOT 1 (no-ship) and NOT 6 (catch-all)
+        assert run.out == ""
+        streams = run.out + run.err
+        assert "result.json" not in streams
+        assert str(run.result) not in streams
+        assert str(run.result.parent) not in streams
+
+    def test_the_catch_all_prints_only_the_class_name(self, monkeypatch, capsys, tmp_path):
+        def raiser(inputs):
+            raise RuntimeError(f"internal detail {SENTINEL}")
+
+        run = _ship(monkeypatch, capsys, tmp_path, select=raiser)
+        assert run.code == 6
+        assert "unexpected RuntimeError" in run.err
+        assert SENTINEL_TEXT not in run.out + run.err
+        assert "Traceback" not in run.err
+
+    def test_no_substring_of_either_private_path_reaches_a_stream(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        for stream in (run.out, run.err):
+            assert str(run.result) not in stream
+            assert str(run.artifact) not in stream
+            assert run.result.name not in stream
+            assert run.artifact.name not in stream
+
+
+class TestExitCodeTable:
+    """Every row produced by a real invocation, and exit 1 asserted to be UNIQUELY no-ship."""
+
+    def test_zero_is_a_winner(self, monkeypatch, capsys, tmp_path):
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 0
+        assert json.loads(run.out)["no_ship"] is False
+        assert run.result.exists()
+
+    def test_one_is_no_ship_and_publishes_the_full_record(self, monkeypatch, capsys, tmp_path):
+        run = _run_select_release(monkeypatch, capsys, tmp_path, selfix._no_ship_inputs())
+        assert run.code == 1
+        assert json.loads(run.out)["no_ship"] is True
+        assert run.result.exists()
+
+    def test_two_is_the_cli_contract(self, monkeypatch, capsys, tmp_path):
+        assert _ship(monkeypatch, capsys, tmp_path, artifact="relative.json").code == 2
+
+    def test_three_is_a_release_trust_refusal(self, monkeypatch, capsys, tmp_path):
+        assert _ship(monkeypatch, capsys, tmp_path, mount=False).code == 3
+
+    def test_four_is_an_input_rejection(self, monkeypatch, capsys, tmp_path):
+        def rejects(path):
+            raise cal.ArtifactIntegrityError("artifact vs record mismatch")
+
+        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=rejects)
+        assert run.code == 4
+        assert not run.result.exists()
+
+    def test_four_covers_an_oserror_reading_the_artifact(self, monkeypatch, capsys, tmp_path):
+        def rejects(path):
+            raise OSError(5, "Input/output error")
+
+        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=rejects)
+        assert run.code == 4
+
+    def test_five_is_an_output_failure(self, monkeypatch, capsys, tmp_path):
+        monkeypatch.setattr(
+            cal, "build_redacted_summary",
+            lambda result, digest, sha: {"no_ship": result.no_ship},  # missing keys
+        )
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 5
+        assert run.out == ""
+        assert not run.result.exists()
+
+    def test_five_covers_a_forged_record_digest_in_the_summary(self, monkeypatch, capsys, tmp_path):
+        real = cal.build_redacted_summary
+
+        def forged(result, digest, sha):
+            summary = real(result, digest, sha)
+            summary["provenance_record_sha256"] = "c" * 64
+            return summary
+
+        monkeypatch.setattr(cal, "build_redacted_summary", forged)
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 5
+        assert not run.result.exists()
+
+    def test_five_covers_a_forged_binding_digest_in_the_summary(self, monkeypatch, capsys, tmp_path):
+        real = cal.build_redacted_summary
+
+        def forged(result, digest, sha):
+            summary = real(result, digest, sha)
+            summary["winner_binding"]["provenance_record_sha256"] = "d" * 64
+            return summary
+
+        monkeypatch.setattr(cal, "build_redacted_summary", forged)
+        run = _ship(monkeypatch, capsys, tmp_path)
+        assert run.code == 5
+        assert not run.result.exists()
+
+    def test_six_is_the_catch_all(self, monkeypatch, capsys, tmp_path):
+        def raiser(inputs):
+            raise ZeroDivisionError("boom")
+
+        run = _ship(monkeypatch, capsys, tmp_path, select=raiser)
+        assert run.code == 6
+
+    def test_no_failure_path_ever_returns_one(self, monkeypatch, capsys, tmp_path):
+        cases = [
+            lambda: _ship(monkeypatch, capsys, tmp_path, artifact="relative.json"),
+            lambda: _ship(monkeypatch, capsys, tmp_path, mount=False),
+            lambda: _run_select_release(
+                monkeypatch, capsys, tmp_path, None,
+                build=lambda p: (_ for _ in ()).throw(cal.ArtifactIntegrityError("x")),
+            ),
+            lambda: _ship(
+                monkeypatch, capsys, tmp_path,
+                select=lambda i: (_ for _ in ()).throw(ZeroDivisionError("x")),
+            ),
+        ]
+        for case in cases:
+            assert case().code != 1
+
+
+class TestParserErrorRedaction:
+    """A REJECTED argument's value must never reach a stream. Stock argparse echoes it
+    verbatim, which turns --release-guard-user into the very leak the environment-only
+    guard contract exists to prevent."""
+
+    GUARD = "987654"
+    PRIVATE = "/abs/private-store/cohort-2026-07-user987654.json"
+
+    @pytest.mark.parametrize("argv", [
+        ["--release-guard-user", GUARD],                       # the retired flag
+        ["capture-cohort", "--output", "/abs/x", "--release-guard-user", GUARD],
+        ["select-release", "--artifact", "/abs/a", "--result-output", "/abs/r",
+         "--release-guard-user", GUARD],
+    ])
+    def test_a_rejected_guard_user_is_never_echoed(self, argv, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(argv)
+        assert exc.value.code == 2
+        streams = "".join(capsys.readouterr())
+        assert self.GUARD not in streams
+        # The flag is nameable because it is a literal in _RETIRED_OPTIONS, and naming it
+        # is what lets the message explain WHERE the guard user actually comes from.
+        assert "--release-guard-user" in streams
+        assert "GHOSTREPLAY_RELEASE_GUARD_USER" in streams
+
+    @pytest.mark.parametrize("argv", [
+        ["select-release", "--artifact", "/abs/a", "--result-output", "/abs/r",
+         "--output", PRIVATE],
+        ["report", "--result-output", PRIVATE],
+        ["capture-cohort", "--output", "/abs/x", "--artifact", PRIVATE],
+    ])
+    def test_a_rejected_private_path_is_never_echoed(self, argv, capsys):
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(argv)
+        assert exc.value.code == 2
+        streams = "".join(capsys.readouterr())
+        assert self.PRIVATE not in streams
+        assert "private-store" not in streams
+        assert "987654" not in streams
+
+    def test_an_equals_form_is_truncated_at_the_equals(self, capsys):
+        with pytest.raises(SystemExit):
+            cal._parse_args(["report", f"--result-output={self.PRIVATE}"])
+        streams = "".join(capsys.readouterr())
+        assert self.PRIVATE not in streams
+        assert "--result-output" in streams
+
+    def test_a_dash_prefixed_value_is_not_mistaken_for_an_option_name(self, capsys):
+        # THE dash-prefix bypass: a value may lead with '-' (a negative number, a path
+        # fragment), so "looks like a flag" is not a safety property. Only MEMBERSHIP in
+        # the closed vocabulary is.
+        with pytest.raises(SystemExit):
+            cal._parse_args(["--release-guard-user", f"-{self.GUARD}"])
+        streams = "".join(capsys.readouterr())
+        assert self.GUARD not in streams
+        assert "1 token(s) withheld" in streams
+
+    @pytest.mark.parametrize("value", [
+        GUARD + "x",            # repr uses single quotes
+        GUARD + "'x",           # ...but switches to double quotes on an apostrophe
+        '"' + GUARD + "'x",     # ...and to escaped single quotes when both appear
+        "-" + GUARD,
+    ])
+    def test_a_type_callable_value_is_never_echoed_however_it_reprs(self, value, capsys):
+        # The single-quote filter this replaced missed every repr form but the first.
+        with pytest.raises(SystemExit):
+            cal._parse_args(["capture-cohort", "--output", "/abs/x", "--max-attempts", value])
+        streams = "".join(capsys.readouterr())
+        assert self.GUARD not in streams
+        assert "--max-attempts" in streams
+
+    @pytest.mark.parametrize("value", [GUARD, f"0.5,{GUARD}", PRIVATE])
+    def test_an_out_of_range_fold_grid_value_is_never_echoed(self, value, capsys):
+        # parse_report_fold_grid's ValueError names the token ("got 987654.0") and used to
+        # be forwarded verbatim — the one error path argparse never quoted at all.
+        with pytest.raises(SystemExit) as exc:
+            cal._parse_args(["report", "--report-fold-grid", value])
+        assert exc.value.code == 2
+        streams = "".join(capsys.readouterr())
+        assert self.GUARD not in streams
+        assert "private-store" not in streams
+        assert "0 < p <= 1" in streams  # the RULE is data-free, and is the useful part
+
+    def test_an_unknown_flag_is_withheld_entirely(self, capsys):
+        # Not in the vocabulary => not echoed, even though it is unmistakably a flag. The
+        # option NAME itself can carry data (an operator can spell anything after '--').
+        with pytest.raises(SystemExit):
+            cal._parse_args([f"--user-{self.GUARD}={self.PRIVATE}"])
+        streams = "".join(capsys.readouterr())
+        assert self.GUARD not in streams
+        assert "none nameable" in streams
+
+    def test_a_subcommand_token_out_of_place_is_still_named(self, capsys):
+        # A CLOSED vocabulary is provably non-sensitive, so naming it costs nothing and is
+        # the single most useful thing the message can say.
+        with pytest.raises(SystemExit):
+            cal._parse_args(["--limit", "5", "capture-cohort"])
+        assert "capture-cohort" in "".join(capsys.readouterr())
+
+    def test_a_missing_required_option_is_still_named(self, capsys):
+        # The rebuild path must stay USEFUL: these names are source literals, so the
+        # data-free rule costs the operator nothing here.
+        with pytest.raises(SystemExit):
+            cal._parse_args(["select-release"])
+        streams = "".join(capsys.readouterr())
+        assert "--artifact" in streams and "--result-output" in streams
+
+    def test_an_unrecognized_message_shape_collapses_to_the_fixed_string(self, capsys):
+        # The default is REFUSAL, not pass-through: a message this module cannot rebuild
+        # from its own literals is replaced wholesale, so a future argparse phrasing (or a
+        # new call site) cannot leak by simply not matching a known shape.
+        parser = cal._RedactedArgumentParser(prog="x")
+        with pytest.raises(SystemExit):
+            parser.error(f"some future phrasing mentioning {self.PRIVATE}")
+        streams = "".join(capsys.readouterr())
+        assert self.PRIVATE not in streams
+        assert "details withheld" in streams
+
+    @pytest.mark.parametrize("argv", [
+        ["select-release"],                                  # missing-required, via a subparser
+        ["--release-guard-user", GUARD],                     # unrecognized, via the root
+        ["report", "--report-fold-grid", GUARD],             # the vetted custom message
+        ["capture-cohort", "--output", "/abs/x", "--max-attempts", "x"],  # a rebuilt message
+        ["--help"],                                          # help, not an error at all
+        ["select-release", "--help"],
+    ])
+    def test_a_hostile_argv0_never_reaches_a_stream(self, argv, capsys, monkeypatch):
+        # sys.argv[0] is PROCESS-CONTROLLED (`exec -a`, or a copy of this script parked in
+        # the private store), and argparse's default prog prints it in BOTH the usage block
+        # and the "prog: error:" prefix — a channel the message assembly cannot see.
+        monkeypatch.setattr(sys, "argv", [f"/abs/private-store/PRIVATE-USER-{self.GUARD}"])
+        with pytest.raises(SystemExit):
+            cal._parse_args(argv)
+        streams = "".join(capsys.readouterr())
+        assert self.GUARD not in streams
+        assert "private-store" not in streams
+        assert cal._PROG in streams  # the pinned literal is what names the program
+
+    def test_the_vocabulary_holds_only_source_literals(self):
+        # The set is the whole safety argument, so pin what may enter it: every member is
+        # an option string, a subcommand, a dest, or a retired-option literal from the
+        # module — argv text can never be added, because only add_argument populates it.
+        cal._parse_args(["report"])  # force the parser tree to be built
+        allowed = set(cal._SUBCOMMANDS) | set(cal._RETIRED_OPTIONS) | {"mode", "-h", "--help"}
+        for token in cal._ECHOABLE_TOKENS - allowed:
+            assert token.startswith("--"), token
+
+
+class TestGovernanceMessageIsDataFree:
+    def test_a_two_character_basename_never_reaches_stderr(self, monkeypatch, capsys, tmp_path):
+        # `id` is below _path_redactor's minimum token length by design, so the leak has to
+        # be closed at the message, not at the filter.
+        run = _ship(monkeypatch, capsys, tmp_path, artifact=tmp_path / "repo" / "id")
+        assert run.code == 2
+        assert "'id'" not in run.err
+        assert "ABSOLUTE" in run.err and "not echoed" in run.err
+
+    def test_the_capture_path_keeps_its_landed_basename_message(self, monkeypatch, tmp_path):
+        # The widened rule is unchanged in TYPE and message SHAPE for --output, which the
+        # landed capture tests pin; only the select-release BOUNDARY withholds it.
+        monkeypatch.setattr(cal, "_REPO_ROOT", _git_init(tmp_path / "repo"))
+        with pytest.raises(cal.CaptureGovernanceError) as exc:
+            cal._refuse_repo_interior_output(tmp_path / "repo" / "captured.json")
+        assert "captured.json" in str(exc.value)
+
+
+class TestProvenanceMovementIsATrustRefusal:
+    """The gate's read and the load guard's read are two INDEPENDENT reads. A record that
+    moves between them is a release-trust refusal (3), not an input rejection (4)."""
+
+    def test_a_record_deleted_between_the_two_reads_exits_three(self, monkeypatch, capsys, tmp_path):
+        def build(path):
+            cal.COHORT_PROVENANCE_PATH.unlink()
+            raise OSError(2, "No such file or directory")
+
+        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
+        assert run.code == 3
+        assert "No such file" not in run.err   # and it does not describe the wrong input
+        assert run.out == ""
+        assert not run.result.exists()
+
+    def test_a_record_rewritten_between_the_two_reads_exits_three(self, monkeypatch, capsys, tmp_path):
+        def build(path):
+            cal.COHORT_PROVENANCE_PATH.write_bytes(b'{"different": "record"}')
+            raise cal.ProvenanceRecordError("record does not validate")
+
+        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
+        assert run.code == 3
+        assert not run.result.exists()
+
+    def test_a_genuinely_bad_artifact_still_exits_four(self, monkeypatch, capsys, tmp_path):
+        # The record is untouched, so the recheck passes and the ORIGINAL classification
+        # stands — the recheck must not swallow real input rejections.
+        def build(path):
+            raise cal.ArtifactIntegrityError("artifact sha256 disagrees with the record")
+
+        run = _run_select_release(monkeypatch, capsys, tmp_path, None, build=build)
+        assert run.code == 4

@@ -776,7 +776,7 @@ class TestArgumentValidation:
     def test_cli_max_attempts_exits_two(self, monkeypatch):
         monkeypatch.setenv("GHOSTREPLAY_RELEASE_GUARD_USER", "14")
         with pytest.raises(SystemExit) as exc:
-            cal._run_capture_cohort_child(["--output", "/tmp/x.json", "--max-attempts", "0"])
+            cal.main(["capture-cohort", "--output", "/tmp/x.json", "--max-attempts", "0"])
         assert exc.value.code == 2  # argparse usage error, never the retry loop
 
 

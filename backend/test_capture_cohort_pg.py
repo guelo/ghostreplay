@@ -974,8 +974,9 @@ def test_the_child_exits_one_without_a_traceback_on_a_self_check_crash(capenv, m
         raise RuntimeError("scorer blew up")
 
     monkeypatch.setattr(cal, "validate_capture_candidate", explode)
-    rc = cal._run_capture_cohort_child(
-        ["--output", str(capenv.output)], session_factory=capenv.session_factory
+    rc = cal.main(
+        ["capture-cohort", "--output", str(capenv.output)],
+        session_factory=capenv.session_factory,
     )
     assert rc == 1
     err = capsys.readouterr().err

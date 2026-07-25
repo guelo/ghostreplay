@@ -102,6 +102,24 @@ cache.
 
 ## CLI reference
 
+The script takes three **subcommands**, and each exposes *only* its own options — an
+option belonging to another mode is rejected as unrecognized (exit 2) rather than
+accepted and ignored, in either token order:
+
+```
+argv := [ "report" ] REPORT_OPTS*
+      | "capture-cohort" CAPTURE_OPTS*
+      | "select-release" SELECT_OPTS*
+```
+
+### `report` (the default)
+
+The legacy bare form still works unchanged: `--json`, `--limit 5`, or no arguments at
+all are all `report`. The test is on `argv[0]` only, so an option *value* that happens
+to spell a subcommand name (`--users capture-cohort`) is not a mode switch. One stated
+exception: a leading `-h`/`--help` is *not* rewritten, so bare `--help` shows the root
+help where the three subcommands are discoverable rather than `report --help`.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--database-url` | configured app URL | SQLAlchemy DB URL (read-only by default) |
@@ -115,14 +133,141 @@ cache.
 | `--write-bench` | off | Time one isolated recompute + cache read (needs `--allow-writes` + guarded URL) |
 | `--allow-writes` | off | Required acknowledgement alongside `--write-bench` |
 
+### `capture-cohort`
+
+Freezes, fences, and publishes a frozen-cohort artifact.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output` | **required** | Final artifact path. Must be ABSOLUTE and resolve OUTSIDE every git working tree of this repo |
+| `--require-quiescent-epoch` | off | Promote global-epoch movement to a retry trigger (explicit maintenance window) |
+| `--max-attempts` | 3 | Fence attempts before giving up (`>= 1`) |
+
+There is **no `--min-observations`** here: the capture threshold is pinned release
+policy (`DEFAULT_MIN_OBSERVATIONS`, stamped by the freeze), and `capture_cohort(...)`
+exposes no threshold parameter. There is also **no CLI option that accepts a
+release-guard user**, and there will not be one: the guard user comes only from the
+`GHOSTREPLAY_RELEASE_GUARD_USER` environment variable, because a command-line argument
+would put a production user id into shell history and into every process listing on the
+capture host for the duration of the run. A missing or non-integer value refuses before
+any DB work, and the value is never echoed, logged, or included in any diagnostic.
+
+Run it through `capture_cohort.sh` **from the ORIGIN checkout** — never bare, and never
+under the release launcher:
+
+```bash
+GHOSTREPLAY_RELEASE_GUARD_USER=<id> \
+  backend/scripts/capture_cohort.sh --output /abs/private/store/cohort.json
+```
+
+A bare invocation refuses before any DB access (the launcher marker, the inherited
+pre-exec digest, `-S`, and bytecode-writing-off are all absent). A capture hosted by the
+*release* launcher refuses too: that launcher deletes its throwaway worktree on exit, so
+the reviewable `cohort_provenance.json` diff would be written into a directory that no
+longer exists.
+
+Exit codes: `0` success, `1` any `CaptureError`, `2` an argparse usage error or a
+missing/non-integer `GHOSTREPLAY_RELEASE_GUARD_USER`.
+
+### `select-release`
+
+Scores a frozen-cohort artifact, decides ship / no-ship, writes the **full**
+`SelectionResult` to a private path, and prints **only** a redacted approval summary.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--artifact` | **required** | ABSOLUTE path to the frozen-cohort artifact, OUTSIDE every worktree |
+| `--result-output` | **required** | ABSOLUTE path the full result JSON is written to, OUTSIDE every worktree. Never overwritten — an existing file is a refusal, not a republish |
+
+Both must be absolute because the launcher execs the child with `cwd=<tree>/backend`, so
+a relative path would resolve against a directory the operator never chose.
+
+```bash
+backend/scripts/release_calibration.sh --mount-cohort-provenance -- \
+  select-release --artifact /abs/private/store/cohort.json \
+                 --result-output /abs/private/store/result.json
+```
+
+**What the mount is for.** Approval happens *before* the provenance record is committed,
+so at selection time the candidate record exists only as an uncommitted working-tree diff
+in the origin checkout — while the run itself executes from a worktree checked out from a
+*revision*, where `COHORT_PROVENANCE_PATH` resolves to the old committed record (or to
+nothing at all). `--mount-cohort-provenance` copies the origin working-tree bytes into the
+checkout and hands the child their SHA-256 in `GHOSTREPLAY_COHORT_PROVENANCE_SHA256`,
+computed before the child interpreter exists. `select-release` refuses without it. There
+is deliberately no `--provenance-record <path>` option: a caller-supplied path would let a
+caller pass an unapproved artifact plus a freshly generated record that matches it.
+
+**Run it from the main checkout.** The origin working tree means git's *main* working tree,
+and the launcher checks rather than assumes it: `--git-dir == --git-common-dir`. The record
+being mounted is uncommitted, so it exists in exactly one checkout — the one the capture ran
+in. Launched from a linked worktree, the mount would silently pick up whatever *that*
+worktree has committed at `cohort_provenance.json`, and a stale record paired with its own
+matching artifact passes every downstream trust gate: a clean-looking approval describing a
+cohort nobody captured today. That is refused, not silently redirected — if the capture
+record is not in the checkout you are standing in, the run is not the one you think it is.
+
+**"Outside every worktree" is decided by filesystem identity**, not by comparing resolved
+path strings. `Path.resolve()` follows symlinks but preserves the caller's *spelling*, and
+this repo lives on a case-insensitive filesystem, so `/users/…/ghostreplay/result.json` is
+the same file as `/Users/…/ghostreplay/result.json` while comparing unequal to every
+forbidden root. `(st_dev, st_ino)` is the filesystem's own answer, and it closes hard links
+and bind mounts in the same move. The leaf need not exist, so the walk covers the path and
+every one of its parents. The worktree listing is read with `--porcelain -z`: git prints the
+path raw, and a directory name may legally contain a newline that line-based parsing would
+cut in half — recording a *prefix* of a real worktree as the forbidden root.
+
+**Rejected arguments are never echoed.** Stock argparse prints the offending tokens
+verbatim, which would put a production user id on stderr for `--release-guard-user 987654`
+and a private store path there for a wrong-mode `--output /abs/private/...`. No message
+argparse rendered is ever forwarded — sanitizing rendered text is unbounded work, and each
+attempt at it leaked (a dash-prefix test read `-987654` as an option name; a single-quote
+filter missed `"987654'x"`, because `repr` switches quote styles around an apostrophe; the
+`--report-fold-grid` domain error was never quoted at all). Every usage error is instead
+*assembled* from a closed vocabulary — the option names, subcommand names, and dests
+registered by this CLI itself, plus the retired options it names deliberately — together
+with fixed prose and counts of what was withheld. A token is echoed only if it is a member
+of that vocabulary; anything else, flag-shaped or not, is counted. A message that cannot
+be assembled that way collapses to a single fixed string, so an unanticipated phrasing
+degrades to silence rather than to a leak.
+
+The program name in the usage block and the `prog: error:` prefix is a pinned literal, not
+`sys.argv[0]`. argv[0] is process-controlled — `exec -a`, or a copy of this script parked
+in the private store — and argparse would otherwise print it on every usage error and on
+`--help`, through a channel the message assembly cannot see.
+
+**stdout / stderr split.** stdout carries the redacted summary JSON *and nothing else*, so
+a failed run has empty stdout and a successful one can be piped straight into `jq`. Every
+diagnostic goes to stderr, and every diagnostic is a fixed, data-free message plus the
+exception class name — no exception text and no path is ever forwarded, because binding
+errors embed real score operands and cohort pair identifiers. There is no debug-verbosity
+switch: it would be a leak with a flag on it. The inputs are in the private store and the
+failing condition is reproducible there.
+
+The summary carries names, booleans, digests, and the winner's six cutoffs. It does not
+carry the result filename (a content hash names the reviewed bytes instead), the B1 grade,
+any distribution, any gate operand, or the free-form no-ship reason — all of which live in
+the private file the approver reads.
+
+| Exit | Meaning |
+|------|---------|
+| `0` | a valid result WITH a winner; full result published, summary printed |
+| `1` | a valid result with `winner is None` — **no-ship, and nothing else** |
+| `2` | CLI contract: argparse usage error, a relative or repo-interior path, a missing/non-regular artifact, a missing result-output parent |
+| `3` | release-trust refusal: the provenance mount is absent, disagrees, or MOVED between the gate's read and the load guard's; `scorer_source_verified_preexec` is False; the running code is not the code the digest names |
+| `4` | input rejection: the load guard refused the artifact/record pair, a fail-closed binding check refused the inputs, or the artifact could not be read |
+| `5` | output failure: the result failed its own serialization or redaction schema, a result already exists at the requested path, or the write failed |
+| `6` | unexpected internal error (the catch-all) |
+
 ## Release runs: use the launcher
 
 A **release** calibration — one whose winner Phase 3 will apply — must be started
 through `release_calibration_launcher.py`, never by invoking the scorer directly:
 
 ```bash
-# --select-release lands with g-p4ih-release-cli; the launcher forwards any args.
-backend/scripts/release_calibration.sh -- --select-release
+backend/scripts/release_calibration.sh --mount-cohort-provenance -- \
+  select-release --artifact /abs/private/store/cohort.json \
+                 --result-output /abs/private/store/result.json
 ```
 
 Use the wrapper. It is not sugar: it starts the launcher itself under **`-I -S`**, and the

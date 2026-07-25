@@ -74,6 +74,11 @@ Use the interpreter whose environment has the scorer's dependencies — the chil
 ``--rev`` (default ``HEAD``) is the commit the run executes from. Uncommitted edits in the
 working tree are IRRELEVANT by construction — the worktree is checked out from ``rev``, so
 a release run can never score bytes that were never committed.
+
+``--mount-cohort-provenance`` is the ONE deliberate exception to that, and it carries DATA,
+never code: ``select-release`` must select against the candidate provenance record the
+capture run just wrote, which is still an uncommitted working-tree diff at approval time.
+See ``mount_cohort_provenance``.
 """
 from __future__ import annotations
 
@@ -87,12 +92,21 @@ import sys
 import sysconfig
 import tempfile
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 
 # Mirrors cal.SCORER_SOURCE_DIGEST_ENV. NOT imported from it: importing the scorer would
 # compile the very code this launcher exists to vouch for. Pinned by a test instead.
 SCORER_SOURCE_DIGEST_ENV = "GHOSTREPLAY_SCORER_SOURCE_DIGEST"
+
+# Mirrors cal.COHORT_PROVENANCE_DIGEST_ENV, for the same reason and under the same
+# discipline (pinned equal by a test).
+COHORT_PROVENANCE_DIGEST_ENV = "GHOSTREPLAY_COHORT_PROVENANCE_SHA256"
+
+# The candidate provenance record, repo-relative. Deliberately NOT in SCORER_SOURCE_FILES
+# (a test pins that): it is DATA the run selects against, not code the digest binds, and
+# folding it into the manifest would make every capture invalidate the scorer digest.
+COHORT_PROVENANCE_REL = "backend/scripts/fixtures/cohort_provenance.json"
 
 # The scorer, repo-relative. It is both what we exec and where the manifest is read from,
 # and it must appear IN that manifest — see read_manifest.
@@ -266,16 +280,19 @@ def _worktree_registered(repo_root: Path, tree: Path) -> bool | None:
     non-strict on purpose: the caller that matters most asks after deleting the directory.
     """
     listed = subprocess.run(
-        ["git", "-C", str(repo_root), "worktree", "list", "--porcelain"],
-        capture_output=True, text=True,
+        # -z for the same reason the scorer's forbidden-root listing uses it: the porcelain
+        # path is printed raw, and a directory name may contain a newline that splitlines()
+        # would cut in half.
+        ["git", "-C", str(repo_root), "worktree", "list", "--porcelain", "-z"],
+        capture_output=True,
     )
     if listed.returncode != 0:
         return None
     target = tree.resolve()
     return any(
-        Path(line[len("worktree "):]).resolve() == target
-        for line in listed.stdout.splitlines()
-        if line.startswith("worktree ")
+        Path(os.fsdecode(field[len(b"worktree "):])).resolve() == target
+        for field in listed.stdout.split(b"\0")
+        if field.startswith(b"worktree ")
     )
 
 
@@ -363,7 +380,118 @@ def exclusive_checkout(repo_root: Path, rev: str) -> Iterator[Path]:
         shutil.rmtree(parent, ignore_errors=True)
 
 
-def child_env(tree_root: Path, digest: str, pycache_dir: Path) -> dict[str, str]:
+def _require_main_worktree(repo_root: Path) -> None:
+    """Refuse unless ``repo_root`` is git's MAIN working tree.
+
+    ``repo_root`` is derived from ``__file__``, i.e. it is whichever checkout the operator
+    happened to launch from. For everything else that is harmless — ``worktree add`` reaches
+    the same object store from any of them, and the run executes from a REVISION either way.
+    For the mount it is not: the record being mounted is UNCOMMITTED, so it exists in exactly
+    one checkout, the one the capture run wrote it in. Launched from a linked worktree, the
+    mount would instead pick up whatever that worktree has committed at
+    ``COHORT_PROVENANCE_REL`` — a STALE record — and a stale record paired with its own
+    matching artifact passes every downstream trust gate. The approval would look clean while
+    describing a cohort nobody captured today.
+
+    So the mismatch is refused rather than papered over by reading from the main worktree
+    behind the operator's back: if the capture record is not in the checkout they are
+    standing in, the run they are about to approve is not the one they think it is.
+
+    ``--git-dir == --git-common-dir`` IS the main-worktree test; a linked worktree's git dir
+    is ``<common>/worktrees/<name>``. Fails closed — ``_git`` raises on a non-zero git.
+    """
+    lines = _git(
+        "-C", str(repo_root), "rev-parse", "--path-format=absolute",
+        "--git-dir", "--git-common-dir",
+    ).splitlines()
+    if len(lines) != 2:
+        raise LauncherError(
+            "could not determine whether this is git's main working tree, so the candidate "
+            "provenance record cannot be mounted (it exists only as an uncommitted edit in "
+            "the checkout the capture ran in)"
+        )
+    if Path(lines[0].strip()).resolve() != Path(lines[1].strip()).resolve():
+        raise LauncherError(
+            f"{repo_root} is a LINKED git worktree, not the main checkout. "
+            "--mount-cohort-provenance carries the UNCOMMITTED record the capture run just "
+            "wrote, which lives in exactly one checkout; from here it would mount whatever "
+            "this worktree has COMMITTED instead — a stale record that, paired with its own "
+            "artifact, passes every trust gate. Run the release launcher from the checkout "
+            "the capture ran in."
+        )
+
+
+def mount_cohort_provenance(repo_root: Path, tree: Path) -> str:
+    """Copy the ORIGIN WORKING TREE's cohort provenance record into ``tree`` and return the
+    SHA-256 of the bytes copied.
+
+    WHY A MOUNT AND NOT A ``--provenance-record`` OPTION. Approval happens BEFORE the record
+    is committed, so at selection time the candidate record exists only as an uncommitted
+    working-tree diff in the origin checkout — while the run itself executes from a worktree
+    checked out from a REVISION, where ``COHORT_PROVENANCE_PATH`` resolves to the OLD
+    committed record (or to nothing). The record cannot reach selection by itself. It must
+    also not reach it by a path the operator names: the scorer's ``build_selection_inputs``
+    treats the record as a TRUST BOUNDARY precisely because a caller-supplied path lets a
+    caller pass an unapproved artifact plus a freshly generated matching record. The mount
+    keeps the operator out of the naming, and the bytes are hashed HERE — before the child
+    interpreter exists — exactly like the manifest digest.
+
+    The ORIGIN working tree means git's MAIN working tree, and that is CHECKED, not assumed:
+    see _require_main_worktree for why a linked-worktree launch would otherwise mount a
+    stale record that passes every gate.
+
+    Both ends go through ``manifest_path``, so the same "resolves inside the tree" proof the
+    hashed files get covers the record's source and destination. ``os.replace`` onto the
+    destination overwrites whatever the checkout committed there; clobbering is correct HERE
+    and only here, because the destination is inside a throwaway worktree.
+    """
+    _require_main_worktree(repo_root)
+    source = manifest_path(repo_root, COHORT_PROVENANCE_REL)
+    try:
+        data = source.read_bytes()
+    except OSError as exc:
+        raise LauncherError(
+            f"cannot read the candidate provenance record {COHORT_PROVENANCE_REL} in the "
+            f"origin working tree: {exc.strerror}. --mount-cohort-provenance carries the "
+            "record the capture run just wrote; run capture-cohort first, or drop the flag"
+        ) from None
+    digest = hashlib.sha256(data).hexdigest()
+    destination = manifest_path(tree, COHORT_PROVENANCE_REL)
+    temp = destination.with_name(f"{destination.name}.mount-{os.getpid()}")
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(temp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, destination)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(temp)
+            raise
+        destination.chmod(0o444)
+        written = destination.read_bytes()
+    except OSError as exc:
+        raise LauncherError(
+            f"cannot mount {COHORT_PROVENANCE_REL} into the checkout: {exc.strerror}"
+        ) from None
+    if hashlib.sha256(written).hexdigest() != digest:
+        raise LauncherError(
+            f"the mounted {COHORT_PROVENANCE_REL} does not hash to the bytes read from the "
+            "origin working tree — refusing to hand the child a digest it cannot honour"
+        )
+    return digest
+
+
+def child_env(
+    tree_root: Path,
+    digest: str,
+    pycache_dir: Path,
+    *,
+    provenance_digest: str | None = None,
+) -> dict[str, str]:
     """The environment the verified child must run under.
 
     Three things, each load-bearing:
@@ -397,6 +525,10 @@ def child_env(tree_root: Path, digest: str, pycache_dir: Path) -> dict[str, str]
     ``-S``. Non-PYTHON* variables are inherited on purpose: DATABASE_URL and friends are the
     run's actual configuration.
 
+    ``GHOSTREPLAY_COHORT_PROVENANCE_SHA256`` joins them when a record was mounted. It is
+    added HERE, after the ``PYTHON*`` strip and alongside the scorer digest, so the
+    allowlist discipline above holds for it too.
+
     Read ``-S`` in child_command for what the startup-hook half of this buys, and
     ``_audited_dep_paths`` for what "audited" is and is not worth.
     """
@@ -406,6 +538,13 @@ def child_env(tree_root: Path, digest: str, pycache_dir: Path) -> dict[str, str]
     env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONPATH"] = os.pathsep.join(str(p) for p in _audited_dep_paths())
+    # Set it, or REMOVE it. The strip above only covers PYTHON*, so an inherited
+    # GHOSTREPLAY_COHORT_PROVENANCE_SHA256 would otherwise survive into a run that mounted
+    # nothing — handing the child a digest no launcher computed, which is the whole thing
+    # the mount exists to rule out.
+    env.pop(COHORT_PROVENANCE_DIGEST_ENV, None)
+    if provenance_digest is not None:
+        env[COHORT_PROVENANCE_DIGEST_ENV] = provenance_digest
     return env
 
 
@@ -529,7 +668,13 @@ def child_command(tree_root: Path, script_args: Sequence[str]) -> list[str]:
     return [sys.executable, "-S", str(tree_root / CALIBRATE_REL), *script_args]
 
 
-def launch(tree_root: Path, script_args: Sequence[str], *, pycache_dir: Path) -> int:
+def launch(
+    tree_root: Path,
+    script_args: Sequence[str],
+    *,
+    pycache_dir: Path,
+    provenance_digest: str | None = None,
+) -> int:
     """Hash ``tree_root``'s manifest, then run the scorer from it under that digest.
 
     ORDER IS THE POINT: the digest is computed before the child interpreter exists, so it
@@ -551,7 +696,7 @@ def launch(tree_root: Path, script_args: Sequence[str], *, pycache_dir: Path) ->
     print(f"[launcher] tree={tree_root} digest={digest[:12]}", file=sys.stderr)
     proc = subprocess.run(
         child_command(tree_root, script_args),
-        env=child_env(tree_root, digest, pycache_dir),
+        env=child_env(tree_root, digest, pycache_dir, provenance_digest=provenance_digest),
         cwd=str(tree_root / "backend"),
     )
     return proc.returncode
@@ -564,6 +709,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         "--rev", default="HEAD",
         help="Commit to run from (default HEAD). The run executes from a throwaway worktree "
              "of this rev, so working-tree edits never reach a release run.",
+    )
+    parser.add_argument(
+        "--mount-cohort-provenance", action="store_true",
+        help="Copy the ORIGIN WORKING TREE's backend/scripts/fixtures/cohort_provenance.json "
+             "into the checkout and hand the child its SHA-256. Required by select-release, "
+             "whose candidate record is still uncommitted at approval time. OFF by default: a "
+             "dev or report run under the launcher has no candidate record to mount.",
     )
     parser.add_argument(
         "script_args", nargs=argparse.REMAINDER,
@@ -582,8 +734,17 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     repo_root = Path(__file__).resolve().parents[2]
     with exclusive_checkout(repo_root, args.rev) as tree:
+        # AFTER the checkout exists and BEFORE the child: the record's bytes, like the
+        # manifest's, are hashed while no child interpreter exists to have influenced them.
+        provenance_digest = (
+            mount_cohort_provenance(repo_root, tree) if args.mount_cohort_provenance else None
+        )
         # Inside the same private temp parent as the worktree: created fresh, dies with it.
-        return launch(tree, args.script_args, pycache_dir=tree.parent / "pycache")
+        return launch(
+            tree, args.script_args,
+            pycache_dir=tree.parent / "pycache",
+            provenance_digest=provenance_digest,
+        )
 
 
 if __name__ == "__main__":

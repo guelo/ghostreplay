@@ -8,12 +8,14 @@ the in-process half is tested in test_calibrate_opening_scores.py.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import sysconfig
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -787,9 +789,180 @@ class TestLaunchPreconditions:
 
 class TestArgParsing:
     def test_forwards_script_args_after_the_separator(self):
-        args = launcher._parse_args(["--rev", "abc123", "--", "--select-release", "--json"])
+        args = launcher._parse_args(["--rev", "abc123", "--", "select-release", "--artifact", "/abs/a"])
         assert args.rev == "abc123"
-        assert args.script_args == ["--select-release", "--json"]
+        assert args.script_args == ["select-release", "--artifact", "/abs/a"]
 
     def test_defaults_to_head(self):
         assert launcher._parse_args([]).rev == "HEAD"
+
+
+# ---------------------------------------------------------------------------
+# g-p4ih-release-cli: the candidate-provenance MOUNT.
+# ---------------------------------------------------------------------------
+
+
+def _repo_with_provenance(tmp_path: Path, committed: bytes, working: bytes | None) -> Path:
+    """A disposable repo whose cohort_provenance.json is COMMITTED as ``committed`` and then
+    overwritten in the working tree with ``working`` — the shape at approval time, where the
+    candidate record exists only as an uncommitted diff."""
+    repo = _disposable_repo(tmp_path)
+    record = repo / launcher.COHORT_PROVENANCE_REL
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_bytes(committed)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "record"], check=True, capture_output=True)
+    if working is not None:
+        record.write_bytes(working)
+    return repo
+
+
+class TestCohortProvenanceMount:
+    def test_the_env_constant_mirrors_the_scorers(self):
+        # The launcher must never import the scorer, so the constant is duplicated — and
+        # pinned equal here, exactly like SCORER_SOURCE_DIGEST_ENV.
+        assert launcher.COHORT_PROVENANCE_DIGEST_ENV == cal.COHORT_PROVENANCE_DIGEST_ENV
+        assert launcher.COHORT_PROVENANCE_REL == str(
+            cal.COHORT_PROVENANCE_PATH.relative_to(_REPO_ROOT)
+        )
+
+    def test_the_record_is_not_in_the_scorer_manifest(self):
+        # If it were, every capture would invalidate the scorer digest — and the mount would
+        # perturb manifest_digest(tree), coupling two orderings that are deliberately free.
+        assert launcher.COHORT_PROVENANCE_REL not in cal.SCORER_SOURCE_FILES
+
+    def test_mounts_the_working_tree_bytes_not_the_committed_ones(self, tmp_path):
+        repo = _repo_with_provenance(tmp_path, b'{"committed": true}', b'{"candidate": true}')
+        with launcher.exclusive_checkout(repo, "HEAD") as tree:
+            # The checkout carries the COMMITTED record...
+            assert (tree / launcher.COHORT_PROVENANCE_REL).read_bytes() == b'{"committed": true}'
+            digest = launcher.mount_cohort_provenance(repo, tree)
+            # ...and after the mount, the origin WORKING TREE bytes, under their own digest.
+            assert (tree / launcher.COHORT_PROVENANCE_REL).read_bytes() == b'{"candidate": true}'
+            assert digest == hashlib.sha256(b'{"candidate": true}').hexdigest()
+
+    def test_the_destination_goes_through_manifest_path(self, tmp_path):
+        repo = _repo_with_provenance(tmp_path, b"{}", b'{"candidate": true}')
+        with launcher.exclusive_checkout(repo, "HEAD") as tree:
+            launcher.mount_cohort_provenance(repo, tree)
+            destination = launcher.manifest_path(tree, launcher.COHORT_PROVENANCE_REL)
+            assert destination.exists()
+            assert tree.resolve() in destination.parents
+
+    def test_the_mount_does_not_move_the_scorer_digest(self, tmp_path):
+        repo = _repo_with_provenance(tmp_path, b"{}", b'{"candidate": true}')
+        with launcher.exclusive_checkout(repo, "HEAD") as tree:
+            before = launcher.manifest_digest(tree)
+            launcher.mount_cohort_provenance(repo, tree)
+            assert launcher.manifest_digest(tree) == before
+
+    def test_a_missing_origin_record_refuses(self, tmp_path):
+        repo = _disposable_repo(tmp_path)  # no cohort_provenance.json at all
+        with launcher.exclusive_checkout(repo, "HEAD") as tree:
+            with pytest.raises(launcher.LauncherError) as exc:
+                launcher.mount_cohort_provenance(repo, tree)
+        assert launcher.COHORT_PROVENANCE_REL in str(exc.value)
+
+    def test_the_child_env_carries_the_digest_only_when_mounting(self, tmp_path):
+        plain = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc")
+        assert launcher.COHORT_PROVENANCE_DIGEST_ENV not in plain
+        mounted = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc",
+                                     provenance_digest="e" * 64)
+        assert mounted[launcher.COHORT_PROVENANCE_DIGEST_ENV] == "e" * 64
+
+    def test_an_inherited_digest_never_survives_into_an_unmounted_run(self, tmp_path, monkeypatch):
+        # The PYTHON* strip does not cover a GHOSTREPLAY_* variable, so a stale inherited
+        # value would otherwise hand the child a digest no launcher computed.
+        monkeypatch.setenv(launcher.COHORT_PROVENANCE_DIGEST_ENV, "f" * 64)
+        env = launcher.child_env(tmp_path, "d" * 64, tmp_path / "pyc")
+        assert launcher.COHORT_PROVENANCE_DIGEST_ENV not in env
+
+    def test_the_flag_is_off_by_default_and_parses(self):
+        assert launcher._parse_args([]).mount_cohort_provenance is False
+        args = launcher._parse_args([
+            "--mount-cohort-provenance", "--",
+            "select-release", "--artifact", "/abs/a.json", "--result-output", "/abs/r.json",
+        ])
+        assert args.mount_cohort_provenance is True
+        # Forwarded VERBATIM through --: no per-option forwarding code exists or is needed.
+        assert args.script_args == [
+            "select-release", "--artifact", "/abs/a.json", "--result-output", "/abs/r.json",
+        ]
+        assert launcher.child_command(Path("/tree"), args.script_args)[-4:] == [
+            "--artifact", "/abs/a.json", "--result-output", "/abs/r.json",
+        ]
+
+    def test_main_mounts_only_when_asked(self, tmp_path, monkeypatch):
+        """The mount happens in main(), AFTER exclusive_checkout yields and BEFORE launch —
+        so the record's bytes are hashed while no child interpreter exists."""
+        order = []
+        seen = {}
+
+        @contextmanager
+        def fake_checkout(repo_root, rev):
+            order.append("checkout")
+            yield tmp_path / "tree"
+
+        def fake_mount(repo_root, tree):
+            order.append("mount")
+            return "a" * 64
+
+        def fake_launch(tree, script_args, *, pycache_dir, provenance_digest=None):
+            order.append("launch")
+            seen["digest"] = provenance_digest
+            return 0
+
+        monkeypatch.setattr(launcher, "require_isolated_launcher", lambda *a, **k: None)
+        monkeypatch.setattr(launcher, "exclusive_checkout", fake_checkout)
+        monkeypatch.setattr(launcher, "mount_cohort_provenance", fake_mount)
+        monkeypatch.setattr(launcher, "launch", fake_launch)
+
+        assert launcher.main(["--", "report"]) == 0
+        assert order == ["checkout", "launch"]        # OFF is the correct default
+        assert seen["digest"] is None
+
+        order.clear()
+        assert launcher.main(["--mount-cohort-provenance", "--", "select-release"]) == 0
+        assert order == ["checkout", "mount", "launch"]
+        assert seen["digest"] == "a" * 64
+
+    def test_a_linked_worktree_launch_refuses_to_mount(self, tmp_path):
+        """MAIN-DIRTY vs LINKED-COMMITTED. repo_root is wherever the launcher was started
+        from, so a linked-worktree launch would mount that worktree's COMMITTED record — a
+        stale record which, paired with its own artifact, passes every downstream gate."""
+        main = _repo_with_provenance(tmp_path, b'{"stale": true}', b'{"candidate": true}')
+        linked = tmp_path / "linked"
+        subprocess.run(
+            ["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(linked)],
+            check=True, capture_output=True,
+        )
+        # The linked worktree carries the STALE bytes, and nothing there says so.
+        assert (linked / launcher.COHORT_PROVENANCE_REL).read_bytes() == b'{"stale": true}'
+        with launcher.exclusive_checkout(main, "HEAD") as tree:
+            with pytest.raises(launcher.LauncherError) as exc:
+                launcher.mount_cohort_provenance(linked, tree)
+            assert "LINKED" in str(exc.value)
+            # And the main checkout still mounts its uncommitted candidate.
+            assert launcher.mount_cohort_provenance(main, tree) == hashlib.sha256(
+                b'{"candidate": true}'
+            ).hexdigest()
+
+    def test_the_main_worktree_check_fails_closed_when_git_will_not_answer(self, tmp_path, monkeypatch):
+        repo = _repo_with_provenance(tmp_path, b"{}", b'{"candidate": true}')
+        monkeypatch.setattr(launcher, "_git", lambda *a: "only-one-line")
+        with pytest.raises(launcher.LauncherError) as exc:
+            launcher._require_main_worktree(repo)
+        assert "could not determine" in str(exc.value)
+
+    def test_a_newline_bearing_worktree_path_is_still_seen_as_registered(self, tmp_path):
+        # `git worktree list --porcelain` prints the path raw; splitlines() would cut this
+        # one in half and report the registration as absent.
+        repo = _disposable_repo(tmp_path)
+        odd = tmp_path / "lin\nefeed"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", "--detach", str(odd)],
+            check=True, capture_output=True,
+        )
+        assert launcher._worktree_registered(repo, odd) is True
+        assert launcher._registration_gone(repo, odd) is False
