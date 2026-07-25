@@ -7,10 +7,14 @@ export type AnalyzeMoveMessage = {
   moveIndex?: number
   legalMoveCount?: number
   /**
-   * Search depth for the root, post-played, and post-best searches. Omitted by
-   * the in-game analysis path (defaults to 17); the analysis-board evidence driver
-   * passes 21 to produce stronger, persistable `browser-analysis-v1` evidence
-   * (g-cache-stronger-evals).
+   * Search depth for the root, post-played, and post-best searches. Defaults to
+   * 17 when omitted. Both in-game callers now pass `sessionAnalysisDepth()` — the
+   * per-device depth, fixed for the whole page session (g-mk1d) — and the
+   * analysis-board evidence driver passes 21 (g-cache-stronger-evals).
+   *
+   * The CALLER owns this value, and therefore owns the provenance claim built
+   * from it: the worker no longer needs to echo the depth back, only whether the
+   * configured limit was honestly reached (`capFired` below).
    */
   depth?: number
 }
@@ -21,6 +25,9 @@ export type AnalysisWorkerRequest =
   | { type: 'terminate' }
 
 import type { MoveClassification } from './analysisUtils'
+
+/** Why a search (or a whole analyze-move) stopped. */
+export type AnalysisStopReason = 'bestmove' | 'deadline'
 
 export type AnalysisWorkerResponse =
   | { type: 'ready' }
@@ -61,6 +68,30 @@ export type AnalysisWorkerResponse =
        * Diagnostics only — not persisted (profile propagation is a follow-up).
        */
       canonical: boolean
+      /**
+       * True when ANY constituent search of this analyze-move was stopped by the
+       * shared wall-clock deadline (g-mk1d §1.6). The tuple is then a TRUNCATED
+       * search, so the caller must NOT attach a depth claim to it — the row falls
+       * back to provenance-less `browser-game-v1`.
+       *
+       * This is the provenance-honesty signal, NOT `reachedDepth < depth`, which is
+       * wrong in both directions: the stop can land just after `info depth N` is
+       * reported (reached == requested, still truncated), and a forced mate can
+       * finish below N with no cap — the configured limit was honestly satisfied
+       * there, so that tuple KEEPS its provenance.
+       */
+      capFired: boolean
+      /**
+       * Why this analyze-move ended, folded across its constituent searches:
+       * `'deadline'` if ANY was cut short by the shared budget, else
+       * `'bestmove'`. Currently determined by `capFired` — it is the readable
+       * form of the same fact, kept as its own field so a future third reason
+       * (engine abort, stop-grace expiry) can be reported without consumers
+       * having to re-interpret a boolean.
+       */
+      stopReason: AnalysisStopReason
+      /** Deepest completed root iteration observed. Diagnostics only. */
+      reachedDepth: number | null
     }
   | { type: 'error'; error: string; id?: string }
   | { type: 'log'; message: string }

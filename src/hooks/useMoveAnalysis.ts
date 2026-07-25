@@ -4,6 +4,8 @@ import type {
   AnalysisWorkerResponse,
 } from '../workers/analysisMessages'
 import { isRecordableFailure, isWithinRecordingMoveCap, classifyMove, isTrustedPositionHit, isTrustedExactBestHit, isTrustedMoveHit, hasCpEvalLoss, reconcileTrustedBest } from '../workers/analysisUtils'
+import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
+import { buildBrowserProvenance } from '../workers/browserProvenance'
 import { lookupAnalysisCache } from '../utils/api'
 import type { CachedAnalysis } from '../utils/api'
 import type { AnalysisStore } from '../stores/createAnalysisStore'
@@ -130,6 +132,12 @@ const fromCachedAnalysis = (
     classification,
     blunder,
     recordable,
+    // A cache-read result reflects SOMEONE ELSE'S search, not this device's, so it
+    // carries NO provenance: a device must never re-stamp a row it merely read
+    // with its own identity. Harmless in practice — the key already has a stored
+    // row and game uploads are insert-only for such keys — but the honesty rule
+    // is what keeps the strength ordering meaningful (g-mk1d §2.3).
+    provenance: null,
   }
 }
 
@@ -789,6 +797,11 @@ export const useMoveAnalysis = (
               classification: message.classification,
               blunder,
               recordable,
+              // Fresh local search: this device's provenance, unless the shared
+              // wall-clock deadline truncated a constituent search (g-mk1d §1.6).
+              provenance: message.capFired
+                ? null
+                : buildBrowserProvenance(sessionAnalysisDepth()),
             }
 
             if (entry.cacheStatus === 'pending') {
@@ -823,6 +836,9 @@ export const useMoveAnalysis = (
             classification: message.classification,
             blunder: message.classification === 'blunder',
             recordable: false,
+            provenance: message.capFired
+              ? null
+              : buildBrowserProvenance(sessionAnalysisDepth()),
           }
           store.getState().setLastAnalysis(result)
           if (result.blunder && message.delta !== null) {
@@ -982,6 +998,9 @@ export const useMoveAnalysis = (
         fen,
         move,
         playerColor,
+        // Per-device depth, fixed for the whole page session (g-mk1d). The floor
+        // is today's 17, so the weakest device is unchanged.
+        depth: sessionAnalysisDepth(),
         ...(moveIndex !== undefined ? { moveIndex } : {}),
         ...(legalMoveCount !== undefined ? { legalMoveCount } : {}),
       }

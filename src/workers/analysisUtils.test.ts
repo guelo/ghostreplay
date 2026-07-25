@@ -1159,6 +1159,35 @@ describe('reconcileTrustedBest (pure helper)', () => {
     })
   })
 
+  it('clears provenance on BOTH rewrite branches, keeps it on the no-ops', () => {
+    // A rewritten tuple mixes canonical POSITION truth into what was a pure
+    // browser search, so a depth claim on it would be false (g-mk1d §2.5). The
+    // two no-op branches return the input object untouched, provenance included,
+    // so a genuinely raw worker tuple stays eligible for a browser-game-v2 row.
+    const provenance = {
+      engine_version: '18',
+      engine_build: 'a'.repeat(64),
+      eval_file_id: `nn-9067e33176e8.nnue:${'9'.repeat(64)}`,
+      search_limit_type: 'depth' as const,
+      search_limit_value: 17,
+      threads: 1,
+      hash_mb: 128,
+    }
+    const withProvenance = { ...base, provenance }
+
+    // PROMOTION rewrite (played IS the trusted best).
+    expect(reconcileTrustedBest(withProvenance, 'c2c4').provenance).toBeNull()
+    // DEMOTION rewrite (a fallback wrongly graded a non-best move 'best').
+    const wronglyBest = { ...withProvenance, move: 'd7d5', classification: 'best' as const }
+    expect(reconcileTrustedBest(wronglyBest, 'c2c4').provenance).toBeNull()
+
+    // No-op: already 'best' and played IS the trusted best.
+    const alreadyBest = { ...withProvenance, classification: 'best' as const }
+    expect(reconcileTrustedBest(alreadyBest, 'c2c4').provenance).toBe(provenance)
+    // No-op: non-best and played is NOT the trusted best.
+    expect(reconcileTrustedBest(withProvenance, 'd2d4').provenance).toBe(provenance)
+  })
+
   it('is a no-op when the played move is not the trusted best', () => {
     const out = reconcileTrustedBest(base, 'd2d4')
     expect(out).toBe(base)

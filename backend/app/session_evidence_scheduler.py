@@ -71,6 +71,14 @@ class _Entry:
     # the single coalesced worker run computes it. A burst of mid-game
     # incremental uploads (all False) folds to False → zero recomputes.
     run_opportunity: bool = True
+    # OR-folded session-finality bit, derived from the client-sent terminal_action
+    # (g-mk1d code review). SEPARATE from run_opportunity on purpose: the revert
+    # upload also sends recompute_opportunity=True, and any client predating
+    # g-y90g defaults it True on every mid-game upload, so run_opportunity marks
+    # "this run recomputes opportunity", NOT "this session is over". Only
+    # terminal_action's PRESENCE identifies the end-of-session final_full upload
+    # (see the SessionMovesRequest.terminal_action note in app/api/session.py).
+    is_final: bool = False
     enqueue_count: int = 0
 
 
@@ -106,6 +114,7 @@ class SessionEvidenceScheduler:
         player_color: str,
         moves: list,
         run_opportunity: bool,
+        is_final: bool,
     ) -> None:
         """Coalesce an enqueue for ``session_id``. Caller must hold ``_cond``.
 
@@ -116,6 +125,10 @@ class SessionEvidenceScheduler:
         ``run_opportunity`` OR-folds into the entry (g-y90g): an existing entry
         becomes True if ANY enqueue (this one or a prior) requested it, so the
         incremental(False) + final(True) burst collapses to exactly one recompute.
+
+        ``is_final`` OR-folds the same way and for the same reason: the coalesced
+        run covers the whole burst, so it IS the session's final run once the
+        final_full upload has joined it.
         """
         now = self.clock()
         entry = self._pending.get(session_id)
@@ -127,6 +140,7 @@ class SessionEvidenceScheduler:
                 first_seen=now,
                 deadline=min(now + self.quiet_window, now + self.max_wait),
                 run_opportunity=run_opportunity,
+                is_final=is_final,
             )
             self._pending[session_id] = entry
         else:
@@ -136,6 +150,7 @@ class SessionEvidenceScheduler:
                 now + self.quiet_window, entry.first_seen + self.max_wait
             )
             entry.run_opportunity = entry.run_opportunity or run_opportunity
+            entry.is_final = entry.is_final or is_final
         entry.enqueue_count += 1
         self._cond.notify_all()
 
@@ -146,6 +161,7 @@ class SessionEvidenceScheduler:
         player_color: str,
         moves: list,
         run_opportunity: bool = True,
+        is_final: bool = False,
     ) -> None:
         """Coalesce an evidence run for ``session_id``.
 
@@ -156,7 +172,7 @@ class SessionEvidenceScheduler:
             if self._shutdown:
                 return
             self._enqueue_locked(
-                session_id, user_id, player_color, moves, run_opportunity
+                session_id, user_id, player_color, moves, run_opportunity, is_final
             )
         if self.auto_start:
             try:
@@ -298,6 +314,7 @@ class SessionEvidenceScheduler:
                 move_count=len(moves),
                 dialect_name=db.bind.dialect.name,
                 run_opportunity=entry.run_opportunity,
+                is_final=entry.is_final,
             )
         except Exception:
             logger.exception(
@@ -351,6 +368,7 @@ def enqueue_session_evidence(
     evidence_moves: list,
     move_count: int,
     recompute_opportunity: bool = True,
+    is_final: bool = False,
 ) -> None:
     """Schedule the deferred /moves evidence side effects (best-effort).
 
@@ -365,6 +383,9 @@ def enqueue_session_evidence(
     works). ``recompute_opportunity`` (g-y90g) OR-folds into the coalesced entry:
     False from mid-game incremental uploads, True from the final/complete upload,
     so the burst collapses to exactly one opportunity recompute.
+
+    ``is_final`` is the caller's ``terminal_action is not None`` — the ONLY reliable
+    end-of-session signal — and OR-folds independently of ``recompute_opportunity``.
     """
     try:
         _scheduler.enqueue(
@@ -373,6 +394,7 @@ def enqueue_session_evidence(
             player_color,
             evidence_moves,
             run_opportunity=recompute_opportunity,
+            is_final=is_final,
         )
     except Exception:
         logger.exception(

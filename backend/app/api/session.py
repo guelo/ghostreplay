@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 import chess
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,13 +18,17 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.analysis_cache_policy import Reason
+from app.analysis_cache_policy import Reason, browser_live_descriptor
 from app.analysis_cache_repo import write_analysis_cache_rows
+from app.browser_provenance_metrics import session_provenance_verdict
 from app.analysis_profiles import (
     BROWSER_ANALYSIS_MULTIPV_PROFILE_ID,
+    BROWSER_GAME_V2_PROFILE_ID,
     BROWSER_PROFILE_ID,
+    stamp_dynamic_profile,
     stamp_profile_full,
 )
+from app.evidence_policy import validate_browser_provenance
 from app.move_classification import EngineScore, classify_root_alternative
 from app.move_upgrade import MoveUpgrade, move_upgrade_for_row
 from app.centipawn_loss import (
@@ -146,6 +151,20 @@ class SessionMoveInput(BaseModel):
     # synthetic rows are too sparse (and draws can be history-dependent) to be
     # safe global analysis-cache evidence.
     synthetic_terminal_eval: bool = False
+    # Per-row browser-game-v2 DYNAMIC provenance (g-mk1d): the seven engine/search
+    # values this device actually used for THIS move's own local search. Absent or
+    # null ⇒ the row is stamped browser-game-v1 exactly as before (legacy clients,
+    # cache-sourced results, canonically reconciled tuples, time-truncated searches).
+    #
+    # Typed ``Any`` DELIBERATELY. A constrained shape (even ``dict[str, object]``)
+    # makes Pydantic reject every non-object JSON value during request parsing,
+    # which 422s the ENTIRE SessionMovesRequest before the endpoint body runs —
+    # exactly the batch-wide failure the /moves per-row-degradation contract must
+    # prevent. ``Any`` accepts any JSON shape unconditionally, so nothing about
+    # provenance can fail schema validation; ALL checking (starting with "is this
+    # even a mapping?") happens per row in validate_browser_provenance, whose
+    # failure drops only that row's cache evidence.
+    provenance: Any | None = None
 
 
 class SessionMovesRequest(BaseModel):
@@ -806,6 +825,33 @@ def _compute_blunder_opportunity_events(
     # must commit.
 
 
+def _encoded_browser_provenance(move: SessionMoveInput) -> str | None:
+    """JSON for ``session_moves.browser_provenance``, or ``None`` (g-mk1d §5.2).
+
+    Runs the SAME :func:`validate_browser_provenance` gate as the cache write, so
+    the persisted operand can only ever be a well-formed dynamic tuple: absent,
+    malformed, or reconciled-null provenance all persist NULL. A malformed claim
+    must never survive as a comparison operand — a NULL simply withholds the
+    overlay, which is the safe direction.
+
+    Synthetic-terminal rows persist NULL for the same reason ``_upsert_analysis_cache``
+    refuses to cache them: their eval is FABRICATED by the client for a game-ending
+    state, so no search produced it and no search-limit claim can describe it. Without
+    this guard a request carrying both fields would store provenance that the cache
+    correctly declined — and that stored tuple is exactly what
+    ``browser_live_descriptor`` later hands the overlay as its "live search" operand,
+    letting a fabricated eval suppress or license a genuine stored row.
+    """
+    if move.synthetic_terminal_eval:
+        return None
+    if move.provenance is None:
+        return None
+    fields = validate_browser_provenance(move.provenance)
+    if fields is None:
+        return None
+    return json.dumps(fields.values, sort_keys=True, separators=(",", ":"))
+
+
 def _upsert_analysis_cache(
     db: Session,
     moves: list[SessionMoveInput],
@@ -834,8 +880,28 @@ def _upsert_analysis_cache(
     ``finally``, so stamping only after a successful write would record a
     non-empty, possibly-slow failed batch as ``cache_row_count=0`` — falsely in the
     zero-row cohort. Stamped up front, a failed write logs its true row count (and,
-    via the caller's ``status=error``, is excludable from the latency scrape)."""
+    via the caller's ``status=error``, is excludable from the latency scrape).
+
+    Per-row provenance (g-mk1d) selects the profile stamped on each row:
+      * VALID   -> ``browser-game-v2`` + the seven dynamic identity columns;
+      * ABSENT  -> ``browser-game-v1``, all-``None`` identity, exactly as before;
+      * MALFORMED -> the row is DROPPED from the cache write. A malformed claim is
+        never laundered into a silent v1 downgrade — it must stay visible in the
+        counters. The move's ``session_moves`` row is still written (with NULL
+        provenance), so the player's own eval/classification display is unaffected
+        and the batch stays HTTP 200.
+    """
     cache_values = []
+    # Provenance observability (§2.4.1). NOTE the grain: this function runs inside
+    # ``run_side_effects``, which the deferred evidence scheduler invokes ONCE PER
+    # COALESCED SESSION RUN over the last-write-wins-merged move set — NOT once per
+    # /moves request. So these counts are per coalesced run and ROW-WEIGHTED (a long
+    # game contributes many rows). They are the operational health signal ("are
+    # malformed rows appearing at all?"), NOT the fleet-adoption metric; adoption is
+    # the length-independent per-session ``session_provenance`` bit stamped below.
+    provenance_valid = 0
+    provenance_absent = 0
+    provenance_malformed = 0
     for move in moves:
         if move.synthetic_terminal_eval:
             continue
@@ -843,6 +909,18 @@ def _upsert_analysis_cache(
             continue
         if move.eval_cp is None and move.best_move_eval_cp is None:
             continue
+
+        # Classify this row's provenance BEFORE building it: a malformed claim
+        # drops the row rather than downgrading it.
+        if move.provenance is None:
+            provenance_fields = None
+            provenance_absent += 1
+        else:
+            provenance_fields = validate_browser_provenance(move.provenance)
+            if provenance_fields is None:
+                provenance_malformed += 1
+                continue
+            provenance_valid += 1
 
         is_black = move.color == MoveColor.BLACK
         sign = -1 if is_black else 1
@@ -872,6 +950,16 @@ def _upsert_analysis_cache(
             "source": "game",
             "analysis_profile_id": BROWSER_PROFILE_ID,
         }
+        if provenance_fields is not None:
+            # The client supplies ONLY the dynamic half; the fixed identity half
+            # and the manifest digest are stamped server-side from the registry,
+            # so no client can claim a fixed identity it did not earn.
+            row["analysis_profile_id"] = BROWSER_GAME_V2_PROFILE_ID
+            row.update(
+                stamp_dynamic_profile(
+                    BROWSER_GAME_V2_PROFILE_ID, provenance_fields.values
+                )
+            )
         contract_id = select_browser_contract(row)
         if contract_id is None:
             # Row satisfies no allowed contract; skip rather than store a row it
@@ -884,6 +972,19 @@ def _upsert_analysis_cache(
     # Stamp the cohort key before the write, which is the step that can raise.
     if timing_fields is not None:
         timing_fields["cache_row_count"] = len(cache_values)
+        timing_fields["provenance_valid"] = provenance_valid
+        timing_fields["provenance_absent"] = provenance_absent
+        timing_fields["provenance_malformed"] = provenance_malformed
+        # The fleet-adoption bit: ONE verdict per coalesced run, independent of how
+        # long the game is (a 200-move legacy game and a 20-move v2 game each
+        # contribute exactly one verdict). The g-bgv1-cutover criterion rolls these
+        # up per DISTINCT session via ``session_v2_adoption`` — it must never read
+        # the row-weighted counts above.
+        timing_fields["session_provenance"] = session_provenance_verdict(
+            valid=provenance_valid,
+            absent=provenance_absent,
+            malformed=provenance_malformed,
+        )
 
     if not cache_values:
         return 0
@@ -1039,6 +1140,7 @@ def _run_session_move_evidence_side_effects(
     move_count: int,
     dialect_name: str,
     run_opportunity: bool = True,
+    is_final: bool = False,
 ) -> None:
     """Run the evidence side effects after the session_moves upsert, each timed.
 
@@ -1097,10 +1199,17 @@ def _run_session_move_evidence_side_effects(
                 session_id,
                 user_id,
             )
-    # ``run_opportunity`` is the upload-finality signal (g-y90g): the mid-game
-    # incremental uploader opts out (recompute_opportunity=False), so True marks
-    # an end-of-session final/complete upload. Cohorting the latency scrape on
-    # cache_row_count + finality (not move_count) is g-dckw's measurable win.
+    # ``final``/``kind`` are g-dckw's LATENCY cohort and stay keyed on
+    # ``run_opportunity`` — they separate the expensive opportunity-recomputing run
+    # from the cheap incremental ones, which is exactly what latency cohorting wants.
+    #
+    # ``session_final`` is a DIFFERENT question — "is this session over?" — and the
+    # browser-game-v2 adoption rollup (g-mk1d §2.4.1) needs that one, not this one.
+    # run_opportunity cannot answer it: the revert upload also sends True, and a
+    # client predating g-y90g sends True on every mid-game upload, so an abandoned
+    # or reverted session would be scored as if complete. Only terminal_action's
+    # presence marks the end-of-session final_full upload. Deliberately additive:
+    # redefining ``final`` here would silently re-cohort the existing latency metric.
     with _timed_side_effect(
         "analysis_cache_write",
         session_id=session_id,
@@ -1108,6 +1217,7 @@ def _run_session_move_evidence_side_effects(
         move_count=move_count,
         cache_row_count=0,  # stamped with the real filtered count before the write
         final=run_opportunity,
+        session_final=is_final,
         kind="final" if run_opportunity else "live",
         status="error",  # flipped to ok only once the write returns; a raising
         # writer leaves status=error so the latency scrape excludes the failure
@@ -1273,6 +1383,7 @@ def upsert_session_moves(
             "decision_source": move.decision_source.value if move.decision_source else None,
             "target_blunder_id": move.target_blunder_id,
             "segment": segment_for_move(game_session, move.move_number, move.color.value),
+            "browser_provenance": _encoded_browser_provenance(move),
         }
         for move in request.moves
     ]
@@ -1326,6 +1437,7 @@ def upsert_session_moves(
                     existing_row.decision_source = value["decision_source"]
                     existing_row.target_blunder_id = value["target_blunder_id"]
                     existing_row.segment = value["segment"]
+                    existing_row.browser_provenance = value["browser_provenance"]
                 else:
                     db.add(SessionMove(**value))
 
@@ -1355,6 +1467,7 @@ def upsert_session_moves(
                 evidence_moves=evidence_moves,
                 move_count=len(values),
                 recompute_opportunity=request.recompute_opportunity,
+                is_final=is_final_full,
             )
         # Emitted only after the upload is durable (post-commit) so a failed
         # insert/commit never produces a successful-looking analytics event.
@@ -1399,6 +1512,7 @@ def upsert_session_moves(
             "decision_source": statement.excluded.decision_source,
             "target_blunder_id": statement.excluded.target_blunder_id,
             "segment": statement.excluded.segment,
+            "browser_provenance": statement.excluded.browser_provenance,
         },
     )
     with _timed_side_effect(
@@ -1434,6 +1548,7 @@ def upsert_session_moves(
             evidence_moves=evidence_moves,
             move_count=len(values),
             recompute_opportunity=request.recompute_opportunity,
+            is_final=is_final_full,
         )
 
     # Emitted only after the upload is durable (post-commit) so a failed
@@ -1617,6 +1732,20 @@ def get_session_analysis(
         for move, uci in derived_moves
         if move.fen_before and uci
     ]
+    # LIVE comparison operand per key (g-mk1d §5.2). A stored REQUIRES_COMPARISON
+    # row (browser-game-v2) may only re-label a move when it is provably STRONGER
+    # than what THIS session itself searched, and its own per-move provenance is
+    # the only operand available at GET time for a saved game. Legacy/NULL/tampered
+    # provenance yields None -> no overlay, and the player keeps their own label.
+    # (Two session moves can share one key only via an exact position repetition
+    # within the same session; their provenance is identical because the device
+    # depth is fixed for the whole page session, so last-wins is immaterial.)
+    live_by_key: dict[tuple[str, str], object] = {}
+    for move, uci in derived_moves:
+        if move.fen_before and uci:
+            live_by_key[(move.fen_before, uci)] = browser_live_descriptor(
+                move.browser_provenance
+            )
     upgrade_by_key: dict[tuple[str, str], MoveUpgrade] = {}
     if overlay_keys:
         stored_rows = (
@@ -1627,9 +1756,10 @@ def get_session_analysis(
             .all()
         )
         for row in stored_rows:
-            upgrade = move_upgrade_for_row(row)
+            key = (row.fen_before, row.move_uci)
+            upgrade = move_upgrade_for_row(row, live=live_by_key.get(key))
             if upgrade is not None:
-                upgrade_by_key[(row.fen_before, row.move_uci)] = upgrade
+                upgrade_by_key[key] = upgrade
 
     return SessionAnalysisResponse(
         session_id=game_session.id,
@@ -1715,6 +1845,14 @@ _EVIDENCE_ACCEPTED_REASONS = frozenset(
         # The corrective replacement of a defective retired browser-analysis-v1 row
         # by the visible-MultiPV successor is an accepted write (g-reuse-d21-search).
         Reason.PROTOCOL_CORRECTED_REPLACE.value,
+        # A MEASURED replacement (D4 steps 4-5) is a replacement like any other: the
+        # stored row IS now this evidence, so it must emit its MoveUpgrade. Today's
+        # producer cannot generate it — this endpoint stamps the FIXED multipv-v2
+        # profile, which Rule 2a skips and which meets every other profile across an
+        # explicit edge or the authority barrier before the measured steps run — but
+        # omitting it would fail SILENTLY the moment that changes: the write would
+        # succeed and the open MoveList would simply never be told (g-mk1d review).
+        Reason.STRENGTH_REPLACE.value,
         Reason.SAME_PROFILE_SUPERSET_MERGE.value,
         Reason.SAME_PROFILE_CONTRACT_UPGRADE.value,
         Reason.SAME_PROFILE_IDEMPOTENT.value,

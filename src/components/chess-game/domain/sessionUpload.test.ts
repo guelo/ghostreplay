@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Chess } from "chess.js";
 import {
   buildDrillAnalysisSnapshot,
+  buildSessionMoveUploads,
   fillUnresolvedTerminal,
 } from "./sessionUpload";
 import type { MoveRecord } from "./movePresentation";
@@ -93,6 +94,55 @@ const THREEFOLD_LINE = ["Nf3", "Nf6", "Ng1", "Ng8", "Nf3", "Nf6", "Ng1", "Ng8"];
 // through chess.js, so uploads[0].fen_before === the expectedStartingFen passed.
 const FIFTY_MOVE_START = "8/8/4k3/8/8/4K3/8/1R6 w - - 99 60"; // one quiet move -> clock 100
 const INSUFFICIENT_START = "k7/8/8/5n2/8/3B4/8/4K3 w - - 0 1"; // Bxf5 -> K+B vs K
+
+describe("per-row browser provenance", () => {
+  const provenance = {
+    engine_version: "18",
+    engine_build: "a".repeat(64),
+    eval_file_id: `nn-9067e33176e8.nnue:${"9".repeat(64)}`,
+    search_limit_type: "depth" as const,
+    search_limit_value: 20,
+    threads: 1,
+    hash_mb: 128,
+  };
+
+  it("copies each analysis's own provenance onto its upload row", () => {
+    // Per-ROW, not per-request: the deferred scheduler coalesces per slot with
+    // last-write-wins, so each surviving slot must carry its OWN claim.
+    const history = buildHistory();
+    const analyses = new Map([
+      [0, analysis({ provenance })],
+      [1, analysis({ provenance: null })],
+    ]);
+    const uploads = buildSessionMoveUploads(history, analyses, STARTING_FEN);
+    expect(uploads[0].provenance).toEqual(provenance);
+    expect(uploads[1].provenance).toBeNull();
+  });
+
+  it("uploads no provenance for an unanalyzed move", () => {
+    const history = buildHistory();
+    const uploads = buildSessionMoveUploads(history, new Map(), STARTING_FEN);
+    expect(uploads.every((u) => u.provenance === null)).toBe(true);
+  });
+
+  it("re-sends the identical claim, so retries are idempotent", () => {
+    const history = buildHistory();
+    const analyses = new Map([[0, analysis({ provenance })]]);
+    const first = buildSessionMoveUploads(history, analyses, STARTING_FEN);
+    const retry = buildSessionMoveUploads(history, analyses, STARTING_FEN);
+    expect(retry[0].provenance).toEqual(first[0].provenance);
+  });
+
+  it("leaves a synthetic terminal fill provenance-free", () => {
+    // A deterministic terminal score was never searched, so it must not carry a
+    // search claim (the backend skips these rows entirely).
+    const uploads = withUnresolvedFinal(uploadsFor(["f3", "e5", "g4", "Qh4"]));
+    const filled = fillUnresolvedTerminal(uploads, STARTING_FEN);
+    const last = filled[filled.length - 1];
+    expect(last.synthetic_terminal_eval).toBe(true);
+    expect(last.provenance ?? null).toBeNull();
+  });
+});
 
 describe("fillUnresolvedTerminal", () => {
   it("fills only an unresolved final checkmating ply with terminal provenance", () => {

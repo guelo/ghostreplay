@@ -62,6 +62,10 @@ const buildUploadForIndex = (
     best_line_uci: analysis?.bestLine ?? null,
     decision_source: move.decisionSource ?? null,
     target_blunder_id: move.targetBlunderId ?? null,
+    // Carried verbatim from the analysis result, so a retry or an end-of-game
+    // snapshot re-send uploads the identical claim (provenance is idempotent
+    // across attempts). Null whenever the result is not honest raw worker output.
+    provenance: analysis?.provenance ?? null,
   };
 };
 

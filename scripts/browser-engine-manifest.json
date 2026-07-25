@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Shared pin for the bundled browser Stockfish artifact (g-mk1d §2.1).",
+    "",
+    "engine_build is NOT stored here: it is DERIVED by hashing the actually-bundled",
+    "WASM (scripts/gen-browser-engine-identity.mjs), so a swapped artifact cannot",
+    "leave a stale hash behind.",
+    "",
+    "eval_file_id IS stored here because it cannot be derived: the lite-single build",
+    "EMBEDS its single net inside the WASM and ships no standalone .nnue file to hash.",
+    "This is the verified content-addressed identity of that embedded network (its",
+    "filename's 12-hex prefix matches the first 12 hex of the full SHA-256), and it is",
+    "the same value the backend registry pins. Hashing the WASM therefore pins the",
+    "network TRANSITIVELY — swapping the net changes the WASM hash — while this field",
+    "records WHICH network that is.",
+    "",
+    "Bump every field here together with the stockfish npm dependency, then re-run",
+    "`npm run gen:engine-identity`. The CI drift test fails loudly if the committed",
+    "frontend constants, this manifest, and the backend registry disagree."
+  ],
+  "wasm_path": "node_modules/stockfish/bin/stockfish-18-lite-single.wasm",
+  "npm_package": "stockfish@18.0.7",
+  "engine_name": "Stockfish",
+  "engine_version": "18",
+  "eval_file_id": "nn-9067e33176e8.nnue:9067e33176e8c5edb7aa8db6a3aedd012f84a1f39872e86357c6c2d0993f314d"
+}

@@ -20,6 +20,8 @@ import {
   hasCpEvalLoss,
   reconcileTrustedBest,
 } from '../workers/analysisUtils'
+import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
+import { buildBrowserProvenance } from '../workers/browserProvenance'
 import type { MoveClassification, MoveGrade } from '../workers/analysisUtils'
 import { lookupAnalysisCache, uploadSessionMoves } from '../utils/api'
 import type { CachedAnalysis, SessionMoveUpload } from '../utils/api'
@@ -265,6 +267,12 @@ const fromCachedAnalysis = (
     classification,
     blunder,
     recordable,
+    // A cache-read result reflects SOMEONE ELSE'S search, not this device's, so it
+    // carries NO provenance: a device must never re-stamp a row it merely read
+    // with its own identity. Harmless in practice — the key already has a stored
+    // row and game uploads are insert-only for such keys — but the honesty rule
+    // is what keeps the strength ordering meaningful (g-mk1d §2.3).
+    provenance: null,
   }
 }
 
@@ -992,6 +1000,9 @@ export class GameAnalysisCoordinator {
       fen,
       move,
       playerColor,
+      // Per-device depth, fixed for the whole page session (g-mk1d). The floor is
+      // today's 17, so the weakest device is unchanged.
+      depth: sessionAnalysisDepth(),
       ...(moveIndex !== undefined ? { moveIndex } : {}),
       ...(legalMoveCount !== undefined ? { legalMoveCount } : {}),
     }
@@ -1477,6 +1488,11 @@ export class GameAnalysisCoordinator {
       classification: message.classification,
       blunder,
       recordable,
+      // A FRESH local search that reached its configured limit carries this
+      // device's provenance; a time-truncated one (capFired) carries none, so a
+      // depth claim is never stamped on numbers the claimed search did not
+      // produce. Cache-sourced results are built elsewhere and carry null.
+      provenance: message.capFired ? null : buildBrowserProvenance(sessionAnalysisDepth()),
     }
   }
 

@@ -193,6 +193,9 @@ def _create_test_schema(conn) -> None:
             decision_source VARCHAR(20),
             target_blunder_id INTEGER,
             segment VARCHAR(10) NOT NULL DEFAULT 'normal',
+            -- g-mk1d: JSON browser-game-v2 dynamic provenance for this move's own
+            -- local search; the live operand for the REQUIRES_COMPARISON overlay.
+            browser_provenance TEXT,
             UNIQUE(session_id, move_number, color),
             FOREIGN KEY (session_id) REFERENCES game_sessions(id) ON DELETE CASCADE,
             FOREIGN KEY (target_blunder_id) REFERENCES blunders(id),
@@ -573,6 +576,7 @@ def _sync_session_evidence():
         evidence_moves,
         move_count,
         recompute_opportunity: bool = True,
+        is_final: bool = False,
     ):
         session_api._run_session_move_evidence_side_effects(
             db,
@@ -583,6 +587,7 @@ def _sync_session_evidence():
             move_count=move_count,
             dialect_name=db.bind.dialect.name,
             run_opportunity=recompute_opportunity,
+            is_final=is_final,
         )
 
     with patch("app.api.session.enqueue_session_evidence", _run_sync):

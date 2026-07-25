@@ -33,6 +33,7 @@ from app.api.session import (
     AnalysisEvidenceRow,
     _build_evidence_cache_row,
     _derive_move_uci,
+    _EVIDENCE_ACCEPTED_REASONS,
     _prepare_analysis_evidence_rows,
     _session_membership_keys,
 )
@@ -900,6 +901,29 @@ def test_endpoint_rejected_reasons_have_no_upgrade(client, auth_headers, create_
     assert results[0]["upgrade"] is None
     assert results[1]["reason"] == EVIDENCE_CONTRACT_UNSATISFIED
     assert results[1]["upgrade"] is None
+
+
+def test_every_replacement_verdict_a_browser_row_can_earn_emits_an_upgrade():
+    """D9: if the writer replaced the stored row, the open MoveList must be told.
+
+    Membership, not endpoint behavior, because the omission fails SILENTLY: the
+    write succeeds and the upgrade is simply never emitted, so no request errors and
+    nothing shows up in the results payload. `strength_replace` was missing until the
+    g-mk1d review — today's producer stamps a FIXED profile that meets every other
+    profile across an edge or the authority barrier before the measured steps run,
+    but that is a property of the current registry, not of this endpoint.
+    """
+    from app.analysis_cache_policy import Reason
+
+    earnable = {
+        Reason.DOMINATES_REPLACE,
+        Reason.PROTOCOL_CORRECTED_REPLACE,
+        Reason.STRENGTH_REPLACE,
+    }
+    assert {r.value for r in earnable} <= _EVIDENCE_ACCEPTED_REASONS
+    # ...but authority reclamation is NOT earnable by a non-authoritative profile,
+    # so accepting it would mask a writer regression rather than catch one.
+    assert Reason.LEGACY_REPLACED_BY_AUTH.value not in _EVIDENCE_ACCEPTED_REASONS
 
 
 # --------------------------------------------------------------------------- #

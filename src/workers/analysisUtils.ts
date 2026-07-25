@@ -446,6 +446,13 @@ export const reconcileTrustedBest = (
       delta: 0,
       blunder: false,
       recordable: false,
+      // The tuple is now part canonical POSITION truth, not purely this device's
+      // search, so the browser-search provenance claim would be false (g-mk1d
+      // §2.5). Cleared here, in the single shared reconciler, so every caller —
+      // live MoveList and post-game alike — is covered in one place. The row
+      // uploads as provenance-less browser-game-v1, which is correct: its
+      // best-ness came from the position grain, not from a stronger search.
+      provenance: null,
     }
   }
   // played is NOT the trusted best.
@@ -463,6 +470,9 @@ export const reconcileTrustedBest = (
     delta: null,
     blunder: false,
     recordable: false,
+    // Same rule as the promotion branch: a canonically corrected tuple no longer
+    // describes this device's search, so it carries no depth claim (g-mk1d §2.5).
+    provenance: null,
   }
 }
 

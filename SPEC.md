@@ -545,13 +545,14 @@ performs for arrows/lines. Key points:
 - **Five-layer evidence vocabulary (`backend/app/evidence_policy.py`).** The shared
   browser-evidence policy (g-browser-policy-v2) separates *identity* (does a row's
   stored metadata match its claimed profile — one `verify_identity`, replacing five
-  duplicated exact-equality checks; a per-profile `dynamic_fields` seam, empty today,
-  is reserved for g-mk1d), *protocol* (is the producer internally consistent —
+  duplicated exact-equality checks; a per-profile `dynamic_fields` seam, filled by
+  `browser-game-v2` in g-mk1d), *protocol* (is the producer internally consistent —
   `PROTOCOLS`), *contract* (evidence shape — `evidence_contracts`), *comparison*
   (which of two valid rows supersedes the other and why — `compare_evidence_rows`),
   and *capability* (which consumers may reuse a row — `has_capability`). Read/reuse
-  grants beyond `DISPLAY_OVERLAY` (g-v21l), measured-strength comparison (g-mk1d), and
-  the cross-grain authority rule (g-6xc3) lay their API here but are not yet wired.
+  grants beyond `DISPLAY_OVERLAY` (g-v21l) and the cross-grain authority rule (g-6xc3)
+  lay their API here but are not yet wired; measured-strength comparison is wired by
+  g-mk1d (below).
 - **`EDGES` and kinds.** Cross-profile ordering is explicit directed edges, never raw
   depth, each tagged `AUTHORITY` (canonical over any non-authoritative row),
   `PROTOCOL_CORRECTION` (a truthful protocol fixes a defective one), or `TIER_BASELINE`
@@ -562,10 +563,40 @@ performs for arrows/lines. Key points:
   (PROTOCOL_CORRECTION); **`browser-analysis-multipv-v2` → `browser-game-v1`**
   (TIER_BASELINE). A registry-load assertion fails closed unless `EDGES` and each
   profile's `dominates` set agree in both directions. `compare_evidence_rows`
-  implements the authority barrier and explicit-edge steps; unequal non-edged rows are
-  `INCOMPARABLE` (measured strength is g-mk1d). Cache Rule 5 routes through it: a
-  PROTOCOL_CORRECTION supersession reports `protocol_corrected_replace`, AUTHORITY /
-  TIER_BASELINE keep `dominates_replace`.
+  implements the authority barrier and explicit-edge steps; unequal non-edged rows
+  then fall through to the measured-strength steps g-mk1d filled in, which
+  **delegate to `compare_row_strength`** (see below) and return `INCOMPARABLE` unless
+  the two rows share scoring semantics. Delegation, not a second implementation:
+  one pair of rows must not order differently depending on which caller asked.
+- **`Supersession` carries the GRAIN that decided, not just the winner.**
+  `A_SUPERSEDES` / `B_SUPERSEDES` mean a CATEGORICAL win from the authority barrier or
+  a registered edge — independent of any number either row measured, so a depth-30
+  browser row still loses to canonical. `A_STRONGER` / `B_STRONGER` / `EQUAL` mean a
+  MEASURED ordering from steps 4-5, and carry `kind=None` because no registered edge
+  justifies them; they agree name-for-name with `compare_row_strength`, which is steps
+  4-5 alone (Rule 2a calls it directly, where steps 2-3 cannot fire). The comparator
+  never flattens the measured grain into the categorical one: a caller that cannot
+  tell them apart cannot report a measured replacement as `strength_replace`. Callers
+  whose local decision genuinely treats outcomes alike collapse them THEMSELVES —
+  Rule 5 keeps the stored row for `B_STRONGER`, `EQUAL` and `INCOMPARABLE` alike.
+  Cache Rule 5 routes through it: a measured `A_STRONGER` reports `strength_replace`
+  (the same reason Rule 2a uses for the same fact), a PROTOCOL_CORRECTION supersession
+  reports `protocol_corrected_replace`, AUTHORITY / TIER_BASELINE keep
+  `dominates_replace`. This is REACHABLE today, not latent: a `browser-game-v2` row
+  shares engine, build, net, MultiPV 1 and the `browser-analyzer-v1` protocol with a
+  stored retired `browser-analysis-v1` row and is connected to it by no edge, so the
+  two differ only in depth and rank normally — a self-reported depth above 21 replaces
+  the stored d21 row with `strength_replace`. (The shipped client clamps to 17, but the
+  dynamic provenance contract is deliberately permissive about the VALUE; strength
+  still cannot cross the authority barrier or reclaim an all-`None` legacy row.) Every
+  reason that means "the stored row is now this evidence" must therefore appear in
+  EVERY consumer's success allowlist — the evidence endpoint's
+  `_EVIDENCE_ACCEPTED_REASONS` (else the write lands and the open MoveList silently
+  never receives its `MoveUpgrade`) and the precompute script's `_ACCEPTED_REASONS`
+  (else a successful upgrade is counted as a `write_failure` and fails the run).
+  `protocol_corrected_replace` is excluded from the precompute list on purpose: that
+  producer is authoritative, and the authority barrier resolves canonical-vs-browser
+  before explicit edges, so a canonical write can never earn it.
 - **`browser-analysis-multipv-v2` profile.** The corrective successor. Its identity is
   the ACTUAL visible worker (`stockfishWorker.ts`): the same pinned
   `stockfish-18-lite-single` artifact and single net `nn-9067e33176e8.nnue` as the
@@ -603,7 +634,10 @@ performs for arrows/lines. Key points:
   (truth-table-identical to the old `dominates(browser-game-v1)` test for the profiles
   that existed before, now additionally admitting `browser-analysis-multipv-v2`).
   Canonical holds all eight capabilities; `browser-analysis-multipv-v2` and the retired
-  `browser-analysis-v1` hold only `DISPLAY_OVERLAY`; browser-game / jeffml hold none.
+  `browser-analysis-v1` hold only `DISPLAY_OVERLAY`; `browser-game-v1` / jeffml hold
+  none. g-mk1d adds `browser-game-v2`, which holds `DISPLAY_OVERLAY` under the third
+  mode `REQUIRES_COMPARISON` (below) — the ALWAYS-only `display_upgrade_eligible`
+  predicate the one-row seam uses still excludes it.
 - **Exact-key model.** `SessionAnalysisMove` carries `fen_before` and `move_uci`.
   The FEN half is the durable `SessionMove.fen_before` (the same bytes browser-game
   wrote); the UCI half is server-derived from stored SAN via python-chess (SessionMove
@@ -679,6 +713,182 @@ performs for arrows/lines. Key points:
   retry; any HTTP 200 is terminal; a session change clears both). With visible engine
   analysis disabled, no analysis-board evidence computation or submission occurs.
   Read-time skip logic for stronger browser rows is deferred to `g-v21l`.
+
+**Per-device in-game evidence (g-mk1d).** In-game browser evidence used to be a
+single undifferentiated tier: every device searched to depth 17 and every uploaded
+row carried all-`None` engine metadata, so the first row for a `(fen_before,
+move_uci)` key won regardless of what a later, stronger run found. g-mk1d makes the
+in-game producer honest about what it actually ran, and makes browser rows
+comparable *within* the browser tier — without changing the authority barrier.
+
+- **Per-device depth selector (`src/workers/deviceAnalysisTier.ts`).**
+  `computeDeviceAnalysisDepth` picks a depth from deterministic `navigator` signals
+  (`hardwareConcurrency`, and Chromium's `deviceMemory` treated as UNKNOWN rather
+  than "small" when absent, so non-Chromium devices are not pinned to the floor
+  forever). No timing probe: a benchmark would make provenance a function of
+  measurement noise. `BASELINE_DEPTH = 17` is a FLOOR — any missing signal, unknown
+  browser, or thrown lookup returns it, so the change can only be neutral-or-better.
+  `sessionAnalysisDepth()` memoizes the result for the whole page session; that
+  homogeneity is load-bearing, because every row a session uploads then claims the
+  SAME `search_limit_value` and per-slot upload coalescing can never pair one
+  upload's numbers with another's depth claim. Both in-game callers
+  (`GameAnalysisCoordinator`, `useMoveAnalysis`) now send it as
+  `AnalyzeMoveMessage.depth`; the analysis-board reuse path is unaffected.
+- **`MAX_DEVICE_DEPTH` ships AT the baseline (parity), gated on a latency
+  benchmark.** A depth ceiling does NOT bound latency — `go depth N` has no time
+  limit — so raising it requires a per-move p95/p99 acceptance target measured on the
+  WEAKEST device each tier admits, explicitly including the adversarial 8-core /
+  `deviceMemory`-unavailable cell (mobile Safari) that the signal heuristic routes to
+  the high tier. The ceiling raise and the wall-clock cap below are enabled together,
+  under that one gate.
+- **Shared per-move wall-clock cap, DORMANT at parity.** `analyzeMove` establishes ONE
+  `MAX_ANALYSIS_MS` deadline covering the engine reset and all three sequential
+  searches — not a per-search timer, which would let one move consume ~3x the budget.
+  It ships `null` (disabled). That is deliberate, not timidity: a healthy depth-17
+  analyze-move can legitimately run many seconds (g-f2mg recorded a single depth-14
+  iteration at 8.7s), so ANY finite value small enough to bound live-play latency
+  would truncate healthy searches and change their classifications. At depth 17,
+  bounding latency IS the behavior change. The cap is a TOTAL-DURATION bound and is
+  ORTHOGONAL to the ~8s inactivity watchdog (an inactivity window continuously reset
+  by the 1s heartbeat); there is no ordering constraint between them, and a ratified
+  `MAX_ANALYSIS_MS` may sit well above 8s. A reset that hits the deadline takes the
+  FATAL path — terminate + recreate the engine and clear `resetAckQueue` — because the
+  usual leave-in-queue absorber assumes the `readyok` is still coming; against a hung
+  engine an orphaned placeholder would swallow the NEXT request's ack and deadlock
+  every later reset. That move rejects scoped to its own id with no partial result.
+- **The deadline needs a post-stop grace to actually BE a bound.** `stop` is a request
+  to the nested engine, not a guarantee, so the deadline alone bounds only when the
+  stop is *sent*. An engine that never answers it would leave the search pending
+  forever — and worse than an ordinary hang, because `activeSearch` stays set and the
+  unconditional liveness heartbeat keeps vouching for the request, so the coordinator's
+  inactivity watchdog never trips either and the queue wedges with no bound anywhere.
+  A `STOP_GRACE_MS` (2s) timer armed alongside the `stop` closes this: answered in
+  time ⇒ the normal truncated-but-usable result; expired ⇒ the same fatal
+  terminate + recreate path as the reset timeout, rejecting that move scoped to its
+  own id. Every abandonment path (`terminate`, a mid-search cancel/error) clears both
+  timers, since an orphaned grace timer would otherwise destroy a healthy engine
+  mid-way through a LATER request. The grace is ONE PER MOVE, not one per search:
+  the deadline and the grace are two fields of a single `AnalysisBudget` object
+  threaded through the reset and all three searches, and the clock starts at the
+  move's FIRST deadline `stop`, so later searches inherit what is LEFT of it. A
+  per-search grace would let a move run `MAX_ANALYSIS_MS + 3x STOP_GRACE_MS` —
+  every search entered after the deadline stops immediately, so all three would arm
+  their own — reintroducing one level down the ~3x overshoot the shared deadline
+  exists to prevent. The move's total wall-clock bound is therefore
+  `MAX_ANALYSIS_MS + STOP_GRACE_MS`, which is what the latency gate measures against.
+- **Provenance honesty.** A truncated search reports an explicit `capFired` /
+  `stopReason`, never an inferred `reachedDepth < depth` (wrong in both directions: a
+  stop can land just after `info depth N`, and a forced mate finishes below N with no
+  cap — there the configured limit WAS honestly satisfied). Provenance survives only
+  for a tuple that is BOTH untruncated AND unrewritten: `reconcileTrustedBest` clears
+  it on both of its rewrite branches, since a canonically corrected tuple's best-ness
+  came from the position grain, not from a stronger search. Cache-sourced results
+  (someone else's search) carry none. A cleared claim simply falls back to
+  `browser-game-v1` with no strength claim.
+- **`browser-game-v2` — the first DECLARED-DYNAMIC profile.** Its FIXED half
+  (`engine_name`, no small net, `multipv=1`, `browser-analyzer-v1`, manifest digest) is
+  exact-equality verified and always server-stamped; its DYNAMIC half
+  (`engine_version`, `engine_build`, `eval_file_id`, `search_limit_type`,
+  `search_limit_value`, `threads`, `hash_mb`) is per-field validated by
+  `DYNAMIC_FIELD_VALIDATORS` instead — the `dynamic_fields` seam g-reuse-d21-search
+  reserved. No client ever sends a profile id. NON-authoritative,
+  `replacement_eligible`, with NO `dominates` edge. These are self-reported
+  diagnostics by design: forging them can only reorder non-authoritative rows within
+  the browser tier, never cross the authority barrier, earn a capability, or touch
+  `position_analysis`.
+- **Identity constants are artifact-derived, not hand-copied.**
+  `src/workers/browserEngineIdentity.ts` is GENERATED (`npm run gen:engine-identity`)
+  by hashing the actually-bundled `stockfish-18-lite-single.wasm`; because that build
+  EMBEDS its net, the WASM hash pins the network transitively, and
+  `scripts/browser-engine-manifest.json` records WHICH network (there is no standalone
+  `.nnue` to hash). A CI test re-hashes the artifact and cross-checks both values
+  against the backend registry, which loads the same binary. This closes REPOSITORY
+  drift — a stale constant that no longer describes the shipped artifact would
+  identity-verify fine and silently mislabel every uploaded row. It cannot stop a
+  modified client self-reporting a valid-looking identity; see the threat model above.
+- **Measured strength (`compare_row_strength`, D4 steps 4-5).** Reads the ROW's stored
+  identity columns, not the profile's (a dynamic profile's registry values are all
+  `None`). Step 4 is a semantic compatibility guard — same engine, net(s), MultiPV,
+  analyzer protocol, and search-limit TYPE, plus compatible builds; step 5 compares
+  `engine_version` (leading int) then `search_limit_value`. Differing self-reported
+  builds are INCOMPARABLE: `BUILD_EQUIVALENCE` is keyed by profile id and meaningless
+  when every device shares one id. An all-`None` `browser-game-v1` row is UNKNOWN
+  strength, never weak, so it is INCOMPARABLE to every v2 row and a deeper v2 search
+  can NEVER reclaim it by depth. `browser-game-v2` vs `browser-analysis-multipv-v2` is
+  INCOMPARABLE (MultiPV 1 vs 3); the multipv-v2 → browser-analysis-v1 corrective edge
+  is untouched.
+- **Rule 2a — same-profile replacement.** For a declared-dynamic profile, two rows at
+  one key are NOT interchangeable. Stronger comparable ⇒ `strength_replace` (guarded
+  by the same completeness check as Rule 5, else `incoming_less_complete_keep`);
+  weaker ⇒ `strength_weaker_keep`; incomparable ⇒ `strength_incomparable_keep`;
+  identical provenance ⇒ the historical idempotent/merge path. There is NO
+  cross-provenance MERGE: a merged row carries exactly ONE provenance tuple, so
+  unioning evidence produced under different settings would attribute one device's
+  numbers to another device's identity — equal-strength-but-different-provenance rows
+  are therefore idempotent, not merged. `_dedupe_batch` resolves same-key dynamic rows
+  by simulating the decision in BOTH orders, so the batch survivor is
+  permutation-independent and matches what sequential writes would produce; no
+  agreeing strict winner ⇒ `duplicate_conflict`.
+- **Per-row provenance wire, fully permissive.** Provenance rides INSIDE each move
+  payload, not at request level: the deferred scheduler coalesces per `(move_number,
+  color)` slot with last-write-wins, so a request-level value would have no defined
+  merge rule and could mis-stamp rows — per-row needs ZERO scheduler change.
+  `SessionMoveInput.provenance` is typed `Any` on purpose; a constrained shape (even
+  `dict[str, object]`) makes Pydantic reject non-object JSON during request parsing and
+  422 the ENTIRE batch. All checking — starting with "is this even a mapping?" — moves
+  into `validate_browser_provenance`, run per row, with strict numeric typing that
+  rejects JSON booleans (`isinstance(True, int)` would otherwise accept `true` as a
+  depth-1 claim) and per-type `search_limit_value` bounds. VALID ⇒ v2 with the seven
+  dynamic columns; ABSENT ⇒ v1 as before; MALFORMED ⇒ the cache row is DROPPED, never
+  laundered into a silent v1 downgrade, while the `session_moves` row still persists
+  (with NULL provenance) and the batch stays HTTP 200.
+- **Two-grain observability.** The `analysis_cache_write` summary log — emitted once
+  per COALESCED SCHEDULER RUN per session, NOT per request — carries row-weighted
+  `provenance_valid` / `provenance_absent` / `provenance_malformed` (the operational
+  health signal) plus a length-independent per-run `session_provenance` bit
+  (`v2` | `legacy` | `mixed_malformed` | `none`, malformed dominating). The
+  browser-game-v1 retirement criterion reads only the latter, rolled up by
+  `app/browser_provenance_metrics.session_v2_adoption` to ONE verdict per DISTINCT
+  session (its latest FINAL run) — never the row counts, which a few long
+  legacy-client games would dominate, and never per-run counts, which would re-weight
+  by upload frequency. Finality comes from a dedicated `session_final` field that
+  OR-folds the client's `terminal_action` through the scheduler entry, NOT from
+  `run_opportunity`: the revert upload also sets `recompute_opportunity=True`, and a
+  client predating g-y90g sets it on every mid-game upload, so reusing it would score
+  abandoned and reverted sessions as complete. The pre-existing `final`/`kind` fields
+  on the same log line keep their `run_opportunity` meaning — they are g-dckw's
+  LATENCY cohort, and redefining them would silently re-cohort a live metric.
+  Sessions with no final run are excluded from the ratio but COUNTED into
+  `sessions_without_final`, because that exclusion is not neutral: a client too old to
+  send `terminal_action` is also too old to send provenance, so silently dropping
+  those sessions inflates the adoption fraction toward 1.0 exactly when the legacy
+  fleet is largest. A large `sessions_without_final` invalidates the gate.
+- **`browser-game-v1` stays ACTIVE for writes during rollout**; v2 is purely additive.
+  Retiring v1 writes before the deployed fleet reliably stamps valid v2 provenance
+  would fail-close older clients' uploads and drop their evidence. The known cost is
+  explicit: while v1 stays active, stale clients keep seeding all-`None` rows that no
+  v2 search can ever replace by depth, and they persist until they regenerate on
+  revisit. The `active=False` flip and the decision on the stranded rows are the
+  linked follow-up `g-bgv1-cutover`.
+- **REQUIRES_COMPARISON overlay.** `browser-game-v2` holds `DISPLAY_OVERLAY` under a
+  third `OVERLAY_MODE`: it re-labels a played move only when provably STRONGER than a
+  LIVE operand, via the SAME `compare_row_strength` that governs storage — so what the
+  writer calls stronger and what the reader will display cannot drift apart. The
+  one-row Part-B seam supplies no operand and therefore never overlays such a row.
+  Part C (`GET /{session_id}/analysis`) builds the operand from
+  `session_moves.browser_provenance`, a nullable JSON `Text` column holding only the
+  DYNAMIC subset — the fixed half is reconstructed from the server registry at read
+  time, so a hand-edited row cannot claim an identity it did not earn. It is written
+  through the SAME validator as the cache write and refuses the same rows: absent,
+  malformed, AND synthetic-terminal all persist NULL. The synthetic case matters
+  because the two gates are separate code paths — a fabricated game-ending eval that
+  the cache correctly declines would otherwise re-enter here as the overlay's
+  supposedly-live search operand and suppress a genuine stored row. It is the only
+  operand available at GET for a saved game (request-side provenance exists only at
+  upload time; a reloaded page holds no client-side analysis — precisely when a
+  stronger cross-user row matters most). NULL/legacy/tampered ⇒ no operand ⇒ no
+  overlay, and the player keeps their own label. ALWAYS-mode profiles (canonical,
+  browser-analysis-v1/-multipv-v2) ignore the operand entirely — exact parity.
 
 **Position-truth foundation (g-position-analysis).** `analysis_cache` conflates two
 grains on one row — *position* facts (the position's best move / best line / best
@@ -1500,9 +1710,27 @@ Alembic revision `20260719_01` (`down_revision = 20260718_01`) is Release B's co
 
 **Fail-closed assertions.** *Coverage*: zero ended-visible rows with `player_accuracy_algo_version IS DISTINCT FROM 1` — checks the **version**, since a computed NULL is valid. *Ply-coordinate soundness*: zero ended-visible rows at version 1 with a non-NULL accuracy over a broken grid — checks the **value**, since a repaired row is still version 1 and coverage passes either way. Neither can be answered from the repair's materialized candidate set, which is stale by construction; catching a row that broke *during* the migration is the whole point. Either failing raises, the run rolls back, and `alembic_version` does not advance.
 
-Environment surface is exactly two variables, `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` and `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`, neither of which can disable an admission guard. Statements are reached only through a per-dialect `StatementBundle`, so a `_PG` constant is unreachable on SQLite by construction. Downgrade is an explicit no-op — production rollback is a forward revert, not data reversal. The production runtime envelope (revision deadline, timeout arming, per-batch transactions, residual stall budgets, concurrency interleavings) layers on top of this core and is tracked separately.
+Environment surface is exactly two variables, `GHOSTREPLAY_ACCURACY_BACKFILL_MODE` and `GHOSTREPLAY_ACCURACY_BACKFILL_BATCH`, neither of which can disable an admission guard. Statements are reached only through a per-dialect `StatementBundle`, so a `_PG` constant is unreachable on SQLite by construction. Downgrade is an explicit no-op — production rollback is a forward revert, not data reversal.
 
-**Single-runner guard (`app/migration_guard.py`, PostgreSQL only).** `alembic upgrade head` opens the migration transaction with no mutual exclusion, so two overlapping replica starts run two upgrades at once — and `SKIP LOCKED` does not make that safe (it protects individual session rows, not `alembic_version` stamping, `VALIDATE CONSTRAINT`, or the atomic-mode single transaction). `alembic/env.py` therefore takes a **session-scoped two-key `pg_advisory_lock`** on a **dedicated guard connection** — never the migration connection — *before* the migration connection is opened, and releases it in a `finally` (explicit unlock → `invalidate()` if the unlock returned false/raised → close under `NullPool`). Session scope is mandatory: `20260709_02`'s `autocommit_block` commits the migration transaction mid-chain, which would drop a transaction-scoped lock with the backfill/repair/validate/stamp still ahead of it. A second overlapping upgrade blocks on the lock, then reads the already-advanced `alembic_version` and no-ops. Acquisition is fixed-order (label `application_name` → log `pg_backend_pid()` → arm a transaction-local `lock_timeout` → acquire → commit); a lock-timeout — and **only** SQLSTATE `55P03` — becomes the named `ConcurrentMigrationError`, while every other `OperationalError` (disconnect, shutdown, crash) propagates unchanged. The guard and migration connections are each labelled session-scoped (`ghostreplay_alembic_guard` / `ghostreplay_alembic_migration`) and log their backend PID so an operator or cancellation probe can tell them apart; `ghostreplay_accuracy_backfill` is reserved here for the per-batch runner the runtime envelope adds. Labelling and the PID log run **inside** `context.begin_transaction()` (never before `context.configure()`), or SQLAlchemy autobegins a transaction Alembic treats as external, `begin_transaction()` degrades to a no-op, and the whole run is silently rolled back at close under `NullPool`. A `migration_stall_probe` (first-lock-wins record, consume-and-clear `report()` from the inner `finally`, never raises) observes the atomic-mode row-lock hold. The lock makes correctness independent of Railway configuration, so both migration-ownership branches (`preDeployCommand`, or `startCommand` with single-replica evidence) stay open; the recorded production choice is deferred to release integration.
+Both convergence statements (`BACKFILL_REMAINING_SQL`, `REPAIR_REMAINING_SQL`) return the **count and up to 20 sampled ids in one dialect-neutral statement** — a windowed `count(*) OVER ()` over the phase's detector, where zero returned rows means zero remaining. That is not a convenience: the exhaustion template's `remaining` / `passes` / `first_remaining` must come from the scan the pass **already paid for**, and fetching the sample with a second `SELECT … LIMIT 20` would be another full detector scan, breaking both one-scan-per-pass and the import scan budget.
+
+##### 7.3.1.1.1 Runtime envelope (Release B)
+
+The same revision carries the production envelope around that core.
+
+**One clock.** `REVISION_DEADLINE_S = 900` is **revision-wide**, taken once at the top of `upgrade()` — before `VALIDATE` and before the population counts — and covers everything the revision executes, including both closing assertions. A phase clock leaves three reachable holes: the repair population count runs during mode binding before any runner exists, both assertions run *after* the runner returns, and a scan armed with a fresh `SCAN_STMT_TIMEOUT_MS` can start at second 899 and finish past second 900. Three rules close them, in both modes: (1) every statement is armed by one `_arm` with the **least of every deadline in force** — its own cap, the remaining revision budget, the batch remainder inside a per-batch batch, and in atomic mode the residual stall budget — with `lock_timeout = min(the mode's per-wait cap, that same remaining)`; (2) Python work is checked against the same clock before each pass, batch, session, repair candidate and assertion, and the compute watchdog is armed to the same remaining; (3) exhaustion raises one frozen template with `phase=<validate|backfill|repair|assert>` and **explicit `n/a`** where a field cannot exist — a mid-statement cancellation leaves the transaction aborted, so no diagnostic query is attempted and `sqlstate` carries `57014`/`55P03` instead. Rule 1's *hardness* is PostgreSQL-only (both GUCs are PostgreSQL's); on SQLite the same clock is enforced best-effort between statements, which is acceptable because SQLite is dev/CI-only, single-writer, atomic-only, and has no concurrent writer whose stall to bound.
+
+**Mode binding.** The mode variable is parsed on **every** dialect (`.strip()` then an exact, case-sensitive match — `ATOMIC`, `Batch`, a typo and a blank-but-set string all raise before any row is touched) and applied per dialect and per population. Off PostgreSQL, unset means atomic and `batch` raises as unsupported. On PostgreSQL the variable is **required** once either population is nonzero — there is no default, because an unset variable is a deployment error and never a silent atomic run — while a database with **both populations empty** upgrades with no configuration at all, skipping the runner but still running `VALIDATE` and both assertions (two scan-bearing `session_moves` statements, zero row locks). Binding first counts both populations and, on PostgreSQL, **probes the live relation dimensions** from the catalog (`pg_total_relation_size`, exact and O(1); `pg_class.reltuples`, an estimate and O(1) — never `count(*)`, which would add a relation scan purely to price another) and derives `G_moves` / `G_sessions` as `max(1.0, byte ratio, row ratio)` against the four frozen `SIZED_*` dimensions. Those factors are load-bearing: a correctly stamped version-1 session is in **neither** population yet adds rows and pages to both relations, and Release A is the sole writer for the whole interval between sizing and deploy — so a guard that rechecks only the populations is checking the one dimension that cannot move.
+
+**Admission.** The scan-budget invariant is rechecked at runtime with the frozen constants **rescaled by relation** (the `session_moves` terms by `G_moves`, the coverage assertion *and both backfill terms* by `G_sessions`), in both modes — batch mode has no stall projection, so this is what catches an outgrown relation there. Atomic mode additionally projects the **full** stall — row work, all scans under lock, the coverage assertion, the backfill's own unindexed `game_sessions` selection sweep and convergence count, **and the commit itself** via a teardown floor plus a per-mutated-row slope — and raises if it exceeds `MAX_WRITER_STALL_MS` or if the teardown reserve leaves no positive residual work budget. The backfill's own two terms are mandatory and easy to miss: its keyset selection sweep and `BACKFILL_REMAINING_SQL` both filter `game_sessions` on `player_accuracy_algo_version IS NULL OR < 1`, which **no index covers**, so each is `O(G_sessions)` and not `O(N_stale)` — a correctly stamped row *raises* their cost while leaving the population unchanged.
+
+**Two envelopes, both shipped.** The deployment chooses which one *runs*, never which code exists, so the per-batch runner and its PostgreSQL suite stay permanently present and permanently gated. **Atomic mode** uses Alembic's single transaction and unlocked selection, one pass per phase (no `SKIP LOCKED`, so nothing is transiently skipped and extra passes were never admitted by the projection). **Per-batch mode** runs on an independent connection whose transaction lifecycle is explicit — the `application_name` label and PID log autobegin a transaction, so it is **committed** before the batch loop opens its first one, or a first-batch rollback would silently drop the name an operator is watching for — with one explicit transaction per batch, `FOR NO KEY UPDATE SKIP LOCKED` selection, a `MAX_BATCH_MS` batch deadline, up to `MAX_PASSES` passes with a `0.5, 1, 2, 4, 5, 5 …` backoff clamped to the remaining budget (a backoff that would sleep *past* the deadline raises instead), and no transaction open during a sleep.
+
+**What bounds what, at its true confidence.** *Enforced by PostgreSQL:* no SQL runs past the deadline; no **single** lock wait exceeds the mode's cap; and no **sum** of lock waits exceeds the budget the hold spends from, because `lock_timeout` is armed as `min(cap, remaining)`. The third is separate from the second on purpose — `lock_timeout` applies **per acquisition**, so on its own it permits any number of just-under-cap waits, each extending a hold already open over every row locked so far. *Enforced where it can arm:* Python compute, by a `signal.setitimer` watchdog re-armed **per session** to `min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining, revision remaining, atomic remaining)`, with the previous handler and pending timer saved and restored; main thread only, and off it the runner **logs that it is unarmed** rather than claiming enforcement it lacks. Because the batch remainder is one of those minima, `MAX_BATCH_MS` is batch-wide over SQL *and* Python — which is why `EST_MAX_LOCK_HOLD_MS = MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS` and has **no** per-session compute addend. *Estimated only:* teardown, which `statement_timeout` does not cover. Per-batch mode therefore gets an after-the-fact **tripwire** — each batch compares its observed hold against `EST_MAX_LOCK_HOLD_MS` and raises, explicitly *not* a bound: by the time it fires the lock has been held too long, and what it buys is that the next batch does not repeat it and the breach becomes recorded evidence. Atomic mode reserves its teardown out of `MAX_WRITER_STALL_MS` and holds the work to the residual: at `t_stall_0` — the instant immediately **before** the first lock-bearing statement, conservative because it also charges that first acquisition's wait — it derives `ATOMIC_WORK_BUDGET_MS` and arms every subsequent statement against it.
+
+**Atomic mode has no lock-hold tripwire and must not claim one.** Its hold ends when Alembic's transaction commits, which happens in `env.py` *after* `upgrade()` has returned, so the revision can neither observe "first row lock through commit" nor raise on it — and raising after a durable commit would fail a deploy whose data is fine while a rerun (both populations now empty) could never reproduce the observation. What it gets instead is enforcement in front (the projection) and in flight (the residual deadline), plus **observation** behind both: the revision hands `max_stall_ms` and `projected_stall_ms` to the already-shipped `app.migration_guard.migration_stall_probe` at `t_stall_0`, and the existing `report()` in `env.py`'s `finally` — which fires exactly when COMMIT *or* ROLLBACK returns, i.e. when the locks are released, on both paths — logs `observed_atomic_stall_ms` at INFO with the projection alongside, and at **ERROR** when it exceeds the bound. It never raises. Both threshold arguments are optional, so revisions that record only a timestamp keep their INFO-only behaviour. That log line is the only empirical check on the atomic projection, and sizing qualification is where it is read.
+
+**Single-runner guard (`app/migration_guard.py`, PostgreSQL only).** `alembic upgrade head` opens the migration transaction with no mutual exclusion, so two overlapping replica starts run two upgrades at once — and `SKIP LOCKED` does not make that safe (it protects individual session rows, not `alembic_version` stamping, `VALIDATE CONSTRAINT`, or the atomic-mode single transaction). `alembic/env.py` therefore takes a **session-scoped two-key `pg_advisory_lock`** on a **dedicated guard connection** — never the migration connection — *before* the migration connection is opened, and releases it in a `finally` (explicit unlock → `invalidate()` if the unlock returned false/raised → close under `NullPool`). Session scope is mandatory: `20260709_02`'s `autocommit_block` commits the migration transaction mid-chain, which would drop a transaction-scoped lock with the backfill/repair/validate/stamp still ahead of it. A second overlapping upgrade blocks on the lock, then reads the already-advanced `alembic_version` and no-ops. Acquisition is fixed-order (label `application_name` → log `pg_backend_pid()` → arm a transaction-local `lock_timeout` → acquire → commit); a lock-timeout — and **only** SQLSTATE `55P03` — becomes the named `ConcurrentMigrationError`, while every other `OperationalError` (disconnect, shutdown, crash) propagates unchanged. The guard and migration connections are each labelled session-scoped (`ghostreplay_alembic_guard` / `ghostreplay_alembic_migration`) and log their backend PID so an operator or cancellation probe can tell them apart; `ghostreplay_accuracy_backfill` is frozen here and applied by `20260719_01`'s per-batch runner through the same shared helpers. Labelling and the PID log run **inside** `context.begin_transaction()` (never before `context.configure()`), or SQLAlchemy autobegins a transaction Alembic treats as external, `begin_transaction()` degrades to a no-op, and the whole run is silently rolled back at close under `NullPool`. A `migration_stall_probe` (first-lock-wins record, consume-and-clear `report()` from the inner `finally`, never raises) observes the atomic-mode row-lock hold, and classifies it at ERROR when the revision supplied a threshold — see §7.3.1.1.1. The lock makes correctness independent of Railway configuration, so both migration-ownership branches (`preDeployCommand`, or `startCommand` with single-replica evidence) stay open; the recorded production choice is deferred to release integration.
 
 #### 7.3.1.2 Sizing derivation and admission constants (Release B)
 

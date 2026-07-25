@@ -734,6 +734,7 @@ export type SessionDecisionSource =
   | 'local_fallback'
 
 import type { MoveClassification } from '../workers/analysisUtils'
+import type { BrowserAnalysisProvenance } from '../types/analysis'
 // Re-export MoveClassification so existing imports from api.ts keep working
 export type { MoveClassification }
 
@@ -760,6 +761,18 @@ export interface SessionMoveUpload {
   target_blunder_id: number | null
   /** True only for a deterministic terminal score synthesized by the client. */
   synthetic_terminal_eval?: boolean
+  /**
+   * This device's own search provenance for THIS move (g-mk1d). Present only for
+   * an honest raw worker tuple; null/absent for cache-sourced, canonically
+   * reconciled, time-truncated, or legacy rows — the backend then stamps
+   * `browser-game-v1` with no strength claim, exactly as before.
+   *
+   * Rides INSIDE the move payload rather than at request level on purpose: the
+   * deferred evidence scheduler coalesces per (move_number, color) slot with
+   * last-write-wins, so a request-level value would have no defined coalescing
+   * rule and could mis-stamp rows from a different upload.
+   */
+  provenance?: BrowserAnalysisProvenance | null
 }
 
 interface SessionMovesRequest {

@@ -18,7 +18,11 @@ from __future__ import annotations
 import chess
 from pydantic import BaseModel
 
-from app.analysis_cache_policy import display_upgrade_eligible, project_cache_row
+from app.analysis_cache_policy import (
+    CacheRow,
+    display_upgrade_eligible_vs,
+    project_cache_row,
+)
 from app.analysis_profiles import get_profile
 from app.centipawn_loss import centipawn_loss
 from app.fen import active_color
@@ -114,16 +118,28 @@ def _row_dict(row: AnalysisCache) -> dict:
     return {col.name: getattr(row, col.name) for col in AnalysisCache.__table__.columns}
 
 
-def move_upgrade_for_row(row: AnalysisCache) -> MoveUpgrade | None:
+def move_upgrade_for_row(
+    row: AnalysisCache, *, live: CacheRow | None = None
+) -> MoveUpgrade | None:
     """Project + gate + build in one seam shared by Parts B and C.
 
-    Returns a :class:`MoveUpgrade` only when the stored row is
-    :func:`~app.analysis_cache_policy.display_upgrade_eligible` (identity-verified,
-    contract-satisfied, classification-carrying, dominates ``browser-game-v1``); else
-    ``None``. Gating both the immediate read-back and the durable overlay through the
-    same predicate keeps them from diverging.
+    Returns a :class:`MoveUpgrade` only when the stored row is display-upgrade
+    eligible (identity-verified, contract-satisfied, classification-carrying, and
+    holding the DISPLAY_OVERLAY capability); else ``None``. Gating both the
+    immediate read-back and the durable overlay through the same predicate keeps
+    them from diverging.
+
+    ``live`` is the second operand for a REQUIRES_COMPARISON stored row
+    (``browser-game-v2``, g-mk1d), whose per-device strength is not implied by its
+    profile: it overlays only when strictly STRONGER than ``live``. Part C (the
+    refetch overlay) supplies the session's own persisted per-move provenance.
+    Part B — the analysis-evidence POST read-back — has only the one row it just
+    stored, so it passes nothing and a REQUIRES_COMPARISON row correctly yields no
+    upgrade. That is structurally moot today (browser-game rows are written by the
+    /moves path, which returns no MoveUpgrade at all) but keeps the one-row seam
+    safe by construction rather than by coincidence.
     """
     projected = project_cache_row(_row_dict(row))
-    if not display_upgrade_eligible(projected):
+    if not display_upgrade_eligible_vs(projected, live):
         return None
     return build_move_upgrade(row, row.fen_before)

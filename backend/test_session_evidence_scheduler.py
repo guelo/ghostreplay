@@ -196,6 +196,44 @@ def test_final_synthetic_provenance_survives_last_write_wins_coalescing():
     assert moves[0].synthetic_terminal_eval is True
 
 
+def test_per_row_provenance_rides_the_slot_through_coalescing():
+    # Provenance is a field of the move payload, NOT of the request, precisely so
+    # last-write-wins per slot keeps every surviving slot bound to its OWN
+    # provenance — with no new coalescing semantics and no scheduler change
+    # (g-mk1d §2/§4). A request-level value would have no defined merge rule and
+    # could stamp one upload's claim onto another upload's numbers.
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(
+        sid, 7, "white", [_move(5, "white", eval_cp=10, provenance={"depth": 17})]
+    )
+    clock.advance(0.1)
+    sched.enqueue(
+        sid,
+        7,
+        "white",
+        [
+            _move(5, "white", eval_cp=20, provenance={"depth": 20}),
+            _move(6, "white", eval_cp=30, provenance=None),
+        ],
+    )
+
+    clock.advance(2.0)
+    sched.run_due()
+
+    moves = run.calls[0]["evidence_moves"]
+    by_slot = {(m.move_number, m.color): m for m in moves}
+    # The surviving payload carries the LATER upload's provenance, matched to the
+    # later upload's eval — the two can never come from different requests.
+    assert by_slot[(5, "white")].eval_cp == 20
+    assert by_slot[(5, "white")].provenance == {"depth": 20}
+    # A provenance-less slot in the same burst stays provenance-less.
+    assert by_slot[(6, "white")].provenance is None
+
+
 def test_run_opportunity_default_true_forwarded():
     # A single enqueue with no flag defaults to True and forwards it into the run.
     clock = _FakeClock()
@@ -272,8 +310,11 @@ def test_facade_forwards_recompute_opportunity_false(monkeypatch):
     # run_opportunity kwarg.
     captured: dict = {}
 
-    def fake_enqueue(session_id, user_id, player_color, moves, run_opportunity=True):
+    def fake_enqueue(
+        session_id, user_id, player_color, moves, run_opportunity=True, is_final=False
+    ):
         captured["run_opportunity"] = run_opportunity
+        captured["is_final"] = is_final
 
     monkeypatch.setattr(evidence_mod._scheduler, "enqueue", fake_enqueue)
     enqueue_session_evidence(
@@ -506,3 +547,55 @@ def test_lifespan_starts_all_and_drains_baseline_then_evidence_before_opening(mo
         call.evidence.shutdown(drain=True),
         call.opening.shutdown(drain=True),
     ]
+
+
+def test_is_final_or_folds_across_the_coalesced_burst():
+    # The end-of-session burst is incremental(not final) ... incremental ... then
+    # the final_full upload. The ONE coalesced run that covers the whole burst is
+    # the session's final run, so the bit must survive the fold.
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(sid, 7, "white", [_move(1, "white")], is_final=False)
+    sched.enqueue(sid, 7, "white", [_move(2, "black")], is_final=False)
+    sched.enqueue(sid, 7, "white", [_move(3, "white")], is_final=True)
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert run.calls[0]["is_final"] is True
+
+
+def test_is_final_stays_false_for_a_burst_with_no_terminal_upload():
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(sid, 7, "white", [_move(1, "white")], is_final=False)
+    sched.enqueue(sid, 7, "white", [_move(2, "black")], is_final=False)
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert run.calls[0]["is_final"] is False
+
+
+def test_is_final_is_independent_of_run_opportunity():
+    # The whole point of the separate bit: the revert upload sets
+    # recompute_opportunity=True without ending the session, and a pre-g-y90g
+    # client does so on EVERY mid-game upload. Folding finality onto
+    # run_opportunity would score both as complete sessions.
+    clock = _FakeClock()
+    run = _RecordingSideEffects()
+    sched, _ = _make_scheduler(clock, run)
+    sid = uuid.uuid4()
+
+    sched.enqueue(
+        sid, 7, "white", [_move(1, "white")], run_opportunity=True, is_final=False
+    )
+    clock.advance(2.0)
+    sched.run_due()
+
+    assert run.calls[0]["run_opportunity"] is True
+    assert run.calls[0]["is_final"] is False

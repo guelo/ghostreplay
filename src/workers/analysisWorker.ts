@@ -4,6 +4,7 @@ import { Chess } from "chess.js";
 import stockfishEngineUrl from "stockfish/bin/stockfish-18-lite-single.js?url";
 import stockfishWasmUrl from "stockfish/bin/stockfish-18-lite-single.wasm?url";
 import type {
+  AnalysisStopReason,
   AnalysisWorkerRequest,
   AnalysisWorkerResponse,
   AnalyzeMoveMessage,
@@ -24,18 +25,130 @@ const ctx = self as DedicatedWorkerGlobalScope;
 
 let engineReady = false;
 let engine: Worker | null = null;
+
+/**
+ * Total wall-clock budget for ONE analyze-move — reset + all three searches, not
+ * per search (g-mk1d §1.6).
+ *
+ * SHIPS DORMANT (`null` == no deadline, every timer below inert). This is not
+ * timidity: a healthy depth-17 analyze-move can legitimately run for many seconds
+ * (g-f2mg recorded a SINGLE depth-14 iteration at 8.7s, and an analyze-move runs
+ * up to three sequential searches DEEPER than that). So ANY finite value small
+ * enough to bound live-play latency WILL truncate healthy depth-17 searches, demote
+ * those moves to `browser-game-v1`, and change their classifications. There is no
+ * "conservative provisional value" that both bounds latency and fires only on a
+ * genuine hang — at depth 17, bounding latency IS the behavior change. The finite
+ * value is therefore ratified and enabled TOGETHER with the `MAX_DEVICE_DEPTH`
+ * raise, under the same benchmark gate, so this landing is a true no-op.
+ *
+ * ORTHOGONAL to the inactivity watchdog, not "below" it. The coordinator's ~8s
+ * `ANALYSIS_INACTIVITY_TIMEOUT_MS` is an INACTIVITY bound, continuously reset by
+ * the 1s liveness heartbeat; a healthy search can run far longer than 8s of total
+ * wall-clock without tripping it. This is a TOTAL-DURATION bound. The two measure
+ * different things, so there is NO ordering constraint between them — a ratified
+ * `MAX_ANALYSIS_MS` may legitimately sit well above 8s.
+ */
+let MAX_ANALYSIS_MS: number | null = null;
+
+/** Test-only: inject a finite budget so the dormant plumbing can be exercised. */
+export const __setMaxAnalysisMsForTests = (value: number | null) => {
+  MAX_ANALYSIS_MS = value;
+};
+
+/**
+ * How long a deadline-issued `stop` may go unanswered before we declare the
+ * engine wedged (g-mk1d code review, P2).
+ *
+ * `stop` is a REQUEST, not a guarantee: the worker cannot force the nested
+ * Stockfish worker to emit `bestmove`. Without this second timer the deadline
+ * path degenerates into an unbounded wait — and worse than a plain hang, because
+ * `activeSearch` stays non-null so the unconditional liveness heartbeat keeps
+ * vouching for the request and the coordinator's inactivity watchdog never trips.
+ * The queue would then be wedged with no bound anywhere in the system.
+ *
+ * So MAX_ANALYSIS_MS alone does NOT bound an analyze-move; MAX_ANALYSIS_MS plus
+ * this grace does. A healthy engine answers `stop` within a single search
+ * iteration, so 2s is generous — exceeding it means genuinely stuck, and we take
+ * the same fatal path as the reset timeout: terminate and rebuild the engine.
+ *
+ * ONE grace per analyze-move, not one per search (see `AnalysisBudget`): an
+ * analyze-move runs up to three sequential searches, and every search entered
+ * after the deadline stops immediately, so a per-search grace would let a move
+ * run MAX_ANALYSIS_MS + 3x this value — the very ~3x overshoot the SHARED
+ * deadline exists to prevent, reintroduced one level down.
+ */
+const STOP_GRACE_MS = 2000;
+
+/**
+ * The ONE wall-clock budget an analyze-move's reset + up-to-three searches share.
+ *
+ * Both fields are absolute timestamps so a search entered late inherits what is
+ * LEFT of the move's budget instead of restarting it. Mutable by design:
+ * `graceExpiresAt` is written by whichever search issues the FIRST deadline
+ * `stop` and then read by every search after it.
+ */
+type AnalysisBudget = {
+  /** When the search budget expires. `Infinity` while MAX_ANALYSIS_MS is dormant. */
+  deadlineAt: number;
+  /**
+   * When the move stops waiting on an unanswered `stop`. `null` until the first
+   * deadline `stop` is issued; from then on it bounds the WHOLE remaining move.
+   */
+  graceExpiresAt: number | null;
+};
+
+/** A budget that never fires — the shape `runSearch` assumes when none is passed. */
+const dormantBudget = (): AnalysisBudget => ({
+  deadlineAt: Infinity,
+  graceExpiresAt: null,
+});
+
+/** Why a search stopped. Provenance honesty keys off this, never a depth compare. */
+type StopReason = AnalysisStopReason;
+
 type SearchResult = {
   bestmove: string;
   score: EngineScore | null;
   pv: string[] | null;
+  /**
+   * True ONLY when the shared analyze-move deadline issued the `stop`.
+   *
+   * Deliberately an EXPLICIT signal rather than `reachedDepth < requestedDepth`,
+   * which is unreliable in BOTH directions: the stop can fire just AFTER
+   * `info depth N` is reported (reached == requested, yet the run WAS truncated),
+   * and a natural early termination — a forced mate, or no further legal
+   * improvement — finishes BELOW N with no cap at all.
+   */
+  capFired: boolean;
+  stopReason: StopReason;
+  /** Deepest completed iteration seen on this search's info lines. */
+  reachedDepth: number | null;
 };
-let activeSearch: {
+type ActiveSearch = {
   resolve: (value: SearchResult) => void;
   reject: (error: Error) => void;
   lastScore: EngineScore | null;
   lastPv: string[] | null;
+  lastDepth: number | null;
+  capFired: boolean;
+  capTimer: ReturnType<typeof setTimeout> | null;
+  /** Armed when the deadline sends `stop`; fires only if `bestmove` never comes. */
+  graceTimer: ReturnType<typeof setTimeout> | null;
   onInfo?: (score: EngineScore, depth: number) => void;
-} | null = null;
+};
+let activeSearch: ActiveSearch | null = null;
+
+/** Clear both of a search's deadline timers so neither outlives it. */
+const clearSearchTimers = (search: ActiveSearch) => {
+  if (search.capTimer !== null) {
+    clearTimeout(search.capTimer);
+    search.capTimer = null;
+  }
+  if (search.graceTimer !== null) {
+    clearTimeout(search.graceTimer);
+    search.graceTimer = null;
+  }
+};
 let activeAnalysisId: string | null = null;
 const canceledAnalyses = new Set<string>();
 
@@ -130,6 +243,16 @@ type ResetWaiter = {
   resolve: () => void;
   reject: (error: Error) => void;
   done: boolean;
+  /** Deadline timer for this reset; cleared whenever the waiter settles. */
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+/** Clear a settled waiter's deadline timer so it cannot fire against a fresh engine. */
+const clearWaiterTimer = (waiter: ResetWaiter) => {
+  if (waiter.timer !== null) {
+    clearTimeout(waiter.timer);
+    waiter.timer = null;
+  }
 };
 const resetAckQueue: ResetWaiter[] = [];
 
@@ -171,9 +294,30 @@ const throwIfCanceled = (analysisId: string) => {
  * positions no longer share leftover search state. Resolves on the next
  * `readyok` via the dedicated pendingRequestReady waiter.
  */
-const awaitRequestReady = () =>
+const awaitRequestReady = (deadlineAt: number) =>
   new Promise<void>((resolve, reject) => {
-    resetAckQueue.push({ resolve, reject, done: false });
+    const waiter: ResetWaiter = { resolve, reject, done: false, timer: null };
+    resetAckQueue.push(waiter);
+    // The deadline must bound the WHOLE analyze-move including this reset: a
+    // stalled reset (no `readyok`) would otherwise burn the entire budget while
+    // the searches after it merely inherit an already-expired clock.
+    if (Number.isFinite(deadlineAt)) {
+      waiter.timer = setTimeout(() => {
+        if (waiter.done) return;
+        // A reset timeout takes the FATAL path, NOT the usual leave-in-queue
+        // absorber. That absorber is correct for cancel/error — the `isready`
+        // was sent, so its `readyok` really is coming and must be swallowed
+        // rather than released to the next request. It is WRONG here: a hung
+        // engine's `readyok` will NEVER arrive, so a leftover `done` placeholder
+        // would consume the NEXT request's ack, deadlock that reset, and desync
+        // the FIFO a little further with every subsequent timeout. Terminating
+        // the engine and clearing the whole queue is safe precisely because
+        // MAX_ANALYSIS_MS is far larger than a healthy `ucinewgame`+`isready`
+        // (near-instant on a live engine) — exceeding it means genuinely stuck.
+        destroyEngine();
+        failAllRequestReady(new ResetTimeoutError());
+      }, Math.max(0, deadlineAt - Date.now()));
+    }
     sendEngineCommand("ucinewgame");
     sendEngineCommand("isready");
   });
@@ -189,6 +333,7 @@ const rejectRequestReady = (error: Error) => {
     const waiter = resetAckQueue[i];
     if (!waiter.done) {
       waiter.done = true;
+      clearWaiterTimer(waiter);
       waiter.reject(error);
       return;
     }
@@ -203,12 +348,64 @@ const rejectRequestReady = (error: Error) => {
 const failAllRequestReady = (error: Error) => {
   const waiters = resetAckQueue.splice(0);
   for (const waiter of waiters) {
+    clearWaiterTimer(waiter);
     if (!waiter.done) {
       waiter.done = true;
       waiter.reject(error);
     }
   }
 };
+
+/**
+ * Tear down the engine sub-worker so the next request rebuilds it from scratch.
+ *
+ * Used by the reset-deadline path: once we conclude the engine is hung, leaving it
+ * running would keep a zombie that may emit a late `readyok` into a queue we have
+ * cleared. Callers pair this with `failAllRequestReady` so no orphaned placeholder
+ * survives to consume a future ack.
+ */
+const destroyEngine = () => {
+  stopHeartbeat();
+  if (engine) {
+    engine.terminate();
+    engine = null;
+  }
+  engineReady = false;
+  // Boot a replacement immediately rather than waiting for the next search to
+  // lazily call ensureEngine: the NEXT request's first act is `awaitRequestReady`,
+  // which posts to the engine — against a null engine those commands would vanish
+  // and the request would wait forever for a reset that was never requested.
+  // Recreating here re-runs the init handshake, whose `readyok` flips engineReady
+  // and drains the queue.
+  ensureEngine();
+};
+
+/**
+ * The analyze-move exceeded its total wall-clock budget while waiting for the
+ * engine reset — so no search ever started and there is NO partial bestmove to
+ * return. Distinct from a search timeout, which still yields a usable (shallower)
+ * result. Scoped to the originating request id by `drainQueue`.
+ */
+class ResetTimeoutError extends Error {
+  constructor() {
+    super("Analysis reset timed out");
+    this.name = "ResetTimeoutError";
+  }
+}
+
+/**
+ * The engine did not answer the deadline's `stop` with a `bestmove` within
+ * `STOP_GRACE_MS`. Unlike a normal deadline stop — which still yields a usable,
+ * merely shallower result — there is nothing to return here: the engine is
+ * unresponsive and is torn down. Scoped to the originating request id, so one
+ * wedged move fails alone rather than failing all analysis.
+ */
+class SearchStopTimeoutError extends Error {
+  constructor() {
+    super("Engine did not stop before the analysis deadline grace expired");
+    this.name = "SearchStopTimeoutError";
+  }
+}
 
 const ensureEngine = async () => {
   if (engine) {
@@ -241,6 +438,7 @@ const runSearch = async (
   moves: string[],
   onInfo?: (score: EngineScore, depth: number) => void,
   searchDepth?: number,
+  budget: AnalysisBudget = dormantBudget(),
 ) => {
   const pendingEngine = await ensureEngine();
 
@@ -254,10 +452,61 @@ const runSearch = async (
 
   return new Promise<SearchResult>(
     (resolve, reject) => {
-      activeSearch = { resolve, reject, lastScore: null, lastPv: null, onInfo };
+      const search = {
+        resolve,
+        reject,
+        lastScore: null,
+        lastPv: null,
+        lastDepth: null,
+        capFired: false,
+        capTimer: null as ReturnType<typeof setTimeout> | null,
+        graceTimer: null as ReturnType<typeof setTimeout> | null,
+        onInfo,
+      };
+      activeSearch = search;
       // Arm the wall-clock heartbeat for THIS search so a single long iteration
       // (which emits no info line) still proves worker liveness to the watchdog.
       startHeartbeat();
+      // Each search of an analyze-move gets whatever is LEFT of the ONE shared
+      // budget — BOTH halves of it — so reset + up to three sequential searches
+      // together are bounded by MAX_ANALYSIS_MS + STOP_GRACE_MS rather than ~3x
+      // either. A search entered after the deadline has already passed arms at 0
+      // and stops immediately, still yielding a shallow bestmove for display.
+      if (Number.isFinite(budget.deadlineAt)) {
+        search.capTimer = setTimeout(() => {
+          if (activeSearch !== search) return;
+          search.capFired = true;
+          // Stockfish answers `stop` with a `bestmove` for the best line so far,
+          // so display still gets a usable — just shallower — result.
+          sendEngineCommand("stop");
+          // ...but only if it is alive to answer. `stop` is a request, not a
+          // guarantee, and a wedged engine would leave this search pending
+          // forever WITH its heartbeat still vouching for it. Bound the wait.
+          //
+          // The grace clock starts at the move's FIRST deadline `stop` and is
+          // shared from there: later searches get what is LEFT of it, not a fresh
+          // 2s each. A healthy engine answers `stop` in milliseconds, so in
+          // practice each later search still sees nearly the full window; burning
+          // the shared grace across several searches means the engine is already
+          // taking seconds to acknowledge, which is the wedge this detects.
+          if (budget.graceExpiresAt === null) {
+            budget.graceExpiresAt = Date.now() + STOP_GRACE_MS;
+          }
+          const graceExpiresAt = budget.graceExpiresAt;
+          search.graceTimer = setTimeout(() => {
+            if (activeSearch !== search) return;
+            activeSearch = null;
+            clearSearchTimers(search);
+            stopHeartbeat();
+            // Same fatal handling as the reset timeout: a `bestmove` that never
+            // came will never come, and a zombie engine could emit one into a
+            // later request's search. Terminate, rebuild, clear the reset FIFO.
+            destroyEngine();
+            failAllRequestReady(new ResetTimeoutError());
+            search.reject(new SearchStopTimeoutError());
+          }, Math.max(0, graceExpiresAt - Date.now()));
+        }, Math.max(0, budget.deadlineAt - Date.now()));
+      }
       const movesSegment = moves.length > 0 ? ` moves ${moves.join(" ")}` : "";
       sendEngineCommand(`position fen ${fen}${movesSegment}`);
       sendEngineCommand(`go depth ${searchDepth ?? DEFAULT_SEARCH_DEPTH}`);
@@ -375,6 +624,7 @@ const handleEngineLine = (line: string) => {
     if (!current) {
       return;
     }
+    clearSearchTimers(current);
 
     const parts = line.split(" ");
     const move = parts[1] ?? "";
@@ -382,6 +632,9 @@ const handleEngineLine = (line: string) => {
       bestmove: move,
       score: current.lastScore,
       pv: current.lastPv,
+      capFired: current.capFired,
+      stopReason: current.capFired ? "deadline" : "bestmove",
+      reachedDepth: current.lastDepth,
     });
     // Search-phase completion (root / post-played / post-best): emit a
     // phase-boundary liveness ping so the watchdog covers the gap between this
@@ -405,6 +658,9 @@ const handleEngineLine = (line: string) => {
           id: activeAnalysisId,
         } satisfies AnalysisWorkerResponse);
       }
+    }
+    if (info.depth !== undefined) {
+      activeSearch.lastDepth = info.depth;
     }
     if (info.score) {
       activeSearch.lastScore = info.score;
@@ -502,7 +758,10 @@ const drainQueue = () => {
       // cancel, or error). The last search's bestmove normally stops the
       // heartbeat already, but a mid-search reject (e.g. AnalysisCanceledError)
       // can abandon activeSearch — clear the timer so it never leaks into the
-      // next request.
+      // next request. Same for that search's deadline timers: an orphaned
+      // graceTimer still passes its `activeSearch === search` guard and would
+      // destroy a healthy engine mid-way through the NEXT request.
+      if (activeSearch) clearSearchTimers(activeSearch);
       stopHeartbeat();
       analysisInFlight = false;
       drainQueue();
@@ -529,13 +788,34 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     throw new Error("Invalid FEN supplied for analysis");
   }
 
+  // ONE shared budget for the whole analyze-move — the reset plus up to three
+  // sequential searches — established here and passed down, rather than fresh
+  // per-search timers that would let a single move consume ~3x the intended
+  // budget. Covers BOTH the deadline and the post-`stop` grace, so the move's
+  // total wall-clock bound is MAX_ANALYSIS_MS + STOP_GRACE_MS, full stop.
+  // Infinity when MAX_ANALYSIS_MS is dormant, which makes every timer below inert.
+  const budget: AnalysisBudget = {
+    deadlineAt: MAX_ANALYSIS_MS === null ? Infinity : Date.now() + MAX_ANALYSIS_MS,
+    graceExpiresAt: null,
+  };
+  // Any constituent search truncated by the deadline poisons the whole move's
+  // provenance: the tuple no longer describes a search that reached its limit.
+  let capFired = false;
+
   // Reset the engine ONCE per independent analysis, before the root search and
   // never between the 3 related searches. Then re-check cancellation: a cancel
   // delivered during the reset rejects the waiter, so we never start searching.
-  await awaitRequestReady();
+  await awaitRequestReady(budget.deadlineAt);
   throwIfCanceled(request.id);
 
-  const bestSearch = await runSearch(request.fen, [], undefined, request.depth);
+  const bestSearch = await runSearch(
+    request.fen,
+    [],
+    undefined,
+    request.depth,
+    budget,
+  );
+  capFired = capFired || bestSearch.capFired;
   throwIfCanceled(request.id);
   const bestMove = bestSearch.bestmove;
 
@@ -553,6 +833,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
       delta: null,
       classification: null,
       canonical: false,
+      capFired,
+      stopReason: capFired ? "deadline" : "bestmove",
+      reachedDepth: bestSearch.reachedDepth,
     } satisfies AnalysisWorkerResponse);
     return;
   }
@@ -561,7 +844,16 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
   const opponentToMove = sideToMove === "w" ? "b" : "w";
   const terminalPlayedScore = terminalScoreAfterMove(request.fen, request.move);
   const playedEvalSearch: SearchResult = terminalPlayedScore
-    ? { bestmove: "(terminal)", score: terminalPlayedScore, pv: null }
+    ? {
+        bestmove: "(terminal)",
+        score: terminalPlayedScore,
+        pv: null,
+        // A deterministic terminal score is not a search: it can never be
+        // truncated, so it never poisons provenance.
+        capFired: false,
+        stopReason: "bestmove",
+        reachedDepth: null,
+      }
     : await runSearch(
         request.fen,
         [request.move],
@@ -580,7 +872,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
           }
         },
         request.depth,
+        budget,
       );
+  capFired = capFired || playedEvalSearch.capFired;
   throwIfCanceled(request.id);
 
   // When best != played, search after the best move too for an apples-to-apples
@@ -593,7 +887,14 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     if (terminalBestScore) {
       postBestScore = terminalBestScore;
     } else {
-      postBestSearch = await runSearch(request.fen, [bestMove], undefined, request.depth);
+      postBestSearch = await runSearch(
+        request.fen,
+        [bestMove],
+        undefined,
+        request.depth,
+        budget,
+      );
+      capFired = capFired || postBestSearch.capFired;
       postBestScore = postBestSearch.score;
     }
   }
@@ -665,6 +966,9 @@ const analyzeMove = async (request: AnalyzeMoveMessage) => {
     delta,
     classification,
     canonical,
+    capFired,
+    stopReason: capFired ? "deadline" : "bestmove",
+    reachedDepth: bestSearch.reachedDepth,
   } satisfies AnalysisWorkerResponse);
 };
 
@@ -697,6 +1001,10 @@ ctx.addEventListener(
         engineReady = false;
         stopHeartbeat();
         failAllRequestReady(new Error("Analysis worker terminated"));
+        // Clear the abandoned search's deadline timers BEFORE dropping it. A
+        // leaked graceTimer would fire against a terminated worker and call
+        // destroyEngine, resurrecting the engine this branch just tore down.
+        if (activeSearch) clearSearchTimers(activeSearch);
         activeSearch = null;
         activeAnalysisId = null;
         canceledAnalyses.clear();

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { useGameStore } from '../stores/useGameStore'
 import { gameAnalysisStore } from '../stores/createAnalysisStore'
 import type { MoveRecord } from '../components/chess-game/domain/movePresentation'
+import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
 
 const lookupAnalysisCacheMock = vi.fn()
 const uploadSessionMovesMock = vi.fn()
@@ -1020,6 +1021,26 @@ describe('GameAnalysisCoordinator', () => {
 
       expect(coordinator.store.getState().analysisMap.get(0)?.id).toBe(secondId)
       expect(coordinator.store.getState().analysisMap.get(0)?.move).toBe('d2d4')
+    })
+
+    it('sends this device\'s session depth on every analyze-move', () => {
+      // Both in-game callers must carry the depth, or an uploaded provenance
+      // claim would name a search limit the worker never used (g-mk1d §1.4).
+      coordinator.startSession('session-A')
+      const worker = (coordinator as any).worker as MockWorker
+      worker.postMessage.mockClear()
+
+      coordinator.analyzeMove('fen-1', 'e2e4', 'white', 0, 20)
+      coordinator.analyzeMove('fen-2', 'd7d5', 'black', 1, 20)
+
+      const depths = worker.postMessage.mock.calls
+        .map((call) => call[0] as { type: string; depth?: number })
+        .filter((m) => m.type === 'analyze-move')
+        .map((m) => m.depth)
+      expect(depths).toHaveLength(2)
+      // One fixed value for the whole session: per-slot coalescing must never be
+      // able to pair one move's numbers with another move's depth claim.
+      expect(new Set(depths)).toEqual(new Set([sessionAnalysisDepth()]))
     })
 
     it('cancels the older worker request when a move index is replayed', () => {

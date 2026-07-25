@@ -29,6 +29,7 @@ from app.analysis_cache_policy import (
     Reason,
     decide_analysis_cache_replacement,
     declared_profile_inactive,
+    dynamic_identity_of,
     incoming_is_valid,
     project_cache_row,
 )
@@ -180,6 +181,39 @@ def _normalized(fen: str) -> str | None:
         return None
 
 
+def _resolve_dynamic_duplicate(a, b) -> str | None:
+    """Resolve two same-key rows from ONE declared-dynamic profile (g-mk1d).
+
+    Returns ``"existing"`` / ``"incoming"`` for an unambiguous strict winner,
+    ``"conflict"`` when the two rows cannot be ordered (incomparable searches, or
+    equal-strength rows with DIFFERENT provenance — the survivor would otherwise
+    depend on input order), or ``None`` when this rule does not apply (a fixed
+    profile, differing profiles, or identical provenance, which the historical
+    same-producer collapse below already handles correctly).
+
+    The ordering is obtained by running :func:`decide_analysis_cache_replacement`
+    in BOTH orders. Only an agreeing pair (one order REPLACEs, the reverse KEEPs)
+    is a winner, which makes the batch survivor independent of the order rows
+    happened to arrive in — and guarantees the intra-batch result matches what
+    sequential writes of the same rows would have produced.
+    """
+    a_eff = a.effective_profile_id()
+    if a_eff is None or a_eff != b.effective_profile_id():
+        return None
+    if dynamic_identity_of(a) is None:
+        return None  # fixed profile — historical same-producer collapse.
+    if dynamic_identity_of(a) == dynamic_identity_of(b):
+        return None  # identical provenance — safe to collapse/union as before.
+
+    b_replaces_a = decide_analysis_cache_replacement(a, b)[0] is Decision.REPLACE
+    a_replaces_b = decide_analysis_cache_replacement(b, a)[0] is Decision.REPLACE
+    if b_replaces_a and not a_replaces_b:
+        return "incoming"
+    if a_replaces_b and not b_replaces_a:
+        return "existing"
+    return "conflict"
+
+
 def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, str], Reason]]]:
     """Collapse intra-batch duplicate keys deterministically (order-independent).
 
@@ -256,6 +290,23 @@ def _dedupe_batch(rows: list[dict]) -> tuple[list[dict], list[tuple[tuple[str, s
                 by_key[key] = data
             continue
         if not valid_e:  # both invalid: keep incumbent, rejected downstream
+            continue
+
+        # Same-key rows from ONE declared-dynamic profile (browser-game-v2) are
+        # ordered by measured strength instead of being conflicted for having
+        # different producer metadata — differing dynamic metadata is exactly what
+        # a per-device profile is FOR (g-mk1d). Resolved by simulating the
+        # replacement decision in BOTH orders, so the survivor is permutation-
+        # independent; only an agreeing strict winner survives.
+        dynamic_winner = _resolve_dynamic_duplicate(proj_e, proj_i)
+        if dynamic_winner is not None:
+            if dynamic_winner == "conflict":
+                conflicted.add(key)
+                del by_key[key]
+                rejected.append((key, Reason.DUPLICATE_CONFLICT))
+            elif dynamic_winner == "incoming":
+                by_key[key] = data
+            # "existing" keeps the incumbent.
             continue
 
         # Both valid: collapse only when same producer with comparable, agreeing

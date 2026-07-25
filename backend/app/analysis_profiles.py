@@ -147,6 +147,12 @@ BROWSER_ANALYSIS_PROFILE_ID = "browser-analysis-v1"
 # child searches). Replaces the defective hidden ``browser-analysis-v1`` protocol
 # for an exact key via a PROTOCOL_CORRECTION edge.
 BROWSER_ANALYSIS_MULTIPV_PROFILE_ID = "browser-analysis-multipv-v2"
+# The DYNAMIC per-device in-game producer (g-mk1d): the same browser-analyzer-v1
+# protocol as ``browser-game-v1``, but the client now reports its ACTUAL engine
+# artifact + per-device search settings per row, so browser-game rows are no
+# longer all-``None`` and can be strength-ordered against each other. Registered
+# with a non-empty ``dynamic_fields`` set; the fixed half is server-stamped.
+BROWSER_GAME_V2_PROFILE_ID = "browser-game-v2"
 JEFFML_PROFILE_ID = "jeffml-scores-v1"
 
 # The Stockfish-18 lite-single browser analyzer protocol: a root best-move search
@@ -435,17 +441,110 @@ _BROWSER_ANALYSIS_MULTIPV = Profile(
     **_BROWSER_ANALYSIS_MULTIPV_IDENTITY,
 )
 
+# --- Browser dynamic in-game profile (g-mk1d) ----------------------------------
+#
+# ``browser-game-v2`` is the FIRST declared-dynamic profile. The client supplies
+# the seven DYNAMIC identity values per uploaded row (its actual bundled engine
+# artifact + the per-device search settings it really used); the server stamps the
+# FIXED half below and never accepts a client-sent profile id.
+#
+# Fixed half (exact-equality verified, and the only input to the manifest digest —
+# the dynamic values are ``None`` on the Profile, so the digest is stable across
+# every device):
+#   engine_name "Stockfish", eval_file_small_id None (the lite-single build has no
+#   small net), multipv 1 (the in-game worker sets MultiPV 1), and the
+#   browser-analyzer-v1 protocol (root + post-played + post-best searches — the
+#   SAME method as browser-game-v1, only with honest metadata).
+#
+# Dynamic half (per-field validated, never exact-equality): engine_version,
+# engine_build, eval_file_id, search_limit_type, search_limit_value, threads,
+# hash_mb.
+#
+# NON-authoritative (never a trusted hit, never reclaims legacy rows, never enters
+# position truth) but ``replacement_eligible`` so a stronger comparable v2 row can
+# replace a weaker v2 row for an exact key (Rule 2 measured strength). It gets NO
+# ``dominates`` edge: an all-``None`` browser-game-v1 row is UNKNOWN strength and
+# INCOMPARABLE to every v2 row, so v2 never reclaims legacy d17 rows by depth.
+_BROWSER_GAME_V2_FIXED = {
+    "engine_name": "Stockfish",
+    "eval_file_small_id": None,
+    "multipv": 1,
+    "analyzer_protocol_version": BROWSER_ANALYZER_PROTOCOL_VERSION,
+}
+
+# The declared-dynamic identity set: verified by per-field validators
+# (``app.evidence_policy.DYNAMIC_FIELD_VALIDATORS``), never by equality against the
+# profile (whose values for these are ``None``).
+BROWSER_GAME_V2_DYNAMIC_FIELDS = frozenset(
+    {
+        "engine_version",
+        "engine_build",
+        "eval_file_id",
+        "search_limit_type",
+        "search_limit_value",
+        "threads",
+        "hash_mb",
+    }
+)
+
+_BROWSER_GAME_V2 = Profile(
+    profile_id=BROWSER_GAME_V2_PROFILE_ID,
+    engine_version=None,
+    engine_build=None,
+    eval_file=None,
+    eval_file_small=None,
+    eval_file_id=None,
+    search_limit_type=None,
+    search_limit_value=None,
+    threads=None,
+    hash_mb=None,
+    network_id=None,
+    # Digest over the fixed half only (every dynamic field is None here), so a
+    # row from ANY device stamps the same digest and exact-equality-verifies it.
+    profile_manifest_digest=_manifest_digest(_BROWSER_GAME_V2_FIXED),
+    authoritative=False,
+    replacement_eligible=True,
+    active=True,
+    dominates=frozenset(),
+    dynamic_fields=BROWSER_GAME_V2_DYNAMIC_FIELDS,
+    **_BROWSER_GAME_V2_FIXED,
+)
+
 _REGISTRY: dict[str, Profile] = {
         p.profile_id: p
         for p in (
             _CANONICAL,
             _CANONICAL_LINUX,
             _BROWSER,
+            _BROWSER_GAME_V2,
             _BROWSER_ANALYSIS,
             _BROWSER_ANALYSIS_MULTIPV,
             _JEFFML,
         )
 }
+
+
+def stamp_dynamic_profile(profile_id: str, dynamic: dict) -> dict:
+    """Identity stamp for a DECLARED-DYNAMIC profile row (g-mk1d).
+
+    Returns every :data:`IDENTITY_FIELDS` column: the profile's FIXED values plus
+    the caller-supplied ``dynamic`` values for the profile's ``dynamic_fields``.
+    The client can only populate the dynamic half — the fixed half and the
+    manifest digest are always server-stamped from the registry, so a row can
+    never claim a fixed identity it did not earn.
+
+    Returns ``{}`` for an unknown profile id, and ignores any ``dynamic`` key the
+    profile does not declare dynamic (defense in depth: a client cannot overwrite
+    a fixed column by naming it).
+    """
+    profile = get_profile(profile_id)
+    if profile is None:
+        return {}
+    stamped = {f: getattr(profile, f) for f in IDENTITY_FIELDS}
+    for f in profile.dynamic_fields:
+        if f in IDENTITY_FIELDS:
+            stamped[f] = dynamic.get(f)
+    return stamped
 
 
 def get_profile(profile_id: str | None) -> Profile | None:
@@ -561,7 +660,7 @@ AUTHORITATIVE_PROFILE_PRIORITY = (
 )
 
 
-def _parse_engine_version(version: str | None) -> int | None:
+def parse_engine_version(version: str | None) -> int | None:
     """Parse the leading integer of an engine_version (e.g. ``"18"`` -> 18).
 
     Returns ``None`` when the value is missing or has no leading integer, so the
@@ -586,8 +685,8 @@ def compare_search_strength(a: Profile, b: Profile) -> StrengthComparison:
         if getattr(a, f) != getattr(b, f):
             return StrengthComparison.INCOMPARABLE
 
-    a_ver = _parse_engine_version(a.engine_version)
-    b_ver = _parse_engine_version(b.engine_version)
+    a_ver = parse_engine_version(a.engine_version)
+    b_ver = parse_engine_version(b.engine_version)
     if a_ver is not None and b_ver is not None:
         if a_ver > b_ver:
             return StrengthComparison.A_STRONGER

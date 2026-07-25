@@ -18,7 +18,8 @@
     "test:e2e:run": "playwright test --config playwright.prepush.config.ts",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:ui": "playwright test --ui",
-    "test:e2e:screens": "playwright test e2e/screenshots"
+    "test:e2e:screens": "playwright test e2e/screenshots",
+    "gen:engine-identity": "node scripts/gen-browser-engine-identity.mjs"
   },
   "dependencies": {
     "@posthog/react": "^1.10.2",

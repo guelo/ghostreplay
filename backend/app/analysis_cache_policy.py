@@ -14,10 +14,17 @@ masks only — never raw numeric depth.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, field
 from enum import Enum
 
-from app.analysis_profiles import get_profile
+from app.analysis_profiles import (
+    BROWSER_GAME_V2_PROFILE_ID,
+    IDENTITY_FIELDS,
+    StrengthComparison,
+    get_profile,
+    stamp_dynamic_profile,
+)
 from app.evidence_contracts import (
     contract_satisfied,
     is_strict_successor,
@@ -29,8 +36,10 @@ from app.evidence_policy import (
     OverlayMode,
     Supersession,
     compare_evidence_rows,
+    compare_row_strength,
     has_capability,
     overlay_mode,
+    validate_browser_provenance,
     verify_identity,
 )
 
@@ -85,6 +94,17 @@ class Reason(str, Enum):
     SAME_PROFILE_SUPERSET_MERGE = "same_profile_superset_merge"
     SAME_PROFILE_CONTRACT_UPGRADE = "same_profile_contract_upgrade"
     MERGE_CONFLICT_KEEP = "merge_conflict_keep"
+    # --- same-profile MEASURED-STRENGTH outcomes (g-mk1d, declared-dynamic
+    # profiles only). Two rows from one dynamic profile are not interchangeable:
+    # they may have searched to different depths on different devices.
+    # A strictly stronger comparable search replaced the stored row. An accepted write.
+    STRENGTH_REPLACE = "strength_replace"
+    # The incoming search is strictly WEAKER than the stored one: kept (rejected).
+    STRENGTH_WEAKER_KEEP = "strength_weaker_keep"
+    # The two searches are not strength-rankable (different net / multipv /
+    # protocol / limit type / build family, or an unknown-strength legacy row):
+    # kept (rejected). Never guess an ordering across incompatible semantics.
+    STRENGTH_INCOMPARABLE_KEEP = "strength_incomparable_keep"
     INCOMPATIBLE_KEEP = "incompatible_keep"
     INCOMING_LESS_COMPLETE_KEEP = "incoming_less_complete_keep"
     DUPLICATE_CONFLICT = "duplicate_conflict"
@@ -106,6 +126,15 @@ class CacheRow:
     populated_fields: frozenset[str]  # non-null evidence fields
     # Raw evidence values for overlapping-field agreement checks during MERGE.
     values: dict
+    # The row's OWN stored IDENTITY_FIELDS values (g-mk1d). Needed because a
+    # declared-dynamic profile carries ``None`` for its dynamic fields in the
+    # registry, so measured strength must read the row, not the profile. Defaults
+    # empty: a row projected without them is simply never strength-rankable.
+    metadata: dict = field(default_factory=dict)
+
+    def identity_values(self) -> dict:
+        """The row's stored identity metadata (the ``RowView`` strength surface)."""
+        return self.metadata
 
     def effective_profile_id(self) -> str | None:
         """Profile id only when identity-verified; otherwise effective legacy."""
@@ -180,6 +209,62 @@ def declared_profile_inactive(incoming: CacheRow) -> bool:
     return declared is not None and not declared.active
 
 
+def dynamic_identity_of(row: CacheRow) -> dict | None:
+    """The row's DECLARED-DYNAMIC identity values, or ``None`` for a fixed profile.
+
+    ``None`` means "this row's profile has no dynamic half" (every profile but
+    ``browser-game-v2``), which is how callers detect the fixed-profile path.
+    """
+    profile = get_profile(row.effective_profile_id())
+    if profile is None or not profile.dynamic_fields:
+        return None
+    return {f: row.metadata.get(f) for f in profile.dynamic_fields}
+
+
+def _same_profile_strength_decision(
+    existing: CacheRow, incoming: CacheRow
+) -> tuple[Decision, Reason] | None:
+    """Rule 2a: order two same-DYNAMIC-profile rows by measured search strength.
+
+    Returns ``None`` when this rule does not apply — a fixed profile, or two rows
+    whose dynamic provenance is IDENTICAL (then the historical idempotent/merge
+    path is safe, because a merged row would carry the same provenance tuple it
+    already has).
+
+    There is deliberately NO cross-provenance MERGE: a merged row carries exactly
+    ONE provenance tuple, so unioning evidence produced under DIFFERENT search
+    settings would attribute one device's numbers to another device's identity.
+    Equal-strength-but-different-provenance rows are therefore idempotent (first
+    wins), not merged.
+    """
+    existing_dynamic = dynamic_identity_of(existing)
+    if existing_dynamic is None:
+        return None  # fixed profile — historical path.
+    if existing_dynamic == dynamic_identity_of(incoming):
+        return None  # identical provenance — merging cannot fabricate anything.
+
+    strength = compare_row_strength(incoming, existing)
+    if strength is StrengthComparison.A_STRONGER:
+        # A strictly stronger comparable search may replace the stored row, but
+        # only if it does not DROP evidence (same completeness guard as Rule 5).
+        contract_ok = is_superset_or_successor(
+            incoming.evidence_contract_id, existing.evidence_contract_id
+        )
+        superset_ok = (incoming.populated_fields - OPTIONAL_MATE_FIELDS) >= (
+            existing.populated_fields - OPTIONAL_MATE_FIELDS
+        )
+        if contract_ok and superset_ok:
+            return Decision.REPLACE, Reason.STRENGTH_REPLACE
+        return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
+    if strength is StrengthComparison.B_STRONGER:
+        return Decision.KEEP, Reason.STRENGTH_WEAKER_KEEP
+    if strength is StrengthComparison.INCOMPARABLE:
+        return Decision.KEEP, Reason.STRENGTH_INCOMPARABLE_KEEP
+    # EQUAL strength, different provenance (e.g. same depth, different hash_mb):
+    # neither row is better evidence and they cannot be merged, so first wins.
+    return Decision.KEEP, Reason.SAME_PROFILE_IDEMPOTENT
+
+
 def decide_analysis_cache_replacement(
     existing: CacheRow | None,
     incoming: CacheRow,
@@ -211,6 +296,12 @@ def decide_analysis_cache_replacement(
         and incoming_eff is not None
         and existing_eff == incoming_eff
     ):
+        # Rule 2a (g-mk1d): for a DECLARED-DYNAMIC profile, two same-profile rows
+        # are NOT interchangeable — each carries its own device's search settings.
+        # Order them by measured strength before the idempotent/merge path.
+        strength_decision = _same_profile_strength_decision(existing, incoming)
+        if strength_decision is not None:
+            return strength_decision
         # Only replacement-eligible profiles may MERGE; others are idempotent (first
         # wins). Canonical stays eligible (defaulted from authoritative); browser-
         # analysis is now eligible and merges; browser-game stays first-wins.
@@ -265,7 +356,16 @@ def decide_analysis_cache_replacement(
     # TIER_BASELINE) live in one place (g-reuse-d21-search D6). The comparator
     # gives ordering + edge kind; the completeness gate below is unchanged.
     comparison = compare_evidence_rows(incoming, existing)
-    if comparison.outcome is not Supersession.A_SUPERSEDES:
+    # Two grains of win: a CATEGORICAL A_SUPERSEDES (authority / explicit edge) and
+    # a MEASURED A_STRONGER (steps 4-5). Both let the incoming row through; they
+    # differ only in the reason reported below. Every other outcome —
+    # B_SUPERSEDES, B_STRONGER, EQUAL, INCOMPARABLE — keeps the stored row, and
+    # THIS caller genuinely treats them alike, so it collapses them here rather
+    # than the comparator collapsing them for everyone.
+    if comparison.outcome not in (
+        Supersession.A_SUPERSEDES,
+        Supersession.A_STRONGER,
+    ):
         return Decision.KEEP, Reason.INCOMPATIBLE_KEEP
     contract_ok = is_superset_or_successor(
         incoming.evidence_contract_id, existing.evidence_contract_id
@@ -278,14 +378,18 @@ def decide_analysis_cache_replacement(
         existing.populated_fields - OPTIONAL_MATE_FIELDS
     )
     if contract_ok and superset_ok:
+        # A MEASURED win reports strength_replace — the same reason Rule 2a uses
+        # for the same fact, so "this row won on numbers" reads identically whether
+        # the two rows shared a profile or not. Of the categorical wins,
         # PROTOCOL_CORRECTION gets its own reason so the corrective replacement of
         # a defective hidden row is observable; AUTHORITY / TIER_BASELINE keep the
         # historical dominates_replace reason for parity.
-        reason = (
-            Reason.PROTOCOL_CORRECTED_REPLACE
-            if comparison.kind is EdgeKind.PROTOCOL_CORRECTION
-            else Reason.DOMINATES_REPLACE
-        )
+        if comparison.outcome is Supersession.A_STRONGER:
+            reason = Reason.STRENGTH_REPLACE
+        elif comparison.kind is EdgeKind.PROTOCOL_CORRECTION:
+            reason = Reason.PROTOCOL_CORRECTED_REPLACE
+        else:
+            reason = Reason.DOMINATES_REPLACE
         return Decision.REPLACE, reason
     return Decision.KEEP, Reason.INCOMING_LESS_COMPLETE_KEEP
 
@@ -319,6 +423,7 @@ def project_cache_row(data: dict) -> CacheRow:
         contract_satisfied=contract_satisfied(contract_id, data),
         populated_fields=populated_fields_of(data),
         values={f: data.get(f) for f in EVIDENCE_FIELDS},
+        metadata={f: data.get(f) for f in IDENTITY_FIELDS},
     )
 
 
@@ -351,3 +456,81 @@ def display_upgrade_eligible(row: CacheRow) -> bool:
     if not has_capability(row, Capability.DISPLAY_OVERLAY):
         return False
     return overlay_mode(row.effective_profile_id()) is OverlayMode.ALWAYS
+
+
+def browser_live_descriptor(raw_provenance: str | None) -> CacheRow | None:
+    """Rebuild the LIVE comparison operand from a persisted provenance JSON blob.
+
+    ``session_moves.browser_provenance`` stores ONLY the seven declared-dynamic
+    values a client may self-report. The FIXED half (engine_name, small-net,
+    multipv, analyzer protocol) and the ``profile_manifest_digest`` are NOT stored
+    — they are reconstructed here from the server registry, so a hand-edited
+    session-move row can never claim a fixed identity it did not earn.
+
+    Returns ``None`` for a NULL, unparseable, non-object, or identity-failing blob
+    (a tampered or legacy row). ``None`` reads downstream as "no comparable live
+    evidence" → the REQUIRES_COMPARISON overlay is withheld, which is the safe
+    direction: the viewer keeps their own label.
+    """
+    if not raw_provenance:
+        return None
+    try:
+        parsed = json.loads(raw_provenance)
+    except (TypeError, ValueError):
+        return None
+    fields = validate_browser_provenance(parsed)
+    if fields is None:
+        return None
+    data = {
+        "analysis_profile_id": BROWSER_GAME_V2_PROFILE_ID,
+        **stamp_dynamic_profile(BROWSER_GAME_V2_PROFILE_ID, fields.values),
+    }
+    if not verify_identity(data):
+        return None
+    return CacheRow(
+        analysis_profile_id=BROWSER_GAME_V2_PROFILE_ID,
+        evidence_contract_id=None,
+        identity_verified=True,
+        # A descriptor is an identity/strength operand only — it carries no
+        # evidence, so it is never contract-satisfied and never overlays anything
+        # itself.
+        contract_satisfied=False,
+        populated_fields=frozenset(),
+        values={},
+        metadata={f: data.get(f) for f in IDENTITY_FIELDS},
+    )
+
+
+def display_upgrade_eligible_vs(stored: CacheRow, live: CacheRow | None) -> bool:
+    """Overlay gate for a stored row that MAY need a live comparison (g-mk1d).
+
+    The full two-operand gate for the refetch overlay:
+
+    * an ALWAYS-mode row (canonical, browser-analysis-v1/-multipv-v2) overlays
+      unconditionally — identical to :func:`display_upgrade_eligible`, and ``live``
+      is not consulted. Parity for every profile that shipped before g-mk1d;
+    * a REQUIRES_COMPARISON row (``browser-game-v2``) overlays ONLY when it is
+      STRICTLY STRONGER than ``live`` under the same guarded comparison that
+      governs STORAGE replacement (:func:`compare_row_strength`). Equal, weaker,
+      incomparable, or a missing/unverifiable ``live`` operand → no overlay, and
+      the viewer keeps the label they already have;
+    * NEVER-mode / uncapable rows never overlay.
+
+    Sharing ``compare_row_strength`` with Rule 2a is the point: what the writer
+    considers a stronger row and what the reader is willing to display cannot
+    drift apart.
+    """
+    if not (stored.identity_verified and stored.contract_satisfied):
+        return False
+    if "classification" not in stored.populated_fields:
+        return False
+    if not has_capability(stored, Capability.DISPLAY_OVERLAY):
+        return False
+    mode = overlay_mode(stored.effective_profile_id())
+    if mode is OverlayMode.ALWAYS:
+        return True
+    if mode is not OverlayMode.REQUIRES_COMPARISON:
+        return False
+    if live is None:
+        return False
+    return compare_row_strength(stored, live) is StrengthComparison.A_STRONGER

@@ -105,6 +105,15 @@ _ACCEPTED_REASONS = frozenset(
         Reason.NEW_KEY,
         Reason.DOMINATES_REPLACE,
         Reason.LEGACY_REPLACED_BY_AUTH,
+        # A MEASURED replacement (D4 steps 4-5) is a successful write like any other.
+        # Latent today — the two canonical manifests compare EQUAL, so no canonical
+        # pair ranks — but a future deeper canonical profile with no explicit edge
+        # would rank, and without this entry that successful upgrade would land in
+        # `write_failures` and exit the run unsuccessfully (g-mk1d review).
+        Reason.STRENGTH_REPLACE,
+        # PROTOCOL_CORRECTED_REPLACE stays out: this producer is authoritative, and
+        # the authority barrier resolves canonical-vs-browser before explicit edges,
+        # so a canonical write can never earn a protocol-correction verdict.
         Reason.SAME_PROFILE_SUPERSET_MERGE,
         Reason.SAME_PROFILE_CONTRACT_UPGRADE,
         # Accepted ONLY when post-write verification confirms the stored row is

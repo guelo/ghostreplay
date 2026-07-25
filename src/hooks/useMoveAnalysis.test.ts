@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useMoveAnalysis } from './useMoveAnalysis'
 import { createAnalysisStore, type AnalysisStore } from '../stores/createAnalysisStore'
+import { buildBrowserProvenance } from '../workers/browserProvenance'
+import { sessionAnalysisDepth } from '../workers/deviceAnalysisTier'
+
+/** The provenance a fresh (untruncated) worker result carries on this device. */
+const expectedProvenance = () => buildBrowserProvenance(sessionAnalysisDepth())
 
 const lookupAnalysisCacheMock = vi.fn()
 
@@ -164,6 +169,9 @@ describe('useMoveAnalysis', () => {
       classification: 'blunder',
       blunder: true,
       recordable: false,
+      // A worker message with no `capFired` is not a truncated search, so the
+      // result carries this device's provenance at the session depth (g-mk1d).
+      provenance: expectedProvenance(),
     })
   })
 
@@ -251,6 +259,11 @@ describe('useMoveAnalysis', () => {
         move: 'e2e4',
         playerColor: 'white',
         id: expect.any(String),
+        // The in-game path no longer omits depth: it carries this device's
+        // session depth so the uploaded provenance can name a real search limit
+        // (g-mk1d). The floor is the historical 17, so the weakest device is
+        // unchanged.
+        depth: sessionAnalysisDepth(),
       }),
     )
   })
@@ -1125,6 +1138,7 @@ describe('useMoveAnalysis', () => {
       classification: null,
       blunder: false,
       recordable: false,
+      provenance: expectedProvenance(),
     })
   })
 

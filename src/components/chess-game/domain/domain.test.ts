@@ -365,6 +365,9 @@ describe("chess-game domain helpers", () => {
         best_line_uci: null,
         decision_source: null,
         target_blunder_id: null,
+        // The fixture analyses carry no provenance, so the uploads carry none —
+        // the backend stamps these as legacy browser-game-v1 rows.
+        provenance: null,
       },
       {
         move_number: 1,
@@ -385,6 +388,9 @@ describe("chess-game domain helpers", () => {
         best_line_uci: null,
         decision_source: null,
         target_blunder_id: null,
+        // The fixture analyses carry no provenance, so the uploads carry none —
+        // the backend stamps these as legacy browser-game-v1 rows.
+        provenance: null,
       },
     ]);
   });

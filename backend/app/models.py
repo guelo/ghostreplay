@@ -374,6 +374,18 @@ class SessionMove(Base):
     decision_source: Mapped[str | None] = mapped_column(String(20))
     target_blunder_id: Mapped[int | None] = mapped_column(BIGINT_SQLITE, ForeignKey("blunders.id"))
     segment: Mapped[str] = mapped_column(String(10), nullable=False, server_default="normal")
+    # JSON-encoded browser-game-v2 DYNAMIC provenance for this move's own local
+    # search (the seven self-reported engine/search values), or NULL for legacy,
+    # cache-sourced, reconciled, malformed, or no-provenance rows (g-mk1d).
+    #
+    # Read at exactly one place: GET /{session_id}/analysis, to build the LIVE
+    # operand for a REQUIRES_COMPARISON overlay decision — "is this stored
+    # cross-user browser row stronger than what this session already computed?".
+    # Never filtered, joined, or indexed, hence one opaque Text column rather than
+    # seven typed ones. The FIXED identity half is deliberately NOT stored: it is
+    # reconstructed from the server registry at read time so a hand-edited row
+    # cannot claim an identity it did not earn.
+    browser_provenance: Mapped[str | None] = mapped_column(Text)
 
 
 class SessionUploadReceipt(Base):
