@@ -10,7 +10,9 @@ Each scenario runs pytest in a **subprocess** (``runpytest_subprocess``) so a
 fresh interpreter activates the REAL importable plugin and rebinds its two
 manifests to a *synthetic* body, then asserts the gate's behaviour. Subprocess
 isolation keeps a nested run's env and manifest monkeypatching from leaking into
-this outer session's own plugin state.
+this outer session's own plugin state, and the synthetic project carries its own
+``pytest.ini`` so the nested rootdir — and therefore the node ids the manifests
+are keyed on — never depends on where the basetemp happens to live.
 
 Covered (mirrors g-release-integrate's acceptance criteria):
 
@@ -79,7 +81,18 @@ def _write_synthetic_project(pytester, *, body: str,
     ``import pg_gate_plugin``, rebinds both manifests to the synthetic identities
     (the gate hooks read the module globals at call time), and activates the
     plugin via ``pytest_plugins``.
+
+    The project also ships its OWN ``pytest.ini``. That pins the nested run's
+    rootdir to the pytester directory, which the synthetic manifests below depend
+    on: node ids are relative to rootdir, so identities are ``test_synth.py::...``
+    only while rootdir is this directory. Without the pin, a basetemp inside the
+    repo (the documented ``TMPDIR=backend/.tmp``) lets the nested run discover
+    ``backend/pytest.ini``, rootdir becomes ``backend/``, every id grows a long
+    relative prefix, and every manifest assertion fails for the wrong reason.
+    Pinning rootdir also cuts conftest collection off here, so the real
+    ``backend/conftest.py`` never loads into the synthetic run.
     """
+    pytester.makefile(".ini", pytest="[pytest]\n")
     pytester.makeconftest(
         "import sys\n"
         f"sys.path.insert(0, {str(_BACKEND_DIR)!r})\n"
@@ -93,6 +106,22 @@ def _write_synthetic_project(pytester, *, body: str,
 
 def _combined(result) -> str:
     return result.stdout.str() + "\n" + result.stderr.str()
+
+
+def _run_nested(pytester, *args):
+    """Run the synthetic project in a subprocess, asserting it stayed isolated.
+
+    Every assertion in this file is keyed on ``test_synth.py::...`` identities, and
+    those only hold while the nested run's rootdir is the pytester directory (see
+    ``_write_synthetic_project``). Checking the reported rootdir here turns an
+    escape into one clear diagnosis instead of six unrelated-looking gate failures.
+    """
+    result = pytester.runpytest_subprocess(*args)
+    assert f"rootdir: {pytester.path}\n" in result.stdout.str(), (
+        "nested run escaped the synthetic project's rootdir, so its node ids are "
+        "not the manifest identities under test:\n" + _combined(result)
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +142,7 @@ def test_missing_test_url_fails_in_required_mode(pytester, monkeypatch):
         manifest_tests={"test_synth.py::test_needs_url"},
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers", "-rs")
+    result = _run_nested(pytester, "--strict-markers", "-rs")
     outcomes = result.parseoutcomes()
     assert outcomes.get("skipped", 0) == 0
     assert outcomes.get("passed", 0) == 0
@@ -141,7 +170,7 @@ def test_missing_maintenance_url_fails_in_required_mode(pytester, monkeypatch):
         manifest_tests={"test_synth.py::test_needs_maint"},
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers", "-rs")
+    result = _run_nested(pytester, "--strict-markers", "-rs")
     outcomes = result.parseoutcomes()
     assert outcomes.get("skipped", 0) == 0
     assert outcomes.get("passed", 0) == 0
@@ -178,7 +207,7 @@ def test_residual_skips_are_promoted_to_failures(pytester, monkeypatch):
         },
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers", "-rs")
+    result = _run_nested(pytester, "--strict-markers", "-rs")
     outcomes = result.parseoutcomes()
     # Neither residual skip survives as a skip; both become non-passing (a
     # call-phase skip -> failed, a setup/fixture skip -> error).
@@ -214,7 +243,7 @@ def test_failing_xfail_is_promoted_to_failure(pytester, monkeypatch):
         },
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers", "-rx")
+    result = _run_nested(pytester, "--strict-markers", "-rx")
     outcomes = result.parseoutcomes()
     # An xfailed report (outcome="skipped" + wasxfail) must not survive as a
     # non-failure: both forms become failures, none remain xfailed/skipped.
@@ -241,7 +270,7 @@ def test_empty_gated_selection_raises_usage_error(pytester, monkeypatch):
         manifest_tests=set(),
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers")
+    result = _run_nested(pytester, "--strict-markers")
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     assert "no @pg_gate tests were selected" in _combined(result)
 
@@ -268,7 +297,7 @@ def test_incomplete_function_manifest_names_missing_identity(pytester, monkeypat
         },
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers")
+    result = _run_nested(pytester, "--strict-markers")
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     combined = _combined(result)
     assert "manifest incomplete" in combined
@@ -298,7 +327,7 @@ def test_incomplete_matrix_names_missing_case(pytester, monkeypatch):
             "test_synth.py::test_matrix[missing_case]",
         },
     )
-    result = pytester.runpytest_subprocess("--strict-markers")
+    result = _run_nested(pytester, "--strict-markers")
     assert result.ret == pytest.ExitCode.USAGE_ERROR
     combined = _combined(result)
     assert "matrix incomplete" in combined
@@ -334,7 +363,7 @@ def test_complete_manifest_and_url_collects_and_passes(pytester, monkeypatch):
             "test_synth.py::test_matrix[b]",
         },
     )
-    result = pytester.runpytest_subprocess("--strict-markers", "-rs")
+    result = _run_nested(pytester, "--strict-markers", "-rs")
     assert result.ret == pytest.ExitCode.OK
     outcomes = result.parseoutcomes()
     assert outcomes.get("passed", 0) == 3
@@ -361,7 +390,7 @@ def test_developer_default_mode_skips_cleanly(pytester, monkeypatch):
         manifest_tests={"test_synth.py::test_needs_url"},
         manifest_cases=set(),
     )
-    result = pytester.runpytest_subprocess("--strict-markers", "-rs")
+    result = _run_nested(pytester, "--strict-markers", "-rs")
     assert result.ret == pytest.ExitCode.OK
     outcomes = result.parseoutcomes()
     assert outcomes.get("skipped", 0) == 1
