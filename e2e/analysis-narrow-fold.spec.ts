@@ -20,10 +20,103 @@ import { test } from "./fixtures/auth";
  * values, so type and copy tweaks don't churn them.
  */
 
-const box = async (page: Page, selector: string) => {
-  const b = await page.locator(selector).boundingBox();
-  expect(b, `expected ${selector} to be laid out`).not.toBeNull();
-  return b!;
+type Box = { x: number; y: number; width: number; height: number };
+
+/**
+ * Measure several elements in ONE layout pass, once the layout has stopped
+ * moving.
+ *
+ * Two `locator.boundingBox()` calls are two round-trips, so a layout that
+ * settles between them yields a torn read: numbers from two different layout
+ * states that no single frame ever rendered. Every assertion here compares
+ * boxes against each other, so a torn read fails a contract the page never
+ * actually broke.
+ *
+ * That is not hypothetical (g-fold-e2e-flake): on load the wide band settles
+ * ~100ms in — a sub-pixel 100dvh change re-resolves the graph's
+ * `calc(100% - 250px)` cap, which moves the stats pane by 46px. The old
+ * per-box reads straddled that settle under the full parallel run and failed
+ * `stats.x >= graph.x + graph.width` with the graph measured before it and the
+ * stats after.
+ *
+ * The single `evaluate` removes the tearing; polling for two identical
+ * consecutive reads makes the assertions describe the settled layout instead of
+ * a frame on the way there.
+ *
+ * It also has to re-earn the two guarantees `locator.boundingBox()` gave for
+ * free, because `getBoundingClientRect()` gives neither: a `display:none`
+ * element yields a truthy all-zeros rect rather than null, and `querySelector`
+ * silently takes the first of N matches where a locator is strict. So each
+ * selector must resolve to exactly ONE visible, non-empty element — otherwise a
+ * hidden or ambiguous graph would sail through these assertions. Filtering to
+ * the visible matches before counting keeps that strictness without banning a
+ * responsive layout that renders a variant it hides by CSS.
+ */
+type Measured = { box?: Box; problem?: string };
+
+const settledBoxes = async <K extends string>(
+  page: Page,
+  selectors: Record<K, string>,
+): Promise<Record<K, Box>> => {
+  const read = () =>
+    page.evaluate((sels: Record<string, string>) => {
+      const out: Record<string, Measured> = {};
+      for (const [name, selector] of Object.entries(sels)) {
+        const rendered = [...document.querySelectorAll(selector)]
+          .filter((el) =>
+            el.checkVisibility({
+              contentVisibilityAuto: true,
+              visibilityProperty: true,
+            }),
+          )
+          .map((el) => el.getBoundingClientRect())
+          .filter((r) => r.width > 0 && r.height > 0);
+
+        if (rendered.length !== 1) {
+          out[name] = {
+            problem: `${selector} matched ${rendered.length} visible non-empty elements (expected exactly 1)`,
+          };
+          continue;
+        }
+        const r = rendered[0];
+        out[name] = {
+          box: { x: r.x, y: r.y, width: r.width, height: r.height },
+        };
+      }
+      return out;
+    }, selectors);
+
+  let latest: Record<string, Measured> = {};
+  let previous = "";
+  await expect
+    .poll(
+      async () => {
+        latest = await read();
+        const problems = Object.values(latest)
+          .map((m) => m.problem)
+          .filter(Boolean);
+        const current = JSON.stringify(latest);
+        const unchanged = current === previous;
+        previous = current;
+        if (problems.length > 0) return problems.join("; ");
+        return unchanged ? "settled" : "still moving";
+      },
+      {
+        message: `expected ${Object.values(selectors).join(", ")} to be laid out and settled`,
+        // Fixed cadence, not expect.poll's default [100, 250, 500, ...]: the
+        // quiet window has to be WIDER than the transient it must not mistake
+        // for the settled layout. The wide band holds its pre-settle values for
+        // ~130ms, so two reads 100ms apart can both land inside it and match.
+        // 250ms cannot fit in that plateau.
+        intervals: [250],
+        timeout: 10_000,
+      },
+    )
+    .toBe("settled");
+
+  return Object.fromEntries(
+    Object.entries(latest).map(([name, m]) => [name, (m as Measured).box]),
+  ) as Record<K, Box>;
 };
 
 /** Land on the seeded game analysis for the stable user. */
@@ -71,10 +164,12 @@ for (const target of PAGES) {
       await loginAs(page, "stable");
       await target.open(page);
 
-      const graph = await box(page, ".analysis-graph");
-      const stats = await box(page, ".history-stats-pane");
-      const board = await box(page, ".analysis-board__board-frame");
-      const col = await box(page, ".analysis-board__board-col");
+      const { graph, stats, board, col } = await settledBoxes(page, {
+        graph: ".analysis-graph",
+        stats: ".history-stats-pane",
+        board: ".analysis-board__board-frame",
+        col: ".analysis-board__board-col",
+      });
 
       // Still stacked: the stats pane sits under the graph, not beside it.
       expect(stats.y).toBeGreaterThanOrEqual(graph.y + graph.height);
@@ -116,9 +211,11 @@ for (const target of PAGES) {
       await loginAs(page, "stable");
       await target.open(page);
 
-      const graph = await box(page, ".analysis-graph");
-      const stats = await box(page, ".history-stats-pane");
-      const board = await box(page, ".analysis-board__board-frame");
+      const { graph, stats, board } = await settledBoxes(page, {
+        graph: ".analysis-graph",
+        stats: ".history-stats-pane",
+        board: ".analysis-board__board-frame",
+      });
 
       // Side by side: stats start after the graph ends, on the same row.
       expect(stats.x).toBeGreaterThanOrEqual(graph.x + graph.width);
@@ -150,10 +247,12 @@ test("wide viewports keep their own board sizing and stats layout", async ({
   await loginAs(page, "stable");
   await openHistory(page);
 
-  const graph = await box(page, ".analysis-graph");
-  const stats = await box(page, ".history-stats-pane");
-  const board = await box(page, ".analysis-board__board-frame");
-  const col = await box(page, ".analysis-board__board-col");
+  const { graph, stats, board, col } = await settledBoxes(page, {
+    graph: ".analysis-graph",
+    stats: ".history-stats-pane",
+    board: ".analysis-board__board-frame",
+    col: ".analysis-board__board-col",
+  });
 
   // 721–1099px is the pre-existing two-column layout, untouched by the narrow
   // rules: the board is height-driven (100dvh - 24rem, far larger than the
