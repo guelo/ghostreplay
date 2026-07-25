@@ -59,6 +59,7 @@ from test_release_b_migrations import (
     PREVIOUS_HEAD,
     REVISION,
     _Row,
+    run_phases_directly,
 )
 
 _BACKEND_DIR = pathlib.Path(__file__).resolve().parent
@@ -172,7 +173,7 @@ def test_pg_release_b_validates_the_not_valid_check(pg_migration_db, monkeypatch
         # Both fail-closed assertions ran and passed inside that upgrade — the
         # revision could not have completed otherwise — and the population is
         # empty afterwards.
-        assert conn.execute(text(mod.SQL_PG.backfill_remaining)).scalar() == 0
+        assert mod.remaining_scan(conn, mod.SQL_PG.backfill_remaining) == (0, [])
     eng.dispose()
 
     # NOTE: the revision re-arms lock_timeout immediately after VALIDATE, because
@@ -220,6 +221,11 @@ def test_pg_population_parity_matrix(pg_migration_db, monkeypatch):
     assert PRESEEDED_V1_ACCURACY != INTACT_ACCURACY
     url = pg_migration_db
     monkeypatch.setenv("DATABASE_URL", url)
+    # The execution mode is REQUIRED on PostgreSQL once either population is
+    # nonzero — there is no default, because an unset variable is a deployment
+    # error and never a silent atomic run. This suite proves CORRECTNESS, so it
+    # binds atomic mode; the per-batch envelope has its own suite.
+    monkeypatch.setenv(mod.ENV_MODE, "atomic")
     cfg = _alembic_config()
     command.upgrade(cfg, PREVIOUS_HEAD)
 
@@ -424,7 +430,7 @@ def test_pg_guarded_update_typed_arrays_all_null_mixed_and_all_scored(
             # --- run the real runner over exactly this batch ---
             executed.clear()
             with eng.begin() as conn:
-                mod._run_backfill(conn, mod.SQL_PG, 500)
+                run_phases_directly(conn, mod.SQL_PG, batch_size=500)
 
             updates = [
                 (sql, many)
@@ -444,7 +450,7 @@ def test_pg_guarded_update_typed_arrays_all_null_mixed_and_all_scored(
                         ).bindparams(i=str(sid))
                     ).one()
                     assert stored == (expected, 1), (round_name, kind, sid)
-                assert conn.execute(text(mod.SQL_PG.backfill_remaining)).scalar() == 0
+                assert mod.remaining_scan(conn, mod.SQL_PG.backfill_remaining) == (0, [])
     finally:
         event.remove(eng, "before_cursor_execute", _record)
         eng.dispose()
@@ -462,6 +468,11 @@ def test_pg_nil_uuid_session_is_backfilled(pg_migration_db, monkeypatch):
     """
     url = pg_migration_db
     monkeypatch.setenv("DATABASE_URL", url)
+    # The execution mode is REQUIRED on PostgreSQL once either population is
+    # nonzero — there is no default, because an unset variable is a deployment
+    # error and never a silent atomic run. This suite proves CORRECTNESS, so it
+    # binds atomic mode; the per-batch envelope has its own suite.
+    monkeypatch.setenv(mod.ENV_MODE, "atomic")
     cfg = _alembic_config()
     command.upgrade(cfg, PREVIOUS_HEAD)
     eng = create_engine(url)

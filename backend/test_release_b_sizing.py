@@ -60,6 +60,12 @@ MEASURED_CONSTANTS = (
     "MARGINED_MS_PER_REPAIR_ROW",
     "MARGINED_MS_PER_SCAN_STMT",
     "MARGINED_MS_COVERAGE_ASSERT",
+    # The backfill's OWN game_sessions work. PROVISIONAL until
+    # g-b-size-derive-backfill-terms times them directly, but declared, positive
+    # and load-bearing now: the scan budget and the atomic projection both charge
+    # them, and a zero would price a growing relation at nothing.
+    "MARGINED_MS_BACKFILL_REMAINING",
+    "MARGINED_MS_BACKFILL_SELECT_SWEEP",
     "SCAN_STMT_TIMEOUT_MS",
     "MAX_SINGLE_SESSION_COMPUTE_MS",
     "TEARDOWN_ALLOWANCE_MS",
@@ -118,19 +124,78 @@ def test_est_max_lock_hold_fits_the_writer_stall_bound():
     literals: it cannot enforce a production observation, and a green suite here
     is NOT a proof that a row lock is never held longer than
     ``MAX_WRITER_STALL_MS``. It also says nothing about atomic mode, whose single
-    lock hold is bounded by the admission projection rather than by this term.
+    lock hold is bounded by the admission projection and the residual stall
+    deadline rather than by this term.
     """
+    assert mod.EST_MAX_LOCK_HOLD_MS == mod.MAX_BATCH_MS + mod.TEARDOWN_ALLOWANCE_MS
+    assert mod.EST_MAX_LOCK_HOLD_MS <= mod.MAX_WRITER_STALL_MS
+
+
+def test_est_max_lock_hold_has_no_single_session_compute_addend():
+    """Adding the per-session ceiling here would DOUBLE-COUNT it.
+
+    ``MAX_BATCH_MS`` is batch-wide over SQL *and* Python, because the compute
+    watchdog is armed to ``min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining,
+    revision remaining, atomic remaining)`` — so no session's compute can push the
+    batch past its deadline, and the compute is already inside ``MAX_BATCH_MS``.
+    ``MAX_SINGLE_SESSION_COMPUTE_MS`` survives only as that watchdog ceiling.
+    """
+    assert mod.MAX_SINGLE_SESSION_COMPUTE_MS > 0  # still declared, still armed
     assert (
         mod.EST_MAX_LOCK_HOLD_MS
-        == mod.MAX_BATCH_MS + mod.MAX_SINGLE_SESSION_COMPUTE_MS + mod.TEARDOWN_ALLOWANCE_MS
+        != mod.MAX_BATCH_MS + mod.MAX_SINGLE_SESSION_COMPUTE_MS + mod.TEARDOWN_ALLOWANCE_MS
     )
-    assert mod.EST_MAX_LOCK_HOLD_MS <= mod.MAX_WRITER_STALL_MS
 
 
 def test_scan_stmt_timeout_covers_the_most_expensive_scan_it_is_armed_on():
     assert mod.SCAN_STMT_TIMEOUT_MS >= max(
-        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT
+        mod.MARGINED_MS_PER_SCAN_STMT,
+        mod.MARGINED_MS_COVERAGE_ASSERT,
+        mod.MARGINED_MS_BACKFILL_REMAINING,
     )
+
+
+def test_scan_stmt_timeout_must_cover_the_backfill_convergence_scan_specifically():
+    """The backfill convergence scan, pinned on its own.
+
+    The two convergence scans are priced by DIFFERENT terms, and only one of them
+    needed adding to the maximum. ``REPAIR_REMAINING_SQL`` wraps the ply detector,
+    so it scans ``session_moves`` and is already one of the four complete
+    statements behind ``MARGINED_MS_PER_SCAN_STMT`` (scaled by ``G_moves``).
+    ``BACKFILL_REMAINING_SQL`` scans ``game_sessions`` on an unindexed predicate,
+    so it is priced by ``MARGINED_MS_BACKFILL_REMAINING`` and scales by
+    ``G_sessions`` — by NEITHER population, which is what lets relation growth
+    alone push it past the other two terms. Both go through
+    ``_Runner._arm_scan``, so ``SCAN_STMT_TIMEOUT_MS`` is the cap armed on both,
+    and a value below the backfill term arms that scan with less time than it
+    measurably needs. The resulting 57014 arrives through the exhaustion template
+    as ``did not converge`` — a self-inflicted cancellation misreported as the
+    migration's own non-convergence.
+    """
+    inflated_remaining = mod.SCAN_STMT_TIMEOUT_MS + 1
+    assert not (
+        mod.SCAN_STMT_TIMEOUT_MS
+        >= max(
+            mod.MARGINED_MS_PER_SCAN_STMT,
+            mod.MARGINED_MS_COVERAGE_ASSERT,
+            inflated_remaining,
+        )
+    )
+
+
+def test_derived_scan_stmt_timeout_covers_the_backfill_convergence_scan():
+    """The DERIVATION, not just the frozen constant.
+
+    The frozen numbers happen to satisfy the invariant above, so the invariant
+    test passes whether or not ``derive()`` charges the backfill convergence scan.
+    This drives the harness with a measurement where that scan is the most
+    expensive armed statement and asserts the emitted constant covers it.
+    """
+    slow = _measurement()
+    slow["scans"]["backfill_remaining"]["max_ms"] = 4000.0
+    derived = harness.derive([slow] + _complete()[1:], None)["constants"]
+    assert derived["MARGINED_MS_BACKFILL_REMAINING"] > derived["MARGINED_MS_PER_SCAN_STMT"]
+    assert derived["SCAN_STMT_TIMEOUT_MS"] >= derived["MARGINED_MS_BACKFILL_REMAINING"]
 
 
 def test_scan_stmt_timeout_must_cover_the_coverage_assertion_specifically():
@@ -158,10 +223,63 @@ def test_scan_budget_fits_the_revision_deadline():
     non-convergence error 900 seconds later.
     """
     budget = mod._scan_budget_ms(mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT)
-    assert budget == (2 * mod.MAX_PASSES + 2) * mod.MARGINED_MS_PER_SCAN_STMT + (
-        mod.MARGINED_MS_COVERAGE_ASSERT
+    assert budget == (
+        (2 * mod.MAX_PASSES + 2) * mod.MARGINED_MS_PER_SCAN_STMT
+        + mod.MARGINED_MS_COVERAGE_ASSERT
+        + mod.MAX_PASSES
+        * (mod.MARGINED_MS_BACKFILL_SELECT_SWEEP + mod.MARGINED_MS_BACKFILL_REMAINING)
     )
     assert budget < mod.REVISION_DEADLINE_S * 1000
+
+
+def test_scan_budget_charges_the_backfills_own_game_sessions_work():
+    """The last term is MANDATORY, and a budget without it is an underestimate.
+
+    The backfill's keyset SELECTION SWEEP and ``BACKFILL_REMAINING_SQL`` both
+    filter ``game_sessions`` on ``player_accuracy_algo_version IS NULL OR < 1``,
+    which NO index covers (``app/models.py:188``, ``app/models.py:224``). So each
+    is O(G_sessions) and not O(N_stale) — every version-1 row Release A stamps
+    between sizing and deploy grows the scanned relation while shrinking the
+    population — and per-batch mode can run up to ``MAX_PASSES`` backfill passes.
+    A budget that counted only the ``session_moves`` detectors and the coverage
+    assertion priced that relation-scaled work at zero.
+    """
+    with_terms = mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT
+    )
+    without_terms = mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, 0, 0
+    )
+    assert with_terms > without_terms
+    assert with_terms - without_terms == mod.MAX_PASSES * (
+        mod.MARGINED_MS_BACKFILL_SELECT_SWEEP + mod.MARGINED_MS_BACKFILL_REMAINING
+    )
+
+
+def test_scan_budget_scales_each_relations_terms_by_its_own_growth_factor():
+    """``session_moves`` terms by ``G_moves``, ``game_sessions`` terms by
+    ``G_sessions`` — including BOTH backfill terms.
+
+    Growing only one relation must move only that relation's terms. A budget that
+    scaled the ``session_moves`` detectors and left the backfill's own
+    ``game_sessions`` sweep at its frozen value would be blind to exactly the
+    growth that a correctly-stamped version-1 row produces.
+    """
+    base = mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT
+    )
+    moves_only = mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, g_moves=2.0
+    )
+    sessions_only = mod._scan_budget_ms(
+        mod.MARGINED_MS_PER_SCAN_STMT, mod.MARGINED_MS_COVERAGE_ASSERT, g_sessions=2.0
+    )
+    assert moves_only - base == (2 * mod.MAX_PASSES + 2) * mod.MARGINED_MS_PER_SCAN_STMT
+    assert sessions_only - base == (
+        mod.MARGINED_MS_COVERAGE_ASSERT
+        + mod.MAX_PASSES
+        * (mod.MARGINED_MS_BACKFILL_SELECT_SWEEP + mod.MARGINED_MS_BACKFILL_REMAINING)
+    )
 
 
 def test_runner_pass_limits_do_not_exceed_the_charged_pass_bound():
@@ -424,6 +542,11 @@ def _measurement(**over):
             "soundness_assert": {"max_ms": 110.0},
             "repair_population_count": {"max_ms": 115.0},
             "coverage_assert": {"max_ms": 60.0},
+            # The backfill's OWN game_sessions work, priced by its own two
+            # constants and scaled by r_sessions — NOT part of "the maximum across
+            # the four complete session_moves statements".
+            "backfill_remaining": {"max_ms": 70.0},
+            "backfill_select_sweep": {"max_ms": 90.0, "pages": 3},
         },
         "teardown_point": "full",
         "validated_in_run": True,
@@ -542,10 +665,17 @@ def test_scan_terms_survive_a_run_where_both_populations_are_zero():
     assert out["projected_ms"]["T_repair_prod"] == 0.0
     assert out["constants"]["MARGINED_MS_PER_SCAN_STMT"] > 0
     assert out["constants"]["MARGINED_MS_COVERAGE_ASSERT"] > 0
-    # Three scans under lock plus the coverage assertion plus the teardown floor
-    # are the WHOLE stall on this run, and none of them is zero.
+    assert out["constants"]["MARGINED_MS_BACKFILL_SELECT_SWEEP"] > 0
+    assert out["constants"]["MARGINED_MS_BACKFILL_REMAINING"] > 0
+    # Three session_moves scans under lock, the coverage assertion, the backfill's
+    # own selection sweep and convergence count, and the teardown floor are the
+    # WHOLE stall on this run — and not one of them is zero.
     assert out["decision_1"]["T_stall_prod_ms"] == pytest.approx(
-        mod.ATOMIC_SCANS_UNDER_LOCK * 120.0 + 60.0 + 40.0
+        mod.ATOMIC_SCANS_UNDER_LOCK * 120.0
+        + 60.0
+        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * 90.0
+        + mod.BACKFILL_REMAINING_UNDER_LOCK * 70.0
+        + 40.0
     )
 
 
@@ -843,6 +973,75 @@ def test_relation_growth_scales_the_scan_terms_and_nothing_else():
         grown["constants"]["MARGINED_MS_PER_REPAIR_ROW"]
         == base["constants"]["MARGINED_MS_PER_REPAIR_ROW"]
     )
+    # The backfill's own terms scan game_sessions, which did NOT grow here.
+    for name in ("MARGINED_MS_BACKFILL_SELECT_SWEEP", "MARGINED_MS_BACKFILL_REMAINING"):
+        assert grown["constants"][name] == base["constants"][name], name
+
+
+def test_relation_growth_of_game_sessions_alone_scales_the_backfills_own_terms():
+    """The other relation, and the leak a ``session_moves``-only model misses.
+
+    ``game_sessions`` doubles while ``session_moves`` stands still — the exact
+    shape a month of correctly-stamped version-1 sessions with no new plies would
+    NOT produce, but a month of ordinary traffic would. The coverage assertion AND
+    both backfill terms must double; the ``session_moves`` scan term must not.
+    """
+    m = _measurement()
+    prod = {
+        "dimensions": {
+            "total_rows": 2000,
+            "sessions_bytes": 4_000_000,
+            "m_total": 60_000,
+            "moves_bytes": 8_000_000,
+        },
+        "populations": m["populations_before"],
+    }
+    base = harness.derive([m] + _complete()[1:], None)
+    grown = harness.derive([m] + _complete()[1:], prod)
+    assert grown["scaling"]["r_sessions"] == 2.0
+    assert grown["scaling"]["r_moves"] == 1.0
+    for name in (
+        "MARGINED_MS_COVERAGE_ASSERT",
+        "MARGINED_MS_BACKFILL_SELECT_SWEEP",
+        "MARGINED_MS_BACKFILL_REMAINING",
+    ):
+        assert grown["constants"][name] == 2 * base["constants"][name], name
+    assert (
+        grown["constants"]["MARGINED_MS_PER_SCAN_STMT"]
+        == base["constants"]["MARGINED_MS_PER_SCAN_STMT"]
+    )
+
+
+def test_decision_1_rejects_atomic_when_only_the_backfills_own_terms_breach():
+    """Small ``N_stale``, small ``session_moves``, LARGE ``game_sessions``.
+
+    The shape a formula that prices only the ``session_moves`` scans scores as
+    nearly free: the backfill's unindexed selection sweep and its convergence
+    count must walk the whole of a large ``game_sessions`` under every row lock the
+    backfill took. If the two BACKFILL terms were dropped, this run would be
+    admitted into atomic mode.
+    """
+    m = _measurement()
+    m["timings"]["single_session_compute"] = {"total_ms": 2.0, "max_ms": 2.0}
+    for name in ("repair_populate", "repair_remaining", "soundness_assert",
+                 "repair_population_count"):
+        m["scans"][name] = {"max_ms": 1.0}
+    m["scans"]["coverage_assert"] = {"max_ms": 1.0}
+    m["scans"]["backfill_select_sweep"] = {"max_ms": 6_000.0, "pages": 3}
+    m["scans"]["backfill_remaining"] = {"max_ms": 6_000.0}
+    prod = {
+        "dimensions": m["dimensions_before"],
+        "populations": {"n_stale": 1, "m_moves": 60, "n_broken_audit": 0, "n_repair": 0},
+    }
+    out = harness.derive([m] + _complete()[1:], prod)
+    assert out["projected_ms"]["T_repair_prod"] == 0.0
+    assert out["decision_1"]["verdict"] == "batch"
+    # And the reason really is those two terms: zeroing them admits the same run.
+    without = dict(m)
+    without["scans"] = dict(m["scans"])
+    without["scans"]["backfill_select_sweep"] = {"max_ms": 0.0, "pages": 3}
+    without["scans"]["backfill_remaining"] = {"max_ms": 0.0}
+    assert harness.derive([without] + _complete()[1:], prod)["decision_1"]["verdict"] == "atomic"
 
 
 def test_decision_1_charges_every_term_of_the_stall():
@@ -859,6 +1058,8 @@ def test_decision_1_charges_every_term_of_the_stall():
         + p["T_repair_prod"]
         + mod.ATOMIC_SCANS_UNDER_LOCK * p["T_scan_stmt_prod"]
         + p["T_coverage_assert_prod"]
+        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * p["T_backfill_select_sweep_prod"]
+        + mod.BACKFILL_REMAINING_UNDER_LOCK * p["T_backfill_remaining_prod"]
         + p["T_atomic_teardown_floor_prod"]
         + p["T_atomic_teardown_per_row_prod"] * (1000 + 10)
     )

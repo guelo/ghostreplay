@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import pathlib
 import re
+import time
 import uuid
 
 import pytest
@@ -51,6 +52,18 @@ from sqlalchemy.orm import sessionmaker
 # ---------------------------------------------------------------------------
 # Environment reads (always call-time, never module-level constants).
 # ---------------------------------------------------------------------------
+
+
+# How long ``_pg_pool_leak_guard`` waits for an in-flight connection to find its way
+# back to the pool before calling it stranded. Generous enough that a thread finishing
+# its return path is never mistaken for a leak, short enough that a real leak is
+# reported against the test that caused it.
+_POOL_DRAIN_GRACE_SECONDS = 5.0
+
+# The live ``pg_engine`` for this run, published by the fixture so the autouse pool
+# leak guard can read it WITHOUT requesting the fixture (which would build an engine —
+# or skip — for tests that never wanted one). ``None`` whenever no engine exists.
+_LIVE_PG_ENGINE: dict[str, object] = {"engine": None}
 
 
 def _pg_url() -> str | None:
@@ -169,6 +182,87 @@ REQUIRED_PG_GATE_TESTS = frozenset({
     "test_release_b_pg_matrix.py::test_pg_nil_uuid_session_is_backfilled",
     "test_release_b_pg_matrix.py::test_pg_detector_parity",
     "test_release_b_pg_matrix.py::test_pg_integer_division_floors_like_the_validator",
+    # Release-B runtime envelope (g-b-runtime-envelope). Every one of these is
+    # structurally invisible to the SQLite suite: SQLite has no statement_timeout
+    # and no lock_timeout, no FOR NO KEY UPDATE SKIP LOCKED, no second writer to
+    # stall, no pg_stat_activity/pg_locks to observe, and no per-batch transactions
+    # on an independent connection.
+    #
+    # The VALIDATE lock-timeout leak (SET LOCAL is transaction-scoped and env.py
+    # opens one transaction around the whole run).
+    "test_release_b_pg_runtime.py::test_pg_validate_lock_timeout_does_not_leak_into_the_row_locks",
+    # The arming rule, in both modes: the armed value is the LEAST of every budget
+    # the statement spends from, and a scan never receives a batch allowance.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_per_batch_arming_is_non_increasing_and_never_a_fresh_batch_allowance",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_arming_draws_on_the_residual_stall_budget_from_the_first_lock",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_the_materialization_and_the_assertions_never_get_a_batch_allowance",
+    # Scan accounting: the per-path counts under lock, the zero-population path, the
+    # already-stamped boundary, and one scan per PASS rather than per batch.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_scans_under_lock_is_a_bound_and_each_path_is_exact",
+    "test_release_b_pg_runtime.py::test_pg_both_populations_zero_takes_no_row_lock_and_scans_twice",
+    "test_release_b_pg_runtime.py::test_pg_one_scan_per_pass_not_one_per_batch",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_backfill_issues_one_selection_sweep_and_one_convergence_count_per_pass",
+    # The materialization's transaction contract is MODE-SPLIT, and the one
+    # invariant both modes share is that it takes no row lock of its own.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_materialization_commits_before_the_batch_loop_in_per_batch_mode",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_materialization_runs_inside_alembics_transaction_in_atomic_mode",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_materialization_takes_no_row_lock_of_its_own_in_either_mode",
+    # The per-batch runner: its own labelled connection with an explicitly closed
+    # setup transaction, SKIP LOCKED convergence, the exhaustion template, and
+    # durability of committed batches across a failure.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_per_batch_runner_labels_its_own_connection_and_commits_the_setup_first",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_skipped_rows_converge_across_passes_and_a_zero_row_pass_is_never_success",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_a_permanently_locked_row_exhausts_the_pass_bound_with_the_exact_template",
+    "test_release_b_pg_runtime.py::test_pg_earlier_batches_stay_durable_when_a_later_one_fails",
+    # Enforcement, for slow SQL as well as slow Python, plus budget carry-over.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_a_slow_statement_is_cancelled_at_its_armed_timeout_and_rolls_back",
+    "test_release_b_pg_runtime.py::test_pg_the_guarded_update_inherits_only_what_the_load_left",
+    "test_release_b_pg_runtime.py::test_pg_slow_python_compute_rolls_the_batch_back",
+    "test_release_b_pg_runtime.py::test_pg_repair_batches_obey_the_same_budget",
+    # The observed-lock-hold tripwire is PER-BATCH MODE ONLY. The atomic negative is
+    # what forbids the revision from claiming a measurement it cannot make.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_the_observed_lock_hold_tripwire_fires_after_teardown_and_raises",
+    "test_release_b_pg_runtime.py::test_pg_atomic_mode_has_no_lock_hold_tripwire_to_fire",
+    # A per-wait cap bounds one wait and never their sum; the residual stall budget
+    # bounds the sum. The companion negative is what makes it a proof of a budget.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_cumulative_lock_waits_breach_the_residual_budget",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_the_same_waits_complete_cleanly_under_a_budget_that_absorbs_them",
+    # The env.py stall probe: it measures THROUGH the commit, on both paths.
+    "test_release_b_pg_runtime.py::test_pg_the_stall_probe_measures_through_the_commit",
+    "test_release_b_pg_runtime.py::test_pg_the_stall_probe_still_reports_on_a_failing_upgrade",
+    # Relation growth that leaves BOTH populations bit-for-bit unchanged.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_growth_in_neither_population_still_moves_the_growth_factors",
+    # The probe is armed, so its cancellation must reach the frozen template.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_a_cancelled_dimension_probe_arrives_as_the_frozen_template",
+    # The six interleavings, split by mode — live-first is reachable only in atomic
+    # mode, because per-batch selection locks at selection time.
+    "test_release_b_pg_runtime.py::test_pg_atomic_backfill_yields_to_a_hook_that_wrote_first",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_per_batch_selection_skips_a_row_a_hook_holds_and_the_hook_wins",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_per_batch_migration_first_blocks_the_writer_until_the_batch_commits",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_repair_re_read_skips_a_grid_the_hook_already_repaired",
+    "test_release_b_pg_runtime.py::test_pg_the_repair_nulls_a_broken_row_when_no_hook_intervenes",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_per_batch_repair_selection_already_holds_the_lock_the_hook_needs",
     # Release-B single-runner guard + stall observation (g-b-runner-guard). The
     # session-scoped two-key advisory guard on a dedicated connection, its survival
     # across 20260709_02's autocommit-block commit, cross-process serialization
@@ -245,6 +339,19 @@ REQUIRED_PG_GATE_PARAM_CASES = frozenset({
     "test_release_b_pg_matrix.py::test_pg_detector_parity[white_white_adjacency]",
     "test_release_b_pg_matrix.py::test_pg_detector_parity[contiguous_surplus]",
     "test_release_b_pg_matrix.py::test_pg_detector_parity[empty]",
+    # ATOMIC_SCANS_UNDER_LOCK is a MAXIMUM over paths, not an identity, so all three
+    # reachable atomic paths are pinned individually. The repair-only case is the one
+    # most likely to be dropped and the one that matters most: with nothing to
+    # back-fill the FIRST row lock is the repair's own, taken AFTER the
+    # materialization, so only TWO scans are under lock. A suite that lost it would
+    # silently reduce the proof to "3 on every path", which is wrong about where the
+    # first lock falls.
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_scans_under_lock_is_a_bound_and_each_path_is_exact[stale_and_repair]",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_scans_under_lock_is_a_bound_and_each_path_is_exact[stale_only]",
+    "test_release_b_pg_runtime.py::"
+    "test_pg_atomic_scans_under_lock_is_a_bound_and_each_path_is_exact[repair_only]",
     # Each exception the self-check's scoring pass can raise outside the artifact
     # vocabulary is pinned: dropping one would silently narrow the proof that the
     # subcommand still emits a typed diagnostic instead of a traceback.
@@ -407,9 +514,58 @@ def pg_engine():
         else:
             os.environ["DATABASE_URL"] = prior_database_url
 
-    pg = create_engine(url)
-    yield pg
-    pg.dispose()
+    # pool_pre_ping mirrors app/db.py. One engine backs the WHOLE gate run, so a
+    # pooled connection can sit for minutes between checkouts and can be killed out
+    # from under the pool (the capture suite SIGKILLs backends, the migration suite
+    # terminates them). Without the ping, the next checkout of such a connection
+    # surfaces as an opaque 500 in whatever test happens to draw it —
+    # g-rating-serialize-flake, where the victim is never the culprit.
+    pg = create_engine(url, pool_pre_ping=True)
+    _LIVE_PG_ENGINE["engine"] = pg
+    try:
+        yield pg
+    finally:
+        _LIVE_PG_ENGINE["engine"] = None
+        pg.dispose()
+
+
+@pytest.fixture(autouse=True)
+def _pg_pool_leak_guard():
+    """Fail the test that STRANDS a pooled connection, not the next one to need it.
+
+    ``pg_engine``'s pool is capped at (pool_size + max_overflow) for the entire run,
+    so a test that leaves a connection checked out — a request thread still blocked
+    at teardown, a ``Session`` never closed — permanently shrinks the pool for every
+    later test. The eventual symptom is a checkout timeout raised inside a request,
+    answered by the app's generic 500 handler, in a test that did nothing wrong; that
+    is precisely the order-flake shape this guard exists to attribute
+    (g-rating-serialize-flake).
+
+    Reads the engine the ``pg_engine`` fixture published rather than requesting the
+    fixture, so the guard can be autouse over the WHOLE suite without ever building
+    an engine: with no PostgreSQL URL there is nothing published and this is a no-op.
+    A short poll absorbs a connection still in flight back to the pool; a real leak
+    then fails HERE and the pool is replaced so the rest of the run is not poisoned.
+    """
+    yield
+    engine = _LIVE_PG_ENGINE["engine"]
+    if engine is None:
+        return
+    pool = engine.pool
+    deadline = time.perf_counter() + _POOL_DRAIN_GRACE_SECONDS
+    while pool.checkedout() and time.perf_counter() < deadline:
+        time.sleep(0.05)
+    stranded = pool.checkedout()
+    if stranded:
+        # Replace the pool so ONE leaking test does not cascade into every test after
+        # it. Connections still checked out are closed when (if) they are returned.
+        engine.dispose()
+        pytest.fail(
+            f"{stranded} PostgreSQL connection(s) still checked out at teardown; this "
+            "test strands pool capacity for the rest of the run (close every Session / "
+            "Connection it opens, and join every thread it starts)",
+            pytrace=False,
+        )
 
 
 @pytest.fixture

@@ -174,9 +174,10 @@ mod = _revision_module()
 
 
 def repair_population_count_sql() -> str:
-    return mod.REPAIR_REMAINING_SQL.replace(
-        "ghostreplay:repair_remaining", "ghostreplay:repair_population_count", 1
-    )
+    # The revision now DECLARES this statement (it is a bundle field the runner
+    # executes during mode binding), so the harness reads it rather than deriving
+    # it — a locally derived copy could drift from the one production issues.
+    return mod.REPAIR_POPULATION_COUNT_SQL
 
 
 def scan_bearing_statements() -> dict[str, str]:
@@ -267,14 +268,19 @@ def read_dimensions(conn) -> dict[str, int]:
 
 def read_populations(conn) -> dict[str, int]:
     scalar = lambda sql: int(conn.execute(text(sql)).scalar() or 0)  # noqa: E731
-    n_stale = scalar(mod.BACKFILL_REMAINING_SQL)
+    # The two convergence statements return a COUNT AND up to 20 sampled ids in one
+    # result set (zero rows means zero remaining), so they are read through the
+    # revision's own reader rather than with .scalar() — which would return the
+    # first sampled id.
+    count = lambda sql: mod.remaining_scan(conn, sql)[0]  # noqa: E731
+    n_stale = count(mod.BACKFILL_REMAINING_SQL)
     m_moves = scalar(_MOVES_OF_STALE_SQL)
     return {
         "n_stale": n_stale,
         "m_moves": m_moves,
         "mean_plies_per_stale": (m_moves / n_stale) if n_stale else None,
         "n_broken_audit": scalar(_BROKEN_AUDIT_SQL),
-        "n_repair": scalar(mod.REPAIR_REMAINING_SQL),
+        "n_repair": count(mod.REPAIR_REMAINING_SQL),
     }
 
 
@@ -514,6 +520,51 @@ def time_scan_statements(conn, trials: int) -> dict[str, dict[str, float]]:
         "cold_ms": cov[0],
         "max_ms": max(cov),
         "median_ms": statistics.median(cov),
+    }
+
+    # The BACKFILL's OWN game_sessions work, priced by its own two constants and
+    # scaled by G_sessions. Scan-bearing even though neither statement touches
+    # session_moves: both filter game_sessions on
+    # `player_accuracy_algo_version IS NULL OR < 1`, and NO INDEX covers that
+    # predicate (app/models.py:188, app/models.py:224). So each costs
+    # O(G_sessions), NOT O(N_stale) — every version-1 row Release A stamps between
+    # sizing and deploy grows the scanned relation while shrinking the population.
+    # Omitting them priced a growing relation at zero.
+    for name, sql in (("backfill_remaining", mod.BACKFILL_REMAINING_SQL),):
+        durations = []
+        for _ in range(trials):
+            started = time.perf_counter()
+            conn.execute(text(sql))
+            durations.append(_ms(started))
+        out[name] = {
+            "n": trials,
+            "cold_ms": durations[0],
+            "max_ms": max(durations),
+            "median_ms": statistics.median(durations),
+        }
+
+    # One full selection SWEEP: every SELECT_BATCH_* page of one pass, timed as ONE
+    # unit, because that is the unit the constant prices — the atomic projection
+    # charges one sweep per pass, not one page. Unlocked variants and no mutation,
+    # so the sweep is repeatable: nothing it selects leaves the population.
+    sweeps = []
+    for _ in range(trials):
+        started = time.perf_counter()
+        pages = 0
+        last_id: str | None = None
+        while True:
+            page = _select_page(conn, last_id, mod.MAX_BATCH_SIZE, locked=False)
+            pages += 1
+            if not page:
+                break
+            last_id = str(page[-1].id)
+        sweeps.append(_ms(started))
+    out["backfill_select_sweep"] = {
+        "n": trials,
+        "cold_ms": sweeps[0],
+        "max_ms": max(sweeps),
+        "median_ms": statistics.median(sweeps),
+        "pages": pages,
     }
     return out
 
@@ -1314,6 +1365,13 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     t_scan_stmt_prod = t_scan_stmt_snap * r_moves
     t_coverage_snap = scans["coverage_assert"]["max_ms"]
     t_coverage_prod = t_coverage_snap * r_sessions
+    # The backfill's own game_sessions work: one convergence count, and one full
+    # selection sweep (all pages of one pass). Both scale by r_sessions, not by
+    # either population — see time_scan_statements.
+    t_backfill_remaining_snap = scans.get("backfill_remaining", {}).get("max_ms", 0.0)
+    t_backfill_remaining_prod = t_backfill_remaining_snap * r_sessions
+    t_backfill_sweep_snap = scans.get("backfill_select_sweep", {}).get("max_ms", 0.0)
+    t_backfill_sweep_prod = t_backfill_sweep_snap * r_sessions
 
     # --- atomic teardown: a floor AND a slope ------------------------------
     full = atomic["teardown"]
@@ -1353,6 +1411,8 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
     margined_ms_per_repair_row = max(1, ceil3(per_candidate_snap))
     margined_ms_per_scan_stmt = max(1, ceil3(t_scan_stmt_prod))
     margined_ms_coverage_assert = max(1, ceil3(t_coverage_prod))
+    margined_ms_backfill_remaining = max(1, ceil3(t_backfill_remaining_prod))
+    margined_ms_backfill_select_sweep = max(1, ceil3(t_backfill_sweep_prod))
     max_single_session_compute_ms = max(1, ceil3(max_single_session_compute))
     teardown_allowance_ms = max(1, ceil3(max(max_batch_commit, probe_unlock_max)))
     if int(atomic_probe.get("rows_locked", 0)) < n_mut_snap:
@@ -1438,10 +1498,41 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             f"re-probe with --probe-scope batch --batch-size {largest_admitted_batch}"
         )
 
-    est_max_lock_hold_ms = (
-        max_batch_ms + max_single_session_compute_ms + teardown_allowance_ms
+    # MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS and NOTHING MORE. There is deliberately
+    # no MAX_SINGLE_SESSION_COMPUTE_MS addend: MAX_BATCH_MS is batch-wide over SQL
+    # AND Python, because the per-session compute watchdog is armed to
+    # min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining, revision remaining,
+    # atomic remaining) and so cannot let a session's compute pass the batch
+    # deadline. Adding the per-session ceiling on top would double-count it; it
+    # survives only as that watchdog ceiling.
+    est_max_lock_hold_ms = max_batch_ms + teardown_allowance_ms
+    # The maximum over EVERY statement _arm arms with this cap, i.e. everything
+    # routed through _Runner._arm_scan. The two convergence scans are NOT priced by
+    # the same term, and that is the whole reason a third argument is needed here:
+    #
+    #   REPAIR_REMAINING_SQL wraps the ply detector, so it scans session_moves and
+    #   is already one of the four complete statements behind
+    #   margined_ms_per_scan_stmt (scaled by G_moves).
+    #
+    #   BACKFILL_REMAINING_SQL scans game_sessions on
+    #   `player_accuracy_algo_version IS NULL OR < 1`, which no index covers, so it
+    #   is O(G_sessions) and priced by margined_ms_backfill_remaining instead. That
+    #   is the term the maximum used to omit — and the one that relation growth
+    #   alone can push above the other two, because it scales by neither population.
+    #
+    # Omitting it derives a timeout that cancels a statement at less than its own
+    # measured cost, and the 57014 surfaces through the exhaustion template as
+    # "did not converge".
+    #
+    # BACKFILL_SELECT_SWEEP is deliberately NOT in this maximum: the sweep is a
+    # sequence of pages and each page is armed by _arm_batch_stmt against
+    # MAX_BATCH_MS, so the sweep constant prices a multi-statement unit that no
+    # single armed value has to cover. It belongs to the stall projection only.
+    scan_stmt_timeout_ms = max(
+        margined_ms_per_scan_stmt,
+        margined_ms_coverage_assert,
+        margined_ms_backfill_remaining,
     )
-    scan_stmt_timeout_ms = max(margined_ms_per_scan_stmt, margined_ms_coverage_assert)
 
     # --- Decision 1: the writer-stall admission verdict --------------------
     t_stall_prod = (
@@ -1449,6 +1540,13 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
         + t_repair_prod
         + mod.ATOMIC_SCANS_UNDER_LOCK * t_scan_stmt_prod
         + t_coverage_prod
+        # The backfill's own game_sessions work, counted 1 and 1 because atomic
+        # backfill converges in a single unlocked-selection pass. Charged
+        # unconditionally, which over-charges the N_stale = 0 path (where both
+        # precede the first, repair-owned, row lock) by two game_sessions scans —
+        # safe in the only direction that matters.
+        + mod.BACKFILL_SELECT_SWEEPS_UNDER_LOCK * t_backfill_sweep_prod
+        + mod.BACKFILL_REMAINING_UNDER_LOCK * t_backfill_remaining_prod
         + floor_prod
         + slope_prod * ((prod_pops.get("n_stale") or 0) + (prod_pops.get("n_repair") or 0))
     )
@@ -1472,6 +1570,11 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "T_scan_stmt_prod": t_scan_stmt_prod,
             "T_coverage_assert_snap": t_coverage_snap,
             "T_coverage_assert_prod": t_coverage_prod,
+            "T_backfill_remaining_snap": t_backfill_remaining_snap,
+            "T_backfill_remaining_prod": t_backfill_remaining_prod,
+            "T_backfill_select_sweep_snap": t_backfill_sweep_snap,
+            "T_backfill_select_sweep_prod": t_backfill_sweep_prod,
+            "backfill_select_sweep_pages": scans.get("backfill_select_sweep", {}).get("pages"),
             "T_atomic_teardown_floor_prod": floor_prod,
             "T_atomic_teardown_per_row_prod": slope_prod,
             "N_mut_snap": n_mut_snap,
@@ -1495,6 +1598,8 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "MARGINED_MS_PER_REPAIR_ROW": margined_ms_per_repair_row,
             "MARGINED_MS_PER_SCAN_STMT": margined_ms_per_scan_stmt,
             "MARGINED_MS_COVERAGE_ASSERT": margined_ms_coverage_assert,
+            "MARGINED_MS_BACKFILL_REMAINING": margined_ms_backfill_remaining,
+            "MARGINED_MS_BACKFILL_SELECT_SWEEP": margined_ms_backfill_select_sweep,
             "SCAN_STMT_TIMEOUT_MS": scan_stmt_timeout_ms,
             "MAX_SINGLE_SESSION_COMPUTE_MS": max_single_session_compute_ms,
             "TEARDOWN_ALLOWANCE_MS": teardown_allowance_ms,
@@ -1519,11 +1624,22 @@ def derive(measurements: list[dict], production: dict | None) -> dict[str, Any]:
             "zero_batch_backfill_ok": b_formula >= 1,
             "zero_batch_repair_ok": r_formula >= 1,
             "est_lock_hold_fits": est_max_lock_hold_ms <= mod.MAX_WRITER_STALL_MS,
-            "scan_budget_ms": (2 * mod.MAX_PASSES + 2) * margined_ms_per_scan_stmt
-            + margined_ms_coverage_assert,
+            # The revision's OWN formula, over the freshly derived constants — the
+            # last term (the backfill's per-pass game_sessions work) is mandatory
+            # and was the gap a session_moves-only budget left.
+            "scan_budget_ms": mod._scan_budget_ms(
+                margined_ms_per_scan_stmt,
+                margined_ms_coverage_assert,
+                margined_ms_backfill_select_sweep,
+                margined_ms_backfill_remaining,
+            ),
             "scan_budget_limit_ms": mod.REVISION_DEADLINE_S * 1000,
-            "scan_budget_ok": (2 * mod.MAX_PASSES + 2) * margined_ms_per_scan_stmt
-            + margined_ms_coverage_assert
+            "scan_budget_ok": mod._scan_budget_ms(
+                margined_ms_per_scan_stmt,
+                margined_ms_coverage_assert,
+                margined_ms_backfill_select_sweep,
+                margined_ms_backfill_remaining,
+            )
             < mod.REVISION_DEADLINE_S * 1000,
         },
         "decision_1": {

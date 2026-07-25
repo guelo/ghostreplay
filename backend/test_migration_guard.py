@@ -92,6 +92,13 @@ def _alembic_config() -> Config:
 # subprocesses always `upgrade head`, so the durable stamp is this, not REVISION.
 _HEAD = ScriptDirectory.from_config(_alembic_config()).get_heads()[0]
 
+# Release B's revision module, for its ENVIRONMENT SURFACE only (the mode variable
+# name). Never for class identity: each subprocess — and each in-process
+# command.upgrade — re-imports the file, so the MigrationError raised there is not
+# this module's, which is why every Alembic-driven assertion below is on
+# RuntimeError plus a message.
+_REVISION_MOD = ScriptDirectory.from_config(_alembic_config()).get_revision(REVISION).module
+
 # A barrier key DISTINCT from the guard key (different classid), so the parent's hold
 # on it cannot be confused with, or contend against, the guard advisory lock.
 _BARRIER_CLASSID = 987_654_321
@@ -391,8 +398,18 @@ def test_pg_seeded_concurrent_backfill_is_applied_exactly_once(pg_migration_db):
     _install_audit_counters(eng)
     # Hold the barrier BEFORE spawning, so the winner parks instead of racing through.
     barrier = _hold_barrier(eng)
-    child_a = _spawn_upgrade(url, barrier_key=_BARRIER_KEY, target="head")
-    child_b = _spawn_upgrade(url, barrier_key=_BARRIER_KEY, target="head")
+    # Release B's execution mode is REQUIRED on PostgreSQL once either population
+    # is nonzero — there is no default, because an unset variable is a deployment
+    # error and never a silent atomic run. Both populations are seeded above, so
+    # both children must carry it. Atomic mode is the one under test here: the
+    # guard's whole point is that ONE process owns the migration transaction.
+    _mode_env = {_REVISION_MOD.ENV_MODE: "atomic"}
+    child_a = _spawn_upgrade(
+        url, barrier_key=_BARRIER_KEY, target="head", extra_env=_mode_env
+    )
+    child_b = _spawn_upgrade(
+        url, barrier_key=_BARRIER_KEY, target="head", extra_env=_mode_env
+    )
     barrier_released = False
     try:
         # Serialization, observed: exactly one guard row granted, one waiting.
@@ -757,6 +774,11 @@ def test_pg_alembic_owns_the_migration_transaction(pg_migration_db, monkeypatch)
         return original_configure(*args, **kwargs)
 
     monkeypatch.setattr(alembic_context, "configure", _spy_configure)
+    # A nonzero backfill population is seeded above, and Release B REQUIRES the
+    # execution mode on PostgreSQL once either population is nonzero. Atomic mode
+    # is what this test is about: Alembic's single transaction is the one the
+    # revision runs inside.
+    monkeypatch.setenv(_REVISION_MOD.ENV_MODE, "atomic")
     command.upgrade(cfg, REVISION)
 
     assert seen.get("in_transaction_at_configure") is False

@@ -343,7 +343,11 @@ file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
 | `MARGINED_MS_PER_REPAIR_ROW` | 2 | `ceil(3 * 0.358)` |
 | `MARGINED_MS_PER_SCAN_STMT` | 521 | `ceil(3 * 173.49)` |
 | `MARGINED_MS_COVERAGE_ASSERT` | 6 | `ceil(3 * 1.74)` |
-| `SCAN_STMT_TIMEOUT_MS` | 521 | `max(521, 6)` |
+| `MARGINED_MS_BACKFILL_REMAINING` | 6 | **PROVISIONAL** — `ceil(3 * 1.74)`, from the recorded `COVERAGE_ASSERT_SQL` measurement (see below) |
+| `MARGINED_MS_BACKFILL_SELECT_SWEEP` | 37 | **PROVISIONAL** — `ceil(3 * 7 pages * 1.74)`, same recorded measurement (see below) |
+| `BACKFILL_SELECT_SWEEPS_UNDER_LOCK` | 1 | structural per-pass count (atomic backfill converges in one unlocked-selection pass) |
+| `BACKFILL_REMAINING_UNDER_LOCK` | 1 | structural per-pass count (same argument) |
+| `SCAN_STMT_TIMEOUT_MS` | 521 | `max(521, 6, 6)` — the maximum over **every** statement it is armed on: the four complete `session_moves` scans (which already include `REPAIR_REMAINING_SQL`), the coverage assertion, **and `BACKFILL_REMAINING_SQL`** via `MARGINED_MS_BACKFILL_REMAINING`. The two convergence scans are priced by *different* terms — the repair one by `MARGINED_MS_PER_SCAN_STMT`/`G_moves`, the backfill one by `MARGINED_MS_BACKFILL_REMAINING`/`G_sessions` — and only the latter needed adding. `MARGINED_MS_BACKFILL_SELECT_SWEEP` is deliberately absent: each page of the sweep is armed by the mode's batch cap, so the sweep constant prices a multi-statement unit no single armed value has to cover. |
 | `MAX_SINGLE_SESSION_COMPUTE_MS` | 79 | `ceil(3 * 26.28)` |
 | `TEARDOWN_ALLOWANCE_MS` | 7 | `ceil(3 * max(1.408 commit, 2.230 cancel-to-unlock))` — **cancel-to-unlock won** |
 | `MARGINED_MS_ATOMIC_TEARDOWN_FIXED` | 2 | `ceil(3 * 0.646)` (empty-population point, own restore) |
@@ -353,7 +357,7 @@ file was supplied, so `SIZED_*` are the snapshot's own dimensions. Margin is
 | `MAX_BATCH_SIZE` | 1,000 | `min(B_formula = 1000, B_tested = 1000)` — **bound by formula** (tie) |
 | `DEFAULT_BATCH_SIZE` | 1,000 | `== MAX_BATCH_SIZE` |
 | `REPAIR_BATCH_SIZE` | 2,500 | `min(R_formula = 2500, R_tested = 3000)` — **bound by formula** |
-| `EST_MAX_LOCK_HOLD_MS` | 5,086 | `5000 + 79 + 7`, derived at import |
+| `EST_MAX_LOCK_HOLD_MS` | 5,007 | `MAX_BATCH_MS + TEARDOWN_ALLOWANCE_MS = 5000 + 7`, derived at import. **No `MAX_SINGLE_SESSION_COMPUTE_MS` addend**: the per-session compute watchdog is armed to `min(MAX_SINGLE_SESSION_COMPUTE_MS, batch remaining, revision remaining, atomic remaining)`, so no session's compute can pass the batch deadline and `MAX_BATCH_MS` is already batch-wide over SQL *and* Python. Adding the ceiling on top would double-count it; it survives only as that watchdog ceiling. |
 
 `MARGINED_MS_PER_ROW` is derived **per row first, then multiplied by the
 production population** — never by projecting a total and dividing by the
@@ -363,6 +367,39 @@ the constant. Per-row survives a production zero intact, which is exactly what
 the design requires: the backfill *term* drops out of Decision 1 while the
 *constant* stays declared, because the runtime guard multiplies it by the **live**
 count.
+
+### The two PROVISIONAL backfill terms
+
+`MARGINED_MS_BACKFILL_SELECT_SWEEP` and `MARGINED_MS_BACKFILL_REMAINING` price the
+backfill's **own** `game_sessions` work: its keyset selection sweep (all
+`SELECT_BATCH_*` pages of one pass) and `BACKFILL_REMAINING_SQL`. Both filter
+`game_sessions` on `player_accuracy_algo_version IS NULL OR < 1`, a predicate **no
+index covers** (`app/models.py:188`, `app/models.py:224`), so each costs
+`O(G_sessions)` and **not** `O(N_stale)` — every version-1 row Release A stamps
+between sizing and deploy *grows* the scanned relation while *shrinking* the
+population. Omitting them priced a growing relation at zero, which is why they
+are now charged in both the scan budget and the atomic stall projection.
+
+They are **PROVISIONAL** because the Phase 1 run above predates the discovery of
+that leak and therefore never timed either statement directly. Their values are
+derived from that same run's recorded `game_sessions` scan measurement
+(`COVERAGE_ASSERT_SQL`, 1.74 ms max at the sized dimensions), which is the same
+shape against the same relation:
+
+- `MARGINED_MS_BACKFILL_REMAINING = ceil(3 * 1.74) = 6` — a count over
+  `game_sessions` on an unindexed predicate, i.e. the coverage assertion's shape.
+- `MARGINED_MS_BACKFILL_SELECT_SWEEP = ceil(3 * 7 * 1.74) = 37` — a sweep at the
+  sized dimensions is `ceil(6000 / 1000) + 1 = 7` pages (the `+1` is the empty page
+  that terminates it), and **each page is priced at a whole `game_sessions`
+  scan**, the worst case for an unindexed filter. Deliberately conservative: a
+  direct measurement can only lower it.
+
+`scripts/size_accuracy_backfill.py` now measures both directly
+(`backfill_remaining` and `backfill_select_sweep` in `time_scan_statements`, and
+`--derive` emits both constants), so the next sizing run produces measured values.
+`g-b-size-derive-backfill-terms` owns that re-measurement, and sizing
+qualification may adjust the numbers and rerun this bead's gates — an adjusted
+*number* is expected refinement, not a structural change.
 
 `MARGINED_US_ATOMIC_TEARDOWN_PER_ROW` is denominated in **microseconds** on
 purpose. The measured slope is 0.000575 ms/row; rounded up to an integer
@@ -393,10 +430,10 @@ whole population.
 |---|---|---|---|
 | Zero-batch, backfill: `MARGINED_MS_PER_ROW <= MAX_BATCH_MS` | 5 | 5,000 | ✅ |
 | Zero-batch, repair: `MARGINED_MS_PER_REPAIR_ROW <= MAX_BATCH_MS` | 2 | 5,000 | ✅ |
-| Scan budget: `(2*20 + 2) * 521 + 6` | 21,888 ms | 900,000 ms | ✅ |
-| `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` | 5,086 | 30,000 | ✅ |
+| Scan budget: `(2*20 + 2) * 521 + 6 + 20 * (37 + 6)` | 22,748 ms | 900,000 ms | ✅ |
+| `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` | 5,007 | 30,000 | ✅ |
 | `BATCH_LOCK_WAIT_MS < MAX_BATCH_MS` | 1,000 | 5,000 | ✅ |
-| `SCAN_STMT_TIMEOUT_MS >= max(scan, coverage)` | 521 | 521 | ✅ |
+| `SCAN_STMT_TIMEOUT_MS >= max(per_scan_stmt, coverage, backfill_remaining)` | 521 | 521 | ✅ |
 
 `EST_MAX_LOCK_HOLD_MS <= MAX_WRITER_STALL_MS` is arithmetic over frozen
 literals. It proves that the *estimate* fits the budget and **nothing more** — a

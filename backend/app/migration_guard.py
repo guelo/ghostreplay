@@ -25,14 +25,15 @@ the cancellation probe — can tell them apart:
     -----------------|-------------------------------|---------------------
     Guard            | ghostreplay_alembic_guard     | THIS module
     Migration        | ghostreplay_alembic_migration | THIS module (env.py)
-    Per-batch runner | ghostreplay_accuracy_backfill | g-b-runtime-envelope
+    Per-batch runner | ghostreplay_accuracy_backfill | revision 20260719_01
 
-``RUNNER_APP_NAME`` is RESERVED here as a frozen shared constant with the shared
-``_label_connection`` / PID-log helpers so the runtime-envelope runner can label
-itself consistently; this module opens no per-batch connection and asserts nothing
-about it. Distinct names stay load-bearing: once the runner lands, an atomic run has
-no runner connection at all, so a probe that knows only the runner's name finds
-nothing — this module guarantees the two names that ALWAYS exist are observable.
+``RUNNER_APP_NAME`` is a frozen shared constant here, alongside the shared
+``_label_connection`` / PID-log helpers, so the runner labels itself with the same
+string a probe filters on: 20260719_01's per-batch mode opens that connection and
+calls both helpers, and this module opens none. Distinct names stay load-bearing —
+an ATOMIC run has no runner connection at all, so a probe that knows only the
+runner's name finds nothing, and this module guarantees the two names that ALWAYS
+exist are observable.
 
 Why the guard guarantee holds:
 
@@ -301,37 +302,107 @@ class _MigrationStallProbe:
 
     Inert unless a revision recorded a first-row-lock timestamp, so every other
     revision, every SQLite run, and the both-populations-zero path pay nothing. The
-    record() call site is the revision's (g-b-backfill-core / g-b-runtime-envelope);
+    record() call site is the revision's (20260719_01's atomic mode, at t_stall_0);
     THIS module owns the probe and its report() call site in env.py. Instance state
     (not module globals) so the object is trivially resettable in unit tests while
     remaining stable across the many command.upgrade() calls a test process makes.
+
+    Why the classification lives here rather than in the revision: atomic mode's lock
+    hold ends when Alembic's transaction commits, and that happens when env.py exits
+    context.begin_transaction() — AFTER upgrade() has already returned. There is no
+    per-batch commit for the revision to observe and no code of the revision's still
+    running when the locks are released, so a measurement that stopped at the last
+    assertion would be a measurement of the hold MINUS its commit. The revision
+    therefore hands over the threshold and the projection at record time and lets
+    report() compare them.
     """
 
     def __init__(self) -> None:
         self._first_row_lock_at: float | None = None  # monotonic seconds
+        self._max_stall_ms: float | None = None
+        self._projected_stall_ms: float | None = None
 
-    def record_first_row_lock(self, ts: float) -> None:
-        # FIRST-LOCK-WINS: only the first row lock in a run sets the timestamp; later
-        # locks do not overwrite it, so the measured hold spans first lock -> release.
+    def record_first_row_lock(
+        self,
+        ts: float,
+        *,
+        max_stall_ms: float | None = None,
+        projected_stall_ms: float | None = None,
+    ) -> None:
+        """Anchor the measurement, and optionally hand it the numbers to judge by.
+
+        FIRST-LOCK-WINS: only the first row lock in a run sets the timestamp; later
+        locks do not overwrite it, so the measured hold spans first lock -> release.
+        The two threshold arguments are OPTIONAL on purpose — every other revision
+        records only a timestamp and must keep its existing INFO-only behaviour, so
+        a bare ``record_first_row_lock(ts)`` never produces an ERROR line. They are
+        stored beside the winning timestamp, and only by it: a later call cannot
+        retro-fit a threshold onto an earlier anchor.
+
+        A timestamp with nothing to compare against can only ever be logged, which
+        is why the classification lives here rather than in the caller — the caller
+        is a revision, and the event that ENDS the measurement happens after that
+        revision's last line of code has run.
+        """
         if self._first_row_lock_at is None:
             self._first_row_lock_at = ts
+            self._max_stall_ms = max_stall_ms
+            self._projected_stall_ms = projected_stall_ms
 
     def report(self) -> None:
-        # CONSUME-AND-CLEAR before logging; NEVER raises. Reading and clearing the
-        # timestamp first guarantees the next run in the same process starts from
-        # None regardless of what logging does.
+        """Log the observed hold; classify it when a threshold was supplied. NEVER raises.
+
+        Called from env.py's finally around ``context.begin_transaction()``, which
+        runs precisely when COMMIT returns on the success path and ROLLBACK returns
+        on the failure path — the moment the row locks are actually released, on
+        both paths. Evidence, not enforcement: the event that ends the measurement
+        is the same event that releases the lock, so there is nothing left to
+        prevent, and raising after a commit that already happened would fail a
+        deploy whose data is durable.
+
+        This log line is the ONLY empirical check on the atomic-mode stall
+        projection, because atomic mode's hold ends after ``upgrade()`` has already
+        returned and no measurement taken inside the revision can include the
+        commit. Sizing qualification reads ``observed_atomic_stall_ms`` from it and
+        requires it to be at or below both ``projected_stall_ms`` and
+        ``max_stall_ms``.
+        """
+        # CONSUME-AND-CLEAR all three before logging; NEVER raises. Reading and
+        # clearing first guarantees the next run in the same process starts clean
+        # regardless of what logging does.
         ts, self._first_row_lock_at = self._first_row_lock_at, None
+        max_stall_ms, self._max_stall_ms = self._max_stall_ms, None
+        projected_ms, self._projected_stall_ms = self._projected_stall_ms, None
         if ts is None:
             return
         try:
             held_ms = (time.monotonic() - ts) * 1000.0
-            logger.info("atomic migration row-lock hold=%.1fms", held_ms)
+            projected = "n/a" if projected_ms is None else f"{projected_ms:.1f}"
+            if max_stall_ms is not None and held_ms > max_stall_ms:
+                logger.error(
+                    "atomic migration row-lock hold BREACHED the writer-stall bound: "
+                    "observed_atomic_stall_ms=%.1f max_stall_ms=%.1f projected_stall_ms=%s",
+                    held_ms,
+                    max_stall_ms,
+                    projected,
+                )
+                return
+            logger.info(
+                "atomic migration row-lock hold=%.1fms observed_atomic_stall_ms=%.1f "
+                "projected_stall_ms=%s max_stall_ms=%s",
+                held_ms,
+                held_ms,
+                projected,
+                "n/a" if max_stall_ms is None else f"{max_stall_ms:.1f}",
+            )
         except Exception:
             pass  # observation must never fail the migration
 
     def reset(self) -> None:
-        """Test hook: drop any recorded timestamp without logging."""
+        """Test hook: drop any recorded state without logging."""
         self._first_row_lock_at = None
+        self._max_stall_ms = None
+        self._projected_stall_ms = None
 
 
 # The single stable instance imported by env.py (report) and the revision (record).

@@ -228,6 +228,31 @@ def _build_pre_b(url) -> None:
     eng.dispose()
 
 
+def run_phases_directly(conn, bundle, *, batch_size=500, env=None):
+    """Drive both phases through the REAL runner, in atomic mode, on one connection.
+
+    The direct-call tests need the runtime envelope's own entry point rather than a
+    hand-rolled loop: the pass bound, the convergence-by-remaining-count rule, the
+    arming and the watchdog all live in :meth:`mod._Runner.run_phase`, and a test
+    that called the pass functions itself would be asserting against a shape
+    production never executes. Returns the clock so the caller can pass it to
+    ``_assert_fail_closed``.
+    """
+    clock = mod._RunClock()
+    with mod._ComputeWatchdog() as watchdog:
+        runner = mod._Runner(
+            conn,
+            bundle,
+            clock=clock,
+            env=env or mod.ATOMIC_ENV,
+            batch_size=batch_size,
+            stall=None,
+        )
+        runner.run_phase("backfill", watchdog)
+        runner.run_phase("repair", watchdog)
+    return clock
+
+
 def _cached(conn, sid):
     return conn.execute(
         text(
@@ -576,8 +601,12 @@ def test_sqlite_release_b_backfill_repair_and_assertions(tmp_path, monkeypatch):
         # Both fail-closed assertions pass after a clean run.
         assert conn.execute(text(bundle.coverage_assert)).scalar() == 0
         assert conn.execute(text(bundle.soundness_assert)).scalar() == 0
-        # And the population is empty, so nothing is re-selected on rerun.
-        assert conn.execute(text(bundle.backfill_remaining)).scalar() == 0
+        # And the population is empty, so nothing is re-selected on rerun. Read
+        # through the revision's own reader: the convergence statements return a
+        # count AND up to 20 sampled ids, and ZERO ROWS means zero remaining — a
+        # bare .scalar() would return the first sampled id instead.
+        assert mod.remaining_scan(conn, bundle.backfill_remaining) == (0, [])
+        assert mod.remaining_scan(conn, bundle.repair_remaining) == (0, [])
 
     # The Release-A CHECK survived (on SQLite it was created validated, so B
     # skips VALIDATE — but the constraint must still be there or the assertion
@@ -596,9 +625,8 @@ def test_sqlite_release_b_backfill_repair_and_assertions(tmp_path, monkeypatch):
     # Idempotent across both PHASES too, not just across the Alembic no-op:
     # re-running the phases directly changes nothing.
     with eng.begin() as conn:
-        mod._run_backfill(conn, bundle, 10)
-        mod._run_repair(conn, bundle)
-        mod._assert_fail_closed(conn, bundle)
+        clock = run_phases_directly(conn, bundle, batch_size=10)
+        mod._assert_fail_closed(conn, bundle, clock, mod.ATOMIC_ENV)
     assert _snapshot(eng) == before
 
     eng.dispose()
@@ -649,12 +677,11 @@ def test_coverage_assertion_raises_on_an_unstamped_visible_row(tmp_path):
     eng = create_engine(url)
     bundle = mod.SQL_SQLITE
     with eng.begin() as conn:
-        mod._run_backfill(conn, bundle, 500)
-        mod._run_repair(conn, bundle)
-        mod._assert_fail_closed(conn, bundle)  # clean
+        clock = run_phases_directly(conn, bundle)
+        mod._assert_fail_closed(conn, bundle, clock, mod.ATOMIC_ENV)  # clean
         _seed_session(conn, "s-late-arrival", plies=INTACT_PLIES)
         with pytest.raises(mod.MigrationError, match="coverage"):
-            mod._assert_fail_closed(conn, bundle)
+            mod._assert_fail_closed(conn, bundle, clock, mod.ATOMIC_ENV)
     eng.dispose()
 
 
@@ -673,9 +700,8 @@ def test_soundness_assertion_raises_on_a_stamped_broken_row(tmp_path):
     eng = create_engine(url)
     bundle = mod.SQL_SQLITE
     with eng.begin() as conn:
-        mod._run_backfill(conn, bundle, 500)
-        mod._run_repair(conn, bundle)
-        mod._assert_fail_closed(conn, bundle)  # clean
+        clock = run_phases_directly(conn, bundle)
+        mod._assert_fail_closed(conn, bundle, clock, mod.ATOMIC_ENV)  # clean
         conn.execute(
             text(
                 "UPDATE game_sessions SET player_accuracy = :a, "
@@ -685,7 +711,7 @@ def test_soundness_assertion_raises_on_a_stamped_broken_row(tmp_path):
         # Coverage still passes — that is precisely why a second assertion exists.
         assert conn.execute(text(bundle.coverage_assert)).scalar() == 0
         with pytest.raises(mod.MigrationError, match="soundness"):
-            mod._assert_fail_closed(conn, bundle)
+            mod._assert_fail_closed(conn, bundle, clock, mod.ATOMIC_ENV)
     eng.dispose()
 
 
